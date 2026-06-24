@@ -15,10 +15,6 @@ from ..utils import compare_two_settings, create_new_process_for_each_test
 )
 @pytest.mark.parametrize(
     "ATTN_BACKEND",
-    # The unified FLASH_ATTN backend is CUDA-only: on ROCm get_flash_attn_version()
-    # returns None and FlashAttentionImpl.forward() passes FA3/FA4-only kwargs that
-    # the upstream ROCm flash-attn does not accept. Pass None on ROCm so the platform
-    # attention selector (vllm/platforms/rocm.py) picks a valid backend (ROCM_ATTN).
     [None] if current_platform.is_rocm() else ["FLASH_ATTN"],
 )
 @create_new_process_for_each_test()
