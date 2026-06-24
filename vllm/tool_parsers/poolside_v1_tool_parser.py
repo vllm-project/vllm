@@ -136,15 +136,15 @@ class PoolsideV1ToolParser(ToolParser):
         if tools is None:
             return False
         for tool in tools:
-            if tool.function.name != tool_name:
+            # ChatCompletion tools nest under .function; Responses
+            # FunctionTool is flat (.name/.parameters at the top level).
+            fn = getattr(tool, "function", tool)
+            if getattr(fn, "name", None) != tool_name:
                 continue
-            if tool.function.parameters is None:
+            params = getattr(fn, "parameters", None)
+            if params is None:
                 return False
-            arg_type = (
-                tool.function.parameters.get("properties", {})
-                .get(arg_name, {})
-                .get("type", None)
-            )
+            arg_type = params.get("properties", {}).get(arg_name, {}).get("type", None)
             return arg_type == "string"
         logger.debug("No tool named '%s'.", tool_name)
         return False

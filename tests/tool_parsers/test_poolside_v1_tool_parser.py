@@ -194,3 +194,24 @@ def test_non_string_arg_still_deserialized() -> None:
     assert args["content"] == "hi"
     # Non-string value is stripped and parsed to its native type.
     assert args["mode"] == 420
+
+
+def test_responses_extract_tool_calls_with_flat_tools() -> None:
+    # required/named Responses calls route into extract_tool_calls with flat
+    # FunctionTool (.name); _is_string_type must not raise.
+    request = _build_responses_request(tool_choice="required")
+    parser = PoolsideV1ToolParser(_StubTokenizer(), tools=request.tools)
+
+    content = "  x = 1\n"
+    model_output = (
+        "<tool_call>write_file\n"
+        "<arg_key>content</arg_key>\n"
+        f"<arg_value>{content}</arg_value>\n"
+        "</tool_call>"
+    )
+
+    result = parser.extract_tool_calls(model_output, request)
+
+    assert result.tools_called
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert args["content"] == content
