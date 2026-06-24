@@ -433,6 +433,15 @@ def has_flashinfer_fused_kda_decode() -> bool:
 
 
 @functools.cache
+def has_flashinfer_cutedsl_decode() -> bool:
+    """Return ``True`` if the CuteDSL paged decode wrapper is available."""
+    if not has_flashinfer_cutedsl():
+        return False
+    mod = _get_submodule("flashinfer.cute_dsl.attention")
+    return mod is not None and hasattr(mod, "BatchDecodePagedCuteDSLWrapper")
+
+
+@functools.cache
 def has_flashinfer_trtllm_fused_moe() -> bool:
     """Return `True` if FlashInfer TRTLLM fused MoE is available."""
     if not has_flashinfer_moe():
