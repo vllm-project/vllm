@@ -41,7 +41,13 @@ def get_token_bin_counts_and_mask(
     bin_counts = torch.zeros(
         (num_seqs, vocab_size + 1), dtype=torch.long, device=tokens.device
     )
-    bin_counts.scatter_add_(1, tokens, torch.ones_like(tokens))
+    # Clamp tokens to valid range [0, vocab_size]. With TP>1, logits.shape[1]
+    # is the per-shard vocab size, but token IDs may come from the full vocab
+    # range (e.g., multimodal models like LongCat-Next with codec tokens up to
+    # 282624). Tokens >= vocab_size land in the padding bin and are discarded
+    # when we slice bin_counts[:, :vocab_size] below.
+    clamped_tokens = tokens.clamp(max=vocab_size)
+    bin_counts.scatter_add_(1, clamped_tokens, torch.ones_like(clamped_tokens))
     bin_counts = bin_counts[:, :vocab_size]
     mask = bin_counts > 0
 
