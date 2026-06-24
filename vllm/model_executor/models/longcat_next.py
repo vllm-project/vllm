@@ -86,12 +86,6 @@ _IMAGE_NEWLINE_TOKEN_ID = 131109
 _AUDIO_START_TOKEN_ID = 131103
 _AUDIO_END_TOKEN_ID = 131104
 _AUDIO_PAD_TOKEN_ID = 131105
-_AUDIO_DELIM_TOKEN_ID = 131116
-_AUDIOTEXT_START_TOKEN_ID = 131120
-_AUDIOTEXT_END_TOKEN_ID = 131121
-_AUDIOTEXT_PAD_TOKEN_ID = 131122
-_AUDIOGEN_START_TOKEN_ID = 131123
-_AUDIOGEN_END_TOKEN_ID = 131124
 
 
 class Int4PerChannelEmbeddingMethod(QuantizeMethodBase):
@@ -1195,9 +1189,11 @@ class LongcatNextWhisperEncoder(WhisperEncoder):
 
         if output_length is not None:
             result = hidden_states.new_zeros(bs, max_len, dim)
+            # Move to CPU once to avoid per-element device-to-host sync
+            cu_seqlens_cpu = cu_seqlens.cpu()
             for i in range(bs):
-                start = int(cu_seqlens[i])
-                end = int(cu_seqlens[i + 1])
+                start = int(cu_seqlens_cpu[i])
+                end = int(cu_seqlens_cpu[i + 1])
                 result[i, :end - start] = packed_hidden[start:end]
             # Padded positions remain zero (implicit mask)
         else:

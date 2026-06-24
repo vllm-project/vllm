@@ -1134,6 +1134,9 @@ class Qwen2_5_VisionTransformer(nn.Module):
         loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
+            # Skip merger weights when skip_merger=True
+            if self.skip_merger and "merger" in name:
+                continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
