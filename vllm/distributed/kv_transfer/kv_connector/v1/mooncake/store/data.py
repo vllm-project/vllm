@@ -5,8 +5,9 @@
 # (vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/).
 """Data classes for MooncakeStoreConnector."""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from typing import cast
 
 import torch
 
@@ -23,6 +24,77 @@ from vllm.v1.core.kv_cache_utils import (
 logger = init_logger(__name__)
 
 
+class BlobBlockHashes(Sequence[BlockHash]):
+    """Lazy view over a flat buffer of fixed-size block hashes to avoid the overhead
+    of materializing all hashes upfront.
+    """
+
+    def __init__(self, blob: memoryview, hash_len: int):
+        self._blob = blob
+        self._hash_len = hash_len
+        self._n = len(blob) // hash_len if hash_len else 0
+
+    def __len__(self) -> int:
+        return self._n
+
+    def __getitem__(self, idx):
+        if isinstance(idx, slice):
+            return [self[i] for i in range(*idx.indices(self._n))]
+        if idx < 0:
+            idx += self._n
+        if not 0 <= idx < self._n:
+            raise IndexError(idx)
+        off = idx * self._hash_len
+        return BlockHash(self._blob[off : off + self._hash_len])
+
+
+class _CompactChunkHashList(BlockHashListWithBlockSize):
+    """View that keys each ``block_size`` chunk by the last constituent
+    ``hash_block_size`` hash instead of concatenating all of them.
+
+    The engine chains block hashes (each hash folds in the previous one), so the
+    final sub-block hash of a chunk already uniquely identifies the whole chunk
+    and its prefix. Using it keeps a Mooncake key at a single hash digest
+    regardless of the ``block_size`` / ``hash_block_size`` ratio, instead of
+    growing the key linearly with it (e.g. 64x for ``block_size=256``,
+    ``hash_block_size=4``).
+    """
+
+    def __init__(
+        self,
+        block_hashes: Sequence[BlockHash],
+        hash_block_size: int,
+        target_block_size: int,
+    ):
+        # Accept any indexable sequence (e.g. the lazy ``BlobBlockHashes``), not
+        # just ``list``; the base only indexes/sizes it.
+        assert target_block_size % hash_block_size == 0
+        self.block_hashes = block_hashes  # type: ignore[assignment]
+        self.scale_factor = target_block_size // hash_block_size
+
+    def _get_value_at(self, idx: int) -> BlockHash:
+        return self.block_hashes[idx * self.scale_factor + self.scale_factor - 1]
+
+
+def chunk_hashes_for_block_size(
+    block_hashes: Sequence[BlockHash],
+    hash_block_size: int,
+    block_size: int,
+) -> Sequence[BlockHash]:
+    """Map ``hash_block_size``-granular block hashes to one compact hash per
+    ``block_size`` chunk (the chunk's last sub-hash). Returns ``block_hashes``
+    unchanged when the two sizes are equal.
+    """
+    if block_size == hash_block_size:
+        return block_hashes
+    # Structurally a Sequence[BlockHash] (indexable + sized); the base class
+    # just isn't declared as one.
+    return cast(
+        "Sequence[BlockHash]",
+        _CompactChunkHashList(block_hashes, hash_block_size, block_size),
+    )
+
+
 @dataclass
 class KeyMetadata:
     """Metadata for constructing pool keys."""
@@ -33,6 +105,10 @@ class KeyMetadata:
     dcp_rank: int
     pp_rank: int
     group_id: int = 0
+    # Optional namespace prepended to every key. Lets separate deployments
+    # share one Mooncake master without colliding on identical block hashes.
+    # Empty (the default) keeps keys byte-identical to the unprefixed format.
+    cache_prefix: str = ""
 
 
 @dataclass(order=True)
@@ -45,6 +121,7 @@ class PoolKey:
     def __hash__(self):
         return hash(
             (
+                self.key_metadata.cache_prefix,
                 self.key_metadata.model_name,
                 self.key_metadata.tp_rank,
                 self.key_metadata.pcp_rank,
@@ -55,15 +132,32 @@ class PoolKey:
             )
         )
 
-    def to_string(self) -> str:
+    @staticmethod
+    def build_prefix(
+        key_metadata: KeyMetadata,
+        *,
+        tp_rank: int | None = None,
+        pp_rank: int | None = None,
+    ) -> str:
+        """Return the stable prefix for a Mooncake pool key."""
+        prefix = f"{key_metadata.cache_prefix}@" if key_metadata.cache_prefix else ""
         return (
-            f"{self.key_metadata.model_name}"
-            f"@tp_rank:{self.key_metadata.tp_rank}"
-            f"@pcp{self.key_metadata.pcp_rank}"
-            f"@dcp{self.key_metadata.dcp_rank}"
-            f"@pp_rank:{self.key_metadata.pp_rank}"
-            f"@group:{self.key_metadata.group_id}"
-            f"@{self.chunk_hash}"
+            f"{prefix}"
+            f"{key_metadata.model_name}"
+            f"@tp_rank:{key_metadata.tp_rank if tp_rank is None else tp_rank}"
+            f"@pcp{key_metadata.pcp_rank}"
+            f"@dcp{key_metadata.dcp_rank}"
+            f"@pp_rank:{key_metadata.pp_rank if pp_rank is None else pp_rank}"
+            f"@group:{key_metadata.group_id}"
+        )
+
+    @staticmethod
+    def build_key_string(key_prefix: str, chunk_hash: str) -> str:
+        return f"{key_prefix}@{chunk_hash}"
+
+    def to_string(self) -> str:
+        return self.build_key_string(
+            self.build_prefix(self.key_metadata), self.chunk_hash
         )
 
 
@@ -86,9 +180,10 @@ class ChunkedTokenDatabase:
             )
         self.kv_caches_base_addr: list[int] = []
         self.block_len: list[int] = []
+        self._key_prefix = PoolKey.build_prefix(metadata)
 
-    def _make_key_by_hash(self, chunk_hash: str) -> PoolKey:
-        return PoolKey(self.metadata, chunk_hash)
+    def key_for(self, chunk_hash: BlockHash) -> str:
+        return PoolKey.build_key_string(self._key_prefix, chunk_hash.hex())
 
     def set_kv_caches_base_addr(self, kv_caches_base_addr: list[int]):
         self.kv_caches_base_addr = kv_caches_base_addr
@@ -121,32 +216,48 @@ class ChunkedTokenDatabase:
         token_len: int,
         block_hashes: list[BlockHash],
         mask_num: int = 0,
-    ) -> Iterable[tuple[int, int, PoolKey]]:
-        """Process tokens and yield (start_idx, end_idx, pool_key) tuples.
+        *,
+        chunk_mask: list[bool] | None = None,
+        put_step: int = 1,
+        put_step_rank: int = 0,
+    ) -> Iterable[tuple[int, int, BlockHash]]:
+        """Process tokens and yield (start_idx, end_idx, block_hash) tuples.
+
+        When there are fewer KV heads than TP ranks, chunks are distributed
+        across TP ranks to avoid duplicate load/store. The assignment keys off
+        the absolute ``chunk_id`` so a given chunk always lands on the same
+        rank regardless of where the processed suffix begins.
 
         Args:
             token_len: Total number of tokens.
             block_hashes: Block hashes computed at ``hash_block_size`` granularity.
-                When ``block_size > hash_block_size`` consecutive hashes are merged
-                up to the group's ``block_size`` via ``BlockHashListWithBlockSize``.
+                When ``block_size > hash_block_size`` each group's ``block_size`` chunk
+                is keyed by its last sub-hash via ``chunk_hashes_for_block_size``.
             mask_num: Number of tokens to skip from the beginning.
+            chunk_mask: Optional mask relative to the first chunk after
+                ``mask_num``. False entries are skipped before hash access.
+            put_step: Stride for distributing chunks across ranks.
+            put_step_rank: ``chunk_id % put_step`` value this rank stores.
         """
+        assert put_step > 0
         if not block_hashes:
             return
-        if self.block_size == self.hash_block_size:
-            chunk_hashes: Iterable[BlockHash] = block_hashes
-        else:
-            chunk_hashes = BlockHashListWithBlockSize(
-                block_hashes, self.hash_block_size, self.block_size
-            )
-        for chunk_id, h in enumerate(chunk_hashes):
-            start_idx = chunk_id * self.block_size
-            if start_idx >= token_len:
-                break
-            end_idx = min(start_idx + self.block_size, token_len)
-            if start_idx < mask_num:
+        chunk_hashes: Sequence[BlockHash] = chunk_hashes_for_block_size(
+            block_hashes, self.hash_block_size, self.block_size
+        )
+        start_chunk = max(0, cdiv(mask_num, self.block_size))
+        max_chunks = min(len(chunk_hashes), cdiv(token_len, self.block_size))
+        if chunk_mask is not None:
+            max_chunks = min(max_chunks, start_chunk + len(chunk_mask))
+        for chunk_id in range(start_chunk, max_chunks):
+            if chunk_mask is not None and not chunk_mask[chunk_id - start_chunk]:
                 continue
-            yield start_idx, end_idx, self._make_key_by_hash(h.hex())
+            if chunk_id % put_step != put_step_rank:
+                continue
+            h = chunk_hashes[chunk_id]
+            start_idx = chunk_id * self.block_size
+            end_idx = min(start_idx + self.block_size, token_len)
+            yield start_idx, end_idx, h
 
 
 @dataclass
@@ -213,6 +324,7 @@ class ReqMeta:
     current_event: torch.cuda.Event | None = None
 
     token_ids: list[int] | None = None
+    num_prompt_tokens: int | None = None
 
     @staticmethod
     def from_request_tracker(
@@ -272,6 +384,7 @@ class ReqMeta:
             block_hashes=block_hashes,
             is_last_chunk=is_last_chunk,
             token_ids=token_ids,
+            num_prompt_tokens=tracker.prefill_end_tokens,
         )
 
 

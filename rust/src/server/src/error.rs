@@ -1,6 +1,7 @@
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use thiserror_ext::AsReport as _;
 use thiserror_ext::{Construct, Macro};
 
 use crate::routes::openai::utils::types::{ErrorDetail, ErrorResponse};
@@ -70,5 +71,148 @@ impl ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.status_code(), Json(self.to_error_response())).into_response()
+    }
+}
+
+/// Classify a text-pipeline submit failure: request validation failures are
+/// the client's fault and map to HTTP 400, mirroring the Python frontend.
+/// Everything else stays an internal 500.
+pub fn text_submit_error(context: &'static str, error: vllm_text::Error) -> ApiError {
+    if is_request_validation_error(&error) {
+        return invalid_request!("{error}");
+    }
+    server_error!("{}: {}", context, error.to_report_string())
+}
+
+/// Like [`text_submit_error`], for the chat pipeline (which both wraps the
+/// text errors and raises its own prompt-length variant).
+pub fn chat_submit_error(context: &'static str, error: vllm_chat::Error) -> ApiError {
+    match &error {
+        vllm_chat::Error::PromptTooLong { .. } => invalid_request!("{error}"),
+        vllm_chat::Error::Text(text_error) if is_request_validation_error(text_error) => {
+            invalid_request!("{error}")
+        }
+        _ => server_error!("{}: {}", context, error.to_report_string()),
+    }
+}
+
+fn is_request_validation_error(error: &vllm_text::Error) -> bool {
+    matches!(
+        error,
+        vllm_text::Error::PromptTooLong { .. }
+            | vllm_text::Error::EmptyPromptTokenIds { .. }
+            | vllm_text::Error::Logprobs(_)
+            | vllm_text::Error::TokenIds(_)
+            | vllm_text::Error::InvalidThinkingTokenBudget
+            // An empty tokenized prompt detected later, at request prepare
+            // time, surfaces through the transparent Llm wrapper.
+            | vllm_text::Error::Llm(vllm_llm::Error::EmptyPromptTokenIds { .. })
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prompt_too_long_maps_to_invalid_request() {
+        let error = vllm_text::Error::PromptTooLong {
+            max_model_len: 8192,
+            prompt_len: 9000,
+        };
+        let api_error = text_submit_error("failed to submit completion request", error);
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        let response = api_error.to_error_response();
+        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert!(response.error.message.contains("8192"));
+        assert!(response.error.message.contains("9000"));
+    }
+
+    #[test]
+    fn invalid_thinking_token_budget_maps_to_invalid_request() {
+        let api_error = text_submit_error(
+            "failed to submit completion request",
+            vllm_text::Error::InvalidThinkingTokenBudget,
+        );
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        let response = api_error.to_error_response();
+        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert!(response.error.message.contains("thinking_token_budget"));
+    }
+
+    #[test]
+    fn chat_wrapped_prompt_too_long_maps_to_invalid_request() {
+        let error = vllm_chat::Error::Text(vllm_text::Error::PromptTooLong {
+            max_model_len: 8192,
+            prompt_len: 9000,
+        });
+        let api_error = chat_submit_error("failed to submit chat request", error);
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn llm_wrapped_empty_prompt_maps_to_invalid_request() {
+        let error = vllm_text::Error::Llm(vllm_llm::Error::EmptyPromptTokenIds {
+            request_id: "req-1".to_string(),
+        });
+        let api_error = text_submit_error("failed to submit completion request", error);
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn logprobs_validation_maps_to_invalid_request() {
+        let error = vllm_text::Error::Logprobs(vllm_text::LogprobsError::TooManyCount {
+            parameter: "logprobs",
+            requested: 1000,
+            max_allowed: 20,
+        });
+        let api_error = text_submit_error("failed to submit completion request", error);
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        let response = api_error.to_error_response();
+        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert!(response.error.message.contains("logprobs"));
+    }
+
+    #[test]
+    fn chat_wrapped_logprobs_validation_maps_to_invalid_request() {
+        let error = vllm_chat::Error::Text(vllm_text::Error::Logprobs(
+            vllm_text::LogprobsError::TooManyCount {
+                parameter: "prompt_logprobs",
+                requested: 1000,
+                max_allowed: 20,
+            },
+        ));
+        let api_error = chat_submit_error("failed to submit chat request", error);
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn out_of_vocab_validation_maps_to_invalid_request() {
+        let error = vllm_text::Error::TokenIds(vllm_text::TokenIdsError::OutOfVocab {
+            parameter: "logprob_token_ids",
+            token_ids: vec![1000],
+            vocab_size: 1000,
+        });
+        let api_error = text_submit_error("failed to submit completion request", error);
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn empty_allowed_token_ids_maps_to_invalid_request() {
+        let error = vllm_text::Error::TokenIds(vllm_text::TokenIdsError::EmptyAllowedTokenIds);
+        let api_error = text_submit_error("failed to submit completion request", error);
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        let response = api_error.to_error_response();
+        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert!(response.error.message.contains("allowed_token_ids"));
+    }
+
+    #[test]
+    fn other_submit_errors_stay_internal() {
+        let error = vllm_text::Error::Tokenizer("backend exploded".to_string());
+        let api_error = text_submit_error("failed to submit completion request", error);
+        assert_eq!(api_error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+        let response = api_error.to_error_response();
+        assert!(response.error.message.starts_with("failed to submit completion request:"));
     }
 }

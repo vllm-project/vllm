@@ -155,6 +155,14 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
         # so can skip the padding in the forward before applying the moe method
         return self.mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8
 
+    # TODO(bnell): move to MK/expert_class?
+    @property
+    def has_unpadded_output(self) -> bool:
+        return self.mxfp4_backend in [
+            Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
+            Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
+        ]
+
     def maybe_roundup_sizes(
         self,
         hidden_size: int,
@@ -385,16 +393,19 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
     def get_fused_moe_quant_config(
         self, layer: RoutedExperts
     ) -> FusedMoEQuantConfig | None:
-        w1_scale = layer.w13_weight_scale
-        w2_scale = layer.w2_weight_scale
         w1_bias = getattr(layer, "w13_bias", None)
         w2_bias = getattr(layer, "w2_bias", None)
 
         if self.mxfp4_backend in TRITON_BACKENDS:
+            # TRITON backends free w13/w2_weight_scale after swizzling; the
+            # swizzled scales live inside the precision configs instead.
             assert self.w13_precision_config is not None
             assert self.w2_precision_config is not None
             w1_scale = self.w13_precision_config
             w2_scale = self.w2_precision_config
+        else:
+            w1_scale = layer.w13_weight_scale
+            w2_scale = layer.w2_weight_scale
 
         return make_mxfp4_moe_quant_config(
             mxfp4_backend=self.mxfp4_backend,
@@ -482,10 +493,22 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.w2_precision_config = None
 
     @property
+    def supports_eplb(self) -> bool:
+        return True
+
+    @property
     def skip_forward_padding(self) -> bool:
         # SM100_FI_MXFP4_MXFP8_TRTLLM supports padding with mxfp8 quant
         # so can skip the padding in the forward before applying the moe method
         return self.mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8
+
+    # TODO(bnell): move to MK/expert_class?
+    @property
+    def has_unpadded_output(self) -> bool:
+        return self.mxfp4_backend in [
+            Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
+            Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
+        ]
 
     def maybe_roundup_sizes(
         self,
@@ -718,17 +741,20 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self,
         layer: RoutedExperts,
     ) -> FusedMoEQuantConfig | None:
-        w1_scale = layer.w13_weight_scale
-        w2_scale = layer.w2_weight_scale
         w1_bias = getattr(layer, "w13_bias", None)
         w2_bias = getattr(layer, "w2_bias", None)
         swiglu_limit = getattr(layer, "swiglu_limit", None)
 
         if self.mxfp4_backend in TRITON_BACKENDS:
+            # TRITON backends free w13/w2_weight_scale after swizzling; the
+            # swizzled scales live inside the precision configs instead.
             assert self.w13_precision_config is not None
             assert self.w2_precision_config is not None
             w1_scale = self.w13_precision_config
             w2_scale = self.w2_precision_config
+        else:
+            w1_scale = layer.w13_weight_scale
+            w2_scale = layer.w2_weight_scale
 
         return make_mxfp4_moe_quant_config(
             mxfp4_backend=self.mxfp4_backend,

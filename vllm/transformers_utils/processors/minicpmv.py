@@ -58,7 +58,12 @@ class MiniCPMVProcessor(ProcessorMixin):
 
     def __init__(self, image_processor=None, tokenizer=None):
         super().__init__(image_processor, tokenizer)
-        self.version = image_processor.version
+        # Newer (transformers v5.7+) MiniCPM-V image processors, e.g.
+        # MiniCPMV4_6ImageProcessor, no longer carry a `version` attribute.
+        # Fall back to None instead of hard-crashing: `version` is only used
+        # to special-case the 2.5 tokenization path in `_convert`, and any
+        # value other than 2.5 takes the default branch anyway.
+        self.version = getattr(image_processor, "version", None)
 
     def __call__(
         self,

@@ -334,7 +334,32 @@ def sparse_attn_indexer(
         num_rows = logits.shape[0]
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
-        if current_platform.is_cuda() and topk_tokens in (512, 1024, 2048):
+        use_cooperative_topk = (
+            current_platform.is_cuda()
+            and topk_tokens in (512, 1024, 2048)
+            and num_rows <= 32
+            and logits.stride(0) % 4 == 0  # TMA 16-byte alignment
+            and current_platform.has_device_capability(90)
+        )
+        use_persistent_topk = current_platform.is_cuda() and topk_tokens in (
+            512,
+            1024,
+            2048,
+        )
+        if use_cooperative_topk:
+            workspace_manager = current_workspace_manager()
+            (topk_workspace,) = workspace_manager.get_simultaneous(
+                ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
+            )
+            torch.ops._C.cooperative_topk(
+                logits,
+                seq_lens,
+                topk_indices,
+                topk_workspace,
+                topk_tokens,
+                attn_metadata_narrowed.max_seq_len,
+            )
+        elif use_persistent_topk:
             workspace_manager = current_workspace_manager()
             (topk_workspace,) = workspace_manager.get_simultaneous(
                 ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
@@ -442,7 +467,8 @@ class SparseAttnIndexer(CustomOp):
         self.use_fp4_cache = use_fp4_cache
         if current_platform.is_cuda() and not has_deep_gemm():
             raise RuntimeError(
-                "Sparse Attention Indexer CUDA op requires DeepGEMM to be installed."
+                "Sparse Attention Indexer CUDA op requires DeepGEMM support in "
+                "the current vLLM environment."
             )
 
     def forward_native(

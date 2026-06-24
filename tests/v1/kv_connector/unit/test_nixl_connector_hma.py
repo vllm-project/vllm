@@ -34,7 +34,9 @@ from .utils import (
         (False, [0]),
     ],
 )
-@patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler.current_platform")
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler.current_platform"
+)
 def test_sw_sizes(mock_platform, swa_enabled, expected_sw_sizes):
     """Test sw_sizes is correctly computed based on SWA enabled/disabled."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
@@ -90,6 +92,50 @@ def test_logical_to_kernel_block_ids_with_hma():
     assert kernel_block_ids == expected_kernel_block_ids, (
         f"Expected {expected_kernel_block_ids}, got {kernel_block_ids}"
     )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "is_rocm,has_mamba,use_host_buffer,done_recving,failed_recving,expected_syncs",
+    [
+        (True, True, False, {"req"}, set(), 1),
+        (False, True, False, {"req"}, set(), 0),
+        (True, False, False, {"req"}, set(), 0),
+        (True, True, True, {"req"}, set(), 0),
+        (True, True, False, set(), set(), 0),
+        (True, True, False, {"req"}, {"req"}, 0),
+    ],
+)
+def test_sync_device_after_mamba_recv_gates(
+    monkeypatch,
+    is_rocm,
+    has_mamba,
+    use_host_buffer,
+    done_recving,
+    failed_recving,
+    expected_syncs,
+):
+    """Only direct-GPU Mamba receives on ROCm need a device fence."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker._has_mamba = has_mamba
+    worker.use_host_buffer = use_host_buffer
+
+    sync_calls = []
+    monkeypatch.setattr(base_worker.current_platform, "is_rocm", lambda: is_rocm)
+    monkeypatch.setattr(
+        base_worker.torch.accelerator,
+        "synchronize",
+        lambda: sync_calls.append(True),
+    )
+
+    worker._sync_device_after_mamba_recv(done_recving, failed_recving)
+
+    assert len(sync_calls) == expected_syncs
 
 
 @pytest.mark.cpu_test
@@ -162,6 +208,7 @@ def test_read_blocks_for_req_expands_remote_ids(
 
     worker = object.__new__(NixlConnectorWorker)
     worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
+    worker._engine_last_active = {}
 
     has_mamba = any(t is MambaSpec for t in resolved_types)
     has_swa = any(t is SlidingWindowSpec for t in resolved_types)
@@ -781,7 +828,9 @@ def test_mamba_n1_p_side_truncation():
     ],
     ids=["fa_swa_mamba", "fa_swa_only", "fa_only"],
 )
-@patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler.current_platform")
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler.current_platform"
+)
 def test_has_mamba_init(
     mock_platform,
     swa_enabled,

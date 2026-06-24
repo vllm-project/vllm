@@ -16,7 +16,10 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
@@ -46,6 +49,13 @@ from .utils import (
     make_layers,
     maybe_prefix,
 )
+
+
+def is_prefix_dense_layer(config: CohereConfig, layer_idx: int) -> bool:
+    """True when layer_idx lies in the contiguous dense MLP prefix."""
+    if layer_idx >= len(config.mlp_layer_types):
+        return False
+    return all(t == "dense" for t in config.mlp_layer_types[: layer_idx + 1])
 
 
 @torch.compile(backend=current_platform.simple_compile_backend)
@@ -204,17 +214,15 @@ class Cohere2MoeAttention(nn.Module):
         ):
             self.sliding_window = config.sliding_window
 
-        # Prefix-dense layers (layer_idx < first_k_dense_replace) have full
-        # attention (no sliding window). When prefix_dense_sliding_window_pattern
-        # == 1, they keep RoPE even though they are not sliding-window layers.
-        first_k_dense_replace = getattr(config, "first_k_dense_replace", 0)
+        # Prefix-dense layers have full attention (no sliding window). When
+        # prefix_dense_sliding_window_pattern == 1, they keep RoPE even though
+        # they are not sliding-window layers.
         prefix_dense_sliding_window_pattern = getattr(
             config, "prefix_dense_sliding_window_pattern", 1
         )
         self.force_rope = bool(
-            first_k_dense_replace
+            is_prefix_dense_layer(config, self.layer_idx)
             and prefix_dense_sliding_window_pattern == 1
-            and self.layer_idx < first_k_dense_replace
         )
 
         self.attn = Attention(
@@ -343,9 +351,7 @@ class Cohere2MoeDecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
         )
 
-        # Layers before first_k_dense_replace use a dense MLP instead of MoE.
-        first_k_dense_replace = getattr(config, "first_k_dense_replace", 0)
-        if self.layer_idx < first_k_dense_replace:
+        if config.mlp_layer_types[self.layer_idx] == "dense":
             self.mlp = Cohere2MoeMLP(
                 config=config,
                 intermediate_size=getattr(
@@ -399,6 +405,21 @@ class Cohere2MoeModel(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size, config.hidden_size
         )
+
+        # Decoder layers read per-layer MLP layout from config.mlp_layer_types
+        # (dense MLP vs MoE) and use it for weight loading. Transformers >=5.10
+        # populates this field; older versions only expose first_k_dense_replace.
+        # Normalize here so layer construction below sees a consistent layout.
+        if getattr(config, "mlp_layer_types", None) is None:
+            first_k_dense_replace = getattr(config, "first_k_dense_replace", None)
+            n = config.num_hidden_layers
+            if first_k_dense_replace is not None:
+                config.mlp_layer_types = ["dense"] * first_k_dense_replace + [
+                    "sparse"
+                ] * (n - first_k_dense_replace)
+            else:
+                config.mlp_layer_types = ["sparse"] * n
+
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: Cohere2MoeDecoderLayer(
@@ -450,7 +471,7 @@ class Cohere2MoeModel(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
 
-        expert_params_mapping = FusedMoE.make_expert_params_mapping(
+        expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",

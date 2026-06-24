@@ -101,8 +101,6 @@ Style = Literal[
     "replicate",
     "colwise_gather_output",
     "rowwise_split_input",
-    "colwise_rep",
-    "rowwise_rep",
 ]
 
 
@@ -131,12 +129,8 @@ def replace_linear_class(
         "colwise": (ColumnParallelLinear, {}),
         "rowwise": (RowParallelLinear, {}),
         "replicate": (ReplicatedLinear, {}),
-        # Transformers v5
         "colwise_gather_output": (ColumnParallelLinear, {"gather_output": True}),
         "rowwise_split_input": (RowParallelLinear, {"input_is_parallel": False}),
-        # Transformers v4
-        "colwise_rep": (ColumnParallelLinear, {"gather_output": True}),
-        "rowwise_rep": (RowParallelLinear, {"input_is_parallel": False}),
     }.get(style, (ReplicatedLinear, {}))
 
     return vllm_linear_cls(
