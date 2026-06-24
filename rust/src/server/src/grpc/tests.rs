@@ -206,6 +206,7 @@ impl ChatRenderer for FakeTextBackend {
     fn render(&self, _request: &ChatRequest) -> vllm_chat::Result<RenderedPrompt> {
         Ok(RenderedPrompt {
             prompt: Prompt::Text(String::new()),
+            effective_template_kwargs: Default::default(),
         })
     }
 }

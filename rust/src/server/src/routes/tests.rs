@@ -581,6 +581,7 @@ impl ChatRenderer for FakeChatBackend {
         }
         Ok(vllm_chat::RenderedPrompt {
             prompt: Prompt::Text(prompt),
+            effective_template_kwargs: Default::default(),
         })
     }
 }
