@@ -74,6 +74,22 @@ _VISUAL_CODE_SIZE = 448 // 14  # 32
 _SINUSOID_MAX_TIMESCALE = 10000.0
 _TOKENS_PER_SECOND_ESTIMATE = 100
 
+# Default multimodal token IDs (fallbacks matching config.json).
+# Used only as getattr() defaults; the actual values always come from config.
+_IMAGE_START_TOKEN_ID = 131106
+_IMAGE_END_TOKEN_ID = 131107
+_IMAGE_PAD_TOKEN_ID = 131108
+_IMAGE_NEWLINE_TOKEN_ID = 131109
+_AUDIO_START_TOKEN_ID = 131103
+_AUDIO_END_TOKEN_ID = 131104
+_AUDIO_PAD_TOKEN_ID = 131105
+_AUDIO_DELIM_TOKEN_ID = 131116
+_AUDIOTEXT_START_TOKEN_ID = 131120
+_AUDIOTEXT_END_TOKEN_ID = 131121
+_AUDIOTEXT_PAD_TOKEN_ID = 131122
+_AUDIOGEN_START_TOKEN_ID = 131123
+_AUDIOGEN_END_TOKEN_ID = 131124
+
 
 class Int4PerChannelEmbeddingMethod(QuantizeMethodBase):
     """Online int4 per-channel quantization for huge vocabulary embeddings.
@@ -1984,13 +2000,23 @@ class LongcatNextMultiModalProcessor(
 
         # Get token IDs from config
         image_start_id = getattr(
-            hf_config.visual_config, "image_start_token_id", 131106
+            hf_config.visual_config, "image_start_token_id", _IMAGE_START_TOKEN_ID
         )
-        image_end_id = getattr(hf_config.visual_config, "image_end_token_id", 131107)
-        image_pad_id = getattr(hf_config.visual_config, "image_pad_token_id", 131108)
-        audio_start_id = getattr(hf_config.audio_config, "audio_start_token_id", 131103)
-        audio_end_id = getattr(hf_config.audio_config, "audio_end_token_id", 131104)
-        audio_pad_id = getattr(hf_config.audio_config, "audio_pad_token_id", 131105)
+        image_end_id = getattr(
+            hf_config.visual_config, "image_end_token_id", _IMAGE_END_TOKEN_ID
+        )
+        image_pad_id = getattr(
+            hf_config.visual_config, "image_pad_token_id", _IMAGE_PAD_TOKEN_ID
+        )
+        audio_start_id = getattr(
+            hf_config.audio_config, "audio_start_token_id", _AUDIO_START_TOKEN_ID
+        )
+        audio_end_id = getattr(
+            hf_config.audio_config, "audio_end_token_id", _AUDIO_END_TOKEN_ID
+        )
+        audio_pad_id = getattr(
+            hf_config.audio_config, "audio_pad_token_id", _AUDIO_PAD_TOKEN_ID
+        )
 
         spatial_merge_size = getattr(hf_config.visual_config, "spatial_merge_size", 2)
         merge_length = spatial_merge_size * spatial_merge_size
@@ -2306,8 +2332,7 @@ class LongcatNextForCausalLM(
         """
         # Conservative estimate: 100 tokens per second of audio
         # This accounts for the VQ compression in the audio bridge
-        tokens_per_second = 100
-        return int(audio_duration_s * tokens_per_second)
+        return int(audio_duration_s * _TOKENS_PER_SECOND_ESTIMATE)
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -2455,25 +2480,25 @@ class LongcatNextForCausalLM(
 
         # Special token IDs (from config)
         self.image_start_token_id = getattr(
-            config.visual_config, "image_start_token_id", 131106
+            config.visual_config, "image_start_token_id", _IMAGE_START_TOKEN_ID
         )
         self.image_end_token_id = getattr(
-            config.visual_config, "image_end_token_id", 131107
+            config.visual_config, "image_end_token_id", _IMAGE_END_TOKEN_ID
         )
         self.image_pad_token_id = getattr(
-            config.visual_config, "image_pad_token_id", 131108
+            config.visual_config, "image_pad_token_id", _IMAGE_PAD_TOKEN_ID
         )
         self.image_newline_token_id = getattr(
-            config.visual_config, "image_newline_token_id", 131109
+            config.visual_config, "image_newline_token_id", _IMAGE_NEWLINE_TOKEN_ID
         )
         self.audio_start_token_id = getattr(
-            config.audio_config, "audio_start_token_id", 131103
+            config.audio_config, "audio_start_token_id", _AUDIO_START_TOKEN_ID
         )
         self.audio_end_token_id = getattr(
-            config.audio_config, "audio_end_token_id", 131104
+            config.audio_config, "audio_end_token_id", _AUDIO_END_TOKEN_ID
         )
         self.audio_pad_token_id = getattr(
-            config.audio_config, "audio_pad_token_id", 131105
+            config.audio_config, "audio_pad_token_id", _AUDIO_PAD_TOKEN_ID
         )
         self.visual_offset = config.visual_offset  # 150581
         self.audio_offset = config.audio_offset  # 131125
