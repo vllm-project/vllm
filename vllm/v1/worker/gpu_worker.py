@@ -196,8 +196,45 @@ class Worker(WorkerBase):
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
 
-        if tags is None or "kv_cache" in tags:
+        woke_kv_cache = tags is None or "kv_cache" in tags
+        if woke_kv_cache:
             self.model_runner.post_kv_cache_wake_up()
+
+        # Validate the woken engine with a minimal forward pass before reporting
+        # success. A cumem-backed wake can leave the engine silently corrupted
+        # (e.g. stale CUDA graphs or remapped device memory that produce
+        # cudaErrorIllegalAddress on the FIRST real forward pass). Without this,
+        # wake_up() returns success and /health reports ready, then traffic is
+        # routed into a poisoned engine and the next decode crashes the worker.
+        # Running a dummy decode here forces any such corruption to raise NOW,
+        # which propagates up through collective_rpc -> engine core and marks the
+        # engine errored so /health returns non-200 (the truth). Only run when KV
+        # cache was woken, since that is the wake that re-enables real forward
+        # passes; weights-only / scheduling wakes do not.
+        if woke_kv_cache and envs.VLLM_WAKE_VALIDATE:
+            self._validate_wake()
+
+    def _validate_wake(self) -> None:
+        """Run a minimal validation forward pass after waking from sleep.
+
+        Raises whatever the forward pass raises (e.g. a CUDA illegal-access
+        error from a corrupt wake), after synchronizing so the error is
+        attributed here rather than surfacing asynchronously on the next real
+        request.
+        """
+        try:
+            num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
+            self.model_runner._dummy_run(num_tokens, uniform_decode=True)
+            if current_platform.is_cuda_alike():
+                torch.cuda.synchronize()
+        except Exception as e:
+            logger.error(
+                "Post-wake validation forward pass failed; the engine is "
+                "corrupted after wake_up and must not serve traffic. Set "
+                "VLLM_WAKE_VALIDATE=0 to disable this check. Error: %s",
+                e,
+            )
+            raise
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if (

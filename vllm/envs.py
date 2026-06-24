@@ -143,6 +143,7 @@ if TYPE_CHECKING:
     VLLM_USE_RUST_FRONTEND: bool = False
     VLLM_RUST_FRONTEND_PATH: str | None = "auto"
     VLLM_SERVER_DEV_MODE: bool = False
+    VLLM_WAKE_VALIDATE: bool = True
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
     VLLM_MLA_DISABLE: bool = False
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
@@ -1256,6 +1257,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # some additional endpoints for developing and debugging,
     # e.g. `/reset_prefix_cache`
     "VLLM_SERVER_DEV_MODE": lambda: bool(int(os.getenv("VLLM_SERVER_DEV_MODE", "0"))),
+    # After waking from sleep mode (e.g. cumem-backed sleep/wake), run a minimal
+    # validation forward pass inside wake_up() before reporting success. This
+    # catches engines that were silently corrupted by the wake (e.g. stale CUDA
+    # graphs or remapped memory producing cudaErrorIllegalAddress on the first
+    # real forward pass) so the failure surfaces at wake time and /health
+    # reflects the truth, instead of routing traffic into a poisoned engine.
+    # Default on; set to 0 to opt out.
+    "VLLM_WAKE_VALIDATE": lambda: bool(int(os.getenv("VLLM_WAKE_VALIDATE", "1"))),
     # Controls the maximum number of requests to handle in a
     # single asyncio task when processing per-token outputs in the
     # V1 AsyncLLM interface. It is applicable when handling a high
@@ -1981,6 +1990,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_CACHE_ROOT",
         "LD_LIBRARY_PATH",
         "VLLM_SERVER_DEV_MODE",
+        "VLLM_WAKE_VALIDATE",
         "VLLM_DP_MASTER_IP",
         "VLLM_DP_MASTER_PORT",
         "VLLM_NIXL_SIDE_CHANNEL_HOST",

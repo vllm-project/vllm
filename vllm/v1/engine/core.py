@@ -780,10 +780,30 @@ class EngineCore:
             tags = [t for t in tags if t != "scheduling"]
 
         if tags is None or tags:
-            self.model_executor.wake_up(tags)
+            try:
+                self.model_executor.wake_up(tags)
+            except Exception:
+                # A wake failure (e.g. the post-wake validation forward pass
+                # raising on a silently-corrupted engine) means this engine can
+                # no longer serve traffic. Mark it dead so /health reports the
+                # truth instead of returning ready over a poisoned engine, then
+                # re-raise so the wake call itself reports failure.
+                logger.exception(
+                    "Engine wake_up failed; marking engine as dead. The engine "
+                    "must be restarted to recover."
+                )
+                self._on_fatal_error()
+                raise
 
         # Resume scheduling (applies to all levels)
         self.resume_scheduler()
+
+    def _on_fatal_error(self) -> None:
+        """Hook invoked when an unrecoverable engine error occurs (e.g. a
+        corrupt wake). Base implementation is a no-op; the multiprocess engine
+        core overrides this to signal the client that the engine is dead so
+        readiness/health checks fail."""
+        return None
 
     def is_sleeping(self) -> bool:
         """Check if engine is sleeping at any level."""
@@ -1443,7 +1463,6 @@ class EngineCoreProc(EngineCore):
 
         # Put ENGINE_CORE_DEAD in the queue.
         self.output_queue.put_nowait(EngineCoreProc.ENGINE_CORE_DEAD)
-
         # Wait until msg sent by the daemon before shutdown.
         self.output_thread.join(timeout=5.0)
         if self.output_thread.is_alive():
@@ -1451,6 +1470,11 @@ class EngineCoreProc(EngineCore):
                 "vLLM shutdown signal from EngineCore failed "
                 "to send. Please report this issue."
             )
+
+    def _on_fatal_error(self) -> None:
+        """Signal the client that the engine is dead so health/readiness checks
+        report the failure (e.g. after a corrupt wake)."""
+        self._send_engine_dead()
 
     def process_input_sockets(
         self,
