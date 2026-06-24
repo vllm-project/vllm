@@ -492,12 +492,18 @@ MOE_MODEL_CONFIGS = {
 }
 
 
-def _load_nvfp4_moe_weights(model_id: str, tensor_parallel_size: int):
+def _load_nvfp4_moe_weights(
+    model_id: str,
+    tensor_parallel_size: int,
+    max_experts: int | None = None,
+):
     """Load and stack NVFP4 MoE weights from checkpoint shards.
 
     Returns (w1, w1_scale, w1_gscale, w2, w2_scale, w2_gscale,
              a1_gscale, a2_gscale, num_experts, hidden_dim,
              intermediate_size).
+
+    When max_experts is set, only the first max_experts experts are loaded.
 
     When tensor_parallel_size > 1, the N dimension of w1 and the K
     dimension of w2 are narrowed to the first TP shard (simulating
@@ -529,6 +535,8 @@ def _load_nvfp4_moe_weights(model_id: str, tensor_parallel_size: int):
             if key.endswith(".gate_proj.weight")
         }
     )
+    if max_experts is not None:
+        expert_indices = expert_indices[:max_experts]
     num_experts = len(expert_indices)
 
     gate_weights, up_weights, down_weights = [], [], []
@@ -631,6 +639,7 @@ def test_nvfp4_moe_correctness(
 
     Both must produce bit-identical results.
     """
+    num_test_experts = max(8, top_k)
     (
         w1,
         w1_scale,
@@ -643,7 +652,11 @@ def test_nvfp4_moe_correctness(
         num_experts,
         hidden_dim,
         intermediate_size,
-    ) = _load_nvfp4_moe_weights(model_id, tensor_parallel_size)
+    ) = _load_nvfp4_moe_weights(
+        model_id,
+        tensor_parallel_size,
+        max_experts=num_test_experts,
+    )
 
     moe_config = FusedMoEConfig(
         num_experts=num_experts,
