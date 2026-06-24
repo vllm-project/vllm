@@ -148,6 +148,7 @@ def _get_backend_priorities(
                 AttentionBackendEnum.TRITON_ATTN,
                 AttentionBackendEnum.FLEX_ATTENTION,
                 AttentionBackendEnum.TURBOQUANT,
+                AttentionBackendEnum.SQUAT,
             ]
         else:
             return [
@@ -156,6 +157,7 @@ def _get_backend_priorities(
                 AttentionBackendEnum.TRITON_ATTN,
                 AttentionBackendEnum.FLEX_ATTENTION,
                 AttentionBackendEnum.TURBOQUANT,
+                AttentionBackendEnum.SQUAT,
             ]
 
 
