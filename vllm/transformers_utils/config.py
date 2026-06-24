@@ -126,6 +126,10 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     tarsier2="Tarsier2Config",
 )
 
+# `model_type` contains a hyphen, which is not a valid keyword argument name for
+# `LazyConfigDict`, so register it explicitly here.
+_CONFIG_REGISTRY["unlimited-ocr"] = "UnlimitedOCRConfig"  # type: ignore[assignment]
+
 _SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators"}
 
 _PATCH_HF_VALIDATE_ROPE: set[str] = {"sarvam_mla"}

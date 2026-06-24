@@ -486,6 +486,9 @@ class GPUModelRunner(
 
         self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
         self.is_mm_prefix_lm = self.model_config.is_mm_prefix_lm
+        # Reference Sliding Window Attention (R-SWA) window size; populated from
+        # the loaded model in ``load_model`` (None disables R-SWA).
+        self.rswa_window: int | None = None
 
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
@@ -2335,6 +2338,15 @@ class GPUModelRunner(
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 req_doc_ranges[req_idx] = image_doc_ranges
 
+        # Reference Sliding Window Attention (R-SWA): the prompt/image tokens
+        # form a globally-visible prefix while generated tokens use a sliding
+        # window. Pass the per-request prompt length so the FlexAttention mask
+        # can keep the prefix visible. Populated for cudagraph capture too so
+        # the captured mask matches replay.
+        rswa_prefix_lens = None
+        if self.rswa_window is not None:
+            rswa_prefix_lens = num_prompt_tokens_cpu.to(self.device, non_blocking=True)
+
         cm_base = CommonAttentionMetadata(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
             query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs_padded + 1],
@@ -2352,6 +2364,8 @@ class GPUModelRunner(
             is_prefilling=is_prefilling,
             positions=self.positions[:num_tokens_padded],
             mm_req_doc_ranges=req_doc_ranges,
+            rswa_prefix_lens=rswa_prefix_lens,
+            rswa_window=self.rswa_window,
         )
 
         if self.dcp_world_size > 1:
@@ -5176,6 +5190,9 @@ class GPUModelRunner(
                 self.model = model_loader.load_model(
                     vllm_config=self.vllm_config, model_config=self.model_config
                 )
+                # Models may request Reference Sliding Window Attention by
+                # exposing an ``rswa_window`` attribute (e.g. Unlimited-OCR).
+                self.rswa_window = getattr(self.model, "rswa_window", None)
                 if self.lora_config:
                     self.model = self.load_lora_model(
                         self.model, self.vllm_config, self.device
