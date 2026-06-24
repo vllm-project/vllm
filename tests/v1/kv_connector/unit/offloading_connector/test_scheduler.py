@@ -708,6 +708,7 @@ class TestMaximalPrefixLookup:
             {1: LookupResult.RETRY, 2: LookupResult.HIT}
         )
         assert sched._maximal_prefix_lookup(to_keys([1, 2]), _EMPTY_REQ_CTX) is None
+        assert sched.manager.lookup.call_count == 2
 
     def test_retry_after_hit_defers(self):
         sched = _make_scheduler_with_lookup(
@@ -720,6 +721,15 @@ class TestMaximalPrefixLookup:
             {1: LookupResult.HIT_PENDING, 2: LookupResult.HIT}
         )
         assert sched._maximal_prefix_lookup(to_keys([1, 2]), _EMPTY_REQ_CTX) is None
+        assert sched.manager.lookup.call_count == 2
+
+    def test_hit_pending_does_not_stop_scan(self):
+        """HIT_PENDING defers but does not break — scan continues until miss."""
+        sched = _make_scheduler_with_lookup(
+            {1: LookupResult.HIT_PENDING, 2: LookupResult.MISS, 3: LookupResult.HIT}
+        )
+        assert sched._maximal_prefix_lookup(to_keys([1, 2, 3]), _EMPTY_REQ_CTX) is None
+        assert sched.manager.lookup.call_count == 2
 
     def test_retry_stops_at_miss(self):
         """RETRY is treated as hit for iteration, but miss stops the scan."""
