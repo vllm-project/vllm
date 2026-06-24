@@ -1127,6 +1127,15 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         tokenizer="moondream/starmie-v1",
         trust_remote_code=True,
     ),
+    "MossAudioModel": _HfExamplesInfo(
+        "OpenMOSS-Team/MOSS-Audio-4B-Instruct",
+        extras={
+            "4b-thinking": "OpenMOSS-Team/MOSS-Audio-4B-Thinking",
+            "8b-instruct": "OpenMOSS-Team/MOSS-Audio-8B-Instruct",
+            "8b-thinking": "OpenMOSS-Team/MOSS-Audio-8B-Thinking",
+        },
+        trust_remote_code=True,
+    ),
     "HfMoondream": _HfExamplesInfo(
         "moondream/moondream3-preview",
         tokenizer="moondream/starmie-v1",
