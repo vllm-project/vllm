@@ -343,16 +343,22 @@ def test_common_group_indices_rejects_missing_group_metadata():
         group_indices=(0, 2),
     )
 
-    assert _common_group_indices_for_regions(
-        local_region,
-        remote_region,
-        num_groups=3,
-    ) is None
-    assert _common_group_indices_for_regions(
-        remote_region,
-        local_region,
-        num_groups=3,
-    ) is None
+    assert (
+        _common_group_indices_for_regions(
+            local_region,
+            remote_region,
+            num_groups=3,
+        )
+        is None
+    )
+    assert (
+        _common_group_indices_for_regions(
+            remote_region,
+            local_region,
+            num_groups=3,
+        )
+        is None
+    )
     assert _common_group_indices_for_regions(
         local_region,
         annotated_remote_region,
