@@ -630,52 +630,25 @@ def test_causal_backend_correctness(
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
     reason="FlashInfer is not available.",
 )
-def test_flashinfer_sm90_xqa_decode_correctness(monkeypatch):
+def test_flashinfer_sm90_xqa_decode_correctness(default_vllm_config):
     """FlashInfer should route Hopper decode through XQA and match SDPA."""
-    if not current_platform.is_cuda():
-        pytest.skip("FlashInfer XQA decode requires CUDA.")
+    if not current_platform.is_cuda() or not current_platform.is_device_capability(90):
+        pytest.skip("FlashInfer XQA decode requires SM90.")
 
-    from vllm.platforms.interface import DeviceCapability
+    import unittest.mock
+
+    from vllm.utils.flashinfer import can_use_trtllm_attention
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
     from vllm.v1.attention.backends.utils import PerLayerParameters
 
-    monkeypatch.setattr(
-        flashinfer_backend.current_platform,
-        "is_device_capability",
-        lambda capability: capability == 90,
-    )
-    monkeypatch.setattr(
-        flashinfer_backend.current_platform,
-        "is_device_capability_family",
-        lambda family: False,
-    )
-    monkeypatch.setattr(
-        flashinfer_backend.current_platform,
-        "get_device_capability",
-        lambda: DeviceCapability(9, 0),
-    )
-    monkeypatch.setattr(
-        flashinfer_backend,
-        "can_use_trtllm_attention",
-        lambda num_qo_heads, num_kv_heads, is_prefill=False: not is_prefill,
-    )
-    monkeypatch.setattr(
-        flashinfer_backend,
-        "use_trtllm_attention",
-        lambda *args, **kwargs: not kwargs.get("is_prefill", False),
-    )
-    monkeypatch.setattr(flashinfer_backend, "force_use_trtllm_attention", lambda: None)
-    monkeypatch.setattr(
-        flashinfer_backend,
-        "get_per_layer_parameters",
-        lambda *args, **kwargs: {
+    def mock_get_per_layer_parameters(vllm_config, layer_names, impl_cls):
+        return {
             "placeholder": PerLayerParameters(
                 window_left=-1,
                 logits_soft_cap=0.0,
                 sm_scale=1.0,
             )
-        },
-    )
+        }
 
     def causal_mask_mod(
         b: torch.Tensor,
@@ -704,17 +677,26 @@ def test_flashinfer_sm90_xqa_decode_correctness(monkeypatch):
     )
 
     with set_current_vllm_config(vllm_config):
-        builder = flashinfer_backend.FlashInferMetadataBuilder(
-            kv_cache_spec, ["placeholder"], vllm_config, device
-        )
-        common_attn_metadata = create_common_attn_metadata(
-            batch_spec, vllm_config.cache_config.block_size, device
-        )
-        try:
-            set_kv_cache_layout("HND")
+        if not can_use_trtllm_attention(
+            vllm_config.model_config.get_num_attention_heads(
+                vllm_config.parallel_config
+            ),
+            kv_cache_spec.num_kv_heads,
+            is_prefill=False,
+        ):
+            pytest.skip("FlashInfer XQA decode is not available in this setup.")
+
+        with unittest.mock.patch(
+            "vllm.v1.attention.backends.flashinfer.get_per_layer_parameters",
+            mock_get_per_layer_parameters,
+        ):
+            builder = flashinfer_backend.FlashInferMetadataBuilder(
+                kv_cache_spec, ["placeholder"], vllm_config, device
+            )
+            common_attn_metadata = create_common_attn_metadata(
+                batch_spec, vllm_config.cache_config.block_size, device
+            )
             attn_metadata = builder.build(0, common_attn_metadata)
-        finally:
-            set_kv_cache_layout(None)
 
     assert isinstance(
         attn_metadata.decode,
@@ -760,7 +742,7 @@ else:
 @pytest.mark.parametrize("model", ["microsoft/Phi-tiny-MoE-instruct"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
 def test_sliding_window_backend_correctness(
-    batch_spec_name: str, model: str, tensor_parallel_size: int
+    default_vllm_config, batch_spec_name: str, model: str, tensor_parallel_size: int
 ):
     """Test backend's correctness with sliding window attention."""
 
@@ -822,7 +804,7 @@ def test_sliding_window_backend_correctness(
 @pytest.mark.parametrize("model", ["google/embeddinggemma-300m"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2])
 def test_sliding_window_encoder_backend_correctness(
-    batch_spec_name: str, model: str, tensor_parallel_size: int
+    default_vllm_config, batch_spec_name: str, model: str, tensor_parallel_size: int
 ):
     """Test backend's correctness with sliding window attention."""
 
