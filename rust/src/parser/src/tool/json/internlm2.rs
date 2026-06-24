@@ -140,8 +140,8 @@ mod tests {
         let mut parser = Internlm2ToolParser::new(&test_tools());
         let result = parser.parse_complete("Hello, world!").unwrap();
 
-        assert_eq!(result.normal_text, "Hello, world!");
-        assert!(result.calls.is_empty());
+        assert_eq!(result.normal_text(), "Hello, world!");
+        assert!(result.calls().is_empty());
     }
 
     #[test]
@@ -155,11 +155,11 @@ mod tests {
             ))
             .unwrap();
 
-        assert_eq!(result.normal_text, "Let me check.\n");
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].tool_index, 0);
-        assert_eq!(result.calls[0].name.as_deref(), Some("get_weather"));
-        assert_eq!(result.calls[0].arguments, arguments);
+        assert_eq!(result.normal_text(), "Let me check.\n");
+        assert_eq!(result.calls().len(), 1);
+        assert_eq!(result.calls()[0].tool_index, 0);
+        assert_eq!(result.calls()[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(result.calls()[0].arguments, arguments);
     }
 
     #[test]
@@ -170,9 +170,9 @@ mod tests {
             .parse_complete(&build_tool_call("get_weather", "arguments", arguments))
             .unwrap();
 
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].name.as_deref(), Some("get_weather"));
-        assert_eq!(result.calls[0].arguments, arguments);
+        assert_eq!(result.calls().len(), 1);
+        assert_eq!(result.calls()[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(result.calls()[0].arguments, arguments);
     }
 
     #[test]
@@ -185,8 +185,8 @@ mod tests {
             ))
             .unwrap();
 
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(result.calls().len(), 1);
+        assert_eq!(result.calls()[0].name.as_deref(), Some("get_weather"));
     }
 
     #[test]
@@ -197,7 +197,7 @@ mod tests {
             .parse_complete(&build_tool_call("get_weather", "parameters", arguments))
             .unwrap();
 
-        assert_eq!(result.calls[0].arguments, arguments);
+        assert_eq!(result.calls()[0].arguments, arguments);
     }
 
     #[test]
@@ -218,7 +218,7 @@ mod tests {
         for chunk in chunks {
             let next = parser.parse_chunk(chunk).unwrap();
             observed_arguments.extend(
-                next.calls
+                next.calls()
                     .iter()
                     .filter(|call| call.name.is_none())
                     .map(|call| call.arguments.clone()),
@@ -231,9 +231,9 @@ mod tests {
             observed_arguments,
             [r#"{"location":"#, r#""Beijing""#, r#"}"#]
         );
-        assert_eq!(result.normal_text, "preface  suffix");
+        assert_eq!(result.normal_text(), "preface  suffix");
         assert_eq!(
-            result.coalesce_calls().calls[0].arguments,
+            result.coalesce().calls()[0].arguments,
             r#"{"location":"Beijing"}"#
         );
     }
@@ -249,9 +249,9 @@ mod tests {
 
         let result = collect_stream(&mut parser, &chunks);
 
-        assert_eq!(result.normal_text, "hello ");
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].arguments, r#"{"location":"Tokyo"}"#);
+        assert_eq!(result.normal_text(), "hello ");
+        assert_eq!(result.calls().len(), 1);
+        assert_eq!(result.calls()[0].arguments, r#"{"location":"Tokyo"}"#);
     }
 
     #[test]
@@ -268,22 +268,25 @@ mod tests {
 
         expect![[r#"
             ToolParserOutput {
-                normal_text: "",
-                calls: [
-                    ToolCallDelta {
-                        tool_index: 0,
-                        name: Some(
-                            "get_weather",
-                        ),
-                        arguments: "{\"location\":\"Shanghai\"}",
-                    },
-                    ToolCallDelta {
-                        tool_index: 1,
-                        name: Some(
-                            "add",
-                        ),
-                        arguments: "{\"x\":1,\"y\":2}",
-                    },
+                events: [
+                    ToolCall(
+                        ToolCallDelta {
+                            tool_index: 0,
+                            name: Some(
+                                "get_weather",
+                            ),
+                            arguments: "{\"location\":\"Shanghai\"}",
+                        },
+                    ),
+                    ToolCall(
+                        ToolCallDelta {
+                            tool_index: 1,
+                            name: Some(
+                                "add",
+                            ),
+                            arguments: "{\"x\":1,\"y\":2}",
+                        },
+                    ),
                 ],
             }
         "#]]
@@ -298,8 +301,8 @@ mod tests {
 
         let result = parser.parse_complete(&input).unwrap();
 
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].arguments, arguments);
+        assert_eq!(result.calls().len(), 1);
+        assert_eq!(result.calls()[0].arguments, arguments);
     }
 
     #[test]
@@ -313,7 +316,7 @@ mod tests {
         let error = parser.finish().unwrap_err();
 
         assert_eq!(
-            pre_finish.calls[0].name.as_deref(),
+            pre_finish.calls()[0].name.as_deref(),
             Some("get_weather"),
             "name delta is still emitted from parse_chunk() before truncation",
         );

@@ -146,30 +146,30 @@ impl PyToolParserOutput {
     #[new]
     #[pyo3(signature = (normal_text="", calls=None))]
     fn new(py: Python<'_>, normal_text: &str, calls: Option<Vec<Py<PyToolCallDelta>>>) -> Self {
-        let calls =
-            calls.unwrap_or_default().iter().map(|call| call.borrow(py).0.clone()).collect();
-        Self(ToolParserOutput {
-            normal_text: normal_text.to_owned(),
-            calls,
-        })
+        let mut output = ToolParserOutput::default();
+        output.push_text(normal_text);
+        for call in calls.unwrap_or_default() {
+            output.push_call(call.borrow(py).0.clone());
+        }
+        Self(output)
     }
 
     #[getter]
-    fn normal_text(&self) -> &str {
-        &self.0.normal_text
+    fn normal_text(&self) -> String {
+        self.0.normal_text()
     }
 
     #[getter]
     fn calls(&self) -> Vec<PyToolCallDelta> {
-        self.0.calls.iter().cloned().map(PyToolCallDelta).collect()
+        self.0.calls().into_iter().cloned().map(PyToolCallDelta).collect()
     }
 
     fn append(&mut self, other: PyRef<'_, PyToolParserOutput>) {
         self.0.append(other.0.clone());
     }
 
-    fn coalesce_calls(&self) -> Self {
-        Self(self.0.clone().coalesce_calls())
+    fn coalesce(&self) -> Self {
+        Self(self.0.clone().coalesce())
     }
 }
 
@@ -300,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn output_append_and_coalesce_calls() {
+    fn output_append_and_coalesce() {
         with_python(|py| {
             let first = Py::new(
                 py,
@@ -311,7 +311,7 @@ mod tests {
             let other = Py::new(py, PyToolParserOutput::new(py, "", Some(vec![second])))?;
             output.append(other.borrow(py));
 
-            let coalesced = output.coalesce_calls();
+            let coalesced = output.coalesce();
             assert_eq!(coalesced.normal_text(), "text");
             let calls = coalesced.calls();
             assert_eq!(calls.len(), 1);
@@ -334,7 +334,7 @@ mod tests {
             parser.parse_into_output(&build_call(), &mut output)?;
             let finish = Py::new(py, parser.finish()?)?;
             output.append(finish.borrow(py));
-            let output = output.coalesce_calls();
+            let output = output.coalesce();
 
             assert_eq!(output.normal_text(), "");
             let calls = output.calls();

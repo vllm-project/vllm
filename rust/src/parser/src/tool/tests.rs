@@ -44,8 +44,8 @@ fn default_parse_complete_delegates_through_parse_chunk_and_finish() {
         }
 
         fn parse_into(&mut self, _chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
-            output.normal_text.push_str("prefix ");
-            output.calls.extend([
+            output.push_text("prefix ");
+            for call in [
                 ToolCallDelta {
                     tool_index: 0,
                     name: Some("weather".to_string()),
@@ -61,26 +61,26 @@ fn default_parse_complete_delegates_through_parse_chunk_and_finish() {
                     name: Some("time".to_string()),
                     arguments: "{\"timezone\":".to_string(),
                 },
-            ]);
+            ] {
+                output.push_call(call);
+            }
             Ok(())
         }
 
         fn finish(&mut self) -> Result<ToolParserOutput> {
-            Ok(ToolParserOutput {
-                normal_text: "suffix".to_string(),
-                calls: vec![
-                    ToolCallDelta {
-                        tool_index: 0,
-                        name: None,
-                        arguments: "}".to_string(),
-                    },
-                    ToolCallDelta {
-                        tool_index: 1,
-                        name: None,
-                        arguments: "\"UTC\"}".to_string(),
-                    },
-                ],
-            })
+            let mut output = ToolParserOutput::default();
+            output.push_text("suffix");
+            output.push_call(ToolCallDelta {
+                tool_index: 0,
+                name: None,
+                arguments: "}".to_string(),
+            });
+            output.push_call(ToolCallDelta {
+                tool_index: 1,
+                name: None,
+                arguments: "\"UTC\"}".to_string(),
+            });
+            Ok(output)
         }
 
         fn reset(&mut self) -> String {
@@ -90,9 +90,9 @@ fn default_parse_complete_delegates_through_parse_chunk_and_finish() {
 
     let mut parser = StreamingParser;
     let output = parser.parse_complete("ignored").unwrap();
-    assert_eq!(output.normal_text, "prefix suffix");
+    assert_eq!(output.normal_text(), "prefix suffix");
     assert_eq!(
-        output.calls,
+        output.calls().into_iter().cloned().collect::<Vec<_>>(),
         vec![
             ToolCallDelta {
                 tool_index: 0,

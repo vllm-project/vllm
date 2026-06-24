@@ -92,7 +92,7 @@ impl DeepSeekDsmlToolParser {
     fn apply_event(&mut self, event: DsmlEvent, output: &mut ToolParserOutput) -> Result<()> {
         match event {
             DsmlEvent::Text { len: consumed_len } => {
-                output.normal_text.push_str(&self.buffer[..consumed_len]);
+                output.push_text(&self.buffer[..consumed_len]);
             }
             DsmlEvent::ToolCallsStart => {
                 self.mode = DsmlMode::ToolBlock {
@@ -116,7 +116,7 @@ impl DeepSeekDsmlToolParser {
                 let arguments = serde_json::to_string(&arguments)
                     .map_err(|error| parsing_failed!("failed to serialize arguments: {}", error))?;
 
-                output.calls.push(ToolCallDelta {
+                output.push_call(ToolCallDelta {
                     tool_index: self.emitted_invoke_count,
                     name: Some(name),
                     arguments,
@@ -156,7 +156,7 @@ impl DeepSeekDsmlToolParser {
     fn finish(&mut self) -> Result<ToolParserOutput> {
         let mut output = ToolParserOutput::default();
         match self.mode {
-            DsmlMode::Text => output.normal_text.push_str(&self.buffer),
+            DsmlMode::Text => output.push_text(&self.buffer),
             DsmlMode::Done => {}
             DsmlMode::ToolBlock { .. } => {
                 return Err(parsing_failed!("incomplete DeepSeek DSML tool call"));

@@ -57,55 +57,104 @@ pub struct ToolCallDelta {
     pub arguments: String,
 }
 
+/// One ordered event emitted while parsing assistant text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolParserEvent {
+    /// Plain assistant text that is not part of any tool call.
+    Text(String),
+    /// A tool-call update extracted from assistant text.
+    ToolCall(ToolCallDelta),
+}
+
 /// Result of advancing tool parsing with one assistant-text input.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ToolParserOutput {
-    /// Plain assistant text that is not part of any tool call.
-    pub normal_text: String,
-    /// Tool-call updates extracted from this input.
-    pub calls: Vec<ToolCallDelta>,
+    /// Ordered parser events committed by this input.
+    pub events: Vec<ToolParserEvent>,
 }
 
 impl ToolParserOutput {
-    /// Append another parser output onto this one.
-    ///
-    /// Note that this does not attempt to merge multiple deltas for the same
-    /// tool call into one complete item. Call `coalesce_calls()` after if
-    /// that behavior is desired.
-    pub fn append(&mut self, mut other: Self) {
-        self.normal_text.push_str(&other.normal_text);
-        self.calls.append(&mut other.calls);
+    /// Append one visible text event if `text` is non-empty.
+    pub fn push_text(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        if text.is_empty() {
+            return;
+        }
+        self.events.push(ToolParserEvent::Text(text));
     }
 
-    /// Merge multiple deltas for the same tool call into one complete item.
+    /// Append one tool-call update event.
+    pub fn push_call(&mut self, call: ToolCallDelta) {
+        self.events.push(ToolParserEvent::ToolCall(call));
+    }
+
+    /// Return all plain assistant text committed by this output.
+    pub fn normal_text(&self) -> String {
+        self.events
+            .iter()
+            .filter_map(|event| match event {
+                ToolParserEvent::Text(text) => Some(text.as_str()),
+                ToolParserEvent::ToolCall(_) => None,
+            })
+            .collect()
+    }
+
+    /// Return all tool-call updates committed by this output.
+    pub fn calls(&self) -> Vec<&ToolCallDelta> {
+        self.events
+            .iter()
+            .filter_map(|event| match event {
+                ToolParserEvent::Text(_) => None,
+                ToolParserEvent::ToolCall(call) => Some(call),
+            })
+            .collect()
+    }
+
+    /// Append another parser output onto this one.
+    ///
+    /// Note that this keeps events exactly as they arrive. Call `coalesce()`
+    /// after if final text and tool-call fragments should be flattened.
+    pub fn append(&mut self, mut other: Self) {
+        self.events.append(&mut other.events);
+    }
+
+    /// Flatten text and merge deltas for the same tool call.
+    ///
+    /// All text events are concatenated into one leading text event. Tool-call
+    /// events follow that text event in first-seen tool index order, with
+    /// argument fragments for the same tool call concatenated together.
     ///
     /// This is primarily used by the default `parse_complete()` implementation,
     /// which delegates through the incremental parser lifecycle and then
     /// needs to collapse streaming-style argument fragments into one final
     /// tool call.
-    pub fn coalesce_calls(mut self) -> Self {
+    pub fn coalesce(self) -> Self {
         let mut merged = BTreeMap::<usize, ToolCallDelta>::new();
         let mut order = Vec::new();
+        let normal_text = self.normal_text();
 
-        for call in self.calls {
+        for call in self.calls() {
             match merged.entry(call.tool_index) {
                 btree_map::Entry::Vacant(entry) => {
                     order.push(call.tool_index);
-                    entry.insert(call);
+                    entry.insert(call.clone());
                 }
                 btree_map::Entry::Occupied(mut entry) => {
                     let existing = entry.get_mut();
                     if existing.name.is_none() {
-                        existing.name = call.name;
+                        existing.name = call.name.clone();
                     }
                     existing.arguments.push_str(&call.arguments);
                 }
             }
         }
 
-        self.calls =
-            order.into_iter().filter_map(|tool_index| merged.remove(&tool_index)).collect();
-        self
+        let mut output = Self::default();
+        output.push_text(normal_text);
+        for call in order.into_iter().filter_map(|tool_index| merged.remove(&tool_index)) {
+            output.push_call(call);
+        }
+        output
     }
 }
 
@@ -183,7 +232,7 @@ impl<T: ToolParser + ?Sized> T {
     pub fn parse_complete(&mut self, text: &str) -> Result<ToolParserOutput> {
         let mut output = self.parse_chunk(text)?;
         output.append(self.finish()?);
-        Ok(output.coalesce_calls())
+        Ok(output.coalesce())
     }
 }
 

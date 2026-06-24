@@ -107,11 +107,11 @@ mod tests {
             ))
             .unwrap();
 
-        assert!(output.normal_text.is_empty());
-        assert_eq!(output.calls.len(), 1);
-        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
+        assert!(output.normal_text().is_empty());
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
         assert_eq!(
-            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
             json!({
                 "location": "SF",
                 "date": "2024-01-16"
@@ -137,11 +137,11 @@ mod tests {
             ],
         );
 
-        assert_eq!(output.normal_text, "Thinking... ");
-        assert_eq!(output.calls.len(), 1);
-        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(output.normal_text(), "Thinking... ");
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
         assert_eq!(
-            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
             json!({ "location": "Beijing" })
         );
     }

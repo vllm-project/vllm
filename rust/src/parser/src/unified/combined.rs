@@ -228,7 +228,7 @@ mod tests {
             chunk: &str,
             output: &mut crate::tool::ToolParserOutput,
         ) -> crate::tool::Result<()> {
-            output.normal_text.push_str(chunk);
+            output.push_text(chunk);
             Ok(())
         }
 

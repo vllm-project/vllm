@@ -90,7 +90,7 @@ pub fn collect_stream<T: ToolParser + ?Sized>(parser: &mut T, chunks: &[&str]) -
         output.append(parser.parse_chunk(chunk).unwrap());
     }
     output.append(parser.finish().unwrap());
-    output.coalesce_calls()
+    output.coalesce()
 }
 
 /// Split text into chunks containing at most `chunk_chars` Unicode scalar
