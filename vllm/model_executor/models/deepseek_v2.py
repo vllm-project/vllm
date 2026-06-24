@@ -42,6 +42,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
+    tensor_model_parallel_reduce_scatter,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -358,15 +359,18 @@ class DeepseekV2MoE(nn.Module):
                 self.gate.e_score_correction_bias.data.to(self.gate.out_dtype)
             )
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        already_sequence_parallel: bool = False,
+        gather_output: bool = True,
+    ) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
         # Chunk the hidden states so they aren't replicated across TP ranks.
         # This avoids duplicate computation in self.experts.
-        # TODO: We can replace the all_reduce at the end of attn with a
-        # reduce_scatter instead of chunking here.
-        if self.is_sequence_parallel:
+        if self.is_sequence_parallel and not already_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
         if self.experts.is_internal_router:
@@ -379,7 +383,7 @@ class DeepseekV2MoE(nn.Module):
                 hidden_states=hidden_states, router_logits=router_logits
             )
 
-        if self.is_sequence_parallel:
+        if self.is_sequence_parallel and gather_output:
             final_hidden_states = tensor_model_parallel_all_gather(
                 final_hidden_states, 0
             )
@@ -1151,12 +1155,17 @@ class DeepseekV2DecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
         )
-
-        if (
+        is_moe_layer = (
             config.n_routed_experts is not None
             and layer_idx >= config.first_k_dense_replace
             and layer_idx % moe_layer_freq == 0
-        ):
+        )
+        self.use_sequence_parallel_moe = (
+            parallel_config.use_sequence_parallel_moe and is_moe_layer
+        )
+        self.self_attn.o_proj.reduce_results = not self.use_sequence_parallel_moe
+
+        if is_moe_layer:
             self.mlp = DeepseekV2MoE(
                 config=config,
                 parallel_config=parallel_config,
@@ -1184,12 +1193,23 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: torch.Tensor | None,
         llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        full_num_tokens = positions.shape[0]
+        input_is_sequence_parallel = (
+            self.use_sequence_parallel_moe
+            and residual is not None
+            and hidden_states.shape[0] != full_num_tokens
+        )
+
         # Self Attention
         if residual is None:
             residual = hidden_states.clone()
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
+
+        if input_is_sequence_parallel:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+            hidden_states = hidden_states[:full_num_tokens]
 
         attn_kwargs = {
             "positions": positions,
@@ -1212,9 +1232,30 @@ class DeepseekV2DecoderLayer(nn.Module):
                 # first layer.
                 residual *= 1.0 / self.routed_scaling_factor
 
+        if self.use_sequence_parallel_moe:
+            sp_remainder = (
+                hidden_states.shape[0] % get_tensor_model_parallel_world_size()
+            )
+            # pad if not divisible by world size
+            if sp_remainder:
+                sp_pad = get_tensor_model_parallel_world_size() - sp_remainder
+                hidden_states = torch.nn.functional.pad(
+                    hidden_states, (0, 0, 0, sp_pad)
+                )
+            hidden_states = tensor_model_parallel_reduce_scatter(hidden_states, 0)
+            if not input_is_sequence_parallel:
+                residual = sequence_parallel_chunk(residual)
+
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        hidden_states = self.mlp(hidden_states)
+        if self.use_sequence_parallel_moe:
+            hidden_states = self.mlp(
+                hidden_states,
+                already_sequence_parallel=True,
+                gather_output=False,
+            )
+        else:
+            hidden_states = self.mlp(hidden_states)
 
         if isinstance(self.mlp, DeepseekV2MLP) and hidden_states.dtype == torch.float16:
             # Fix FP16 overflow
@@ -1336,8 +1377,23 @@ class DeepseekV2Model(nn.Module):
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
+            # all gather if we need to use the whole states
+            if (
+                hidden_states.shape[0] != positions.shape[0]
+                and not layer.use_sequence_parallel_moe
+            ):
+                hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+                hidden_states = hidden_states[: positions.shape[0]]
+                residual = tensor_model_parallel_all_gather(residual, 0)
+                residual = residual[: positions.shape[0]]
             if idx in self.aux_hidden_state_layers:
-                aux_hidden_states.append(hidden_states + residual)
+                aux_hidden_state = hidden_states + residual
+                if aux_hidden_state.shape[0] != positions.shape[0]:
+                    aux_hidden_state = tensor_model_parallel_all_gather(
+                        aux_hidden_state, 0
+                    )
+                    aux_hidden_state = aux_hidden_state[: positions.shape[0]]
+                aux_hidden_states.append(aux_hidden_state)
             hidden_states, residual = layer(
                 positions, hidden_states, residual, llama_4_scaling
             )
@@ -1346,6 +1402,12 @@ class DeepseekV2Model(nn.Module):
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
+
+        if hidden_states.shape[0] != positions.shape[0]:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+            hidden_states = hidden_states[: positions.shape[0]]
+            residual = tensor_model_parallel_all_gather(residual, 0)
+            residual = residual[: positions.shape[0]]
 
         hidden_states, _ = self.norm(hidden_states, residual)
         if len(aux_hidden_states) > 0:
