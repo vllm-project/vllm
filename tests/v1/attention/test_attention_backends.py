@@ -29,7 +29,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.utils import (
     set_kv_cache_layout,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVQuantMode
+from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 BACKENDS_TO_TEST = [
     AttentionBackendEnum.FLASH_ATTN,
@@ -630,8 +630,8 @@ def test_causal_backend_correctness(
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
     reason="FlashInfer is not available.",
 )
-def test_flashinfer_sm90_fp8_decode_selects_xqa(monkeypatch):
-    """FlashInfer should route Hopper FP8 decode through XQA metadata."""
+def test_flashinfer_sm90_xqa_decode_correctness(monkeypatch):
+    """FlashInfer should route Hopper decode through XQA and match SDPA."""
     if not current_platform.is_cuda():
         pytest.skip("FlashInfer XQA decode requires CUDA.")
 
@@ -664,6 +664,7 @@ def test_flashinfer_sm90_fp8_decode_selects_xqa(monkeypatch):
         "use_trtllm_attention",
         lambda *args, **kwargs: not kwargs.get("is_prefill", False),
     )
+    monkeypatch.setattr(flashinfer_backend, "force_use_trtllm_attention", lambda: None)
     monkeypatch.setattr(
         flashinfer_backend,
         "get_per_layer_parameters",
@@ -676,13 +677,22 @@ def test_flashinfer_sm90_fp8_decode_selects_xqa(monkeypatch):
         },
     )
 
+    def causal_mask_mod(
+        b: torch.Tensor,
+        h: torch.Tensor,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+        *,
+        context_len: int,
+    ):
+        return (q_idx + context_len) >= kv_idx
+
     batch_spec = BATCH_SPECS["small_decode"]
     vllm_config = create_vllm_config(
         model_name="meta-llama/Meta-Llama-3-8B",
         max_model_len=max(batch_spec.seq_lens),
         block_size=16,
     )
-    vllm_config.cache_config.cache_dtype = "fp8"
     device = torch.device(f"{DEVICE_TYPE}:0")
     kv_cache_spec = FullAttentionSpec(
         block_size=vllm_config.cache_config.block_size,
@@ -691,7 +701,6 @@ def test_flashinfer_sm90_fp8_decode_selects_xqa(monkeypatch):
         ),
         head_size=vllm_config.model_config.get_head_size(),
         dtype=vllm_config.model_config.dtype,
-        kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
     )
 
     with set_current_vllm_config(vllm_config):
@@ -712,6 +721,13 @@ def test_flashinfer_sm90_fp8_decode_selects_xqa(monkeypatch):
         flashinfer_backend.FlashInferTrtllmAPIDecode,
     )
     assert attn_metadata.decode.kernel == flashinfer_backend.FlashInferDecodeKernel.XQA
+
+    _test_backend_correctness(
+        batch_spec,
+        "meta-llama/Meta-Llama-3-8B",
+        [AttentionBackendEnum.FLASHINFER],
+        causal_mask_mod,
+    )
 
 
 if current_platform.is_rocm():
