@@ -54,6 +54,48 @@ class Gemma3TextModelConfig(VerifyAndUpdateConfig):
         hf_config.is_causal = not hf_config.use_bidirectional_attention
 
 
+class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        """Configure Unlimited-OCR attention backends for R-SWA and vision."""
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        attn_config = vllm_config.attention_config
+        if attn_config.backend is None:
+            attn_config.backend = AttentionBackendEnum.FLEX_ATTENTION
+            logger.info(
+                "Unlimited-OCR: forcing FlexAttention backend for the language "
+                "model to implement Reference Sliding Window Attention (R-SWA)."
+            )
+        elif attn_config.backend != AttentionBackendEnum.FLEX_ATTENTION:
+            logger.warning(
+                "Unlimited-OCR: language-model attention backend %s cannot "
+                "express the R-SWA mask (only FlexAttention can); overriding to "
+                "FlexAttention.",
+                attn_config.backend,
+            )
+            attn_config.backend = AttentionBackendEnum.FLEX_ATTENTION
+
+        mm_config = getattr(vllm_config.model_config, "multimodal_config", None)
+        if mm_config is not None:
+            if mm_config.mm_encoder_attn_backend is None:
+                mm_config.mm_encoder_attn_backend = AttentionBackendEnum.FLASH_ATTN
+            elif mm_config.mm_encoder_attn_backend == AttentionBackendEnum.FLASHINFER:
+                logger.warning(
+                    "Unlimited-OCR: FlashInfer is not supported for the vision "
+                    "encoder (the CLIP stage runs full attention without "
+                    "cu_seqlens); falling back to FlashAttention."
+                )
+                mm_config.mm_encoder_attn_backend = AttentionBackendEnum.FLASH_ATTN
+
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        text_config = model_config.hf_config.text_config
+        text_config.architectures = ["DeepseekV2ForCausalLM"]
+        if getattr(model_config.hf_config, "rswa_window", None) is None:
+            model_config.hf_config.rswa_window = 128
+
+
 class Gemma4Config(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
@@ -703,6 +745,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen3VLForSequenceClassification": Qwen3VLForSequenceClassificationConfig,
     "Qwen3_5ForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
     "Qwen3_5MoeForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
+    "UnlimitedOCRForCausalLM": UnlimitedOCRForCausalLMConfig,
     "VoyageQwen3BidirectionalEmbedModel": VoyageQwen3BidirectionalEmbedModelConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,
 }

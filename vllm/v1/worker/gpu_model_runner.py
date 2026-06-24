@@ -486,9 +486,7 @@ class GPUModelRunner(
 
         self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
         self.is_mm_prefix_lm = self.model_config.is_mm_prefix_lm
-        # Reference Sliding Window Attention (R-SWA) window size; populated from
-        # the loaded model in ``load_model`` (None disables R-SWA).
-        self.rswa_window: int | None = None
+        self.rswa_window = self.model_config.rswa_window
 
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
@@ -5190,9 +5188,6 @@ class GPUModelRunner(
                 self.model = model_loader.load_model(
                     vllm_config=self.vllm_config, model_config=self.model_config
                 )
-                # Models may request Reference Sliding Window Attention by
-                # exposing an ``rswa_window`` attribute (e.g. Unlimited-OCR).
-                self.rswa_window = getattr(self.model, "rswa_window", None)
                 if self.lora_config:
                     self.model = self.load_lora_model(
                         self.model, self.vllm_config, self.device
