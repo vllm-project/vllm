@@ -909,7 +909,7 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
             alpha = (
                 quant_config.gemm1_alpha
                 if quant_config.gemm1_alpha is not None
-                else 1.0  # SILU (DeepSeek-V4); was 1.702 gpt-oss default
+                else 1.702
             )
             limit = (
                 quant_config.gemm1_clamp_limit
@@ -1035,7 +1035,7 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
         swiglu_alpha = (
             quant_config.gemm1_alpha
             if quant_config.gemm1_alpha is not None
-            else 1.0  # SILU (DeepSeek-V4); was 1.702 gpt-oss default
+            else 1.702
         )
         swiglu_limit = (
             quant_config.gemm1_clamp_limit
@@ -1075,37 +1075,27 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
             swiglu_limit,
         )
 
-        # GEMM1 WITHOUT fused swiglu. aiter's fused _swiglu splits gate/up by
-        # INTERLEAVING, but DeepSeek-V4 (SILU) stores w13 half/half, so emit the raw
-        # gate_up (bf16) and apply the half/half SILU+clamp ourselves -- identical to
-        # the unfused activation() path (swiglu_limit_func) -- then requantize to fp8.
-        raw_gate_up = moe_gemm_a8w4(
+        intermediate_cache1 = moe_gemm_a8w4(
             hidden_fp8,
             w1.storage.data,
             None,
             quant_config.w1_precision.weight_scale.storage.data,
             gemm1_lhs_scale,
-            None,
+            gemm2_lhs_scale,
             quant_config.w1_bias,
             routing_data,
             gather_indx=None,
             gammas=gammas if apply_router_weight_on_input else None,
             swizzle_mx_scale=None,
-            out_dtype=torch.bfloat16,
-            apply_swiglu=False,
+            out_dtype=torch.float8_e4m3fn,
+            apply_swiglu=True,
+            alpha=swiglu_alpha,
+            limit=swiglu_limit,
             unpadded_N=unpadded_n_w1,
             unpadded_K=unpadded_k_w1,
         )
-        gate_up = raw_gate_up[:, :unpadded_n_w1]
-        _act = torch.empty(
-            (gate_up.shape[0], unpadded_n_w1 // 2),
-            dtype=torch.bfloat16,
-            device=gate_up.device,
-        )
-        swiglu_limit_func(_act, gate_up, swiglu_limit)
-        intermediate_cache1 = downcast_to_static_fp8(_act, gemm2_lhs_scale)
         logger.info(
-            "[aiter-w4a8] gemm1(raw)+halfsplit-silu OK ic1=%s %s; calling gemm2",
+            "[aiter-w4a8] gemm1 OK ic1=%s %s; calling gemm2",
             tuple(intermediate_cache1.shape),
             intermediate_cache1.dtype,
         )
@@ -1274,7 +1264,7 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
             swiglu_alpha = (
                 quant_config.gemm1_alpha
                 if quant_config.gemm1_alpha is not None
-                else 1.0  # SILU (DeepSeek-V4); was 1.702 gpt-oss default
+                else 1.702
             )
             swiglu_limit = (
                 quant_config.gemm1_clamp_limit

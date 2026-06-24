@@ -46,11 +46,34 @@ def aiter_triton_kernel_w4a8_moe_forward(
         and quant_config.use_mxfp4_w4a8
         and rocm_aiter_ops.is_enabled()
     )
-    from aiter.ops.triton.moe_routing.routing import routing as aiter_routing
+    from vllm.platforms.rocm import on_gfx1250
+
+    try:
+        from aiter.ops.triton.moe.moe_routing import routing as _routing_mod
+    except ImportError:
+        from aiter.ops.triton.moe_routing import routing as _routing_mod
+
+    # TODO: (JPVILLAM) This causes a tl compile error on 1250.
+    # Need to figure out why this is a problem and sync with triton team
+    if on_gfx1250():
+        _routing_mod.is_tdm_avail = lambda: False
+    aiter_routing = _routing_mod.routing
 
     routing_data, gather_idx, scatter_idx = aiter_routing(
         gating_output, topk, sm_first=not renormalize
     )
+
+    # gfx1250: aiter's in-kernel gather is numerically broken (validated on the
+    # FFM sim: do_gather=True -> maxrel ~2.4), so gather rows into expert-sorted
+    # order in torch and pass gather_indx=None. Per aiter's moe_gemm_torch,
+    # sorted row i reads source token gather_idx[i] // n_expts_act, so this
+    # reproduces the in-kernel gather exactly (manual gather -> maxrel ~5e-3).
+    # gfx950 keeps the (working) in-kernel gather.
+    if on_gfx1250():
+        gather_src = gather_idx.to(torch.long) // topk
+        hidden_states = hidden_states[gather_src]
+        gather_idx = None
+
     return triton_kernel_fused_mxfp4_w4a8_experts(
         None,
         hidden_states,
@@ -116,8 +139,11 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
     from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
         should_use_cdna4_mx_scale_swizzle,
     )
+    from vllm.platforms.rocm import on_gfx1250
 
     _swizzle_mx_scale = "CDNA4_SCALE" if should_use_cdna4_mx_scale_swizzle() else None
+    # TODO (JPVILLAM): merge conflict resolve later if _swizzle_mx_scale is enough
+    mx_scale_swizzle = None if on_gfx1250() else "CDNA4_SCALE"
 
     assert quant_config.w1_precision is not None, (
         "w1_precision in quant config can't be None"
@@ -130,6 +156,12 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
         hidden_states, quant_config.w1_precision.flex_ctx.lhs_data.scale
     )
 
+    # gfx1250 stores the MXFP4 weight scale unswizzled (StridedLayout, see
+    # mxfp4_utils._swizzle_mxfp4) because the gfx1250 moe_gemm_a8w4 reads a
+    # CDNA4-swizzled scale as garbage (validated on the FFM sim: CDNA4_SCALE ->
+    # maxrel ~7e4, plain/None -> ~6e-3); pass swizzle_mx_scale=None there.
+    # gfx950 uses the CDNA4 swizzle layout.
+
     intermediate_cache1 = moe_gemm_a8w4(
         hidden_states,
         w1.storage.data,
@@ -141,7 +173,7 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
         routing_data,
         gather_indx=gather_indx,
         gammas=gammas if apply_router_weight_on_input else None,
-        swizzle_mx_scale=_swizzle_mx_scale,
+        swizzle_mx_scale=mx_scale_swizzle,
         out_dtype=torch.float8_e4m3fn,
         apply_swiglu=True,
         alpha=swiglu_alpha,
@@ -161,7 +193,7 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
         routing_data,
         scatter_indx=scatter_indx,
         gammas=None if apply_router_weight_on_input else gammas,
-        swizzle_mx_scale=_swizzle_mx_scale,
+        swizzle_mx_scale=mx_scale_swizzle,
         unpadded_N=unpadded_N_w2,
         unpadded_K=unpadded_K_w2,
     )
@@ -199,12 +231,16 @@ class AiterW4A8ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        # Requires AITER and GFX950
+        # Requires AITER and a supported AMD arch. gfx950 (CDNA4) uses the
+        # in-kernel gather + CDNA4 scale swizzle; gfx1250 routes through the
+        # same moe_gemm_a8w4 kernel with a manual gather and unswizzled scales
+        # (see aiter_triton_kernel_w4a8_moe_forward / the swizzle handling in
+        # triton_kernel_fused_mxfp4_w4a8_experts).
         if not rocm_aiter_ops.is_enabled():
             return False
-        from vllm.platforms.rocm import on_gfx950
+        from vllm.platforms.rocm import on_gfx950, on_gfx1250
 
-        return on_gfx950()
+        return on_gfx950() or on_gfx1250()
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:

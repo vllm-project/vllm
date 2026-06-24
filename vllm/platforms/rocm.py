@@ -37,8 +37,14 @@ try:
         amdsmi_topo_get_link_type,
         amdsmi_topo_get_numa_node_number,
     )
+
+    _AMDSMI_AVAILABLE = True
 except ImportError as e:
     logger.warning("Failed to import from amdsmi with %r", e)
+    # amdsmi is unavailable on the FFM pre-silicon simulator (and would report
+    # the host's real GPUs, not the sim). amdsmi-decorated methods fall back to
+    # torch when this is False.
+    _AMDSMI_AVAILABLE = False
 
 try:
     import vllm._C  # noqa: F401
@@ -146,6 +152,10 @@ _sync_hip_cuda_env_vars()
 def with_amdsmi_context(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
+        if not _AMDSMI_AVAILABLE:
+            # amdsmi unavailable (e.g. FFM simulator): skip init/shutdown and let
+            # the wrapped function use its own non-amdsmi (torch) fallback.
+            return fn(*args, **kwargs)
         amdsmi_init()
         try:
             return fn(*args, **kwargs)
@@ -186,11 +196,13 @@ def _get_gcn_arch() -> str:
         return _query_gcn_arch_from_amdsmi()
     except Exception as e:
         logger.debug("Failed to get GCN arch via amdsmi: %s", e)
-        logger.warning_once(
-            "Failed to get GCN arch via amdsmi, falling back to torch.cuda. "
-            "This will initialize CUDA and may cause "
-            "issues if CUDA_VISIBLE_DEVICES is not set yet."
-        )
+        # NOTE: use logger.debug, not warning_once, here. This runs at module
+        # load while resolving the platform; warning_once imports
+        # vllm.distributed, which causes a circular import before
+        # current_platform is bound. This path is taken on the FFM simulator,
+        # where amdsmi is unavailable (and would report the host's real gfx950
+        # cards rather than the simulated gfx1250) — torch.cuda below is correct.
+        logger.debug("Failed to get GCN arch via amdsmi, falling back to torch.cuda.")
     # Ultimate fallback: use torch.cuda (will initialize CUDA)
     return torch.cuda.get_device_properties("cuda").gcnArchName
 
@@ -205,11 +217,17 @@ _ON_GFX11 = "gfx11" in _GCN_ARCH
 _ON_GFX1100 = "gfx1100" in _GCN_ARCH
 _ON_GFX1151 = "gfx1151" in _GCN_ARCH
 _ON_GFX12X = any(arch in _GCN_ARCH for arch in ["gfx12"])
-_ON_MI3XX = any(arch in _GCN_ARCH for arch in ["gfx942", "gfx950"])
-_ON_GFX9 = any(arch in _GCN_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
+_ON_MI3XX = any(arch in _GCN_ARCH for arch in ["gfx942", "gfx950", "gfx1250"])
+_ON_GFX9 = any(
+    arch in _GCN_ARCH for arch in ["gfx90a", "gfx942", "gfx950", "gfx1250"]
+)  # TODO(JPVILLAM): Bubblegum patch to unlock gptoss
 _ON_GFX90A = "gfx90a" in _GCN_ARCH
 _ON_GFX942 = "gfx942" in _GCN_ARCH
 _ON_GFX950 = "gfx950" in _GCN_ARCH
+# any(
+#    arch in _GCN_ARCH for arch in ["gfx950", "gfx1250"]
+# )  # TODO(JPVILLAM): Bubblegum patch to unlock DSR1
+_ON_GFX1250 = "gfx1250" in _GCN_ARCH
 
 
 def _capability_from_gcn_arch(gcn_arch: str) -> tuple[int, int] | None:
@@ -322,6 +340,9 @@ def on_gfx942() -> bool:
 def on_gfx950() -> bool:
     return _ON_GFX950
 
+
+def on_gfx1250() -> bool:
+    return _ON_GFX1250
 
 # Enable HIP online tuning early, before hipBLASLt initializes.
 # Turn on hipBLASLt online tuning if use AITER hipBLASLt GEMM.
@@ -712,6 +733,9 @@ class RocmPlatform(Platform):
     @with_amdsmi_context
     @lru_cache(maxsize=8)
     def get_device_name(cls, device_id: int = 0) -> str:
+        if not _AMDSMI_AVAILABLE:
+            # FFM simulator: amdsmi can't see the simulated GPU; use torch.
+            return torch.cuda.get_device_name(device_id)
         physical_device_id = cls.device_id_to_physical_device_id(device_id)
         handle = amdsmi_get_processor_handles()[physical_device_id]
         asic_info = amdsmi_get_gpu_asic_info(handle)
@@ -857,7 +881,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def supports_mx(cls) -> bool:
-        return any(gfx in _GCN_ARCH for gfx in ["gfx95"])
+        return any(gfx in _GCN_ARCH for gfx in ["gfx95", "gfx1250"])
 
     @classmethod
     def supports_fp8(cls) -> bool:

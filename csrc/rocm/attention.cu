@@ -2405,6 +2405,15 @@ template <typename T, int absz, int cbid, int blgp>
 __device__ __forceinline__ floatx8 gcn_wmma16x16x16_instr(const bit16x8& inpA,
                                                           const bit16x8& inpB,
                                                           const floatx8& inpC) {
+#if defined(__gfx1250__)
+  // gfx1250 (gfx12 family) does not provide the gfx12 WMMA variant used by
+  // gfx1200/1201 (needs wmma-128b-insts). This custom-attention WMMA path is
+  // unsupported on gfx1250; trap if ever launched (fail loud, not silent-wrong).
+  (void)inpA;
+  (void)inpB;
+  __builtin_trap();
+  return inpC;
+#else
   if constexpr (std::is_same<T, _Float16>::value) {
     return __builtin_amdgcn_wmma_f32_16x16x16_f16_w32_gfx12(inpA, inpB, inpC);
   } else if constexpr (std::is_same<T, __hip_bfloat16>::value) {
@@ -2412,6 +2421,7 @@ __device__ __forceinline__ floatx8 gcn_wmma16x16x16_instr(const bit16x8& inpA,
   } else {
     static_assert(false, "unsupported 16b dtype");
   }
+#endif
 }
 
 template <typename T>

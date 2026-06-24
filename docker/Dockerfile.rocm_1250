@@ -1,0 +1,114 @@
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+
+# --- ROCm + PyTorch versioning (override any of these at build time) -------
+ARG GFX_ARCH=gfx1250
+ARG ROCM_VERSION=7.14.0a20260604
+ARG ROCM_BUILD=a0
+ARG TORCH_VERSION=2.10.0
+ARG ROCM_WHEEL_INDEX=https://rocm.genesis.amd.com/whl/gfx1250/
+ARG VLLM_REPO="https://github.com/ROCm/vllm.git"
+ARG VLLM_BRANCH="455_wip"
+ARG AITER_BRANCH="jpvillam/gfx1250_0604"
+
+ENV VLLM_TARGET_DEVICE=rocm
+ENV PYTORCH_ROCM_ARCH=${GFX_ARCH}
+ENV CMAKE_BUILD_TYPE=Release
+ENV GPU_TARGET=${GFX_ARCH}
+ENV VIRTUAL_ENV=/opt/venv
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        build-essential clang-19 lld ccache ninja-build cmake \
+        git curl libcurl4-openssl-dev rsync ssh wget ca-certificates \
+        python3 python3-pip python3-dev python3-venv \
+        less vim libzstd-dev numactl libelf1 m4 && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+SHELL ["/bin/bash", "-e", "-u", "-o", "pipefail", "-c"]
+
+RUN python3 -m venv "${VIRTUAL_ENV}" && \
+    "${VIRTUAL_ENV}/bin/python" -m pip install --upgrade pip setuptools PyYAML
+ENV PATH=${VIRTUAL_ENV}/bin:$PATH
+
+# COPY ffm/ /root/x/ffm/
+# ENV PATH=${ROCM_PATH}/llvm/bin:${ROCM_PATH}/bin:$PATH
+# ENV LD_LIBRARY_PATH=${ROCM_PATH}/lib:${ROCM_PATH}/lib/rocm_sysdeps/lib:${ROCM_PATH}/llvm/lib
+# ENV HSA_MODEL_LIB=/root/x/ffm/libhsakmtmodel.so
+# ENV HSA_MODEL_TOML="/root/x/ffm/ffm_config.toml"
+# ENV HSA_MODEL_ARGS=ffm_enable_time_slicing
+# ENV HSA_MODEL_TOPOLOGY=/root/x/ffm/topology/mi450
+# ENV HSA_MODEL_NUM_THREADS=64
+
+ENV HSA_ENABLE_SDMA=0
+ENV HSA_ENABLE_INTERRUPT=0
+
+# Install the TheRock PyTorch wheel and the matching rocm-sdk wheels into the venv
+RUN pip install --pre --index-url "${ROCM_WHEEL_INDEX}" \
+        "torch==${TORCH_VERSION}+rocm${ROCM_VERSION}${ROCM_BUILD:+.${ROCM_BUILD}}" \
+        "rocm[libraries,devel]==${ROCM_VERSION}${ROCM_BUILD:++${ROCM_BUILD}}" && \
+    rocm-sdk init
+
+RUN pip install \
+        filelock \
+        "typing-extensions>=4.10.0" \
+        "sympy>=1.13.3" \
+        "networkx>=2.5.1" \
+        jinja2 \
+        "fsspec>=0.8.5"
+
+# Set ROCm, Python, Paths, and Environment Variables
+ENV SITE_PACKAGES=${VIRTUAL_ENV}/lib/python3.12/site-packages
+ENV ROCM_PATH=${SITE_PACKAGES}/_rocm_sdk_devel
+ENV ROCM_HOME=${ROCM_PATH}
+ENV ROCM_SOURCE_DIR=${ROCM_PATH}
+ENV ROCM_BIN=${ROCM_PATH}/bin
+ENV ROCM_CMAKE_PREFIX=${ROCM_PATH}/lib/cmake
+ENV HIP_DEVICE_LIB_PATH=${SITE_PACKAGES}/_rocm_sdk_core/lib/llvm/amdgcn/bitcode
+ENV PATH=${ROCM_PATH}/bin:${ROCM_PATH}/llvm/bin:$PATH
+ENV LD_LIBRARY_PATH=${ROCM_PATH}/lib:${SITE_PACKAGES}/_rocm_sdk_core/lib:${SITE_PACKAGES}/_rocm_sdk_libraries_${GFX_ARCH}/lib
+ENV CMAKE_PREFIX_PATH=${ROCM_PATH}/lib/cmake:${SITE_PACKAGES}/torch/share/cmake
+ENV PYTHONPATH=${SITE_PACKAGES}/_rocm_sdk_core/share/amd_smi
+
+# NPI base-image fix-ups so the wheel ROCm behaves like a normal install:
+#  - build amd_smi from the bundled source (provides the `amdsmi` module),
+#  - flip rocm_sdk's library preload off RTLD_GLOBAL (avoids symbol clashes),
+RUN if [ -d "${SITE_PACKAGES}/_rocm_sdk_core/share/amd_smi" ]; then \
+        cd "${SITE_PACKAGES}/_rocm_sdk_core/share/amd_smi" && pip install .; \
+    fi && \
+    if [ -f "${SITE_PACKAGES}/rocm_sdk/__init__.py" ]; then \
+        sed -i 's/rtld_global: bool = True/rtld_global: bool = False/g' \
+            "${SITE_PACKAGES}/rocm_sdk/__init__.py"; \
+    fi
+
+# Install AITER (https://github.com/ROCm/aiter): plain clone WITHOUT submodules
+# (so 3rdparty/composable_kernel is absent), built with Composable Kernel disabled.
+RUN git clone -b ${AITER_BRANCH} --depth 1 https://github.com/ROCm/aiter.git /app/aiter && \
+    cd /app/aiter && \
+    pip install packaging "cmake<4" ninja wheel setuptools_scm vcs_versioning pybind11 numpy && \
+    ENABLE_CK=0 AITER_USE_SYSTEM_TRITON=1 pip install --no-build-isolation -e .
+
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends pkg-config libnuma-dev libdrm-dev && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+RUN pip install "setuptools>=77.0.3,<81.0.0" setuptools_scm setuptools_rust wheel packaging jinja2
+
+# Build + install vLLM for gfx1250 (cloned from VLLM_REPO @ VLLM_BRANCH)
+RUN git clone "${VLLM_REPO}" /app/vllm \
+    && cd /app/vllm \
+    && git fetch -v --prune -- origin "${VLLM_BRANCH}" \
+    && git checkout FETCH_HEAD
+
+# Compile the C++/HIP extensions (_C, _rocm_C) for gfx1250 and editable-install.
+# MAX_JOBS is a build-arg so it can be tuned per machine (docker build --build-arg).
+RUN cd /app/vllm && \
+    pip install -e . --no-build-isolation --no-deps -v
+
+# vLLM Python runtime deps. common.txt pins no torch, so the NPI ROCm torch
+# installed above is left untouched.
+RUN pip install -r /app/vllm/requirements/common.txt
+
+WORKDIR /app/vllm
+ENTRYPOINT ["/bin/bash"]
