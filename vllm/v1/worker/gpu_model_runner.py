@@ -7,7 +7,7 @@ import itertools
 import threading
 import time
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
@@ -229,6 +229,24 @@ if TYPE_CHECKING:
     from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 
 logger = init_logger(__name__)
+
+
+def _iter_kv_cache_tensors(kv_caches: Iterable[Any]) -> Iterator[torch.Tensor]:
+    for cache in kv_caches:
+        if cache is None:
+            continue
+        if isinstance(cache, torch.Tensor):
+            yield cache
+        elif isinstance(cache, Mapping):
+            yield from _iter_kv_cache_tensors(cache.values())
+        elif isinstance(cache, (list, tuple)):
+            yield from _iter_kv_cache_tensors(cache)
+        else:
+            raise TypeError(
+                "Expected KV cache entries to be tensors or nested containers "
+                f"of tensors, got {type(cache)!r}."
+            )
+
 
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
@@ -945,9 +963,8 @@ class GPUModelRunner(
             return
 
         kv_caches = getattr(self, "kv_caches", [])
-        for cache_tensor in kv_caches:
-            if cache_tensor is not None:
-                cache_tensor.zero_()
+        for cache_tensor in _iter_kv_cache_tensors(kv_caches):
+            cache_tensor.zero_()
 
         k_attr_names = ("_k_scale", "k_scale")
         v_attr_names = ("_v_scale", "v_scale")
