@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -275,7 +276,7 @@ class cmake_build_ext(build_ext):
 
         other_cmake_args = os.environ.get("CMAKE_ARGS")
         if other_cmake_args:
-            cmake_args += other_cmake_args.split()
+            cmake_args += shlex.split(other_cmake_args)
 
         subprocess.check_call(
             ["cmake", ext.cmake_lists_dir, *build_tool, *cmake_args],
