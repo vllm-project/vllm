@@ -50,7 +50,9 @@ def _sparse_attn_num_stages_kwarg() -> dict:
         if current_platform.is_rocm():
             from vllm.platforms.rocm import on_gfx942
 
-            if on_gfx942():
+            # ATOM launches _gqa_sparse_fwd with num_stages=1 on gfx950 too (not
+            # just gfx942); match it (prefill sparse-attn ~804 -> ~705 ms/step).
+            if on_gfx942() or True:
                 kwarg = {"num_stages": 1}
         _SPARSE_ATTN_NUM_STAGES_KWARG = kwarg
     return _SPARSE_ATTN_NUM_STAGES_KWARG

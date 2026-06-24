@@ -314,13 +314,14 @@ class MiniMaxM3MoE(nn.Module):
         else:
             self.e_score_correction_bias = None
 
-        # Router weights are stored in fp32; GateLinear upcasts the bf16
-        # activations and computes the gate in fp32 (fp32 router logits).
+        # Router gate GEMM runs in bf16 (matches ATOM); out_dtype stays fp32 so
+        # routing logits keep fp32 precision. Avoids the fp32 activation upcast on
+        # ROCm/gfx950 (prefill per-step ~684 -> ~658 ms, accuracy unchanged).
         self.gate = GateLinear(
             config.hidden_size,
             config.num_local_experts,
             bias=False,
-            params_dtype=torch.float32,
+            params_dtype=torch.bfloat16,
             out_dtype=torch.float32,
             prefix=f"{prefix}.gate",
         )

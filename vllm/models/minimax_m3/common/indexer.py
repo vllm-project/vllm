@@ -176,6 +176,12 @@ class MiniMaxM3IndexerDecodeMetadata:
     max_seq_len: int
     decode_query_len: int
     max_decode_query_len: int
+    # teamdecode (Turn 27): leading count of KV blocks whose physical page is
+    # identical across all valid decode requests (cross-request shared prefix),
+    # derived ONCE PER STEP here in build() instead of per-layer inside
+    # minimax_m3_index_decode (was 57x/step -> ~570 tiny kernels). [1] int32
+    # tensor living in a STABLE persistent buffer (cudagraph-safe address).
+    start_block: torch.Tensor | None = None
 
 
 @dataclass
@@ -239,6 +245,11 @@ class MiniMaxM3IndexerMetadataBuilder(
             dtype=torch.int32,
             device=device,
         )
+        # teamdecode (Turn 27): stable [1] buffer holding the per-step
+        # common_num_blocks (shared-prefix length) so the decode indexer's
+        # shared-K-reuse kernel reads a fixed address under cudagraph replay.
+        # Computed once per build() instead of 57x/step inside the kernel launcher.
+        self.start_block_buffer = torch.zeros(1, dtype=torch.int32, device=device)
 
 
 class MiniMaxM3IndexerTritonMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
@@ -295,12 +306,37 @@ class MiniMaxM3IndexerTritonMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                 (query_lens_cpu == decode_query_len) | (query_lens_cpu == 0)
             )
             assert num_decode_tokens == num_decodes * decode_query_len
+            d_seq_lens = seq_lens[:num_decodes]
+            d_block_table = block_table[:num_decodes]
+            # teamdecode (Turn 27): derive the cross-request shared-prefix length
+            # (common_num_blocks) ONCE here, not per-layer inside the kernel
+            # launcher (that ran 57x/step -> ~570 tiny elementwise/reduce kernels
+            # that ate the indexer kernel savings; Turn 26). Same on-device math,
+            # written into the STABLE start_block_buffer (cudagraph-safe address).
+            # Gate matches minimax_m3_index_decode's enable_shared.
+            _SPARSE_BLOCK_SIZE = 128
+            _bsq = 1 << max(0, (self.max_decode_query_len - 1)).bit_length()
+            _enable_shared = (decode_query_len == 1) and (
+                self.num_index_heads * _bsq <= 16
+            )
+            if _enable_shared:
+                _max_block = (
+                    common_attn_metadata.max_seq_len + _SPARSE_BLOCK_SIZE - 1
+                ) // _SPARSE_BLOCK_SIZE
+                _valid = d_seq_lens > 0
+                _bt = d_block_table[:, :_max_block]
+                _same = ((_bt == _bt[0:1]) | (~_valid[:, None])).all(dim=0)
+                _cnb = torch.cumprod(_same.to(torch.int32), dim=0).sum()
+                self.start_block_buffer.copy_(_cnb.reshape(1), non_blocking=True)
+            else:
+                self.start_block_buffer.zero_()
             decode_metadata = MiniMaxM3IndexerDecodeMetadata(
-                seq_lens=seq_lens[:num_decodes],
-                block_table=block_table[:num_decodes],
+                seq_lens=d_seq_lens,
+                block_table=d_block_table,
                 max_seq_len=common_attn_metadata.max_seq_len,
                 decode_query_len=decode_query_len,
                 max_decode_query_len=self.max_decode_query_len,
+                start_block=self.start_block_buffer,
             )
 
         return MiniMaxM3IndexerMetadata(
@@ -409,6 +445,7 @@ class MiniMaxM3IndexerTritonImpl(MiniMaxM3IndexerImpl):
                 self.num_kv_heads,
                 d.decode_query_len,
                 d.max_decode_query_len,
+                start_block=d.start_block,  # teamdecode T27: hoisted once/step
             )
         if index_md.num_prefills > 0:
             p = index_md.prefill

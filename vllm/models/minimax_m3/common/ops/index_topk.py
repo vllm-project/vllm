@@ -298,6 +298,7 @@ def _decode_index_score_kernel(
     score_ptr,  # [num_idx_heads, total_q, max_block]
     block_table_ptr,  # [num_reqs, max_blocks]
     seq_lens,  # [num_reqs]
+    start_block_ptr,  # teamdecode: 0-dim int32; first SUFFIX block (== common_num_blocks)
     num_idx_heads: tl.constexpr,
     head_dim: tl.constexpr,
     init_blocks,
@@ -340,9 +341,15 @@ def _decode_index_score_kernel(
     kv_len_max = tl.max(tl.where(q_mask, kv_len, 0), axis=0)
     num_blocks = (kv_len_max + BLOCK_SIZE_K - 1) // BLOCK_SIZE_K
 
+    # teamdecode shared-K-reuse: the leading [0, suffix_start) blocks are the
+    # cross-request shared prefix, scored ONCE by _decode_shared_score_kernel.
+    # This per-request kernel only covers the SUFFIX [suffix_start, num_blocks).
+    # Rebase the fixed split-K onto the suffix range (grid still shape-constant).
+    suffix_start = tl.load(start_block_ptr)
+    suffix_blocks = tl.maximum(num_blocks - suffix_start, 0)
     # block-aligned fixed-count split: grid independent of seq_len (cuda graph).
-    chunk_size_blocks = (num_blocks + num_kv_chunks - 1) // num_kv_chunks
-    chunk_start_block = pid_c * chunk_size_blocks
+    chunk_size_blocks = (suffix_blocks + num_kv_chunks - 1) // num_kv_chunks
+    chunk_start_block = suffix_start + pid_c * chunk_size_blocks
     chunk_end_block = tl.minimum(chunk_start_block + chunk_size_blocks, num_blocks)
     if chunk_start_block >= chunk_end_block:
         return
@@ -385,6 +392,100 @@ def _decode_index_score_kernel(
             score,
             mask=q_mask,
         )
+
+
+# ---------------------------------------------------------------------------
+# teamdecode (Turn 25): shared-prefix K-reuse decode score kernel.
+# Root cause (patches/DIAG_indexer_shared_K_reuse_design.md): the per-request
+# kernel above reads each shared-prefix K page (32 KB) once PER REQUEST, so at
+# conc128 the identical page is fetched from HBM 128x. atom reads it ONCE and
+# dots it against all queries. This kernel does exactly that for the shared
+# prefix region [0, common_num_blocks): load each page once, compute
+# K[N,D] @ Q_all[D,batch] in ONE MFMA tile (also kills the N=1 MFMA padding from
+# HQ=1), max over N -> one score per (request, head) per block. Grid is
+# shape-constant (max_block, num_idx_heads) with a device-scalar early-return, so
+# it is cudagraph-safe. Only used for the pure-decode path (decode_query_len==1).
+# ---------------------------------------------------------------------------
+@triton.jit(do_not_specialize=["num_reqs"])
+def _decode_shared_score_kernel(
+    q_ptr,  # idx_q: [total_q, num_idx_heads, head_dim]
+    ik_cache_ptr,  # index-K cache: [num_blocks, 128, head_dim]
+    score_ptr,  # [num_idx_heads, total_q, max_block]
+    block_table_ptr,  # [num_reqs, max_blocks]
+    seq_lens,  # [num_reqs]
+    common_num_blocks_ptr,  # 0-dim int32: number of leading shared-prefix blocks
+    num_idx_heads: tl.constexpr,
+    head_dim: tl.constexpr,
+    init_blocks,
+    local_blocks,
+    stride_q_n,
+    stride_q_h,
+    stride_q_d,
+    stride_ik_blk,
+    stride_ik_pos,
+    stride_ik_d,
+    stride_s_h,
+    stride_s_n,
+    stride_s_k,
+    stride_bt_b,
+    BLOCK_SIZE_K: tl.constexpr,  # == SPARSE_BLOCK_SIZE (128)
+    BLOCK_SIZE_B: tl.constexpr,  # next_pow2(num_reqs); query-batch MFMA tile
+    num_reqs,
+    USE_PDL: tl.constexpr,
+):
+    pid_blk = tl.program_id(0)
+    pid_h = tl.program_id(1)
+
+    if USE_PDL:
+        tl.extra.cuda.gdc_wait()
+        tl.extra.cuda.gdc_launch_dependents()
+
+    cnb = tl.load(common_num_blocks_ptr)
+    # Past the shared prefix -> the per-request suffix kernel owns these blocks.
+    if pid_blk >= cnb:
+        return
+
+    off_k = tl.arange(0, BLOCK_SIZE_K)  # [N] positions within the 128-block
+    off_d = tl.arange(0, head_dim)  # [D]
+    r_off = tl.arange(0, BLOCK_SIZE_B)  # [B] request ids (q_id == r for qlen 1)
+    r_mask = r_off < num_reqs
+
+    # Shared page is identical across requests in the prefix -> read once (row 0).
+    page = tl.load(block_table_ptr + pid_blk).to(tl.int64)
+    k = tl.load(
+        ik_cache_ptr
+        + page * stride_ik_blk
+        + off_k[:, None] * stride_ik_pos
+        + off_d[None, :] * stride_ik_d,
+    )  # [N, D]
+    # All requests' query vectors for this index head (decode_query_len == 1).
+    q = tl.load(
+        q_ptr
+        + r_off[None, :] * stride_q_n
+        + pid_h * stride_q_h
+        + off_d[:, None] * stride_q_d,
+        mask=r_mask[None, :],
+        other=0.0,
+    )  # [D, B]
+    kq = tl.dot(k, q)  # [N, B] -- one full MFMA tile, K read exactly once
+
+    seq_len = tl.load(seq_lens + r_off, mask=r_mask, other=0)  # [B]
+    pos = pid_blk * BLOCK_SIZE_K + off_k  # [N]
+    pos_mask = pos[:, None] < seq_len[None, :]  # [N, B]
+    kq = tl.where(pos_mask, kq, float("-inf"))
+    score = tl.max(kq, axis=0)  # [B]
+
+    num_blocks_q = (seq_len + BLOCK_SIZE_K - 1) // BLOCK_SIZE_K  # [B]
+    is_visible_block = pid_blk < num_blocks_q
+    is_init = (pid_blk < init_blocks) & is_visible_block
+    local_start = tl.maximum(0, num_blocks_q - local_blocks)
+    is_local = (pid_blk >= local_start) & is_visible_block
+    score = tl.where(is_local, 1e29, tl.where(is_init, 1e30, score))
+    tl.store(
+        score_ptr + pid_h * stride_s_h + r_off * stride_s_n + pid_blk * stride_s_k,
+        score,
+        mask=r_mask,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -757,10 +858,16 @@ def minimax_m3_index_decode(
     num_kv_heads: int,
     decode_query_len: int,
     max_decode_query_len: int,
+    start_block: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Decode index block-score + top-k, both split-K (cudagraph-safe).
 
     Returns topk_idx [num_kv_heads, total_q, topk] (0-indexed block ids, -1 pad).
+
+    teamdecode (Turn 27): ``start_block`` is the cross-request shared-prefix
+    length (common_num_blocks) as a stable [1] int32 tensor, derived ONCE PER
+    STEP by the metadata builder. When provided it replaces the per-layer
+    on-device derivation below (was 57x/step -> ~570 tiny kernels, Turn 26).
     """
     total_q, num_idx_heads, head_dim = idx_q.shape
     assert num_idx_heads == num_kv_heads, (
@@ -805,6 +912,59 @@ def minimax_m3_index_decode(
         min(MAX_NUM_KV_CHUNKS, TARGET_GRID // max(1, score_ctas_per_chunk)),
     )
     num_kv_chunks = 1 << (target.bit_length() - 1)
+
+    # teamdecode (Turn 25) shared-prefix K-reuse. Derive the leading run of KV
+    # blocks whose physical page is identical across all (valid) requests -- the
+    # cross-request shared prefix -- ON DEVICE (no .item(), cudagraph-safe). The
+    # shared kernel scores those blocks once; the per-request kernel below covers
+    # only the suffix [common_num_blocks, num_blocks). Pure-decode path only.
+    nreq = seq_lens.shape[0]
+    enable_shared = (decode_query_len == 1) and (num_idx_heads * BLOCK_SIZE_Q <= 16)
+    if enable_shared:
+        if start_block is None:
+            # Fallback: derive common_num_blocks on-device here (per-call). The
+            # hoisted path (Turn 27) passes start_block from the metadata builder
+            # so this runs once/step instead of 57x; kept for non-builder callers.
+            valid = seq_lens > 0
+            bt = block_table[:nreq, :max_block]
+            # A page is shared only if it matches row 0 on every valid request.
+            same_rows = (bt == bt[0:1]) | (~valid[:, None])  # [nreq, max_block]
+            same = same_rows.all(dim=0)  # [max_block]
+            common_num_blocks = (
+                torch.cumprod(same.to(torch.int32), dim=0).sum().to(torch.int32)
+            )
+            start_block = common_num_blocks.reshape(1)
+        BLOCK_SIZE_B = triton.next_power_of_2(nreq)
+        _decode_shared_score_kernel[(max_block, num_idx_heads)](
+            idx_q,
+            index_kv_cache,
+            score,
+            block_table,
+            seq_lens,
+            start_block,
+            num_idx_heads,
+            head_dim,
+            init_blocks,
+            local_blocks,
+            idx_q.stride(0),
+            idx_q.stride(1),
+            idx_q.stride(2),
+            index_kv_cache.stride(0),
+            index_kv_cache.stride(1),
+            index_kv_cache.stride(2),
+            score.stride(0),
+            score.stride(1),
+            score.stride(2),
+            block_table.stride(0),
+            BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
+            BLOCK_SIZE_B=BLOCK_SIZE_B,
+            num_reqs=nreq,
+            USE_PDL=use_pdl,
+            **pdl_kwargs,
+        )
+    else:
+        start_block = torch.zeros(1, dtype=torch.int32, device=idx_q.device)
+
     grid_score = (seq_lens.shape[0], num_kv_chunks)
     _decode_index_score_kernel[grid_score](
         idx_q,
@@ -812,6 +972,7 @@ def minimax_m3_index_decode(
         score,
         block_table,
         seq_lens,
+        start_block,
         num_idx_heads,
         head_dim,
         init_blocks,
