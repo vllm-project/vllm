@@ -80,11 +80,48 @@ async def build_async_engine_client(
     usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,
     client_config: dict[str, Any] | None = None,
 ) -> AsyncIterator[EngineClient]:
+    # Forkserver setup. Ordering matters here:
+    #   1. _maybe_force_spawn() consults Ray/numa/WSL/CUDA-init state and
+    #      MAY override the env var to "spawn". It only mutates os.environ;
+    #      it does NOT call multiprocessing.set_start_method().
+    #   2. We re-read the env var AFTER the override so we honor a forced
+    #      spawn from step 1.
+    #   3. Platform-gate the CUDA-init guard on cuda_alike platforms — XPU,
+    #      ROCm-via-cuda-alike, and CPU all have their own start-method
+    #      handling; torch.cuda.is_initialized() is a no-op or wrong test
+    #      on non-CUDA platforms.
+    #   4. Use a real RuntimeError instead of assert so the guard survives
+    #      `python -O` (which strips assertions).
+    #   5. Pass force=True to set_start_method so this is idempotent across
+    #      callers (subprocess respawn, double-init, etc.).
+    from vllm.platforms import current_platform
+    from vllm.utils.system_utils import _maybe_force_spawn
+
+    _maybe_force_spawn()
     if os.getenv("VLLM_WORKER_MULTIPROC_METHOD") == "forkserver":
         # The executor is expected to be mp.
-        # Pre-import heavy modules in the forkserver process
+        # Pre-import heavy modules in the forkserver process.
         logger.debug("Setup forkserver with pre-imports")
-        multiprocessing.set_start_method("forkserver")
+        # Defensive guard: forkserver-after-CUDA-init duplicates the CUDA
+        # context into every child and corrupts state. _maybe_force_spawn()
+        # above is the primary defense (it overrides forkserver->spawn when
+        # CUDA is already initialized), but if something in the import
+        # chain between _maybe_force_spawn and here touches CUDA (regression
+        # risk), fail loud rather than silent. Run BEFORE set_start_method
+        # so an unrecoverable global-default flip never happens.
+        if current_platform.is_cuda_alike():
+            import torch
+
+            if torch.cuda.is_initialized():
+                raise RuntimeError(
+                    "CUDA was initialized in the parent process before "
+                    "forkserver setup. Forkserver-from-CUDA-parent would "
+                    "duplicate the CUDA context into every child and is "
+                    "not safe. Set VLLM_WORKER_MULTIPROC_METHOD=spawn to "
+                    "fall back, or fix the import chain that initialized "
+                    "CUDA early."
+                )
+        multiprocessing.set_start_method("forkserver", force=True)
         multiprocessing.set_forkserver_preload(["vllm.v1.engine.async_llm"])
         forkserver.ensure_running()
         logger.debug("Forkserver setup complete!")
