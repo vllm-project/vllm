@@ -775,8 +775,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.paged_kv_indices = self._make_buffer(max_num_pages)
         self.paged_kv_last_page_len = self._make_buffer(max_num_reqs)
 
-    # Keep Q dtype selection in one place so init and cudagraph support checks
-    # agree on whether decode can use the FlashInfer TRTLLM API.
+    # Keep SM90 prefill/decode Q dtype selection in one place.
     @classmethod
     def get_q_data_type(
         cls,
