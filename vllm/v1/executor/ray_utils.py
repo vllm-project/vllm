@@ -19,6 +19,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.network_utils import get_ip
 from vllm.v1.outputs import AsyncModelRunnerOutput
 from vllm.v1.serial_utils import run_method
+from vllm.v1.worker.pp_utils import coordinate_cudagraph_mode_across_pp
 from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 if TYPE_CHECKING:
@@ -142,8 +143,30 @@ try:
                 scheduler_output, grammar_output = execute_model_input
                 intermediate_tensors = None
             assert self.worker.model_runner is not None
+            # PP cudagraph-mode consensus (#45094/#45610). The Ray compiled-graph
+            # executor bypasses Worker.execute_model (where the consensus is
+            # hoisted for the default executor), so issue it here too. Ray passes
+            # the inter-stage activations as a DAG argument rather than via the
+            # worker's gloo recv, so there is no all-reduce-vs-recv deadlock on
+            # this path; we still must reach consensus or PP stages can
+            # split-brain on cudagraph mode and wedge the DAG's P2P edge. The
+            # all-reduce is on the PP CPU (gloo) group, independent of the Ray
+            # DAG channel, and must precede consuming intermediate_tensors.
+            pp_synced_cudagraph_mode: int | None = None
+            forward_pass = scheduler_output.total_num_scheduled_tokens > 0
+            if forward_pass and get_pp_group().world_size > 1:
+                local_cudagraph_mode = (
+                    self.worker.model_runner.predispatch_cudagraph_mode(
+                        scheduler_output
+                    )
+                )
+                pp_synced_cudagraph_mode = coordinate_cudagraph_mode_across_pp(
+                    local_cudagraph_mode
+                )
             output = self.worker.model_runner.execute_model(
-                scheduler_output, intermediate_tensors
+                scheduler_output,
+                intermediate_tensors,
+                pp_synced_cudagraph_mode=pp_synced_cudagraph_mode,
             )
             if self._is_intermediate_tensors(output):
                 if (
