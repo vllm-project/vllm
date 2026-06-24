@@ -423,6 +423,16 @@ class FlashInferBackend(AttentionBackend):
             raise ValueError(f"Unrecognized dtype: {kv_cache_dtype}")
 
     @classmethod
+    def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
+        if kv_cache_dtype == "nvfp4":
+            return (
+                current_platform.is_device_capability_family(100)
+                and supports_trtllm_attention(is_prefill=True)
+                and supports_trtllm_attention(is_prefill=False)
+            )
+        return super().supports_kv_cache_dtype(kv_cache_dtype)
+
+    @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         # https://github.com/flashinfer-ai/flashinfer/blob/3d55c71a62052c590c130897d3a3db49b14fcc34/include/flashinfer/utils.cuh#L157
         return [64, 128, 256, 512]
@@ -675,6 +685,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # storage dtype may not be the same as the op dtype (uint8 vs fp8_e4m3)
             self.is_kvcache_nvfp4 = self.cache_dtype == "nvfp4"
             if self.is_kvcache_nvfp4:
+                if (
+                    force_use_trtllm_attention() is False
+                    or not supports_trtllm_attention(is_prefill=True)
+                    or not supports_trtllm_attention(is_prefill=False)
+                ):
+                    raise ValueError(
+                        "--kv-cache-dtype nvfp4 requires the SM100 trtllm-gen "
+                        "FlashInfer path."
+                    )
                 # For NVFP4, kv_cache_dtype stays as the string "nvfp4"
                 # which is passed to FlashInferImpl
                 self.kv_cache_dtype = self.cache_dtype
@@ -717,8 +736,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             if can_use_xqa_or_trtllm_gen_decode
             else None
         )
+        supports_spec_as_decode = (
+            self.flashinfer_trtllm_api_decode_kernel
+            == FlashInferDecodeKernel.TRTLLM_GEN
+        )
         self._init_reorder_batch_threshold(
-            1, supports_spec_as_decode=can_use_xqa_or_trtllm_gen_decode
+            1, supports_spec_as_decode=supports_spec_as_decode
         )
 
         self._cascade_wrapper = None  # Wrapper for cascade attention
@@ -1485,16 +1508,9 @@ class FlashInferImpl(AttentionImpl):
             num_heads, num_kv_heads, is_prefill=False
         )
         vllm_config = get_current_vllm_config_or_none()
-        # Upstream query pre-quantization (`Attention.forward`, fusible by
-        # torch.compile) requires the whole query tensor to use a single dtype.
-        # That holds on SM100 trtllm-gen, where both prefill and decode use an
-        # FP8 query. It does NOT hold on SM90: XQA decode requires a BF16/FP16
-        # query, so we cannot quantize the (combined prefill+decode) query to
-        # FP8 beforehand. Hence we gate this on SM100 (family 100). On SM90 the
-        # prefill slice is instead quantized inside `forward()` via
-        # `maybe_quant_query`; that custom-op path may be slower than the fused
-        # upstream quant, but it only affects prefill (XQA decode keeps its
-        # BF16 query), so the overhead is acceptable.
+        # Query pre-quantization needs a single dtype for the whole query tensor.
+        # SM90 XQA needs BF16/FP16-Q for decode and FP8 for prefill,
+        # so only enable this for SM100 trtllm-gen where both use FP8-Q.
         self.supports_quant_query_input = (
             self.supports_xqa_or_trtllm_gen_decode
             and is_quantized_kv_cache(self.kv_cache_dtype)
@@ -1542,17 +1558,8 @@ class FlashInferImpl(AttentionImpl):
         if self.sinks is not None and self.sinks.dtype != torch.float32:
             self.sinks = self.sinks.to(torch.float32)
 
-    # Quantize `query` to `q_data_type` if they differ, otherwise return it
-    # unchanged. This exists for the SM90 path: FI-native prefill needs an FP8
-    # query while XQA decode needs a BF16/FP16 query, so the combined query
-    # tensor cannot be pre-quantized to a single dtype upstream
-    # (`supports_quant_query_input` is False on SM90). Here we quantize only the
-    # slice that needs FP8 (prefill); the XQA decode slice already matches its
-    # BF16/FP16 target and passes through untouched.
-    #
-    # NOTE: today this only handles the SM90 XQA-decode / FI-native-prefill
-    # split (BF16/FP16 -> FP8). If another caller needs different conversions,
-    # generalize it then.
+    # SM90 may need FP8-Q for native prefill and BF16/FP16-Q for XQA decode,
+    # so quantize only the slice whose target dtype differs.
     def maybe_quant_query(
         self,
         query: torch.Tensor,
