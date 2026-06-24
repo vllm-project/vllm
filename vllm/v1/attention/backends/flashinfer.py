@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import ClassVar
 
+import flashinfer
 import numpy as np
 import torch
 from flashinfer import (
@@ -649,13 +650,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # storage dtype may not be the same as the op dtype (uint8 vs fp8_e4m3)
             self.is_kvcache_nvfp4 = self.cache_dtype == "nvfp4"
             if self.is_kvcache_nvfp4:
-                # trtllm-gen FP4 FMHA kernels only exist for sm100f (sm_100/sm_103).
-                # Fail fast at init rather than crashing on the first request.
-                if not current_platform.is_device_capability_family(100):
-                    raise ValueError(
-                        "--kv-cache-dtype nvfp4 requires sm100f, "
-                        "please try a different dtype or remove"
-                    )
                 # For NVFP4, kv_cache_dtype stays as the string "nvfp4"
                 # which is passed to FlashInferImpl
                 self.kv_cache_dtype = self.cache_dtype
@@ -1370,6 +1364,10 @@ class FlashInferImpl(AttentionImpl):
         )
         self.kv_cache_dtype = kv_cache_dtype
         self.is_kvcache_nvfp4 = kv_cache_dtype == "nvfp4"
+        self.use_native_nvfp4_kv_cache_update = self.is_kvcache_nvfp4 and (
+            current_platform.is_device_capability_family(100)
+            or current_platform.is_device_capability_family(120)
+        )
         self.fp4_data_dim = head_size // 2 if self.is_kvcache_nvfp4 else 0
         self.logits_soft_cap = logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
@@ -1921,18 +1919,43 @@ class FlashInferImpl(AttentionImpl):
             # and value[:num_actual_tokens] because the reshape_and_cache_flash
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
-            k_cache = kv_cache[:, 0]
-            v_cache = kv_cache[:, 1]
-            torch.ops._C_cache_ops.reshape_and_cache_flash(
-                key,
-                value,
-                k_cache,
-                v_cache,
-                slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
-            )
+            if self.is_kvcache_nvfp4 and not self.use_native_nvfp4_kv_cache_update:
+                nvfp4_kv_data, nvfp4_kv_block_scales = nvfp4_kv_cache_split_views(
+                    kv_cache
+                )
+                nvfp4_slot_writer = getattr(
+                    flashinfer,
+                    "nvfp4_quantize_append_paged_kv_cache_with_slot_mapping",
+                    None,
+                )
+                if nvfp4_slot_writer is None:
+                    raise RuntimeError(
+                        "FlashInfer NVFP4 slot-mapping KV cache update is "
+                        "required for pre-SM100 NVFP4 KV cache."
+                    )
+                nvfp4_slot_writer(
+                    key,
+                    value,
+                    slot_mapping,
+                    nvfp4_kv_data,
+                    nvfp4_kv_block_scales,
+                    layer._k_scale,
+                    layer._v_scale,
+                    kv_layout=get_kv_cache_layout(),
+                )
+            else:
+                k_cache = kv_cache[:, 0]
+                v_cache = kv_cache[:, 1]
+                torch.ops._C_cache_ops.reshape_and_cache_flash(
+                    key,
+                    value,
+                    k_cache,
+                    v_cache,
+                    slot_mapping,
+                    self.kv_cache_dtype,
+                    layer._k_scale,
+                    layer._v_scale,
+                )
 
 
 def fast_plan_decode(
