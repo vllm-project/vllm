@@ -1,5 +1,5 @@
 use super::{DeepSeekDsmlToolParser, DsmlTokens};
-use crate::{Result, Tool, ToolParser, ToolParserOutput};
+use crate::{Result, StructuralTagModel, Tool, ToolParser, ToolParserOutput};
 
 /// Tool parser for DeepSeek V3.2 models.
 ///
@@ -42,6 +42,10 @@ impl ToolParser for DeepSeekV32ToolParser {
 
     fn preserve_special_tokens(&self) -> bool {
         true
+    }
+
+    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
+        Some(StructuralTagModel::DeepSeekV32)
     }
 
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
@@ -186,7 +190,7 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_v32_parse_complete_unescapes_literal_closing_tags_in_parameter_value() {
+    fn deepseek_v32_parse_complete_preserves_raw_closing_tag_text_in_parameter_value() {
         let mut parser = DeepSeekV32ToolParser::new(&test_tools());
         let output = parser
             .parse_complete(&build_tool_call(
@@ -204,7 +208,7 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
             json!({
-                "location": "Hangzhou </｜DSML｜parameter></｜DSML｜invoke></｜DSML｜function_calls>",
+                "location": "Hangzhou &lt;/｜DSML｜parameter&gt;&lt;/｜DSML｜invoke&gt;&lt;/｜DSML｜function_calls&gt;",
                 "date": "2026-05-08",
             })
         );

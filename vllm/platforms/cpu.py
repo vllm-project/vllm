@@ -50,7 +50,7 @@ class CpuPlatform(Platform):
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
         if self.get_cpu_architecture() == CpuArchEnum.POWERPC:
-            return [torch.bfloat16, torch.float32]
+            return [torch.bfloat16, torch.float32, torch.float16]
         elif self.get_cpu_architecture() == CpuArchEnum.ARM and sys.platform.startswith(
             "darwin"
         ):
@@ -91,6 +91,11 @@ class CpuPlatform(Platform):
         meminfo = get_memory_node_info(device_id)
 
         return meminfo.total_memory
+
+    @classmethod
+    def mem_get_info(cls) -> tuple[int, int]:
+        meminfo = get_memory_node_info()
+        return meminfo.available_memory, meminfo.total_memory
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
