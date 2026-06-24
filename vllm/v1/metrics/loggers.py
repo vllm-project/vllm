@@ -176,10 +176,8 @@ class LoggingStatLogger(StatLoggerBase):
         encoder_msg = ""
         if encoder_stats is not None:
             encoder_msg = (
-                f", ViT inputs: {encoder_stats.num_inputs}, "
-                f"ViT input tokens: {encoder_stats.input_tokens}, "
-                f"ViT input seq lens: {encoder_stats.input_token_lens}, "
-                f"encoder output tokens: {encoder_stats.output_tokens}"
+                f", encoder inputs: {encoder_stats.num_inputs}, "
+                f"encoder output embeddings: {encoder_stats.output_tokens}"
             )
 
         logger.info(

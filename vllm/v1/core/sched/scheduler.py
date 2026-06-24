@@ -1448,44 +1448,6 @@ class Scheduler(SchedulerInterface):
             external_load_encoder_input,
         )
 
-    @staticmethod
-    def _get_vit_input_seq_len(mm_feature: Any) -> int | None:
-        data = mm_feature.data
-        if data is None:
-            return None
-
-        if mm_feature.modality == "image":
-            grid_key = "image_grid_thw"
-            pixel_key = "pixel_values"
-        elif mm_feature.modality == "video":
-            grid_key = "video_grid_thw"
-            pixel_key = "pixel_values_videos"
-        else:
-            return None
-
-        pixel_elem = data.get(pixel_key)
-        if pixel_elem is None or pixel_elem.data is None:
-            return None
-
-        grid_elem = data.get(grid_key)
-        if grid_elem is None or grid_elem.data is None:
-            return None
-
-        grid_thw = grid_elem.data
-        if hasattr(grid_thw, "tolist"):
-            grid_thw = grid_thw.tolist()
-        if not grid_thw:
-            return None
-
-        grids = grid_thw if isinstance(grid_thw[0], (list, tuple)) else [grid_thw]
-        input_len = 0
-        for grid in grids:
-            if len(grid) != 3:
-                return None
-            t, h, w = grid
-            input_len += int(t) * int(h) * int(w)
-        return input_len
-
     def _make_scheduled_encoder_input_stats(
         self, scheduled_encoder_inputs: dict[str, list[int]]
     ) -> ScheduledEncoderInputStats | None:
@@ -1498,14 +1460,8 @@ class Scheduler(SchedulerInterface):
 
             for input_id in input_ids:
                 mm_feature = request.mm_features[input_id]
-                input_len = self._get_vit_input_seq_len(mm_feature)
-                if input_len is None:
-                    continue
-
                 stats.num_inputs += 1
-                stats.input_tokens += input_len
                 stats.output_tokens += mm_feature.mm_position.get_num_embeds()
-                stats.input_token_lens.append(input_len)
 
         return stats if stats.num_inputs else None
 

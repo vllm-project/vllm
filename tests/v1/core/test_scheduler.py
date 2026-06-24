@@ -18,9 +18,7 @@ from vllm.config import (
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
-    MultiModalFieldElem,
     MultiModalKwargsItem,
-    MultiModalSharedField,
     PlaceholderRange,
 )
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
@@ -44,56 +42,35 @@ from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 pytestmark = pytest.mark.cpu_test
 
 
-def _make_qwen_vit_feature(
-    modality: str, grid_thw: list[int], output_tokens: int
-) -> MultiModalFeatureSpec:
-    field = MultiModalSharedField(batch_size=1)
-    grid_key = f"{modality}_grid_thw"
-    pixel_key = "pixel_values" if modality == "image" else "pixel_values_videos"
-    return MultiModalFeatureSpec(
-        data=MultiModalKwargsItem(
-            {
-                grid_key: MultiModalFieldElem(torch.tensor(grid_thw), field),
-                pixel_key: MultiModalFieldElem(torch.empty(1), field),
-            }
-        ),
-        modality=modality,
-        identifier=f"{modality}-0",
-        mm_position=PlaceholderRange(offset=0, length=output_tokens),
-    )
-
-
-def test_make_scheduled_encoder_input_stats_qwen_vit_lengths():
+def test_make_scheduled_encoder_input_stats_output_embeddings():
     scheduler = create_scheduler()
-    image_feature = _make_qwen_vit_feature(
-        modality="image", grid_thw=[1, 28, 28], output_tokens=196
-    )
-    video_feature = _make_qwen_vit_feature(
-        modality="video", grid_thw=[4, 14, 14], output_tokens=196
-    )
-    embed_only_feature = MultiModalFeatureSpec(
-        data=MultiModalKwargsItem(
-            {
-                "image_grid_thw": MultiModalFieldElem(
-                    torch.tensor([1, 14, 14]), MultiModalSharedField(batch_size=1)
-                )
-            }
+    mm_features = [
+        MultiModalFeatureSpec(
+            data=MultiModalKwargsItem.dummy(),
+            modality="image",
+            identifier="image-0",
+            mm_position=PlaceholderRange(offset=0, length=196),
         ),
-        modality="image",
-        identifier="embed-only",
-        mm_position=PlaceholderRange(offset=0, length=49),
-    )
-    scheduler.requests["req"] = Mock(
-        mm_features=[image_feature, video_feature, embed_only_feature]
-    )
+        MultiModalFeatureSpec(
+            data=MultiModalKwargsItem.dummy(),
+            modality="video",
+            identifier="video-0",
+            mm_position=PlaceholderRange(offset=200, length=196),
+        ),
+        MultiModalFeatureSpec(
+            data=MultiModalKwargsItem.dummy(),
+            modality="audio",
+            identifier="audio-0",
+            mm_position=PlaceholderRange(offset=400, length=49),
+        ),
+    ]
+    scheduler.requests["req"] = Mock(mm_features=mm_features)
 
     stats = scheduler._make_scheduled_encoder_input_stats({"req": [0, 1, 2]})
 
     assert stats is not None
-    assert stats.num_inputs == 2
-    assert stats.input_tokens == 1568
-    assert stats.input_token_lens == [784, 784]
-    assert stats.output_tokens == 392
+    assert stats.num_inputs == 3
+    assert stats.output_tokens == 441
 
 
 def test_scheduled_encoder_input_stats_disabled_without_iteration_logging(

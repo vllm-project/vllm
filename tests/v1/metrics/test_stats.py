@@ -29,9 +29,7 @@ def test_scheduler_iteration_details_serialization():
     )
     encoder_input_stats = ScheduledEncoderInputStats(
         num_inputs=2,
-        input_tokens=1568,
         output_tokens=392,
-        input_token_lens=[784, 784],
     )
     outputs = EngineCoreOutputs(
         scheduler_stats=SchedulerStats(

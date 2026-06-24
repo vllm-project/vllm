@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING
 
@@ -182,9 +182,7 @@ class ScheduledEncoderInputStats:
     """Stats for encoder inputs scheduled in one iteration."""
 
     num_inputs: int = 0
-    input_tokens: int = 0
     output_tokens: int = 0
-    input_token_lens: list[int] = field(default_factory=list)
 
 
 @dataclass
