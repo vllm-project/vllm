@@ -1243,15 +1243,17 @@ def test_batched_moe_align_block_size_opcheck():
     )
 
 
+# topk=8 covers topk > 4; k=511 covers the non-vectorized scalar path.
 @pytest.mark.parametrize("m", [1, 33, 222])
-@pytest.mark.parametrize("topk", TOP_KS)
+@pytest.mark.parametrize("topk", [*TOP_KS, 8])
 @pytest.mark.parametrize("k", [128, 511, 1024])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_moe_sum(m: int, topk: int, k: int, dtype: torch.dtype):
     input = torch.randn((m, topk, k), device="cuda", dtype=dtype)
     actual = torch.empty((m, k), device="cuda", dtype=dtype)
 
-    expected = input.sum(dim=1)
+    # Reduction accumulates in fp32.
+    expected = input.float().sum(dim=1).to(dtype)
     torch.ops._moe_C.moe_sum(input, actual)
 
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=0)
