@@ -27,10 +27,6 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
-from vllm.parser.engine.adapters import (
-    ParserEngineReasoningAdapter,
-    ParserEngineToolAdapter,
-)
 from vllm.parser.metrics import record_tool_parser_invocation
 from vllm.parser.utils import count_history_tool_calls
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
@@ -401,7 +397,7 @@ class DelegatingParser(Parser):
     ) -> tuple[str | None, str | None]:
         if self._reasoning_parser is None:
             return None, model_output
-        if isinstance(self._reasoning_parser, ParserEngineReasoningAdapter):
+        if hasattr(self._reasoning_parser, "extract_reasoning_with_token_ids"):
             return self._reasoning_parser.extract_reasoning_with_token_ids(
                 model_output, request, token_ids
             )
@@ -601,7 +597,7 @@ class DelegatingParser(Parser):
         result = None
         is_tool_called: bool | Exception = False
         try:
-            if isinstance(self._tool_parser, ParserEngineToolAdapter):
+            if hasattr(self._tool_parser, "extract_tool_calls_with_token_ids"):
                 result = self._tool_parser.extract_tool_calls_with_token_ids(
                     model_output,
                     request=request,
