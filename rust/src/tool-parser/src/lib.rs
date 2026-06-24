@@ -35,6 +35,7 @@ pub use minimax_m3::MinimaxM3ToolParser;
 pub use qwen_coder::Qwen3CoderToolParser;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+pub use xgrammar_structural_tag::Model as StructuralTagModel;
 
 /// One function-style tool made available to the model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +122,11 @@ pub trait ToolParser: Send {
     /// parsers need `skip_special_tokens = false` while parsing is enabled.
     fn preserve_special_tokens(&self) -> bool {
         false
+    }
+
+    /// Return the xgrammar structural-tag model used for strict tool calling.
+    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
+        None
     }
 
     /// Return the parser-provided ID for a tool call by index, if the model

@@ -317,6 +317,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
+name = "auto_impl"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ffdcb70bdbc4d478427380519163274ac86e52916e10f0a8889adf0f96d3fee7"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5726,6 +5737,7 @@ dependencies = [
  "vllm-text",
  "vllm-tokenizer",
  "vllm-tool-parser",
+ "xgrammar-structural-tag",
  "zeromq",
 ]
 
@@ -5750,6 +5762,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "vllm-chat",
  "vllm-engine-core-client",
  "vllm-managed-engine",
  "vllm-server",
@@ -5880,6 +5893,7 @@ dependencies = [
  "expect-test",
  "futures",
  "http-body",
+ "indexmap 2.13.0",
  "itertools 0.14.0",
  "libc",
  "llm-multimodal",
@@ -5979,6 +5993,7 @@ dependencies = [
  "thiserror-ext",
  "tool-parser",
  "winnow",
+ "xgrammar-structural-tag",
 ]
 
 [[package]]
@@ -6579,6 +6594,19 @@ name = "writeable"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
+
+[[package]]
+name = "xgrammar-structural-tag"
+version = "0.1.0+xgrammar.0.2.2.4d145cc"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2436dea2393d55a3b188588aa300c5a8afe8f45a77da52c611fb4498a6c876e6"
+dependencies = [
+ "auto_impl",
+ "serde",
+ "serde_json",
+ "strum",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "y4m"
