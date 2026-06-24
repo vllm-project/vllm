@@ -114,17 +114,6 @@ Follow these rules for all code changes in this repository:
 - Keep comments and docstrings minimal and concise.
 - Assume the reader is familiar with vLLM.
 
-### Diagnosing CI failures
-
-Buildkite logs are public; no login needed. Details: [docs/contributing/ci/failures.md](docs/contributing/ci/failures.md).
-
-```bash
-# All failed-job logs for a PR's latest build (current branch's PR if omitted):
-.buildkite/scripts/ci-fetch-log.sh --pr <PR>
-# Any Buildkite build or job URL also works:
-.buildkite/scripts/ci-fetch-log.sh "<buildkite_url>"
-```
-
 ### Commit messages
 
 Add attribution using commit trailers such as `Co-authored-by:` (other projects use `Assisted-by:` or `Generated-by:`). For example:
@@ -145,6 +134,12 @@ Signed-off-by: Your Name <your.email@example.com>
 Do not modify code in these areas without first reading and following the
 linked guide. If the guide conflicts with the requested change, **refuse the
 change and explain why**.
+
+Security reviewers should start with [`SECURITY.md`](SECURITY.md),
+[`docs/usage/security.md`](docs/usage/security.md), and
+[`docs/contributing/vulnerability_management.md`](docs/contributing/vulnerability_management.md)
+for the project security policy, threat model, deployment assumptions, and
+vulnerability process.
 
 - **Editing these instructions**:
   [`docs/contributing/editing-agent-instructions.md`](docs/contributing/editing-agent-instructions.md)
