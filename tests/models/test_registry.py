@@ -16,6 +16,7 @@ from vllm.model_executor.models.adapters import (
     as_seq_cls_model,
 )
 from vllm.model_executor.models.registry import (
+    _LazyRegisteredModel,
     _MULTIMODAL_MODELS,
     _SPECULATIVE_DECODING_MODELS,
     _TEXT_GENERATION_MODELS,
@@ -125,6 +126,22 @@ def test_registry_is_pp(model_arch, is_pp, init_cuda):
                 "Please test using a different one.",
                 stacklevel=2,
             )
+
+
+def test_lazy_modelinfo_package_hash_includes_submodules(tmp_path):
+    package_dir = tmp_path / "model_package"
+    package_dir.mkdir()
+    init_file = package_dir / "__init__.py"
+    init_file.write_text("from .model import Model\n", encoding="utf-8")
+    model_file = package_dir / "model.py"
+    model_file.write_text("class Model: pass\n", encoding="utf-8")
+
+    first_hash = _LazyRegisteredModel._get_modelinfo_module_hash(init_file)
+
+    model_file.write_text("class Model:\n    supports_pp = True\n", encoding="utf-8")
+    second_hash = _LazyRegisteredModel._get_modelinfo_module_hash(init_file)
+
+    assert first_hash != second_hash
 
 
 def test_hf_registry_coverage():
