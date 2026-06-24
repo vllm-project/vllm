@@ -2032,25 +2032,42 @@ class Scheduler(SchedulerInterface):
         # Second pass: set status and free requests
         for request in valid_requests:
             delay_free_blocks = False
+            skip_connector = False
             if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
-                delay_free_blocks = (
-                    request.request_id not in self.finished_recving_kv_req_ids
-                )
+                recv_done = request.request_id in self.finished_recving_kv_req_ids
+                delay_free_blocks = not recv_done
+                # Recv must complete before send can begin: don't call
+                # request_finished() for a request still mid-recv, as that
+                # could cause the connector to initiate an async send and
+                # emit finished_sending before finished_recving is resolved.
+                skip_connector = not recv_done
                 self.finished_recving_kv_req_ids.discard(request.request_id)
                 self.failed_recving_kv_req_ids.discard(request.request_id)
 
             request.status = finished_status
-            self._free_request(request, delay_free_blocks=delay_free_blocks)
+            self._free_request(
+                request,
+                delay_free_blocks=delay_free_blocks,
+                skip_connector=skip_connector,
+            )
 
         return [(r.request_id, r.client_index) for r in valid_requests]
 
     def _free_request(
-        self, request: Request, delay_free_blocks: bool = False
+        self,
+        request: Request,
+        delay_free_blocks: bool = False,
+        skip_connector: bool = False,
     ) -> dict[str, Any] | None:
         assert request.is_finished()
 
         self._inflight_prefills.discard(request)
-        connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
+        if skip_connector:
+            connector_delay_free_blocks, kv_xfer_params = False, None
+        else:
+            connector_delay_free_blocks, kv_xfer_params = self._connector_finished(
+                request
+            )
         self.encoder_cache_manager.free(request)
         request_id = request.request_id
         self.finished_req_ids.add(request_id)

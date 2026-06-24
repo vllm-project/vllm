@@ -4206,6 +4206,33 @@ def test_aborted_request_both_kv_xfers_same_step():
     assert request.request_id not in scheduler.requests
 
 
+def test_abort_mid_recv_skips_connector():
+    """Aborting a mid-recv request must not invoke request_finished().
+
+    recv must complete before send can begin; calling request_finished()
+    while recv is still pending could cause the connector to initiate an
+    async send and emit finished_sending before finished_recving resolves.
+    """
+    scheduler = create_scheduler(use_kv_connector=True)
+
+    request = create_requests(num_requests=1)[0]
+    scheduler.add_request(request)
+    request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    # Simulate a connector that would return True (async send) if asked.
+    scheduler._connector_finished = Mock(return_value=(True, None))
+
+    # Abort while recv is still pending (finished_recving not yet received).
+    scheduler.finish_requests((request.request_id,), RequestStatus.FINISHED_ABORTED)
+
+    # request_finished() must NOT have been called — the connector should
+    # never learn about this request so it cannot initiate a send.
+    scheduler._connector_finished.assert_not_called()
+
+    # Blocks must still be held (delay_free_blocks=True) until finished_recving.
+    assert request.request_id in scheduler.requests
+
+
 def test_delayed_kv_connector_free_keeps_scheduler_active():
     scheduler = create_scheduler(use_kv_connector=True)
     queued_request, request = create_requests(
