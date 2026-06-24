@@ -154,8 +154,7 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
 
         Engines that receive weights in checkpoint format initialize layerwise reloading
         here, else this is typically a no-op.
-        See: https://docs.vllm.ai/en/latest/training/layerwise/
-        for more details.
+        See: https://docs.vllm.ai/en/latest/training/layerwise/ for more details.
         """
         raise NotImplementedError
 
