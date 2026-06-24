@@ -1279,6 +1279,7 @@ def _make_bare_worker(
         scheduler_block_size=block_size,
         hash_block_size=block_size,
     )
+    worker._init_lookup_key_prefixes()
     return worker
 
 
@@ -1346,6 +1347,7 @@ def test_lookup_checks_all_potential_swa_hit_boundaries():
         hash_block_size=8,
         retention_interval=0,
     )
+    worker._init_lookup_key_prefixes()
     # Candidate order: 3 full-attention chunks, then SWA chunks 3, 7, 11.
     # Only the first full chunk and the SWA chunk ending at token 32 exist, so
     # lookup should recover a 32-token external prefix hit. A sparse

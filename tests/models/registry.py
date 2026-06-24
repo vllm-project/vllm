@@ -421,15 +421,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         },
         trust_remote_code=True,
     ),
-    "MiniMaxForCausalLM": _HfExamplesInfo("MiniMaxAI/MiniMax-Text-01-hf"),
-    "MiniMaxText01ForCausalLM": _HfExamplesInfo(
-        "MiniMaxAI/MiniMax-Text-01",
-        trust_remote_code=True,
-        revision="a59aa9cbc53b9fb8742ca4e9e1531b9802b6fdc3",
-    ),
-    "MiniMaxM1ForCausalLM": _HfExamplesInfo(
-        "MiniMaxAI/MiniMax-M1-40k", trust_remote_code=True
-    ),
     "MiniMaxM2ForCausalLM": _HfExamplesInfo(
         "MiniMaxAI/MiniMax-M2",
         trust_remote_code=True,
@@ -1112,10 +1103,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "MiniCPMV4_6ForConditionalGeneration": _HfExamplesInfo(
         "openbmb/MiniCPM-V-4_6",
         min_transformers_version="5.7.0",
-    ),
-    "MiniMaxVL01ForConditionalGeneration": _HfExamplesInfo(
-        "MiniMaxAI/MiniMax-VL-01",
-        trust_remote_code=True,
     ),
     "MiniMaxM3SparseForConditionalGeneration": _HfExamplesInfo(
         "MiniMaxAI/MiniMax-M3",
