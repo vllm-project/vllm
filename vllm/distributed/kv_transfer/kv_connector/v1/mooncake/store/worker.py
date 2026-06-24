@@ -1119,6 +1119,20 @@ class MooncakeStoreWorker:
             )
             for g_idx, g in enumerate(self._kv_cache_groups)
         ]
+        self._init_lookup_key_prefixes()
+
+    def _init_lookup_key_prefixes(self) -> None:
+        """Precompute per-group key prefixes expanded across TP/PP ranks."""
+        tp_count = min(self.tp_size, self.num_kv_head)
+        self._lookup_key_prefixes = tuple(
+            tuple(
+                PoolKey.build_prefix(db.metadata, tp_rank=tp, pp_rank=pp)
+                for tp in range(tp_count)
+                for pp in range(self.pp_size)
+            )
+            for db in self.token_dbs
+        )
+        self._lookup_expected_per_key = tp_count * self.pp_size
 
     def register_cross_layers_kv_caches(self, kv_cache: torch.Tensor) -> None:
         """Register a cross-layers KV cache tensor.
@@ -1381,22 +1395,17 @@ class MooncakeStoreWorker:
             return 0
 
         # Build per-(group, hash) candidate keys expanded across TP/PP.
-        # candidate_meta[i] is the (group_id, hash_bytes) for candidate_keys[i].
+        # candidate_meta stores the (group, hash_bytes) for key slice.
         candidate_keys: list[str] = []
         candidate_meta: list[tuple[int, bytes]] = []
         lookup_masks = self.coord.lookup_mask(token_len)
-        tp_count = min(self.tp_size, self.num_kv_head)
         for g_idx, db in enumerate(self.token_dbs):
             spec_block_size = db.block_size
             lookup_mask = lookup_masks[g_idx]
+            key_prefixes = self._lookup_key_prefixes[g_idx]
             group_hashes = self.coord.block_hashes_for_spec(
                 block_hashes, self._kv_cache_groups[g_idx].kv_cache_spec
             )
-            metadata_templates = [
-                dataclasses.replace(db.metadata, tp_rank=tp, pp_rank=pp)
-                for tp in range(tp_count)
-                for pp in range(self.pp_size)
-            ]
             for chunk_id, h in enumerate(group_hashes):
                 start_idx = chunk_id * spec_block_size
                 if start_idx >= token_len:
@@ -1405,11 +1414,12 @@ class MooncakeStoreWorker:
                     chunk_id >= len(lookup_mask) or not lookup_mask[chunk_id]
                 ):
                     continue
-                h_hex = h.hex()
-                h_bytes = bytes(h)
-                for md in metadata_templates:
-                    candidate_keys.append(PoolKey(md, h_hex).to_string())
-                    candidate_meta.append((g_idx, h_bytes))
+                hash_hex = h.hex()
+                for key_prefix in key_prefixes:
+                    candidate_keys.append(
+                        PoolKey.build_key_string(key_prefix, hash_hex)
+                    )
+                candidate_meta.append((g_idx, bytes(h)))
 
         if not candidate_keys:
             return 0
@@ -1434,12 +1444,15 @@ class MooncakeStoreWorker:
             return 0
 
         # A (group, hash) is "present" only when every TP*PP rank has it.
-        expected_per_key = max(1, tp_count * self.pp_size)
-        present_count: dict[tuple[int, bytes], int] = {}
-        for gh, exists in zip(candidate_meta, res, strict=True):
-            if exists == 1:
-                present_count[gh] = present_count.get(gh, 0) + 1
-        exists_set = {gh for gh, c in present_count.items() if c >= expected_per_key}
+        ranks_per_candidate = self._lookup_expected_per_key
+        exists_set = {
+            (g_idx, hash_bytes)
+            for i, (g_idx, hash_bytes) in enumerate(candidate_meta)
+            if all(
+                res[i * ranks_per_candidate + j] == 1
+                for j in range(ranks_per_candidate)
+            )
+        }
 
         _masks, hit_length = self.coord.find_longest_cache_hit(
             block_hashes, token_len, ExternalCachedBlockPool(exists_set)
