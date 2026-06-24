@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="arc-ray-qwen3-30b-rayclient-readiness-retry-exact-iface-v4"
+SCRIPT_VERSION="arc-ray-qwen3-30b-tcp-preflight-vllm-driver-exact-iface-v5"
 
 DEBUG_SLURM_SCRIPT="${DEBUG_SLURM_SCRIPT:-0}"
 NSYS_COPY_DEBUG="${NSYS_COPY_DEBUG:-0}"
@@ -27,9 +27,9 @@ SERVER_SHUTDOWN_TIMEOUT_S="${SERVER_SHUTDOWN_TIMEOUT_S:-420}"
 HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-900}"
 
 RAY_CLIENT_PORT="${RAY_CLIENT_PORT:-10001}"
-RAY_CLIENT_READINESS_TIMEOUT_S="${RAY_CLIENT_READINESS_TIMEOUT_S:-360}"
+RAY_TCP_PREFLIGHT_TIMEOUT_S="${RAY_TCP_PREFLIGHT_TIMEOUT_S:-360}"
 RAY_HEAD_START_SLEEP_S="${RAY_HEAD_START_SLEEP_S:-60}"
-RAY_WORKER_START_SLEEP_S="${RAY_WORKER_START_SLEEP_S:-30}"
+RAY_WORKER_START_SLEEP_S="${RAY_WORKER_START_SLEEP_S:-45}"
 
 WORKER_NSYS_LIVE_COPY_INTERVAL="${WORKER_NSYS_LIVE_COPY_INTERVAL:-2}"
 WORKER_NSYS_FINALIZE_WAIT_S="${WORKER_NSYS_FINALIZE_WAIT_S:-180}"
@@ -43,10 +43,8 @@ export NSYS_ENABLE="${NSYS_ENABLE:-1}"
 export NSYS_PROFILE_WORKERS="${NSYS_PROFILE_WORKERS:-1}"
 export NSYS_PROFILE_RAY="${NSYS_PROFILE_RAY:-0}"
 
-# Keep Ray usage telemetry enabled.
 export RAY_USAGE_STATS_ENABLED="${RAY_USAGE_STATS_ENABLED:-1}"
 
-# Debug logging for vLLM/NCCL/Ray.
 export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-DEBUG}"
 export VLLM_LOG_STATS_INTERVAL="${VLLM_LOG_STATS_INTERVAL:-1}"
 export TORCH_DISTRIBUTED_DEBUG="${TORCH_DISTRIBUTED_DEBUG:-DETAIL}"
@@ -135,20 +133,6 @@ interface_for_ip() {
         exit
       }
     }'
-}
-
-interface_has_ip() {
-  local iface="$1"
-  local target_ip="$2"
-  ip -o -4 addr show dev "${iface}" 2>/dev/null | awk -v target="${target_ip}" '
-    {
-      split($4, addr, "/")
-      if (addr[1] == target) {
-        found = 1
-        exit
-      }
-    }
-    END { exit(found ? 0 : 1) }'
 }
 
 configure_socket_ifnames() {
@@ -672,7 +656,6 @@ echo "Starting head node ${HEAD_NODE}..."
 
 RAY_HEAD_CMD="$(
   declare -f interface_for_ip
-  declare -f interface_has_ip
   declare -f configure_socket_ifnames
   declare -f network_debug_snapshot
   declare -f copy_ray_nsight_locally_once
@@ -777,7 +760,6 @@ if [ -n "${WORKER_NODES}" ]; then
 
     RAY_WORKER_CMD="$(
       declare -f interface_for_ip
-      declare -f interface_has_ip
       declare -f configure_socket_ifnames
       declare -f network_debug_snapshot
       declare -f copy_ray_nsight_locally_once
@@ -867,85 +849,56 @@ fi"
   sleep "${RAY_WORKER_START_SLEEP_S}"
 fi
 
-echo "=== Ray cluster readiness via Ray Client ==="
-echo "Waiting for Ray Client at ray://${HEAD_NODE_IP}:${RAY_CLIENT_PORT} ..."
-echo "This intentionally avoids ray status and ray.init(address=auto)."
+echo "=== Ray TCP preflight ==="
+echo "Avoiding ray status, ray.init(address=auto), and blocking Ray Client readiness."
+echo "Waiting for Ray head/GCS TCP port only; vLLM will be the real Ray driver."
 
-export HEAD_NODE_IP NUM_NODES GPUS_PER_NODE RAY_CLIENT_PORT RAY_CLIENT_READINESS_TIMEOUT_S
+export HEAD_NODE_IP RAY_PORT RAY_CLIENT_PORT RAY_TCP_PREFLIGHT_TIMEOUT_S
 
 python -u <<'PY'
 import os
 import sys
 import time
 import socket
-import ray
 
 head_ip = os.environ["HEAD_NODE_IP"]
-num_nodes = int(os.environ.get("NUM_NODES", "2"))
-gpus_per_node = int(os.environ.get("GPUS_PER_NODE", "1"))
-expected_gpus = num_nodes * gpus_per_node
+ray_port = int(os.environ.get("RAY_PORT", "6378"))
 ray_client_port = int(os.environ.get("RAY_CLIENT_PORT", "10001"))
-timeout_s = int(os.environ.get("RAY_CLIENT_READINESS_TIMEOUT_S", "360"))
+timeout_s = int(os.environ.get("RAY_TCP_PREFLIGHT_TIMEOUT_S", "360"))
 
-deadline = time.time() + timeout_s
-last_error = None
+def wait_tcp(host, port, label, timeout_s):
+    deadline = time.time() + timeout_s
+    last_error = None
+    while time.time() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=5):
+                print(f"{label} is reachable: {host}:{port}")
+                return True
+        except Exception as e:
+            last_error = repr(e)
+            print(f"{label} not ready yet at {host}:{port}: {last_error}")
+            time.sleep(5)
+    print(f"WARNING: {label} never became reachable at {host}:{port}; last_error={last_error}")
+    return False
 
-print(f"Expected Ray resources: nodes={num_nodes}, GPUs={expected_gpus}")
-print(f"Waiting for TCP {head_ip}:{ray_client_port} ...")
+gcs_ok = wait_tcp(head_ip, ray_port, "Ray head/GCS port", timeout_s)
+client_ok = wait_tcp(head_ip, ray_client_port, "Ray Client port", 30)
 
-while time.time() < deadline:
-    try:
-        with socket.create_connection((head_ip, ray_client_port), timeout=5):
-            print(f"Ray Client TCP port is reachable: {head_ip}:{ray_client_port}")
-            break
-    except Exception as e:
-        last_error = repr(e)
-        print(f"Ray Client TCP port not ready yet: {last_error}")
-        time.sleep(5)
-else:
-    print(f"ERROR: Ray Client TCP port never became reachable: {head_ip}:{ray_client_port}", file=sys.stderr)
-    print(f"Last error: {last_error}", file=sys.stderr)
+if not gcs_ok:
+    print("ERROR: Ray head/GCS port is not reachable. vLLM would not be able to connect.", file=sys.stderr)
     sys.exit(1)
 
-print(f"Connecting to ray://{head_ip}:{ray_client_port} ...")
+if not client_ok:
+    print("WARNING: Ray Client port is not reachable, but continuing because vLLM uses RAY_ADDRESS.")
 
-while time.time() < deadline:
-    try:
-        ray.init(f"ray://{head_ip}:{ray_client_port}")
-
-        resources = ray.cluster_resources()
-        available = ray.available_resources()
-
-        print("Ray cluster resources:", resources)
-        print("Ray available resources:", available)
-
-        actual_gpus = resources.get("GPU", 0)
-        node_keys = [
-            k for k in resources
-            if k.startswith("node:") and k != "node:__internal_head__"
-        ]
-
-        if actual_gpus >= expected_gpus and len(node_keys) >= num_nodes:
-            print("Ray cluster is ready.")
-            ray.shutdown()
-            sys.exit(0)
-
-        print(
-            f"Ray connected but resources not ready yet: "
-            f"nodes={node_keys}, GPUs={actual_gpus}; "
-            f"expected nodes={num_nodes}, GPUs={expected_gpus}"
-        )
-        ray.shutdown()
-    except Exception as e:
-        last_error = repr(e)
-        print(f"Ray Client connection/resources not ready yet: {last_error}")
-
-    time.sleep(5)
-
-print("ERROR: Ray cluster readiness timed out.", file=sys.stderr)
-print(f"Last error: {last_error}", file=sys.stderr)
-sys.exit(1)
+print("Ray TCP preflight passed.")
 PY
+
+echo "=== Ray process snapshot before vLLM ==="
+ps -ef | egrep 'ray start|gcs_server|raylet|ray::|dashboard|client.server' | grep -v grep || true
+
+echo "=== Ray recent logs before vLLM ==="
+grep -R "Ray runtime started\|ERROR\|Traceback\|Exception" /tmp/ray/session_latest/logs 2>/dev/null | tail -100 || true
 
 echo "=== vLLM api_server (background process; no outer nsys wrapper) ==="
 echo "Starting vLLM server on head node WITHOUT outer Nsight wrapper..."
@@ -965,6 +918,14 @@ if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_WORKERS}" = "1" ]; then
   nsight_copy_msg "live sidecar copies current-job Slurm tmp plus live /tmp/ray sessions"
   nsight_copy_msg "empty.nsys-rep and zero-byte reports are ignored"
 fi
+
+export RAY_ADDRESS="${HEAD_NODE_IP}:${RAY_PORT}"
+export VLLM_HOST_IP="${HEAD_NODE_IP}"
+
+echo "Launching vLLM with RAY_ADDRESS=${RAY_ADDRESS}"
+echo "Launching vLLM with VLLM_HOST_IP=${VLLM_HOST_IP}"
+echo "Launching vLLM with GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME}"
+echo "Launching vLLM with NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME}"
 
 python -m vllm.entrypoints.openai.api_server \
   --model "${MODEL_ID}" \
