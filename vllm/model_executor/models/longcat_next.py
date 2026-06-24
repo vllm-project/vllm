@@ -2786,8 +2786,12 @@ class LongcatNextForCausalLM(
         # Map to vocab space using per-level cumulative offsets.
         visual_ids = visual_ids + self.visual_offset_vals.to(visual_ids.device)
 
-        # CRITICAL: Protect against OOV visual IDs (same as audio).
-        vocab_size = self.language_model.embed_tokens.weight.shape[0]
+        # CRITICAL: Protect against OOV visual IDs.
+        # Use config.vocab_size (full, 282624), NOT embed_tokens.weight.shape[0]
+        # which is the per-shard size with TP>1 (e.g. 141312 with TP=2).
+        # VocabParallelEmbedding already handles per-shard routing correctly;
+        # this clamp is only a safety net for config mismatches.
+        vocab_size = self.config.vocab_size
         max_visual_id = int(visual_ids.max())
         if max_visual_id >= vocab_size:
             logger.warning(
@@ -2879,7 +2883,11 @@ class LongcatNextForCausalLM(
         )
         audio_ids = audio_ids + self.audio_offset_vals.to(audio_ids.device)
 
-        vocab_size = self.language_model.embed_tokens.weight.shape[0]
+        # Use config.vocab_size (full, 282624), NOT embed_tokens.weight.shape[0]
+        # which is the per-shard size with TP>1 (e.g. 141312 with TP=2).
+        # VocabParallelEmbedding handles per-shard routing correctly; this
+        # clamp is only a safety net for config mismatches.
+        vocab_size = self.config.vocab_size
         logger.warning(
             "[AUDIO_DIAG] after offset: audio_ids min=%d max=%d vocab_size=%d",
             int(audio_ids.min()),
