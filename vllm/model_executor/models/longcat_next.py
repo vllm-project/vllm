@@ -1219,19 +1219,23 @@ class LongcatNextWhisperEncoder(WhisperEncoder):
             ("qkv_proj", "v_proj", "v"),
         ]
         name_remap = {
-            "fc1.": "mlp.fc1.",
-            "fc2.": "mlp.fc2.",
+            "fc1": "mlp.fc1",
+            "fc2": "mlp.fc2",
             "positional_embedding": "embed_positions.weight",
         }
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             # Apply name remapping (path-aware, not substring replacement)
-            for old, new in name_remap.items():
-                # Replace only complete path components
-                parts = name.split(".")
-                parts = [new if p == old.rstrip(".") else p for p in parts]
-                name = ".".join(parts)
+            parts = name.split(".")
+            new_parts = []
+            for p in parts:
+                if p in name_remap:
+                    # Replace this component with the new path
+                    new_parts.extend(name_remap[p].split("."))
+                else:
+                    new_parts.append(p)
+            name = ".".join(new_parts)
 
             # Handle stacked QKV params
             for param_name, weight_name, shard_id in stacked_params_mapping:
