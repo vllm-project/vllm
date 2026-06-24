@@ -129,7 +129,6 @@ def _fs_lookup_worker_main(
         def _batch_lookup(
             keys: list[OffloadKey], req_context: ReqContext
         ) -> list[bool]:
-            del req_context
             return [os.path.exists(file_mapper.get_file_name(key)) for key in keys]
 
         while True:
