@@ -604,6 +604,13 @@ class RemoteVLLMServer:
                         mem_info = nvmlDeviceGetMemoryInfo(handle)
                         total_used += mem_info.used
                     return total_used
+            elif current_platform.is_xpu():
+                total_used = 0
+                device_count = current_platform.device_count()
+                for i in range(device_count):
+                    free_mem, total_mem = torch.xpu.mem_get_info(i)
+                    total_used += total_mem - free_mem
+                return total_used
         except Exception as e:
             print(f"[RemoteOpenAIServer] Could not query GPU memory: {e}")
             return None
@@ -1508,6 +1515,10 @@ def wait_for_gpu_memory_to_clear(
                 mem_info = amdsmi_get_gpu_vram_usage(dev_handle)
                 gb_used = mem_info["vram_used"] / 2**10
                 gb_total = mem_info["vram_total"] / 2**10
+            elif current_platform.is_xpu():
+                free_mem, total_mem = torch.xpu.mem_get_info(device)
+                gb_used = (total_mem - free_mem) / 2**30
+                gb_total = total_mem / 2**30
             else:
                 dev_handle = nvmlDeviceGetHandleByIndex(device)
                 mem_info = nvmlDeviceGetMemoryInfo(dev_handle)
