@@ -3,11 +3,12 @@
 mod combined;
 
 use thiserror::Error;
+use vllm_tokenizer::DynTokenizer;
 
 pub use combined::CombinedParser;
 
 use crate::reasoning::ReasoningError;
-use crate::tool::{StructuralTagModel, ToolCallDelta, ToolParserError, ToolParserOutput};
+use crate::tool::{StructuralTagModel, Tool, ToolCallDelta, ToolParserError, ToolParserOutput};
 
 /// Result alias for unified parser operations.
 pub type Result<T> = std::result::Result<T, UnifiedParserError>;
@@ -62,6 +63,11 @@ impl UnifiedParserOutput {
 
 /// Incremental parser that extracts reasoning and tool-call events from assistant output.
 pub trait UnifiedParser: Send {
+    /// Construct a boxed parser instance for one request stream.
+    fn create(tools: &[Tool], tokenizer: DynTokenizer) -> Result<Box<dyn UnifiedParser>>
+    where
+        Self: Sized + 'static;
+
     /// Initialize parser state from prompt token IDs before output deltas arrive.
     fn initialize(&mut self, _prompt_token_ids: &[u32]) -> Result<()> {
         Ok(())
@@ -99,6 +105,8 @@ pub trait UnifiedParser: Send {
 /// Errors produced while creating or running unified parsers.
 #[derive(Debug, Error)]
 pub enum UnifiedParserError {
+    #[error("combined parser is constructed from split parser instances")]
+    CombinedParserConstructor,
     #[error(transparent)]
     Reasoning(#[from] ReasoningError),
     #[error(transparent)]

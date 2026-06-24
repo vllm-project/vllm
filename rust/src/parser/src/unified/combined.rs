@@ -1,9 +1,11 @@
 //! Adapter that combines reasoning and tool parsers.
 
-use crate::reasoning::ReasoningParser;
-use crate::tool::{StructuralTagModel, ToolParser, ToolParserOutput};
+use vllm_tokenizer::DynTokenizer;
 
-use super::{Result, UnifiedParser, UnifiedParserOutput};
+use crate::reasoning::ReasoningParser;
+use crate::tool::{StructuralTagModel, Tool, ToolParser, ToolParserOutput};
+
+use super::{Result, UnifiedParser, UnifiedParserError, UnifiedParserOutput};
 
 /// Unified parser that composes existing reasoning and tool parsers.
 pub struct CombinedParser {
@@ -53,6 +55,13 @@ impl CombinedParser {
 }
 
 impl UnifiedParser for CombinedParser {
+    fn create(_tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn UnifiedParser>>
+    where
+        Self: Sized + 'static,
+    {
+        Err(UnifiedParserError::CombinedParserConstructor)
+    }
+
     fn initialize(&mut self, prompt_token_ids: &[u32]) -> Result<()> {
         if let Some(reasoning) = self.reasoning.as_mut() {
             reasoning.initialize(prompt_token_ids)?;
