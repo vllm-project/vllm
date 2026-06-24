@@ -8,7 +8,8 @@ already covered by ``test_qwen3.py``/``test_qwen3_reasoning.py``. These tests
 cover only what is seed_oss-specific: that the ``seed:`` token overrides are
 wired through, the reasoning→tool boundary holds with them, the malformed
 header from #46314 no longer drops sibling calls, and the registered adapters
-resolve.
+resolve. Seed-specific budget-reflect tags inside reasoning are also covered
+here because the old dedicated parser tests exercised them.
 """
 
 import json
@@ -155,3 +156,34 @@ def test_end_to_end_through_registered_adapters(mock_tokenizer, mock_request):
     tool_result = tool_parser.extract_tool_calls(remaining, mock_request)
     assert tool_result.tool_calls[0].function.name == "get_weather"
     assert json.loads(tool_result.tool_calls[0].function.arguments) == {"city": "Tokyo"}
+
+
+def test_budget_reflect_tags_do_not_break_adapter_pipeline(
+    mock_tokenizer,
+    mock_request,
+):
+    reasoning_parser = SeedOssParserReasoningAdapter(mock_tokenizer)
+    tool_parser = SeedOssParserToolAdapter(mock_tokenizer)
+    text = (
+        f"{THINK_START}"
+        "The user's current thinking budget is 512.</seed:cot_budget_reflect>\n"
+        "I need the weather.\n"
+        "<seed:cot_budget_reflect>I have used 131 tokens."
+        "</seed:cot_budget_reflect>\n"
+        f"{THINK_END}"
+        f"{TOOL_CALL_START}\n<function=get_weather>\n"
+        "<parameter=city>Barcelona</parameter>\n"
+        f"</function>\n{TOOL_CALL_END}"
+    )
+
+    reasoning, remaining = reasoning_parser.extract_reasoning(text, mock_request)
+    assert reasoning is not None
+    assert "current thinking budget is 512" in reasoning
+    assert "<seed:cot_budget_reflect>" in reasoning
+    assert "</seed:cot_budget_reflect>" in reasoning
+
+    tool_result = tool_parser.extract_tool_calls(remaining, mock_request)
+    assert tool_result.tool_calls[0].function.name == "get_weather"
+    assert json.loads(tool_result.tool_calls[0].function.arguments) == {
+        "city": "Barcelona"
+    }
