@@ -49,10 +49,41 @@ except Exception:
     _AR_OP = None
 
 
+# Cache for whether this engine should route TP all-reduce through the opaque
+# DBO custom op. Only true when micro-batching / DBO is configured. When it is
+# not, routing through the custom op would place Python-level (non
+# cudagraph-safe) work inside PIECEWISE cudagraph regions, breaking capture.
+# Falling back to the plain all-reduce keeps behavior identical to the
+# non-DBO path. This is a per-engine compile-time constant, so torch.compile
+# can safely fold the branch in `tensor_model_parallel_all_reduce`.
+_USE_DBO_AR_OP: bool | None = None
+
+
+def _use_dbo_all_reduce_op() -> bool:
+    global _USE_DBO_AR_OP
+    if _USE_DBO_AR_OP is not None:
+        return _USE_DBO_AR_OP
+    if _AR_OP is None:
+        _USE_DBO_AR_OP = False
+        return False
+    # Lazy import to avoid a circular import at module load time
+    # (communication_op is imported early during distributed setup).
+    from vllm.config import get_current_vllm_config_or_none
+
+    cfg = get_current_vllm_config_or_none()
+    if cfg is None:
+        # Config not set yet (e.g. before model build). Don't cache so a later
+        # call with config available can still resolve the real value; fall
+        # back to the plain all-reduce for now.
+        return False
+    _USE_DBO_AR_OP = bool(cfg.parallel_config.use_ubatching)
+    return _USE_DBO_AR_OP
+
+
 def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
-    if _AR_OP is not None:
+    if _use_dbo_all_reduce_op():
         return _AR_OP(input_)
-    return _all_reduce_with_dbo_yields(input_)
+    return get_tp_group().all_reduce(input_)
 
 
 def tensor_model_parallel_all_gather(
