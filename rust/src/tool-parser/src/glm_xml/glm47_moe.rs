@@ -1,5 +1,5 @@
 use super::{GlmXmlToolParser, Separator};
-use crate::{Result, Tool, ToolParser, ToolParserOutput};
+use crate::{Result, StructuralTagModel, Tool, ToolParser, ToolParserOutput};
 
 /// Tool parser for GLM-4.7 MoE XML-style tool calls.
 ///
@@ -20,6 +20,10 @@ impl ToolParser for Glm47MoeToolParser {
         Self: Sized + 'static,
     {
         Ok(Box::new(Self::new(tools)))
+    }
+
+    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
+        Some(StructuralTagModel::Glm47)
     }
 
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
