@@ -284,15 +284,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     uv pip freeze | grep -i "^torch=\|^torchvision=\|^torchaudio=" > torch_lib_versions.txt \
     && TORCH_LIB_VERSIONS=$(cat torch_lib_versions.txt | xargs) \
     && echo "Installed torch libs: ${TORCH_LIB_VERSIONS}" \
-    && /opt/venv/bin/python3 -c " \
-import importlib.metadata, hashlib; \
-d = importlib.metadata.distribution('torch'); \
-meta_hash = hashlib.sha256(d.read_text('METADATA').encode()).hexdigest(); \
-print(f'=== Torch wheel verification ==='); \
-print(f'torch=={d.version}'); \
-print(f'metadata_sha256={meta_hash}'); \
-print(f'================================'); \
-"
+    && /opt/venv/bin/python3 -c "import importlib.metadata, hashlib; d = importlib.metadata.distribution('torch'); meta_hash = hashlib.sha256(d.read_text('METADATA').encode()).hexdigest(); print(f'=== Torch wheel verification ==='); print(f'torch=={d.version}'); print(f'metadata_sha256={meta_hash}'); print(f'================================')"
 
 # CUDA arch list used by torch
 # Explicitly set the list to avoid issues with torch 2.2
