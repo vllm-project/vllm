@@ -39,6 +39,7 @@ class EngineCoreSamplingParams(msgspec.Struct, dict=True, omit_defaults=True):
     seed: int | None = None
     max_tokens: int = 16
     min_tokens: int = 0
+    thinking_token_budget: int | None = None
     min_p: float = 0.0
     frequency_penalty: float = 0.0
     presence_penalty: float = 0.0
@@ -122,6 +123,7 @@ request = EngineCoreRequest(
         seed=None,
         max_tokens=32,
         min_tokens=1,
+        thinking_token_budget=256,
         min_p=0.0,
         frequency_penalty=0.0,
         presence_penalty=0.0,
@@ -358,6 +360,8 @@ class EngineCoreReadyResponse:
     dp_stats_address: str | None
     dtype: str
     vllm_version: str
+    world_size: int
+    data_parallel_size: int
     kv_cache_size_tokens: int | None = None
     kv_cache_max_concurrency: float | None = None
 
@@ -369,6 +373,8 @@ ready_response = EngineCoreReadyResponse(
     dp_stats_address=None,
     dtype="float32",
     vllm_version="0.0.0",
+    data_parallel_size=1,
+    world_size=1,
 )
 
 print(msgspec.msgpack.encode(request).hex())
