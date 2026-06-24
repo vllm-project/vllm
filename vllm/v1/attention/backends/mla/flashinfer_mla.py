@@ -50,6 +50,14 @@ class FlashInferMLABackend(MLACommonBackend):
         return [32, 64]
 
     @staticmethod
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
+        if include_num_layers_dimension:
+            return (1, 0, 2, 3)
+        return (0, 1, 2)
+
+    @staticmethod
     def get_name() -> str:
         return "FLASHINFER_MLA"
 

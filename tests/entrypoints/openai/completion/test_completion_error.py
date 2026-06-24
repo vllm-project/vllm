@@ -14,9 +14,11 @@ from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
 from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+from vllm.entrypoints.serve.render.serving import ServingRender
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.hf import HfRenderer
+from vllm.renderers.online_derenderer import OnlineDerenderer
+from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.v1.engine.async_llm import AsyncLLM
 
@@ -77,10 +79,9 @@ def _build_serving_completion(engine: AsyncLLM) -> OpenAIServingCompletion:
         engine_client=engine,
         base_model_paths=BASE_MODEL_PATHS,
     )
-    serving_render = OpenAIServingRender(
+    online_renderer = OnlineRenderer(
         model_config=engine.model_config,
         renderer=engine.renderer,
-        model_registry=models.registry,
         request_logger=None,
         chat_template=None,
         chat_template_content_format="auto",
@@ -88,7 +89,7 @@ def _build_serving_completion(engine: AsyncLLM) -> OpenAIServingCompletion:
     return OpenAIServingCompletion(
         engine,
         models,
-        openai_serving_render=serving_render,
+        online_renderer=online_renderer,
         request_logger=None,
     )
 
@@ -158,7 +159,7 @@ async def test_openai_completion_keeps_mm_cache_for_engine_execution():
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     serving_completion = _build_serving_completion(mock_engine)
-    serving_completion.openai_serving_render.preprocess_completion = AsyncMock(
+    serving_completion.online_renderer.preprocess_completion = AsyncMock(
         return_value=[{"prompt_token_ids": [1, 2, 3]}]
     )
 
@@ -171,11 +172,46 @@ async def test_openai_completion_keeps_mm_cache_for_engine_execution():
 
     assert isinstance(result, list)
     assert (
-        serving_completion.openai_serving_render.preprocess_completion.call_args.kwargs[
+        serving_completion.online_renderer.preprocess_completion.call_args.kwargs[
             "skip_mm_cache"
         ]
         is False
     )
+
+
+def _build_serving_render(engine: AsyncLLM) -> ServingRender:
+    models = OpenAIServingModels(
+        engine_client=engine,
+        base_model_paths=BASE_MODEL_PATHS,
+    )
+    online_renderer = OnlineRenderer(
+        model_config=engine.model_config,
+        renderer=engine.renderer,
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+    )
+    online_derenderer = OnlineDerenderer(
+        model_config=engine.model_config,
+        renderer=engine.renderer,
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+    )
+
+    serving_render = ServingRender(models, online_renderer, online_derenderer)
+
+    async def _fake_preprocess_chat(*args, **kwargs):
+        # return conversation, engine_inputs
+        return (
+            [{"role": "user", "content": "Test"}],
+            [{"prompt_token_ids": [1, 2, 3]}],
+        )
+
+    serving_render.online_renderer.preprocess_chat = AsyncMock(
+        side_effect=_fake_preprocess_chat
+    )
+    return serving_render
 
 
 @pytest.mark.asyncio
@@ -186,8 +222,9 @@ async def test_renderer_only_completion_request_skips_mm_cache():
     mock_engine.input_processor = MagicMock()
     mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
-    serving_completion = _build_serving_completion(mock_engine)
-    serving_completion.openai_serving_render.preprocess_completion = AsyncMock(
+    serving_render = _build_serving_render(mock_engine)
+
+    serving_render.online_renderer.preprocess_completion = AsyncMock(
         return_value=[{"prompt_token_ids": [1, 2, 3]}]
     )
 
@@ -196,13 +233,11 @@ async def test_renderer_only_completion_request_skips_mm_cache():
         prompt="Test prompt",
     )
 
-    result = await serving_completion.openai_serving_render.render_completion_request(
-        request
-    )
+    result = await serving_render.render_completion_request(request)
 
     assert isinstance(result, list)
     assert (
-        serving_completion.openai_serving_render.preprocess_completion.call_args.kwargs[
+        serving_render.online_renderer.preprocess_completion.call_args.kwargs[
             "skip_mm_cache"
         ]
         is True
