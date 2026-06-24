@@ -8,6 +8,7 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from typing import Any, Literal
 
 import numpy as np
+import regex as re
 import torch
 import torch.nn as nn
 from scipy.io import wavfile
@@ -18,9 +19,8 @@ from transformers.configuration_utils import PretrainedConfig
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_rank
+from vllm.distributed import get_pp_group
 from vllm.inputs import MultiModalDataDict, PromptType
-from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
@@ -67,7 +67,12 @@ from .utils import (
     maybe_prefix,
 )
 
-logger = init_logger(__name__)
+# Magic number constants for clarity
+_INT4_QUANTIZATION_CHUNK_ROWS = 1_048_576  # ~512 MiB bf16 per chunk
+_ATTENTION_HEAD_DIM = 128
+_VISUAL_CODE_SIZE = 448 // 14  # 32
+_SINUSOID_MAX_TIMESCALE = 10000.0
+_TOKENS_PER_SECOND_ESTIMATE = 100
 
 
 class Int4PerChannelEmbeddingMethod(QuantizeMethodBase):
@@ -119,16 +124,6 @@ class Int4PerChannelEmbeddingMethod(QuantizeMethodBase):
                 f"Int4 embedding requires even embedding_dim, got {hidden_size}"
             )
 
-        logger.warning(
-            "Quantizing %s weight %s to int4 (shape %s, device %s, "
-            "current mem %.2f GB)",
-            layer.__class__.__name__,
-            getattr(layer, "prefix", "?"),
-            tuple(weight.shape),
-            weight.device,
-            torch.accelerator.memory_allocated(weight.device) / 1e9,
-        )
-
         # Per-channel symmetric int4 scale: range [-7, 7].
         max_abs = weight.abs().max(dim=0, keepdim=True).values
         scale = (max_abs / 7.0).to(weight.dtype)
@@ -146,11 +141,6 @@ class Int4PerChannelEmbeddingMethod(QuantizeMethodBase):
         )
         layer._already_int4_quantized = True
         torch.accelerator.empty_cache()
-        logger.warning(
-            "Finished int4 quant for %s (new mem %.2f GB)",
-            getattr(layer, "prefix", "?"),
-            torch.accelerator.memory_allocated(weight.device) / 1e9,
-        )
 
     def apply(
         self,
@@ -276,7 +266,7 @@ class Int4VocabParallelEmbedding(VocabParallelEmbedding):
         staging_device = self._pick_staging_device(target_device)
 
         # ~512 MiB bf16 per chunk keeps staging memory modest.
-        chunk_rows = 1_048_576
+        chunk_rows = _INT4_QUANTIZATION_CHUNK_ROWS
 
         # First pass: compute per-channel max abs.
         max_abs = torch.zeros(
@@ -329,11 +319,6 @@ class NgramEmbedding(nn.Module):
         # Only create N-gram embedders on the first PP rank
         # On non-first ranks, embed_tokens is PPMissingLayer
         is_first = get_pp_group().is_first_rank
-        with open("/tmp/longcat_ngram_debug.log", "a") as _f:
-            _f.write(
-                f"NgramEmbedding init is_first_rank={is_first} "
-                f"tp_rank={get_tensor_model_parallel_rank()}\n"
-            )
         if is_first:
             self.is_first_pp_rank = True
             # Create embedders for each N-gram combination
@@ -381,17 +366,17 @@ class NgramEmbedding(nn.Module):
         Returns:
             Shifted tensor with zeros in invalid positions
         """
-        q = tensor.numel()
+        seq_len = tensor.numel()
         if n == 0:
             return tensor.clone()
-        if n >= q:
+        if n >= seq_len:
             return torch.zeros_like(tensor)
 
         result = torch.zeros_like(tensor)
 
-        # Find EOS and special token locations
-        special_tokens = 0
-        total_mask = (tensor == eos_token_id) | (tensor == special_tokens)
+        # Find EOS and PAD token locations
+        pad_token_id = 0
+        total_mask = (tensor == eos_token_id) | (tensor == pad_token_id)
 
         # Calculate segment IDs based on EOS positions
         eos_cumsum = total_mask.long().cumsum(dim=0)
@@ -400,10 +385,11 @@ class NgramEmbedding(nn.Module):
             dim=0,
         )
 
-        col_indices = torch.arange(q, device=tensor.device)
-        max_segments = segment_ids.max().item() + 1
+        col_indices = torch.arange(seq_len, device=tensor.device)
+        # Use seq_len as upper bound for segment_starts size to avoid CPU-GPU sync
+        # from .item() call. Actual segments used will be <= seq_len.
         segment_starts = torch.full(
-            (max_segments,), q, dtype=torch.long, device=tensor.device
+            (seq_len,), seq_len, dtype=torch.long, device=tensor.device
         )
         segment_starts.scatter_reduce_(
             0, segment_ids, col_indices, reduce="amin", include_self=False
@@ -472,7 +458,7 @@ class NgramEmbedding(nn.Module):
                 [ngram_context[..., -(self.emb_neighbor_num - 1) :], input_ids], dim=-1
             )
         else:
-            context = input_ids.clone()
+            context = input_ids
 
         # Skip N-gram look-up for oe_ignored_token_ids.
         # Use isin_list (which uses async_tensor_h2d) instead of
@@ -549,8 +535,8 @@ class LongcatNextHeadAttention(nn.Module):
     def __init__(self, embed_dim: int) -> None:
         super().__init__()
         self.embed_dim = embed_dim
-        self.num_heads = embed_dim // 128
-        self.head_dim = 128
+        self.num_heads = embed_dim // _ATTENTION_HEAD_DIM
+        self.head_dim = _ATTENTION_HEAD_DIM
 
         self.q_proj = nn.Linear(embed_dim, embed_dim, bias=True)
         self.k_proj = nn.Linear(embed_dim, embed_dim, bias=False)
@@ -580,7 +566,7 @@ class LongcatNextHeadAttention(nn.Module):
 class LongcatNextHeadTransformerLayer(nn.Module):
     """Single depth-wise transformer layer for visual/audio heads.
 
-    Matches the HF ``CasualDepthTransformerLayer`` layout and weight shapes:
+    Matches the HF ``CausalDepthTransformerLayer`` layout and weight shapes:
     - RMSNorm -> causal self-attention -> residual
     - RMSNorm -> depth-wise FFN (weights reshaped and contracted over depth)
       -> residual
@@ -921,6 +907,9 @@ class RQBottleneck(nn.Module):
         self.shape_divisor = torch.Size(
             [latent_shape[i] // code_shape[i] for i in range(3)]
         )
+        # NOTE: shared_codebook parameter is ignored. The checkpoint format
+        # always uses separate codebooks per depth level, regardless of this
+        # parameter value.
         self.shared_codebook = False
 
         n_embed_list = (
@@ -1027,7 +1016,7 @@ class VisualQuantizer(nn.Module):
         self.shared_codebook = getattr(self.config, "shared_codebook", False)
         self.quantizer_type = getattr(self.config, "quantizer_type", "rq")
 
-        code_h_w = int(448 / 14)
+        code_h_w = _VISUAL_CODE_SIZE
         latent_shape = [code_h_w, code_h_w, self.codebook_dim]
         code_shape = [code_h_w, code_h_w, self.depth]
 
@@ -1303,7 +1292,7 @@ class LongcatNextAudioEncoder(nn.Module):
 
     @staticmethod
     def _sinusoids(
-        length: int, channels: int, max_timescale: float = 10000.0
+        length: int, channels: int, max_timescale: float = _SINUSOID_MAX_TIMESCALE
     ) -> torch.Tensor:
         assert channels % 2 == 0
         log_timescale_increment = np.log(max_timescale) / (channels // 2 - 1)
@@ -1734,8 +1723,6 @@ class LongcatNextMultiModalProcessor(
         prompt replacements can correctly compute the number of audio
         tokens per file.
         """
-        import regex as re
-
         hf_inputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
@@ -1895,31 +1882,41 @@ class LongcatNextMultiModalProcessor(
             sampling_rate = getattr(
                 self.info.get_hf_config().audio_config, "sampling_rate", 16000
             )
-            for audio in audio_items:
-                if audio is None:
-                    continue
-                if isinstance(audio, torch.Tensor):
-                    audio = audio.numpy()
-                audio = np.asarray(audio, dtype=np.float32)
-                fd, path = tempfile.mkstemp(suffix=".wav")
-                try:
-                    os.close(fd)
-                    wavfile.write(path, sampling_rate, audio)
-                    audio_paths.append(path)
-                except Exception:
-                    os.close(fd)
-                    raise
+            try:
+                for audio in audio_items:
+                    if audio is None:
+                        continue
+                    if isinstance(audio, torch.Tensor):
+                        audio = audio.numpy()
+                    audio = np.asarray(audio, dtype=np.float32)
+                    fd, path = tempfile.mkstemp(suffix=".wav")
+                    try:
+                        with os.fdopen(fd, "wb") as f:
+                            wavfile.write(f, sampling_rate, audio)
+                        audio_paths.append(path)
+                    except Exception:
+                        # fd is already closed by os.fdopen context manager
+                        if os.path.exists(path):
+                            os.unlink(path)
+                        raise
 
-            if audio_paths:
-                audio_inputs = processor.audio_processor(
-                    audio_paths, **output_kwargs["audio_kwargs"]
-                )
-                # HF processor flattens audio data across files
-                for key in list(audio_inputs.keys()):
-                    val = audio_inputs[key]
-                    if isinstance(val, list):
-                        audio_inputs[key] = [v for b_val in val for v in b_val]
-                merged_data.update(audio_inputs)
+                if audio_paths:
+                    audio_inputs = processor.audio_processor(
+                        audio_paths, **output_kwargs["audio_kwargs"]
+                    )
+                    # HF processor flattens audio data across files
+                    for key in list(audio_inputs.keys()):
+                        val = audio_inputs[key]
+                        if isinstance(val, list):
+                            audio_inputs[key] = [v for b_val in val for v in b_val]
+                    merged_data.update(audio_inputs)
+            finally:
+                # Clean up all temporary files
+                for path in audio_paths:
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        pass
 
         return BatchFeature(
             data=merged_data,
@@ -2002,7 +1999,10 @@ class LongcatNextMultiModalProcessor(
 
         def get_image_replacement(item_idx: int):
             grid_thw = out_mm_data["image_grid_thw"][item_idx]
-            assert isinstance(grid_thw, torch.Tensor)
+            if not isinstance(grid_thw, torch.Tensor):
+                raise TypeError(
+                    f"Expected grid_thw to be torch.Tensor, got {type(grid_thw)}"
+                )
             n_tokens = int(grid_thw.prod()) // merge_length
             full = [image_start_id] + [image_pad_id] * n_tokens + [image_end_id]
             return PromptUpdateDetails.select_token_ids(full, [image_pad_id])
@@ -2011,7 +2011,10 @@ class LongcatNextMultiModalProcessor(
             # Video now has its own grid_thw field after renaming
             # in _apply_hf_processor_mm_only
             grid_thw = out_mm_data["video_grid_thw"][item_idx]
-            assert isinstance(grid_thw, torch.Tensor)
+            if not isinstance(grid_thw, torch.Tensor):
+                raise TypeError(
+                    f"Expected grid_thw to be torch.Tensor, got {type(grid_thw)}"
+                )
             n_tokens = int(grid_thw.prod()) // merge_length
             full = [image_start_id] + [image_pad_id] * n_tokens + [image_end_id]
             return PromptUpdateDetails.select_token_ids(full, [image_pad_id])
@@ -2019,11 +2022,19 @@ class LongcatNextMultiModalProcessor(
         def get_audio_replacement(item_idx: int):
             bridge_lengths = out_mm_data["bridge_length"]
             audio_num_segments = out_mm_data.get("audio_num_segments")
-            assert isinstance(bridge_lengths, torch.Tensor)
+            if not isinstance(bridge_lengths, torch.Tensor):
+                raise TypeError(
+                    f"Expected bridge_lengths to be torch.Tensor, "
+                    f"got {type(bridge_lengths)}"
+                )
 
             if audio_num_segments is not None:
                 # Reconstruct per-file bridge lengths from flattened data
-                assert isinstance(audio_num_segments, torch.Tensor)
+                if not isinstance(audio_num_segments, torch.Tensor):
+                    raise TypeError(
+                        f"Expected audio_num_segments to be torch.Tensor, "
+                        f"got {type(audio_num_segments)}"
+                    )
                 segments = audio_num_segments.tolist()
                 start_idx = sum(segments[:item_idx])
                 end_idx = start_idx + segments[item_idx]
@@ -2189,6 +2200,17 @@ class LongcatNextForCausalLM(
 
         # Build instruction with explicit task description
         # Following Qwen3-Omni pattern: "Transcribe this audio into <language>"
+        #
+        # NOTE: LongCat-Next's transcription behavior is non-deterministic
+        # due to its Qwen3-based architecture with strong tool-calling
+        # capabilities. Observations from testing:
+        # - The model sometimes enters transcription mode (produces text)
+        # - The model sometimes enters tool-calling mode (produces
+        #   <longcat_tool_call> tokens)
+        # - This depends on the language parameter, audio content, and
+        #   inherent model non-determinism
+        # - "into English" tends to work better than "into Chinese"
+        # This is a model-level limitation, not a prompt engineering issue.
         if task_type == "transcribe":
             instruction = "Transcribe this audio"
             if language and language in cls.supported_languages:
@@ -2209,7 +2231,7 @@ class LongcatNextForCausalLM(
         if request_prompt:
             instruction += f" {request_prompt}"
 
-        # Construct prompt with LongCat-Next audio placeholder
+        # Construct prompt with LongCat-Next audio placeholder.
         # Format: <longcat_audio_start><longcat_audio_pad><longcat_audio_end>
         audio_placeholder = (
             "<longcat_audio_start><longcat_audio_pad><longcat_audio_end>"
@@ -2738,7 +2760,10 @@ class LongcatNextForCausalLM(
 
         if self.visual is None:
             raise RuntimeError("Visual tower is not initialized")
-        assert isinstance(pixel_values, torch.Tensor)
+        if not isinstance(pixel_values, torch.Tensor):
+            raise TypeError(
+                f"Expected pixel_values to be torch.Tensor, got {type(pixel_values)}"
+            )
 
         # Run visual encoder + bridge + quantizer
         visual_ids = self.visual.encode(
@@ -2757,7 +2782,11 @@ class LongcatNextForCausalLM(
         visual_embeds = self.visual.visual_embedding_layer(visual_embeds)
 
         # Split concatenated embeddings for each image item.
-        assert isinstance(image_grid_thw, torch.Tensor)
+        if not isinstance(image_grid_thw, torch.Tensor):
+            raise TypeError(
+                f"Expected image_grid_thw to be torch.Tensor, "
+                f"got {type(image_grid_thw)}"
+            )
         merge_size = getattr(self.config.visual_config, "spatial_merge_size", 2)
         merge_length = merge_size * merge_size
         sizes = (image_grid_thw.prod(-1) // merge_length).tolist()
@@ -2775,7 +2804,10 @@ class LongcatNextForCausalLM(
 
         if self.visual is None:
             raise RuntimeError("Visual tower is not initialized")
-        assert isinstance(pixel_values, torch.Tensor)
+        if not isinstance(pixel_values, torch.Tensor):
+            raise TypeError(
+                f"Expected pixel_values to be torch.Tensor, got {type(pixel_values)}"
+            )
 
         # Run visual encoder + bridge + quantizer
         visual_ids = self.visual.encode(
@@ -2794,12 +2826,6 @@ class LongcatNextForCausalLM(
         vocab_size = self.config.vocab_size
         max_visual_id = int(visual_ids.max())
         if max_visual_id >= vocab_size:
-            logger.debug(
-                "[VISUAL_FIX] visual_ids contain OOV tokens: max=%d >= vocab_size=%d. "
-                "Clamping to 0. This indicates a vocab_size mismatch in the model config.",
-                max_visual_id,
-                vocab_size,
-            )
             visual_ids = visual_ids.clamp(max=vocab_size - 1)
 
         # Look up embeddings
@@ -2809,7 +2835,11 @@ class LongcatNextForCausalLM(
         visual_embeds = self.visual.visual_embedding_layer(visual_embeds)
 
         # Split concatenated embeddings for each video item.
-        assert isinstance(video_grid_thw, torch.Tensor)
+        if not isinstance(video_grid_thw, torch.Tensor):
+            raise TypeError(
+                f"Expected video_grid_thw to be torch.Tensor, "
+                f"got {type(video_grid_thw)}"
+            )
         merge_size = getattr(self.config.visual_config, "spatial_merge_size", 2)
         merge_length = merge_size * merge_size
         sizes = (video_grid_thw.prod(-1) // merge_length).tolist()
@@ -2832,26 +2862,11 @@ class LongcatNextForCausalLM(
 
         if self.audio_tower is None:
             raise RuntimeError("Audio tower is not initialized")
-        assert isinstance(input_audio_features, torch.Tensor)
-
-        logger.debug("[AUDIO_DIAG] _process_audio_input: "
-            "audio_features shape=%s dtype=%s min=%.4f max=%.4f "
-            "encoder_length=%s bridge_length=%s",
-            tuple(input_audio_features.shape),
-            input_audio_features.dtype,
-            float(input_audio_features.min())
-            if input_audio_features.numel() > 0
-            else float("nan"),
-            float(input_audio_features.max())
-            if input_audio_features.numel() > 0
-            else float("nan"),
-            tuple(audio_length.shape) if audio_length is not None else None,
-            tuple(bridge_length.shape) if bridge_length is not None else None,
-        )
-        if audio_length is not None:
-            logger.debug("[AUDIO_DIAG] encoder_length values: %s", audio_length)
-        if bridge_length is not None:
-            logger.debug("[AUDIO_DIAG] bridge_length values: %s", bridge_length)
+        if not isinstance(input_audio_features, torch.Tensor):
+            raise TypeError(
+                f"Expected input_audio_features to be torch.Tensor, "
+                f"got {type(input_audio_features)}"
+            )
 
         # Run audio encoder + bridge
         audio_ids = self.audio_tower.encode(
@@ -2860,24 +2875,10 @@ class LongcatNextForCausalLM(
             bridge_length=bridge_length,  # type: ignore[arg-type]
         )
 
-        logger.debug("[AUDIO_DIAG] after encode: audio_ids shape=%s dtype=%s "
-            "unique_count=%d min=%d max=%d",
-            tuple(audio_ids.shape),
-            audio_ids.dtype,
-            int(audio_ids.unique().numel()),
-            int(audio_ids.min()) if audio_ids.numel() > 0 else -1,
-            int(audio_ids.max()) if audio_ids.numel() > 0 else -1,
-        )
-
         # Map to vocab space using per-level cumulative offsets.
         # audio_ids shape: [L, num_levels]. audio_offset_vals shape: [num_levels].
         # Each codebook level occupies a distinct embedding-table region, so
         # level k must be offset by cumsum(audio_offset_list)[:k+1].
-        logger.debug("[AUDIO_DIAG] audio_offset_vals: %s",
-            self.audio_offset_vals.tolist()
-            if self.audio_offset_vals is not None
-            else None,
-        )
         audio_ids = audio_ids + self.audio_offset_vals.to(audio_ids.device)
 
         # Use config.vocab_size (full, 282624), NOT embed_tokens.weight.shape[0]
@@ -2885,11 +2886,6 @@ class LongcatNextForCausalLM(
         # VocabParallelEmbedding handles per-shard routing correctly; this
         # clamp is only a safety net for config mismatches.
         vocab_size = self.config.vocab_size
-        logger.debug("[AUDIO_DIAG] after offset: audio_ids min=%d max=%d vocab_size=%d",
-            int(audio_ids.min()),
-            int(audio_ids.max()),
-            vocab_size,
-        )
 
         # CRITICAL: Protect against OOV audio IDs.
         # The audio encoder produces discrete token IDs per codebook level,
@@ -2901,23 +2897,10 @@ class LongcatNextForCausalLM(
         # and ensure deterministic behavior regardless of TP size.
         max_audio_id = int(audio_ids.max())
         if max_audio_id >= vocab_size:
-            logger.warning(
-                "[AUDIO_FIX] audio_ids contain OOV tokens: max=%d >= vocab_size=%d. "
-                "Clamping to 0. This indicates a vocab_size mismatch in the model config.",
-                max_audio_id,
-                vocab_size,
-            )
             audio_ids = audio_ids.clamp(max=vocab_size - 1)
 
         # Look up embeddings: [L, depth] -> [L, depth, hidden] -> [L, hidden]
         audio_embeds = self.language_model.embed_tokens(audio_ids).sum(dim=1)
-
-        logger.debug("[AUDIO_DIAG] audio_embeds shape=%s dtype=%s min=%.6f max=%.6f",
-            tuple(audio_embeds.shape),
-            audio_embeds.dtype,
-            float(audio_embeds.min()),
-            float(audio_embeds.max()),
-        )
 
         # Split concatenated embeddings for each audio item.
         # `bridge_length` returned by the HF processor is already the number of
