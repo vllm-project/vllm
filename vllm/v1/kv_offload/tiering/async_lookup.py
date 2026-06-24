@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Async lookup managers for secondary-tier existence checks.
+AsyncLookupManager: per-tier async lookup manager for secondary tier
+existence checks.
 
 Each secondary tier that wants non-blocking lookups composes its own
 AsyncLookupManager instance internally.  The manager maintains lookup
@@ -35,7 +36,7 @@ import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import cast
 
 from typing_extensions import override
 
@@ -78,9 +79,6 @@ class BaseAsyncLookupManager(ABC):
         tier_type: str,
     ) -> None:
         self._tier_type = tier_type
-        # Concrete subclasses provide queue implementations (thread/process).
-        self._lookup_queue: Any
-        self._pending_results: Any
 
         # key → LookupState; scheduler-owned, no lock needed.
         self._lookup_state: dict[OffloadKey, LookupState] = {}
@@ -92,41 +90,6 @@ class BaseAsyncLookupManager(ABC):
         self._lookup_batch: list[tuple[OffloadKey, ReqContext]] = []
 
         self._need_to_drain: bool = False
-
-    @staticmethod
-    def execute_lookup_batch(
-        pending: LookupBatch,
-        tier_type: str,
-        batch_lookup: Callable[[list[OffloadKey], ReqContext], Iterable[bool]],
-    ) -> LookupResults:
-        """Resolve one queued lookup batch grouped by request id."""
-        batches: dict[str, tuple[ReqContext, list[OffloadKey]]] = {}
-        for key, req_context in pending:
-            req_id = req_context.req_id
-            if req_id not in batches:
-                batches[req_id] = (req_context, [])
-            batches[req_id][1].append(key)
-
-        if not batches:
-            return []
-
-        results: LookupResults = []
-        for req_context, keys in batches.values():
-            try:
-                hits = batch_lookup(keys, req_context)
-            except Exception as exc:
-                logger.warning(
-                    "batch_lookup failed on tier %s for %d keys: %s",
-                    tier_type,
-                    len(keys),
-                    exc,
-                )
-                hits = (False for _ in keys)
-
-            for key, hit in zip(keys, hits):
-                results.append((key, hit))
-
-        return results
 
     # ------------------------------------------------------------------
     # Scheduler-thread API
@@ -164,7 +127,7 @@ class BaseAsyncLookupManager(ABC):
         """
         self._need_to_drain = True
         if self._lookup_batch:
-            self._send_lookup_batch(self._lookup_batch)
+            self.send_lookup_batch(self._lookup_batch)
             self._lookup_batch = []
 
     def drain_results(self) -> None:
@@ -173,7 +136,7 @@ class BaseAsyncLookupManager(ABC):
         Called from lookup() before checking state.
         """
         while True:
-            batch = self._try_recv_result_batch()
+            batch = self.try_recv_result_batch()
             if batch is None:
                 break
             for key, result in batch:
@@ -194,18 +157,50 @@ class BaseAsyncLookupManager(ABC):
                 del self._lookup_state[key]
 
     @abstractmethod
+    def send_lookup_batch(self, batch: LookupBatch) -> None: ...
+
+    @abstractmethod
+    def try_recv_result_batch(self) -> LookupResults | None: ...
+
+    @abstractmethod
     def shutdown(self) -> None:
         """Stop the background worker."""
         ...
 
-    def _send_lookup_batch(self, batch: LookupBatch) -> None:
-        self._lookup_queue.put(batch)
+    @staticmethod
+    def execute_lookup_batch(
+        pending: LookupBatch,
+        tier_type: str,
+        batch_lookup: Callable[[list[OffloadKey], ReqContext], Iterable[bool]],
+    ) -> LookupResults:
+        """Resolve one queued lookup batch grouped by request id."""
+        batches: dict[str, tuple[ReqContext, list[OffloadKey]]] = {}
+        for key, req_context in pending:
+            req_id = req_context.req_id
+            if req_id not in batches:
+                batches[req_id] = (req_context, [])
+            batches[req_id][1].append(key)
 
-    def _try_recv_result_batch(self) -> LookupResults | None:
-        try:
-            return cast(LookupResults, self._pending_results.get_nowait())
-        except queue.Empty:
-            return None
+        if not batches:
+            return []
+
+        results: LookupResults = []
+        for req_context, keys in batches.values():
+            try:
+                hits = batch_lookup(keys, req_context)
+            except Exception as exc:
+                logger.warning(
+                    "batch_lookup failed on tier %s for %d keys: %s",
+                    tier_type,
+                    len(keys),
+                    exc,
+                )
+                hits = (False for _ in keys)
+
+            for key, hit in zip(keys, hits):
+                results.append((key, hit))
+
+        return results
 
 
 class AsyncLookupManager(BaseAsyncLookupManager, ABC):
@@ -239,6 +234,17 @@ class AsyncLookupManager(BaseAsyncLookupManager, ABC):
     def shutdown(self) -> None:
         self._lookup_queue.put(None)  # unblock _worker from _lookup_queue.get()
         self._thread.join()
+
+    @override
+    def send_lookup_batch(self, batch: LookupBatch) -> None:
+        self._lookup_queue.put(batch)
+
+    @override
+    def try_recv_result_batch(self) -> LookupResults | None:
+        try:
+            return cast(LookupResults, self._pending_results.get_nowait())
+        except queue.Empty:
+            return None
 
     def _worker(self) -> None:
         while True:

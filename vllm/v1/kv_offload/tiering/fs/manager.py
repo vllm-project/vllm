@@ -63,11 +63,11 @@ class FsAsyncLookupManager(BaseAsyncLookupManager):
         self._io_process.shutdown()
 
     @override
-    def _send_lookup_batch(self, batch: LookupBatch) -> None:
+    def send_lookup_batch(self, batch: LookupBatch) -> None:
         self._io_process.enqueue_lookup_batch(batch)
 
     @override
-    def _try_recv_result_batch(self) -> LookupResults | None:
+    def try_recv_result_batch(self) -> LookupResults | None:
         return self._io_process.dequeue_lookup_results_nowait()
 
 
