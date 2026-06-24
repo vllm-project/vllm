@@ -375,6 +375,10 @@ def gemma4_config() -> ParserEngineConfig:
                 ParserState.TOOL_PREAMBLE,
                 (EventType.REASONING_END, EventType.TOOL_CALL_START),
             ),
+            (ParserState.TOOL_PREAMBLE, "TOOL_END"): Transition(
+                ParserState.CONTENT,
+                (EventType.TOOL_CALL_END,),
+            ),
             (ParserState.TOOL_PREAMBLE, "CALL_PREFIX"): Transition(
                 ParserState.TOOL_NAME,
                 (),

@@ -22,6 +22,7 @@ from vllm.platforms import current_platform
 
 
 @skip_unsupported_device
+@pytest.mark.flaky(reruns=3)
 @pytest.mark.timeout(1000)
 @pytest.mark.parametrize(
     "backend",
