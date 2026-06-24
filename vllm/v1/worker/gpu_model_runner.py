@@ -5273,13 +5273,7 @@ class GPUModelRunner(
                 # VLM models (e.g. KimiK25ForConditionalGeneration) wrap the
                 # actual MoE language model but don't implement
                 # MixtureOfExperts themselves.
-                moe_candidate = self.model
-                if not is_mixture_of_experts(moe_candidate) and isinstance(
-                    moe_candidate, SupportsMultiModal
-                ):
-                    moe_candidate = moe_candidate.get_language_model()
-                if is_mixture_of_experts(moe_candidate):
-                    self._moe_model = moe_candidate
+                self._moe_model = get_mixture_of_experts_model(self.model)
 
                 if (
                     self.parallel_config.enable_eplb
