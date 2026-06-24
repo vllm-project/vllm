@@ -84,7 +84,10 @@ Both the trainer (`NCCLTrainerSendWeightsArgs`) and inference side (`NCCLWeightT
 
 ## Receiving Weights (Inference Side)
 
-The inference side triggers weight reception using the four-phase protocol — `init_weight_transfer_engine`, `start_weight_update`, `update_weights`, `finish_weight_update`. The init phase is shown [above](#initialization). The remaining three steps are:
+The inference side triggers weight reception using the four-phase protocol:
+`init_weight_transfer_engine`, `start_weight_update`, `update_weights`,
+`finish_weight_update`. The init phase is shown [above](#initialization). The
+remaining three steps are:
 
 ```python
 from vllm.distributed.weight_transfer.base import WeightTransferUpdateRequest
@@ -108,12 +111,24 @@ llm.update_weights(
 llm.finish_weight_update()
 ```
 
-The `names`, `dtype_names`, and `shapes` lists describe each parameter. These must match the order in which the trainer iterates over its parameters.
+The `names`, `dtype_names`, and `shapes` lists describe each parameter. These
+must match the order in which the trainer iterates over its parameters.
 
-`start_weight_update` must be called before `update_weights`, and `finish_weight_update` must be called after all weight chunks have been transferred. The `is_checkpoint_format` flag controls whether layerwise reload processing is applied (`True` for checkpoint-format weights, `False` for pre-processed kernel-format weights).
+`start_weight_update` must be called before `update_weights`, and
+`finish_weight_update` must be called after all weight chunks have been
+transferred. The `is_checkpoint_format` flag controls whether layerwise reload
+processing is applied (`True` for checkpoint-format weights, `False` for
+pre-processed kernel-format weights).
+
+Sparse NCCL patches still use `update_kind="sparse_flat"` inside
+`update_info`, but they should be wrapped in
+`start_weight_update(is_checkpoint_format=False)` because sparse patches apply
+directly to runtime/kernel-format parameters. The current sparse MVP requires
+`TP=1` and `PP=1`.
 
 ## Examples
 
 - [RLHF with NCCL weight syncing (offline, Ray)](../../../examples/rl/rlhf_nccl.py) - Trainer on one GPU, 2x tensor-parallel vLLM engine on two others, with packed NCCL weight broadcast
+- [RLHF with sparse NCCL weight syncing (offline, Ray)](../../../examples/rl/rlhf_sparse_nccl.py) - Dense-vs-sparse equivalence demo with a real model on a 2-GPU trainer/inference setup; sparse patches use `start_weight_update(is_checkpoint_format=False)` and currently require `TP=1` and `PP=1`
 - [RLHF with async weight syncing (offline, Ray)](../../../examples/rl/rlhf_async_new_apis.py) - Async generation with mid-flight pause, weight sync, resume, and validation against a fresh model
 - [RLHF with NCCL weight syncing (online serving, HTTP)](../../../examples/rl/rlhf_http_nccl.py) - Weight transfer with a running vLLM HTTP server using HTTP control plane and NCCL data plane

@@ -697,12 +697,18 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
                     moe_offset = int(name.split(".")[-3])
                     vision_expert_start_idx = self.config.moe_num_experts[0]
                     is_text_expert = moe_offset <= vision_expert_start_idx - 1
+                    routed_experts = (
+                        ".routed_experts" if ("w13_" in name or "w2_" in name) else ""
+                    )
                     if is_text_expert:
-                        name = name.replace(".experts.", ".text_experts.")
+                        name = name.replace(
+                            ".experts", f".text_experts{routed_experts}"
+                        )
                     else:
+                        delta = moe_offset - vision_expert_start_idx
                         name = name.replace(
                             f".experts.{moe_offset}",
-                            f".vision_experts.{moe_offset - vision_expert_start_idx}",
+                            f".vision_experts{routed_experts}.{delta}",
                         )
 
                 for mapping in expert_params_mapping:

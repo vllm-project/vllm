@@ -20,7 +20,6 @@ except ImportError as e:
     ) from e
 
 
-from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
@@ -90,7 +89,7 @@ MODEL_TO_TAG_STYLE: dict[str, CohereTagStyle] = {
         tools=COMMAND_A_TOOLS_TAG,
     ),
     "Cohere2MoeForCausalLM": CohereTagStyle(
-        json_tags=(COMMAND_A_JSON_TAG,),
+        json_tags=(COMMAND_A_JSON_TAG, COMMAND_A_PLUS_JSON_TAG),
         tools=COMMAND_A_TOOLS_TAG,
     ),
 }
@@ -480,15 +479,6 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         return any(tid == self.end_token_id for tid in reversed(input_ids))
-
-    def prepare_structured_tag(
-        self, original_tag: str | None, tool_server: ToolServer | None
-    ) -> str | None:
-        # Responses API replaces ``structural_tag`` via the reasoning parser.
-        # Default ``ReasoningParser.prepare_structured_tag`` returns None, which
-        # would clear a Cohere tag produced in ``adjust_request`` and break
-        # ``StructuredOutputsParams`` validation. Preserve the existing tag.
-        return original_tag
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest

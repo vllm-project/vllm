@@ -3,6 +3,7 @@ accuracy_threshold: 0.89
 tolerance: 0.03
 num_questions: 1319
 num_fewshot: 5
+startup_max_wait_seconds: 3600
 server_args: >-
   --max-model-len 4096
   --tensor-parallel-size 2

@@ -471,6 +471,12 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         for c in self._connectors:
             c.set_xfer_handshake_metadata(metadata)
 
+    def set_xfer_handshake_metadata_pp_aware(
+        self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
+    ) -> None:
+        for c in self._connectors:
+            c.set_xfer_handshake_metadata_pp_aware(metadata)
+
     def _aggregate_request_finished(
         self,
         request: "Request",
@@ -531,6 +537,9 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def take_events(self) -> Iterable["KVCacheEvent"]:
         for c in self._connectors:
             yield from c.take_events()
+
+    def has_pending_push_work(self) -> bool:
+        return any(c.has_pending_push_work() for c in self._connectors)
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:

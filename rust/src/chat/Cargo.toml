@@ -10,6 +10,7 @@ asynk-strim-attr.workspace = true
 easy-ext.workspace = true
 futures.workspace = true
 half.workspace = true
+indexmap.workspace = true
 itertools.workspace = true
 llm-multimodal.workspace = true
 minijinja.workspace = true
@@ -33,6 +34,7 @@ vllm-reasoning-parser.workspace = true
 vllm-text.workspace = true
 vllm-tokenizer.workspace = true
 vllm-tool-parser.workspace = true
+xgrammar-structural-tag.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true

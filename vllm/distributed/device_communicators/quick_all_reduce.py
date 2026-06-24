@@ -24,11 +24,7 @@ except Exception:
     quick_ar = False
 
 
-def is_weak_contiguous(inp: torch.Tensor):
-    return inp.is_contiguous() or (
-        inp.storage().nbytes() - inp.storage_offset() * inp.element_size()
-        == inp.numel() * inp.element_size()
-    )
+from vllm.distributed.utils import is_weak_contiguous  # noqa: E402, F401
 
 
 class QuickReduceRegime(Enum):
@@ -133,12 +129,10 @@ class QuickAllReduce:
         assert isinstance(device, torch.device)
         self.device = device
 
-        cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES
-        if cuda_visible_devices:
-            device_ids = list(map(int, cuda_visible_devices.split(",")))
-        else:
-            device_ids = list(range(current_platform.device_count()))
-        physical_device_id = device_ids[device.index]
+        # device.index is a visible ordinal, not a logical local ID.
+        physical_device_id = current_platform.visible_device_id_to_physical_device_id(
+            device.index
+        )
         tensor = torch.tensor([physical_device_id], dtype=torch.int, device="cpu")
         gather_list = [
             torch.tensor([0], dtype=torch.int, device="cpu")

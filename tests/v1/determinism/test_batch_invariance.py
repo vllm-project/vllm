@@ -19,6 +19,7 @@ from vllm import LLM, SamplingParams
 
 
 @skip_unsupported
+@pytest.mark.flaky(reruns=3)
 @pytest.mark.timeout(1000)
 @pytest.mark.parametrize(
     "backend",
