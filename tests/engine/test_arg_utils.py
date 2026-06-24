@@ -853,3 +853,26 @@ class TestDpDeviceIdSharding:
             get_physical_gpu_ids_for_local_dp_rank(
                 evar, local_dp_rank=2, world_size=2, user_assigned_gpu_ids=[4, 5, 6, 7]
             )
+
+
+def test_snapshot_args():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    # Default values
+    args = parser.parse_args([])
+    engine_args = EngineArgs.from_cli_args(args=args)
+    assert not engine_args.enable_snapshot_post_startup
+    assert engine_args.snapshot_provider is None
+
+    # Set CLI arguments
+    args = parser.parse_args(
+        ["--enable-snapshot-post-startup", "--snapshot-provider", "dummy"]
+    )
+    engine_args = EngineArgs.from_cli_args(args=args)
+    assert engine_args.enable_snapshot_post_startup is True
+    assert engine_args.snapshot_provider == "dummy"
+
+    # Verify propagation into VllmConfig additional_config
+    config = engine_args.create_engine_config()
+    assert config.additional_config.get("enable_snapshot_post_startup") is True
+    assert config.additional_config.get("snapshot_provider") == "dummy"

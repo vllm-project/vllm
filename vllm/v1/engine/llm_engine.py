@@ -15,6 +15,7 @@ from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.engine.arg_utils import EngineArgs
+from vllm.engine.snapshot.manager import SnapshotManager
 from vllm.inputs import EngineInput, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -139,6 +140,29 @@ class LLMEngine:
 
         # Don't keep the dummy data in memory
         self.reset_mm_cache()
+
+        # Trigger snapshot if enabled
+        additional_config = self.vllm_config.additional_config
+        enable_snapshot = False
+        snapshot_provider = None
+        if isinstance(additional_config, dict):
+            enable_snapshot = additional_config.get(
+                "enable_snapshot_post_startup", False
+            )
+            snapshot_provider = additional_config.get("snapshot_provider", None)
+
+        api_process_rank = getattr(
+            self.vllm_config.parallel_config, "_api_process_rank", 0
+        )
+        dp_rank_local = getattr(
+            self.vllm_config.parallel_config, "data_parallel_rank_local", None
+        )
+        is_primary_dp = dp_rank_local <= 0 if dp_rank_local is not None else True
+        self.snapshot_manager = None
+        if enable_snapshot and api_process_rank <= 0 and is_primary_dp:
+            self.snapshot_manager = SnapshotManager(snapshot_provider)
+            logger.info("Triggering post-startup snapshot for LLMEngine...")
+            self.run_snapshot()
 
     @classmethod
     def from_vllm_config(
@@ -441,6 +465,13 @@ class LLMEngine:
         for module in model.modules():
             if isinstance(module, TorchCompileWithNoGuardsWrapper):
                 module.cleanup()
+
+    def run_snapshot(self) -> None:
+        """Trigger a snapshot of the engine state."""
+        if self.snapshot_manager is not None:
+            self.snapshot_manager.run_snapshot()
+        else:
+            logger.warning("No snapshot provider configured or available.")
 
     def __del__(self):
         dp_group = getattr(self, "dp_group", None)
