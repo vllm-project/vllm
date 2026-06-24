@@ -597,6 +597,57 @@ class TestTieringOffloadingManager:
             ("secondary_finish_2", ctx.req_id),
         ]
 
+    def test_failed_store_finalizes_finished_request(self, manager_setup):
+        """Failed primary stores still unblock secondary finalization."""
+        blocks = to_keys(range(2))
+        ctx = ReqContext(req_id="req_failed_store_finalize")
+
+        self.secondary_tier1.submit_store = MagicMock(
+            wraps=self.secondary_tier1.submit_store
+        )
+        self.secondary_tier2.submit_store = MagicMock(
+            wraps=self.secondary_tier2.submit_store
+        )
+        self.secondary_tier1.on_request_finished = MagicMock(
+            wraps=self.secondary_tier1.on_request_finished
+        )
+        self.secondary_tier2.on_request_finished = MagicMock(
+            wraps=self.secondary_tier2.on_request_finished
+        )
+
+        self._start_request(ctx)
+        self.manager.prepare_store(blocks, ctx)
+        self.manager.on_request_finished(ctx)
+
+        self.secondary_tier1.on_request_finished.assert_not_called()
+        self.secondary_tier2.on_request_finished.assert_not_called()
+
+        self.manager.complete_store(blocks, ctx, success=False)
+
+        self.secondary_tier1.submit_store.assert_not_called()
+        self.secondary_tier2.submit_store.assert_not_called()
+        self.secondary_tier1.on_request_finished.assert_called_once_with(ctx)
+        self.secondary_tier2.on_request_finished.assert_called_once_with(ctx)
+        assert ctx.req_id not in self.manager._req_state
+
+    def test_zero_store_request_finalizes_immediately(self, manager_setup):
+        """Requests with no pending stores finalize secondary tiers immediately."""
+        ctx = ReqContext(req_id="req_zero_store_finalize")
+
+        self.secondary_tier1.on_request_finished = MagicMock(
+            wraps=self.secondary_tier1.on_request_finished
+        )
+        self.secondary_tier2.on_request_finished = MagicMock(
+            wraps=self.secondary_tier2.on_request_finished
+        )
+
+        self._start_request(ctx)
+        self.manager.on_request_finished(ctx)
+
+        self.secondary_tier1.on_request_finished.assert_called_once_with(ctx)
+        self.secondary_tier2.on_request_finished.assert_called_once_with(ctx)
+        assert ctx.req_id not in self.manager._req_state
+
     def test_reset_cache_finalizes_delayed_secondary_request(self, manager_setup):
         """reset_cache abandons pending primary stores and finalizes secondaries."""
         blocks = to_keys(range(2))
