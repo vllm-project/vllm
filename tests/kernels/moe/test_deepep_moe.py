@@ -362,6 +362,9 @@ def _deep_ep_moe(
     use_fp8_dispatch: bool,
     per_act_token_quant: bool,
 ):
+    # Set seed in worker process for deterministic tensor generation.
+    set_random_seed(7)
+
     device = torch.device(f"cuda:{pgi.local_rank}")
     init_workspace_manager(device)
 
