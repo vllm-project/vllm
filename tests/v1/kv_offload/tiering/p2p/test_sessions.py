@@ -332,7 +332,7 @@ class TestClientFlows:
                 TransferDoneMsg.SUCCESS: True,
             }
         )
-        loads, _ = session.poll()
+        loads = session.poll().loads
         assert loads == [LoadResult(job_id=1, kv_request_id="req-1", success=True)]
 
     def test_transfer_done_failure(self):
@@ -348,7 +348,7 @@ class TestClientFlows:
                 TransferDoneMsg.SUCCESS: False,
             }
         )
-        loads, _ = session.poll()
+        loads = session.poll().loads
         assert loads == [LoadResult(job_id=1, kv_request_id="req-1", success=False)]
 
     def test_finish_request_sends_abort(self):
@@ -388,7 +388,7 @@ class TestClientFlows:
         session._client._inbound["req-7"].submitted_at = (
             time.monotonic() - _LOAD_TIMEOUT_S - 1.0
         )
-        loads, _ = session.poll()
+        loads = session.poll().loads
         assert loads == []
         assert any(
             m.get(TYPE_KEY) == AbortFetchMsg.TYPE
@@ -402,7 +402,7 @@ class TestClientFlows:
         session._client._inbound["req-7"].aborted_at = (
             time.monotonic() - _ABORT_ACK_TIMEOUT_S - 1.0
         )
-        loads, _ = session.poll()
+        loads = session.poll().loads
         assert loads == [LoadResult(job_id=7, kv_request_id="req-7", success=False)]
         assert "req-7" not in session._client._inbound
 
@@ -429,7 +429,7 @@ class TestClientFlows:
                 AbortAckMsg.KV_REQUEST_ID: "req-8",
             }
         )
-        loads, _ = session.poll()
+        loads = session.poll().loads
         assert loads == [LoadResult(job_id=8, kv_request_id="req-8", success=False)]
         assert "req-8" not in session._client._inbound
 
@@ -492,7 +492,7 @@ class TestServerFlows:
         session.poll()
         tid = next(iter(transport._transfers))
         transport._poll_done.append(tid)
-        _, stores = session.poll()
+        stores = session.poll().stores
         assert StoreResult(job_id=1, success=True) in stores
         assert any(m[TYPE_KEY] == TransferDoneMsg.TYPE for m in conn._sent)
 
@@ -655,7 +655,7 @@ class TestServerFlows:
         session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
         # Backdate.
         session._server._store_jobs[1] = time.monotonic() - 60.0
-        _, stores = session.poll()
+        stores = session.poll().stores
         assert StoreResult(job_id=1, success=False) in stores
 
     def test_store_timeout_then_late_completion_no_duplicate(self):
@@ -678,14 +678,14 @@ class TestServerFlows:
 
         # Backdate the store job so the next poll times it out.
         session._server._store_jobs[1] = time.monotonic() - 60.0
-        _, stores = session.poll()
+        stores = session.poll().stores
         assert StoreResult(job_id=1, success=False) in stores
         assert StoreResult(job_id=1, success=True) not in stores
 
         # Transport later reports the same transfer as done — must not
         # emit a second (contradictory) StoreResult for job_id=1.
         transport._poll_done.append(tid)
-        _, stores = session.poll()
+        stores = session.poll().stores
         assert all(s.job_id != 1 for s in stores), (
             f"unexpected duplicate StoreResult after timeout: {stores}"
         )
@@ -709,13 +709,13 @@ class TestServerFlows:
         tid = next(iter(transport._transfers))
 
         session._server._store_jobs[1] = time.monotonic() - 60.0
-        _, stores = session.poll()
+        stores = session.poll().stores
         assert [s for s in stores if s.job_id == 1] == [
             StoreResult(job_id=1, success=False)
         ]
 
         transport._poll_failed.append(tid)
-        _, stores = session.poll()
+        stores = session.poll().stores
         assert all(s.job_id != 1 for s in stores), (
             f"unexpected duplicate StoreResult after timeout: {stores}"
         )
@@ -911,7 +911,7 @@ class TestFinishRequestServerSide:
         assert "req-1" not in session._server._outbound
 
         # Local store job surfaces on the next poll, success=False.
-        _, stores = session.poll()
+        stores = session.poll().stores
         assert StoreResult(job_id=42, success=False) in stores
         assert 42 not in session._server._store_jobs
 
@@ -938,7 +938,7 @@ class TestFinishRequestServerSide:
         # Last inflight completes -> _finalize_outbound(success=True) fires.
         tid = next(iter(transport._transfers))
         transport._poll_done.append(tid)
-        _, stores = session.poll()
+        stores = session.poll().stores
 
         msg = self._last_transfer_done(conn)
         assert msg is not None
@@ -979,7 +979,7 @@ class TestFinishRequestServerSide:
         assert msg[TransferDoneMsg.KV_REQUEST_ID] == "req-1"
         assert msg[TransferDoneMsg.SUCCESS] is False
         # Local store job surfaces on the next poll.
-        _, stores = session.poll()
+        stores = session.poll().stores
         assert StoreResult(job_id=42, success=False) in stores
         assert 42 not in session._server._store_jobs
 
@@ -1019,7 +1019,7 @@ class TestFinishRequestServerSide:
 
         # Transfer 1 completes.
         transport._poll_done.append(tid_1)
-        _, stores = session.poll()
+        stores = session.poll().stores
         assert StoreResult(job_id=100, success=True) in stores
         assert session._server._inflight == {}
         assert outbound.remaining == 2
@@ -1035,7 +1035,7 @@ class TestFinishRequestServerSide:
 
         # Transfer 2 completes — request now fully satisfied.
         transport._poll_done.append(tid_2)
-        _, stores = session.poll()
+        stores = session.poll().stores
         assert StoreResult(job_id=200, success=True) in stores
         # _finalize_outbound fired — request gone, peer notified with success.
         assert "req-1" not in session._server._outbound
@@ -1087,7 +1087,7 @@ class TestFinishRequestServerSide:
         # The k1 success result is direct; the k2 failure result is queued
         # in _pending_store_results and surfaces on the NEXT poll.
         transport._poll_done.append(tid_1)
-        _, stores_first = session.poll()
+        stores_first = session.poll().stores
         assert StoreResult(job_id=100, success=True) in stores_first
         # Outbound state cleaned up; peer notified with success=False.
         assert "req-1" not in session._server._outbound
@@ -1096,7 +1096,7 @@ class TestFinishRequestServerSide:
         assert done[TransferDoneMsg.SUCCESS] is False
 
         # Next poll drains the queued failure.
-        _, stores_second = session.poll()
+        stores_second = session.poll().stores
         assert StoreResult(job_id=200, success=False) in stores_second
 
 
@@ -1156,7 +1156,9 @@ class TestBidirectional:
                 TransferDoneMsg.SUCCESS: True,
             }
         )
-        loads, stores = session.poll()
+        result_ = session.poll()
+        loads = result_.loads
+        stores = result_.stores
 
         assert LoadResult(job_id=200, kv_request_id="req-cli", success=True) in loads
         assert StoreResult(job_id=100, success=True) in stores
@@ -1179,7 +1181,9 @@ class TestPendingSession:
             conn=None,
         )
         session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
-        loads, stores = session.poll()
+        result_ = session.poll()
+        loads = result_.loads
+        stores = result_.stores
         assert loads == []
         assert stores == []
         assert not session.connected
@@ -1257,7 +1261,9 @@ class TestAdversarial:
         session, conn, _ = _make_session()
         _activate(session, conn)
         conn.enqueue({TYPE_KEY: "evil_command"})
-        loads, stores = session.poll()
+        result_ = session.poll()
+        loads = result_.loads
+        stores = result_.stores
         assert loads == []
         assert stores == []
 
@@ -1265,7 +1271,9 @@ class TestAdversarial:
         session, conn, _ = _make_session()
         _activate(session, conn)
         conn.enqueue({})
-        loads, stores = session.poll()
+        result_ = session.poll()
+        loads = result_.loads
+        stores = result_.stores
         assert loads == []
         assert stores == []
 
@@ -1273,7 +1281,9 @@ class TestAdversarial:
         session, conn, _ = _make_session()
         _activate(session, conn)
         conn._inbox.append(42)  # type: ignore[arg-type]
-        loads, stores = session.poll()
+        result_ = session.poll()
+        loads = result_.loads
+        stores = result_.stores
         assert loads == []
         assert stores == []
 
@@ -1299,7 +1309,7 @@ class TestAdversarial:
         session, conn, _ = _make_session()
         _activate(session, conn)
         conn.enqueue({TYPE_KEY: TransferDoneMsg.TYPE, TransferDoneMsg.SUCCESS: True})
-        loads, _ = session.poll()
+        loads = session.poll().loads
         assert loads == []
         assert not session.alive
         assert any(m[TYPE_KEY] == DisconnectMsg.TYPE for m in conn._sent)

@@ -417,24 +417,6 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             return f"{host}:{port}"
         return None
 
-    def _on_session_fetch(self, kv_request_id: str, session: P2PSession) -> None:
-        """Bind a kv_request_id to a session on its first FetchMsg.
-
-        Called from P2PSession._dispatch_message before ServerRole.on_fetch
-        runs, so any submit_store batches parked in _unbound_stores get
-        replayed into ServerRole's `available` map in time for
-        add_fetch_demand to match them against the incoming demand.
-
-        Idempotent on the binding — a duplicate FetchMsg for the same id
-        is rejected by ServerRole.on_fetch as a protocol violation.
-        """
-        self._kv_to_session[kv_request_id] = session
-        batches = self._unbound_stores.pop(kv_request_id, ())
-        for batch in batches:
-            session.add_stored_blocks(
-                kv_request_id, batch.keys, batch.block_ids, batch.job_id
-            )
-
     def _get_or_create_session(self, peer_id: str) -> P2PSession:
         """Return the existing session for peer_id, or open one outbound.
 
@@ -454,7 +436,6 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             transport=self._data,
             local_block_len=self._data.block_len,
             conn=conn,
-            on_fetch_received=self._on_session_fetch,
         )
         self._sessions[peer_id] = session
         return session
@@ -476,7 +457,6 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                     transport=self._data,
                     local_block_len=self._data.block_len,
                     conn=conn,
-                    on_fetch_received=self._on_session_fetch,
                 )
                 logger.info(
                     "P2P %s: created connected session for %s",
@@ -578,17 +558,28 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         self._accept_new_peers(new_connections)
 
         for session in self._sessions.values():
-            loads, stores = session.poll()
-            for lr in loads:
+            result = session.poll()
+            for lr in result.loads:
                 self._finished_jobs.append(
                     JobResult(job_id=lr.job_id, success=lr.success)
                 )
                 if not lr.success:
                     self._failed_req_ids.add(lr.kv_request_id)
-            for sr in stores:
+            for sr in result.stores:
                 self._finished_jobs.append(
                     JobResult(job_id=sr.job_id, success=sr.success)
                 )
+            # Bind kv_request_id → session for any FetchMsg this tick and
+            # replay any submit_store batches parked while no peer was
+            # asking. ServerRole.on_fetch already recorded the demand
+            # inline in dispatch, so the replayed add_stored_blocks calls
+            # match that demand and submit transfers immediately.
+            for kv_request_id in result.new_fetch_ids:
+                self._kv_to_session[kv_request_id] = session
+                for batch in self._unbound_stores.pop(kv_request_id, ()):
+                    session.add_stored_blocks(
+                        kv_request_id, batch.keys, batch.block_ids, batch.job_id
+                    )
 
         self._reap_dead_sessions()
         self._reap_unbound_stores()

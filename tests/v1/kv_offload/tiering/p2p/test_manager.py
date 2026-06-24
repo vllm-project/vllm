@@ -20,7 +20,11 @@ from vllm.v1.kv_offload.tiering.p2p.manager import (
     _UNBOUND_STORE_TIMEOUT_S,
     P2PSecondaryTierManager,
 )
-from vllm.v1.kv_offload.tiering.p2p.session import LoadResult, StoreResult
+from vllm.v1.kv_offload.tiering.p2p.session import (
+    LoadResult,
+    SessionPollResult,
+    StoreResult,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -398,6 +402,7 @@ class _FakeSession:
         connected: bool = True,
         loads: list[LoadResult] | None = None,
         stores: list[StoreResult] | None = None,
+        new_fetch_ids: list[str] | None = None,
         close_loads: list[tuple[int, str]] | None = None,
         close_stores: list[int] | None = None,
     ) -> None:
@@ -407,6 +412,7 @@ class _FakeSession:
         self.ready = True
         self._loads = loads or []
         self._stores = stores or []
+        self._new_fetch_ids = new_fetch_ids or []
         self._close_loads = close_loads or []
         self._close_stores = close_stores or []
         self.requests: list[tuple[int, str]] = []
@@ -420,11 +426,15 @@ class _FakeSession:
         self._client = _FakeClientHalf()
 
     def poll(self):
-        loads = self._loads
-        stores = self._stores
+        result = SessionPollResult(
+            loads=self._loads,
+            stores=self._stores,
+            new_fetch_ids=self._new_fetch_ids,
+        )
         self._loads = []
         self._stores = []
-        return loads, stores
+        self._new_fetch_ids = []
+        return result
 
     def request_blocks(self, job_id, kv_request_id, keys, block_ids):
         self.requests.append((job_id, kv_request_id))
@@ -1102,6 +1112,64 @@ class TestPollOnce:
         assert "req-33" in mgr._failed_req_ids
         assert peer_dead not in mgr._sessions
         assert peer_alive in mgr._sessions
+
+    def test_new_fetch_id_binds_and_replays_unbound_batches(self):
+        """When session.poll() reports a kv_request_id whose FetchMsg
+        arrived this tick, the manager binds it to that session and
+        replays every parked submit_store batch via add_stored_blocks."""
+        from vllm.v1.kv_offload.tiering.p2p.manager import _UnboundStoreBatch
+
+        mgr = _make_manager()
+        peer = "10.0.0.1:8000"
+        sess = _FakeSession(
+            peer_id=peer,
+            alive=True,
+            connected=True,
+            new_fetch_ids=["req-1"],
+        )
+        mgr._sessions[peer] = sess  # type: ignore[assignment]
+        mgr._unbound_stores["req-1"] = [
+            _UnboundStoreBatch(job_id=5, keys=[b"k1"], block_ids=[0]),
+            _UnboundStoreBatch(job_id=6, keys=[b"k2"], block_ids=[1]),
+        ]
+
+        class _Ctrl:
+            def poll(self_inner):
+                return []
+
+        mgr._control = _Ctrl()  # type: ignore[assignment]
+        mgr._poll_once()
+
+        assert mgr._kv_to_session["req-1"] is sess
+        assert "req-1" not in mgr._unbound_stores
+        replayed = [
+            (kv_req_id, list(keys), job_id)
+            for kv_req_id, keys, _, job_id in sess.stores_added
+        ]
+        assert replayed == [("req-1", [b"k1"], 5), ("req-1", [b"k2"], 6)]
+
+    def test_new_fetch_id_with_no_unbound_still_binds(self):
+        """A FetchMsg for a kv_request_id with no parked batches still
+        records the binding so subsequent submit_stores route fast."""
+        mgr = _make_manager()
+        peer = "10.0.0.1:8000"
+        sess = _FakeSession(
+            peer_id=peer,
+            alive=True,
+            connected=True,
+            new_fetch_ids=["req-fast"],
+        )
+        mgr._sessions[peer] = sess  # type: ignore[assignment]
+
+        class _Ctrl:
+            def poll(self_inner):
+                return []
+
+        mgr._control = _Ctrl()  # type: ignore[assignment]
+        mgr._poll_once()
+
+        assert mgr._kv_to_session["req-fast"] is sess
+        assert sess.stores_added == []
 
     def test_failed_load_records_kv_request_id(self):
         """A LoadResult(success=False) from session.poll() must add its

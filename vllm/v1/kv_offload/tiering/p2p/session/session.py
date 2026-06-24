@@ -19,8 +19,8 @@ received our ConnectMsg, after which queued outgoing messages are flushed.
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, NamedTuple
 
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import OffloadKey
@@ -55,6 +55,22 @@ logger = init_logger(__name__)
 _MAX_CONSECUTIVE_DISPATCH_ERRORS = 5
 
 
+class SessionPollResult(NamedTuple):
+    """Result of one P2PSession.poll() tick.
+
+    `loads`/`stores` are the same per-role results the manager has always
+    consumed. `new_fetch_ids` reports kv_request_ids whose FetchMsg
+    arrived this tick — the manager uses them to bind kv_request_id →
+    session and replay any submit_store batches parked while no peer had
+    asked yet. Reporting (rather than calling back into the manager
+    mid-dispatch) keeps the dependency strictly top-down.
+    """
+
+    loads: list[LoadResult]
+    stores: list[StoreResult]
+    new_fetch_ids: list[str]
+
+
 class P2PSession:
     """Bidirectional session — coordinator over ClientRole + ServerRole.
 
@@ -78,7 +94,6 @@ class P2PSession:
         transport: DataTransport,
         local_block_len: int,
         conn: ControlConnection | None = None,
-        on_fetch_received: Callable[[str, P2PSession], None] | None = None,
     ) -> None:
         self.peer_id = peer_id
         self._local_id = local_id
@@ -93,11 +108,11 @@ class P2PSession:
         # Consecutive non-protocol dispatch errors. Reset on success.
         self._dispatch_error_count: int = 0
 
-        # Manager-supplied hook invoked once per (kv_request_id, session)
-        # the first time a FetchMsg arrives for that id. Lets the manager
-        # bind the kv_request_id to this session and replay any
-        # submit_store batches that were parked before the binding existed.
-        self._on_fetch_received = on_fetch_received
+        # kv_request_ids whose FetchMsg arrived during the current poll
+        # tick. Drained and returned in the next poll() result so the
+        # manager can bind kv_request_id → session and replay any
+        # submit_store batches parked before the binding existed.
+        self._new_fetch_ids: list[str] = []
 
         self._client = ClientRole(peer_id=peer_id, send=self._send)
         self._server = ServerRole(peer_id=peer_id, transport=transport, send=self._send)
@@ -175,12 +190,16 @@ class P2PSession:
         self._client.cancel(kv_request_id)
         self._server.finish(kv_request_id)
 
-    def poll(self) -> tuple[list[LoadResult], list[StoreResult]]:
+    def poll(self) -> SessionPollResult:
         """Process incoming messages, drive transfers, apply timeouts."""
         if self._conn is None:
             # Pending session — store-job timeouts still apply so buffered
             # jobs that never get picked up are surfaced as failures.
-            return [], self._server.collect_idle_timeouts()
+            return SessionPollResult(
+                loads=[],
+                stores=self._server.collect_idle_timeouts(),
+                new_fetch_ids=[],
+            )
 
         for msg in self._conn.recv():
             self._on_message(msg)
@@ -188,7 +207,12 @@ class P2PSession:
         loads = self._client.collect_results()
         stores = self._server.collect_results()
         self._server.drain_pending_aborts()
-        return loads, stores
+
+        new_fetch_ids = self._new_fetch_ids
+        self._new_fetch_ids = []
+        return SessionPollResult(
+            loads=loads, stores=stores, new_fetch_ids=new_fetch_ids
+        )
 
     def close(self) -> tuple[list[tuple[int, str]], list[int]]:
         """Shut down. Returns (failed_loads, failed_stores).
@@ -280,13 +304,14 @@ class P2PSession:
                 for bh in msg[FetchMsg.BLOCK_HASHES]
             ]
             block_indexes = msg[FetchMsg.BLOCK_INDEXES]
-            # Bind kv_request_id → session and replay any parked
-            # submit_store batches before on_fetch matches demand against
-            # supply. Order matters: replay must populate ServerRole's
-            # `available` map before add_fetch_demand consumes it.
-            if self._on_fetch_received is not None:
-                self._on_fetch_received(kv_request_id, self)
+            # Run the server-role state machine inline as today —
+            # add_fetch_demand records demand against any blocks we've
+            # already seen in `available`. Report the kv_request_id so
+            # the manager (after poll() returns) can replay any parked
+            # submit_store batches; their add_stored_blocks calls hit
+            # the demand recorded here and submit transfers immediately.
             self._server.on_fetch(kv_request_id, block_hashes, block_indexes)
+            self._new_fetch_ids.append(kv_request_id)
         elif msg_type == AbortFetchMsg.TYPE:
             AbortFetchMsg.validate(msg)
             self._server.on_abort_fetch(msg[AbortFetchMsg.KV_REQUEST_ID])
