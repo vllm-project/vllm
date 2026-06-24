@@ -94,6 +94,7 @@ def dequant_nvfp4_kv_cache(
     global_scale: float,
     head_size: int,
     block_size: int,
+    triton_scale_layout: bool = False,
 ) -> torch.Tensor:
     """Dequantize an NVFP4 KV cache with 4x4-swizzled block scales.
 
@@ -107,6 +108,8 @@ def dequant_nvfp4_kv_cache(
         global_scale: checkpoint dequant scale (k_scale or v_scale).
         head_size: head dimension.
         block_size: page size.
+        triton_scale_layout: use the Triton software KV layout for 16 scale
+            groups; other scale dimensions keep native 4x4 swizzling.
 
     Returns:
         [..., num_heads, block_size, head_size] float32.
@@ -117,16 +120,25 @@ def dequant_nvfp4_kv_cache(
     fp4_packed = fp4_data
     sf_swizzled = block_scale.view(torch.uint8)
 
-    # Unswizzle 4x4 block scales on (block_size, scale_dim) plane.
-    # [..., T, S] → [..., T//4, 4, sg, 4] → permute → [..., T, S]
     batch_shape = sf_swizzled.shape[:-2]
     T, S = block_size, scale_dim
-    sg = S // 4
-    sf_reshape = sf_swizzled.reshape(*batch_shape, T // 4, 4, sg, 4)
-    ndim = sf_reshape.ndim
-    # Swap the last four dims: (..., T//4, 4, sg, 4) → (..., T//4, 4, 4, sg)
-    perm = list(range(ndim - 4)) + [ndim - 4, ndim - 1, ndim - 3, ndim - 2]
-    sf_linear = sf_reshape.permute(*perm).reshape(*batch_shape, T, S)
+    if triton_scale_layout and scale_dim == 16:
+        sf_linear = sf_swizzled
+    else:
+        # Unswizzle 4x4 block scales on (block_size, scale_dim) plane.
+        # [..., T, S] → [..., T//4, 4, sg, 4] → permute → [..., T, S]
+        sg = S // 4
+        sf_reshape = sf_swizzled.reshape(*batch_shape, T // 4, 4, sg, 4)
+        ndim = sf_reshape.ndim
+        # Swap the last four dims:
+        # (..., T//4, 4, sg, 4) → (..., T//4, 4, 4, sg)
+        perm = list(range(ndim - 4)) + [
+            ndim - 4,
+            ndim - 1,
+            ndim - 3,
+            ndim - 2,
+        ]
+        sf_linear = sf_reshape.permute(*perm).reshape(*batch_shape, T, S)
     sf_f32 = sf_linear.view(torch.float8_e4m3fn).to(torch.float32)
 
     # Unpack fp4

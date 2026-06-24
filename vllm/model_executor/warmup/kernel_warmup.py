@@ -6,7 +6,7 @@ This is useful specifically for JIT'ed kernels as we don't want JIT'ing to
 happen during model execution.
 """
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
@@ -33,6 +33,259 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
+
+
+def _is_attention_backend(backend, name: str) -> bool:
+    try:
+        return backend.get_name() == name
+    except NotImplementedError:
+        return False
+
+
+def _warmup_triton_nvfp4_prefill_kernels(runner: "GPUModelRunner") -> None:
+    """Warm NVFP4 pure-prefill Triton kernels missed by dummy runs.
+
+    The NVFP4 Triton path can bypass the paged cache for pure prefill and call
+    `context_attention_fwd` directly. Hybrid models may have several Triton
+    prefill specializations, for example full and sliding-window attention with
+    different head sizes. Use tiny synthetic tensors with the real layer shapes
+    so those variants compile before the JIT monitor is enabled.
+    """
+    from vllm.config import get_layers_from_vllm_config
+    from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+    from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
+
+    warmup_tokens = min(runner.max_num_tokens, runner.max_model_len, 64)
+    if warmup_tokens <= 0:
+        return
+
+    b_start_loc = torch.zeros((1,), dtype=torch.int32, device=runner.device)
+    b_seq_len = torch.full((1,), warmup_tokens, dtype=torch.int32, device=runner.device)
+
+    seen: set[tuple] = set()
+    for groups in runner.attn_groups:
+        for group in groups:
+            if not _is_attention_backend(group.backend, "TRITON_ATTN"):
+                continue
+
+            layer_names = getattr(group, "layer_names", ())
+            if not layer_names:
+                continue
+
+            layer_type = cast(type[Any], AttentionLayerBase)
+            layers = get_layers_from_vllm_config(
+                runner.vllm_config,
+                layer_type,
+                layer_names,
+            )
+            for layer_name in layer_names:
+                layer = layers.get(layer_name)
+                if layer is None:
+                    continue
+
+                impl = cast(Any, layer.impl)
+                if (
+                    getattr(impl, "kv_cache_dtype", None) != "nvfp4"
+                    or getattr(impl, "kv_sharing_target_layer_name", None) is not None
+                    or getattr(impl, "alibi_slopes", None) is not None
+                    or getattr(impl, "use_alibi_sqrt", False)
+                    or getattr(impl, "sinks", None) is not None
+                    or getattr(impl, "chunk_lookback", -1) != -1
+                ):
+                    continue
+
+                sliding_window = getattr(impl, "sliding_window", (-1, -1))
+                key = (
+                    impl.num_heads,
+                    impl.num_kv_heads,
+                    impl.head_size,
+                    impl.scale,
+                    impl.logits_soft_cap,
+                    sliding_window,
+                    runner.dtype,
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                q = torch.zeros(
+                    (warmup_tokens, impl.num_heads, impl.head_size),
+                    dtype=runner.dtype,
+                    device=runner.device,
+                )
+                k = torch.zeros(
+                    (warmup_tokens, impl.num_kv_heads, impl.head_size),
+                    dtype=runner.dtype,
+                    device=runner.device,
+                )
+                v = torch.zeros_like(k)
+                out = torch.empty_like(q)
+
+                context_attention_fwd(
+                    q=q,
+                    k=k,
+                    v=v,
+                    o=out,
+                    b_start_loc=b_start_loc,
+                    b_seq_len=b_seq_len,
+                    max_input_len=warmup_tokens,
+                    is_causal=True,
+                    softmax_scale=impl.scale,
+                    softcap=impl.logits_soft_cap,
+                    sliding_window_q=sliding_window[0],
+                    sliding_window_k=sliding_window[1],
+                )
+
+
+def _warmup_triton_nvfp4_raw_current_split_kernels(
+    runner: "GPUModelRunner",
+) -> None:
+    """Warm NVFP4 raw-current split Triton attention kernels.
+
+    Multi-token raw-current chunks compile two partial attention kernels plus
+    a reducer. Use one synthetic denoise-shaped request per unique layer shape
+    so the first real request does not pay that JIT cost.
+    """
+    from vllm.config import get_layers_from_vllm_config
+    from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+    from vllm.utils.torch_utils import (
+        nvfp4_kv_cache_full_dim,
+        nvfp4_kv_cache_split_views,
+    )
+    from vllm.v1.attention.ops import triton_unified_attention
+    from vllm.v1.kv_cache_interface import KVQuantMode
+
+    model_config = getattr(runner.vllm_config, "model_config", None)
+    if not getattr(model_config, "is_diffusion", False):
+        return
+
+    query_len = min(runner.max_num_tokens, 256)
+    if query_len < 256:
+        return
+
+    context_len = 94
+    seq_len = context_len + query_len
+    query_start_loc = torch.tensor(
+        [0, query_len], dtype=torch.int32, device=runner.device
+    )
+    seq_lens = torch.tensor([seq_len], dtype=torch.int32, device=runner.device)
+    per_seq_causal = torch.ones((1,), dtype=torch.bool, device=runner.device)
+
+    seen: set[tuple] = set()
+    for groups in runner.attn_groups:
+        for group in groups:
+            if not _is_attention_backend(group.backend, "TRITON_ATTN"):
+                continue
+
+            layer_names = getattr(group, "layer_names", ())
+            if not layer_names:
+                continue
+
+            kv_cache_spec = getattr(group, "kv_cache_spec", None)
+            block_size = getattr(kv_cache_spec, "block_size", 0)
+            if block_size <= 0:
+                continue
+            num_blocks = (seq_len + block_size - 1) // block_size
+            # Runtime block tables are allocated with a padded stride. Match
+            # the specialization class instead of the minimal synthetic length.
+            block_table_width = ((num_blocks + 15) // 16) * 16
+            block_table = torch.arange(
+                block_table_width, dtype=torch.int32, device=runner.device
+            )[None, :]
+
+            layer_type = cast(type[Any], AttentionLayerBase)
+            layers = get_layers_from_vllm_config(
+                runner.vllm_config,
+                layer_type,
+                layer_names,
+            )
+            for layer_name in layer_names:
+                layer = layers.get(layer_name)
+                if layer is None:
+                    continue
+
+                impl = cast(Any, layer.impl)
+                head_size = getattr(impl, "head_size", 0)
+                if (
+                    getattr(impl, "kv_cache_dtype", None) != "nvfp4"
+                    or head_size not in (256, 512)
+                    or getattr(impl, "kv_sharing_target_layer_name", None) is not None
+                    or getattr(impl, "alibi_slopes", None) is not None
+                    or getattr(impl, "use_alibi_sqrt", False)
+                    or getattr(impl, "sinks", None) is not None
+                    or getattr(impl, "chunk_lookback", -1) != -1
+                ):
+                    continue
+
+                sliding_window = getattr(impl, "sliding_window", (-1, -1))
+                key = (
+                    impl.num_heads,
+                    impl.num_kv_heads,
+                    head_size,
+                    impl.scale,
+                    impl.logits_soft_cap,
+                    sliding_window,
+                    block_size,
+                    runner.dtype,
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                q = torch.zeros(
+                    (query_len, impl.num_heads, head_size),
+                    dtype=runner.dtype,
+                    device=runner.device,
+                )
+                raw_k = torch.zeros(
+                    (query_len, impl.num_kv_heads, head_size),
+                    dtype=runner.dtype,
+                    device=runner.device,
+                )
+                raw_v = torch.zeros_like(raw_k)
+                out = torch.empty_like(q)
+                k_global_scale = torch.ones(
+                    (), dtype=torch.float32, device=runner.device
+                )
+                v_global_scale = torch.ones_like(k_global_scale)
+
+                full_dim = nvfp4_kv_cache_full_dim(head_size)
+                key_cache_full = torch.zeros(
+                    (block_table_width, block_size, impl.num_kv_heads, full_dim),
+                    dtype=torch.uint8,
+                    device=runner.device,
+                )
+                value_cache_full = torch.zeros_like(key_cache_full)
+                (key_cache,), (k_scale_cache,) = nvfp4_kv_cache_split_views(
+                    key_cache_full
+                )
+                (value_cache,), (v_scale_cache,) = nvfp4_kv_cache_split_views(
+                    value_cache_full
+                )
+
+                triton_unified_attention.unified_attention(
+                    q=q,
+                    k=key_cache,
+                    v=value_cache,
+                    out=out,
+                    cu_seqlens_q=query_start_loc,
+                    max_seqlen_q=query_len,
+                    seqused_k=seq_lens,
+                    max_seqlen_k=seq_len,
+                    softmax_scale=impl.scale,
+                    causal=per_seq_causal,
+                    window_size=sliding_window,
+                    block_table=block_table,
+                    softcap=impl.logits_soft_cap,
+                    q_descale=None,
+                    k_descale=k_global_scale,
+                    v_descale=v_global_scale,
+                    kv_quant_mode=KVQuantMode.NVFP4,
+                    k_scale_cache=k_scale_cache.view(torch.uint8),
+                    v_scale_cache=v_scale_cache.view(torch.uint8),
+                    raw_k=raw_k,
+                    raw_v=raw_v,
+                )
 
 
 def kernel_warmup(worker: "Worker"):
@@ -77,15 +330,12 @@ def kernel_warmup(worker: "Worker"):
     elif has_flashinfer() and current_platform.has_device_capability(90):
         flashinfer_autotune(worker.model_runner)
 
+    _warmup_triton_nvfp4_prefill_kernels(worker.model_runner)
+    _warmup_triton_nvfp4_raw_current_split_kernels(worker.model_runner)
+
     # FlashInfer attention warmup
     # Only warmup if the model has FlashInfer attention groups
     # and is not a pooling model
-    def _is_flashinfer_backend(backend):
-        try:
-            return backend.get_name() == "FLASHINFER"
-        except NotImplementedError:
-            return False
-
     if (
         not worker.model_runner.is_pooling_model
         and worker.model_runner.attn_groups
@@ -93,7 +343,7 @@ def kernel_warmup(worker: "Worker"):
         # backends don't support this dummy run. Once we remove
         # `build_for_cudagraph_capture`, we can change it to `any`.
         and all(
-            _is_flashinfer_backend(group.backend)
+            _is_attention_backend(group.backend, "FLASHINFER")
             for groups in worker.model_runner.attn_groups
             for group in groups
         )

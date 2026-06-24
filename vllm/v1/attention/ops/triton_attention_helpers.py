@@ -164,9 +164,10 @@ def compute_tile_loop_bounds(
     Combines three concerns into one helper:
 
     1. Longest prefix spanned by any query token in this q-block.
-       Clamped to ``seq_len`` (causal) or extended to it when
-       mm_prefix is active or non-causal sequences need the full
-       sequence.
+       Clamped to ``seq_len`` for causal requests. MM prefix needs the
+       full valid sequence but must not extend tile loads past ``seq_len``;
+       non-causal and per-sequence causal batches may extend to the full
+       sequence range.
     2. Sliding-window pruning: narrows ``[tile_start, tile_end)`` to
        only tiles that can contain an allowed key under SWA.
        For non-causal sequences, the window extends in both directions.
@@ -182,7 +183,12 @@ def compute_tile_loop_bounds(
         + (BLOCK_M - 1) // num_queries_per_kv
         + 1
     )
-    if USE_MM_PREFIX or USE_PER_SEQ_CAUSAL or (not USE_CAUSAL):
+    if USE_MM_PREFIX:
+        # Image bidirectional attention ranges require the full valid sequence
+        # to make sure the prefix mask is complete, but q-block padding must
+        # not extend tile loads past seq_len.
+        max_seq_prefix_len = seq_len
+    elif USE_PER_SEQ_CAUSAL or (not USE_CAUSAL):
         # Non-causal or mixed batches need the full sequence range.
         # Per-element masking in compute_kv_seq_mask handles the
         # actual causal/non-causal boundary per sequence.
@@ -403,16 +409,21 @@ def softmax_step(S, M, L):
     """
     # compute running maximum
     # m_j : (BLOCK_M,)
-    m_j = tl.maximum(M, tl.max(S, axis=1))
+    tile_max = tl.max(S, axis=1)
+    has_valid_score = tile_max > float("-inf")
+    m_j = tl.maximum(M, tile_max)
     # For sliding window there's a chance the max is -inf due to masking of
-    # the entire row. In this case we need to set m_j 0 to avoid NaN
-    m_j = tl.where(m_j > float("-inf"), m_j, 0.0)
+    # the entire row. Use a temporary finite max for exp() only; all-masked
+    # rows must not advance M/L because segmented reducers consume those
+    # values as the partial softmax scaling contract.
+    safe_m_j = tl.where(has_valid_score | (float("-inf") < M), m_j, 0.0)
     # P : (BLOCK_M, TILE_SIZE)
-    P = tl.exp(S - m_j[:, None])
+    P = tl.exp(S - safe_m_j[:, None])
     # l_j : (BLOCK_M,)
     l_j = tl.sum(P, axis=1)
     # alpha : (BLOCK_M, )
-    alpha = tl.exp(M - m_j)
+    alpha = tl.where(has_valid_score, tl.exp(M - safe_m_j), 1.0)
     # update constants
-    L_new = L * alpha + l_j
-    return m_j, L_new, P, alpha
+    L_new = tl.where(has_valid_score, L * alpha + l_j, L)
+    M_new = tl.where(has_valid_score, safe_m_j, M)
+    return M_new, L_new, P, alpha

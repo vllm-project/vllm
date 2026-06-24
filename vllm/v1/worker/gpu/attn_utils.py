@@ -25,6 +25,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
+    get_attn_backend_cache_dtype_str,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import (
@@ -198,6 +199,7 @@ def _reshape_attention_kv_cache(
     kv_cache_stride_order: tuple[int, ...],
     num_blocks: int,
     packing: tuple[int, int] | None,
+    block_dim: int = 0,
 ) -> torch.Tensor:
     permuted_kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
     inv_order = [
@@ -216,24 +218,17 @@ def _reshape_attention_kv_cache(
         )
     elif kv_cache_spec.page_size_padded is not None:
         # Use a strided view to skip the padding between physical pages.
-        #
-        # Only num-blocks-first layouts are supported (the block dimension is
-        # dim 0 of the unpermuted shape). kv-first layouts such as ROCm's
-        # ``(2, num_blocks, ...)`` are intentionally not supported here. For a
-        # num-blocks-first layout the only stride that must change is the block
-        # stride: every other (contiguous) stride already steps within the
-        # unpadded region of a page, so no further adjustment is needed.
-        assert kv_cache_shape[0] == num_blocks, (
-            "Padded KV pages require a num-blocks-first KV cache layout (got "
-            f"shape {kv_cache_shape} with num_blocks={num_blocks}); "
-            "kv-first layouts are not supported."
+        assert kv_cache_shape[block_dim] == num_blocks, (
+            "Padded KV pages require the block dimension to match num_blocks "
+            f"(got shape {kv_cache_shape}, block_dim={block_dim}, "
+            f"num_blocks={num_blocks})."
         )
         dtype_size = get_dtype_size(kv_cache_spec.dtype)
         page_stride = kv_cache_spec.page_size_bytes // dtype_size
 
-        num_blocks_dim = inv_order[0]
+        physical_block_dim = kv_cache_stride_order.index(block_dim)
         strides = list(torch.empty(permuted_kv_cache_shape).stride())
-        strides[num_blocks_dim] = page_stride
+        strides[physical_block_dim] = page_stride
 
         kv_cache = torch.as_strided(
             kv_raw_tensor.view(dtype),
@@ -300,12 +295,13 @@ def _reshape_kv_cache(
                     kv_cache_spec.storage_block_size // kernel_block_size
                 )
                 kernel_num_blocks = num_blocks * num_blocks_per_kv_block
+                cache_dtype_str = get_attn_backend_cache_dtype_str(kv_cache_spec)
                 kv_cache_shape = group.backend.get_kv_cache_shape(
                     kernel_num_blocks,
                     kernel_block_size,
                     kv_cache_spec.num_kv_heads,
                     kv_cache_spec.head_size,
-                    cache_dtype_str=cache_dtype,
+                    cache_dtype_str=cache_dtype_str,
                 )
 
                 # FIXME(woosuk): Add kv_cache_stride_order to all attention backends.
@@ -315,6 +311,12 @@ def _reshape_kv_cache(
                 except (AttributeError, NotImplementedError):
                     kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
 
+                block_dim = group.backend.get_kv_cache_block_dim(
+                    kernel_block_size,
+                    kv_cache_spec.num_kv_heads,
+                    kv_cache_spec.head_size,
+                    cache_dtype_str=cache_dtype_str,
+                )
                 kv_caches[layer_name] = _reshape_attention_kv_cache(
                     kv_raw_tensor,
                     kv_cache_spec,
@@ -322,6 +324,7 @@ def _reshape_kv_cache(
                     kv_cache_stride_order,
                     kernel_num_blocks,
                     packing,
+                    block_dim,
                 )
 
             elif isinstance(kv_cache_spec, MambaSpec):
@@ -381,7 +384,7 @@ def _update_hybrid_attention_layout(
             kernel_block_sizes[group.kv_cache_group_id],
             kv_cache_spec.num_kv_heads,
             kv_cache_spec.head_size,
-            cache_dtype_str=cache_dtype,
+            cache_dtype_str=get_attn_backend_cache_dtype_str(kv_cache_spec),
         )
         # if the first dim of the kvcache's layout is already num_blocks, continue
         if block_dim == 0:

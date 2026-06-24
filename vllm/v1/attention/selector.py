@@ -32,10 +32,12 @@ class AttentionSelectorConfig(NamedTuple):
     use_non_causal: bool = False
     use_batch_invariant: bool = False
     use_kv_connector: bool = False
+    head_size_v: int | None = None
 
     def __repr__(self):
         return (
             f"AttentionSelectorConfig(head_size={self.head_size}, "
+            f"head_size_v={self.head_size_v}, "
             f"dtype={self.dtype}, "
             f"kv_cache_dtype={self.kv_cache_dtype}, "
             f"block_size={self.block_size}, "
@@ -62,6 +64,7 @@ def get_attn_backend(
     use_per_head_quant_scales: bool = False,
     attn_type: str | None = None,
     num_heads: int | None = None,
+    head_size_v: int | None = None,
 ) -> type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
 
@@ -89,6 +92,7 @@ def get_attn_backend(
 
     attn_selector_config = AttentionSelectorConfig(
         head_size=head_size,
+        head_size_v=head_size_v,
         dtype=dtype,
         kv_cache_dtype=cast(CacheDType | None, kv_cache_dtype),
         block_size=block_size,
