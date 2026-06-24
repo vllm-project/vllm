@@ -2,7 +2,7 @@ mod encoding;
 
 use vllm_text::Prompt;
 
-use super::{ChatRenderer, RenderedPrompt};
+use super::{ChatRenderer, RenderedPrompt, request_template_kwargs};
 use crate::Result;
 use crate::request::ChatRequest;
 
@@ -22,6 +22,7 @@ impl ChatRenderer for DeepSeekV4ChatRenderer {
 
         Ok(RenderedPrompt {
             prompt: Prompt::Text(encoding::render_request(request)?),
+            effective_template_kwargs: request_template_kwargs(request),
         })
     }
 }

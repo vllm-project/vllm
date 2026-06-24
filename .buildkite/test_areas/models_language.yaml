@@ -15,6 +15,10 @@ steps:
     - pytest -v -s models/language -m 'core_model and (not slow_test)'
   mirror:
     torch_nightly: {}
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
 
 - label: Language Models Tests (Extra Standard) %N
   key: language-models-tests-extra-standard
@@ -32,6 +36,21 @@ steps:
   parallelism: 2
   mirror:
     torch_nightly: {}
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/model_executor/models/
+      - vllm/model_executor/model_loader/
+      - vllm/model_executor/layers/
+      - vllm/v1/attention/backends/
+      - vllm/v1/attention/selector.py
+      - tests/models/language/pooling/test_embedding.py
+      - tests/models/language/generation/test_common.py
+      - tests/models/language/pooling/test_classification.py
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
 
 - label: Language Models Tests (Hybrid) %N
   key: language-models-tests-hybrid
