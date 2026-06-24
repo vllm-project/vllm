@@ -673,6 +673,7 @@ def resolve_kv_cache_block_sizes(
 def get_request_block_hasher(
     hash_block_size: int,
     caching_hash_fn: Callable[[Any], bytes],
+    prompt_only: bool = False,
 ) -> Callable[[Request], list[BlockHash]]:
     """
     Returns a function which computes the list of un-computed block hashes
@@ -682,11 +683,20 @@ def get_request_block_hasher(
     full prefix, so each hash uniquely fingerprints the prefix ending at its
     boundary. Coarser group block sizes and partial-cache boundaries reuse
     these hashes directly (see ``BlockHashListWithBlockSize``).
+
+    If ``prompt_only`` is set, only blocks fully contained within the prompt are
+    hashed, so decode-generated tokens never become cacheable. This is required
+    for models whose decode-phase KV is not a pure causal function of the prefix
+    (e.g. Reference Sliding Window Attention).
     """
 
     def request_block_hasher(request: Request) -> list[BlockHash]:
         start_token_idx = len(request.block_hashes) * hash_block_size
         num_tokens = request.num_tokens
+        if prompt_only:
+            # Only blocks fully covered by prompt tokens are cacheable; a block
+            # straddling the prompt/decode boundary is excluded.
+            num_tokens = min(num_tokens, request.num_prompt_tokens)
 
         if start_token_idx + hash_block_size > num_tokens:
             # Early stop when there no new full blocks created.

@@ -91,6 +91,12 @@ class CacheConfig:
     `ModelConfig` and that value should be manually duplicated here."""
     enable_prefix_caching: bool = True
     """Whether to enable prefix caching."""
+    prefix_cache_prompt_only: bool = False
+    """If True, only prompt (prefill) tokens are eligible for prefix caching;
+    blocks containing decode-generated tokens are never hashed or reused. Set by
+    models whose decode-phase KV is not a pure causal function of the prefix
+    (e.g. Reference Sliding Window Attention), for which reusing decode-token
+    blocks would be incorrect."""
     prefix_caching_hash_algo: PrefixCachingHashAlgo = "sha256"
     """Set the hash algorithm for prefix caching:
 

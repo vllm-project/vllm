@@ -116,6 +116,7 @@ class KVCacheManager:
         hash_block_size: int,
         max_num_batched_tokens: int | None = None,
         enable_caching: bool = True,
+        cache_prompt_only: bool = False,
         use_eagle: bool = False,
         log_stats: bool = False,
         enable_kv_cache_events: bool = False,
@@ -132,6 +133,10 @@ class KVCacheManager:
             max_num_batched_tokens = max_model_len
 
         self.enable_caching = enable_caching
+        # Only cache prompt (prefill) tokens; never cache decode-generated
+        # tokens. Used by models whose decode-phase KV is not a pure causal
+        # function of the prefix (e.g. Reference Sliding Window Attention).
+        self.cache_prompt_only = cache_prompt_only
         self.use_eagle = use_eagle
         self.log_stats = log_stats
         self.metrics_collector = metrics_collector
@@ -453,6 +458,13 @@ class KVCacheManager:
             total_computed_tokens + num_new_tokens,
             request.num_tokens,
         )
+        if self.cache_prompt_only:
+            # Exclude decode-generated tokens from caching so the committed
+            # blocks match the prompt-only block hashes produced by the request
+            # block hasher (see get_request_block_hasher(prompt_only=True)).
+            num_tokens_to_cache = min(
+                num_tokens_to_cache, request.num_prompt_tokens
+            )
         self.coordinator.cache_blocks(request, num_tokens_to_cache)
 
         return self.create_kv_cache_blocks(new_blocks)
@@ -593,8 +605,12 @@ class KVCacheManager:
             num_computed_tokens: The number of computed tokens, including tokens
                 that are already cached and tokens to be cached.
         """
-        if self.enable_caching:
-            self.coordinator.cache_blocks(request, num_computed_tokens)
+        if not self.enable_caching:
+            return
+        if self.cache_prompt_only:
+            # Never cache decode-generated tokens (see allocate_slots).
+            num_computed_tokens = min(num_computed_tokens, request.num_prompt_tokens)
+        self.coordinator.cache_blocks(request, num_computed_tokens)
 
     def create_kv_cache_blocks(
         self, blocks: tuple[list[KVCacheBlock], ...]

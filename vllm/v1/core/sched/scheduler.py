@@ -256,6 +256,7 @@ class Scheduler(SchedulerInterface):
             max_model_len=self.max_model_len,
             max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
             enable_caching=self.cache_config.enable_prefix_caching,
+            cache_prompt_only=self.cache_config.prefix_cache_prompt_only,
             use_eagle=self.use_eagle,
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,

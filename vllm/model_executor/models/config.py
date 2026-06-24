@@ -88,6 +88,20 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
                 )
                 mm_config.mm_encoder_attn_backend = AttentionBackendEnum.FLASH_ATTN
 
+        # R-SWA windows the *generated* tokens, so a generated token's KV is not
+        # a pure causal function of the prefix; reusing decode-token blocks via
+        # prefix caching is incorrect and corrupts the FlexAttention R-SWA block
+        # mask metadata (observed as a CUDA illegal memory access once such
+        # blocks start being reused). The prompt/image prefix *is* fully causal
+        # and safe to cache, so restrict prefix caching to prompt tokens only.
+        cache_config = vllm_config.cache_config
+        if cache_config.enable_prefix_caching:
+            cache_config.prefix_cache_prompt_only = True
+            logger.info(
+                "Unlimited-OCR: restricting prefix caching to prompt tokens "
+                "(decode-token blocks are not cacheable under R-SWA)."
+            )
+
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         text_config = model_config.hf_config.text_config
