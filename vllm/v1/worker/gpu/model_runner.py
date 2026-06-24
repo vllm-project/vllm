@@ -1229,7 +1229,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     scheduled_encoder_inputs=scheduler_output.scheduled_encoder_inputs,
                 )
             inputs_embeds = self.model_state.get_mm_embeddings(
-                scheduler_output.scheduled_encoder_inputs, input_batch
+                scheduler_output.scheduled_encoder_inputs, input_batch, self.req_states
             )
             if inputs_embeds is not None and not self.model.requires_raw_input_tokens:
                 input_ids = None
@@ -1413,15 +1413,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Get cached multimodal embeddings for draft forward.
             # NOTE: This is done here because postprocess updates
             # num_computed_prefill_tokens.
-            mm_inputs = self.model_state.encoder_runner.gather_mm_embeddings(
-                input_batch.req_ids,
-                input_batch.num_tokens,
-                input_batch.num_scheduled_tokens,
-                input_batch.query_start_loc_np,
-                input_batch.prefill_len_np,
-                input_batch.num_computed_prefill_tokens_np,
-                # The EAGLE/MTP drafter reads one position ahead of the target.
-                draft_lookahead=1,
+            # The EAGLE/MTP drafter reads one position ahead of the target.
+            mm_inputs = self.model_state.gather_mm_embeddings(
+                input_batch, draft_lookahead=1
             )
 
         # Postprocess results and update request states.
