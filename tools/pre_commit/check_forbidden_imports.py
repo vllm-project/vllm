@@ -100,7 +100,10 @@ CHECK_IMPORTS = {
             "non-hardware=angnostic parts. The only exceptions are general "
             "utils.py files such as vllm.model_executor.layers.utils.py."
         ),
-        applies_to=re.compile(r"^vllm/models/[^/]+/hw_agnostic/.*\.py$"),
+        applies_to=re.compile(
+            r"^vllm/(?:models/[^/]+/hw_agnostic|model_executor/hw_agnostic)"
+            r"/.*\.py$"
+        ),
         allowed_files={
             "vllm/models/deepseek_v4/hw_agnostic/quantization/quant_config.py",
             "vllm/models/deepseek_v4/hw_agnostic/quantization/fp8_quant.py",
@@ -290,7 +293,8 @@ def test_regex():
             False,
         ),
         # model_executor.kernels: forbidden everywhere on hw_agnostic.
-        # The vendored kernel selector lives under hw_agnostic/shared/kernels/.
+        # The vendored kernel selector lives under
+        # vllm/model_executor/hw_agnostic/kernels/.
         (
             "from vllm.model_executor.kernels.linear import init_fp8_linear_kernel",
             True,
@@ -301,7 +305,7 @@ def test_regex():
         ),
         # Vendored kernel subtree inside hw_agnostic must not be flagged.
         (
-            "from vllm.models.deepseek_v4.hw_agnostic.shared.kernels.linear "
+            "from vllm.model_executor.hw_agnostic.kernels.linear "
             "import init_fp8_linear_kernel",
             False,
         ),
@@ -353,11 +357,11 @@ def test_regex():
         ("from vllm.forward_context import get_forward_context", False),
         ("# from vllm.model_executor.layers.layernorm import RMSNorm", False),
         (
-            "from vllm.models.deepseek_v4.hw_agnostic.shared.layers.layernorm import X",
+            "from vllm.model_executor.hw_agnostic.layers.layernorm import X",
             False,
         ),
         (
-            "from vllm.models.minimax_m3.hw_agnostic.shared.layers.layernorm import X",
+            "from vllm.models.minimax_m3.hw_agnostic.layers.layernorm import X",
             False,
         ),
         ("from vllm.model_executor.layers_extra import x", False),
@@ -376,16 +380,21 @@ def test_regex():
     accept_paths = [
         "vllm/models/deepseek_v4/hw_agnostic/model.py",
         "vllm/models/deepseek_v4/hw_agnostic/attention/attention.py",
-        "vllm/models/deepseek_v4/hw_agnostic/shared/layers/linear.py",
         "vllm/models/deepseek_v4/hw_agnostic/tests/test_hw_agnostic_e2e.py",
         "vllm/models/minimax_m3/hw_agnostic/model.py",
         "vllm/models/llama4/hw_agnostic/attention/attention.py",
+        # Lifted shared subtree at vllm/model_executor/hw_agnostic/ is
+        # subject to the same isolation lint as the per-model trees.
+        "vllm/model_executor/hw_agnostic/layers/linear.py",
+        "vllm/model_executor/hw_agnostic/layers/fused_moe/layer.py",
+        "vllm/model_executor/hw_agnostic/custom_op.py",
     ]
     reject_paths = [
         "vllm/models/deepseek_v4/attention.py",
         "vllm/models/deepseek_v4/sparse_mla.py",
         "vllm/models/minimax_m3/model.py",
         "vllm/model_executor/layers/activation.py",
+        "vllm/model_executor/custom_op.py",
         "tests/some_other.py",
     ]
     for p in accept_paths:

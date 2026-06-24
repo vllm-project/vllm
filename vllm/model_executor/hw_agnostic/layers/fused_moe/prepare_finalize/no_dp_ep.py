@@ -2,15 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-import vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.modular_kernel as mk
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.config import (
+import vllm.model_executor.hw_agnostic.layers.fused_moe.modular_kernel as mk
+from vllm.model_executor.hw_agnostic.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.topk_weight_and_reduce import (  # noqa: E501
+from vllm.model_executor.hw_agnostic.layers.fused_moe.topk_weight_and_reduce import (  # noqa: E501
     TopKWeightAndReduceContiguous,
     TopKWeightAndReduceDelegate,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.utils import (
+from vllm.model_executor.hw_agnostic.layers.fused_moe.utils import (
     moe_kernel_quantize_input,
 )
 

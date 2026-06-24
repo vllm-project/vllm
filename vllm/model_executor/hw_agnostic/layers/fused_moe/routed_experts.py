@@ -12,22 +12,22 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.custom_op import PluggableLayer
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.config import (
+from vllm.model_executor.hw_agnostic.custom_op import PluggableLayer
+from vllm.model_executor.hw_agnostic.layers.fused_moe.config import (
     FusedMoEConfig,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.expert_map_manager import (  # noqa: E501
+from vllm.model_executor.hw_agnostic.layers.fused_moe.expert_map_manager import (  # noqa: E501
     ExpertMapManager,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.fused_moe_method_base import (  # noqa: E501
+from vllm.model_executor.hw_agnostic.layers.fused_moe.fused_moe_method_base import (  # noqa: E501
     FusedMoEMethodBase,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.unquantized_fused_moe_method import (  # noqa: E501
+from vllm.model_executor.hw_agnostic.layers.fused_moe.unquantized_fused_moe_method import (  # noqa: E501
     UnquantizedFusedMoEMethod,
 )
 
 if TYPE_CHECKING:
-    from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.runner.shared_experts import (  # noqa: E501
+    from vllm.model_executor.hw_agnostic.layers.fused_moe.runner.shared_experts import (  # noqa: E501
         SharedExperts,
     )
 

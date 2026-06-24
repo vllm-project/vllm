@@ -7,8 +7,8 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_gather,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.custom_op import PluggableLayer
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.vocab_parallel_embedding import (
+from vllm.model_executor.hw_agnostic.custom_op import PluggableLayer
+from vllm.model_executor.hw_agnostic.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.platforms import current_platform

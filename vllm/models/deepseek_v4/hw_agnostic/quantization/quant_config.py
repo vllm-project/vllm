@@ -20,13 +20,13 @@ from vllm.models.deepseek_v4.hw_agnostic.quantization.fp8_quant import (
     Fp8MoEMethod,
     Fp8OnlineMoEMethod,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.routed_experts import (
+from vllm.model_executor.hw_agnostic.layers.fused_moe.routed_experts import (
     RoutedExperts,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.unquantized_fused_moe_method import (  # noqa: E501
+from vllm.model_executor.hw_agnostic.layers.fused_moe.unquantized_fused_moe_method import (  # noqa: E501
     UnquantizedFusedMoEMethod,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.linear import (
+from vllm.model_executor.hw_agnostic.layers.linear import (
     LinearBase,
     UnquantizedLinearMethod,
 )

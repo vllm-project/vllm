@@ -41,15 +41,15 @@ from vllm.models.deepseek_v4.hw_agnostic.attention.sparse_mla import (
     DeepseekV4HWAgnosticMetadata,
 )
 from vllm.models.deepseek_v4.hw_agnostic.attention.sparse_swa import DeepseekV4SWACache
-from vllm.models.deepseek_v4.hw_agnostic.shared.custom_op import PluggableLayer
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.attention_layer_base import (
+from vllm.model_executor.hw_agnostic.custom_op import PluggableLayer
+from vllm.model_executor.hw_agnostic.layers.attention_layer_base import (
     AttentionLayerBase,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.layernorm import (
+from vllm.model_executor.hw_agnostic.layers.layernorm import (
     LayerNorm,
     RMSNorm,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.linear import ReplicatedLinear
+from vllm.model_executor.hw_agnostic.layers.linear import ReplicatedLinear
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec

@@ -30,10 +30,10 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
-from vllm.models.deepseek_v4.hw_agnostic.shared.kernels.linear import (
+from vllm.model_executor.hw_agnostic.kernels.linear import (
     init_fp8_linear_kernel,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.linear import LinearMethodBase
+from vllm.model_executor.hw_agnostic.layers.linear import LinearMethodBase
 
 if TYPE_CHECKING:
     from .quant_config import DeepseekV4FP8Config

@@ -32,7 +32,7 @@ from vllm.model_executor.parameter import (
     RowvLLMParameter,
 )
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.models.deepseek_v4.hw_agnostic.shared.custom_op import PluggableLayer
+from vllm.model_executor.hw_agnostic.custom_op import PluggableLayer
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)

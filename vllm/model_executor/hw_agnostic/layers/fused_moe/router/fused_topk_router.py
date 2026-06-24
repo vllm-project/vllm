@@ -7,11 +7,11 @@ import torch
 import vllm._custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.config import (
+from vllm.model_executor.hw_agnostic.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.router.base_router import (  # noqa: E501
+from vllm.model_executor.hw_agnostic.layers.fused_moe.router.base_router import (  # noqa: E501
     BaseRouter,
 )
 

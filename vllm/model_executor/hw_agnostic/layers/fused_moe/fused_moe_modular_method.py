@@ -6,23 +6,23 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.logger import init_logger
-from vllm.models.deepseek_v4.hw_agnostic.shared.custom_op import CustomOp
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.config import (
+from vllm.model_executor.hw_agnostic.custom_op import CustomOp
+from vllm.model_executor.hw_agnostic.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.fused_moe_method_base import (  # noqa: E501
+from vllm.model_executor.hw_agnostic.layers.fused_moe.fused_moe_method_base import (  # noqa: E501
     FusedMoEMethodBase,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.modular_kernel import (
+from vllm.model_executor.hw_agnostic.layers.fused_moe.modular_kernel import (
     FusedMoEKernel,
     FusedMoEPrepareAndFinalizeModular,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.runner.shared_experts import (  # noqa: E501
+from vllm.model_executor.hw_agnostic.layers.fused_moe.runner.shared_experts import (  # noqa: E501
     SharedExperts,
 )
 
 if TYPE_CHECKING:
-    from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.routed_experts import (  # noqa: E501
+    from vllm.model_executor.hw_agnostic.layers.fused_moe.routed_experts import (  # noqa: E501
         RoutedExperts,
     )
 

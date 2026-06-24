@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm.models.deepseek_v4.hw_agnostic.shared.custom_op import CustomOp
+from vllm.model_executor.hw_agnostic.custom_op import CustomOp
 
 
 def _mhc_pre_torch(

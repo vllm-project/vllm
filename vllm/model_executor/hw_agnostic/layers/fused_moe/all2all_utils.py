@@ -10,15 +10,15 @@ from vllm.distributed import (
     get_ep_group,
 )
 from vllm.logger import init_logger
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.config import (
+from vllm.model_executor.hw_agnostic.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.modular_kernel import (
+from vllm.model_executor.hw_agnostic.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.prepare_finalize import (  # noqa: E501
+from vllm.model_executor.hw_agnostic.layers.fused_moe.prepare_finalize import (  # noqa: E501
     make_moe_prepare_and_finalize_naive_dp_ep,
     make_moe_prepare_and_finalize_no_dp_ep,
 )

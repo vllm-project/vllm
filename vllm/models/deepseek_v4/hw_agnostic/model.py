@@ -32,28 +32,28 @@ from vllm.models.deepseek_v4.hw_agnostic.attention.attention import (
     DeepseekV4MultiHeadLatentAttentionWrapper,
 )
 from vllm.models.deepseek_v4.hw_agnostic.layers.rotary_embedding import get_rope
-from vllm.models.deepseek_v4.hw_agnostic.shared.interfaces import SupportsPP
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.activation import (
+from vllm.model_executor.hw_agnostic.interfaces import SupportsPP
+from vllm.model_executor.hw_agnostic.layers.activation import (
     SiluAndMul,
     SiluAndMulWithClamp,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.gate_linear import (
+from vllm.model_executor.hw_agnostic.layers.fused_moe.gate_linear import (
     GateLinear,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.layer import (
+from vllm.model_executor.hw_agnostic.layers.fused_moe.layer import (
     FusedMoE,
     fused_moe_make_expert_params_mapping,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.layernorm import RMSNorm
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.linear import (
+from vllm.model_executor.hw_agnostic.layers.layernorm import RMSNorm
+from vllm.model_executor.hw_agnostic.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
     RowParallelLinear,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.logits_processor import (
+from vllm.model_executor.hw_agnostic.layers.logits_processor import (
     LogitsProcessor,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.vocab_parallel_embedding import (
+from vllm.model_executor.hw_agnostic.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )

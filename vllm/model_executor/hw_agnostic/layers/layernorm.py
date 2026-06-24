@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from vllm.models.deepseek_v4.hw_agnostic.shared.custom_op import CustomOp
+from vllm.model_executor.hw_agnostic.custom_op import CustomOp
 
 
 @CustomOp.register("rms_norm")

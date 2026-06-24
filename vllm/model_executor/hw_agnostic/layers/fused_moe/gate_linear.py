@@ -3,8 +3,8 @@
 import torch
 from torch.nn.parameter import Parameter
 
-from vllm.models.deepseek_v4.hw_agnostic.shared.custom_op import PluggableLayer
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.linear import ReplicatedLinear
+from vllm.model_executor.hw_agnostic.custom_op import PluggableLayer
+from vllm.model_executor.hw_agnostic.layers.linear import ReplicatedLinear
 from vllm.platforms import current_platform
 
 

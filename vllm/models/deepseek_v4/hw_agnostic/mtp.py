@@ -24,15 +24,15 @@ from vllm.models.deepseek_v4.hw_agnostic.model import (
     DeepseekV4DecoderLayer,
     hc_head,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.layer import (
+from vllm.model_executor.hw_agnostic.layers.fused_moe.layer import (
     fused_moe_make_expert_params_mapping,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.layernorm import RMSNorm
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.linear import ReplicatedLinear
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.logits_processor import (
+from vllm.model_executor.hw_agnostic.layers.layernorm import RMSNorm
+from vllm.model_executor.hw_agnostic.layers.linear import ReplicatedLinear
+from vllm.model_executor.hw_agnostic.layers.logits_processor import (
     LogitsProcessor,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.vocab_parallel_embedding import (
+from vllm.model_executor.hw_agnostic.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )

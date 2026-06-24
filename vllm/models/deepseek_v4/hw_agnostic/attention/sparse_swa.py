@@ -9,7 +9,7 @@ from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.models.deepseek_v4.hw_agnostic.attention._metadata_utils import (
     split_decodes_and_prefills,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.attention_layer_base import (
+from vllm.model_executor.hw_agnostic.layers.attention_layer_base import (
     AttentionLayerBase,
 )
 from vllm.triton_utils import tl, triton

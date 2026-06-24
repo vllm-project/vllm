@@ -7,14 +7,14 @@ import torch
 from torch.nn import Module
 
 import vllm.envs as envs
-import vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.modular_kernel as mk
+import vllm.model_executor.hw_agnostic.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.all2all_utils import (
+from vllm.model_executor.hw_agnostic.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.config import (
+from vllm.model_executor.hw_agnostic.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )

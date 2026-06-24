@@ -5,7 +5,7 @@
 import torch
 
 import vllm._custom_ops as ops
-import vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.modular_kernel as mk
+import vllm.model_executor.hw_agnostic.layers.fused_moe.modular_kernel as mk
 
 
 class TopKWeightAndReduceDelegate(mk.TopKWeightAndReduce):

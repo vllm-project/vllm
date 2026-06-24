@@ -12,11 +12,11 @@ from vllm.models.deepseek_v4.hw_agnostic.attention.kernels import (
     compress_norm_rope_store_triton,
     save_partial_states,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.attention_layer_base import (
+from vllm.model_executor.hw_agnostic.layers.attention_layer_base import (
     AttentionLayerBase,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.layernorm import RMSNorm
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.linear import (
+from vllm.model_executor.hw_agnostic.layers.layernorm import RMSNorm
+from vllm.model_executor.hw_agnostic.layers.linear import (
     MergedColumnParallelLinear,
 )
 from vllm.platforms import current_platform
