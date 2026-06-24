@@ -60,6 +60,15 @@ class CPUModelRunner(GPUModelRunner):
                     v.gpu = v.cpu
 
     def _postprocess_triton(self) -> None:
+        from vllm.triton_utils import HAS_TRITON
+
+        if HAS_TRITON:
+            logger.info(
+                "Triton-CPU backend is available; skipping C++ monkey-patches "
+                "for Triton kernels."
+            )
+            return
+
         import vllm.v1.worker.block_table
 
         vllm.v1.worker.block_table._compute_slot_mapping_kernel = (

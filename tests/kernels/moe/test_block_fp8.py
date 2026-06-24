@@ -269,7 +269,6 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed, monkeypatch)
             moe_config=moe_config,
             quant_config=quant_config,
         ),
-        inplace=False,
     )
 
     def deep_gemm_moe_fp8(a, w1, w2, w1_s, w2_s, topk_weights, topk_ids):

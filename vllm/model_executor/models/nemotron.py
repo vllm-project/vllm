@@ -71,13 +71,14 @@ from .utils import (
 # - Adds a partial_rotary_factor to RoPE
 
 
-def _cast_if_autocast_enabled(*args):
-    if not torch.is_autocast_enabled():
+def _cast_if_autocast_enabled(device_type: str, *args):
+    if not torch.is_autocast_enabled(device_type):
         return args
-    else:
-        return torch.amp.autocast_mode._cast(
-            args, device_type="cuda", dtype=torch.get_autocast_gpu_dtype()
-        )
+    return torch.amp.autocast_mode._cast(
+        args,
+        device_type=device_type,
+        dtype=torch.get_autocast_dtype(device_type),
+    )
 
 
 class NemotronLayerNorm1P(nn.LayerNorm):
@@ -100,10 +101,11 @@ class NemotronLayerNorm1P(nn.LayerNorm):
         if residual is not None:
             x = x + residual
             residual = x
+        device_type = x.device.type
         args = _cast_if_autocast_enabled(
-            x, self.normalized_shape, self.weight + 1, self.bias, self.eps
+            device_type, x, self.normalized_shape, self.weight + 1, self.bias, self.eps
         )
-        with torch.amp.autocast("cuda", enabled=False):
+        with torch.amp.autocast(device_type, enabled=False):
             x = torch.nn.functional.layer_norm(*args)
             return x if residual is None else (x, residual)
 
@@ -237,7 +239,6 @@ class NemotronDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         # Support abacusai/Smaug-72B-v0.1 with attention_bias
-        # Support internlm/internlm-7b with bias
         attention_bias = getattr(config, "attention_bias", False) or getattr(
             config, "bias", False
         )
@@ -375,18 +376,6 @@ class NemotronModel(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                # Loading kv cache quantization scales
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = (
-                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
-                )
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
-                continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue

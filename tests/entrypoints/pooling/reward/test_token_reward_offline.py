@@ -45,9 +45,10 @@ def test_config(llm: LLM):
 
 def test_pooling_params(llm: LLM):
     def get_outputs(use_activation):
-        outputs = llm.reward(
+        outputs = llm.encode(
             prompts,
             pooling_params=PoolingParams(use_activation=use_activation),
+            pooling_task="token_classify",
             use_tqdm=False,
         )
         return torch.cat([x.outputs.data for x in outputs])

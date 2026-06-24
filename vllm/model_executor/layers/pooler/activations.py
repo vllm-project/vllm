@@ -49,10 +49,11 @@ def get_act_fn(
         function_name = config.sbert_ce_default_activation_function
 
     if function_name is not None:
-        assert function_name.startswith("torch.nn.modules."), (
-            "Loading of activation functions is restricted to "
-            "torch.nn.modules for security reasons"
-        )
+        if not function_name.startswith("torch.nn.modules."):
+            raise ValueError(
+                "Loading of activation functions is restricted to "
+                "torch.nn.modules for security reasons"
+            )
         fn = resolve_obj_by_qualname(function_name)()
         return PoolerActivation.wraps(fn)
 
@@ -63,11 +64,12 @@ def resolve_classifier_act_fn(
     model_config: ModelConfig,
     static_num_labels: bool = True,
     act_fn: "PoolerActivation | None" = None,
-):
+) -> "PoolerActivation":
     if act_fn is None:
         return get_act_fn(model_config.hf_config, static_num_labels)
 
-    assert callable(act_fn)
+    if not callable(act_fn):
+        raise TypeError(f"Expected a callable activation function, got {type(act_fn)}")
     return act_fn
 
 
@@ -76,7 +78,7 @@ _T = TypeVar("_T", torch.Tensor, list[torch.Tensor])
 
 class PoolerActivation(nn.Module, ABC):
     @staticmethod
-    def wraps(module: nn.Module):
+    def wraps(module: nn.Module) -> "PoolerActivation":
         if isinstance(module, nn.Identity):
             return PoolerIdentity()
         if isinstance(module, (nn.Sigmoid, nn.Softmax)):
@@ -126,6 +128,9 @@ class PoolerClassify(PoolerActivation):
 
         self.num_labels = num_labels
 
+    def extra_repr(self) -> str:
+        return f"num_labels={self.num_labels}"
+
     def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
         num_labels = self.num_labels
         if num_labels is None:
@@ -138,10 +143,16 @@ class PoolerClassify(PoolerActivation):
 
 
 class LambdaPoolerActivation(PoolerActivation):
-    def __init__(self, fn: Callable[[torch.Tensor], torch.Tensor]):
+    def __init__(self, fn: Callable[[torch.Tensor], torch.Tensor]) -> None:
         super().__init__()
 
         self.fn = fn
+
+    def extra_repr(self) -> str:
+        name = getattr(self.fn, "__name__", None)
+        if name is None:
+            name = self.fn.__class__.__name__
+        return f"fn={name}"
 
     def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
         return self.fn(pooled_data)

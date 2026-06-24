@@ -5,8 +5,9 @@
 # (vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/).
 """Data classes for MooncakeStoreConnector."""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from typing import cast
 
 import torch
 
@@ -23,6 +24,77 @@ from vllm.v1.core.kv_cache_utils import (
 logger = init_logger(__name__)
 
 
+class BlobBlockHashes(Sequence[BlockHash]):
+    """Lazy view over a flat buffer of fixed-size block hashes to avoid the overhead
+    of materializing all hashes upfront.
+    """
+
+    def __init__(self, blob: memoryview, hash_len: int):
+        self._blob = blob
+        self._hash_len = hash_len
+        self._n = len(blob) // hash_len if hash_len else 0
+
+    def __len__(self) -> int:
+        return self._n
+
+    def __getitem__(self, idx):
+        if isinstance(idx, slice):
+            return [self[i] for i in range(*idx.indices(self._n))]
+        if idx < 0:
+            idx += self._n
+        if not 0 <= idx < self._n:
+            raise IndexError(idx)
+        off = idx * self._hash_len
+        return BlockHash(self._blob[off : off + self._hash_len])
+
+
+class _CompactChunkHashList(BlockHashListWithBlockSize):
+    """View that keys each ``block_size`` chunk by the last constituent
+    ``hash_block_size`` hash instead of concatenating all of them.
+
+    The engine chains block hashes (each hash folds in the previous one), so the
+    final sub-block hash of a chunk already uniquely identifies the whole chunk
+    and its prefix. Using it keeps a Mooncake key at a single hash digest
+    regardless of the ``block_size`` / ``hash_block_size`` ratio, instead of
+    growing the key linearly with it (e.g. 64x for ``block_size=256``,
+    ``hash_block_size=4``).
+    """
+
+    def __init__(
+        self,
+        block_hashes: Sequence[BlockHash],
+        hash_block_size: int,
+        target_block_size: int,
+    ):
+        # Accept any indexable sequence (e.g. the lazy ``BlobBlockHashes``), not
+        # just ``list``; the base only indexes/sizes it.
+        assert target_block_size % hash_block_size == 0
+        self.block_hashes = block_hashes  # type: ignore[assignment]
+        self.scale_factor = target_block_size // hash_block_size
+
+    def _get_value_at(self, idx: int) -> BlockHash:
+        return self.block_hashes[idx * self.scale_factor + self.scale_factor - 1]
+
+
+def chunk_hashes_for_block_size(
+    block_hashes: Sequence[BlockHash],
+    hash_block_size: int,
+    block_size: int,
+) -> Sequence[BlockHash]:
+    """Map ``hash_block_size``-granular block hashes to one compact hash per
+    ``block_size`` chunk (the chunk's last sub-hash). Returns ``block_hashes``
+    unchanged when the two sizes are equal.
+    """
+    if block_size == hash_block_size:
+        return block_hashes
+    # Structurally a Sequence[BlockHash] (indexable + sized); the base class
+    # just isn't declared as one.
+    return cast(
+        "Sequence[BlockHash]",
+        _CompactChunkHashList(block_hashes, hash_block_size, block_size),
+    )
+
+
 @dataclass
 class KeyMetadata:
     """Metadata for constructing pool keys."""
@@ -33,6 +105,10 @@ class KeyMetadata:
     dcp_rank: int
     pp_rank: int
     group_id: int = 0
+    # Optional namespace prepended to every key. Lets separate deployments
+    # share one Mooncake master without colliding on identical block hashes.
+    # Empty (the default) keeps keys byte-identical to the unprefixed format.
+    cache_prefix: str = ""
 
 
 @dataclass(order=True)
@@ -45,6 +121,7 @@ class PoolKey:
     def __hash__(self):
         return hash(
             (
+                self.key_metadata.cache_prefix,
                 self.key_metadata.model_name,
                 self.key_metadata.tp_rank,
                 self.key_metadata.pcp_rank,
@@ -55,15 +132,32 @@ class PoolKey:
             )
         )
 
-    def to_string(self) -> str:
+    @staticmethod
+    def build_prefix(
+        key_metadata: KeyMetadata,
+        *,
+        tp_rank: int | None = None,
+        pp_rank: int | None = None,
+    ) -> str:
+        """Return the stable prefix for a Mooncake pool key."""
+        prefix = f"{key_metadata.cache_prefix}@" if key_metadata.cache_prefix else ""
         return (
-            f"{self.key_metadata.model_name}"
-            f"@tp_rank:{self.key_metadata.tp_rank}"
-            f"@pcp{self.key_metadata.pcp_rank}"
-            f"@dcp{self.key_metadata.dcp_rank}"
-            f"@pp_rank:{self.key_metadata.pp_rank}"
-            f"@group:{self.key_metadata.group_id}"
-            f"@{self.chunk_hash}"
+            f"{prefix}"
+            f"{key_metadata.model_name}"
+            f"@tp_rank:{key_metadata.tp_rank if tp_rank is None else tp_rank}"
+            f"@pcp{key_metadata.pcp_rank}"
+            f"@dcp{key_metadata.dcp_rank}"
+            f"@pp_rank:{key_metadata.pp_rank if pp_rank is None else pp_rank}"
+            f"@group:{key_metadata.group_id}"
+        )
+
+    @staticmethod
+    def build_key_string(key_prefix: str, chunk_hash: str) -> str:
+        return f"{key_prefix}@{chunk_hash}"
+
+    def to_string(self) -> str:
+        return self.build_key_string(
+            self.build_prefix(self.key_metadata), self.chunk_hash
         )
 
 
@@ -127,18 +221,15 @@ class ChunkedTokenDatabase:
         Args:
             token_len: Total number of tokens.
             block_hashes: Block hashes computed at ``hash_block_size`` granularity.
-                When ``block_size > hash_block_size`` consecutive hashes are merged
-                up to the group's ``block_size`` via ``BlockHashListWithBlockSize``.
+                When ``block_size > hash_block_size`` each group's ``block_size`` chunk
+                is keyed by its last sub-hash via ``chunk_hashes_for_block_size``.
             mask_num: Number of tokens to skip from the beginning.
         """
         if not block_hashes:
             return
-        if self.block_size == self.hash_block_size:
-            chunk_hashes: Iterable[BlockHash] = block_hashes
-        else:
-            chunk_hashes = BlockHashListWithBlockSize(
-                block_hashes, self.hash_block_size, self.block_size
-            )
+        chunk_hashes: Iterable[BlockHash] = chunk_hashes_for_block_size(
+            block_hashes, self.hash_block_size, self.block_size
+        )
         for chunk_id, h in enumerate(chunk_hashes):
             start_idx = chunk_id * self.block_size
             if start_idx >= token_len:
@@ -173,6 +264,13 @@ class RequestTracker:
     # request it includes previously-generated tokens, which are re-prefilled.
     prefill_end_tokens: int = 0
 
+    def reset(self) -> None:
+        self.token_len = 0
+        self.allocated_block_ids = ()
+        self.num_saved_tokens = 0
+        self.token_ids = None
+        self.prefill_end_tokens = 0
+
     def update(
         self,
         new_block_ids: tuple[list[int], ...] | list[int],
@@ -206,7 +304,7 @@ class ReqMeta:
     current_event: torch.cuda.Event | None = None
 
     token_ids: list[int] | None = None
-    original_block_size: int | None = None
+    num_prompt_tokens: int | None = None
 
     @staticmethod
     def from_request_tracker(
@@ -216,26 +314,22 @@ class ReqMeta:
         skip_save: bool | None = False,
         block_hashes: list[BlockHash] | None = None,
         is_last_chunk: bool | None = None,
-        discard_partial_chunks: bool = True,
-        original_block_size: int | None = None,
     ) -> "ReqMeta | None":
         """Create ReqMeta from a RequestTracker."""
         if block_hashes is None:
             block_hashes = []
         input_token_len = tracker.token_len
 
-        chunk_boundary = (
-            cdiv(tracker.num_saved_tokens + 1, block_size) * block_size
-            if discard_partial_chunks
-            else 0
-        )
-        num_tokens_to_save = (
-            (input_token_len // block_size * block_size)
-            if discard_partial_chunks
-            else input_token_len
-        )
+        chunk_boundary = cdiv(tracker.num_saved_tokens + 1, block_size) * block_size
+        num_tokens_to_save = input_token_len // block_size * block_size
 
         skip_save = skip_save or num_tokens_to_save < chunk_boundary
+        # A ReqMeta must never carry both a save AND a load.
+        # The save would also be wasted work — the bytes are being looked up
+        # in the store right now. Later cached_reqs steps save new tokens
+        # normally.
+        if load_spec is not None and load_spec.can_load:
+            skip_save = True
         if skip_save and load_spec is None:
             return None
 
@@ -270,7 +364,7 @@ class ReqMeta:
             block_hashes=block_hashes,
             is_last_chunk=is_last_chunk,
             token_ids=token_ids,
-            original_block_size=original_block_size,
+            num_prompt_tokens=tracker.prefill_end_tokens,
         )
 
 

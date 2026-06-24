@@ -39,7 +39,6 @@ You can compute pairwise similarity scores to build a similarity matrix using th
 | ------------ | ------ | ----------------- | ------------------------------ | ------------------------------------------ |
 | `BertModel` | BERT-based | `BAAI/bge-base-en-v1.5`, `Snowflake/snowflake-arctic-embed-xs`, etc. | | |
 | `BertSpladeSparseEmbeddingModel` | SPLADE | `naver/splade-v3` | | |
-| `ErnieModel` | BERT-like Chinese ERNIE | `shibing624/text2vec-base-chinese-sentence` | | |
 | `Gemma2Model`<sup>C</sup> | Gemma 2-based | `BAAI/bge-multilingual-gemma2`, etc. | ✅︎ | ✅︎ |
 | `Gemma3TextModel`<sup>C</sup> | Gemma 3-based | `google/embeddinggemma-300m`, etc. | ✅︎ | ✅︎ |
 | `GritLM` | GritLM | `parasail-ai/GritLM-7B-vllm`. | ✅︎ | ✅︎ |
@@ -91,7 +90,7 @@ You can compute pairwise similarity scores to build a similarity matrix using th
 | `LlamaNemotronVLModel` | Llama Nemotron Embedding + SigLIP | T + I | `nvidia/llama-nemotron-embed-vl-1b-v2` | | |
 | `LlavaNextForConditionalGeneration`<sup>C</sup> | LLaVA-NeXT-based | T / I | `royokong/e5-v` | | ✅︎ |
 | `Phi3VForCausalLM`<sup>C</sup> | Phi-3-Vision-based | T + I | `TIGER-Lab/VLM2Vec-Full` | | ✅︎ |
-| `Qwen3VLForConditionalGeneration`<sup>C</sup> | Qwen3-VL | T + I + V | `Qwen/Qwen3-VL-Embedding-2B`, etc. | ✅︎ | ✅︎ |
+| `Qwen3VLForConditionalGeneration`<sup>C</sup> (see note) | Qwen3-VL | T + I + V | `Qwen/Qwen3-VL-Embedding-2B`, etc. | ✅︎ | ✅︎ |
 | `SiglipModel` | SigLIP, SigLIP2 | T / I | `google/siglip-base-patch16-224`, `google/siglip2-base-patch16-224` | | |
 | `*ForConditionalGeneration`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | \* | N/A | \* | \* |
 
@@ -101,6 +100,9 @@ You can compute pairwise similarity scores to build a similarity matrix using th
 If your model is not in the above list, we will try to automatically convert the model using
 [as_embedding_model][vllm.model_executor.models.adapters.as_embedding_model]. By default, the embeddings
 of the whole prompt are extracted from the normalized hidden state corresponding to the last token.
+
+!!! note
+    `Qwen3-VL-Embedding` officially uses `qwen_vl_utils` for image preprocessing, while vLLM uses `transformers`' `video_processing_qwen3_vl`, which leads to slightly different results compared to the official Hugging Face repository examples. Example code for offline inference using `qwen_vl_utils` can be found in the [vision_embedding_offline.py](../../../examples/pooling/embed/vision_embedding_offline.py) example.
 
 !!! note
     Although vLLM supports automatically converting models of any architecture into embedding models via --convert embed, to get the best results, you should use pooling models that are specifically trained as such.

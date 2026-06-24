@@ -145,12 +145,16 @@ class LlamaModel(nn.Module):
         # Get drafter's quantization config
         self.quant_config = get_draft_quant_config(vllm_config)
 
-        eagle_config = getattr(self.config, "eagle_config", None)
-        if eagle_config is not None and "use_aux_hidden_state" in eagle_config:
+        eagle_config = getattr(self.config, "eagle_config", None) or {}
+        if "use_aux_hidden_state" in eagle_config:
             self.use_aux_hidden_state = eagle_config["use_aux_hidden_state"]
         else:
             self.use_aux_hidden_state = True
-        self.norm_before_fc = getattr(self.config, "norm_before_fc", False)
+        self.norm_before_fc = bool(
+            eagle_config.get(
+                "norm_before_fc", getattr(self.config, "norm_before_fc", False)
+            )
+        )
 
         current_vllm_config = get_current_vllm_config()
 
@@ -263,19 +267,6 @@ class LlamaModel(nn.Module):
         for name, loaded_weight in weights:
             if "midlayer." in name:
                 name = name.replace("midlayer.", "layers.0.")
-            # Handle kv cache quantization scales
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                # Loading kv cache quantization scales
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = (
-                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
-                )
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
-                continue
             # Remapping the name FP8 kv-scale or zero point.
             if "scale" in name or "zero_point" in name:
                 name = maybe_remap_kv_scale_name(name, params_dict)

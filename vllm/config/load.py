@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 from pydantic import Field, field_validator
 
@@ -11,12 +11,11 @@ from vllm.utils.hashing import safe_hash
 
 DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS = 8
 DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE = 16 * 1024 * 1024
+SafetensorsLoadStrategy: TypeAlias = Literal["lazy", "eager", "prefetch", "torchao"]
 
 if TYPE_CHECKING:
-    from vllm.model_executor.model_loader import LoadFormats
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 else:
-    LoadFormats = Any
     TensorizerConfig = Any
 
 logger = init_logger(__name__)
@@ -26,7 +25,7 @@ logger = init_logger(__name__)
 class LoadConfig:
     """Configuration for loading the model weights."""
 
-    load_format: str | LoadFormats = "auto"
+    load_format: str = "auto"
     """
     The format of the model weights to load.
 
@@ -51,16 +50,15 @@ class LoadConfig:
     - "bitsandbytes" will load the weights using bitsandbytes quantization.
     - "sharded_state" will load weights from pre-sharded checkpoint files,
       supporting efficient loading of tensor-parallel models.
-    - "gguf" will load weights from GGUF format files (details specified in
-      https://github.com/ggml-org/ggml/blob/master/docs/gguf.md).
     - "mistral" will load weights from consolidated safetensors files used by
       Mistral models.
+    - "modelexpress" will load weights using ModelExpress.
     - Other custom values can be supported via plugins.
     """
     download_dir: str | None = None
     """Directory to download and load the weights, default to the default
     cache directory of Hugging Face."""
-    safetensors_load_strategy: str | None = None
+    safetensors_load_strategy: SafetensorsLoadStrategy | None = None
     """
     Specifies the loading strategy for safetensors weights.
 

@@ -59,6 +59,14 @@ class FlashMLABackend(MLACommonBackend):
         return [64]
 
     @staticmethod
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
+        if include_num_layers_dimension:
+            return (1, 0, 2, 3)
+        return (0, 1, 2)
+
+    @staticmethod
     def get_name() -> str:
         return "FLASHMLA"
 
@@ -84,6 +92,7 @@ class FlashMLABackend(MLACommonBackend):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
         if use_sparse:

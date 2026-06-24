@@ -2,9 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Quantization config for DeepSeek V4."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from vllm.config import get_current_vllm_config
-from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
+from vllm.model_executor.layers.fused_moe import (
+    RoutedExperts,
+    UnquantizedFusedMoEMethod,
+)
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.quantization.mxfp4 import Mxfp4MoEMethod
@@ -13,6 +19,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 
 _DEEPSEEK_V4_EXPERT_DTYPES = ("fp4", "fp8")
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.modelopt import (
+        ModelOptNvFp4Config,
+    )
 
 
 class DeepseekV4FP8Config(Fp8Config):
@@ -38,6 +49,8 @@ class DeepseekV4FP8Config(Fp8Config):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._resolved_expert_dtype: str | None = None
+        self._resolved_moe_quant_algo: str | None = None
+        self._nvfp4_config: ModelOptNvFp4Config | None = None
         # ``is_scale_e8m0`` is a property that resolves on first read,
         # by which time the current vllm_config has been set.
 
@@ -70,6 +83,36 @@ class DeepseekV4FP8Config(Fp8Config):
         # checkpoints (Flash-Base) store them as float32.
         return self.expert_dtype == "fp4"
 
+    def _resolve_moe_overrides(self) -> None:
+        if self._resolved_moe_quant_algo is not None:
+            return
+        try:
+            hf_config = get_current_vllm_config().model_config.hf_config
+        except Exception:
+            return
+        quant_cfg = getattr(hf_config, "quantization_config", None) or {}
+        algo = (quant_cfg.get("moe_quant_algo") or "").upper() or None
+        self._resolved_moe_quant_algo = algo or ""
+
+    @property
+    def moe_quant_algo(self) -> str:
+        self._resolve_moe_overrides()
+        return self._resolved_moe_quant_algo or ""
+
+    def _get_nvfp4_config(self) -> ModelOptNvFp4Config:
+        if self._nvfp4_config is None:
+            from vllm.model_executor.layers.quantization.modelopt import (
+                ModelOptNvFp4Config,
+            )
+
+            self._nvfp4_config = ModelOptNvFp4Config(
+                is_checkpoint_nvfp4_serialized=True,
+                kv_cache_quant_algo=None,
+                exclude_modules=[],
+                group_size=16,
+            )
+        return self._nvfp4_config
+
     @classmethod
     def get_name(cls) -> QuantizationMethods:
         return "deepseek_v4_fp8"
@@ -89,7 +132,7 @@ class DeepseekV4FP8Config(Fp8Config):
         return None
 
     def get_quant_method(self, layer, prefix):
-        if isinstance(layer, FusedMoE):
+        if isinstance(layer, RoutedExperts):
             if is_layer_skipped(
                 prefix=prefix,
                 ignored_layers=self.ignored_layers,
@@ -97,10 +140,21 @@ class DeepseekV4FP8Config(Fp8Config):
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
             if self.expert_dtype == "fp4":
+                if self.moe_quant_algo == "NVFP4":
+                    from vllm.model_executor.layers.quantization.modelopt import (
+                        ModelOptNvFp4FusedMoE,
+                    )
+
+                    return ModelOptNvFp4FusedMoE(
+                        quant_config=self._get_nvfp4_config(),
+                        moe_config=layer.moe_config,
+                    )
                 return Mxfp4MoEMethod(layer.moe_config)
             # expert_dtype == "fp8": fall through to Fp8Config which
             # returns Fp8MoEMethod with block-wise float32 scales.
         return super().get_quant_method(layer, prefix)
 
     def is_mxfp4_quant(self, prefix, layer):
-        return isinstance(layer, FusedMoE) and self.expert_dtype == "fp4"
+        if not isinstance(layer, RoutedExperts) or self.expert_dtype != "fp4":
+            return False
+        return self.moe_quant_algo != "NVFP4"

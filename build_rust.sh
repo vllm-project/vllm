@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build the vllm-rs Rust frontend binary and install it into the vllm package.
+# Build vLLM Rust artifacts and install them into the vllm package.
 # Usage: ./build_rust.sh [--debug]
 #
 # By default builds in release mode. Pass --debug for faster compile times
@@ -8,11 +8,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
-RUST_DIR="$REPO_ROOT/rust"
-TARGET_PATH="$REPO_ROOT/vllm/vllm-rs"
 
 # Read the required toolchain from rust-toolchain.toml.
-TOOLCHAIN=$(grep '^channel' "$RUST_DIR/rust-toolchain.toml" | sed 's/.*= *"\(.*\)"/\1/')
+TOOLCHAIN=$(grep '^channel' "$REPO_ROOT/rust-toolchain.toml" | sed 's/.*= *"\(.*\)"/\1/')
 
 # Ensure rustup and the required toolchain are available.
 if ! command -v rustup &>/dev/null; then
@@ -27,17 +25,9 @@ if ! rustup run "$TOOLCHAIN" rustc --version &>/dev/null; then
 fi
 
 if [[ "${1:-}" == "--debug" ]]; then
-    PROFILE_ARGS=()
-    PROFILE_DIR="debug"
+    PROFILE_ARG="--debug"
 else
-    PROFILE_ARGS=(--release)
-    PROFILE_DIR="release"
+    PROFILE_ARG="--release"
 fi
 
-cargo +"$TOOLCHAIN" build "${PROFILE_ARGS[@]}" \
-    --manifest-path "$RUST_DIR/Cargo.toml" \
-    --bin vllm-rs \
-    --features native-tls-vendored
-
-cp "$RUST_DIR/target/$PROFILE_DIR/vllm-rs" "$TARGET_PATH"
-echo "Installed vllm-rs to $TARGET_PATH"
+python3 "$REPO_ROOT/tools/build_rust.py" "$PROFILE_ARG"

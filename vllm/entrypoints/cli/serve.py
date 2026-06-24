@@ -12,7 +12,10 @@ import vllm.envs as envs
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.entrypoints.openai.api_server import run_server, setup_server
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
-from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG
+from vllm.entrypoints.openai.dp_supervisor import (
+    run_dp_supervisor,
+)
+from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -66,31 +69,41 @@ class ServeSubcommand(CLISubcommand):
             args.api_server_count = 0
 
         # Detect LB mode for defaulting api_server_count.
+        # Multi-port: --data-parallel-multi-port-external-lb
         # External LB: --data-parallel-external-lb or --data-parallel-rank
         # Hybrid LB: --data-parallel-hybrid-lb or --data-parallel-start-rank
         is_external_lb = (
             args.data_parallel_external_lb or args.data_parallel_rank is not None
         )
-        is_hybrid_lb = (
-            args.data_parallel_hybrid_lb or args.data_parallel_start_rank is not None
-        )
 
-        if is_external_lb and is_hybrid_lb:
+        # If --data_parallel_multi_port_external_lb and --data_parallel_hybrid_lb
+        # are unset, default to hybrid if --data-parallel-start-rank is set
+        is_hybrid_lb = is_multi_port = False
+        if (
+            not args.data_parallel_hybrid_lb
+            and not args.data_parallel_multi_port_external_lb
+        ):
+            is_hybrid_lb = args.data_parallel_start_rank is not None
+        else:
+            is_hybrid_lb = args.data_parallel_hybrid_lb
+            is_multi_port = args.data_parallel_multi_port_external_lb
+
+        if sum([is_multi_port, is_external_lb, is_hybrid_lb]) > 1:
             raise ValueError(
-                "Cannot use both external and hybrid data parallel load "
-                "balancing modes. External LB is enabled via "
-                "--data-parallel-external-lb or --data-parallel-rank. "
-                "Hybrid LB is enabled via --data-parallel-hybrid-lb or "
-                "--data-parallel-start-rank. Use one mode or the other."
+                "Cannot use more than one data parallel load balancing mode. "
+                "Choose one of: --data-parallel-multi-port-external-lb, "
+                "--data-parallel-external-lb (or --data-parallel-rank), "
+                "--data-parallel-hybrid-lb (or --data-parallel-start-rank)."
             )
 
         # Default api_server_count if not explicitly set.
-        # - Rust frontend: Use 1 (not applicable as it's multithreaded)
-        # - External LB: Leave as 1 (external LB handles distribution)
+        # - Multi-port: 1 (supervisor spawns one server per local DP rank)
+        # - Rust frontend: 1 (not applicable as it's multithreaded)
+        # - External LB: 1 (external LB handles distribution)
         # - Hybrid LB: Use local DP size (internal LB for local ranks only)
         # - Internal LB: Use full DP size
         if args.api_server_count is None:
-            if is_external_lb or envs.VLLM_RUST_FRONTEND_PATH:
+            if is_multi_port or is_external_lb or envs.VLLM_RUST_FRONTEND_PATH:
                 args.api_server_count = 1
             elif is_hybrid_lb:
                 args.api_server_count = args.data_parallel_size_local or 1
@@ -109,7 +122,8 @@ class ServeSubcommand(CLISubcommand):
                     )
         elif envs.VLLM_RUST_FRONTEND_PATH and args.api_server_count > 1:
             logger.warning(
-                "Ignoring --api-server-count=%d when using rust front-end process"
+                "Ignoring --api-server-count=%d when using rust front-end process",
+                args.api_server_count,
             )
             args.api_server_count = 1
 
@@ -122,7 +136,9 @@ class ServeSubcommand(CLISubcommand):
             )
             args.api_server_count = 1
 
-        if args.api_server_count < 1:
+        if is_multi_port:
+            run_dp_supervisor(args)
+        elif args.api_server_count < 1:
             run_headless(args)
         elif args.api_server_count > 1 or envs.VLLM_RUST_FRONTEND_PATH:
             run_multi_api_server(args)
@@ -292,7 +308,17 @@ def run_multi_api_server(args: argparse.Namespace):
 
     from vllm.v1.engine.utils import get_engine_zmq_addresses
 
-    addresses = get_engine_zmq_addresses(vllm_config, num_api_servers)
+    # Defer port allocation to the child's bind() to avoid TOCTOU, except
+    # for Rust front-end and Ray DP, which can't see the post-bind rebind
+    # (CLI-arg subprocess / pickled-into-actor snapshot respectively) and
+    # so pre-allocate driver-side -- reintroducing the original race only
+    # there.
+    is_ray_dp = parallel_config.data_parallel_backend == "ray"
+    addresses = get_engine_zmq_addresses(
+        vllm_config,
+        num_api_servers,
+        defer_api_server_ports=not (rust_frontend_path or is_ray_dp),
+    )
 
     with launch_core_engines(
         vllm_config, executor_class, log_stats, addresses, num_api_servers
@@ -302,6 +328,12 @@ def run_multi_api_server(args: argparse.Namespace):
         )
 
         if rust_frontend_path:
+            if parallel_config.local_engines_only:
+                expected_engine_start_index = parallel_config.data_parallel_rank
+                expected_engine_count = parallel_config.data_parallel_size_local
+            else:
+                expected_engine_start_index = 0
+                expected_engine_count = parallel_config.data_parallel_size
             # Start rust front-end process.
             api_server_manager = RustFrontendProcessManager(
                 binary_path=rust_frontend_path,
@@ -309,7 +341,8 @@ def run_multi_api_server(args: argparse.Namespace):
                 args=args,
                 input_address=addresses.inputs[0],
                 output_address=addresses.outputs[0],
-                engine_count=parallel_config.data_parallel_size,
+                engine_start_index=expected_engine_start_index,
+                engine_count=expected_engine_count,
                 stats_update_address=stats_update_address,
             )
         else:
@@ -324,6 +357,16 @@ def run_multi_api_server(args: argparse.Namespace):
                 stats_update_address=stats_update_address,
                 tensor_queue=tensor_queue,
             )
+
+            if not is_ray_dp:
+                # Forward each child's bound endpoints to the engine handshake
+                # (runs on ``with`` exit). Skipped for Ray DP, where addresses
+                # are pre-allocated above and Ray actors already hold them.
+                actual_inputs, actual_outputs = (
+                    api_server_manager.gather_actual_addresses()
+                )
+                addresses.inputs = actual_inputs
+                addresses.outputs = actual_outputs
 
     # Wait for API servers.
     try:
