@@ -1279,9 +1279,13 @@ def _move_to_workspace(
         layer=result.layer_idx,
     )
 
+    # In async EPLB mode, post-rearrangement actions need to be performed
+    # per layer.
+    moe_layer = model_state.model.moe_layers[result.layer_idx]
+    moe_layer.quant_method.after_eplb_rearrangement(moe_layer)
+
     if result.layer_idx == model_state.model.num_moe_layers - 1:
         model_state.rebalanced = False
-        _run_after_eplb_rearrangement_hooks(model_state.model)
 
     # Reset pending_result before unblocking the async worker
     model_state.pending_result = None

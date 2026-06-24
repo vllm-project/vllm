@@ -12,22 +12,10 @@ from vllm.config import ModelConfig
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
-    SupportsMultiModal,
     get_mixture_of_experts_model,
-    is_mixture_of_experts,
 )
 
 logger = init_logger(__name__)
-
-
-def _unwrap_moe(model: nn.Module) -> nn.Module:
-    # VLM wrappers (e.g. KimiK25ForConditionalGeneration) hold the MoE
-    # language model under `.language_model` but don't implement
-    # MixtureOfExperts themselves. Mirror the V1 path
-    # (see vllm/v1/worker/gpu_model_runner.py, PR #39805).
-    if not is_mixture_of_experts(model) and isinstance(model, SupportsMultiModal):
-        return model.get_language_model()
-    return model
 
 
 def step_eplb_after(*, is_dummy: bool = False) -> Callable:

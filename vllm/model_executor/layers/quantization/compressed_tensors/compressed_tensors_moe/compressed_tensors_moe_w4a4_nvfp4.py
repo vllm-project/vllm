@@ -244,7 +244,10 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w2_weight", w2)
 
-        if self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL:
+        if (
+            self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL
+            and self.moe.moe_parallel_config.enable_eplb
+        ):
             # flashinfer's convert_sf_to_mma_layout returns a strided
             # permuted view (shape (32, 4, m_t, 4, k_t, E)) of contiguous
             # storage laid out as (E, m_t, k_t, 32, 4, 4). EPLB needs a
@@ -263,7 +266,11 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 "flashinfer's convert_sf_to_mma_layout storage layout may "
                 "have changed."
             )
-            assert w2_scale_eplb_view.is_contiguous()
+            assert w2_scale_eplb_view.is_contiguous(), (
+                "Expected the inverse-permuted w2 scale view to be contiguous; "
+                "flashinfer's convert_sf_to_mma_layout storage layout may "
+                "have changed."
+            )
             layer.w13_weight_scale_mma_view = w13_scale
             layer.w2_weight_scale_mma_view = w2_scale
             replace_parameter(layer, "w13_weight_scale", w13_scale_eplb_view)
@@ -299,11 +306,13 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         )
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
-        if self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL:
-            # Kernel consumes the strided MMA-layout view; the
-            # registered Parameter is the E-leading view of the same
-            # storage so EPLB can rearrange per-expert. Both alias the
-            # same memory -- updates from either propagate.
+        if (
+            self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL
+            and self.moe.moe_parallel_config.enable_eplb
+        ):
+            # When EPLB is enabled the registered Parameter is the E-leading
+            # contiguous view (for per-expert slicing); the kernel needs the
+            # strided MMA-layout view stashed alongside it.
             w13_scale = layer.w13_weight_scale_mma_view
             w2_scale = layer.w2_weight_scale_mma_view
         else:
