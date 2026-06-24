@@ -110,6 +110,7 @@ class OmniASRConfig(PretrainedConfig):
         eos_token_id: int = 2,
         pad_token_id: int = 1,
         lid_marker_token_id: int = 9812,
+        encoder_stacking: int = 1,
         **kwargs,
     ):
         super().__init__(
@@ -166,3 +167,4 @@ class OmniASRConfig(PretrainedConfig):
         self.target_vocab_size = target_vocab_size
         self.num_languages = num_languages
         self.lid_marker_token_id = lid_marker_token_id
+        self.encoder_stacking = encoder_stacking
