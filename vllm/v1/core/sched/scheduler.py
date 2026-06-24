@@ -803,14 +803,10 @@ class Scheduler(SchedulerInterface):
                     # preserve full cudagraph for this step.
                     if (
                         (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
-                        and (prefill_scheduled and scheduled_running_reqs)
-                        and num_computed_tokens == request.num_tokens - 1
-                        and request.num_tokens
-                        + self.num_spec_tokens
-                        + self.num_sampled_tokens_per_step
-                        <= self.max_model_len
+                        and num_new_tokens == 1
+                        and (scheduled_running_reqs and not prefill_scheduled)
                     ):
-                        num_new_tokens += self.num_spec_tokens
+                        num_new_tokens = 1 + self.num_spec_tokens
                         if num_new_tokens > token_budget:
                             break
                         pad_spec_decode = True
