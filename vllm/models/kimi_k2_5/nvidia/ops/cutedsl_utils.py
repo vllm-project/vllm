@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Shared CuTe DSL compile helpers for the Kimi-K2.5 NVFP4 kernels.
+"""Shared CuTe DSL compile helpers.
 
 These wrap the fake-tensor / fake-stream construction used by each kernel's
 ``functools.cache``-decorated ``_compile_*`` helper, following the convention

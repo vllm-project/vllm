@@ -1,18 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fused Q/KV-LoRA RMSNorm + key RoPE CuTe DSL kernel for Kimi-K2.5 NVFP4.
-
-This Blackwell (SM10x) kernel runs once per layer, right after the fused QKV-A
-projection, fusing the Q-LoRA RMSNorm, KV-LoRA RMSNorm, and the key (``k_pe``)
-RoPE into a single launch (all updates in place).
-
-The public entry point is :func:`_run_kimik25_qkv_rmsnorm_k_pe_fused`
-(torch tensors in, in-place out). Compilation is cached per constexpr
-configuration by :func:`_compile_qkv_rmsnorm_k_pe_fused`, which builds fake
-tensors with symbolic shapes/strides and calls ``cute.compile``, following the
-convention in ``vllm/v1/attention/ops/deepseek_v4_ops``. The compiled executor
-is then called directly with torch tensors and sources its launch stream from
-the TVM-FFI environment.
 """
 
 from functools import cache

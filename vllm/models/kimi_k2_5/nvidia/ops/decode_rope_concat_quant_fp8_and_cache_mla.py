@@ -1,20 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fused decode-query RoPE + concat + FP8 quant + paged KV-cache write kernel.
-
-This Blackwell (SM10x) CuTe DSL kernel specializes the Kimi-K2.5 NVFP4 MLA
-decode path: it applies RoPE to the decode query, concatenates it with the
-absorbed (no-RoPE) query, and per-tensor FP8-quantizes the result, fused with
-writing the (already-RoPE'd) latent KV into the paged FP8 KV cache.
-
-The public entry point is
-:func:`_run_kimik25_decode_rope_concat_quant_fp8_and_cache_mla` (torch tensors
-in, FP8 query out). Compilation is cached per constexpr configuration by
-:func:`_compile_decode_rope_concat_quant_fp8_and_cache_mla`, which builds fake
-tensors with symbolic shapes/strides and calls ``cute.compile``, following the
-convention in ``vllm/v1/attention/ops/deepseek_v4_ops``. The compiled executor
-is then called directly with torch tensors and sources its launch stream from
-the TVM-FFI environment.
 """
 
 from functools import cache

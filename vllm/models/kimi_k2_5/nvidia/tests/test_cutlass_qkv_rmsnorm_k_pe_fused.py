@@ -5,14 +5,9 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.platforms import current_platform
 
-if not torch.cuda.is_available() or not current_platform.is_device_capability_family(
-    100
-):
-    pytest.skip(
-        "This test only runs on Blackwell GPUs (SM10x).", allow_module_level=True
-    )
+if not torch.cuda.is_available():
+    pytest.skip("This test only runs on CUDA GPUs.", allow_module_level=True)
 
 pytest.importorskip("cutlass")
 pytest.importorskip("cutlass.torch")
