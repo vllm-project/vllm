@@ -853,8 +853,10 @@ class EngineCore:
         if tags is None or tags:
             self.model_executor.wake_up(tags)
 
-        # Resume scheduling (applies to all levels)
-        self.resume_scheduler()
+        # Partial wakes intentionally keep the remaining allocations asleep.
+        # Resume scheduling only once all executor memory is resident again.
+        if not self.model_executor.is_sleeping:
+            self.resume_scheduler()
 
     def is_sleeping(self) -> bool:
         """Check if engine is sleeping at any level."""
@@ -1991,12 +1993,13 @@ class DPEngineCoreProc(EngineCoreProc):
                     # All engines are idle.
                     continue
 
-                # We are in a running state and so must execute a dummy pass
-                # if the model didn't execute any ready requests.
-                pending_iteration = self._start_iteration_details(None)
-                self.execute_dummy_batch()
-                iteration_details = self._finish_iteration_details(pending_iteration)
-                if iteration_details is not None and not self.has_coordinator:
+                # Execute a dummy pass when no ready requests ran, unless the
+                # engine is sleeping.
+                elif not self.model_executor.is_sleeping:
+                  pending_iteration = self._start_iteration_details(None)
+                  self.execute_dummy_batch()
+                  iteration_details = self._finish_iteration_details(pending_iteration)
+                  if iteration_details is not None and not self.has_coordinator:
                     stats = self._make_iteration_details_stats(iteration_details)
                     self.output_queue.put_nowait(
                         (0, EngineCoreOutputs(scheduler_stats=stats))
