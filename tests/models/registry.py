@@ -208,12 +208,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "Snowflake/snowflake-arctic-instruct", trust_remote_code=True
     ),
     "AXK1ForCausalLM": _HfExamplesInfo("skt/A.X-K1", trust_remote_code=True),
-    "BaiChuanForCausalLM": _HfExamplesInfo(
-        "baichuan-inc/Baichuan-7B", trust_remote_code=True
-    ),
-    "BaichuanForCausalLM": _HfExamplesInfo(
-        "baichuan-inc/Baichuan2-7B-chat", trust_remote_code=True
-    ),
     "BailingMoeForCausalLM": _HfExamplesInfo(
         "inclusionAI/Ling-lite-1.5", trust_remote_code=True
     ),
