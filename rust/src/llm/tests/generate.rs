@@ -179,7 +179,7 @@ fn sample_generate_request(request_id: &str, max_tokens: u32) -> GenerateRequest
         trace_headers: None,
         priority: 0,
         data_parallel_rank: None,
-        reasoning_ended: None,
+        reasoning_parser_kwargs: None,
         lora_request: None,
     }
 }

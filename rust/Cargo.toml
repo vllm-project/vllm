@@ -123,6 +123,7 @@ vllm-text = { path = "src/text" }
 vllm-tokenizer = { path = "src/tokenizer" }
 vllm-tool-parser = { path = "src/tool-parser" }
 winnow = "1.0.2"
+xgrammar-structural-tag = "0.1.0"
 zeromq = { version = "0.6.0", default-features = false, features = [
     "tokio-runtime",
     "all-transport",
