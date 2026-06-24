@@ -1,0 +1,104 @@
+group: E2E Integration Intel
+depends_on:
+  - image-build-xpu
+steps:
+- label: DeepSeek V2-Lite Sync EPLB Accuracy
+  timeout_in_minutes: 60
+  device: intel_gpu
+  optional: true
+  num_devices: 4
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 4+
+  _raw_old_commands:
+  - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_eplb.sh 0.25 200 8010
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_eplb.sh 0.25 200 8010'
+- label: Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy
+  timeout_in_minutes: 60
+  device: intel_gpu
+  optional: true
+  num_devices: 4
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 4+
+  _raw_old_commands:
+  - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020'
+- label: Qwen3-30B-A3B-FP8-block Sync EPLB Accuracy (B200)
+  timeout_in_minutes: 60
+  device: intel_gpu
+  optional: true
+  num_devices: 2
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 2+
+  _raw_old_commands:
+  - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020 2 1
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020 2 1'
+- label: Qwen3-30B-A3B-FP8 DP4 Async EPLB Accuracy
+  timeout_in_minutes: 60
+  device: intel_gpu
+  optional: true
+  num_devices: 4
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 4+
+  _raw_old_commands:
+  - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_dp4_async_eplb.sh 0.8 200 8050
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_dp4_async_eplb.sh 0.8 200 8050'
+- label: DeepSeek V2-Lite Prefetch Offload Accuracy (H100)
+  timeout_in_minutes: 60
+  device: intel_gpu
+  optional: true
+  num_devices: 1
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_prefetch_offload.sh 0.25 200 8030
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_prefetch_offload.sh 0.25 200 8030'

@@ -1,0 +1,176 @@
+group: Models - Language Intel
+depends_on:
+  - image-build-xpu
+steps:
+- label: Language Models Tests (Standard)
+  timeout_in_minutes: 25
+  device: intel_gpu
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pip freeze | grep -E 'torch'
+  - pytest -v -s models/language -m 'core_model and (not slow_test)'
+  source_file_dependencies:
+  - vllm/
+  - tests/models/language
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s models/language -m 'core_model and (not slow_test)''
+- label: Language Models Tests (Extra Standard) %N
+  timeout_in_minutes: 45
+  parallelism: 2
+  device: intel_gpu
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pip freeze | grep -E 'torch'
+  - pytest -v -s models/language -m 'core_model and slow_test' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  source_file_dependencies:
+  - vllm/model_executor/models/
+  - tests/models/language/pooling/test_embedding.py
+  - tests/models/language/generation/test_common.py
+  - tests/models/language/pooling/test_classification.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s models/language -m 'core_model and slow_test' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB'
+- label: Language Models Tests (Hybrid) %N
+  timeout_in_minutes: 75
+  parallelism: 2
+  device: intel_gpu
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0'
+  - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+  - pytest -v -s models/language/generation -m hybrid_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  source_file_dependencies:
+  - vllm/
+  - tests/models/language/generation
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0' &&
+    uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0' &&
+    pytest -v -s models/language/generation -m hybrid_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB'
+- label: Language Models Test (Extended Generation)
+  device: intel_gpu
+  timeout_in_minutes: 110
+  optional: true
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0'
+  - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+  - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
+  source_file_dependencies:
+  - vllm/
+  - tests/models/language/generation
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0' &&
+    uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0' &&
+    pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)''
+- label: Language Models Test (PPL)
+  timeout_in_minutes: 110
+  device: intel_gpu
+  optional: true
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s models/language/generation_ppl_test
+  source_file_dependencies:
+  - vllm/
+  - tests/models/language/generation_ppl_test
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s models/language/generation_ppl_test'
+- label: Language Models Test (Extended Pooling)
+  device: intel_gpu
+  timeout_in_minutes: 50
+  optional: true
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s models/language/pooling -m 'not core_model'
+  source_file_dependencies:
+  - vllm/
+  - tests/models/language/pooling
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s models/language/pooling -m 'not core_model''
+- label: Language Models Test (MTEB)
+  timeout_in_minutes: 110
+  device: intel_gpu
+  optional: true
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s models/language/pooling_mteb_test
+  source_file_dependencies:
+  - vllm/
+  - tests/models/language/pooling_mteb_test
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s models/language/pooling_mteb_test'

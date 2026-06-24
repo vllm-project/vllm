@@ -1,0 +1,101 @@
+group: Models - Basic Intel
+depends_on:
+  - image-build-xpu
+steps:
+- label: Basic Models Tests (Initialization)
+  timeout_in_minutes: 45
+  device: intel_gpu
+  torch_nightly: true
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
+  source_file_dependencies:
+  - vllm/
+  - tests/models/test_initialization.py
+  - tests/models/registry.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s models/test_initialization.py::test_can_initialize_small_subset'
+- label: Basic Models Tests (Extra Initialization) %N
+  device: intel_gpu
+  timeout_in_minutes: 45
+  parallelism: 2
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s models/test_initialization.py -k 'not test_can_initialize_small_subset' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  source_file_dependencies:
+  - vllm/model_executor/models/
+  - tests/models/test_initialization.py
+  - tests/models/registry.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s models/test_initialization.py -k 'not test_can_initialize_small_subset' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB'
+- label: Basic Models Tests (Other)
+  device: intel_gpu
+  timeout_in_minutes: 45
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s models/test_terratorch.py models/test_transformers.py models/test_registry.py
+  source_file_dependencies:
+  - vllm/
+  - tests/models/test_terratorch.py
+  - tests/models/test_transformers.py
+  - tests/models/test_registry.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s models/test_terratorch.py models/test_transformers.py models/test_registry.py'
+- label: Basic Models Test (Other CPU)
+  depends_on:
+  - image-build-cpu
+  timeout_in_minutes: 10
+  device: intel_gpu
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s models/test_utils.py models/test_vision.py
+  source_file_dependencies:
+  - vllm/
+  - tests/models/test_utils.py
+  - tests/models/test_vision.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s models/test_utils.py models/test_vision.py'

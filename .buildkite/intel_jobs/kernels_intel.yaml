@@ -6,7 +6,7 @@ steps:
   timeout_in_minutes: 30
   device: intel_gpu
   agent_tags:
-    label: production
+    label: debug
     gpu: 1+
     mem: 16+
   no_plugin: true
@@ -22,4 +22,5 @@ steps:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
-      pytest -v -s kernels/ir'
+      pytest -v -s tests/ir &&
+      pytest -v -s tests/kernels/ir'

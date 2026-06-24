@@ -1,131 +1,283 @@
-group: Models - Multimodal
+group: Models - Multimodal Intel
 depends_on:
   - image-build-xpu
 steps:
-- label: "Multi-Modal Models (Standard) 1: qwen2"
-  key: multi-modal-models-standard-1-qwen2
+- label: 'Multi-Modal Models (Standard) 1: qwen2'
   timeout_in_minutes: 45
   device: intel_gpu
-  agent_tags:
-    label: production
-    gpu: 1+
-    mem: 16+
   no_plugin: true
-  working_dir: "."
+  working_dir: .
   env:
-    REGISTRY: "public.ecr.aws/q9t5s3a7"
-    REPO: "vllm-ci-test-repo"
-    VLLM_TEST_DEVICE: "xpu"
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+  - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen2"
+  - pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
   commands:
-    - >-
-      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'pip install av git+https://github.com/TIGER-AI-Lab/Mantis.git &&
-      cd tests &&
-      pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen2" &&
-      pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model'
-
-- label: "Multi-Modal Models (Standard) 2: qwen3 + gemma"
-  key: multi-modal-models-standard-2-qwen3-gemma
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pip install git+https://github.com/TIGER-AI-Lab/Mantis.git &&
+    pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen2" &&
+    pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model'
+- label: 'Multi-Modal Models (Standard) 2: qwen3 + gemma'
   timeout_in_minutes: 45
   device: intel_gpu
-  agent_tags:
-    label: production
-    gpu: 1+
-    mem: 16+
   no_plugin: true
-  working_dir: "."
+  working_dir: .
   env:
-    REGISTRY: "public.ecr.aws/q9t5s3a7"
-    REPO: "vllm-ci-test-repo"
-    VLLM_TEST_DEVICE: "xpu"
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+  - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen3 or gemma"
+  - pytest -v -s models/multimodal/generation/test_qwen2_5_vl.py -m core_model
+  - pytest -v -s models/multimodal/generation/test_vit_cudagraph.py -m core_model
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
   commands:
-    - >-
-      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'pip install git+https://github.com/TIGER-AI-Lab/Mantis.git &&
-      cd tests &&
-      pytest -v -s models/multimodal/generation/test_qwen2_5_vl.py -m core_model'
-
-- label: "Multi-Modal Models (Standard) 3: llava + qwen2_vl"
-  key: multi-modal-models-standard-3-llava-qwen2-vl
-  timeout_in_minutes: 45
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pip install git+https://github.com/TIGER-AI-Lab/Mantis.git &&
+    pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen3 or gemma" &&
+    pytest -v -s models/multimodal/generation/test_qwen2_5_vl.py -m core_model &&
+    pytest -v -s models/multimodal/generation/test_vit_cudagraph.py -m core_model'
+- label: 'Multi-Modal Models (Standard) 3: llava + qwen2_vl'
   device: intel_gpu
-  agent_tags:
-    label: production
-    gpu: 1+
-    mem: 24+
+  timeout_in_minutes: 45
   no_plugin: true
-  working_dir: "."
+  working_dir: .
   env:
-    REGISTRY: "public.ecr.aws/q9t5s3a7"
-    REPO: "vllm-ci-test-repo"
-    VLLM_TEST_DEVICE: "xpu"
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+  - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "not qwen2 and not qwen3 and not gemma"
+  - pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
   commands:
-    - >-
-      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'pip install git+https://github.com/TIGER-AI-Lab/Mantis.git &&
-      cd tests &&
-      pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "not qwen2 and not qwen3 and not gemma" &&
-      pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model'
-
-- label: "Multi-Modal Models (Standard) 4: other + whisper"
-  key: multi-modal-models-standard-4-other-whisper
-  timeout_in_minutes: 45
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pip install git+https://github.com/TIGER-AI-Lab/Mantis.git &&
+    pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "not qwen2 and not qwen3 and not gemma" &&
+    pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model'
+- label: 'Multi-Modal Models (Standard) 4: other + whisper'
   device: intel_gpu
-  agent_tags:
-    label: production
-    gpu: 1+
-    mem: 16+
+  timeout_in_minutes: 45
   no_plugin: true
-  working_dir: "."
+  working_dir: .
   env:
-    REGISTRY: "public.ecr.aws/q9t5s3a7"
-    REPO: "vllm-ci-test-repo"
-    VLLM_TEST_DEVICE: "xpu"
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+  - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py  --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/processing
+  - pytest models/multimodal/generation/test_memory_leak.py -m core_model
+  - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
   commands:
-    - >-
-      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'pip install av git+https://github.com/TIGER-AI-Lab/Mantis.git &&
-      cd tests &&
-      pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py  --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/processing'
-
-- label: Multi-Modal Processor # 44min
-  key: multi-modal-processor
-  timeout_in_minutes: 45
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pip install git+https://github.com/TIGER-AI-Lab/Mantis.git &&
+    pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py  --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/processing &&
+    pytest models/multimodal/generation/test_memory_leak.py -m core_model &&
+    cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model'
+- label: Multi-Modal Processor (CPU)
+  depends_on:
+  - image-build-cpu
+  timeout_in_minutes: 60
   device: intel_gpu
-  agent_tags:
-    label: production
-    gpu: 1+
-    mem: 16+
   no_plugin: true
-  working_dir: "."
+  working_dir: .
   env:
-    REGISTRY: "public.ecr.aws/q9t5s3a7"
-    REPO: "vllm-ci-test-repo"
-    VLLM_TEST_DEVICE: "xpu"
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+  - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
   - tests/models/registry.py
   commands:
-    - >-
-      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'pip install av matplotlib ftfy git+https://github.com/TIGER-AI-Lab/Mantis.git &&
-      pip install open-clip-torch --no-deps &&
-      cd tests &&
-      pytest -v -s models/multimodal/processing/test_tensor_schema.py
-      --deselect "tests/models/multimodal/processing/test_tensor_schema.py::test_model_tensor_schema[mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4]"
-      --deselect "tests/models/multimodal/processing/test_tensor_schema.py::test_model_tensor_schema[Qwen/Qwen2.5-Omni-7B-AWQ]"
-      --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB'
-  parallelism: 4
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pip install git+https://github.com/TIGER-AI-Lab/Mantis.git &&
+    pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py'
+- label: Multi-Modal Processor
+  timeout_in_minutes: 60
+  device: intel_gpu
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+  - pytest -v -s models/multimodal/processing/test_tensor_schema.py
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal
+  - tests/models/registry.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pip install git+https://github.com/TIGER-AI-Lab/Mantis.git &&
+    pytest -v -s models/multimodal/processing/test_tensor_schema.py'
+- label: Multi-Modal Accuracy Eval (Small Models)
+  device: intel_gpu
+  timeout_in_minutes: 70
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
+  source_file_dependencies:
+  - vllm/multimodal/
+  - vllm/inputs/
+  - vllm/v1/core/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1'
+- label: Multi-Modal Models (Extended Generation 1)
+  optional: true
+  device: intel_gpu
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+  - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py
+  - pytest -v -s models/multimodal/test_mapping.py
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal/generation
+  - tests/models/multimodal/test_mapping.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pip install git+https://github.com/TIGER-AI-Lab/Mantis.git &&
+    pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py &&
+    pytest -v -s models/multimodal/test_mapping.py'
+- label: Multi-Modal Models (Extended Generation 2)
+  device: intel_gpu
+  optional: true
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+  - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal/generation
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pip install git+https://github.com/TIGER-AI-Lab/Mantis.git &&
+    pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model''
+- label: Multi-Modal Models (Extended Generation 3)
+  device: intel_gpu
+  optional: true
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+  - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal/generation
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pip install git+https://github.com/TIGER-AI-Lab/Mantis.git &&
+    pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model''
+- label: Multi-Modal Models (Extended Pooling)
+  optional: true
+  device: intel_gpu
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s models/multimodal/pooling -m 'not core_model'
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal/pooling
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s models/multimodal/pooling -m 'not core_model''

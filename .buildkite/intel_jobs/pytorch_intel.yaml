@@ -1,0 +1,250 @@
+group: PyTorch Intel
+depends_on:
+  - image-build-xpu
+steps:
+- label: PyTorch Compilation Unit Tests
+  device: intel_gpu
+  timeout_in_minutes: 10
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - find compile/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'
+  source_file_dependencies:
+  - vllm/__init__.py
+  - vllm/_aiter_ops.py
+  - vllm/_custom_ops.py
+  - vllm/compilation/
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/env_override.py
+  - vllm/envs.py
+  - vllm/forward_context.py
+  - vllm/inputs/
+  - vllm/ir/
+  - vllm/kernels/
+  - vllm/logger.py
+  - vllm/model_executor/
+  - vllm/multimodal/
+  - vllm/platforms/
+  - vllm/plugins/
+  - vllm/sampling_params.py
+  - vllm/sequence.py
+  - vllm/transformers_utils/
+  - vllm/triton_utils/
+  - vllm/utils/
+  - vllm/v1/
+  - tests/compile
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    find compile/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}''
+- label: PyTorch Compilation Unit Tests (H100)
+  timeout_in_minutes: 30
+  device: intel_gpu
+  num_devices: 1
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - find compile/h100/ -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'
+  source_file_dependencies:
+  - vllm/__init__.py
+  - vllm/_aiter_ops.py
+  - vllm/_custom_ops.py
+  - vllm/compilation/
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/env_override.py
+  - vllm/envs.py
+  - vllm/forward_context.py
+  - vllm/inputs/
+  - vllm/ir/
+  - vllm/kernels/
+  - vllm/logger.py
+  - vllm/model_executor/
+  - vllm/multimodal/
+  - vllm/platforms/
+  - vllm/plugins/
+  - vllm/sampling_params.py
+  - vllm/sequence.py
+  - vllm/transformers_utils/
+  - vllm/triton_utils/
+  - vllm/utils/
+  - vllm/v1/
+  - tests/compile/h100/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    find compile/h100/ -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}''
+- label: PyTorch Compilation Passes Unit Tests
+  timeout_in_minutes: 20
+  device: intel_gpu
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -s -v compile/passes --ignore compile/passes/distributed
+  source_file_dependencies:
+  - vllm/__init__.py
+  - vllm/_aiter_ops.py
+  - vllm/_custom_ops.py
+  - vllm/compilation/
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/env_override.py
+  - vllm/envs.py
+  - vllm/forward_context.py
+  - vllm/inputs/
+  - vllm/ir/
+  - vllm/kernels/
+  - vllm/logger.py
+  - vllm/model_executor/
+  - vllm/multimodal/
+  - vllm/platforms/
+  - vllm/plugins/
+  - vllm/sampling_params.py
+  - vllm/sequence.py
+  - vllm/transformers_utils/
+  - vllm/triton_utils/
+  - vllm/utils/
+  - vllm/v1/
+  - tests/compile/passes
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -s -v compile/passes --ignore compile/passes/distributed'
+- label: PyTorch Fullgraph Smoke Test
+  timeout_in_minutes: 35
+  device: intel_gpu
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_graph.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'
+  source_file_dependencies:
+  - vllm/__init__.py
+  - vllm/_aiter_ops.py
+  - vllm/_custom_ops.py
+  - vllm/compilation/
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/env_override.py
+  - vllm/envs.py
+  - vllm/forward_context.py
+  - vllm/inputs/
+  - vllm/ir/
+  - vllm/kernels/
+  - vllm/logger.py
+  - vllm/model_executor/
+  - vllm/multimodal/
+  - vllm/platforms/
+  - vllm/plugins/
+  - vllm/sampling_params.py
+  - vllm/sequence.py
+  - vllm/transformers_utils/
+  - vllm/triton_utils/
+  - vllm/utils/
+  - vllm/v1/
+  - tests/compile
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_graph.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}''
+- label: PyTorch Fullgraph
+  timeout_in_minutes: 30
+  device: intel_gpu
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s compile/fullgraph/test_full_graph.py -k 'not test_fp8_kv_scale_compile'
+  source_file_dependencies:
+  - vllm/__init__.py
+  - vllm/_aiter_ops.py
+  - vllm/_custom_ops.py
+  - vllm/compilation/
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/env_override.py
+  - vllm/envs.py
+  - vllm/forward_context.py
+  - vllm/inputs/
+  - vllm/ir/
+  - vllm/kernels/
+  - vllm/logger.py
+  - vllm/model_executor/
+  - vllm/multimodal/
+  - vllm/platforms/
+  - vllm/plugins/
+  - vllm/sampling_params.py
+  - vllm/sequence.py
+  - vllm/transformers_utils/
+  - vllm/triton_utils/
+  - vllm/utils/
+  - vllm/v1/
+  - tests/compile
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s compile/fullgraph/test_full_graph.py -k 'not test_fp8_kv_scale_compile''
+- label: Pytorch Nightly Dependency Override Check
+  device: intel_gpu
+  soft_fail: true
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - bash standalone_tests/pytorch_nightly_dependency.sh
+  source_file_dependencies:
+  - requirements/test/nightly-torch.txt
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'bash standalone_tests/pytorch_nightly_dependency.sh'

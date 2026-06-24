@@ -1,0 +1,30 @@
+group: Docker Intel
+depends_on:
+- image-build-cpu
+steps:
+- label: Docker Build Metadata
+  timeout_in_minutes: 10
+  device: intel_gpu
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s tools/test_docker_build_metadata_args.py
+  source_file_dependencies:
+  - .buildkite/release-pipeline.yaml
+  - .buildkite/scripts/docker-build-metadata-args.sh
+  - docker/Dockerfile
+  - docker/Dockerfile.cpu
+  - docker/docker-bake.hcl
+  - tests/tools/test_docker_build_metadata_args.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s tools/test_docker_build_metadata_args.py'

@@ -1,0 +1,408 @@
+group: Distributed Intel
+depends_on:
+  - image-build-xpu
+steps:
+- label: Distributed Comm Ops
+  timeout_in_minutes: 20
+  working_dir: .
+  num_devices: 2
+  device: intel_gpu
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 2+
+  _raw_old_commands:
+  - pytest -v -s distributed/test_comm_ops.py
+  - pytest -v -s distributed/test_shm_broadcast.py
+  - pytest -v -s distributed/test_shm_buffer.py
+  - pytest -v -s distributed/test_shm_storage.py
+  source_file_dependencies:
+  - vllm/distributed
+  - tests/distributed
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s distributed/test_comm_ops.py &&
+    pytest -v -s distributed/test_shm_broadcast.py &&
+    pytest -v -s distributed/test_shm_buffer.py &&
+    pytest -v -s distributed/test_shm_storage.py'
+- label: Distributed DP Tests (2 GPUs)
+  timeout_in_minutes: 20
+  working_dir: .
+  num_devices: 2
+  device: intel_gpu
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 2+
+  _raw_old_commands:
+  - export NCCL_CUMEM_HOST_ENABLE=0
+  - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
+  - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
+  - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
+  - DP_SIZE=2 pytest -v -s entrypoints/openai/test_multi_api_servers.py
+  source_file_dependencies:
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/executor/
+  - vllm/worker/worker_base.py
+  - vllm/v1/engine/
+  - vllm/v1/worker/
+  - tests/v1/distributed
+  - tests/entrypoints/openai/test_multi_api_servers.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    export NCCL_CUMEM_HOST_ENABLE=0 &&
+    TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py &&
+    TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py &&
+    TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py &&
+    DP_SIZE=2 pytest -v -s entrypoints/openai/test_multi_api_servers.py'
+- label: Distributed Compile + RPC Tests (2 GPUs)
+  timeout_in_minutes: 20
+  working_dir: .
+  num_devices: 2
+  device: intel_gpu
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 2+
+  _raw_old_commands:
+  - export NCCL_CUMEM_HOST_ENABLE=0
+  - pytest -v -s entrypoints/llm/test_collective_rpc.py
+  - pytest -v -s ./compile/fullgraph/test_basic_correctness.py
+  - pytest -v -s ./compile/test_wrapper.py
+  source_file_dependencies:
+  - vllm/compilation/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/executor/
+  - vllm/worker/worker_base.py
+  - vllm/v1/engine/
+  - vllm/v1/worker/
+  - tests/compile/fullgraph/test_basic_correctness.py
+  - tests/compile/test_wrapper.py
+  - tests/entrypoints/llm/test_collective_rpc.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    export NCCL_CUMEM_HOST_ENABLE=0 &&
+    pytest -v -s entrypoints/llm/test_collective_rpc.py &&
+    pytest -v -s ./compile/fullgraph/test_basic_correctness.py &&
+    pytest -v -s ./compile/test_wrapper.py'
+- label: Distributed Torchrun + Shutdown Tests (2 GPUs)
+  timeout_in_minutes: 20
+  working_dir: .
+  num_devices: 2
+  device: intel_gpu
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 2+
+  _raw_old_commands:
+  - export NCCL_CUMEM_HOST_ENABLE=0
+  - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
+  - VLLM_TEST_SAME_HOST=1 VLLM_TEST_WITH_DEFAULT_DEVICE_SET=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
+  - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
+  - pytest -v -s v1/worker/test_worker_memory_snapshot.py
+  source_file_dependencies:
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/executor/
+  - vllm/worker/worker_base.py
+  - vllm/v1/engine/
+  - vllm/v1/worker/
+  - tests/distributed/
+  - tests/v1/shutdown
+  - tests/v1/worker/test_worker_memory_snapshot.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    export NCCL_CUMEM_HOST_ENABLE=0 &&
+    VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed' &&
+    VLLM_TEST_SAME_HOST=1 VLLM_TEST_WITH_DEFAULT_DEVICE_SET=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed' &&
+    CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown &&
+    pytest -v -s v1/worker/test_worker_memory_snapshot.py'
+- label: Distributed Torchrun + Examples (4 GPUs)
+  timeout_in_minutes: 30
+  working_dir: .
+  num_devices: 4
+  device: intel_gpu
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 4+
+  _raw_old_commands:
+  - export NCCL_CUMEM_HOST_ENABLE=0
+  - torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example.py
+  - PP_SIZE=2 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example.py
+  - TP_SIZE=4 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
+  - PP_SIZE=2 TP_SIZE=2 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
+  - DP_SIZE=4 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
+  - TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
+  - python3 examples/features/data_parallel/data_parallel_offline.py --enforce-eager
+  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_nccl.py
+  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_ipc.py
+  source_file_dependencies:
+  - vllm/distributed/
+  - tests/distributed/test_torchrun_example.py
+  - tests/distributed/test_torchrun_example_moe.py
+  - examples/rl/
+  - tests/examples/features/data_parallel/data_parallel_offline.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'export NCCL_CUMEM_HOST_ENABLE=0 &&
+    torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example.py &&
+    PP_SIZE=2 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example.py &&
+    TP_SIZE=4 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py &&
+    PP_SIZE=2 TP_SIZE=2 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py &&
+    DP_SIZE=4 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py &&
+    TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py'
+- label: Distributed DP Tests (4 GPUs)
+  timeout_in_minutes: 30
+  working_dir: .
+  num_devices: 4
+  device: intel_gpu
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 4+
+  _raw_old_commands:
+  - export NCCL_CUMEM_HOST_ENABLE=0
+  - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
+  - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
+  - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
+  - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_internal_lb_dp.py
+  - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py
+  - pytest -v -s v1/engine/test_engine_core_client.py::test_kv_cache_events_dp
+  - pytest -v -s distributed/test_utils.py
+  source_file_dependencies:
+  - vllm/distributed/
+  - tests/v1/distributed
+  - tests/v1/engine/test_engine_core_client.py
+  - tests/distributed/test_utils
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    export NCCL_CUMEM_HOST_ENABLE=0 &&
+    TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py &&
+    TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py &&
+    TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py &&
+    TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_internal_lb_dp.py &&
+    TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py &&
+    pytest -v -s v1/engine/test_engine_core_client.py::test_kv_cache_events_dp &&
+    pytest -v -s distributed/test_utils.py'
+- label: Distributed Compile + Comm (4 GPUs)
+  timeout_in_minutes: 30
+  working_dir: .
+  num_devices: 4
+  device: intel_gpu
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 4+
+  _raw_old_commands:
+  - export NCCL_CUMEM_HOST_ENABLE=0
+  - pytest -v -s compile/fullgraph/test_basic_correctness.py
+  - pytest -v -s distributed/test_pynccl.py
+  - pytest -v -s distributed/test_events.py
+  - pytest -v -s distributed/test_symm_mem_allreduce.py
+  - pytest -v -s distributed/test_multiproc_executor.py::test_multiproc_executor_multi_node
+  source_file_dependencies:
+  - vllm/distributed/
+  - tests/distributed/test_pynccl
+  - tests/distributed/test_events
+  - tests/compile/fullgraph/test_basic_correctness.py
+  - tests/distributed/test_symm_mem_allreduce.py
+  - tests/distributed/test_multiproc_executor.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    export NCCL_CUMEM_HOST_ENABLE=0 &&
+    pytest -v -s compile/fullgraph/test_basic_correctness.py &&
+    pytest -v -s distributed/test_pynccl.py &&
+    pytest -v -s distributed/test_events.py &&
+    pytest -v -s distributed/test_symm_mem_allreduce.py &&
+    pytest -v -s distributed/test_multiproc_executor.py::test_multiproc_executor_multi_node'
+- label: Distributed Tests (4 GPUs)(A100)
+  device: intel_gpu
+  optional: true
+  num_devices: 4
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 4+
+  _raw_old_commands:
+  - pytest -v -s distributed/test_custom_all_reduce.py
+  - torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py
+  - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
+  - pytest -v -s -x lora/test_mixtral.py
+  source_file_dependencies:
+  - vllm/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s distributed/test_custom_all_reduce.py &&
+    torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py &&
+    TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)' &&
+    pytest -v -s -x lora/test_mixtral.py'
+- label: Distributed Tests (2 GPUs)(H100)
+  timeout_in_minutes: 15
+  device: intel_gpu
+  optional: true
+  working_dir: .
+  num_devices: 2
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 2+
+  _raw_old_commands:
+  - pytest -v -s tests/distributed/test_context_parallel.py
+  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_async_new_apis.py
+  - VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
+  - pytest -v -s tests/v1/distributed/test_dbo.py
+  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py
+  - pytest -v -s tests/distributed/test_packed_tensor.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest -v -s tests/distributed/test_context_parallel.py &&
+    pytest -v -s tests/v1/distributed/test_dbo.py &&
+    VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py &&
+    pytest -v -s tests/distributed/test_packed_tensor.py'
+- label: Distributed Tests (2 GPUs)(B200)
+  device: intel_gpu
+  optional: true
+  working_dir: .
+  num_devices: 2
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 2+
+  _raw_old_commands:
+  - pytest -v -s tests/distributed/test_context_parallel.py
+  - pytest -v -s tests/distributed/test_nccl_symm_mem_allreduce.py
+  - pytest -v -s tests/v1/distributed/test_dbo.py
+  - pytest -v -s tests/distributed/test_mnnvl_alltoall.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest -v -s tests/distributed/test_context_parallel.py &&
+    pytest -v -s tests/distributed/test_nccl_symm_mem_allreduce.py &&
+    pytest -v -s tests/v1/distributed/test_dbo.py &&
+    pytest -v -s tests/distributed/test_mnnvl_alltoall.py'
+- label: Pipeline + Context Parallelism (4 GPUs)
+  timeout_in_minutes: 60
+  working_dir: .
+  num_devices: 4
+  device: intel_gpu
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 4+
+  _raw_old_commands:
+  - pytest -v -s distributed/test_pp_cudagraph.py
+  - pytest -v -s distributed/test_pipeline_parallel.py
+  source_file_dependencies:
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/executor/
+  - vllm/model_executor/models/
+  - tests/distributed/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s distributed/test_pp_cudagraph.py &&
+    pytest -v -s distributed/test_pipeline_parallel.py'
+- label: RayExecutorV2 (4 GPUs)
+  timeout_in_minutes: 60
+  working_dir: .
+  num_devices: 4
+  device: intel_gpu
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 4+
+  _raw_old_commands:
+  - export VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
+  - export NCCL_CUMEM_HOST_ENABLE=0
+  - pytest -v -s distributed/test_ray_v2_executor.py
+  - pytest -v -s distributed/test_ray_v2_executor_e2e.py
+  - pytest -v -s distributed/test_pipeline_parallel.py -k "ray"
+  - TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/test_basic_correctness.py -k "ray"
+  source_file_dependencies:
+  - vllm/v1/executor/ray_executor_v2.py
+  - vllm/v1/executor/abstract.py
+  - vllm/v1/executor/multiproc_executor.py
+  - tests/distributed/test_ray_v2_executor.py
+  - tests/distributed/test_ray_v2_executor_e2e.py
+  - tests/distributed/test_pipeline_parallel.py
+  - tests/basic_correctness/test_basic_correctness.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    export VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1 &&
+    export NCCL_CUMEM_HOST_ENABLE=0 &&
+    pytest -v -s distributed/test_ray_v2_executor.py &&
+    pytest -v -s distributed/test_ray_v2_executor_e2e.py &&
+    pytest -v -s distributed/test_pipeline_parallel.py -k "ray" &&
+    TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/test_basic_correctness.py -k "ray"'

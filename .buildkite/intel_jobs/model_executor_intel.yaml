@@ -1,0 +1,36 @@
+group: Model Executor Intel
+depends_on:
+  - image-build-xpu
+steps:
+- label: Model Executor
+  timeout_in_minutes: 35
+  device: intel_gpu
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - apt-get update && apt-get install -y curl libsodium23
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - export PYTHONFAULTHANDLER=1
+  - pytest -v -s model_executor -m '(not slow_test)' --timeout=900 --timeout-method=thread
+  - pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py --timeout=900 --timeout-method=thread
+  source_file_dependencies:
+  - vllm/engine/arg_utils.py
+  - vllm/config/model.py
+  - vllm/model_executor
+  - tests/model_executor
+  - tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
+    export PYTHONFAULTHANDLER=1 &&
+    pytest -v -s model_executor -m '(not slow_test)' --timeout=900 --timeout-method=thread &&
+    pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py --timeout=900 --timeout-method=thread'

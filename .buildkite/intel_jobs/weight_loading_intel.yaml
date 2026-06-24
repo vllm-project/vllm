@@ -1,0 +1,28 @@
+group: Weight Loading Intel
+depends_on:
+  - image-build-xpu
+steps:
+- label: Weight Loading Multiple GPU
+  timeout_in_minutes: 45
+  working_dir: .
+  num_devices: 2
+  optional: true
+  device: intel_gpu
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 2+
+  _raw_old_commands:
+  - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models.txt
+  source_file_dependencies:
+  - vllm/
+  - tests/weight_loading
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models.txt'
