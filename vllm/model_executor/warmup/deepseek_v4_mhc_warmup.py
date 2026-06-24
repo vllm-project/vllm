@@ -171,7 +171,7 @@ def _warmup_layer_mhc(
                 getattr(layer, "ffn_norm", None),
             ),
         ):
-            post_mix, comb_mix, layer_input = layer.hc_pre(
+            layer_input, post_mix, comb_mix = layer.hc_pre(
                 residual_slice,
                 fn,
                 scale,
@@ -179,7 +179,7 @@ def _warmup_layer_mhc(
             )
             layer.hc_post(layer_input, residual_slice, post_mix, comb_mix)
             if norm is not None:
-                post_mix, comb_mix, layer_input = layer.hc_pre(
+                layer_input, post_mix, comb_mix = layer.hc_pre(
                     residual_slice,
                     fn,
                     scale,
