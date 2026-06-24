@@ -26,8 +26,11 @@ from vllm.entrypoints.anthropic.serving import (
     _get_cached_tokens,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionResponse,
+    ChatCompletionResponseChoice,
     ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse,
+    ChatMessage,
 )
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
@@ -1381,3 +1384,39 @@ class TestDetectMergeInlineSystem:
     def test_no_template_defaults_merge(self):
         """No chat_template → conservative default: merge."""
         assert AnthropicServingMessages._detect_merge_inline_system(None) is True
+
+
+# ======================================================================
+# Full (non-streaming) response conversion: messages_full_converter
+# ======================================================================
+
+
+def _make_full_converter():
+    obj = MagicMock(spec=AnthropicServingMessages)
+    obj.messages_full_converter = (
+        AnthropicServingMessages.messages_full_converter.__get__(obj)
+    )
+    return obj
+
+
+class TestMessagesFullConverter:
+    def test_empty_completion_emits_one_text_block(self):
+        """An empty completion still yields exactly one (empty) text block."""
+        generator = ChatCompletionResponse(
+            id="chatcmpl-empty",
+            model="test-model",
+            choices=[
+                ChatCompletionResponseChoice(
+                    index=0,
+                    message=ChatMessage(role="assistant", content=None),
+                    finish_reason="stop",
+                )
+            ],
+            usage=UsageInfo(prompt_tokens=10, completion_tokens=0, total_tokens=10),
+        )
+
+        result = _make_full_converter().messages_full_converter(generator)
+
+        assert len(result.content) == 1
+        assert result.content[0].type == "text"
+        assert result.content[0].text == ""
