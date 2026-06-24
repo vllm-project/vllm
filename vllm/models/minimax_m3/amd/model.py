@@ -96,6 +96,7 @@ from vllm.models.minimax_m3.common.sparse_attention import (
 )
 from vllm.models.minimax_m3.common.vision_tower import MiniMaxVLVisionModel
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.kv_cache_interface import (
@@ -108,13 +109,16 @@ from vllm.v1.kv_cache_interface import (
 def _fuse_shared_experts_enabled(config: PretrainedConfig) -> bool:
     """Whether to fuse the shared expert into the routed grouped MoE.
 
-    Opt-in via ``VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS``; requires a shared
-    expert and is disabled under expert parallelism (the shared slot is appended
-    to the routed top-k, which the EP expert-map path does not handle).
+    ROCm only. Opt-in via ``VLLM_ROCM_USE_FUSION_SHARED_EXPERTS`` (router-append
+    fusion on the triton/flydsl mxfp8 MoE, independent of the aiter master
+    switch); requires a shared expert and is disabled under expert parallelism
+    (the shared slot is appended to the routed top-k, which the EP expert-map
+    path does not handle).
     """
     return bool(
-        getattr(config, "n_shared_experts", None)
-        and envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
+        current_platform.is_rocm()
+        and getattr(config, "n_shared_experts", None)
+        and envs.VLLM_ROCM_USE_FUSION_SHARED_EXPERTS
         and not get_current_vllm_config().parallel_config.enable_expert_parallel
     )
 
@@ -310,8 +314,8 @@ class MiniMaxM3MoE(nn.Module):
         )
 
         # Fuse the shared expert into the routed grouped GEMM when opted in via
-        # VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: it becomes routed-expert
-        # slot ``num_local_experts``, reached by every token, eliminating the
+        # VLLM_ROCM_USE_FUSION_SHARED_EXPERTS: it becomes routed-expert slot
+        # ``num_local_experts``, reached by every token, eliminating the
         # separate dense-MLP launches. Not supported under expert parallelism.
         self.fuse_shared_experts = _fuse_shared_experts_enabled(config)
         self.shared_experts: MiniMaxM3MLP | None = None
@@ -343,7 +347,6 @@ class MiniMaxM3MoE(nn.Module):
             n_shared_experts=(
                 self.n_shared_experts if self.fuse_shared_experts else None
             ),
-            fuse_shared_experts=self.fuse_shared_experts,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
         )

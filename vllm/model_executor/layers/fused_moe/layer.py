@@ -6,6 +6,7 @@ from typing import Any
 
 import torch
 
+import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import ParallelConfig, get_current_vllm_config
 from vllm.distributed import (
@@ -74,29 +75,23 @@ def determine_expert_counts(
     num_redundant_experts: int,
     n_shared_experts: int | None,
     is_act_and_mul: bool,
-    force_fuse_shared: bool = False,
 ) -> tuple[int, int, int]:
     global_num_experts = num_experts + num_redundant_experts
     logical_num_experts = num_experts
     # Shared-expert fusion: append the shared expert(s) as routed-expert slots
-    # so they run in the same grouped GEMM. Enabled either by the ROCm aiter
-    # fused-MoE path (VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS + master switch)
-    # or by a model passing ``fuse_shared_experts=True`` (the router appends the
-    # shared slot; works on any gated grouped-MoE backend, independent of the
-    # aiter master switch). Gated activations (silu/gelu/swiglu) only.
+    # so they run in the same grouped GEMM. Enabled by the ROCm aiter fused-MoE
+    # path (VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS + master switch) or by the
+    # backend-neutral router-append path (VLLM_ROCM_USE_FUSION_SHARED_EXPERTS;
+    # works on any gated grouped-MoE backend, e.g. the MM3 triton/flydsl mxfp8
+    # MoE, independent of the aiter master switch). Gated activations only.
     fuse_shared_enabled = (
-        rocm_aiter_ops.is_fusion_moe_shared_experts_enabled() or force_fuse_shared
+        rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+        or envs.VLLM_ROCM_USE_FUSION_SHARED_EXPERTS
     ) and is_act_and_mul
 
     num_fused_shared_experts = (
         n_shared_experts if n_shared_experts is not None and fuse_shared_enabled else 0
     )
-    if not fuse_shared_enabled and num_fused_shared_experts != 0:
-        raise ValueError(
-            "n_shared_experts fusion requires either "
-            "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS (ROCm aiter fused MoE) or "
-            "fuse_shared_experts=True on a gated-activation MoE."
-        )
 
     return global_num_experts, logical_num_experts, num_fused_shared_experts
 
@@ -133,7 +128,6 @@ def FusedMoE(
     is_sequence_parallel: bool = False,
     expert_mapping: list[tuple[str, str, int, str]] | None = None,
     n_shared_experts: int | None = None,
-    fuse_shared_experts: bool = False,
     router_logits_dtype: torch.dtype | None = None,
     gate: torch.nn.Module | None = None,
     shared_experts: torch.nn.Module | None = None,
@@ -190,7 +184,8 @@ def FusedMoE(
         has_bias: Whether expert layers have bias terms
         is_sequence_parallel: Whether sequence parallelism is enabled
         expert_mapping: Expert parameter mapping for weight loading
-        n_shared_experts: Number of shared experts (ROCm aiter only)
+        n_shared_experts: Number of shared experts to fuse into the routed
+            grouped GEMM (ROCm; requires aiter FSE or the router-append path)
         router_logits_dtype: Data type for router logits buffers
         gate: Pre-configured gate module
         shared_experts: Pre-configured shared experts module
@@ -230,7 +225,6 @@ def FusedMoE(
             num_redundant_experts,
             n_shared_experts,
             is_act_and_mul,
-            force_fuse_shared=fuse_shared_experts,
         )
     )
 
