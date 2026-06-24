@@ -240,6 +240,34 @@ class CuMemAllocator:
                         libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
                         data.cpu_backup_tensor = None
 
+        # Ensure every re-map (`create_and_map`) issued above has completed on
+        # the device before the caller returns. `create_and_map` performs the
+        # cuMemCreate/cuMemMap/cuMemSetAccess VMM dance; the freshly re-mapped
+        # regions are not guaranteed to be coherent for an arbitrary downstream
+        # stream the instant the loop exits.
+        #
+        # NOTE on the `cudaMemcpy` restores above: those use the *synchronous*,
+        # host-blocking `cudaMemcpy` (NOT `cudaMemcpyAsync`), so each restore has
+        # already completed w.r.t. the host by the time we get here -- the
+        # restores are not what this synchronize is guarding.
+        #
+        # This `torch.cuda.synchronize()` is a purely LOCAL guarantee: it drains
+        # this rank's device work, nothing more. It does NOT provide any
+        # cross-rank ordering. The cross-rank guarantee for the #45519
+        # PP-broadcast race lives in `Worker.wake_up`, which gates every rank on
+        # a CPU (gloo) all-reduce of a wake-success flag before any rank may
+        # reach a device-group collective. Keeping this local sync here ensures
+        # a rank's local remaps are actually done before it reports success into
+        # that cross-rank all-reduce.
+        #
+        # (Note: the matching `sleep()` offload loop does NOT synchronize per
+        # handle between its `cudaMemcpy` D2H backup and the following
+        # `unmap_and_release` -- the per-handle `torch.cuda.synchronize` lives in
+        # the pluggable-allocator free callback (`_python_free_callback`), a
+        # different path. So this is not a "wake-side analogue" of an existing
+        # sleep-side per-handle sync; it stands on its own.)
+        torch.cuda.synchronize()
+
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):
         """

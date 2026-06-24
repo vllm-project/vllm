@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import regex as re
 import torch
+import torch.distributed
 import torch.nn as nn
 
 import vllm.envs as envs
@@ -42,6 +43,7 @@ from vllm.distributed.parallel_state import (
     Handle,
     get_pp_group,
     get_tp_group,
+    get_world_group,
 )
 from vllm.distributed.weight_transfer import (
     WeightTransferEngine,
@@ -185,8 +187,85 @@ class Worker(WorkerBase):
         )
 
     def wake_up(self, tags: list[str] | None = None) -> None:
+        # Cross-rank wake synchronization (fix for the cumem_tag PP-broadcast
+        # race, issue #45519).
+        #
+        # `wake_up` is dispatched to every worker independently via
+        # `collective_rpc`, and each worker re-maps its own VMM-backed regions
+        # at its own pace. With pipeline/tensor parallelism the very next
+        # decode step issues `torch.distributed.broadcast(..., group=pp.device_
+        # group)` (see `_pp_receive_prev_sampled_token_ids_to_input_batch`).
+        # If a faster rank reaches that collective before a slower rank has
+        # finished re-mapping the regions backing the broadcast buffers, the
+        # collective issues against memory the peer's MMU still treats as
+        # invalid -> CUDA_ERROR_ILLEGAL_ADDRESS, after which the NCCL comm is
+        # permanently corrupt and the engine deadlocks while /health lies 200.
+        #
+        # We therefore must not let any rank proceed to a device-group
+        # collective until *all* ranks have completed their local wake. A plain
+        # barrier after the local wake would do that on the happy path -- but if
+        # one rank's `allocator.wake_up()` raises *before* reaching the barrier,
+        # the surviving ranks would block forever on the barrier, converting a
+        # single-rank wake failure into the exact full-fleet hang we are trying
+        # to fix.
+        #
+        # Instead we all-reduce a per-rank success flag over the CPU (gloo)
+        # group and require unanimity: either every rank succeeded (all proceed)
+        # or at least one failed (every rank raises). This fails LOUD and
+        # SYMMETRIC -- no hang, and no rank silently proceeding into a
+        # device-group collective against a peer whose wake never completed.
+        # The all-reduce is itself a synchronization point, so it subsumes the
+        # barrier. We run it on the CPU/gloo group (the same group
+        # `GroupCoordinator.barrier()` uses) precisely because it never touches
+        # the not-yet-resynced NCCL device_group.
+        needs_wake_sync = (
+            current_platform.is_cuda_alike()
+            and self.vllm_config.model_config.enable_cumem_allocator
+            and (get_tp_group().world_size > 1 or get_pp_group().world_size > 1)
+        )
+
         allocator = get_mem_allocator_instance()
-        allocator.wake_up(tags)
+        if needs_wake_sync:
+            # Catch (do not let escape) the local wake failure so this rank
+            # ALWAYS reaches the cross-rank all-reduce below. If the exception
+            # were allowed to propagate here, this rank would skip the collective
+            # and strand every peer waiting in it forever -- the exact full-fleet
+            # hang we are fixing. We re-raise (chaining the original cause) only
+            # AFTER the handshake, via the unanimity check.
+            local_exc: BaseException | None = None
+            try:
+                allocator.wake_up(tags)
+            except BaseException as e:  # noqa: BLE001 - re-raised after handshake
+                local_exc = e
+
+            local_ok = 0 if local_exc is not None else 1
+            world_group = get_world_group()
+            flag = torch.ones(1, dtype=torch.int32) * local_ok
+            # Raw torch.distributed.all_reduce on the gloo cpu_group (the same
+            # group GroupCoordinator.barrier() uses), NOT
+            # GroupCoordinator.all_reduce (which dispatches to the NCCL device
+            # communicator). ReduceOp.MIN => the global flag is 0 iff ANY rank
+            # contributed 0, so every rank observes the same all_ok verdict.
+            torch.distributed.all_reduce(
+                flag,
+                op=torch.distributed.ReduceOp.MIN,
+                group=world_group.cpu_group,
+            )
+            all_ok = bool(flag.item())
+
+            if not all_ok:
+                msg = (
+                    "Worker.wake_up failed on at least one rank; aborting on "
+                    "all ranks to avoid issuing a device-group collective "
+                    "against a peer whose cumem wake did not complete "
+                    f"(issue #45519). This rank's local wake "
+                    f"{'succeeded' if local_ok else 'FAILED'}."
+                )
+                # Preserve the original traceback/cause on the rank that
+                # actually failed; surviving ranks raise the symmetric abort.
+                raise RuntimeError(msg) from local_exc
+        else:
+            allocator.wake_up(tags)
 
         # Restore the buffers after level 2 sleep
         if len(self._sleep_saved_buffers):
