@@ -1416,10 +1416,27 @@ logger = init_logger(__name__)
 
 _ENABLE_CUSTOM_ALL_REDUCE = True
 
+# Toggle for the cross-rank quiesce barrier the cumem allocator issues at
+# sleep entry / wake_up exit. Default ON: the barrier is cheap (one CPU-side
+# gloo barrier on the world group) and required to avoid #45519-class
+# ``cudaErrorIllegalAddress`` in NCCL P2P after selective-offload sleep/wake
+# (TP×PP with cumem_tag). Provided as a kill switch in case a future setup
+# can demonstrate the barrier is unwanted (e.g. embedded use without a
+# coordinating CPU group). Toggle via ``set_enable_cumem_vmm_barrier``.
+_ENABLE_BARRIER_FOR_VMM_MUTATION = True
+
 
 def set_custom_all_reduce(enable: bool):
     global _ENABLE_CUSTOM_ALL_REDUCE
     _ENABLE_CUSTOM_ALL_REDUCE = enable
+
+
+def set_enable_cumem_vmm_barrier(enable: bool) -> None:
+    """Enable/disable the cross-rank quiesce barrier the cumem allocator
+    issues at sleep entry / wake_up exit. See ``_ENABLE_BARRIER_FOR_VMM_MUTATION``
+    for the rationale (vllm-project/vllm#45519)."""
+    global _ENABLE_BARRIER_FOR_VMM_MUTATION
+    _ENABLE_BARRIER_FOR_VMM_MUTATION = enable
 
 
 def _init_process_group_for_split_group(
