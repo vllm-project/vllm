@@ -8,7 +8,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, NewType
+from typing import TYPE_CHECKING, Any, NamedTuple, NewType
 
 import numpy as np
 import torch
@@ -68,12 +68,13 @@ class RequestOffloadingContext:
     policy: OffloadPolicy = OffloadPolicy.BLOCK_LEVEL
 
 
-@dataclass
-class ScheduleEndContext:
+class ScheduleEndContext(NamedTuple):
     """Per-step scheduling info passed to on_schedule_end()."""
 
-    new_req_ids: Iterable[str]
-    preempted_req_ids: Iterable[str]
+    # Request IDs scheduled for the first time this step.
+    new_req_ids: Collection[str]
+    # Request IDs preempted this step.
+    preempted_req_ids: Collection[str]
 
 
 class LoadStoreSpec(ABC):
