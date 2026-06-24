@@ -16,6 +16,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
+    tensor_model_parallel_reduce_scatter,
 )
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.forward_context import get_forward_context, is_forward_context_available
@@ -526,6 +527,18 @@ class DeepseekV4MoE(nn.Module):
                 "Enable it with --enable-expert-parallel, or pick a different "
                 "moe backend."
             )
+        # mHC sequence parallelism: the FusedMoE runs sharded-in/sharded-out
+        # (internal all-gather dispatch + reduce-scatter combine over the TP
+        # group), so the MoE adds no comm beyond the AllReduce it replaces.
+        # Only wired for the FusedMoE path; MegaMoE+SP is unsupported.
+        self.is_sequence_parallel = (
+            vllm_config.parallel_config.enable_sequence_parallel_mhc
+        )
+        if self.is_sequence_parallel and self.use_mega_moe:
+            raise NotImplementedError(
+                "mHC sequence parallelism requires the FusedMoE path; "
+                "MegaMoE + sequence parallelism is not supported."
+            )
 
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
         self.hidden_size = config.hidden_size
@@ -684,6 +697,7 @@ class DeepseekV4MoE(nn.Module):
             router_logits_dtype=torch.float32,
             enable_eplb=parallel_config.enable_eplb,
             num_redundant_experts=eplb_config.num_redundant_experts,
+            is_sequence_parallel=self.is_sequence_parallel,
         )
 
     def forward(
@@ -816,6 +830,12 @@ class DeepseekV4DecoderLayer(nn.Module):
             topk_indices_buffer=topk_indices_buffer,
             aux_stream_list=aux_stream_list,
         )
+        # Real Megatron-SP on the attention side: have wo_b return the
+        # un-reduced per-rank partial so the layer can replace its AllReduce
+        # with a ReduceScatter (AllReduce == ReduceScatter + AllGather, so this
+        # redistributes the existing reduce instead of adding comm on top).
+        if self.is_sequence_parallel:
+            self.attn.wo_b.reduce_results = False
         self.ffn = DeepseekV4MoE(vllm_config, prefix=f"{prefix}.ffn")
 
         self.attn_norm = RMSNorm(self.hidden_size, self.rms_norm_eps)
@@ -917,13 +937,14 @@ class DeepseekV4DecoderLayer(nn.Module):
             )
 
         # attn_norm is fused into mhc_pre_tilelang / mhc_fused_post_pre above.
-        # Under SP, x is sharded along the token dim: gather to full tokens for
-        # attention, then slice the full output back to this rank's shard.
+        # Under SP: all-gather the sharded stream to full tokens for attention,
+        # then reduce-scatter wo_b's partial output back to this rank's shard
+        # (replaces wo_b's AllReduce; net comm == baseline, mHC stays sharded).
         if self.is_sequence_parallel:
             x = tensor_model_parallel_all_gather(x, dim=0)
         x = self.attn(positions, x, None)
         if self.is_sequence_parallel:
-            x = sequence_parallel_chunk(x)
+            x = tensor_model_parallel_reduce_scatter(x, dim=0)
 
         ffn_norm_weight = self.ffn_norm.weight.data
         ffn_norm_eps = self.ffn_norm.variance_epsilon
@@ -946,11 +967,16 @@ class DeepseekV4DecoderLayer(nn.Module):
             norm_eps=ffn_norm_eps,
         )
 
+        # FFN, symmetric to attention: gather to full tokens, run the MoE with
+        # its final TP all-reduce disabled (is_sequence_parallel=True makes
+        # FusedMoE + shared experts return the un-reduced per-rank partial),
+        # then reduce-scatter that partial back to this rank's shard. AG + RS
+        # == the AllReduce it replaces, so the FFN adds no comm vs non-SP.
         if self.is_sequence_parallel:
             x = tensor_model_parallel_all_gather(x, dim=0)
         x = self.ffn(x, input_ids)
         if self.is_sequence_parallel:
-            x = sequence_parallel_chunk(x)
+            x = tensor_model_parallel_reduce_scatter(x, dim=0)
         return x, residual, post_mix, res_mix
 
 
