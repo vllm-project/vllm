@@ -33,6 +33,7 @@
 #include <torch/headeronly/util/Exception.h>
 
 #include "libtorch_stable/torch_utils.h"
+#include "core/batch_invariant.hpp"
 
 #define STATIC_ASSERT_SCALAR_TYPE_VALID(scalar_t)               \
   static_assert(std::is_same<scalar_t, half>::value ||          \
@@ -277,7 +278,7 @@ exec_config_t determine_exec_config(
     int prob_n, int prob_k, int num_experts, int top_k, int thread_m_blocks,
     bool m_block_size_8, int num_bits, int group_size, bool has_act_order,
     bool is_k_full, bool has_zp, bool is_zp_float, bool is_a_8bit, int stages,
-    int max_shared_mem, int sms) {
+    int max_shared_mem, int sms, bool batch_invariant_launch) {
   exec_config_t exec_cfg = exec_config_t{1, thread_config_t{-1, -1, -1}};
   thread_config_t* thread_configs = thread_m_blocks > 1
                                         ? large_batch_thread_configs
@@ -327,7 +328,8 @@ exec_config_t determine_exec_config(
     else
       allow_count = max(min(allow_count, 2), 1);
 
-    if (prob_n / th_config.thread_n * prob_m * top_k * 4 < sms * allow_count) {
+    if (!batch_invariant_launch &&
+        prob_n / th_config.thread_n * prob_m * top_k * 4 < sms * allow_count) {
       allow_count =
           max(prob_n / th_config.thread_n * prob_m * top_k * 4 / sms, 1);
     }
@@ -354,6 +356,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
                int group_size, int dev, cudaStream_t stream, int thread_k,
                int thread_n, int sms, int blocks_per_sm, bool use_atomic_add,
                bool use_fp32_reduce, bool is_zp_float) {
+  bool batch_invariant_launch = vllm::vllm_is_batch_invariant();
   int thread_m_blocks = div_ceil(moe_block_size, 16);
   bool m_block_size_8 = moe_block_size == 8;
   bool is_a_8bit = a_type.size_bits() == 8;
@@ -478,7 +481,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
         a_type, b_type, c_type, s_type, prob_m, prob_n, prob_k, num_experts,
         top_k, thread_m_blocks, m_block_size_8, num_bits, group_size,
         has_act_order, is_k_full, has_zp, is_zp_float, is_a_8bit, stages,
-        max_shared_mem, sms);
+        max_shared_mem, sms, batch_invariant_launch);
     thread_tfg = exec_cfg.tb_cfg;
   }
 
@@ -534,7 +537,8 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
       A_ptr, B_ptr, C_ptr, C_tmp_ptr, bias_ptr, a_s_ptr, b_s_ptr, g_s_ptr, zp_ptr, g_idx_ptr,
       sorted_token_ids_ptr, expert_ids_ptr, num_tokens_past_padded_ptr,
       topk_weights_ptr, top_k, mul_topk_weights, num_groups, prob_m,
-      prob_n, prob_k, locks, has_bias, use_atomic_add, use_fp32_reduce);
+      prob_n, prob_k, locks, has_bias, use_atomic_add, use_fp32_reduce,
+      batch_invariant_launch);
   // clang-format on
 }
 
