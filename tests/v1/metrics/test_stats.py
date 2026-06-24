@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from vllm.v1.core.sched.output import ScheduledEncoderInputStats
+from vllm.v1.core.sched.output import ScheduledEncoderInputStats, SchedulerOutput
 from vllm.v1.engine import EngineCoreOutputs, FinishReason
 from vllm.v1.metrics.stats import (
     IterationStats,
@@ -11,6 +11,7 @@ from vllm.v1.metrics.stats import (
     SchedulerStats,
 )
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+from vllm.v1.utils import compute_iteration_details
 
 
 def test_iteration_stats_repr():
@@ -26,16 +27,13 @@ def test_scheduler_iteration_details_serialization():
         num_generation_requests=4,
         num_generation_tokens=5,
         elapsed_ms=6.7,
-    )
-    encoder_input_stats = ScheduledEncoderInputStats(
-        num_inputs=2,
-        output_tokens=392,
+        num_encoder_inputs=2,
+        num_encoder_output_tokens=392,
     )
     outputs = EngineCoreOutputs(
         scheduler_stats=SchedulerStats(
             kv_cache_usage=0.5,
             iteration_details=iteration_details,
-            scheduled_encoder_input_stats=encoder_input_stats,
         )
     )
 
@@ -45,7 +43,19 @@ def test_scheduler_iteration_details_serialization():
     assert decoded.scheduler_stats is not None
     assert decoded.scheduler_stats.kv_cache_usage == 0.5
     assert decoded.scheduler_stats.iteration_details == iteration_details
-    assert decoded.scheduler_stats.scheduled_encoder_input_stats == encoder_input_stats
+
+
+def test_compute_iteration_details_includes_encoder_stats():
+    scheduler_output = SchedulerOutput.make_empty()
+    scheduler_output.scheduled_encoder_input_stats = ScheduledEncoderInputStats(
+        num_inputs=2,
+        output_tokens=392,
+    )
+
+    iteration_details = compute_iteration_details(scheduler_output)
+
+    assert iteration_details.num_encoder_inputs == 2
+    assert iteration_details.num_encoder_output_tokens == 392
 
 
 def test_prefill_kv_computed_with_cache():

@@ -486,6 +486,8 @@ class EngineCore:
             num_generation_requests=details.num_generation_requests,
             num_generation_tokens=details.num_generation_tokens,
             elapsed_ms=(time.monotonic() - pending.start_time) * 1000,
+            num_encoder_inputs=details.num_encoder_inputs,
+            num_encoder_output_tokens=details.num_encoder_output_tokens,
             is_dummy=pending.is_dummy,
         )
 

@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any
 
 import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
-from vllm.v1.core.sched.output import ScheduledEncoderInputStats
 from vllm.v1.metrics.perf import PerfStats
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
@@ -178,6 +177,8 @@ class SchedulerIterationDetails:
     num_generation_requests: int
     num_generation_tokens: int
     elapsed_ms: float
+    num_encoder_inputs: int = 0
+    num_encoder_output_tokens: int = 0
     is_dummy: bool = False
 
 
@@ -196,7 +197,6 @@ class SchedulerStats:
 
     kv_cache_usage: float = 0.0
     iteration_details: SchedulerIterationDetails | None = None
-    scheduled_encoder_input_stats: ScheduledEncoderInputStats | None = None
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
     connector_prefix_cache_stats: PrefixCacheStats | None = None

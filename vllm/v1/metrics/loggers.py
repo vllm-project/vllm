@@ -172,12 +172,11 @@ class LoggingStatLogger(StatLoggerBase):
         if details is None:
             return
 
-        encoder_stats = scheduler_stats.scheduled_encoder_input_stats
         encoder_msg = ""
-        if encoder_stats is not None:
+        if details.num_encoder_inputs:
             encoder_msg = (
-                f", encoder inputs: {encoder_stats.num_inputs}, "
-                f"encoder output embeddings: {encoder_stats.output_tokens}"
+                f", encoder inputs: {details.num_encoder_inputs}, "
+                f"encoder output embeddings: {details.num_encoder_output_tokens}"
             )
 
         logger.info(

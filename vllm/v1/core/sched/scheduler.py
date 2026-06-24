@@ -1822,7 +1822,6 @@ class Scheduler(SchedulerInterface):
                 kv_connector_stats,
                 cudagraph_stats,
                 perf_stats,
-                scheduler_output.scheduled_encoder_input_stats,
             )
         ) is not None:
             # Return stats to only one of the front-ends.
@@ -2259,7 +2258,6 @@ class Scheduler(SchedulerInterface):
         kv_connector_stats: KVConnectorStats | None = None,
         cudagraph_stats: CUDAGraphStat | None = None,
         perf_stats: PerfStats | None = None,
-        scheduled_encoder_input_stats: ScheduledEncoderInputStats | None = None,
     ) -> SchedulerStats | None:
         if not self.log_stats:
             return None
@@ -2283,7 +2281,6 @@ class Scheduler(SchedulerInterface):
             num_waiting_reqs=len(self.waiting),
             num_skipped_waiting_reqs=len(self.skipped_waiting),
             kv_cache_usage=self.kv_cache_manager.usage,
-            scheduled_encoder_input_stats=scheduled_encoder_input_stats,
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
             kv_cache_eviction_events=eviction_events,
