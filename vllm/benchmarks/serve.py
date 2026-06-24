@@ -1128,7 +1128,6 @@ async def benchmark(
                 "denoising_steps": denoising_steps,
                 "canvas_positions": delta_positions,
                 "committed_tokens": delta_committed,
-                "committed_throughput": delta_committed / benchmark_duration,
                 "steps_per_canvas": denoising_steps / num_canvases,
                 "committed_per_step": delta_committed / denoising_steps,
             }
@@ -1152,11 +1151,6 @@ async def benchmark(
             selected_percentiles=selected_percentiles,
         )
         actual_output_lens = 0
-
-    if diffusion_stats is not None and isinstance(metrics, BenchmarkMetrics):
-        # Committed decode-only throughput (excludes the first canvas, which
-        # lands in TTFT). See BenchmarkMetrics.decode_throughput.
-        diffusion_stats["decode_throughput"] = metrics.decode_throughput
 
     print("{s:{c}^{n}}".format(s=" Serving Benchmark Result ", n=50, c="="))
     print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
@@ -1184,14 +1178,14 @@ async def benchmark(
         if tokenizer:
             print(
                 "{:<40} {:<10.2f}".format(
-                    "Output throughput (e2e, incl. prefill) (tok/s):",
+                    "Output throughput (incl. TTFT) (tok/s):",
                     metrics.output_throughput,
                 )
             )
-            if metrics.decode_throughput > 0 and diffusion_stats is None:
+            if metrics.decode_throughput > 0:
                 print(
                     "{:<40} {:<10.2f}".format(
-                        "Output throughput (excl. prefill) (tok/s):",
+                        "Output throughput (excl. TTFT) (tok/s):",
                         metrics.decode_throughput,
                     )
                 )
@@ -1270,10 +1264,6 @@ async def benchmark(
         )
 
     if diffusion_stats is not None:
-        result["diffusion_committed_throughput"] = diffusion_stats[
-            "committed_throughput"
-        ]
-        result["diffusion_decode_throughput"] = diffusion_stats["decode_throughput"]
         result["diffusion_steps_per_canvas"] = diffusion_stats["steps_per_canvas"]
         result["diffusion_committed_per_step"] = diffusion_stats["committed_per_step"]
         result["diffusion_committed_tokens"] = int(diffusion_stats["committed_tokens"])
@@ -1328,16 +1318,6 @@ async def benchmark(
     if diffusion_stats is not None:
         print("{s:{c}^{n}}".format(s="Diffusion Decoding", n=50, c="-"))
         for label, key, value_fmt in (
-            (
-                "Committed throughput (e2e, incl. prefill) (tok/s):",
-                "committed_throughput",
-                "{:<10.2f}",
-            ),
-            (
-                "Committed throughput (excl. prefill) (tok/s):",
-                "decode_throughput",
-                "{:<10.2f}",
-            ),
             ("Denoising steps per canvas:", "steps_per_canvas", "{:<10.2f}"),
             ("Committed per denoising step:", "committed_per_step", "{:<10.2f}"),
             ("Committed tokens:", "committed_tokens", "{:<10d}"),
