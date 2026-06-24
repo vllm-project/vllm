@@ -5,10 +5,13 @@ import pytest
 import torch
 
 from tests.kernels.allclose_default import get_default_atol, get_default_rtol
-from vllm._custom_ops import cpu_fused_moe, cpu_prepack_moe_weight
+from vllm._custom_ops import (
+    cpu_fused_moe,
+    cpu_prepack_moe_weight,
+)
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.cpu_fused_moe import _CPU_MOE_ACT_FN
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 if not current_platform.is_cpu():
@@ -26,8 +29,13 @@ ACT = [
     MoEActivation.GELU,
     MoEActivation.GELU_TANH,
 ]
-USE_BIAS = [True, False]
-ISA = ["amx", "vec"] if torch.cpu._is_amx_tile_supported() else ["vec"]
+USE_BIAS = [False, True]
+ISA = ["vec"]
+if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
+    ISA.append("neon")
+if torch.cpu._is_amx_tile_supported():
+    ISA.append("amx")
+
 DTYPE = [torch.bfloat16]
 
 

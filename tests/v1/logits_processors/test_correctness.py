@@ -1226,3 +1226,34 @@ def test_thinking_budget_invalid_budget_rejected(invalid_budget):
 
     with pytest.raises(VLLMValidationError, match="thinking_token_budget"):
         SamplingParams(thinking_token_budget=invalid_budget)
+
+
+def test_thinking_budget_long_thinking_section_end_marker_found_at_correct_index():
+    """Test thinking budget enforced for a long thinking run,
+    then a natural end marker."""
+    h = ThinkingBudgetStateHolder(
+        MockReasoningConfig(), 8, 0, torch.device("cpu"), False
+    )
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=[(0, SamplingParams(thinking_token_budget=10_000), None, [])],
+            moved=(),
+        )
+    )
+    start = MockReasoningConfig.reasoning_start_token_ids
+    end = MockReasoningConfig.reasoning_end_token_ids
+
+    out: list[int] = list(start)
+    h.update_state([out], None, None)
+    for tok in range(500):  # 500 filler thinking tokens, one decode step each
+        out.append(tok)
+        h.update_state([out], None, None)
+        assert h._state[0]["end_thinking"] == -1  # not present yet
+    expected_end_idx = len(out)  # marker appended next
+    out.extend(end)
+    h.update_state([out], None, None)
+
+    assert h._state[0]["start_thinking"] == 0
+    assert h._state[0]["end_thinking"] == expected_end_idx
