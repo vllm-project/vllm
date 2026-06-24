@@ -49,6 +49,7 @@ from vllm.entrypoints.openai.engine.serving import (
     format_token_id_placeholder,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.openai.tool_call_metrics import record_tool_call_parse_attempt
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
@@ -873,14 +874,30 @@ class OpenAIServingChat(OpenAIServing):
                 logprobs = None
 
             if parser is not None:
-                reasoning, content, tool_calls = parser.parse(
-                    output.text,
-                    request,
-                    enable_auto_tools=self.enable_auto_tools,
-                    model_output_token_ids=token_ids,
+                # Record tool call parsing attempt
+                parser_type = "custom" if parser.tool_parser else "standard"
+                try:
+                    reasoning, content, tool_calls = parser.parse(
+                        output.text,
+                        request,
+                        enable_auto_tools=self.enable_auto_tools,
+                        model_output_token_ids=token_ids,
+                    )
+                    if not request.include_reasoning:
+                        reasoning = None
+                except Exception:
+                    record_tool_call_parse_attempt(
+                        model=model_name,
+                        success=False,
+                        parser_type=parser_type,
+                    )
+                    raise
+
+                record_tool_call_parse_attempt(
+                    model=model_name,
+                    success=True,
+                    parser_type=parser_type,
                 )
-                if not request.include_reasoning:
-                    reasoning = None
             else:
                 reasoning = None
                 content = output.text

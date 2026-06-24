@@ -92,6 +92,7 @@ from vllm.entrypoints.openai.responses.utils import (
     extract_function_tool_names,
     extract_tool_types,
 )
+from vllm.entrypoints.openai.tool_call_metrics import record_tool_call_parse_attempt
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
@@ -1033,10 +1034,27 @@ class OpenAIServingResponses(OpenAIServing):
             parser = self.parser(
                 tokenizer, request.tools, chat_template_kwargs=chat_template_kwargs
             )
-            reasoning, content, tool_calls = parser.parse(
-                final_output.text,
-                request,
-                enable_auto_tools=self.enable_auto_tools,
+            # Record tool call parsing attempt
+            model_name = self.models.model_name()
+            parser_type = "custom" if parser.tool_parser else "standard"
+            try:
+                reasoning, content, tool_calls = parser.parse(
+                    final_output.text,
+                    request,
+                    enable_auto_tools=self.enable_auto_tools,
+                )
+            except Exception:
+                record_tool_call_parse_attempt(
+                    model=model_name,
+                    success=False,
+                    parser_type=parser_type,
+                )
+                raise
+
+            record_tool_call_parse_attempt(
+                model=model_name,
+                success=True,
+                parser_type=parser_type,
             )
             return build_response_output_items(
                 reasoning=reasoning,
