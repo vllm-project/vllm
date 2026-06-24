@@ -167,7 +167,7 @@ def fused_topk_bias(
     input_tokens: torch.Tensor | None = None,
     hash_indices_table: torch.Tensor | None = None,
     routed_scaling_factor: float = 1.0,
-):
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     # The topk kernel dispatches dtype based on topk_ids (set by
     # indices_type) and assumes input_tokens/hash_indices_table match.
     if indices_type is not None:
@@ -346,7 +346,6 @@ class FusedTopKBiasRouter(BaseRouter):
         self.renormalize = renormalize
         self.scoring_func = scoring_func
         self.routed_scaling_factor = routed_scaling_factor
-        self.scoring_func = scoring_func
         self._hash_indices_table = hash_indices_table
 
     @property

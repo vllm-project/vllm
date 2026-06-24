@@ -290,7 +290,7 @@ class GroupedTopKRouter(BaseRouter):
         indices_type: torch.dtype | None,
         *,
         input_ids: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Compute routing using grouped top-k."""
 
         def valid_grouping() -> bool:
