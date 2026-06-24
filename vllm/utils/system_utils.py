@@ -126,8 +126,16 @@ def _sync_visible_devices_env_vars():
 def _maybe_force_spawn():
     """Check if we need to force the use of the `spawn` multiprocessing start
     method.
+
+    If the user has explicitly opted into "spawn" or "forkserver", we skip the
+    force-spawn override. forkserver is only enabled when the parent has not
+    yet initialized CUDA (the api_server entrypoint pre-starts the forkserver
+    via forkserver.ensure_running() before any CUDA touch), so the
+    CUDA-init / Ray-actor / WSL / NUMA-bind hazards that motivate forcing
+    spawn do not apply, and silently rewriting forkserver to spawn would
+    defeat the user opt-in.
     """
-    if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") == "spawn":
+    if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") in ("spawn", "forkserver"):
         return
 
     reasons = []
