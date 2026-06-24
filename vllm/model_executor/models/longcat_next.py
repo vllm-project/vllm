@@ -1097,6 +1097,13 @@ class LongcatNextWhisperEncoder(WhisperEncoder):
 
     Reuses vLLM's TP-aware WhisperEncoder (QKVParallelLinear, MMEncoderAttention)
     with pack/unpack logic for variable-length audio via FlashAttention cu_seqlens.
+
+    Note: This subclass intentionally has a different forward() signature than
+    the parent WhisperEncoder. The parent accepts cu_seqlens/max_seqlen directly,
+    while this subclass accepts output_length and computes cu_seqlens internally.
+    This is because LongCat-Next's audio pipeline provides per-sample lengths
+    rather than pre-computed cu_seqlens. Code calling this class should use
+    output_length, not the parent's cu_seqlens interface.
     """
 
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
@@ -1219,21 +1226,29 @@ class LongcatNextWhisperEncoder(WhisperEncoder):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            # Apply name remapping
+            # Apply name remapping (path-aware, not substring replacement)
             for old, new in name_remap.items():
-                name = name.replace(old, new)
+                # Replace only complete path components
+                parts = name.split(".")
+                parts = [new if p == old.rstrip(".") else p for p in parts]
+                name = ".".join(parts)
 
             # Handle stacked QKV params
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-                name = name.replace(weight_name, param_name)
+                # Replace only the specific path component
+                parts = name.split(".")
+                parts = [param_name if p == weight_name else p for p in parts]
+                name = ".".join(parts)
                 # k_proj has no bias in checkpoint; QKVParallelLinear
                 # expects unified bias — pad with zeros.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
                 param = params_dict[name]
-                weight_loader = param.weight_loader
+                weight_loader = getattr(
+                    param, "weight_loader", default_weight_loader
+                )
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
@@ -2878,7 +2893,12 @@ class LongcatNextForCausalLM(
             prefix=maybe_prefix(prefix, "visual"),
         )
 
-    def _build_audio_tower(self, config, vllm_config, prefix):
+    def _build_audio_tower(
+        self,
+        config: PretrainedConfig,
+        vllm_config: VllmConfig,
+        prefix: str,
+    ) -> LongcatNextAudioTokenizer:
         """Build the audio tower (audio encoder).
 
         LongCat-Next's audio pipeline (from HF modular_longcat_next_audio.py):
