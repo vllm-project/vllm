@@ -22,6 +22,8 @@ class GptOssToolParser(ToolParser):
     capability declaration via HarmonyParser.tool_parser_cls.
     """
 
+    supports_required_and_named = False
+
     def __init__(self, tokenizer: "TokenizerLike", tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
 
