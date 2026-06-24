@@ -17,6 +17,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
+    make_tool_call_id,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
@@ -887,7 +888,8 @@ class OpenAIServingChat(OpenAIServing):
                     reasoning=reasoning,
                     content=content or "",
                     tool_calls=[
-                        ToolCall(id=tc.id, function=tc) for tc in (tool_calls or [])
+                        ToolCall(id=tc.id or make_tool_call_id(), function=tc)
+                        for tc in (tool_calls or [])
                     ],
                 )
 
@@ -910,7 +912,8 @@ class OpenAIServingChat(OpenAIServing):
                         reasoning=reasoning,
                         content=content,
                         tool_calls=[
-                            ToolCall(id=tc.id, function=tc) for tc in tool_calls
+                            ToolCall(id=tc.id or make_tool_call_id(), function=tc)
+                            for tc in tool_calls
                         ],
                     )
 

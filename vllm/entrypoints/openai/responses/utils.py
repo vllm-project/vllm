@@ -30,6 +30,7 @@ from openai.types.responses.response_reasoning_item import (
 from openai.types.responses.tool import Tool
 
 from vllm import envs
+from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionMessageParam
 from vllm.entrypoints.openai.engine.protocol import FunctionCall
 from vllm.entrypoints.openai.responses.protocol import ResponseInputOutputItem
@@ -83,7 +84,8 @@ def build_response_output_items(
             outputs.append(
                 ResponseFunctionToolCall(
                     id=f"fc_{random_uuid()}",
-                    call_id=tool_call.id,
+                    call_id=tool_call.id
+                    or make_tool_call_id(func_name=tool_call.name, idx=idx),
                     type="function_call",
                     status="completed",
                     name=tool_call.name,
