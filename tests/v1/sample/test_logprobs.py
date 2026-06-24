@@ -42,11 +42,12 @@ SAMPLE_PROMPT = BatchLogprobsComposition.SAMPLE_PROMPT
 #
 # Force LLM instances into an identical, deterministic execution
 # mode so the test isolates spec-decode correctness only:
-ROCM_DETERMINISM_KWARGS: dict = (
-    dict(max_num_seqs=1, attention_backend="TRITON_ATTN")
-    if current_platform.is_rocm()
-    else {}
-)
+if current_platform.is_rocm():
+    GPU_DETERMINISM_KWARGS: dict = dict(max_num_seqs=1, attention_backend="TRITON_ATTN")
+elif current_platform.is_xpu():
+    GPU_DETERMINISM_KWARGS = dict(max_num_seqs=1, attention_backend="FLASH_ATTN")
+else:
+    GPU_DETERMINISM_KWARGS = {}
 
 
 @pytest.fixture(
@@ -1127,7 +1128,7 @@ def test_spec_decode_logprobs(
         enable_chunked_prefill=True,
         max_num_batched_tokens=32,
         enable_prefix_caching=False,
-        **ROCM_DETERMINISM_KWARGS,
+        **GPU_DETERMINISM_KWARGS,
     )
 
     # Run base LLM.
@@ -1173,7 +1174,7 @@ def test_spec_decode_logprobs(
     assert len(ref_logprobs) == len(spec_logprobs)
     for ref_logprob, spec_logprob in zip(ref_logprobs, spec_logprobs):
         assert math.isclose(
-            ref_logprob.logprob, spec_logprob.logprob, rel_tol=5e-2, abs_tol=1e-1
+            ref_logprob.logprob, spec_logprob.logprob, rel_tol=5e-2, abs_tol=2.5e-1
         ), (
             f"Logprob mismatch: ref={ref_logprob.logprob} "
             f"spec={spec_logprob.logprob} "

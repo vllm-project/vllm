@@ -150,6 +150,7 @@ fn sample_request_with_id(request_id: &str) -> EngineCoreRequest {
             top_k: 8,
             max_tokens: 32,
             min_tokens: 1,
+            thinking_token_budget: Some(256),
             stop_token_ids: vec![151643],
             eos_token_id: Some(151645),
             all_stop_token_ids: BTreeSet::from([151643, 151645]),
@@ -303,6 +304,7 @@ fn bootstrapped_test_config(
         transport_mode: TransportMode::Bootstrapped {
             input_address,
             output_address,
+            engine_start_index: 0,
             engine_count,
             ready_timeout,
         },
@@ -310,6 +312,34 @@ fn bootstrapped_test_config(
         model_name: "test-model".to_string(),
         client_index,
     }
+}
+
+fn bootstrapped_test_config_with_start_index(
+    input_address: String,
+    output_address: String,
+    engine_start_index: u32,
+    engine_count: usize,
+    ready_timeout: Duration,
+    client_index: u32,
+    coordinator_mode: Option<CoordinatorMode>,
+) -> EngineCoreClientConfig {
+    let mut config = bootstrapped_test_config(
+        input_address,
+        output_address,
+        engine_count,
+        ready_timeout,
+        client_index,
+        coordinator_mode,
+    );
+    let TransportMode::Bootstrapped {
+        engine_start_index: start,
+        ..
+    } = &mut config.transport_mode
+    else {
+        unreachable!("bootstrapped_test_config returns bootstrapped transport")
+    };
+    *start = engine_start_index;
+    config
 }
 
 async fn recv_xpub_message(xpub: &mut XPubSocket) -> Vec<bytes::Bytes> {
@@ -1939,7 +1969,7 @@ async fn multi_engine_abort_is_grouped_and_utility_fans_out_to_all_engines() {
 
     let (shutdown_tx_0, engine_task_0) = spawn_mock_engine_task(
         handshake_address.clone(),
-        b"engine-0".to_vec(),
+        EngineId::from_engine_index(0).into_frame().to_vec(),
         |dealer, push| {
             Box::pin(async move {
                 let utility = recv_engine_message(dealer).await;
@@ -1993,7 +2023,7 @@ async fn multi_engine_abort_is_grouped_and_utility_fans_out_to_all_engines() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     let (shutdown_tx_1, engine_task_1) = spawn_mock_engine_task(
         handshake_address.clone(),
-        b"engine-1".to_vec(),
+        EngineId::from_engine_index(1).into_frame().to_vec(),
         |dealer, push| {
             Box::pin(async move {
                 let utility = recv_engine_message(dealer).await;
@@ -2438,6 +2468,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let mut lines = stdout.lines();
     let request_hex = lines.next().expect("missing request fixture line");
+    let defaults_request_hex = lines.next().expect("missing defaults request fixture line");
     let multimodal_request_hex = lines.next().expect("missing multimodal request fixture line");
     let outputs_hex = lines.next().expect("missing outputs fixture line");
     let inline_logprobs_frames = lines.next().expect("missing inline logprobs fixture line");
@@ -2445,6 +2476,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let inline_prompt_frames = lines.next().expect("missing inline prompt logprobs fixture line");
     let multipart_prompt_frames =
         lines.next().expect("missing multipart prompt logprobs fixture line");
+    let ready_response_hex = lines.next().expect("missing ready response fixture line");
 
     let request_bytes = hex::decode(request_hex).unwrap();
     let multimodal_request_bytes = hex::decode(multimodal_request_hex).unwrap();
@@ -2453,6 +2485,43 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let decoded_request: EngineCoreRequest = rmp_serde::from_slice(&request_bytes).unwrap();
     let expected_request = sample_request();
     assert_eq!(decoded_request, expected_request);
+
+    // All-default sampling params -> empty map; must decode to Python defaults.
+    let defaults_request_bytes = hex::decode(defaults_request_hex).unwrap();
+    let decoded_defaults: EngineCoreRequest =
+        rmp_serde::from_slice(&defaults_request_bytes).unwrap();
+    assert_eq!(decoded_defaults.request_id, "req-defaults");
+    let sampling = decoded_defaults
+        .sampling_params
+        .expect("defaults request carries sampling params");
+    assert_eq!(
+        sampling,
+        EngineCoreSamplingParams {
+            temperature: 1.0,
+            top_p: 1.0,
+            top_k: 0,
+            seed: None,
+            max_tokens: 16,
+            min_tokens: 0,
+            thinking_token_budget: None,
+            logprobs: None,
+            prompt_logprobs: None,
+            min_p: 0.0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
+            repetition_penalty: 1.0,
+            stop_token_ids: Vec::new(),
+            eos_token_id: None,
+            all_stop_token_ids: BTreeSet::new(),
+            logit_bias: None,
+            allowed_token_ids: None,
+            bad_words_token_ids: None,
+            structured_outputs: None,
+            logprob_token_ids: None,
+            skip_reading_prefix_cache: None,
+            extra_args: None,
+        },
+    );
 
     let decoded_multimodal_request: EngineCoreRequest =
         rmp_serde::from_slice(&multimodal_request_bytes).unwrap();
@@ -2554,6 +2623,23 @@ fn python_msgpack_fixtures_match_rust_encoding() {
             .as_ref()
             .expect("multipart prompt logprobs decoded"),
     );
+
+    let map_keys = |bytes: &[u8]| -> BTreeSet<String> {
+        match decode_value(bytes) {
+            Value::Map(entries) => entries
+                .into_iter()
+                .filter_map(|(key, _)| key.as_str().map(str::to_owned))
+                .collect(),
+            other => panic!("ready response should encode as a map, got {other:?}"),
+        }
+    };
+    let python_ready_keys = map_keys(&hex::decode(ready_response_hex).unwrap());
+    let rust_ready_keys =
+        map_keys(&rmp_serde::to_vec_named(&crate::mock_engine::default_ready_response()).unwrap());
+    assert_eq!(
+        rust_ready_keys, python_ready_keys,
+        "EngineCoreReadyResponse drifted from the Python dataclass",
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2632,6 +2718,90 @@ async fn bootstrapped_connects_with_contiguous_engine_ids() {
     assert_eq!(engine_ids, vec![vec![0x00, 0x00], vec![0x01, 0x00]]);
 
     client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bootstrapped_connects_with_nonzero_engine_start_index() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let input_address = ipc.input_endpoint();
+    let output_address = ipc.output_endpoint();
+
+    let client_task = tokio::spawn({
+        let input_address = input_address.clone();
+        let output_address = output_address.clone();
+        async move {
+            EngineCoreClient::connect(bootstrapped_test_config_with_start_index(
+                input_address,
+                output_address,
+                3,
+                1,
+                Duration::from_secs(2),
+                0,
+                None,
+            ))
+            .await
+            .unwrap()
+        }
+    });
+
+    let (_dealer, _push) =
+        setup_bootstrapped_mock_engine(input_address, output_address, &[0x03, 0x00]).await;
+    let client = client_task.await.unwrap();
+
+    assert_eq!(client.engine_count(), 1);
+    let engine_ids =
+        client.engine_identities().into_iter().map(|id| id.to_vec()).collect::<Vec<_>>();
+    assert_eq!(engine_ids, vec![vec![0x03, 0x00]]);
+
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bootstrapped_rejects_unexpected_engine_id_for_start_index() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let input_address = ipc.input_endpoint();
+    let output_address = ipc.output_endpoint();
+
+    let client_task = tokio::spawn({
+        let input_address = input_address.clone();
+        let output_address = output_address.clone();
+        async move {
+            EngineCoreClient::connect(bootstrapped_test_config_with_start_index(
+                input_address,
+                output_address,
+                3,
+                1,
+                Duration::from_secs(2),
+                0,
+                None,
+            ))
+            .await
+        }
+    });
+
+    let _ = crate::mock_engine::connect_to_bootstrapped_frontend(
+        input_address,
+        output_address,
+        &[0x00, 0x00],
+        crate::mock_engine::MockEngineConfig {
+            local: true,
+            headless: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    let error = match client_task.await.unwrap() {
+        Ok(_) => panic!("bootstrapped connect should reject unexpected engine id"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("received input registration for unexpected engine id")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
