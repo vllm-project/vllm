@@ -706,9 +706,9 @@ class MoERunner(MoERunnerInterface):
 
         result = self._maybe_reduce_final_output(result, og_hidden_dim_post_xform)
 
-        # Add zero expert output (from ZeroExpertRouter, or zeros if not applicable)
-        # Adding zeros is a no-op, so safe to always add
-        result = result + zero_expert_output
+        # Add zero expert output only if present (from ZeroExpertRouter)
+        if zero_expert_output is not None:
+            result = result + zero_expert_output
 
         return result
 
@@ -830,7 +830,11 @@ class MoERunner(MoERunnerInterface):
             )
             # If zero_expert_output is None, return zeros tensor
             if zero_expert_output is None:
-                zero_expert_output = torch.zeros_like(combined)
+                # Use hidden_states shape (not combined which might be tuple)
+                zero_expert_output = torch.zeros_like(hidden_states)
+            # Handle tuple case from _maybe_combine
+            if isinstance(combined, tuple):
+                combined = torch.stack(combined, dim=0)
             # Clone outputs to prevent aliasing with input tensors
             # (required for torch.compile compatibility)
             return [combined.clone(), zero_expert_output.clone()]

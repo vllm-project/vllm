@@ -2794,7 +2794,7 @@ class LongcatNextForCausalLM(
         vocab_size = self.config.vocab_size
         max_visual_id = int(visual_ids.max())
         if max_visual_id >= vocab_size:
-            logger.warning(
+            logger.debug(
                 "[VISUAL_FIX] visual_ids contain OOV tokens: max=%d >= vocab_size=%d. "
                 "Clamping to 0. This indicates a vocab_size mismatch in the model config.",
                 max_visual_id,
@@ -2834,8 +2834,7 @@ class LongcatNextForCausalLM(
             raise RuntimeError("Audio tower is not initialized")
         assert isinstance(input_audio_features, torch.Tensor)
 
-        logger.warning(
-            "[AUDIO_DIAG] _process_audio_input: "
+        logger.debug("[AUDIO_DIAG] _process_audio_input: "
             "audio_features shape=%s dtype=%s min=%.4f max=%.4f "
             "encoder_length=%s bridge_length=%s",
             tuple(input_audio_features.shape),
@@ -2850,9 +2849,9 @@ class LongcatNextForCausalLM(
             tuple(bridge_length.shape) if bridge_length is not None else None,
         )
         if audio_length is not None:
-            logger.warning("[AUDIO_DIAG] encoder_length values: %s", audio_length)
+            logger.debug("[AUDIO_DIAG] encoder_length values: %s", audio_length)
         if bridge_length is not None:
-            logger.warning("[AUDIO_DIAG] bridge_length values: %s", bridge_length)
+            logger.debug("[AUDIO_DIAG] bridge_length values: %s", bridge_length)
 
         # Run audio encoder + bridge
         audio_ids = self.audio_tower.encode(
@@ -2861,8 +2860,7 @@ class LongcatNextForCausalLM(
             bridge_length=bridge_length,  # type: ignore[arg-type]
         )
 
-        logger.warning(
-            "[AUDIO_DIAG] after encode: audio_ids shape=%s dtype=%s "
+        logger.debug("[AUDIO_DIAG] after encode: audio_ids shape=%s dtype=%s "
             "unique_count=%d min=%d max=%d",
             tuple(audio_ids.shape),
             audio_ids.dtype,
@@ -2875,8 +2873,7 @@ class LongcatNextForCausalLM(
         # audio_ids shape: [L, num_levels]. audio_offset_vals shape: [num_levels].
         # Each codebook level occupies a distinct embedding-table region, so
         # level k must be offset by cumsum(audio_offset_list)[:k+1].
-        logger.warning(
-            "[AUDIO_DIAG] audio_offset_vals: %s",
+        logger.debug("[AUDIO_DIAG] audio_offset_vals: %s",
             self.audio_offset_vals.tolist()
             if self.audio_offset_vals is not None
             else None,
@@ -2888,8 +2885,7 @@ class LongcatNextForCausalLM(
         # VocabParallelEmbedding handles per-shard routing correctly; this
         # clamp is only a safety net for config mismatches.
         vocab_size = self.config.vocab_size
-        logger.warning(
-            "[AUDIO_DIAG] after offset: audio_ids min=%d max=%d vocab_size=%d",
+        logger.debug("[AUDIO_DIAG] after offset: audio_ids min=%d max=%d vocab_size=%d",
             int(audio_ids.min()),
             int(audio_ids.max()),
             vocab_size,
@@ -2916,8 +2912,7 @@ class LongcatNextForCausalLM(
         # Look up embeddings: [L, depth] -> [L, depth, hidden] -> [L, hidden]
         audio_embeds = self.language_model.embed_tokens(audio_ids).sum(dim=1)
 
-        logger.warning(
-            "[AUDIO_DIAG] audio_embeds shape=%s dtype=%s min=%.6f max=%.6f",
+        logger.debug("[AUDIO_DIAG] audio_embeds shape=%s dtype=%s min=%.6f max=%.6f",
             tuple(audio_embeds.shape),
             audio_embeds.dtype,
             float(audio_embeds.min()),
