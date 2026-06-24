@@ -160,7 +160,7 @@ class SchedulerConfig:
     forwards within a single execute_model call to reduce GPU-CPU
     round-trips. E.g., 10 = 1 sample + 9 extra forwards."""
 
-    extra_forward_use_argmax: bool = True
+    extra_forward_use_argmax: bool = False
     """Controls whether extra forward passes use argmax (greedy) or full
     sampling. True = argmax (default, fast). False = use the same sampling
     strategy as the main forward (respects temperature, top_p, top_k,
