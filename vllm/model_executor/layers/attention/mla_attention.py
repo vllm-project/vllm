@@ -208,6 +208,7 @@ from vllm.config import (
     get_current_vllm_config,
     get_current_vllm_config_or_none,
 )
+from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     is_global_first_rank,
@@ -319,6 +320,22 @@ def _detect_output_quant_key(
     return kFp8StaticTensorSym
 
 
+def _canonicalize_sparse_mla_kv_cache_dtype(
+    attn_backend: type[AttentionBackend],
+    kv_cache_dtype: CacheDType,
+) -> CacheDType:
+    backend_name = attn_backend.get_name()
+    if backend_name == "FLASHMLA_SPARSE" and is_quantized_kv_cache(kv_cache_dtype):
+        return "fp8_ds_mla"
+    if backend_name == "FLASHINFER_MLA_SPARSE_SM120" and kv_cache_dtype in (
+        "auto",
+        "fp8",
+        "fp8_e4m3",
+    ):
+        return "fp8_ds_mla"
+    return kv_cache_dtype
+
+
 class MLAAttention(nn.Module, AttentionLayerBase):
     """Multi-Head Latent Attention layer.
 
@@ -369,7 +386,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
 
         if cache_config is not None:
-            kv_cache_dtype = cache_config.cache_dtype
+            kv_cache_dtype: CacheDType = cache_config.cache_dtype
             calculate_kv_scales = cache_config.calculate_kv_scales
         else:
             kv_cache_dtype = "auto"
@@ -393,24 +410,22 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 num_heads=self.num_heads,
             )
 
-        # FlashMLA Sparse Attention fp8 backend uses "fp8_ds_mla" kv-cache format
-        # Automatically convert fp8 kv-cache format to "fp8_ds_mla"
-        if (
-            self.attn_backend.get_name() == "FLASHMLA_SPARSE"
-            and is_quantized_kv_cache(kv_cache_dtype)
-            and kv_cache_dtype != "fp8_ds_mla"
-        ):
-            assert cache_config is not None
-            cache_config.cache_dtype = "fp8_ds_mla"
-            kv_cache_dtype = "fp8_ds_mla"
+        normalized_kv_cache_dtype = _canonicalize_sparse_mla_kv_cache_dtype(
+            self.attn_backend, kv_cache_dtype
+        )
+        if normalized_kv_cache_dtype != kv_cache_dtype:
+            if cache_config is not None:
+                cache_config.cache_dtype = normalized_kv_cache_dtype
+            kv_cache_dtype = normalized_kv_cache_dtype
             logger.info_once(
-                "Using DeepSeek's fp8_ds_mla KV cache format. To use standard "
-                "fp8 kv-cache format, please set `--attention-backend "
-                "FLASHINFER_MLA_SPARSE`"
+                "Using %s KV cache format for %s backend.",
+                kv_cache_dtype,
+                self.attn_backend.get_name(),
             )
 
         if (
             self.attn_backend.get_name() == "FLASHINFER_MLA_SPARSE"
+            and kv_cache_dtype != "fp8_ds_mla"
             and is_quantized_kv_cache(kv_cache_dtype)
         ):
             logger.info_once(
@@ -1212,9 +1227,9 @@ class MLACommonBackend(AttentionBackend):
         include_num_layers_dimension: bool = False,
     ) -> tuple[int, ...]:
         if include_num_layers_dimension:
-            # MLA kernels require contiguous per-layer KV cache views.
-            # Identity permutation keeps num_layers first in physical
-            # layout, signaling cross-layer allocation is unsupported.
+            # Default to identity permutation to signal cross-layer allocation
+            # is unsupported. Each MLA backend must opt in to support cross-layer
+            # allocation by overriding this method.
             return (0, 1, 2, 3)
         return (0, 1, 2)
 
