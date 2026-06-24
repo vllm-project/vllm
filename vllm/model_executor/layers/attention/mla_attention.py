@@ -188,7 +188,6 @@ return curr_o @ W_O
 """
 
 import functools
-import math
 from abc import abstractmethod
 from dataclasses import dataclass
 from enum import Enum
@@ -1532,9 +1531,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.dcp_virtual_block_size = self.dcp_local_block_size * self.dcp_world_size
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
 
-        # Don't try to access the runner on AMD
-        if self.aot_schedule:
-            self.page_size = self.kv_cache_spec.block_size
+        self.page_size = self.kv_cache_spec.block_size
 
         self.chunked_prefill_workspace_size = (
             self.determine_chunked_prefill_workspace_size(vllm_config)
@@ -1684,21 +1681,11 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     self.chunked_prefill_workspace_size // num_prefills_with_context_cpu
                 )
 
-                if self.aot_schedule:
-                    # align max_context_chunk to page_size by rounding down,
-                    # currently the `gather_and_maybe_dequant_cache` kernel
-                    # cannot handle `context_chunk_starts` that are not aligned
-                    # to page_size
-                    max_context_chunk = round_down(max_context_chunk, self.page_size)
-                elif self.dcp_world_size > 1:
-                    # Need to make sure the chunks are aligned when context is
-                    # split across GPUs. Shrink the chunk to the nearest size
-                    # that divides evenly across GPUs and lands on a clean
-                    # cache-block boundary
-                    chunk_alignment = math.lcm(
-                        self.kv_cache_spec.block_size, self.dcp_virtual_block_size
-                    )
-                    max_context_chunk = round_down(max_context_chunk, chunk_alignment)
+                # align max_context_chunk to page_size by rounding down,
+                # currently the `gather_and_maybe_dequant_cache` kernel
+                # cannot handle `context_chunk_starts` that are not aligned
+                # to page_size
+                max_context_chunk = round_down(max_context_chunk, self.page_size)
 
                 assert max_context_chunk > 0
                 num_chunks = cdiv(max_context_len_cpu, max_context_chunk)
