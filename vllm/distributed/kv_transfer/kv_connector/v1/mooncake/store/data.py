@@ -180,9 +180,10 @@ class ChunkedTokenDatabase:
             )
         self.kv_caches_base_addr: list[int] = []
         self.block_len: list[int] = []
+        self._key_prefix = PoolKey.build_prefix(metadata)
 
     def key_for(self, chunk_hash: BlockHash) -> str:
-        return PoolKey(self.metadata, chunk_hash.hex()).to_string()
+        return PoolKey.build_key_string(self._key_prefix, chunk_hash.hex())
 
     def set_kv_caches_base_addr(self, kv_caches_base_addr: list[int]):
         self.kv_caches_base_addr = kv_caches_base_addr
