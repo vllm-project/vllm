@@ -1950,9 +1950,7 @@ class DPEngineCoreProc(EngineCoreProc):
                     continue
 
                 # Execute a dummy pass when no ready requests ran, unless the
-                # engine is sleeping. self.is_sleeping() also covers the KV-offload
-                # window before model_executor.is_sleeping flips.
-                elif not self.is_sleeping():
+                elif not self.model_executor.is_sleeping:
                     with self.log_iteration_details(None):
                         self.execute_dummy_batch()
 
