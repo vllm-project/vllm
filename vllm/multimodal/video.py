@@ -274,7 +274,7 @@ class OpenCVVideoBackendMixin:
 
             if not ok:
                 if is_target_frame:
-                    logger.warning(
+                    logger.debug(
                         "Failed to grab frame %d during video loading.",
                         idx,
                     )
@@ -305,7 +305,7 @@ class OpenCVVideoBackendMixin:
                             idx - recovered_idx,
                         )
                 elif is_target_frame:
-                    logger.warning(
+                    logger.debug(
                         "Failed to retrieve frame %d during video loading.",
                         idx,
                     )
@@ -313,7 +313,7 @@ class OpenCVVideoBackendMixin:
 
         # Log any remaining failed frames
         for failed_idx in failed_frames_idx:
-            logger.warning(
+            logger.debug(
                 "Frame %d could not be recovered (end of video).",
                 failed_idx,
             )
@@ -343,9 +343,9 @@ class OpenCVVideoBackendMixin:
         for idx in range(max_frame_idx + 1):
             ok = cap.grab()
             if not ok:
-                # Frame is broken/unreadable, log warning
+                # Frame is broken/unreadable, skip it
                 if idx in frame_indices:
-                    logger.warning(
+                    logger.debug(
                         "Failed to grab frame %d during video loading. "
                         "This frame will be skipped.",
                         idx,
@@ -359,7 +359,7 @@ class OpenCVVideoBackendMixin:
                     i += 1
                 else:
                     # retrieve() failed even though grab() succeeded
-                    logger.warning(
+                    logger.debug(
                         "Failed to retrieve frame %d during video loading. "
                         "This frame will be skipped.",
                         idx,
@@ -885,7 +885,6 @@ class GLM46VVideoBackend(VideoBackend):
         extract_t = min(extract_t, cls._MAX_FRAME_COUNT_DYNAMIC)
 
         duration_per_frame = 1 / original_fps if original_fps > 0 else 0
-        timestamps = [i * duration_per_frame for i in range(total_frames_num)]
         max_second = int(duration) if duration else 0
 
         if total_frames_num < extract_t:
@@ -897,7 +896,7 @@ class GLM46VVideoBackend(VideoBackend):
             current_second = 0.0
             inv_fps = 1 / (temporal_patch_size * target_fps)
             for frame_index in range(total_frames_num):
-                if timestamps[frame_index] >= current_second:
+                if frame_index * duration_per_frame >= current_second:
                     current_second += inv_fps
                     frame_indices.append(frame_index)
                     if current_second >= max_second:
@@ -991,7 +990,6 @@ class GLMGAVideoBackend(VideoBackend):
         extract_t = min(extract_t, max_frames)
 
         duration_per_frame = 1 / original_fps
-        timestamps = [i * duration_per_frame for i in range(total_frames_num)]
 
         if total_frames_num < extract_t:
             frame_indices = [
@@ -1002,7 +1000,7 @@ class GLMGAVideoBackend(VideoBackend):
             current_second = 0.0
             inv_fps = 1 / target_fps
             for frame_index in range(total_frames_num):
-                if timestamps[frame_index] >= current_second:
+                if frame_index * duration_per_frame >= current_second:
                     current_second += inv_fps
                     frame_indices.append(frame_index)
                     if current_second >= duration - inv_fps:

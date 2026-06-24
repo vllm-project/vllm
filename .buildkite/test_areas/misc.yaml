@@ -250,6 +250,11 @@ steps:
       'opentelemetry-exporter-otlp>=1.26.0' \
       'opentelemetry-semantic-conventions-ai>=0.4.1'"
   - pytest -v -s v1/tracing
+  mirror:
+    amd:
+      device: mi300_2
+      depends_on:
+      - image-build-amd
 
 - label: Python-only Installation
   key: python-only-installation
