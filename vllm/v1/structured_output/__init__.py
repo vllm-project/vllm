@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 import itertools
 import multiprocessing
 from collections.abc import Iterable
@@ -9,7 +10,7 @@ from typing import TYPE_CHECKING
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
-from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.tokenizers import cached_tokenizer_from_config, maybe_make_thread_pool
 from vllm.utils.import_utils import LazyLoader
 from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (
@@ -79,6 +80,24 @@ class StructuredOutputManager:
             self.tokenizer = cached_tokenizer_from_config(
                 model_config=self.vllm_config.model_config
             )
+            # `cached_tokenizer_from_config` returns a single process-global
+            # instance (keyed by config args, not per-worker), but grammar
+            # compilation and the request-scoped reasoner run it concurrently
+            # across `self.executor` threads. HF fast tokenizers mutate shared
+            # state inside `encode` (`set_truncation_and_padding`), so concurrent
+            # calls raise "Already borrowed".
+            #
+            # `maybe_make_thread_pool` mutates the tokenizer IN PLACE (swaps its
+            # __class__ to route public calls through a deep-copied pool) and
+            # returns None for fast tokenizers, so it must be called as a
+            # statement, not assigned. We `copy.copy` first so the in-place swap
+            # lands on our own instance and never mutates the shared cache entry.
+            #
+            # `skip_tokenizer_init` is excluded above, so the tokenizer is never
+            # None here; the assert just narrows the Optional return type.
+            assert self.tokenizer is not None
+            self.tokenizer = copy.copy(self.tokenizer)
+            maybe_make_thread_pool(self.tokenizer, max_workers + 1)
             reasoning_parser_plugin = (
                 self.vllm_config.structured_outputs_config.reasoning_parser_plugin
             )
