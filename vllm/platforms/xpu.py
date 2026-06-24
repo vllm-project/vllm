@@ -416,7 +416,7 @@ class XPUPlatform(Platform):
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
-        if os.environ.get("TORCHCOMMS_USE_VLLM", "0").strip().lower() in (
+        if os.environ.get("VLLM_USE_TORCHCOMMS", "0").strip().lower() in (
             "1",
             "true",
             "yes",
