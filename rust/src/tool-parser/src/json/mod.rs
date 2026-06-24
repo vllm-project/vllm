@@ -3,6 +3,7 @@
 pub use granite4::Granite4ToolParser;
 pub use hermes::HermesToolParser;
 pub use internlm2::Internlm2ToolParser;
+pub use jamba::JambaToolParser;
 pub use llama::Llama3JsonToolParser;
 pub use mistral::MistralToolParser;
 pub use phi4mini::Phi4MiniJsonToolParser;
@@ -11,6 +12,7 @@ pub use qwen::Qwen3XmlToolParser;
 mod granite4;
 mod hermes;
 mod internlm2;
+mod jamba;
 mod llama;
 mod mistral;
 mod phi4mini;
