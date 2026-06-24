@@ -6,9 +6,9 @@ steps:
   key: quantization
   timeout_in_minutes: 30
   env:
-  REGISTRY: "public.ecr.aws/q9t5s3a7"
-  REPO: "vllm-ci-test-repo"
-  VLLM_TEST_DEVICE: "xpu"
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
   no_plugin: true
   working_dir: "."
   device: intel_gpu
