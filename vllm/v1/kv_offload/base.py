@@ -431,9 +431,6 @@ class CanonicalKVCaches:
     group_data_refs: list[list[CanonicalKVCacheRef]]
 
 
-TransferSpec = tuple[LoadStoreSpec, LoadStoreSpec]
-
-
 @dataclass
 class TransferResult:
     job_id: int
@@ -448,12 +445,16 @@ class OffloadingWorker(ABC):
     submit_load, so there is no (src_medium, dst_medium) routing."""
 
     @abstractmethod
-    def submit_store(self, job_id: int, spec: TransferSpec) -> bool:
-        """Async GPU -> offloaded medium. spec = (gpu_src, offload_dst)."""
+    def submit_store(
+        self, job_id: int, src_spec: GPULoadStoreSpec, dst_spec: LoadStoreSpec
+    ) -> bool:
+        """Async GPU -> offloaded medium."""
 
     @abstractmethod
-    def submit_load(self, job_id: int, spec: TransferSpec) -> bool:
-        """Async offloaded medium -> GPU. spec = (offload_src, gpu_dst)."""
+    def submit_load(
+        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: GPULoadStoreSpec
+    ) -> bool:
+        """Async offloaded medium -> GPU."""
 
     @abstractmethod
     def get_finished(self) -> list[TransferResult]: ...

@@ -53,7 +53,6 @@ from vllm.v1.kv_offload.base import (
     PrepareStoreOutput,
     RequestOffloadingContext,
     TransferResult,
-    TransferSpec,
     make_offload_key,
 )
 from vllm.v1.request import Request
@@ -82,7 +81,7 @@ class MockLoadStoreSpec(LoadStoreSpec):
 
 class MockOffloadingWorker(OffloadingWorker):
     def __init__(self):
-        self.transfer_specs: dict[int, TransferSpec] = {}
+        self.transfer_specs: dict[int, tuple[LoadStoreSpec, LoadStoreSpec]] = {}
         self.completed_transfers: list[TransferResult] = []
         self.waiting_jobs: set[int] = set()
         self.completed_jobs: list[int] = []
@@ -93,13 +92,17 @@ class MockOffloadingWorker(OffloadingWorker):
         self.completed_transfers = []
         return finished
 
-    def submit_store(self, job_id: int, spec: TransferSpec) -> bool:
-        self.transfer_specs[job_id] = spec
+    def submit_store(
+        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec
+    ) -> bool:  # type: ignore[override]
+        self.transfer_specs[job_id] = (src_spec, dst_spec)
         self.waiting_jobs.add(job_id)
         return True
 
-    def submit_load(self, job_id: int, spec: TransferSpec) -> bool:
-        self.transfer_specs[job_id] = spec
+    def submit_load(
+        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec
+    ) -> bool:  # type: ignore[override]
+        self.transfer_specs[job_id] = (src_spec, dst_spec)
         self.waiting_jobs.add(job_id)
         return True
 
@@ -141,7 +144,7 @@ class MockOffloadingSpec(OffloadingSpec):
     def complete_transfers(self):
         self.handler.complete_jobs(self.handler.waiting_jobs.copy())
 
-    def get_completed_transfers(self) -> list[TransferSpec]:
+    def get_completed_transfers(self) -> list[tuple[LoadStoreSpec, LoadStoreSpec]]:
         specs = [
             self.handler.transfer_specs[job_id]
             for job_id in self.handler.completed_jobs
@@ -149,7 +152,7 @@ class MockOffloadingSpec(OffloadingSpec):
         self.handler.completed_jobs.clear()
         return specs
 
-    def get_flushed_transfers(self):
+    def get_flushed_transfers(self) -> list[tuple[LoadStoreSpec, LoadStoreSpec]]:
         specs = [
             self.handler.transfer_specs[job_id] for job_id in self.handler.flushed_jobs
         ]
@@ -362,8 +365,7 @@ class RequestRunner:
         self.scheduler.add_request(req)
 
     def _parse_transfers(self):
-        for transfer_spec in self.offloading_spec.get_flushed_transfers():
-            src_spec, dst_spec = transfer_spec
+        for src_spec, dst_spec in self.offloading_spec.get_flushed_transfers():
             if isinstance(src_spec, GPULoadStoreSpec):
                 # store flush
                 for block_id in src_spec.block_ids:
@@ -375,9 +377,7 @@ class RequestRunner:
 
         block_size_factor = self.block_size_factor
 
-        for transfer_spec in self.offloading_spec.get_completed_transfers():
-            src_spec, dst_spec = transfer_spec
-
+        for src_spec, dst_spec in self.offloading_spec.get_completed_transfers():
             if isinstance(src_spec, GPULoadStoreSpec):
                 store = True
                 gpu_spec = src_spec

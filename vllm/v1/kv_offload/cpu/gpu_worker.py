@@ -19,9 +19,9 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
     CanonicalKVCaches,
     GPULoadStoreSpec,
+    LoadStoreSpec,
     OffloadingWorker,
     TransferResult,
-    TransferSpec,
 )
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.swap_blocks_triton import (
@@ -237,8 +237,9 @@ class SingleDirectionOffloadingHandler:
         # list of pinned descriptor buffer sets available for re-use
         self._buffer_pool: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
 
-    def transfer_async(self, job_id: int, transfer_spec: TransferSpec) -> bool:
-        src_spec, dst_spec = transfer_spec
+    def transfer_async(
+        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec
+    ) -> bool:
         assert isinstance(src_spec, BlockIDsLoadStoreSpec)
         assert isinstance(dst_spec, BlockIDsLoadStoreSpec)
 
@@ -531,13 +532,17 @@ class CPUOffloadingWorker(OffloadingWorker):
             gpu_to_cpu=False,
         )
 
-    def submit_store(self, job_id: int, spec: TransferSpec) -> bool:
-        """Async GPU -> CPU. spec = (gpu_src, cpu_dst)."""
-        return self._store_handler.transfer_async(job_id, spec)
+    def submit_store(
+        self, job_id: int, src_spec: GPULoadStoreSpec, dst_spec: LoadStoreSpec
+    ) -> bool:
+        """Async GPU -> CPU."""
+        return self._store_handler.transfer_async(job_id, src_spec, dst_spec)
 
-    def submit_load(self, job_id: int, spec: TransferSpec) -> bool:
-        """Async CPU -> GPU. spec = (cpu_src, gpu_dst)."""
-        return self._load_handler.transfer_async(job_id, spec)
+    def submit_load(
+        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: GPULoadStoreSpec
+    ) -> bool:
+        """Async CPU -> GPU."""
+        return self._load_handler.transfer_async(job_id, src_spec, dst_spec)
 
     def get_finished(self) -> list[TransferResult]:
         return self._store_handler.get_finished() + self._load_handler.get_finished()

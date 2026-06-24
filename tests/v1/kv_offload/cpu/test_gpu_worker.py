@@ -18,7 +18,6 @@ from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
     OffloadingWorker,
     TransferResult,
-    TransferSpec,
 )
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
@@ -221,10 +220,6 @@ class DummyLoadStoreSpec(LoadStoreSpec):
         return "dummy"
 
 
-def _make_spec() -> TransferSpec:
-    return (DummyLoadStoreSpec(), DummyLoadStoreSpec())
-
-
 class FakeDirectionHandler:
     """Stand in for SingleDirectionOffloadingHandler.
 
@@ -233,13 +228,15 @@ class FakeDirectionHandler:
     """
 
     def __init__(self):
-        self.transfers: list[tuple[int, TransferSpec]] = []
+        self.transfers: list[tuple[int, LoadStoreSpec, LoadStoreSpec]] = []
         self.waited: list[set[int]] = []
         self.shutdown_called = False
         self._finished: list[TransferResult] = []
 
-    def transfer_async(self, job_id: int, spec: TransferSpec) -> bool:
-        self.transfers.append((job_id, spec))
+    def transfer_async(
+        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec
+    ) -> bool:
+        self.transfers.append((job_id, src_spec, dst_spec))
         return True
 
     def get_finished(self) -> list[TransferResult]:
@@ -279,22 +276,22 @@ def test_offloading_worker_abc_cannot_instantiate():
 def test_submit_store_routes_to_store_handler():
     """submit_store drives only the GPU->CPU (store) handler."""
     worker, store_handler, load_handler = _make_worker()
-    spec = _make_spec()
+    src_spec, dst_spec = DummyLoadStoreSpec(), DummyLoadStoreSpec()
 
-    assert worker.submit_store(1, spec)
+    assert worker.submit_store(1, src_spec, dst_spec)
 
-    assert store_handler.transfers == [(1, spec)]
+    assert store_handler.transfers == [(1, src_spec, dst_spec)]
     assert load_handler.transfers == []
 
 
 def test_submit_load_routes_to_load_handler():
     """submit_load drives only the CPU->GPU (load) handler."""
     worker, store_handler, load_handler = _make_worker()
-    spec = _make_spec()
+    src_spec, dst_spec = DummyLoadStoreSpec(), DummyLoadStoreSpec()
 
-    assert worker.submit_load(2, spec)
+    assert worker.submit_load(2, src_spec, dst_spec)
 
-    assert load_handler.transfers == [(2, spec)]
+    assert load_handler.transfers == [(2, src_spec, dst_spec)]
     assert store_handler.transfers == []
 
 
