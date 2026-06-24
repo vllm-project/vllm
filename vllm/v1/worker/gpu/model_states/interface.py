@@ -13,6 +13,7 @@ from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
+from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -46,11 +47,32 @@ class ModelState(ABC):
     ) -> None:
         raise NotImplementedError
 
-    @abstractmethod
+    model: nn.Module
+    # Set by mm-capable states; used by the default gather_mm_embeddings().
+    encoder_runner: EncoderRunner
+
     def get_supported_generation_tasks(self) -> tuple[GenerationTask, ...]:
-        raise NotImplementedError
+        from vllm.model_executor.models.interfaces import (
+            supports_realtime,
+            supports_transcription,
+        )
+        from vllm.model_executor.models.interfaces_base import is_text_generation_model
+
+        supported_tasks = list[GenerationTask]()
+        if is_text_generation_model(self.model):
+            supported_tasks.append("generate")
+        if supports_transcription(self.model):
+            if self.model.supports_transcription_only:
+                return ("transcription",)
+            supported_tasks.append("transcription")
+        if supports_realtime(self.model):
+            supported_tasks.append("realtime")
+        return tuple(supported_tasks)
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
+        return None
+
+    def remove_request(self, req_id: str) -> None:
         return None
 
     def apply_staged_writes(self) -> None:
@@ -63,9 +85,26 @@ class ModelState(ABC):
 
     @abstractmethod
     def get_mm_embeddings(
-        self, scheduled_encoder_inputs: dict[str, list[int]], input_batch: InputBatch
+        self,
+        scheduled_encoder_inputs: dict[str, list[int]],
+        input_batch: InputBatch,
+        req_states: RequestState,
     ) -> torch.Tensor | None:
         raise NotImplementedError
+
+    def gather_mm_embeddings(
+        self, input_batch: InputBatch, draft_lookahead: int = 0
+    ) -> tuple[list[torch.Tensor], torch.Tensor]:
+        """Gather cached multimodal embeddings for a speculator's draft forward."""
+        return self.encoder_runner.gather_mm_embeddings(
+            input_batch.req_ids,
+            input_batch.num_tokens,
+            input_batch.num_scheduled_tokens,
+            input_batch.query_start_loc_np,
+            input_batch.prefill_len_np,
+            input_batch.num_computed_prefill_tokens_np,
+            draft_lookahead=draft_lookahead,
+        )
 
     @abstractmethod
     def prepare_inputs(
@@ -89,3 +128,16 @@ class ModelState(ABC):
         for_capture: bool = False,
     ) -> dict[str, Any]:
         raise NotImplementedError
+
+    def custom_sampler(self, sampler: Any) -> tuple[Any, Any] | None:
+        """Wrap or replace the default sampler.
+
+        Called after model loading with the already-constructed base
+        ``Sampler``.  Return ``None`` to keep the defaults, or
+        ``(sampler, rejection_sampler | None)`` to override.
+        """
+        return None
+
+    num_new_sampled_tokens_per_step: int = 1
+    """New tokens sampled on each decode step 
+    (excluding accepted draft tokens, a.k.a num bonus tokens)."""

@@ -9,9 +9,9 @@ use vllm_chat::ReasoningEffort;
 
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{
-    ChatLogProbs, ChatMessage, MessageContent, Normalizable, StreamOptions, StringOrArray, Tool,
-    ToolCall, ToolCallDelta, ToolChoice, ToolChoiceValue, ToolReference, UNKNOWN_MODEL_ID, Usage,
-    default_true, validate_stop, validate_top_p_value,
+    ChatLogProbs, ChatMessage, Normalizable, StreamOptions, StringOrArray, Tool, ToolCall,
+    ToolCallDelta, ToolChoice, ToolChoiceValue, ToolReference, UNKNOWN_MODEL_ID, Usage,
+    default_true, validate_messages, validate_stop, validate_top_p_value,
 };
 
 /// vLLM-compatible request type for the Chat Completions API.
@@ -165,8 +165,10 @@ pub struct ChatCompletionRequest {
     pub bad_words: Option<Vec<String>>,
 
     // -------- Extra vLLM Parameters --------
-    /// Token budget for reasoning/thinking
-    pub thinking_token_budget: Option<u32>,
+    /// Token budget for reasoning/thinking. Accepts a non-negative integer, or
+    /// `-1` for unlimited (mirroring the Python frontend, which normalizes `-1`
+    /// to "no budget").
+    pub thinking_token_budget: Option<i64>,
 
     /// Whether to include reasoning content in the response
     #[serde(default = "default_true")]
@@ -428,32 +430,6 @@ pub(super) struct ChatMessageDelta {
 
 fn default_model() -> String {
     UNKNOWN_MODEL_ID.to_string()
-}
-
-/// Validates messages array is not empty and has valid content
-fn validate_messages(messages: &[ChatMessage]) -> Result<(), validator::ValidationError> {
-    if messages.is_empty() {
-        return Err(validator::ValidationError::new("messages cannot be empty"));
-    }
-
-    for msg in messages {
-        if let ChatMessage::User { content, .. } = msg {
-            match content {
-                MessageContent::Text(text) if text.is_empty() => {
-                    return Err(validator::ValidationError::new(
-                        "message content cannot be empty",
-                    ));
-                }
-                MessageContent::Parts(parts) if parts.is_empty() => {
-                    return Err(validator::ValidationError::new(
-                        "message content parts cannot be empty",
-                    ));
-                }
-                _ => {}
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Schema-level validation for cross-field dependencies

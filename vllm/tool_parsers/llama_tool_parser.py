@@ -46,6 +46,7 @@ class Llama3JsonToolParser(ToolParser):
     """
 
     bot_token: str = "<|python_tag|>"
+    structural_tag_model = "llama"
     # Simple regex to find opening braces - we'll use JSON decoder for parsing
     # This handles arbitrary nesting depth correctly
     tool_call_start_regex: re.Pattern = re.compile(r"\{")

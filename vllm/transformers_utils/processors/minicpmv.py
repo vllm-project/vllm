@@ -58,7 +58,12 @@ class MiniCPMVProcessor(ProcessorMixin):
 
     def __init__(self, image_processor=None, tokenizer=None):
         super().__init__(image_processor, tokenizer)
-        self.version = image_processor.version
+        # Newer (transformers v5.7+) MiniCPM-V image processors, e.g.
+        # MiniCPMV4_6ImageProcessor, no longer carry a `version` attribute.
+        # Fall back to None instead of hard-crashing: `version` is only used
+        # to special-case the 2.5 tokenization path in `_convert`, and any
+        # value other than 2.5 takes the default branch anyway.
+        self.version = getattr(image_processor, "version", None)
 
     def __call__(
         self,
@@ -72,8 +77,8 @@ class MiniCPMVProcessor(ProcessorMixin):
     ) -> MiniCPMVBatchFeature:
         """Run the vendored MiniCPMV processor on a (text, images) pair.
 
-        Only single-sample input is currently supported; batched input is
-        coming soon. ``images`` is forwarded to the underlying image
+        Batched inputs are supported following the upstream MiniCPM-V
+        processor flow. ``images`` is forwarded to the underlying image
         processor and ``text`` is tokenized with image placeholders
         replaced by the appropriate slice tokens. Returns a
         ``MiniCPMVBatchFeature`` with at minimum ``input_ids`` and (when
@@ -194,7 +199,7 @@ class MiniCPMVProcessor(ProcessorMixin):
                 image_end_tokens.unsqueeze(-1),
             ]
         )
-        return input_ids.unsqueeze(0), image_bounds
+        return input_ids, image_bounds
 
     def _convert_images_texts_to_inputs(
         self,
@@ -220,23 +225,41 @@ class MiniCPMVProcessor(ProcessorMixin):
         image_sizes = images["image_sizes"]
         tgt_sizes = images["tgt_sizes"]
 
-        image_tags = regex.findall(pattern, texts)
-        assert len(image_tags) == len(image_sizes[0])
-        text_chunks = texts.split(pattern)
-        final_texts = ""
-        for i in range(len(image_tags)):
-            placeholder = self.image_processor.get_slice_image_placeholder(
-                image_sizes[0][i]
-            )
-            final_texts = final_texts + text_chunks[i] + placeholder
-        final_texts += text_chunks[-1]
-        input_ids, image_bounds = self._convert(final_texts, max_length)
+        if isinstance(texts, str):
+            texts = [texts]
+
+        input_ids_list = []
+        image_bounds_list = []
+
+        for index, text in enumerate(texts):
+            image_tags = regex.findall(pattern, text)
+            assert len(image_tags) == len(image_sizes[index])
+            text_chunks = text.split(pattern)
+            final_text = ""
+            for i in range(len(image_tags)):
+                placeholder = self.image_processor.get_slice_image_placeholder(
+                    image_sizes[index][i]
+                )
+                final_text = final_text + text_chunks[i] + placeholder
+            final_text += text_chunks[-1]
+            input_ids, image_bounds = self._convert(final_text, max_length)
+            input_ids_list.append(input_ids)
+            image_bounds_list.append(image_bounds)
+
+        padded_input_ids, padding_lengths = self.pad(
+            input_ids_list,
+            padding_side="left",
+        )
+        for i, length in enumerate(padding_lengths):
+            image_bounds_list[i] = image_bounds_list[i] + length
+
         return MiniCPMVBatchFeature(
             data={
-                "input_ids": input_ids,
+                "input_ids": padded_input_ids,
+                "attention_mask": padded_input_ids.ne(0),
                 "pixel_values": images_val,
                 "image_sizes": image_sizes,
-                "image_bound": [image_bounds],
+                "image_bound": image_bounds_list,
                 "tgt_sizes": tgt_sizes,
             }
         )
@@ -249,42 +272,36 @@ class MiniCPMVProcessor(ProcessorMixin):
         image_processor_input_names = self.image_processor.model_input_names
         return list(dict.fromkeys(tokenizer_input_names + image_processor_input_names))
 
-    def pad(
-        self,
-        orig_items,
-        key,
-        max_length=None,
-        padding_value=0,
-        padding_side="left",
-    ):
-        if not orig_items:
-            return torch.empty(0)
+    # Copied from openbmb/MiniCPM-V-4_5 processing_minicpmv.py.
+    def pad(self, inputs, max_length=None, padding_value=0, padding_side="left"):
+        if not inputs:
+            return torch.empty(0), []
 
         items = []
-        if isinstance(orig_items[0][key], list):
-            assert isinstance(orig_items[0][key][0], torch.Tensor)
-            for it in orig_items:
-                for tr in it[key]:
-                    items.append({key: tr})
+        if isinstance(inputs[0], list):
+            assert isinstance(inputs[0][0], torch.Tensor)
+            for it in inputs:
+                for tr in it:
+                    items.append(tr)
         else:
-            assert isinstance(orig_items[0][key], torch.Tensor)
-            items = orig_items
+            assert isinstance(inputs[0], torch.Tensor)
+            items = inputs
 
         batch_size = len(items)
-        shape = items[0][key].shape
+        shape = items[0].shape
         dim = len(shape)
-        assert dim <= 3
+        assert dim <= 2
         if max_length is None:
             max_length = 0
-        max_length = max(max_length, max(item[key].shape[-1] for item in items))
-        min_length = min(item[key].shape[-1] for item in items)
-        dtype = items[0][key].dtype
+        max_length = max(max_length, max(item.shape[-1] for item in items))
+        min_length = min(item.shape[-1] for item in items)
+        dtype = items[0].dtype
 
-        if dim == 1:
-            return torch.cat([item[key] for item in items], dim=0)
-        elif dim == 2:
+        if dim == 0:
+            return torch.stack([item for item in items], dim=0), [0]
+        elif dim == 1:
             if max_length == min_length:
-                return torch.cat([item[key] for item in items], dim=0)
+                return torch.stack([item for item in items], dim=0), [0] * batch_size
             tensor = torch.zeros((batch_size, max_length), dtype=dtype) + padding_value
         else:
             tensor = (
@@ -292,23 +309,18 @@ class MiniCPMVProcessor(ProcessorMixin):
                 + padding_value
             )
 
+        padding_lengths = []
         for i, item in enumerate(items):
-            tensor_to_pad = item[key]
-            if tensor_to_pad.shape[0] != 1:
-                raise ValueError(
-                    f"Expected leading batch size of 1 for padding, "
-                    f"but got shape {tensor_to_pad.shape}"
-                )
-            squeezed = tensor_to_pad.squeeze(0)
-            if dim == 2:
+            if dim == 1:
                 if padding_side == "left":
-                    tensor[i, -squeezed.shape[0] :] = squeezed.clone()
+                    tensor[i, -len(item) :] = item.clone()
                 else:
-                    tensor[i, : squeezed.shape[0]] = squeezed.clone()
-            elif dim == 3:
+                    tensor[i, : len(item)] = item.clone()
+            elif dim == 2:
                 if padding_side == "left":
-                    tensor[i, -squeezed.shape[0] :, :] = squeezed.clone()
+                    tensor[i, -len(item) :, :] = item.clone()
                 else:
-                    tensor[i, : squeezed.shape[0], :] = squeezed.clone()
+                    tensor[i, : len(item), :] = item.clone()
+            padding_lengths.append(tensor.shape[-1] - len(item))
 
-        return tensor
+        return tensor, padding_lengths

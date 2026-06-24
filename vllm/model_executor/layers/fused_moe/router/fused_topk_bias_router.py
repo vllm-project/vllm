@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
-from collections.abc import Callable
 
 import torch
 import torch.nn.functional as F
@@ -169,6 +168,14 @@ def fused_topk_bias(
     hash_indices_table: torch.Tensor | None = None,
     routed_scaling_factor: float = 1.0,
 ):
+    # The topk kernel dispatches dtype based on topk_ids (set by
+    # indices_type) and assumes input_tokens/hash_indices_table match.
+    if indices_type is not None:
+        if input_tokens is not None and input_tokens.dtype != indices_type:
+            input_tokens = input_tokens.to(dtype=indices_type)
+        if hash_indices_table is not None and hash_indices_table.dtype != indices_type:
+            hash_indices_table = hash_indices_table.to(dtype=indices_type)
+
     if not rocm_aiter_ops.is_fused_moe_enabled():
         assert hidden_states.size(0) == gating_output.size(0), (
             "Number of tokens mismatch"
@@ -255,13 +262,37 @@ def fused_topk_bias(
                 topk_weights *= routed_scaling_factor
             return topk_weights, topk_ids
 
+    if scoring_func == "sqrtsoftplus":
+        M = hidden_states.size(0)
+        topk_weights = torch.empty(
+            M, topk, dtype=torch.float32, device=hidden_states.device
+        )
+        topk_ids = torch.empty(
+            M,
+            topk,
+            dtype=torch.int32 if indices_type is None else indices_type,
+            device=hidden_states.device,
+        )
+        token_expert_indices = torch.empty(
+            M, topk, dtype=torch.int32, device=hidden_states.device
+        )
+        return vllm_topk_softplus_sqrt(
+            topk_weights,
+            topk_ids,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            e_score_correction_bias,
+            input_tokens,
+            hash_indices_table,
+            routed_scaling_factor,
+        )
+
     n_routed_experts = gating_output.shape[-1]
     if scoring_func == "softmax":
         scores = gating_output.softmax(dim=-1)
     elif scoring_func == "sigmoid":
         scores = gating_output.sigmoid()
-    elif scoring_func == "sqrtsoftplus":
-        scores = F.softplus(gating_output).sqrt()
     else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
     if e_score_correction_bias is not None:
@@ -300,7 +331,6 @@ class FusedTopKBiasRouter(BaseRouter):
         renormalize: bool = True,
         routed_scaling_factor: float = 1.0,
         eplb_state: EplbLayerState | None = None,
-        indices_type_getter: Callable[[], torch.dtype | None] | None = None,
         *,
         scoring_func: str = "sigmoid",
         hash_indices_table: torch.Tensor | None = None,
@@ -309,7 +339,6 @@ class FusedTopKBiasRouter(BaseRouter):
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
-            indices_type_getter=indices_type_getter,
         )
         self.e_score_correction_bias = e_score_correction_bias
         self.renormalize = renormalize

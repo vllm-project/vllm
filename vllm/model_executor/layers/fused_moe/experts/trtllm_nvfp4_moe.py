@@ -142,6 +142,7 @@ class TrtLlmNvFp4ExpertsBase:
             MoEActivation.SILU,
             MoEActivation.RELU2_NO_MUL,
             MoEActivation.GELU,
+            MoEActivation.GELU_TANH,
         ]
 
     @staticmethod
@@ -350,9 +351,9 @@ class TrtLlmNvFp4ExpertsMonolithic(
             RoutingMethodType.RenormalizeNaive,
             RoutingMethodType.Llama4,
             RoutingMethodType.SigmoidRenorm,
+            RoutingMethodType.Sigmoid,
             RoutingMethodType.MiniMax2,
             RoutingMethodType.Simulated,
-            RoutingMethodType.SigmoidRenorm,
         ]
 
     @staticmethod

@@ -556,7 +556,8 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         and returns their outputs. Use after enqueue() to get results.
 
         Args:
-            output_type: The expected output type, defaults to RequestOutput.
+            output_type: The expected output type(s). If not provided, accepts
+                both RequestOutput and PoolingRequestOutput.
             use_tqdm: If True, shows a tqdm progress bar.
 
         Returns:

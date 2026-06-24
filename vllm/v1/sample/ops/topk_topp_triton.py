@@ -111,7 +111,7 @@ def _topk_topp_kernel(
     pid = tl.program_id(0)
     num_programs = tl.num_programs(0)
     for row_id in tl.range(pid, BATCH_SIZE, num_programs):
-        LOGITS_ROW = LOGITS + row_id * LOGITS_STRIDE_0
+        LOGITS_ROW = LOGITS + row_id.to(tl.int64) * LOGITS_STRIDE_0
         BUFFER_ROW = BUFFER + pid * VOCAB_SIZE
 
         final_pivot = -float("inf")
@@ -929,8 +929,12 @@ def apply_top_k_top_p_triton(
         normal_cdf_to_sigma_table, percentile_to_std_table = tables
 
     # Smaller tiles compile and run faster on CPU; GPU benefits from larger tiles.
+    # On XPU, large BLOCK_SIZE causes precision loss in the single-pass pivot
+    # approximation; use smaller tiles for accurate top-p results.
     if logits.device.type == "cpu":
         block_size, block_size_trunc = 256, 128
+    elif logits.device.type == "xpu":
+        block_size, block_size_trunc = 4096, 2048
     else:
         block_size, block_size_trunc = 8192, 4096
 
