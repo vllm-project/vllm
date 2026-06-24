@@ -21,6 +21,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
 from vllm.v1.kv_offload.base import (
+    LookupResult,
     OffloadingCounterMetadata,
     OffloadKey,
     OffloadPolicy,
@@ -60,15 +61,15 @@ def to_keys(int_ids: Iterable[int]) -> list[OffloadKey]:
 def count_hits(manager, keys: list[OffloadKey]) -> int | None:
     """Count consecutive lookup hits from the start of keys.
 
-    Returns the count of leading True results, or None if any lookup
-    returns None (retry-later signal).
+    Returns the count of leading HIT results, or None if any lookup
+    returns HIT_PENDING or RETRY.
     """
     count = 0
     for key in keys:
         result = manager.lookup(key, _CTX)
-        if result is None:
+        if result in (LookupResult.HIT_PENDING, LookupResult.RETRY):
             return None
-        if not result:
+        if result is not LookupResult.HIT:
             break
         count += 1
     return count
@@ -185,18 +186,18 @@ class TestExampleSecondaryTierManager:
 
         # Initially empty
         blocks = to_keys(range(3))
-        assert tier.lookup(blocks[0], _CTX) is False
+        assert tier.lookup(blocks[0], _CTX) is LookupResult.MISS
 
         # Store blocks (simulate with direct insertion for testing)
         tier.blocks[blocks[0]] = True
         tier.blocks[blocks[1]] = True
 
         # Lookup should find first two blocks
-        assert tier.lookup(blocks[0], _CTX) is True
-        assert tier.lookup(blocks[1], _CTX) is True
+        assert tier.lookup(blocks[0], _CTX) is LookupResult.HIT
+        assert tier.lookup(blocks[1], _CTX) is LookupResult.HIT
 
         # Third block not present
-        assert tier.lookup(blocks[2], _CTX) is False
+        assert tier.lookup(blocks[2], _CTX) is LookupResult.MISS
 
 
 class TestTieringOffloadingManager:
@@ -283,8 +284,12 @@ class TestTieringOffloadingManager:
         assert self.secondary_tier2.get_num_blocks() == 3
 
         # Verify blocks are present
-        assert all(self.secondary_tier1.lookup(b, _CTX) for b in blocks)
-        assert all(self.secondary_tier2.lookup(b, _CTX) for b in blocks)
+        assert all(
+            self.secondary_tier1.lookup(b, _CTX) is LookupResult.HIT for b in blocks
+        )
+        assert all(
+            self.secondary_tier2.lookup(b, _CTX) is LookupResult.HIT for b in blocks
+        )
 
     def test_ref_cnt_protection_during_cascade(self, manager_setup):
         """Test that ref_cnt protects blocks during cascade."""
@@ -355,7 +360,7 @@ class TestTieringOffloadingManager:
         # Lookup each block to initiate promotion for all of them
         for block in blocks:
             result = self.manager.lookup(block, _CTX)
-            assert result is None  # Retry later (promotion initiated)
+            assert result is LookupResult.RETRY  # promotion initiated
 
         # End of step 1: flushes deferred submit_load() calls
         self._simulate_on_schedule_end()
@@ -470,11 +475,11 @@ class TestTieringOffloadingManager:
         ctx_a = ReqContext(req_id="req_a")
         ctx_b = ReqContext(req_id="req_b")
 
-        # All lookups return None: secondary hit triggers promotion (in-flight)
-        assert self.manager.lookup(blocks[0], ctx_a) is None
-        assert self.manager.lookup(blocks[1], ctx_a) is None
-        assert self.manager.lookup(blocks[2], ctx_b) is None
-        assert self.manager.lookup(blocks[3], ctx_b) is None
+        # All lookups return RETRY: secondary hit triggers promotion
+        assert self.manager.lookup(blocks[0], ctx_a) is LookupResult.RETRY
+        assert self.manager.lookup(blocks[1], ctx_a) is LookupResult.RETRY
+        assert self.manager.lookup(blocks[2], ctx_b) is LookupResult.RETRY
+        assert self.manager.lookup(blocks[3], ctx_b) is LookupResult.RETRY
 
         # submit_load must not fire during lookup - only at end of step
         self.secondary_tier1.submit_load.assert_not_called()
@@ -511,9 +516,10 @@ class TestTieringOffloadingManager:
         result_a = self.manager.lookup(shared_block, ctx_a)
         result_b = self.manager.lookup(shared_block, ctx_b)
 
-        # Both see None (in-flight), but promotion is only queued once
-        assert result_a is None
-        assert result_b is None
+        # First lookup triggers promotion (RETRY), second finds block
+        # already in primary with write in-flight (HIT_PENDING).
+        assert result_a is LookupResult.RETRY
+        assert result_b is LookupResult.HIT_PENDING
 
         self._simulate_on_schedule_end()
 
@@ -796,7 +802,10 @@ class TestTieringOffloadingManager:
         # the lookup that staged it).
         promo_block = to_keys([99])[0]
         self.secondary_tier1.blocks[promo_block] = True
-        assert self.manager.lookup(promo_block, ReqContext(req_id="pending")) is None
+        assert (
+            self.manager.lookup(promo_block, ReqContext(req_id="pending"))
+            is LookupResult.RETRY
+        )
         assert self.manager._pending_load_submissions
 
         # Request-level tier registration.
@@ -829,7 +838,7 @@ class TestTieringOffloadingManager:
         assert self.primary_tier._num_allocated_blocks == 0
         assert self.primary_tier._free_list == []
         for block in blocks:
-            assert self.primary_tier.lookup(block, _CTX) is False
+            assert self.primary_tier.lookup(block, _CTX) is LookupResult.MISS
 
         # Pending submission was dropped, not submitted.
         self.secondary_tier1.submit_load.assert_not_called()
