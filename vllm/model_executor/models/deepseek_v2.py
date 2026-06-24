@@ -1160,8 +1160,12 @@ class DeepseekV2DecoderLayer(nn.Module):
             and layer_idx >= config.first_k_dense_replace
             and layer_idx % moe_layer_freq == 0
         )
+        # TODO(wentao): enable SP MoE with PP after the PP boundary logic can safely
+        # send/receive sequence-parallel hidden_states across stages.
         self.use_sequence_parallel_moe = (
-            parallel_config.use_sequence_parallel_moe and is_moe_layer
+            parallel_config.use_sequence_parallel_moe
+            and parallel_config.pipeline_parallel_size == 1
+            and is_moe_layer
         )
         self.self_attn.o_proj.reduce_results = not self.use_sequence_parallel_moe
 
