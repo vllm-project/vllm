@@ -89,6 +89,7 @@ class TransferRegion:
     base_addr: int
     block_len: int
     kv_block_len: int
+    group_index: int = 0
 
 
 def _get_tp_ratio(local_tp_size: int, remote_tp_size: int) -> int:
@@ -118,6 +119,7 @@ def _expand_transfer_regions(
     layer_names: list[str],
     layer_indices: list[int],
     is_kv_layout_blocks_first: bool,
+    group_indices: list[int] | None = None,
 ) -> list[TransferRegion]:
     """Expand registered KV tensors into the regions transferred by Mooncake."""
     assert (
@@ -128,9 +130,15 @@ def _expand_transfer_regions(
         f"layer_names={len(layer_names)}, "
         f"layer_indices={len(layer_indices)}."
     )
+    if group_indices is None:
+        group_indices = [0] * len(layer_names)
+    assert len(group_indices) == len(layer_names), (
+        "Mooncake transfer regions require matching group metadata lengths, "
+        f"got group_indices={len(group_indices)}, layer_names={len(layer_names)}."
+    )
     regions: list[TransferRegion] = []
-    for base_addr, block_len, layer_name, layer_index in zip(
-        base_addrs, block_lens, layer_names, layer_indices
+    for base_addr, block_len, layer_name, layer_index, group_index in zip(
+        base_addrs, block_lens, layer_names, layer_indices, group_indices
     ):
         kv_block_len = block_len // 2 if is_kv_layout_blocks_first else block_len
         regions.append(
@@ -140,6 +148,7 @@ def _expand_transfer_regions(
                 base_addr=base_addr,
                 block_len=block_len,
                 kv_block_len=kv_block_len,
+                group_index=group_index,
             )
         )
         if is_kv_layout_blocks_first:
@@ -150,6 +159,7 @@ def _expand_transfer_regions(
                     base_addr=base_addr + kv_block_len,
                     block_len=block_len,
                     kv_block_len=kv_block_len,
+                    group_index=group_index,
                 )
             )
     return regions
@@ -312,6 +322,17 @@ def _align_transfer_regions(
                     f"{remote_region.layer_index}."
                 ),
             )
+        if local_region.group_index != remote_region.group_index:
+            return (
+                [],
+                [],
+                (
+                    "Mooncake registered group index mismatch for "
+                    f"{local_region.layer_name}: producer="
+                    f"{local_region.group_index}, consumer="
+                    f"{remote_region.group_index}."
+                ),
+            )
         aligned_local.append(local_region)
         aligned_remote.append(remote_region)
 
@@ -338,6 +359,7 @@ class MooncakeXferMetadata(
     block_lens: list[int]
     registered_layer_names: list[str] = msgspec.field(default_factory=list)
     registered_layer_indices: list[int] = msgspec.field(default_factory=list)
+    registered_group_indices: list[int] = msgspec.field(default_factory=list)
 
 
 class MooncakeXferResponseStatus(IntEnum):
@@ -860,6 +882,7 @@ class MooncakeConnectorWorker:
         self.block_len_per_layer: list[int] = []
         self.registered_layer_names: list[str] = []
         self.registered_layer_indices: list[int] = []
+        self.registered_group_indices: list[int] = []
         self.seen_base_addresses: list[int] = []
 
         assert (parallel_config := vllm_config.parallel_config)
@@ -933,11 +956,17 @@ class MooncakeConnectorWorker:
 
         self._tp_size: dict[EngineId, int] = {self.engine_id: self.tp_size}
         self._layer_specs: dict[str, KVCacheSpec] = {}
+        self._layer_group_indices: dict[str, int] = {}
         self._has_mamba = False
         if kv_cache_config is not None:
             self._layer_specs = {
                 layer: group.kv_cache_spec
                 for group in kv_cache_config.kv_cache_groups
+                for layer in group.layer_names
+            }
+            self._layer_group_indices = {
+                layer: group_index
+                for group_index, group in enumerate(kv_cache_config.kv_cache_groups)
                 for layer in group.layer_names
             }
             self._has_mamba = any(
@@ -1111,12 +1140,14 @@ class MooncakeConnectorWorker:
             self.block_len_per_layer,
             self.registered_layer_names,
             self.registered_layer_indices,
+            self.registered_group_indices,
         )
         remote_regions = self._get_transfer_regions(
             meta.kv_caches_base_addr,
             meta.block_lens,
             meta.registered_layer_names,
             meta.registered_layer_indices,
+            meta.registered_group_indices,
         )
         local_regions, remote_regions, align_err = _align_transfer_regions(
             local_regions, remote_regions
@@ -1310,13 +1341,12 @@ class MooncakeConnectorWorker:
             ):
                 continue
 
-            # Per-group partial hit trimming, then flatten.
-            # With HMA, groups share the same KV tensor but use different
-            # block ranges.  We trim and concatenate so the coalescer and
-            # address math see one flat block list — same as non-HMA, but
-            # now including blocks from every group.
-            local_block_ids: list[int] = []
-            remote_block_ids: list[int] = []
+            # Keep KV-cache group identity.  Hybrid/HMA groups can carry
+            # different semantics (e.g. full-attention KV pages vs GDN/Mamba
+            # inner-state slots), so their block IDs must not be flattened and
+            # reused for every registered region.
+            local_block_ids_by_group: list[list[int]] = []
+            remote_block_ids_by_group: list[list[int]] = []
             has_block_error = False
             if len(send_meta.local_block_ids) != len(remote_block_ids_per_group):
                 logger.error(
@@ -1346,9 +1376,9 @@ class MooncakeConnectorWorker:
                     break
                 if n_local > n_remote:
                     # Partial prefix cache hit: just read uncomputed blocks.
-                    local_group = local_group[-n_remote:]
-                local_block_ids.extend(local_group)
-                remote_block_ids.extend(remote_group)
+                    local_group = local_group[-n_remote:] if n_remote > 0 else []
+                local_block_ids_by_group.append(local_group)
+                remote_block_ids_by_group.append(remote_group)
 
             if has_block_error:
                 err_reqs.append(d_req_id)
@@ -1356,22 +1386,37 @@ class MooncakeConnectorWorker:
                     err_msg = "P num blocks less than D"
                 continue
 
-            if not local_block_ids:
+            if not any(local_block_ids_by_group):
                 continue
 
-            # Group by indices
-            group_local_block_ids, group_remote_block_ids = group_concurrent_contiguous(
-                local_block_ids, remote_block_ids
-            )
-
             for local_region, remote_region in zip(local_regions, remote_regions):
-                should_transfer, src_region_offset, dst_region_offset, transfer_len = (
-                    self._get_sender_transfer_plan(
-                        local_kv_block_len=local_region.kv_block_len,
-                        remote_kv_block_len=remote_region.kv_block_len,
-                        remote_tp_rank=agent_meta.remote_tp_rank,
-                        remote_tp_size=agent_meta.remote_tp_size,
-                    )
+                assert local_region.group_index == remote_region.group_index, (
+                    "Aligned Mooncake transfer regions must belong to the same "
+                    "KV group."
+                )
+                group_index = local_region.group_index
+                assert group_index < len(local_block_ids_by_group), (
+                    "Transfer region references a missing KV group."
+                )
+                local_block_ids = local_block_ids_by_group[group_index]
+                remote_block_ids = remote_block_ids_by_group[group_index]
+                if not local_block_ids:
+                    continue
+
+                # Group by indices within this region's KV-cache group only.
+                group_local_block_ids, group_remote_block_ids = (
+                    group_concurrent_contiguous(local_block_ids, remote_block_ids)
+                )
+                (
+                    should_transfer,
+                    src_region_offset,
+                    dst_region_offset,
+                    transfer_len,
+                ) = self._get_sender_transfer_plan(
+                    local_kv_block_len=local_region.kv_block_len,
+                    remote_kv_block_len=remote_region.kv_block_len,
+                    remote_tp_rank=agent_meta.remote_tp_rank,
+                    remote_tp_size=agent_meta.remote_tp_size,
                 )
                 if not should_transfer:
                     # Replicated KV cache: only one producer rank in the TP group
@@ -1385,7 +1430,7 @@ class MooncakeConnectorWorker:
                     "Computed source transfer region exceeds local KV block size."
                 )
                 assert dst_region_offset + transfer_len <= remote_region.kv_block_len, (
-                    "Computed destination transfer region exceeds remote KV block size."
+                    "Destination transfer region exceeds remote KV block size."
                 )
                 # Collapse one contiguous block group into a single larger
                 # transfer descriptor when the per-block copy is identical.
@@ -1428,28 +1473,10 @@ class MooncakeConnectorWorker:
                             )
                             lengths.append(transfer_len)
 
-                if local_region is local_regions[0]:
-                    logger.debug(
-                        "Mooncake transfer plan for request %s: local_tp=%d "
-                        "remote_tp=%d remote_tp_rank=%d local_block_len=%d "
-                        "remote_block_len=%d src_offset=%d dst_offset=%d "
-                        "transfer_len=%d coalesce=%s",
-                        d_req_id,
-                        self.tp_size,
-                        agent_meta.remote_tp_size,
-                        agent_meta.remote_tp_rank,
-                        local_region.block_len,
-                        remote_region.block_len,
-                        src_region_offset,
-                        dst_region_offset,
-                        transfer_len,
-                        can_coalesce,
-                    )
-
             logger.debug(
                 "Sending kv_caches for request %s (%d blocks) to %s",
                 d_req_id,
-                len(local_block_ids),
+                sum(len(group) for group in local_block_ids_by_group),
                 remote_session,
             )
 
@@ -1503,6 +1530,7 @@ class MooncakeConnectorWorker:
         self.block_len_per_layer = []
         self.registered_layer_names = []
         self.registered_layer_indices = []
+        self.registered_group_indices = []
 
         tensor_size_bytes = None
         for layer_name, cache_or_caches in kv_caches.items():
@@ -1548,6 +1576,9 @@ class MooncakeConnectorWorker:
                 self.block_len_per_layer.append(block_len)
                 self.registered_layer_names.append(layer_name)
                 self.registered_layer_indices.append(layer_index)
+                self.registered_group_indices.append(
+                    self._layer_group_indices[layer_name]
+                )
                 kv_data_ptrs.append(base_addr)
                 kv_data_lens.append(self.num_blocks * block_len)
 
@@ -1669,6 +1700,7 @@ class MooncakeConnectorWorker:
             block_lens=self.block_len_per_layer,
             registered_layer_names=self.registered_layer_names,
             registered_layer_indices=self.registered_layer_indices,
+            registered_group_indices=self.registered_group_indices,
         )
 
         encoded_data = self._encoder.encode(metadata)
@@ -1879,13 +1911,20 @@ class MooncakeConnectorWorker:
         block_lens: list[int],
         layer_names: list[str],
         layer_indices: list[int],
+        group_indices: list[int] | None = None,
     ) -> list[TransferRegion]:
+        if not group_indices:
+            group_indices = [
+                self._layer_group_indices.get(layer_name, 0)
+                for layer_name in layer_names
+            ]
         return _expand_transfer_regions(
             base_addrs=base_addrs,
             block_lens=block_lens,
             layer_names=layer_names,
             layer_indices=layer_indices,
             is_kv_layout_blocks_first=self.transfer_topo.virtually_split_kv_in_blocks,
+            group_indices=group_indices,
         )
 
     def _get_sender_transfer_plan(
