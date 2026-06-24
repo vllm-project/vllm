@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     align_fp4_moe_weights_for_fi,
     align_trtllm_fp4_moe_hidden_dim_for_fi,
@@ -317,7 +318,18 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
             NvFp4MoeBackend.FLASHINFER_B12X,
         ]
     ):
-        w13, w13_scale = reorder_w1w3_to_w3w1(w13, w13_scale)
+        # Bug 3c: GPT-OSS stores gate/up INTERLEAVED ([g0,u0,g1,u1,...]); the FI
+        # kernels want them de-interleaved AND in [w3,w1] (up,gate) order. Both
+        # reduce to selecting odd (up) rows then even (gate) rows. Packing is on
+        # the last (hidden) dim, so reordering dim -2 rows is safe. The bias is
+        # reordered to match in experts.apply.
+        if layer.activation == MoEActivation.SWIGLUOAI:
+            w13 = torch.cat([w13[:, 1::2], w13[:, 0::2]], dim=-2).contiguous()
+            w13_scale = torch.cat(
+                [w13_scale[:, 1::2], w13_scale[:, 0::2]], dim=-2
+            ).contiguous()
+        else:
+            w13, w13_scale = reorder_w1w3_to_w3w1(w13, w13_scale)
 
     # For some FI kernels, the input scales are shared by all experts.
     if is_global_sf_supported_for_nvfp4_backend(backend):

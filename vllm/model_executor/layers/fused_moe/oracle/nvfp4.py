@@ -418,6 +418,12 @@ def make_nvfp4_moe_quant_config(
     a13_scale: torch.Tensor,
     a2_scale: torch.Tensor,
     swiglu_limit: float | None = None,
+    # Bug 3: clamped-SwiGLU (swigluoai) alpha/beta (clamp limit above).
+    swiglu_alpha: float | None = None,
+    swiglu_beta: float | None = None,
+    # Bug 1: per-expert biases.
+    w13_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
 ) -> FusedMoEQuantConfig:
     if backend == NvFp4MoeBackend.MARLIN:
         return nvfp4_w4a16_moe_quant_config(
@@ -436,6 +442,12 @@ def make_nvfp4_moe_quant_config(
             w1_scale=w13_scale,
             w2_scale=w2_scale,
             gemm1_clamp_limit=swiglu_limit,
+            # Bug 3: clamped-SwiGLU (swigluoai) alpha/beta (clamp limit above).
+            gemm1_alpha=swiglu_alpha,
+            gemm1_beta=swiglu_beta,
+            # Bug 1: per-expert biases.
+            w1_bias=w13_bias,
+            w2_bias=w2_bias,
         )
 
     # Pass w13_scale_2 / w2_scale_2 directly as g1/g2_alphas.
@@ -460,6 +472,12 @@ def make_nvfp4_moe_quant_config(
             )
         ),
         gemm1_clamp_limit=swiglu_limit,
+        # Bug 3: clamped-SwiGLU (swigluoai) alpha/beta (clamp limit above).
+        gemm1_alpha=swiglu_alpha,
+        gemm1_beta=swiglu_beta,
+        # Bug 1: per-expert biases.
+        w1_bias=w13_bias,
+        w2_bias=w2_bias,
     )
 
 

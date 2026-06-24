@@ -1548,6 +1548,30 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
         layer.register_parameter("w2_input_scale", w2_input_scale)
 
+        # Bug 1: register expert biases. GPT-OSS has per-expert
+        # biases; without this, loading fails with KeyError: ...experts.w2_bias.
+        # Bias stays bf16 (not quantized) and is applied by the kernel. Only
+        # registered when the MoE layer declares biases, so bias-free models are
+        # unaffected.
+        if self.moe.has_bias:
+            w13_bias = torch.nn.Parameter(
+                torch.zeros(
+                    num_experts,
+                    w13_num_shards * intermediate_size_per_partition,
+                    dtype=torch.bfloat16,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w13_bias", w13_bias)
+            set_weight_attrs(w13_bias, extra_weight_attrs)
+
+            w2_bias = torch.nn.Parameter(
+                torch.zeros(num_experts, hidden_size, dtype=torch.bfloat16),
+                requires_grad=False,
+            )
+            layer.register_parameter("w2_bias", w2_bias)
+            set_weight_attrs(w2_bias, extra_weight_attrs)
+
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         """
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
@@ -1616,6 +1640,14 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             a13_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
+            # Bug 3: clamped-SwiGLU (swigluoai) alpha/beta, set on the layer by
+            # the model (gpt-oss). The values flow into the MoE quant config and
+            # on to the kernel.
+            swiglu_alpha=getattr(layer, "swiglu_alpha", None),
+            swiglu_beta=getattr(layer, "swiglu_beta", None),
+            # Bug 1: per-expert biases.
+            w13_bias=getattr(layer, "w13_bias", None),
+            w2_bias=getattr(layer, "w2_bias", None),
         )
 
     @property
