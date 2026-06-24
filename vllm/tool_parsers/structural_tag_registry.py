@@ -107,7 +107,12 @@ def get_model_structural_tag(
         return None
 
     if tool_choice == "auto" and not _any_tool_strict(tools):
-        return None
+        # DeepSeek-V4: keep DSML grammar guidance on for auto + non-strict so
+        # the model is constrained to valid DSML when it attempts a tool call.
+        # Without this, malformed DSML leaks into content or is dropped as an
+        # empty response (see #40801).
+        if model != "deepseek_v4":
+            return None
 
     dumped_tools = [_dump_tool_for_xgrammar(tool) for tool in tools]
     dumped_tool_choice = _dump_tool_choice_for_xgrammar(tool_choice)

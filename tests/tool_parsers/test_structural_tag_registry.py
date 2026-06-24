@@ -346,3 +346,17 @@ def test_get_function_parameters_relaxes_function_strict_false():
     )
 
     assert _get_function_parameters(function) is True
+
+
+def test_deepseek_v4_auto_non_strict_gets_structural_tag(
+    sample_tools: list[ChatCompletionToolsParam],
+):
+    # auto + non-strict must still constrain DSML for DeepSeek-V4 so malformed
+    # tool calls don't leak into content / drop as empty responses (#40801).
+    tag = get_model_structural_tag(
+        model="deepseek_v4",
+        tools=sample_tools,
+        tool_choice="auto",
+        reasoning=True,
+    )
+    assert isinstance(tag, StructuralTag)
