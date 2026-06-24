@@ -392,3 +392,77 @@ def test_warning_logs(caplog_vllm):
         # Clean up when done
         writer.shutdown()
         reader.shutdown()
+
+
+def test_writer_acquire_write_honors_shutdown():
+    """Writer-starvation regression test.
+
+    Reproduces the cumem hot-wake worker-death wedge: a worker process aborts
+    before setting its shm read flag, so the dead rank's flag stays 0 forever.
+    The engine-side writer's next acquire_write(timeout=None) then blocks
+    indefinitely because the block never becomes writable. The
+    MultiprocWorkerMonitor fires shutdown() (sets shutting_down + cancels the
+    spin-condition, which only wakes *readers*), so before the fix the writer
+    ignored shutting_down and stayed wedged forever.
+
+    Pre-fix: acquire_write has no shutting_down escape -> the writer thread
+    hangs and this test times out / never completes.
+    Post-fix: acquire_write raises RuntimeError("cancelled") promptly after
+    shutdown() is called.
+    """
+    n_reader = 2
+    max_chunks = 4
+    writer = MessageQueue(
+        n_reader=n_reader,
+        n_local_reader=n_reader,
+        max_chunk_bytes=1024,
+        max_chunks=max_chunks,
+    )
+
+    # Fill every block in the ring so the writer's next acquire_write has no
+    # writable block. No reader ever reads, so the read flags stay 0 and the
+    # blocks never become reusable -- exactly the dead-worker scenario.
+    for _ in range(max_chunks):
+        with writer.acquire_write(timeout=1) as buf:
+            buf[0] = 0
+
+    # The ring is now full. acquire_write(timeout=None) must block...
+    error_box: list[BaseException] = []
+    started = threading.Event()
+    finished = threading.Event()
+
+    def blocked_writer():
+        started.set()
+        try:
+            with writer.acquire_write(timeout=None) as buf:
+                buf[0] = 0
+        except BaseException as e:  # noqa: BLE001 - record whatever is raised
+            error_box.append(e)
+        finally:
+            finished.set()
+
+    t = threading.Thread(target=blocked_writer, daemon=True)
+    t.start()
+    started.wait(timeout=1)
+
+    # Give the writer a moment to actually be wedged in the wait loop, and
+    # confirm it has NOT returned on its own (the ring really is full).
+    assert not finished.wait(timeout=0.2), (
+        "acquire_write returned unexpectedly; ring was not full"
+    )
+
+    # Simulate the MultiprocWorkerMonitor reacting to the worker death.
+    writer.shutdown()
+
+    # Post-fix: the writer must unwedge promptly (well under the old
+    # 60s "No available block" loop). Pre-fix this never fires -> times out.
+    assert finished.wait(timeout=0.5), (
+        "acquire_write did not honor shutdown() within 500ms -- still wedged"
+    )
+
+    assert len(error_box) == 1
+    assert isinstance(error_box[0], RuntimeError)
+    assert "cancelled" in str(error_box[0])
+    assert writer.shutting_down
+
+    writer.shutdown()

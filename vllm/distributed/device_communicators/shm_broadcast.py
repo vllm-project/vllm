@@ -571,6 +571,15 @@ class MessageQueue:
                     # Release the processor to other threads
                     sched_yield()
 
+                    # If the queue is shutting down (e.g. because a worker
+                    # process died), the dead reader's flag will never be set,
+                    # so `check()` would stay False forever and a `timeout=None`
+                    # writer would wedge here indefinitely. Mirror the reader's
+                    # shutdown escape in acquire_read so a worker death surfaces
+                    # as a clean cancellation instead of an unrecoverable hang.
+                    if self.shutting_down:
+                        raise RuntimeError("cancelled")
+
                     # if we time out, raise an exception
                     elapsed = time.monotonic() - start_time
                     if timeout is not None and elapsed > timeout:
