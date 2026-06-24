@@ -902,6 +902,23 @@ class AsyncLLM(EngineClient):
         if self.errored:
             raise self.dead_error
 
+    async def get_decode_liveness(
+        self,
+    ) -> tuple[int, float | None, float | None]:
+        """Snapshot of (num_running_reqs, last_token_age_seconds,
+        last_prefill_age_seconds).
+
+        Sourced from the StatLoggerManager's per-step bookkeeping. When
+        log_stats is disabled (no logger_manager exists), reports as
+        idle (``(0, None, None)``) — callers (specifically the
+        /health/decode route) treat that as healthy "idle" rather than
+        stalled, so disabling stats does not generate false-positive
+        503s.
+        """
+        if self.logger_manager is None:
+            return 0, None, None
+        return self.logger_manager.get_decode_liveness()
+
     async def start_profile(self, profile_prefix: str | None = None) -> None:
         coros = [self.engine_core.profile_async(True, profile_prefix)]
         if self.profiler is not None:
@@ -1023,10 +1040,67 @@ class AsyncLLM(EngineClient):
             # This resets all the prometheus metrics since we
             # unregister during initialization. Need to understand
             # the intended behavior here better.
+            #
+            # Carry forward the decode-liveness bookkeeping from the
+            # old logger_manager so /health/decode is not reset to
+            # "never decoded" / running=0 by the scale-up. Otherwise
+            # a stall that crossed the scale-up boundary would be
+            # silently masked: the new manager would report idle, the
+            # endpoint would return 200, and the orchestrator would
+            # not act. With carry-forward, a previously-stalled
+            # engine continues to look stalled until the next
+            # successful record() advances the timestamp.
+            prev_last_token_emit_time = None
+            prev_last_num_running_reqs = 0
+            prev_token_by_engine: dict = {}
+            prev_running_by_engine: dict = {}
+            prev_prefill_by_engine: dict = {}
+            if self.logger_manager is not None:
+                prev_last_token_emit_time = getattr(
+                    self.logger_manager, "_last_token_emit_time", None
+                )
+                prev_last_num_running_reqs = getattr(
+                    self.logger_manager, "_last_num_running_reqs", 0
+                )
+                # Per-engine bookkeeping (added for DP partial-stall
+                # surfacing). Copy so the new manager keeps surfacing a
+                # stalled shard from before the scale-up.
+                prev_token_by_engine = dict(
+                    getattr(
+                        self.logger_manager,
+                        "_last_token_emit_time_by_engine",
+                        {},
+                    )
+                )
+                prev_running_by_engine = dict(
+                    getattr(
+                        self.logger_manager,
+                        "_last_num_running_reqs_by_engine",
+                        {},
+                    )
+                )
+                prev_prefill_by_engine = dict(
+                    getattr(
+                        self.logger_manager,
+                        "_last_prefill_activity_time_by_engine",
+                        {},
+                    )
+                )
             self.logger_manager = StatLoggerManager(
                 vllm_config=self.vllm_config,
                 engine_idxs=list(range(new_data_parallel_size)),
                 custom_stat_loggers=None,
+            )
+            self.logger_manager._last_token_emit_time = prev_last_token_emit_time
+            self.logger_manager._last_num_running_reqs = prev_last_num_running_reqs
+            self.logger_manager._last_token_emit_time_by_engine.update(
+                prev_token_by_engine
+            )
+            self.logger_manager._last_num_running_reqs_by_engine.update(
+                prev_running_by_engine
+            )
+            self.logger_manager._last_prefill_activity_time_by_engine.update(
+                prev_prefill_by_engine
             )
             # Update the mutable ref so output_handler picks up the
             # new logger without creating a circular reference via self.
