@@ -432,14 +432,28 @@ class SingleDirectionOffloadingHandler:
         self._stream_pool.clear()
         self._event_pool.clear()
         self._buffer_pool.clear()
-        self.src_tensors.clear()
-        self.dst_tensors.clear()
-        if self._pin_thread is not None:
-            self._pin_thread.join()
-            self._pin_thread = None
+
         if self._mmap_region is not None:
+            self.src_tensors.clear()
+            self.dst_tensors.clear()
+            if self._pin_thread is not None:
+                self._pin_thread.join()
+                self._pin_thread = None
             self._mmap_region.cleanup()
             self._mmap_region = None
+        else:
+            if self._pin_thread is not None:
+                self._pin_thread.join()
+                self._pin_thread = None
+                for tensor in self.dst_tensors:
+                    result = torch.cuda.cudart().cudaHostUnregister(tensor.data_ptr())
+                    if result.value != 0:
+                        logger.warning(
+                            "cudaHostUnregister failed for CPU tensor (code=%d)",
+                            result.value,
+                        )
+                self.src_tensors.clear()
+                self.dst_tensors.clear()
 
 
 class CPUOffloadingWorker(OffloadingWorker):
