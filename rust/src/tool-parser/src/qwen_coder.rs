@@ -6,7 +6,7 @@ use winnow::token::{literal, take_until};
 
 use super::parameters::ToolSchemas;
 use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len, take_until_marker};
-use super::{Result, ToolCallDelta, ToolParser, ToolParserOutput};
+use super::{Result, StructuralTagModel, ToolCallDelta, ToolParser, ToolParserOutput};
 use crate::Tool;
 
 const TOOL_CALL_START: &str = "<tool_call>";
@@ -111,6 +111,10 @@ impl ToolParser for Qwen3CoderToolParser {
         Self: Sized + 'static,
     {
         Ok(Box::new(Self::new(tools)))
+    }
+
+    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
+        Some(StructuralTagModel::Qwen3Coder)
     }
 
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
@@ -236,7 +240,7 @@ mod tests {
     use serde_json::{Value, json};
     use thiserror_ext::AsReport;
 
-    use super::{Qwen3CoderToolParser, ToolParser};
+    use super::{Qwen3CoderToolParser, StructuralTagModel, ToolParser};
     use crate::test_utils::{collect_stream, split_by_chars, test_tools};
     use crate::{ToolParserOutput, ToolParserTestExt as _};
 
@@ -247,6 +251,16 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         format!("<tool_call>\n<function={function_name}>\n{params}\n</function>\n</tool_call>")
+    }
+
+    #[test]
+    fn qwen_coder_exposes_structural_tag_model() {
+        let parser = Qwen3CoderToolParser::new(&test_tools());
+
+        assert_eq!(
+            parser.structural_tag_model(),
+            Some(StructuralTagModel::Qwen3Coder)
+        );
     }
 
     #[test]

@@ -14,6 +14,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 thiserror-ext.workspace = true
 winnow.workspace = true
+xgrammar-structural-tag.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

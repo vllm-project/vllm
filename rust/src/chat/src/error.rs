@@ -64,6 +64,8 @@ pub enum Error {
     StreamClosedBeforeTerminalOutput { request_id: String },
     #[error("tool call stream state is inconsistent: {message}")]
     ToolCallStreamInvariant { message: String },
+    #[error("failed to build structural tag: {message}")]
+    StructuralTag { message: String },
     #[error(transparent)]
     Text(#[from] vllm_text::Error),
     #[error(transparent)]
