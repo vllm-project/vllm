@@ -210,7 +210,9 @@ class Fp8PerBlockOnlineLinearMethod(_Fp8OnlineLinearBase):
         self.weight_block_size = [128, 128]
         self.activation_quant_key = create_fp8_quant_key(
             static=False,
-            group_shape=GroupShape(1, self.weight_block_size[0]),
+            # Activations are grouped along the K (contraction) dim:
+            # block_k = weight_block_size[1].
+            group_shape=GroupShape(1, self.weight_block_size[1]),
         )
         self.weight_quant_key = create_fp8_quant_key(
             static=True, group_shape=GroupShape(*self.weight_block_size)
