@@ -29,7 +29,6 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
         layer: AttentionLayer,
         query: torch.Tensor,
         kv_cache: torch.Tensor,
-        topk_idx: tuple[torch.Tensor | None, torch.Tensor | None],
         output: torch.Tensor,
     ) -> torch.Tensor:
         attn_metadata = get_forward_context().attn_metadata
@@ -37,10 +36,12 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
             return output  # profiling run; caches unbound
         main_md = attn_metadata[layer.layer_name]  # type: ignore[attr-defined]
         assert isinstance(main_md, MiniMaxM3SparseMetadata)
-        decode_topk, prefill_topk = topk_idx
 
         nd = main_md.num_decode_tokens
         num_tokens = main_md.num_actual_tokens
+        # Indexer top-k from the shared buffer: decode [:, :nd], prefill [:, nd:].
+        topk = layer.topk_indices_buffer  # type: ignore[attr-defined]
+        assert topk is not None
         hd = self.head_size
         q = query[:num_tokens].view(-1, self.num_heads, hd)
         out = output[:num_tokens].view(-1, self.num_heads, hd)
@@ -51,11 +52,11 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
         # Decode [:nd]: Triton split-K placeholder (no MSA decode yet).
         if main_md.num_decodes > 0:
             d = main_md.decode
-            assert d is not None and decode_topk is not None
+            assert d is not None
             minimax_m3_sparse_attn_decode(
                 q[:nd],
                 kv_cache,
-                decode_topk,
+                topk[:, :nd, :],
                 d.block_table,
                 d.seq_lens,
                 self.num_kv_heads,
@@ -72,7 +73,8 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
             )
 
             p = main_md.prefill
-            assert p is not None and prefill_topk is not None
+            assert p is not None
+            prefill_topk = topk[:, nd:num_tokens, :]
             qp = q[nd:]
             k_cache = kv_cache[:, 0].transpose(1, 2)
             v_cache = kv_cache[:, 1].transpose(1, 2)
