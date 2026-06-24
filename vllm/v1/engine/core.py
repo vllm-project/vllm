@@ -1954,6 +1954,10 @@ class DPEngineCoreProc(EngineCoreProc):
                 # window before model_executor.is_sleeping flips.
                 elif not self.is_sleeping():
                     with self.log_iteration_details(None):
+                # We are in a running state and so must execute a dummy pass
+                # if the model didn't execute any ready requests.
+                if not self.model_executor.is_sleeping:
+                    with self.log_iteration_details(None):
                         self.execute_dummy_batch()
 
             # 3) All-reduce operation to determine global unfinished reqs.
