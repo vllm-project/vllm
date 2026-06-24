@@ -318,7 +318,7 @@ async def test_build_transfer_params_multi_group_trimming(monkeypatch):
         worker.shutdown()
 
 
-def test_common_group_indices_treats_missing_metadata_as_all_groups():
+def test_common_group_indices_rejects_missing_group_metadata():
     local_region = TransferRegion(
         layer_name="model.layers.4.self_attn",
         layer_index=4,
@@ -347,12 +347,12 @@ def test_common_group_indices_treats_missing_metadata_as_all_groups():
         local_region,
         remote_region,
         num_groups=3,
-    ) == (0, 1, 2)
+    ) is None
     assert _common_group_indices_for_regions(
         remote_region,
         local_region,
         num_groups=3,
-    ) == (0, 1, 2)
+    ) is None
     assert _common_group_indices_for_regions(
         local_region,
         annotated_remote_region,
