@@ -63,6 +63,7 @@ from .utils import (
     PPMissingLayer,
     WeightsMapper,
     _merge_multimodal_embeddings,
+    isin_list,
     maybe_prefix,
 )
 
@@ -464,7 +465,6 @@ class NgramEmbedding(nn.Module):
             )
 
         seq_len = input_ids.numel()
-        device = input_ids.device
 
         # Determine complete context
         if ngram_context is not None:
@@ -474,13 +474,14 @@ class NgramEmbedding(nn.Module):
         else:
             context = input_ids.clone()
 
-        # Skip N-gram look-up for oe_ignored_token_ids
-        oe_ignored_mask = torch.isin(
-            input_ids, torch.tensor(self.config.oe_ignored_token_ids, device=device)
-        )
-        context_ignored_mask = torch.isin(
-            context, torch.tensor(self.config.oe_ignored_token_ids, device=device)
-        )
+        # Skip N-gram look-up for oe_ignored_token_ids.
+        # Use isin_list (which uses async_tensor_h2d) instead of
+        # torch.tensor(..., device=device) to avoid CPU→GPU transfers that
+        # are unsafe inside CUDA graph capture regions.
+        oe_ignored_mask = isin_list(input_ids,
+                                    self.config.oe_ignored_token_ids)
+        context_ignored_mask = isin_list(context,
+                                         self.config.oe_ignored_token_ids)
         context = context.clone()
         context[context_ignored_mask] = 0
 
