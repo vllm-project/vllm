@@ -18,7 +18,7 @@ import socket
 import threading
 import time
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Literal, TypeVar
@@ -45,6 +45,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator imp
     MooncakeStoreCoordinator,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
+    BlobBlockHashes,
     ChunkedTokenDatabase,
     KeyMetadata,
     MooncakeStoreConnectorMetadata,
@@ -65,7 +66,6 @@ from vllm.v1.core.kv_cache_utils import (
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec
-from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 from .metrics import MooncakeStoreConnectorStats
 
@@ -1372,7 +1372,7 @@ class MooncakeStoreWorker:
 
         return finished_sending
 
-    def lookup(self, token_len: int, block_hashes: list[BlockHash]) -> int:
+    def lookup(self, token_len: int, block_hashes: Sequence[BlockHash]) -> int:
         """Check how many prefix tokens exist in the store.
 
         Checks across all TP ranks and PP ranks.
@@ -1392,6 +1392,11 @@ class MooncakeStoreWorker:
             group_hashes = self.coord.block_hashes_for_spec(
                 block_hashes, self._kv_cache_groups[g_idx].kv_cache_spec
             )
+            metadata_templates = [
+                dataclasses.replace(db.metadata, tp_rank=tp, pp_rank=pp)
+                for tp in range(tp_count)
+                for pp in range(self.pp_size)
+            ]
             for chunk_id, h in enumerate(group_hashes):
                 start_idx = chunk_id * spec_block_size
                 if start_idx >= token_len:
@@ -1400,11 +1405,11 @@ class MooncakeStoreWorker:
                     chunk_id >= len(lookup_mask) or not lookup_mask[chunk_id]
                 ):
                     continue
-                for tp in range(tp_count):
-                    for pp in range(self.pp_size):
-                        md = dataclasses.replace(db.metadata, tp_rank=tp, pp_rank=pp)
-                        candidate_keys.append(PoolKey(md, h.hex()).to_string())
-                        candidate_meta.append((g_idx, bytes(h)))
+                h_hex = h.hex()
+                h_bytes = bytes(h)
+                for md in metadata_templates:
+                    candidate_keys.append(PoolKey(md, h_hex).to_string())
+                    candidate_meta.append((g_idx, h_bytes))
 
         if not candidate_keys:
             return 0
@@ -1483,7 +1488,6 @@ class LookupKeyServer:
         store_worker: MooncakeStoreWorker,
         vllm_config: VllmConfig,
     ):
-        self.decoder = MsgpackDecoder()
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
         socket_path = get_zmq_rpc_path_lookup(vllm_config)
         self._ipc_path = socket_path.removeprefix("ipc://")
@@ -1506,9 +1510,9 @@ class LookupKeyServer:
 
                 if msg_type == LOOKUP_MSG:
                     token_len = int.from_bytes(all_frames[1], byteorder="big")
-                    hash_frames = all_frames[2:]
-                    hashes_str = self.decoder.decode(hash_frames)
-                    block_hashes = [BlockHash(bytes.fromhex(s)) for s in hashes_str]
+                    hash_len = int.from_bytes(all_frames[2], byteorder="big")
+                    blob = all_frames[3].buffer
+                    block_hashes = BlobBlockHashes(blob, hash_len)
                     result = self.store_worker.lookup(token_len, block_hashes)
                     self.socket.send(result.to_bytes(4, "big"))
 
@@ -1557,7 +1561,6 @@ class LookupKeyClient:
     """
 
     def __init__(self, vllm_config: VllmConfig):
-        self.encoder = MsgpackEncoder()
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
         socket_path = get_zmq_rpc_path_lookup(vllm_config)
         self.socket = make_zmq_socket(
@@ -1574,14 +1577,16 @@ class LookupKeyClient:
         self.futures: dict[str, Future[int]] = {}
 
     def _lookup(self, token_len: int, block_hashes: list[BlockHash]) -> int:
-        hash_strs = [h.hex() for h in block_hashes]
-        hash_frames = self.encoder.encode(hash_strs)
-        token_len_bytes = token_len.to_bytes(4, byteorder="big")
-        all_frames = [LOOKUP_MSG, token_len_bytes] + list(hash_frames)
+        hash_len = len(block_hashes[0]) if block_hashes else 0
+        all_frames = (
+            LOOKUP_MSG,
+            token_len.to_bytes(4, byteorder="big"),
+            hash_len.to_bytes(2, byteorder="big"),
+            b"".join(block_hashes),
+        )
         self.socket.send_multipart(all_frames, copy=False)
         resp = self.socket.recv()
-        result = int.from_bytes(resp, "big")
-        return result
+        return int.from_bytes(resp, "big")
 
     def lookup(
         self,

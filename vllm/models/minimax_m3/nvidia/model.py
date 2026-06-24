@@ -402,6 +402,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         cache_config: CacheConfig | None = None,
+        topk_indices_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -489,6 +490,10 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # cache (--attention-config '{"indexer_kv_dtype": ...}').
         self.indexer_kv_dtype = vllm_config.attention_config.indexer_kv_dtype
 
+        # Shared top-k buffer: the indexer writes the selected blocks into it and
+        # the attend impl reads them back (so nothing crosses the eager break as a
+        # Python value, which would freeze at capture).
+        self.topk_indices_buffer = topk_indices_buffer
         self.attn_backend = MiniMaxM3SparseBackend
         # Indexer (top-k selection) and main attention are separate impls, each
         # picking Triton vs MSA off its cache dtype. impl is AttentionImplBase
@@ -519,6 +524,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             score_type=sparse_cfg.get("sparse_score_type", "max"),
             cache_config=cache_config,
             indexer_kv_dtype=self.indexer_kv_dtype,
+            topk_indices_buffer=topk_indices_buffer,
         )
 
         # Register the main K/V cache so the KV-cache manager allocates it.
@@ -576,7 +582,12 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         main_slot_mapping = fwd_slot_mapping[self.layer_name]
         index_slot_mapping = fwd_slot_mapping[self.indexer.index_cache.prefix]
         q = qkv.new_empty((num_tokens, self.q_size))
-        index_q = qkv.new_empty((num_tokens, self.index_q_size))
+        # index_q matches the index-K cache dtype (e4m3 for the fp8 score path);
+        # the fused kernel emits fp8 directly when this buffer is e4m3.
+        index_q = qkv.new_empty(
+            (num_tokens, self.index_q_size),
+            dtype=self.indexer.index_cache.dtype,
+        )
         ops.fused_minimax_m3_qknorm_rope_kv_insert(
             qkv,
             self.q_norm.weight,
@@ -613,9 +624,10 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         output: torch.Tensor,
     ) -> torch.Tensor:
         # Single eager break around both: their split-K kernels read per-request
-        # metadata and can't be captured into a cudagraph.
-        topk_idx = self.indexer(index_query)
-        return self.impl.forward(self, query, self.kv_cache, topk_idx, output)
+        # metadata and can't be captured into a cudagraph. The indexer writes its
+        # top-k into the shared ``topk_indices_buffer``; the attend reads it back.
+        self.indexer(index_query)
+        return self.impl.forward(self, query, self.kv_cache, output)
 
 
 class MiniMaxM3DecoderLayer(nn.Module):
@@ -627,6 +639,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
         force_sparse_attn: bool = False,
         force_moe: bool = False,
         is_mtp_block: bool = False,
+        topk_indices_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         if is_mtp_block:
@@ -662,6 +675,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.self_attn",
                 cache_config=cache_config,
+                topk_indices_buffer=topk_indices_buffer,
             )
         else:
             self.self_attn = MiniMaxM3Attention(
@@ -747,11 +761,33 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             prefix=f"{prefix}.embed_tokens",
         )
 
+        # Reserved top-k indices buffer shared by all sparse-attention indexer
+        # layers (mirrors DeepseekV4); kept at a stable address so the indexer's
+        # top-k output survives cudagraph capture/replay. Shape matches the
+        # per-head index top-k output [num_index_heads, total_q, topk].
+        sparse_cfg = getattr(config, "sparse_attention_config", None)
+        if sparse_cfg is not None:
+            tp_size = get_tensor_model_parallel_world_size()
+            num_index_heads = max(1, sparse_cfg["sparse_num_index_heads"] // tp_size)
+            # Pad tokens to a multiple of 4 so the buffer head stride stays
+            # int4-aligned for build_k2q_csr's vectorised int4 loads.
+            max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+            padded_num_tokens = (max_num_batched_tokens + 3) // 4 * 4
+            self.topk_indices_buffer = torch.empty(
+                num_index_heads,
+                padded_num_tokens,
+                sparse_cfg["sparse_topk_blocks"],
+                dtype=torch.int32,
+            )
+        else:
+            self.topk_indices_buffer = None
+
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: MiniMaxM3DecoderLayer(
                 vllm_config=vllm_config,
                 prefix=prefix,
+                topk_indices_buffer=self.topk_indices_buffer,
             ),
             prefix=f"{prefix}.layers",
         )
