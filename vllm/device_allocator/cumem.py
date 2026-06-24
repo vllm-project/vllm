@@ -249,6 +249,8 @@ class CuMemAllocator:
         backup_bytes = 0
 
         for ptr, data in self.pointer_to_data.items():
+            if data.is_asleep:
+                continue
             handle = data.handle
             total_bytes += handle[1]
             if data.tag in offload_tags:
@@ -275,6 +277,30 @@ class CuMemAllocator:
             total_bytes / 1024**3,
             backup_bytes / 1024**3,
             (total_bytes - backup_bytes) / 1024**3,
+        )
+
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    def discard(self, tags: tuple[str, ...] | str) -> None:
+        """Selectively release GPU memory for the given tags without
+        CPU backup.  Other tags remain mapped and usable."""
+        if isinstance(tags, str):
+            tags = (tags,)
+
+        discarded_bytes = 0
+        for data in self.pointer_to_data.values():
+            if data.tag in tags and not data.is_asleep:
+                try:
+                    unmap_and_release(data.handle)
+                finally:
+                    data.is_asleep = True
+                discarded_bytes += data.handle[1]
+
+        logger.info(
+            "CuMemAllocator: discarded %.2f GiB for tags %s.",
+            discarded_bytes / 1024**3,
+            tags,
         )
 
         gc.collect()
