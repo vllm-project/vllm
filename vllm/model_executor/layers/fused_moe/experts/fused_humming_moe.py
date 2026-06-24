@@ -513,7 +513,7 @@ class HummingIndexedExperts(HummingExpertsBase):
                 break
 
         if moe_block_size is None:
-            logger.warning(
+            logger.warning_once(
                 "No tuning config found for shape %s, using default block_size=64",
                 valid_shape_m,
             )

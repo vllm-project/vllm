@@ -602,7 +602,7 @@ def select_humming_moe_experts(
     activation_key: QuantKey | None,
 ) -> type[mk.FusedMoEExperts] | None:
     """
-    Select the primary FP8 MoE backend
+    Select the primary Humming MoE Experts class
     Note: Shape-specific fallbacks may still occur at runtime.
     """
 
@@ -949,7 +949,7 @@ def convert_to_humming_moe_kernel_format(
 
     # Build schemas from quant_config if not provided
     has_bias = layer.moe_config.has_bias
-    num_experts = layer.moe_config.num_experts
+    num_experts = layer.moe_config.num_local_experts
     param_dtype = layer.params_dtype
 
     if weight_schema is None or input_schema is None:
