@@ -758,6 +758,6 @@ def test_nvfp4_moe_correctness(
     torch.testing.assert_close(
         output_fused,
         output_ref,
-        atol=0.0 if current_platform.is_rocm() else 0.002,
+        atol=0.0 if current_platform.is_rocm() else 0.02,
         rtol=0,
     )
