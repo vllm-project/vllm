@@ -127,6 +127,10 @@ pub trait ReasoningParser: Send {
 pub enum ReasoningError {
     #[error("tokenizer is missing reasoning delimiter token `{token}`")]
     MissingToken { token: String },
+    #[error(
+        "`{name}` only provides a unified parser; the same reasoning parser and tool parser should be specified together"
+    )]
+    DummyUnifiedParser { name: String },
 }
 
 #[cfg(test)]

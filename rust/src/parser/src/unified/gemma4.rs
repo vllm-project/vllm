@@ -8,7 +8,7 @@ use winnow::token::{literal, take_till, take_until};
 
 use vllm_tokenizer::DynTokenizer;
 
-use super::{Result, UnifiedParser, UnifiedParserError, UnifiedParserEvent, UnifiedParserOutput};
+use super::{Result, UnifiedParser, UnifiedParserError, UnifiedParserOutput};
 use crate::reasoning::last_reasoning_boundary;
 use crate::tool::{Tool, ToolCallDelta};
 use crate::unified::parsing_failed;
@@ -175,6 +175,13 @@ impl Gemma4UnifiedParser {
 }
 
 impl UnifiedParser for Gemma4UnifiedParser {
+    fn create(tools: &[Tool], tokenizer: DynTokenizer) -> Result<Box<dyn UnifiedParser>>
+    where
+        Self: Sized + 'static,
+    {
+        Self::new(tools, tokenizer).map(|parser| Box::new(parser) as Box<dyn UnifiedParser>)
+    }
+
     fn initialize(&mut self, prompt_token_ids: &[u32]) -> Result<()> {
         self.buffer.clear();
         self.emitted_tool_count = 0;
@@ -515,11 +522,10 @@ mod tests {
 
     use super::{
         CHANNEL_END, CHANNEL_START, Gemma4UnifiedParser, ToolCallDelta, UnifiedParser,
-        UnifiedParserError, UnifiedParserEvent, UnifiedParserOutput, gemma4_array_content,
-        parse_gemma4_args,
+        UnifiedParserError, UnifiedParserOutput, gemma4_array_content, parse_gemma4_args,
     };
     use crate::tool::Tool;
-    use crate::unified::parsing_failed;
+    use crate::unified::{UnifiedParserEvent, parsing_failed};
 
     struct FakeTokenizer;
 
