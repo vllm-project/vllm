@@ -83,7 +83,64 @@ def with_pattern_match_debug(fn: Callable[P, R]) -> Callable[P, R]:
     return wrapper
 
 
-class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
+class PassManager(CustomGraphPass):  # type: ignore[misc]
+    """
+    Base class for vLLM custom-graph pass managers.
+
+    Holds the machinery shared by every pass manager: an ordered list of
+    configurable `InductorPass`es, a helper to run them over an fx graph, and
+    UUID aggregation for the Inductor code cache (including torch<2.6 support
+    via pickling, see `.inductor_pass.CustomGraphPass`).
+
+    Subclasses are responsible for:
+    - populating `self.passes` and setting `self.pass_config` (e.g. in a
+      `configure` method),
+    - implementing `__call__` to run `self.passes` (typically via
+      `_run_passes`) plus any always-on passes, and
+    - extending `_uuid_state` with the UUIDs of those always-on passes so the
+      cache key reflects them.
+    """
+
+    def __init__(self) -> None:
+        self.passes: list[InductorPass] = []
+
+    def add(self, pass_: InductorPass) -> None:
+        assert isinstance(pass_, InductorPass)
+        self.passes.append(pass_)
+
+    def _run_passes(self, graph: fx.Graph) -> None:
+        """Run every configurable pass that applies to the current compile
+        range, advancing the dump index for each pass that runs."""
+        compile_range = get_pass_context().compile_range
+        for pass_ in self.passes:
+            if pass_.is_applicable_for_range(compile_range):
+                pass_(graph)
+                VllmInductorPass.dump_prefix += 1
+            else:
+                logger.debug("Skipping %s with compile range %s", pass_, compile_range)
+
+    def _uuid_state(self) -> dict[str, Any]:
+        """Build the dict hashed by `uuid`. Subclasses extend `state["passes"]`
+        with the UUIDs of any always-on passes they run in `__call__`."""
+        state: dict[str, Any] = {"pass_config": self.pass_config.compute_hash()}
+        passes = [pass_.uuid() for pass_ in self.passes]
+
+        # Include the compile range in the uuid to ensure that inductor
+        # recompiles the graph for the new dynamic compile range.
+        state["compile_range"] = str(get_pass_context().compile_range)
+        state["passes"] = passes
+        return state
+
+    def uuid(self) -> str:
+        """
+        The pass manager is set as a custom pass in the Inductor and affects
+        compilation caching. Its uuid depends on the UUIDs of all dependent
+        passes and the pass config. See InductorPass for more info.
+        """
+        return InductorPass.hash_dict(self._uuid_state())
+
+
+class PostGradPassManager(PassManager):  # type: ignore[misc]
     """
     The pass manager for post-grad passes.
     It handles configuration, adding custom passes, and running passes.
@@ -98,20 +155,11 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
     This way, all passes operate on a functionalized graph.
     """
 
-    def __init__(self) -> None:
-        self.passes: list[InductorPass] = []
-
     @with_pattern_match_debug
     def __call__(self, graph: fx.Graph) -> None:
         VllmInductorPass.dump_prefix = 0  # reset dump index
 
-        compile_range = get_pass_context().compile_range
-        for pass_ in self.passes:
-            if pass_.is_applicable_for_range(compile_range):
-                pass_(graph)
-                VllmInductorPass.dump_prefix += 1
-            else:
-                logger.debug("Skipping %s with compile range %s", pass_, compile_range)
+        self._run_passes(graph)
 
         # perform the first post-cleanup before IR lowering to clean up fusion artifacts
         # and make sure no dead IR ops are lowered.
@@ -199,30 +247,17 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
             self.post_cleanup = PostCleanupPass(config)
             self.fix_functionalization = FixFunctionalizationPass(config)
 
-    def add(self, pass_: InductorPass) -> None:
-        assert isinstance(pass_, InductorPass)
-        self.passes.append(pass_)
+    def _uuid_state(self) -> dict[str, Any]:
+        state = super()._uuid_state()
 
-    def uuid(self) -> str:
-        """
-        The PostGradPassManager is set as a custom pass in the Inductor and
-        affects compilation caching. Its uuid depends on the UUIDs of all
-        dependent passes and the pass config. See InductorPass for more info.
-        """
-        passes = []
-
-        state: dict[str, Any] = {"pass_config": self.pass_config.compute_hash()}
-        for pass_ in self.passes:
-            passes.append(pass_.uuid())
-
-        passes.append(self.post_cleanup.uuid())
-        passes.append(self.ir_lowering.uuid())
-        passes.append(self.clone_elimination.uuid())
-        passes.append(self.post_cleanup.uuid())
-        passes.append(self.fix_functionalization.uuid())
-
-        # Include the compile range in the uuid to ensure that inductor
-        # recompiles the graph for the new dynamic compile range.
-        state["compile_range"] = str(get_pass_context().compile_range)
-        state["passes"] = passes
-        return InductorPass.hash_dict(state)
+        # The always-on utility passes run in __call__ after self.passes, in
+        # this order. Append them so the cache key reflects them. Kept
+        # identical to the previous flat uuid() to avoid invalidating caches.
+        state["passes"] += [
+            self.post_cleanup.uuid(),
+            self.ir_lowering.uuid(),
+            self.clone_elimination.uuid(),
+            self.post_cleanup.uuid(),
+            self.fix_functionalization.uuid(),
+        ]
+        return state

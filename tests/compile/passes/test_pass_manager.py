@@ -10,7 +10,7 @@ from vllm.compilation.passes.inductor_pass import (
     InductorPass,
     pass_context,
 )
-from vllm.compilation.passes.pass_manager import PostGradPassManager
+from vllm.compilation.passes.pass_manager import PassManager, PostGradPassManager
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.utils import Range
 
@@ -81,3 +81,37 @@ def test_pass_manager_uuid(callable):
         pass_manager3.configure(config2)
         pass_manager3.add(callable)
         assert uuid1 != pass_manager3.uuid()
+
+
+def test_post_grad_is_pass_manager():
+    """PostGradPassManager should be a thin subclass of the shared base."""
+    assert issubclass(PostGradPassManager, PassManager)
+
+
+def test_uuid_includes_always_on_passes():
+    """The post-grad uuid must hash the always-on utility passes that run in
+    __call__ (post_cleanup, ir_lowering, clone_elimination, post_cleanup,
+    fix_functionalization), not just the configurable `self.passes`. This pins
+    the contract that the base `_uuid_state` is extended by the subclass, so a
+    future refactor that drops the always-on passes from the cache key fails
+    here instead of silently reusing a stale Inductor cache entry."""
+    with pass_context(Range(start=1, end=8)):
+        config = VllmConfig(model_config=ModelConfig(dtype=torch.bfloat16))
+        pass_manager = PostGradPassManager()
+        pass_manager.configure(config)
+
+        full_uuid = pass_manager.uuid()
+        # The base-only state omits the always-on utility passes; the
+        # subclass uuid must differ from hashing that base state alone.
+        base_state = PassManager._uuid_state(pass_manager)
+        assert full_uuid != InductorPass.hash_dict(base_state)
+
+        # And the always-on pass UUIDs must each appear in the hashed state.
+        full_state = pass_manager._uuid_state()
+        for utility in (
+            pass_manager.post_cleanup,
+            pass_manager.ir_lowering,
+            pass_manager.clone_elimination,
+            pass_manager.fix_functionalization,
+        ):
+            assert utility.uuid() in full_state["passes"]
