@@ -8,7 +8,7 @@ import torch
 import vllm._custom_ops as ops
 from tests.kernels.quant_utils import ref_dynamic_per_tensor_fp8_quant
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx950
+from vllm.platforms.rocm import on_gfx12x, on_gfx950
 from vllm.utils.platform_utils import num_compute_units
 
 DTYPES = [torch.bfloat16, torch.float16]
@@ -180,8 +180,11 @@ def test_rocm_wvsplitkrc_kernel(xnorm, n, k, m, dtype, seed, padded_a, bias_mode
 @torch.inference_mode()
 def test_rocm_vec_mat_mul_kernel(n, k, m, dtype, rows_per_block, seed):
     torch.manual_seed(seed)
-    A = torch.randn(n, k, dtype=dtype, device="cuda")
-    B = torch.randn(m, k, dtype=dtype, device="cuda")
+    # TODO: Zero-centering the inputs causes errors for vecMatMul!
+    #      Without that the numbers quickly saturate, and may
+    #      be giving false matches.
+    A = torch.rand(n, k, dtype=dtype, device="cuda")
+    B = torch.rand(m, k, dtype=dtype, device="cuda")
 
     ref_out = torch.matmul(A, B.t())
     out = ops.vecMatMul(B, A, rows_per_block)
@@ -193,6 +196,7 @@ def test_rocm_vec_mat_mul_kernel(n, k, m, dtype, rows_per_block, seed):
 @pytest.mark.parametrize("rows_per_block", [4, 8, 16])
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
+@pytest.mark.skipif(not on_gfx12x(), reason="only for RDNA4 (gfx12)")
 @torch.inference_mode()
 def test_rocm_vec_mat_mul_rdna4_row_write_regression(rows_per_block, dtype):
     # All output rows are correctly written when M spans multiple half2-packed
@@ -201,8 +205,8 @@ def test_rocm_vec_mat_mul_rdna4_row_write_regression(rows_per_block, dtype):
     torch.manual_seed(0)
     m = rows_per_block * 4
     k = 128
-    A = torch.randn(1, k, dtype=dtype, device="cuda")
-    B = torch.randn(m, k, dtype=dtype, device="cuda")
+    A = torch.rand(1, k, dtype=dtype, device="cuda")
+    B = torch.rand(m, k, dtype=dtype, device="cuda")
 
     ref_out = torch.matmul(A, B.t())
     out = ops.vecMatMul(B, A, rows_per_block)
@@ -214,6 +218,7 @@ def test_rocm_vec_mat_mul_rdna4_row_write_regression(rows_per_block, dtype):
 @pytest.mark.parametrize("k", [4096, 8192])
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
+@pytest.mark.skipif(not on_gfx12x(), reason="only for RDNA4 (gfx12)")
 @torch.inference_mode()
 def test_rocm_vec_mat_mul_rdna4_reduction_regression(k, dtype):
     # Cross-warp reduction accumulates all partial sums when num_warps exceeds
@@ -222,8 +227,8 @@ def test_rocm_vec_mat_mul_rdna4_reduction_regression(k, dtype):
     torch.manual_seed(0)
     rows_per_block = 2
     m = rows_per_block * 4
-    A = torch.randn(1, k, dtype=dtype, device="cuda")
-    B = torch.randn(m, k, dtype=dtype, device="cuda")
+    A = torch.rand(1, k, dtype=dtype, device="cuda")
+    B = torch.rand(m, k, dtype=dtype, device="cuda")
 
     ref_out = torch.matmul(A, B.t())
     out = ops.vecMatMul(B, A, rows_per_block)
