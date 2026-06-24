@@ -47,8 +47,10 @@ steps:
   - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
   - vllm/models/deepseek_v4/common/ops/
   - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
+  - tests/kernels/test_top_k_per_row.py # it runs on Blackwell too - some kernels have arch-specific optimizations
   commands:
     - pytest -v -s kernels/test_fused_deepseek_v4_*.py
+    - pytest -v -s kernels/test_top_k_per_row.py
 
 - label: Deepseek V4 Kernel Test (B200)
   key: deepseek-v4-kernel-test-b200
