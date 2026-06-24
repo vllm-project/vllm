@@ -104,11 +104,7 @@ class OpenAIServingCompletion(OpenAIServing):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
 
-        try:
-            return await self.online_renderer.render_completion(request)
-        except Exception as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(e)
+        return await self.online_renderer.render_completion(request)
 
     async def create_completion(
         self,
