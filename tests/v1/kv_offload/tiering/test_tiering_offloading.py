@@ -67,7 +67,7 @@ def count_hits(manager, keys: list[OffloadKey]) -> int | None:
     count = 0
     for key in keys:
         result = manager.lookup(key, _CTX)
-        if result is LookupResult.HIT_PENDING or result is LookupResult.RETRY:
+        if result in (LookupResult.HIT_PENDING, LookupResult.RETRY):
             return None
         if result is not LookupResult.HIT:
             break
