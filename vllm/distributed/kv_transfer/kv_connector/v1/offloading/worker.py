@@ -21,11 +21,10 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
     CanonicalKVCaches,
     CanonicalKVCacheTensor,
+    GPULoadStoreSpec,
+    LoadStoreSpec,
     OffloadingSpec,
-)
-from vllm.v1.kv_offload.worker.worker import (
     OffloadingWorker,
-    TransferSpec,
 )
 
 logger = init_logger(__name__)
@@ -36,16 +35,17 @@ class OffloadingConnectorWorker:
 
     def __init__(self, spec: OffloadingSpec):
         self.spec = spec
-        self.worker = OffloadingWorker()
+        self.worker: OffloadingWorker | None = None
 
         # job_id -> req_id for in-flight loads.
         self._load_jobs: dict[int, ReqId] = {}
-        self._unsubmitted_store_jobs: list[tuple[int, TransferSpec]] = []
+        self._unsubmitted_store_jobs: list[
+            tuple[int, GPULoadStoreSpec, LoadStoreSpec]
+        ] = []
         self._connector_worker_meta = OffloadingWorkerMetadata()
 
-    def _register_handlers(self, kv_caches: CanonicalKVCaches):
-        for src_cls, dst_cls, handler in self.spec.get_handlers(kv_caches):
-            self.worker.register_handler(src_cls, dst_cls, handler)
+    def _init_worker(self, kv_caches: CanonicalKVCaches) -> None:
+        self.worker = self.spec.get_worker(kv_caches)
 
     def register_kv_caches(
         self, kv_caches: dict[str, torch.Tensor | list[torch.Tensor]]
@@ -138,7 +138,7 @@ class OffloadingConnectorWorker:
                 (block_stride, 1),
                 storage_offset=0,
             )
-            self._register_handlers(
+            self._init_worker(
                 CanonicalKVCaches(
                     [CanonicalKVCacheTensor(packed_tensor, block_stride)],
                     [
@@ -204,7 +204,7 @@ class OffloadingConnectorWorker:
             group_data_refs=group_data_refs,
         )
 
-        self._register_handlers(canonical_kv_caches)
+        self._init_worker(canonical_kv_caches)
 
     def register_cross_layers_kv_cache(
         self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
@@ -251,11 +251,12 @@ class OffloadingConnectorWorker:
             tensors=[kv_cache_tensor], group_data_refs=[[kv_cache_data_ref]]
         )
 
-        self._register_handlers(canonical_kv_caches)
+        self._init_worker(canonical_kv_caches)
 
     def handle_preemptions(self, kv_connector_metadata: OffloadingConnectorMetadata):
-        for job_id, transfer_spec in self._unsubmitted_store_jobs:
-            success = self.worker.transfer_async(job_id, transfer_spec)
+        assert self.worker is not None
+        for job_id, src_spec, dst_spec in self._unsubmitted_store_jobs:
+            success = self.worker.submit_store(job_id, src_spec, dst_spec)
             assert success
         self._unsubmitted_store_jobs.clear()
 
@@ -263,14 +264,16 @@ class OffloadingConnectorWorker:
             self.worker.wait(kv_connector_metadata.jobs_to_flush)
 
     def start_kv_transfers(self, metadata: OffloadingConnectorMetadata):
-        for job_id, transfer_spec in self._unsubmitted_store_jobs:
-            success = self.worker.transfer_async(job_id, transfer_spec)
+        assert self.worker is not None
+        for job_id, src_spec, dst_spec in self._unsubmitted_store_jobs:
+            success = self.worker.submit_store(job_id, src_spec, dst_spec)
             assert success
         self._unsubmitted_store_jobs.clear()
 
         for job_id, entry in metadata.load_jobs.items():
             self._load_jobs[job_id] = entry.req_id
-            success = self.worker.transfer_async(job_id, entry.transfer_spec)
+            assert isinstance(entry.dst_spec, GPULoadStoreSpec)
+            success = self.worker.submit_load(job_id, entry.src_spec, entry.dst_spec)
             assert success
 
     def prepare_store_kv(self, metadata: OffloadingConnectorMetadata):
@@ -278,7 +281,10 @@ class OffloadingConnectorWorker:
             # NOTE(orozery): defer the store to the beginning of the next
             # engine step, so that offloading starts AFTER transfers related
             # to token sampling, thereby avoiding delays to token generation.
-            self._unsubmitted_store_jobs.append((job_id, entry.transfer_spec))
+            assert isinstance(entry.src_spec, GPULoadStoreSpec)
+            self._unsubmitted_store_jobs.append(
+                (job_id, entry.src_spec, entry.dst_spec)
+            )
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """
@@ -290,6 +296,7 @@ class OffloadingConnectorWorker:
             finished_recving so the base scheduler can resume requests
             blocked on remote KV (and free aborted-during-load reqs).
         """
+        assert self.worker is not None
         finished_recving: set[str] = set()
         for transfer_result in self.worker.get_finished():
             # we currently do not support job failures
@@ -328,4 +335,5 @@ class OffloadingConnectorWorker:
         self._unsubmitted_store_jobs.clear()
         self._load_jobs.clear()
         self._connector_worker_meta = OffloadingWorkerMetadata()
-        self.worker.shutdown()
+        if self.worker is not None:
+            self.worker.shutdown()
