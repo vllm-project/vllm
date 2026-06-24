@@ -183,6 +183,19 @@ class CuMemAllocator:
 
         assert isinstance(offload_tags, tuple)
 
+        # Drain all in-flight kernels before tearing down any virtual address
+        # space below. Under async scheduling (max_concurrent_batches > 1),
+        # EngineCore.step_with_batch_queue submits execute_model(non_block=True)
+        # and returns without awaiting the future, so a subsequent sleep() can
+        # race the still-running forward kernel: unmap_and_release -> cuMemUnmap
+        # frees the KV/weight VA out from under a kernel that is still writing
+        # to it, surfacing as an Xid-31 write-to-unmapped-VA fault and killing
+        # EngineCore. The synchronous step() path is safe because future.result()
+        # drains the work, but the batch-queue path is exposed. The existing
+        # synchronize in _python_free_callback only covers the GC-driven free
+        # path, not this explicit unmap loop, so add a device-wide drain here.
+        torch.cuda.synchronize()
+
         total_bytes = 0
         backup_bytes = 0
 
