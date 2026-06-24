@@ -107,6 +107,7 @@ def lookup_and_wait(
     latest: list[bool | None] = [None] * len(keys)
     while time.monotonic() < deadline:
         latest = [tier.lookup(k, ctx) for k in keys]
+        tier.on_schedule_end()  # attempt result drain
         if all(v is not None for v in latest):
             break
         time.sleep(0.01)
