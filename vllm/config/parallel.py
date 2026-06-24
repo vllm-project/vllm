@@ -36,6 +36,7 @@ DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
 DCPCommBackend = Literal["ag_rs", "a2a"]
+DCPSparseIndexerMode = Literal["exact", "union"]
 EPLBCommunicatorBackend = Literal["torch_nccl", "torch_gloo", "nixl", "pynccl"]
 All2AllBackend = Literal[
     "naive",
@@ -349,6 +350,11 @@ class ParallelConfig:
 
     """
     dcp_comm_backend: DCPCommBackend = "ag_rs"
+    dcp_sparse_indexer_mode: DCPSparseIndexerMode = "union"
+    """How the sparse-MLA indexer picks top-k under DCP: ``union`` (each rank
+    picks top-k over its local KV shard, reconciled by the LSE merge -- cheap,
+    the prior default) or ``exact`` (ranks all-gather local top-k candidates and
+    recompute a single global top-k identical to the non-DCP result)."""
     """Communication backend for Decode Context Parallel (DCP).
     - "ag_rs": AllGather + ReduceScatter (default, existing behavior)
     - "a2a": All-to-All exchange of partial outputs + LSE, then
