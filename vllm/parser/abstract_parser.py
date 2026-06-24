@@ -604,7 +604,7 @@ class DelegatingParser(Parser):
             if isinstance(self._tool_parser, ParserEngineToolAdapter):
                 result = self._tool_parser.extract_tool_calls_with_token_ids(
                     model_output,
-                    request=request,  # type: ignore[arg-type]
+                    request=request,
                     token_ids=token_ids,
                 )
             else:

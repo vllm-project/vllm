@@ -554,7 +554,7 @@ class ParserEngine(Parser):
     def extract_tool_calls_from_content(
         self,
         content: str,
-        request: ChatCompletionRequest,
+        request: ChatCompletionRequest | ResponsesRequest,
         token_ids: Sequence[int] = (),
     ) -> ExtractedToolCallInformation:
         """Extract tool calls from reasoning-stripped content.
