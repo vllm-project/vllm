@@ -883,6 +883,8 @@ class HfRunner:
         wait_for_rocm_memory_to_settle(
             threshold_ratio=getattr(self, "threshold_ratios", None)
         )
+        if hasattr(self, "threshold_ratios"):
+            del self.threshold_ratios
 
 
 @pytest.fixture(scope="session")
