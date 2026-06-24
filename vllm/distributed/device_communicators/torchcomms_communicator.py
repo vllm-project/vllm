@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import os
-from contextlib import suppress
 from typing import Any
 
 import torch
@@ -49,7 +48,7 @@ def _wait_if_needed(work: Any) -> None:
 
 
 class TorchCommsCommunicator(DeviceCommunicatorBase):
-    """vLLM device communicator backed directly by torchcomms"""
+    """vLLM device communicator backed directly by torchcomms."""
 
     def __init__(
         self,
@@ -107,11 +106,70 @@ class TorchCommsCommunicator(DeviceCommunicatorBase):
             os.environ.get("CCL_ATL_TRANSPORT"),
             os.environ.get("CCL_LOG_LEVEL"),
         )
-        self.comm = torchcomms.new_comm(
-            self.backend,
-            self.device,
-            name=f"{unique_name or 'vllm'}_torchcomms",
+
+        comm_name = f"{unique_name or 'vllm'}_torchcomms"
+
+        orig_master_addr = os.environ.get("MASTER_ADDR")
+        orig_master_port = os.environ.get("MASTER_PORT")
+
+        torchcomm_addr = os.environ.get(
+            "TORCHCOMM_MASTER_ADDR",
+            os.environ.get("MASTER_ADDR", "127.0.0.1"),
         )
+        torchcomm_port = os.environ.get("TORCHCOMM_MASTER_PORT")
+        if torchcomm_port is None:
+            torchcomm_port = os.environ.get("TORCHCOMM_PORT")
+
+        if torchcomm_port is None:
+            raise RuntimeError(
+                "TORCHCOMM_MASTER_PORT/TORCHCOMM_PORT is not set. "
+                "TorchComms needs a separate rendezvous port from MASTER_PORT."
+            )
+
+        # torchcomms.new_comm appears to read MASTER_ADDR/MASTER_PORT.
+        # Temporarily point those to the TorchComms rendezvous port so it
+        # does not collide with vLLM/torch.distributed's main MASTER_PORT.
+        os.environ["MASTER_ADDR"] = torchcomm_addr
+        os.environ["MASTER_PORT"] = str(torchcomm_port)
+
+        logger.info(
+            "[torchcomms] using rendezvous MASTER_ADDR=%s MASTER_PORT=%s "
+            "original_MASTER_ADDR=%s original_MASTER_PORT=%s "
+            "TORCHCOMM_MASTER_ADDR=%s TORCHCOMM_MASTER_PORT=%s "
+            "TORCHCOMM_PORT=%s name=%s",
+            os.environ.get("MASTER_ADDR"),
+            os.environ.get("MASTER_PORT"),
+            orig_master_addr,
+            orig_master_port,
+            os.environ.get("TORCHCOMM_MASTER_ADDR"),
+            os.environ.get("TORCHCOMM_MASTER_PORT"),
+            os.environ.get("TORCHCOMM_PORT"),
+            comm_name,
+        )
+
+        try:
+            self.comm = torchcomms.new_comm(
+                self.backend,
+                self.device,
+                name=comm_name,
+            )
+        except Exception:
+            self.comm = None
+            logger.exception(
+                "[torchcomms] new_comm failed backend=%s device=%s "
+                "name=%s group_rank=%s group_world_size=%s",
+                self.backend,
+                self.device,
+                comm_name,
+                self.group_rank,
+                self.group_world_size,
+            )
+            raise
+        finally:
+            if orig_master_addr is not None:
+                os.environ["MASTER_ADDR"] = orig_master_addr
+            if orig_master_port is not None:
+                os.environ["MASTER_PORT"] = orig_master_port
 
         logger.info(
             "[torchcomms] initialized backend=%s device=%s group_rank=%s "
@@ -160,6 +218,7 @@ class TorchCommsCommunicator(DeviceCommunicatorBase):
             input_.dtype,
             input_.device,
         )
+
         comm = self._get_comm()
         work = comm.all_reduce(
             output,
@@ -199,6 +258,7 @@ class TorchCommsCommunicator(DeviceCommunicatorBase):
             tuple(output.shape),
             dim,
         )
+
         comm = self._get_comm()
         work = comm.all_gather_single(
             output,
@@ -248,6 +308,7 @@ class TorchCommsCommunicator(DeviceCommunicatorBase):
             tuple(output.shape),
             dim,
         )
+
         comm = self._get_comm()
         work = comm.reduce_scatter_single(
             output,
@@ -295,18 +356,13 @@ class TorchCommsCommunicator(DeviceCommunicatorBase):
         return tensor
 
     def destroy(self) -> None:
-        logger.info(
-            "[torchcomms] destroy backend=%s rank=%s world_size=%s",
-            self.backend,
-            self.group_rank,
-            self.group_world_size,
-        )
-
-        if self.comm is not None and hasattr(self.comm, "finalize"):
-            self.comm.finalize()
-
-        self.comm = None
+        # Temporary debugging workaround:
+        # Do not call torchcomms finalize here because XCCL watchdog cleanup
+        # is currently crashing in TorchCommXCCL::timeoutWatchdog().
+        #
+        # Let the process exit without explicitly finalizing this communicator.
+        return
 
     def __del__(self) -> None:
-        with suppress(Exception):
-            self.destroy()
+        # Never run TorchComms cleanup from Python object destruction.
+        return
