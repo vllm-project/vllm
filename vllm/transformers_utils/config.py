@@ -124,11 +124,8 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     laguna="LagunaConfig",
     lfm2_moe="Lfm2MoeConfig",
     tarsier2="Tarsier2Config",
+    **{"unlimited-ocr": "UnlimitedOCRConfig"},
 )
-
-# `model_type` contains a hyphen, which is not a valid keyword argument name for
-# `LazyConfigDict`, so register it explicitly here.
-_CONFIG_REGISTRY["unlimited-ocr"] = "UnlimitedOCRConfig"  # type: ignore[assignment]
 
 _SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators"}
 
