@@ -89,9 +89,6 @@ class AiterCustomAllreduce:
 
         return hasattr(_AiterCustomAllreduce, "fused_ar_rms_per_group_quant")
 
-    # The function is equivalent to `has_fused_allreduce_rmsnorm_quant_per_group`
-    # that we had in _aiter_ops.py.
-    #
     # TODO(frida-andersson): drop once vLLM pins AITER >= 0.1.14 (ROCm/aiter#2823).
     @property
     def supports_per_group_quant(self) -> bool:
