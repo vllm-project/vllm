@@ -838,6 +838,13 @@ def get_pooling_config(
         logger.info("Found pooling configuration.")
 
         config: dict[str, Any] = {"use_activation": normalize}
+        compact_mode = pooling_dict.get("pooling_mode")
+        if isinstance(compact_mode, str):
+            pooling_type = parse_pooling_type(compact_mode)
+            if pooling_type in SEQ_POOLING_TYPES:
+                config["seq_pooling_type"] = pooling_type
+            elif pooling_type in TOK_POOLING_TYPES:
+                config["tok_pooling_type"] = pooling_type
         for key, val in pooling_dict.items():
             if val is True:
                 pooling_type = parse_pooling_type(key)
