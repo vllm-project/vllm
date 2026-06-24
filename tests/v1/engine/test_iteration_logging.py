@@ -39,20 +39,20 @@ def test_start_iteration_details_disabled_without_log_stats():
     assert EngineCore._start_iteration_details(engine, None) is None
 
 
-def test_attach_iteration_details_uses_lowest_existing_client():
+def test_attach_iteration_details_uses_existing_output():
     iteration_details = make_iteration_details()
     outputs = {
-        1: EngineCoreOutputs(scheduler_stats=SchedulerStats()),
         2: EngineCoreOutputs(scheduler_stats=SchedulerStats()),
+        1: EngineCoreOutputs(scheduler_stats=SchedulerStats()),
     }
 
     EngineCore._attach_iteration_details(FakeEngineCore(), outputs, iteration_details)
 
     assert 0 not in outputs
-    assert outputs[1].scheduler_stats is not None
-    assert outputs[1].scheduler_stats.iteration_details == iteration_details
     assert outputs[2].scheduler_stats is not None
-    assert outputs[2].scheduler_stats.iteration_details is None
+    assert outputs[2].scheduler_stats.iteration_details == iteration_details
+    assert outputs[1].scheduler_stats is not None
+    assert outputs[1].scheduler_stats.iteration_details is None
 
 
 def test_attach_iteration_details_falls_back_to_client_zero_without_outputs():

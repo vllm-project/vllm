@@ -504,9 +504,7 @@ class EngineCore:
         if iteration_details is None:
             return
 
-        if outputs:
-            eco = outputs[min(outputs)]
-        else:
+        if (eco := next(iter(outputs.values()), None)) is None:
             outputs[0] = eco = EngineCoreOutputs()
         if eco.scheduler_stats is None:
             eco.scheduler_stats = self._make_iteration_details_stats(iteration_details)
