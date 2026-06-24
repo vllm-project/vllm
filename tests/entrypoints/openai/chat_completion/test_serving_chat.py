@@ -2127,3 +2127,49 @@ async def test_streaming_n_gt1_independent_tool_parsers():
             f"Choice {choice_idx}: expected finish_reason='tool_calls', "
             f"got '{reasons[0]}'"
         )
+
+
+class TestPromptEndsReasoning:
+    """Unit tests for OpenAIServingChat._prompt_ends_reasoning.
+
+    The helper must inspect only the *tail* of the prompt so that an
+    end-of-reasoning token that appeared in an earlier turn (e.g. a
+    few-shot example) doesn't incorrectly signal that reasoning is done.
+    """
+
+    class _DummyParser:
+        """Minimal Parser stand-in: is_reasoning_end fires on a specific token id."""
+
+        def __init__(self, end_token_id: int):
+            self.end_token_id = end_token_id
+            self.reasoning_parser = True  # non-None so the calling code proceeds
+
+        def is_reasoning_end(self, input_ids: list[int]) -> bool:
+            return self.end_token_id in input_ids
+
+    def test_only_checks_tail(self):
+        """end-of-reasoning token in the *middle* of the prompt → False."""
+        parser = self._DummyParser(end_token_id=99)
+        assert not OpenAIServingChat._prompt_ends_reasoning(
+            parser,  # type: ignore[arg-type]
+            [1, 99, 2],
+        )
+
+    def test_tail_token_returns_true(self):
+        """end-of-reasoning token as the *last* prompt token → True."""
+        parser = self._DummyParser(end_token_id=99)
+        assert OpenAIServingChat._prompt_ends_reasoning(
+            parser,  # type: ignore[arg-type]
+            [1, 2, 99],
+        )
+
+    def test_empty_prompt_returns_false(self):
+        parser = self._DummyParser(end_token_id=99)
+        assert not OpenAIServingChat._prompt_ends_reasoning(
+            parser,  # type: ignore[arg-type]
+            [],
+        )
+        assert not OpenAIServingChat._prompt_ends_reasoning(
+            parser,  # type: ignore[arg-type]
+            None,
+        )

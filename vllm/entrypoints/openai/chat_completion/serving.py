@@ -346,7 +346,9 @@ class OpenAIServingChat(OpenAIServing):
                     # non-reasoning outputs.
                     reasoning_ended = True
                 elif parser is not None and parser.reasoning_parser is not None:
-                    reasoning_ended = parser.is_reasoning_end(prompt_token_ids or [])
+                    reasoning_ended = self._prompt_ends_reasoning(
+                        parser, prompt_token_ids
+                    )
                 else:
                     reasoning_ended = None
 
@@ -395,6 +397,22 @@ class OpenAIServingChat(OpenAIServing):
             parser=parser,
             mm_token_counts=mm_token_counts,
         )
+
+    @staticmethod
+    def _prompt_ends_reasoning(
+        parser: Parser,
+        prompt_token_ids: GenericSequence[int] | None,
+    ) -> bool:
+        """Return True only if the *last* token of the prompt is the reasoning-end token.
+
+        Checking the full prompt would return True whenever the end-of-reasoning token
+        appeared *anywhere* in the prompt (e.g. in a few-shot example or an earlier
+        assistant turn), causing subsequent generations to skip the reasoning phase even
+        though the assistant turn hasn't started reasoning yet.
+        """
+        if not prompt_token_ids:
+            return False
+        return parser.is_reasoning_end(as_list(prompt_token_ids)[-1:])
 
     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:
         if request.add_generation_prompt:
