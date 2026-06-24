@@ -22,7 +22,6 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     TransferTopology,
-    get_current_attn_backend,
     get_current_attn_backends,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -53,7 +52,12 @@ from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheSpec,
+    MambaSpec,
+    SlidingWindowSpec,
+)
 from vllm.v1.request import RequestStatus
 from vllm.v1.worker.utils import select_common_block_size
 
@@ -918,24 +922,37 @@ class MooncakeConnectorWorker:
         self.use_mla = self.model_config.use_mla
         self._sync_block_size_with_kernel()
 
-        # Get the attention backend from the first layer
-        # NOTE (NickLucche) models with multiple backends are not supported yet
-        backend = get_current_attn_backend(vllm_config)
-        self.backend_name = backend.get_name()
+        self.attn_backends = get_current_attn_backends(vllm_config)
+        self.backend_name = self.attn_backends[0].get_name()
         self.kv_cache_layout = get_kv_cache_layout()
-        logger.debug("Detected attention backend %s", self.backend_name)
+        logger.debug(
+            "Detected attention backends %s",
+            [backend.get_name() for backend in self.attn_backends],
+        )
         logger.debug("Detected kv cache layout %s", self.kv_cache_layout)
 
         self._tp_size: dict[EngineId, int] = {self.engine_id: self.tp_size}
+        self._layer_specs: dict[str, KVCacheSpec] = {}
+        self._has_mamba = False
+        if kv_cache_config is not None:
+            self._layer_specs = {
+                layer: group.kv_cache_spec
+                for group in kv_cache_config.kv_cache_groups
+                for layer in group.layer_names
+            }
+            self._has_mamba = any(
+                isinstance(g.kv_cache_spec, MambaSpec)
+                for g in kv_cache_config.kv_cache_groups
+            )
         self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
             tp_size=self.tp_size,
             block_size=self.block_size,
             engine_id=self.engine_id,
             is_mla=self.use_mla,
-            is_mamba=False,
+            is_mamba=self._has_mamba,
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
-            attn_backends=[backend],
+            attn_backends=self.attn_backends,
         )
 
         self.async_zmq_ctx = zmq.asyncio.Context()
@@ -1487,11 +1504,19 @@ class MooncakeConnectorWorker:
         self.registered_layer_names = []
         self.registered_layer_indices = []
 
-        split_k_and_v = self.transfer_topo.split_k_and_v
         tensor_size_bytes = None
         for layer_name, cache_or_caches in kv_caches.items():
             layer_index = extract_layer_index(layer_name)
-            cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
+            layer_spec = self._layer_specs.get(layer_name)
+            if layer_spec is None:
+                logger.debug(
+                    "Skipping layer %s because no KV cache spec is present.",
+                    layer_name,
+                )
+                continue
+            cache_list = self.transfer_topo.get_transfer_cache_regions(
+                cache_or_caches, layer_spec
+            )
             logger.debug(
                 "registering layer %s with %d cache tensor(s)",
                 layer_name,
