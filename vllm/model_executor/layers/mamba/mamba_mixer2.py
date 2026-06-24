@@ -520,7 +520,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
-        # The tuple is (conv_state, ssm_state)
+        # The tuple starts with (conv_state, ssm_state). MTP replay mode appends
+        # per-block replay history tensors through MambaSpec.
         self.kv_cache = (torch.tensor([]), torch.tensor([]))
 
         self.model_config = model_config
@@ -564,106 +565,13 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 "Using replay-based Mamba2 MTP SSM state update for %s.",
                 self.prefix,
             )
-        self._mtp_replay_cache_key: (
-            tuple[
-                int,
-                int,
-                int,
-                int,
-                int,
-                int,
-                torch.dtype,
-                torch.dtype,
-                torch.dtype,
-                torch.device,
-            ]
-            | None
-        ) = None
-        self._mtp_replay_old_x: torch.Tensor | None
-        self._mtp_replay_old_B: torch.Tensor | None
-        self._mtp_replay_old_dt: torch.Tensor | None
-        self._mtp_replay_old_dA_cumsum: torch.Tensor | None
-        self._mtp_replay_cache_buf_idx: torch.Tensor | None
-        self._mtp_replay_valid: torch.Tensor | None
         self._mtp_replay_cb_scaled: torch.Tensor | None
         self._mtp_replay_decay_vec: torch.Tensor | None
-        self.register_buffer("_mtp_replay_old_x", None, persistent=False)
-        self.register_buffer("_mtp_replay_old_B", None, persistent=False)
-        self.register_buffer("_mtp_replay_old_dt", None, persistent=False)
-        self.register_buffer("_mtp_replay_old_dA_cumsum", None, persistent=False)
-        self.register_buffer("_mtp_replay_cache_buf_idx", None, persistent=False)
-        self.register_buffer("_mtp_replay_valid", None, persistent=False)
         self.register_buffer("_mtp_replay_cb_scaled", None, persistent=False)
         self.register_buffer("_mtp_replay_decay_vec", None, persistent=False)
 
         # Check if running on Blackwell (SM100+) for kernel tuning
         self.is_blackwell = current_platform.is_device_capability_family(100)
-
-    def _ensure_mtp_replay_cache(
-        self,
-        ssm_state: torch.Tensor,
-        x_dtype: torch.dtype,
-        B_dtype: torch.dtype,
-    ) -> torch.Tensor:
-        cache_size = ssm_state.shape[0]
-        num_heads = self.num_heads // self.tp_size
-        num_groups = self.n_groups // self.tp_size
-        num_steps = 1 + self.num_spec
-        cache_key = (
-            cache_size,
-            num_steps,
-            num_heads,
-            self.head_dim,
-            num_groups,
-            self.ssm_state_size,
-            x_dtype,
-            B_dtype,
-            ssm_state.dtype,
-            ssm_state.device,
-        )
-        if self._mtp_replay_cache_key == cache_key:
-            return ssm_state
-        if self._mtp_replay_cache_key is not None:
-            self._clear_mtp_replay_cache()
-
-        self._mtp_replay_old_x = torch.zeros(
-            cache_size,
-            num_steps,
-            num_heads,
-            self.head_dim,
-            dtype=x_dtype,
-            device=ssm_state.device,
-        )
-        self._mtp_replay_old_B = torch.zeros(
-            cache_size,
-            2,
-            num_steps,
-            num_groups,
-            self.ssm_state_size,
-            dtype=B_dtype,
-            device=ssm_state.device,
-        )
-        self._mtp_replay_old_dt = torch.zeros(
-            cache_size,
-            2,
-            num_heads,
-            num_steps,
-            dtype=torch.float32,
-            device=ssm_state.device,
-        )
-        self._mtp_replay_old_dA_cumsum = torch.zeros_like(self._mtp_replay_old_dt)
-        self._mtp_replay_cache_buf_idx = torch.zeros(
-            cache_size,
-            dtype=torch.int32,
-            device=ssm_state.device,
-        )
-        self._mtp_replay_valid = torch.zeros(
-            cache_size,
-            dtype=torch.int32,
-            device=ssm_state.device,
-        )
-        self._mtp_replay_cache_key = cache_key
-        return ssm_state
 
     def _ensure_mtp_replay_workspace(
         self,
@@ -703,31 +611,19 @@ class MambaMixer2(MambaBase, PluggableLayer):
             device=device,
         )
 
-    def _clear_mtp_replay_cache(self) -> None:
-        self._mtp_replay_old_x = None
-        self._mtp_replay_old_B = None
-        self._mtp_replay_old_dt = None
-        self._mtp_replay_old_dA_cumsum = None
-        self._mtp_replay_cache_buf_idx = None
-        self._mtp_replay_valid = None
-        self._mtp_replay_cb_scaled = None
-        self._mtp_replay_decay_vec = None
-        self._mtp_replay_cache_key = None
-
     def _invalidate_mtp_replay_cache(
         self,
         state_indices: torch.Tensor | None,
     ) -> None:
-        if self._mtp_replay_valid is None or state_indices is None:
+        if len(self.kv_cache) < 8 or state_indices is None:
             return
-        cache_size = self._mtp_replay_valid.shape[0]
+        replay_valid = self.kv_cache[7]
+        cache_size = replay_valid.shape[0]
         valid_indices = _filter_mtp_replay_cache_indices(state_indices, cache_size)
         if valid_indices.numel() == 0:
             return
-        valid_indices = valid_indices.to(
-            device=self._mtp_replay_valid.device, dtype=torch.long
-        )
-        self._mtp_replay_valid.index_fill_(0, valid_indices, 0)
+        valid_indices = valid_indices.to(device=replay_valid.device, dtype=torch.long)
+        replay_valid.index_fill_(0, valid_indices, 0)
 
     def invalidate_mtp_replay_cache(
         self,
@@ -802,7 +698,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
         # Triton's autotuner includes tensor dtypes in its cache key,
         # so state_dtype must match what real inference uses.
-        _, ssm_state_dtype = self.get_state_dtype()
+        ssm_state_dtype = self.get_state_dtype()[1]
 
         # SSD kernel autotune keys depend on dtype and head dimensions,
         # not on sequence length or batch size, so a single shape suffices.
@@ -1218,13 +1114,22 @@ class MambaMixer2(MambaBase, PluggableLayer):
             replay_num_accepted_tokens = None
             replay_state_indices = None
             replay_ssm_state = ssm_state
+            replay_cache_tensors: tuple[torch.Tensor, ...] | None = None
             if use_mtp_replay:
                 num_steps = 1 + self.num_spec
                 num_heads = self.num_heads // self.tp_size
-                replay_ssm_state = self._ensure_mtp_replay_cache(
-                    ssm_state,
-                    hidden_states_B_C_d.dtype,
-                    hidden_states_B_C_d.dtype,
+                if len(self.kv_cache) < 8:
+                    raise RuntimeError(
+                        "MTP replay requires replay tensors in the Mamba "
+                        "cache page."
+                    )
+                replay_cache_tensors = (
+                    self.kv_cache[2],
+                    self.kv_cache[3],
+                    self.kv_cache[4],
+                    self.kv_cache[5],
+                    self.kv_cache[6],
+                    self.kv_cache[7],
                 )
                 self._ensure_mtp_replay_workspace(
                     num_decodes,
@@ -1292,16 +1197,19 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 assert query_start_loc_d is not None
                 assert replay_num_accepted_tokens is not None
                 assert replay_state_indices is not None
+                assert replay_cache_tensors is not None
                 num_steps = 1 + self.num_spec
                 num_heads = self.num_heads // self.tp_size
-                assert self._mtp_replay_old_x is not None
-                assert self._mtp_replay_old_B is not None
-                assert self._mtp_replay_old_dt is not None
-                assert self._mtp_replay_old_dA_cumsum is not None
-                assert self._mtp_replay_cache_buf_idx is not None
-                assert self._mtp_replay_valid is not None
                 assert self._mtp_replay_cb_scaled is not None
                 assert self._mtp_replay_decay_vec is not None
+                (
+                    replay_old_x,
+                    replay_old_B,
+                    replay_old_dt,
+                    replay_old_dA_cumsum,
+                    replay_cache_buf_idx,
+                    replay_valid,
+                ) = replay_cache_tensors
                 replay_kernel_num_accepted_tokens = replay_num_accepted_tokens
                 if num_decode_tokens == num_decodes * num_steps:
                     replay_hidden_states = hidden_states_d.view(
@@ -1379,12 +1287,12 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
                 replay_selective_state_update(
                     replay_ssm_state,
-                    self._mtp_replay_old_x,
-                    self._mtp_replay_old_B,
-                    self._mtp_replay_old_dt,
-                    self._mtp_replay_old_dA_cumsum,
-                    self._mtp_replay_cache_buf_idx,
-                    self._mtp_replay_valid,
+                    replay_old_x,
+                    replay_old_B,
+                    replay_old_dt,
+                    replay_old_dA_cumsum,
+                    replay_cache_buf_idx,
+                    replay_valid,
                     replay_hidden_states,
                     replay_dt,
                     A_d,
@@ -1434,16 +1342,33 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     is_blackwell=self.is_blackwell,
                 )
 
-    def get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
+    def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         assert self.model_config is not None
         assert self.cache_config is not None
+        if self._use_mtp_replay:
+            return MambaStateDtypeCalculator.mamba2_mtp_replay_state_dtype(
+                self.model_config.dtype,
+                self.cache_config.mamba_cache_dtype,
+                self.cache_config.mamba_ssm_cache_dtype,
+            )
         return MambaStateDtypeCalculator.mamba2_state_dtype(
             self.model_config.dtype,
             self.cache_config.mamba_cache_dtype,
             self.cache_config.mamba_ssm_cache_dtype,
         )
 
-    def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
+        if self._use_mtp_replay:
+            return MambaStateShapeCalculator.mamba2_mtp_replay_state_shape(
+                intermediate_size=self.intermediate_size,
+                tp_world_size=get_tensor_model_parallel_world_size(),
+                n_groups=self.n_groups,
+                num_heads=self.num_heads,
+                head_dim=self.head_dim,
+                state_size=self.ssm_state_size,
+                conv_kernel=self.conv_kernel_size,
+                num_spec=self.num_spec,
+            )
         return MambaStateShapeCalculator.mamba2_state_shape(
             intermediate_size=self.intermediate_size,
             tp_world_size=get_tensor_model_parallel_world_size(),

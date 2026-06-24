@@ -78,6 +78,7 @@ def _replay_precompute_kernel(
     stride_old_dA_cumsum_dbuf,
     stride_old_dA_cumsum_head,
     stride_old_dA_cumsum_T,
+    stride_cache_buf_idx,
     DT_SOFTPLUS: tl.constexpr,
     HAS_DT_BIAS: tl.constexpr,
     HAS_CACHE_BATCH_INDICES: tl.constexpr,
@@ -105,7 +106,9 @@ def _replay_precompute_kernel(
         if cache_batch_idx >= cache_size:
             return
 
-    buf_read = tl.load(cache_buf_idx_ptr + cache_batch_idx).to(tl.int32)
+    buf_read = tl.load(cache_buf_idx_ptr + cache_batch_idx * stride_cache_buf_idx).to(
+        tl.int32
+    )
     buf_write = 1 - buf_read
 
     if LAUNCH_DEPENDENT_KERNELS:
@@ -324,6 +327,8 @@ def _replay_state_update_kernel(
     stride_dv_batch,
     stride_dv_head,
     stride_dv_t,
+    stride_cache_buf_idx,
+    stride_replay_valid,
     BLOCK_SIZE_M: tl.constexpr,
     HAS_D: tl.constexpr,
     HAS_CACHE_BATCH_INDICES: tl.constexpr,
@@ -351,7 +356,9 @@ def _replay_state_update_kernel(
         if cache_batch_idx >= cache_size:
             return
 
-    buf_read = tl.load(cache_buf_idx_ptr + cache_batch_idx).to(tl.int32)
+    buf_read = tl.load(cache_buf_idx_ptr + cache_batch_idx * stride_cache_buf_idx).to(
+        tl.int32
+    )
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_n = tl.arange(0, BLOCK_SIZE_DSTATE)
@@ -371,7 +378,9 @@ def _replay_state_update_kernel(
     state_mask = m_mask[:, None] & n_mask[None, :]
     state = tl.load(state_ptrs, mask=state_mask, other=0.0).to(tl.float32)
 
-    replay_valid = tl.load(replay_valid_ptr + cache_batch_idx).to(tl.int32)
+    replay_valid = tl.load(
+        replay_valid_ptr + cache_batch_idx * stride_replay_valid
+    ).to(tl.int32)
     prev_num_accepted_tokens = tl.load(num_accepted_tokens_ptr + pid_b)
     prev_num_accepted_tokens = tl.where(
         replay_valid != 0,
@@ -547,6 +556,8 @@ def _commit_replay_cache_kernel(
     state_batch_indices_ptr,
     null_block_id,
     cache_size: tl.constexpr,
+    stride_cache_buf_idx,
+    stride_replay_valid,
 ):
     pid_b = tl.program_id(axis=0)
     cache_batch_idx = tl.load(state_batch_indices_ptr + pid_b).to(tl.int64)
@@ -556,9 +567,11 @@ def _commit_replay_cache_kernel(
         or cache_batch_idx >= cache_size
     ):
         return
-    buf_read = tl.load(cache_buf_idx_ptr + cache_batch_idx).to(tl.int32)
-    tl.store(cache_buf_idx_ptr + cache_batch_idx, 1 - buf_read)
-    tl.store(replay_valid_ptr + cache_batch_idx, 1)
+    cache_buf_idx_offset = cache_batch_idx * stride_cache_buf_idx
+    replay_valid_offset = cache_batch_idx * stride_replay_valid
+    buf_read = tl.load(cache_buf_idx_ptr + cache_buf_idx_offset).to(tl.int32)
+    tl.store(cache_buf_idx_ptr + cache_buf_idx_offset, 1 - buf_read)
+    tl.store(replay_valid_ptr + replay_valid_offset, 1)
 
 
 def _get_replay_launch_config(
@@ -838,6 +851,7 @@ def replay_selective_state_update(
             old_dA_cumsum.stride(1),
             old_dA_cumsum.stride(2),
             old_dA_cumsum.stride(3),
+            cache_buf_idx.stride(0),
             dt_softplus,
             HAS_CACHE_BATCH_INDICES=has_state_indices,
             HEADS_PER_BLOCK=heads_per_block,
@@ -914,6 +928,8 @@ def replay_selective_state_update(
             decay_vec.stride(0),
             decay_vec.stride(1),
             decay_vec.stride(2),
+            cache_buf_idx.stride(0),
+            replay_valid.stride(0),
             block_size_m,
             PHILOX_ROUNDS=cache_philox_rounds,
             LAUNCH_WITH_PDL=use_internal_pdl,
@@ -928,6 +944,8 @@ def replay_selective_state_update(
                 state_batch_indices,
                 null_block_id,
                 cache_size,
+                cache_buf_idx.stride(0),
+                replay_valid.stride(0),
             )
         else:
             cache_buf_idx[:batch] = 1 - cache_buf_idx[:batch]
