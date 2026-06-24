@@ -13,6 +13,7 @@ from collections.abc import Callable
 import torch
 from compressed_tensors.compressors.pack_quantized.helpers import pack_to_int32
 
+from vllm.distributed.utils import verify_group_size_divides_partition
 from vllm.model_executor.kernels.linear import (
     MPLinearLayerConfig,
     choose_mp_linear_kernel,
@@ -22,7 +23,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_repeat_scales_on_all_ranks,
-    verify_group_size_divides_partition,
 )
 from vllm.model_executor.parameter import (
     BasevLLMParameter,

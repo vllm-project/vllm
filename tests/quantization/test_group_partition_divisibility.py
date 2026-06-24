@@ -8,9 +8,7 @@ Run `pytest tests/quantization/test_group_partition_divisibility.py`.
 
 import pytest
 
-from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-    verify_group_size_divides_partition,
-)
+from vllm.distributed.utils import verify_group_size_divides_partition
 
 
 def test_raises_actionable_error_when_partition_not_divisible():

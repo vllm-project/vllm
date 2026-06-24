@@ -6,6 +6,7 @@ from collections.abc import Callable
 import torch
 from compressed_tensors.quantization import ActivationOrdering
 
+from vllm.distributed.utils import verify_group_size_divides_partition
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     MPLinearLayerConfig,
@@ -16,7 +17,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_repeat_scales_on_all_ranks,
-    verify_group_size_divides_partition,
 )
 from vllm.model_executor.parameter import (
     BasevLLMParameter,

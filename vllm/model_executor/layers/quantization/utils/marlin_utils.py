@@ -9,6 +9,7 @@ import torch
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.distributed.utils import verify_group_size_divides_partition
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase
@@ -165,32 +166,6 @@ def verify_marlin_supported(
     if not cond:
         assert err_msg is not None
         raise ValueError(err_msg)
-
-
-def verify_group_size_divides_partition(
-    input_size_per_partition: int,
-    group_size: int,
-    layer_name: str | None = None,
-    extra_suggestion: str = "",
-) -> None:
-    """Validate that a TP-sharded layer holds a whole number of quant groups.
-
-    When group-quantized scales are partitioned across tensor-parallel ranks,
-    each rank's ``input_size_per_partition`` (``input_size // tp_size``) must be
-    a multiple of ``group_size``; otherwise a group would straddle a rank
-    boundary and its scales cannot be sliced. Raises an actionable ``ValueError``
-    instead of a bare assertion (issue #46230).
-    """
-    if input_size_per_partition % group_size == 0:
-        return
-    location = f" for layer '{layer_name}'" if layer_name else ""
-    raise ValueError(
-        f"Weight input_size_per_partition = {input_size_per_partition}"
-        f"{location} is not divisible by group_size = {group_size}. "
-        "This happens when tensor_parallel_size splits the layer input into "
-        "shards that are not a whole number of quant groups. Consider reducing "
-        f"tensor_parallel_size{extra_suggestion}."
-    )
 
 
 def verify_marlin_supports_shape(
