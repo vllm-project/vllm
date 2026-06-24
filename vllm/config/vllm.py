@@ -1439,9 +1439,10 @@ class VllmConfig:
                 "--all2all-backend=nixl_ep and install the matching kernels."
             )
 
-            if (
-                self.parallel_config.all2all_backend == "deepep_high_throughput"
-                and self.parallel_config.nnodes > 1
+            if self.parallel_config.all2all_backend == "deepep_high_throughput" and (
+                self.parallel_config.nnodes > 1
+                or self.parallel_config.data_parallel_size
+                > self.parallel_config.data_parallel_size_local
             ):
                 raise ValueError(
                     "Dual batch overlap is not supported with the "
