@@ -389,6 +389,7 @@ class KVTransferThread(threading.Thread):
     def run(self):
         self.ready_event.set()
         while True:
+            request_data = None
             try:
                 request_data = self.request_queue.get()
                 if request_data is None:
@@ -396,8 +397,9 @@ class KVTransferThread(threading.Thread):
                     self.request_queue.task_done()
                     continue
                 self._handle_request(request_data)
-            except Exception as e:
-                logger.error("Error in %s: %s", self.name, e)
+            except Exception:
+                req_id = getattr(request_data, "req_id", "<unknown>")
+                logger.exception("Error in %s (req=%s)", self.name, req_id)
 
     def _handle_request(self, req_meta: Any):
         pass
