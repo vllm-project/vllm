@@ -91,7 +91,7 @@ class EngineCoreSentinel:
             "engine_id": self.engine_index,
             "status": self.status_type.name.lower(),
         }
-        if self.status_type == EngineStatusType.UNHEALTHY:
+        if self.status_type == EngineStatusType.UNHEALTHY and not self.auto_recovery:
             try:
                 result["mask"] = self._query_mask()
             except Exception:
@@ -273,6 +273,12 @@ class EngineCoreSentinel:
 
         worker_port = self._coordinate_port("ft_worker_dp_port")
         engine_port = self._coordinate_port("ft_engine_dp_port")
+
+        result: dict[str, int] = {"new_stateless_dp_group_port": worker_port}
+        if parallel_config.enable_eplb:
+            result["new_ep_group_port"] = self._coordinate_port("ft_worker_ep_port")
+            result["new_eplb_group_port"] = self._coordinate_port("ft_worker_eplb_port")
+
         self._dp_reinit_epoch += 1
 
         stateless_destroy_torch_distributed_process_group(engine.dp_group)
@@ -286,7 +292,7 @@ class EngineCoreSentinel:
                 return_store=True,
             )
         )
-        return {"new_stateless_dp_group_port": worker_port}
+        return result
 
     def _coordinate_port(self, key_prefix: str) -> int:
         """Rank 0 picks a fresh port, publishes via dp_store;

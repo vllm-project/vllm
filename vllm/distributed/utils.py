@@ -661,6 +661,25 @@ def stateless_destroy_torch_distributed_process_group(pg: ProcessGroup) -> None:
     _unregister_process_group(pg.group_name)
 
 
+def reinit_gloo_group(
+    group_coordinator,
+    master_ip: str,
+    port: int,
+    rank: int,
+    size: int,
+) -> None:
+    """Destroy and recreate a Gloo cpu_group on *group_coordinator*."""
+    if group_coordinator.cpu_group is not None:
+        stateless_destroy_torch_distributed_process_group(group_coordinator.cpu_group)
+    group_coordinator.cpu_group = stateless_init_torch_distributed_process_group(
+        master_ip,
+        port,
+        rank,
+        size,
+        backend="gloo",
+    )
+
+
 def get_worker_rank_suffix(global_rank: int | None = None) -> str:
     """Generate a descriptive rank suffix for worker identification.
 

@@ -8,14 +8,15 @@ from vllm.config import set_current_vllm_config
 from vllm.distributed import (
     get_dp_group,
     get_ep_group,
-    stateless_destroy_torch_distributed_process_group,
-    stateless_init_torch_distributed_process_group,
+    reinit_gloo_group,
 )
 from vllm.distributed.elastic_ep.ft_eplb_redistribute import (
     compute_dead_ep_ranks,
     mark_dead_columns_inplace,
     rebuild_logical_expert_maps,
     redistribute_expert_placement,
+    refresh_eplb_communicator_group,
+    reinit_eplb_gloo_groups,
     reload_experts_from_disk,
 )
 from vllm.logger import init_logger
@@ -52,12 +53,15 @@ class WorkerSentinel:
         self._clean_worker_state()
         self._reset_eplb_async_state()
         if self.dp_size > 1:
-            self._reinit_gloo_group(
+            reinit_gloo_group(
                 get_dp_group(),
+                self.data_parallel_master_ip,
                 params["new_stateless_dp_group_port"],
                 self.dp_rank,
                 self.dp_size,
             )
+            reinit_eplb_gloo_groups(params, self.data_parallel_master_ip)
+            refresh_eplb_communicator_group(self.worker.model_runner)
             self._get_all2all_manager().clean_buffers()
 
     def _get_all2all_manager(self):
@@ -84,7 +88,9 @@ class WorkerSentinel:
 
         self._redistribute_experts(dead_ep_ranks)
 
-        self._reinit_gloo_group(get_dp_group(), port, new_dp_rank, new_dp_size)
+        reinit_gloo_group(
+            get_dp_group(), self.data_parallel_master_ip, port, new_dp_rank, new_dp_size
+        )
         self.worker.parallel_config.data_parallel_size = new_dp_size
         self.worker.parallel_config.data_parallel_rank = new_dp_rank
         self.dp_rank = new_dp_rank
@@ -191,25 +197,6 @@ class WorkerSentinel:
         """Return the current all2all active mask from the FT backend."""
         mask = self._get_all2all_manager().query_active_mask()
         return {"mask": mask.tolist()}
-
-    def _reinit_gloo_group(
-        self,
-        group_coordinator,
-        port: int,
-        rank: int,
-        size: int,
-    ) -> None:
-        """Destroy old cpu_group and create a new gloo group."""
-        old = group_coordinator.cpu_group
-        if old is not None:
-            stateless_destroy_torch_distributed_process_group(old)
-        group_coordinator.cpu_group = stateless_init_torch_distributed_process_group(
-            self.data_parallel_master_ip,
-            port,
-            rank,
-            size,
-            backend="gloo",
-        )
 
     def _clean_worker_state(self):
         self.worker.model_runner.execute_model_state = None

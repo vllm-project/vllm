@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""EPLB placement-table redistribution and weight reload after peer death.
+"""EPLB fault-tolerance helpers: Gloo group recovery, expert redistribution,
+and weight reload after peer death.
 
 All redistribution operations are deterministic with stable iteration
 order, so all surviving ranks running the same function with the same
@@ -12,11 +13,20 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from itertools import zip_longest
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 from vllm.config import VllmConfig
+from vllm.distributed import (
+    get_ep_group,
+    reinit_gloo_group,
+)
+from vllm.distributed.parallel_state import get_eplb_group
 from vllm.logger import init_logger
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -223,3 +233,36 @@ def reload_experts_from_disk(
         len(loaded) if loaded else 0,
     )
     return len(loaded) if loaded else 0
+
+
+def reinit_eplb_gloo_groups(
+    params: dict[str, Any],
+    master_ip: str,
+) -> None:
+    """Reinit EP and EPLB Gloo cpu_groups from FT params."""
+    for port_key, get_group in [
+        ("new_ep_group_port", get_ep_group),
+        ("new_eplb_group_port", get_eplb_group),
+    ]:
+        port = params.get(port_key)
+        if port is None:
+            continue
+        group = get_group()
+        if group is None or group.cpu_group is None:
+            continue
+        reinit_gloo_group(group, master_ip, port, group.rank_in_group, group.world_size)
+        logger.info("[FT] Reinited %s Gloo group on port %d", port_key, port)
+
+
+def refresh_eplb_communicator_group(model_runner: GPUModelRunner) -> None:
+    """Update EPLB communicator's _cpu_group after Gloo reinit."""
+    eplb_state = getattr(model_runner, "eplb_state", None)
+    if eplb_state is None:
+        return
+    eplb_group = get_eplb_group()
+    if eplb_group is None:
+        return
+    new_cpu_group = eplb_group.cpu_group
+    for ms in eplb_state.model_states.values():
+        if hasattr(ms.communicator, "_cpu_group"):
+            ms.communicator._cpu_group = new_cpu_group
