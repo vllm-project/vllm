@@ -2077,6 +2077,8 @@ class MooncakeConnectorWorker:
 
         for layer_name, cache_or_caches in kv_caches.items():
             layer_index = extract_layer_index(layer_name)
+            # DeepSeek V4 MTP draft caches are named after the base model
+            # layers, so their layer indices are outside the base layer range.
             if is_mtp_speculative and layer_index >= total_num_hidden_layers:
                 logger.debug(
                     "Skipping MTP speculative KV cache layer %s outside the "
