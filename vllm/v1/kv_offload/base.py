@@ -276,16 +276,16 @@ class OffloadingManager(ABC):
         """
         Called when a request has finished.
 
-        By the time this is called, all per-request offload calls for this
-        request (prepare_store/complete_store, prepare_load/complete_load,
-        touch, lookup) have already been issued, and none will follow. The
-        scheduler defers this call until the request is finished and has no
-        in-flight transfer jobs.
+        By the time this is called, the scheduler will issue no more
+        submit-side calls for this request, such as prepare_store() and
+        prepare_load(). Completion callbacks for already-submitted transfers
+        (complete_store() and complete_load()) may still arrive afterward.
 
-        Note this signals only that no further calls will be made; it does NOT
-        imply the data has been persisted. Asynchronous transfers already
-        submitted for this request (e.g. CPU->secondary cascades) may still be
-        in flight. This is the right place to release per-request bookkeeping.
+        This hook does NOT imply the data has been persisted. Asynchronous
+        transfers already submitted for this request may still be in flight.
+        Managers that cascade to lower tiers should delay those tiers'
+        on_request_finished() calls until no more lower-tier submit calls can
+        be issued for this request.
 
         Args:
             req_context: per-request context.
