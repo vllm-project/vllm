@@ -1230,14 +1230,14 @@ void ibv_ar_allreduce(int64_t handle, torch::Tensor& data) {
 
 // Lightweight SHM region for 2-rank reduce + broadcast.
 // Uses atomic sequence counters instead of OMP barriers.
-// Layout: [seq_reduce(64B)] [seq_bcast(64B)] [slot0(MAX_BUF)] [slot1(MAX_BUF)] [bcast(MAX_BUF)]
+// Layout: [seq_reduce(64B)] [seq_read(64B)] [slot0(MAX_BUF)] [slot1(MAX_BUF)] [bcast(MAX_BUF)]
 static constexpr size_t HIER_SHM_MAX_BUF = 4 * 1024 * 1024;  // 4 MB per slot
 static constexpr size_t HIER_SHM_HEADER = 128;  // 2 cache lines for counters
 
 struct alignas(64) HierShmHeader {
   std::atomic<uint64_t> reduce_seq;  // incremented when rank writes its slot
   char _pad1[56];
-  std::atomic<uint64_t> bcast_seq;   // incremented when leader writes broadcast
+  std::atomic<uint64_t> read_seq;    // incremented when rank finishes reading both slots
   char _pad2[56];
 };
 static_assert(sizeof(HierShmHeader) == 128);
@@ -1260,7 +1260,7 @@ struct HierARState {
   void* slot1;                   // rank 1's write slot
   void* bcast_buf;               // leader writes result here
   uint64_t reduce_epoch;         // tracks reduce sequence
-  uint64_t bcast_epoch;          // tracks broadcast sequence
+  uint64_t read_epoch;           // tracks read-barrier sequence
 };
 std::unordered_map<int64_t, HierARState> g_hier_ar_states;
 int64_t g_hier_ar_next_id = 0;
@@ -1291,7 +1291,7 @@ int64_t init_hier_ar(int64_t shm_handle,
   state.slot1 = nullptr;
   state.bcast_buf = nullptr;
   state.reduce_epoch = 0;
-  state.bcast_epoch = 0;
+  state.read_epoch = 0;
 
   if (state.has_local_peer) {
     // Create/open lightweight SHM for hier allreduce
@@ -1331,7 +1331,7 @@ int64_t init_hier_ar(int64_t shm_handle,
 
     if (is_leader) {
       state.header->reduce_seq.store(0, std::memory_order_relaxed);
-      state.header->bcast_seq.store(0, std::memory_order_relaxed);
+      state.header->read_seq.store(0, std::memory_order_relaxed);
     }
   }
 
@@ -1525,6 +1525,22 @@ void hier_allreduce(int64_t handle, torch::Tensor& data) {
     auto t1 = torch::from_blob(state.slot1, data.sizes(), data.strides(),
                                 data.options());
     data.copy_(t0.add(t1));
+  }
+
+  // Step 7: Post-read barrier. Both ranks have now read slot0 and slot1, but
+  // neither may reuse its slot (step 1 of the next epoch) until the peer has
+  // also finished reading. Without this, a faster rank could overwrite its slot
+  // while the peer is still in step 6, corrupting shared memory.
+  state.read_epoch++;
+  std::atomic_thread_fence(std::memory_order_release);
+  state.header->read_seq.fetch_add(1, std::memory_order_release);
+  uint64_t read_target = state.read_epoch * 2;
+  while (state.header->read_seq.load(std::memory_order_acquire) < read_target) {
+#ifdef __aarch64__
+    __asm__ __volatile__("yield");
+#else
+    _mm_pause();
+#endif
   }
 }
 
