@@ -166,7 +166,7 @@ def test_schedule(enable_prefix_caching: bool, prompt_logprobs: int | None):
         assert scheduler.running[i] == request
 
 
-def test_scheduler_stats_route_to_lowest_output_client():
+def test_scheduler_stats_route_to_existing_output_client():
     scheduler = create_scheduler()
     request = create_requests(num_requests=1)[0]
     request.client_index = 1

@@ -1825,10 +1825,8 @@ class Scheduler(SchedulerInterface):
                 scheduler_output.scheduled_encoder_input_stats,
             )
         ) is not None:
-            # Return stats to one deterministic front-end.
-            if engine_core_outputs:
-                eco = engine_core_outputs[min(engine_core_outputs)]
-            else:
+            # Return stats to only one of the front-ends.
+            if (eco := next(iter(engine_core_outputs.values()), None)) is None:
                 # We must return the stats even if there are no request
                 # outputs this step.
                 engine_core_outputs[0] = eco = EngineCoreOutputs()
