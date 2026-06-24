@@ -92,6 +92,16 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
         ),
         (
             SimpleNamespace(
+                model="Qwen/Qwen2-7B-Instruct",
+                architectures=["Qwen2ForCausalLM"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=False,
+            ),
+            False,
+        ),
+        (
+            SimpleNamespace(
                 model="meta-llama/Llama-3.2-1B",
                 architectures=["LlamaForCausalLM"],
                 runner_type="generate",
@@ -142,6 +152,16 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
         ),
         (
             SimpleNamespace(
+                model="deepseek-ai/DeepSeek-V3",
+                architectures=["DeepseekV3ForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
                 model="Qwen/Qwen1.5-MoE-A2.7B",
                 architectures=["Qwen2MoeForCausalLM"],
                 runner_type="generate",
@@ -178,7 +198,7 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
                 is_moe=True,
                 is_quantized=False,
             ),
-            False,
+            True,
         ),
         (
             SimpleNamespace(
