@@ -493,6 +493,12 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "persistent_topk(Tensor logits, Tensor lengths, Tensor! output, "
       "Tensor workspace, int k, int max_seq_len) -> ()");
 
+#ifdef VLLM_ENABLE_COOPERATIVE_TOPK
+  ops.def(
+      "cooperative_topk(Tensor logits, Tensor lengths, Tensor! output, "
+      "Tensor workspace, int k, int max_seq_len) -> ()");
+#endif
+
   // Activation ops
   ops.def(
       "persistent_masked_m_silu_mul_quant(Tensor input, Tensor counts, Tensor! "
@@ -711,6 +717,9 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("top_k_per_row_prefill", TORCH_BOX(&top_k_per_row_prefill));
   ops.impl("top_k_per_row_decode", TORCH_BOX(&top_k_per_row_decode));
   ops.impl("persistent_topk", TORCH_BOX(&persistent_topk));
+#ifdef VLLM_ENABLE_COOPERATIVE_TOPK
+  ops.impl("cooperative_topk", TORCH_BOX(&cooperative_topk));
+#endif
 
   // Activation kernels (shared CUDA/ROCm)
   ops.impl("persistent_masked_m_silu_mul_quant",
