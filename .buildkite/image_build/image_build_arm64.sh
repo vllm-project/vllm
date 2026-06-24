@@ -21,12 +21,13 @@ else
   exit 0
 fi
 
-# build (Grace/GH200 is the arm64 GPU target; sm_90)
+# build for arm64 GPU targets: Grace/GH200 (sm_90) and DGX Spark/GB10
+# (sm_121, family-covered by 12.0 under CUDA 13)
 docker build --file docker/Dockerfile \
   --platform linux/arm64 \
   --build-arg max_jobs=16 \
   --build-arg nvcc_threads=4 \
-  --build-arg torch_cuda_arch_list="9.0" \
+  --build-arg torch_cuda_arch_list="9.0 12.0" \
   --build-arg USE_SCCACHE=1 \
   --build-arg buildkite_commit="$BUILDKITE_COMMIT" \
   --tag "$REGISTRY"/"$REPO":"$BUILDKITE_COMMIT"-arm64 \

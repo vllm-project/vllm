@@ -18,17 +18,9 @@ struct KernelVecType<float> {
 
 template <>
 struct KernelVecType<c10::Half> {
-#if defined(__powerpc64__)
-  // Power specific vector types
-  using qk_load_vec_type = vec_op::FP32Vec16;
-  using qk_vec_type = vec_op::FP32Vec16;
-  using v_load_vec_type = vec_op::FP32Vec16;
-#else
-  // Fallback for other architectures, including x86
   using qk_load_vec_type = vec_op::FP16Vec16;
   using qk_vec_type = vec_op::FP32Vec16;
   using v_load_vec_type = vec_op::FP16Vec16;
-#endif
 };
 
 #ifdef __AVX512BF16__
