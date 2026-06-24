@@ -12,6 +12,8 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
+_OPS_REGISTERED = False
+
 
 @lru_cache(maxsize=1)
 def get_ark_state() -> tuple[bool, str | None, Any | None, Any | None]:
@@ -57,7 +59,7 @@ def _inc_ark_woq_linear_impl(
     target_dtype = torch.float16 if x.device.type == "xpu" else torch.float32
     x = x.to(target_dtype)
     out_shape = x.shape[:-1] + (out_features,)
-    x_2d = x.view(-1, x.shape[-1])
+    x_2d = x.reshape(-1, x.shape[-1])
 
     out = ark.woqgemm(
         x_2d,
@@ -71,7 +73,7 @@ def _inc_ark_woq_linear_impl(
         scale_type,
         asym,
     )
-    return out.to(raw_input_dtype).view(out_shape)
+    return out.to(raw_input_dtype).reshape(out_shape)
 
 
 def _inc_ark_woq_linear_fake(
@@ -101,11 +103,30 @@ def _inc_ark_woq_linear_fake(
     )
 
 
-@lru_cache(maxsize=1)
-def register_ark_custom_op_once() -> None:
-    direct_register_custom_op(
-        op_name="inc_ark_woq_linear",
-        op_func=_inc_ark_woq_linear_impl,
-        fake_impl=_inc_ark_woq_linear_fake,
-        dispatch_key=current_platform.dispatch_key,
-    )
+class ark_ops:
+    @staticmethod
+    def register_ops_once() -> None:
+        global _OPS_REGISTERED
+        if _OPS_REGISTERED:
+            return
+
+        is_available, error_str, _, _ = get_ark_state()
+        if not is_available:
+            logger.debug(
+                "Skip registering ark op because ARK is unavailable: %s",
+                error_str or "unknown error",
+            )
+            return
+
+        direct_register_custom_op(
+            op_name="inc_ark_woq_linear",
+            op_func=_inc_ark_woq_linear_impl,
+            fake_impl=_inc_ark_woq_linear_fake,
+            dispatch_key=current_platform.dispatch_key,
+        )
+        _OPS_REGISTERED = True
+
+
+ark_ops.register_ops_once()
+
+__all__ = ["get_ark_state"]

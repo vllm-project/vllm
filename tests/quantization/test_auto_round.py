@@ -336,7 +336,7 @@ def test_wna16_xpu_prefers_ark_when_available(monkeypatch) -> None:
     monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
     monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
     monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.inc.schemes.inc_wna16_linear.get_ark_state",
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_ark_op.get_ark_state",
         lambda: (True, None, object(), DummyQuantLinear),
     )
 
@@ -355,7 +355,7 @@ def test_wna16_xpu_falls_back_when_ark_unavailable(monkeypatch) -> None:
     monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
     monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
     monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.inc.schemes.inc_wna16_linear.get_ark_state",
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_ark_op.get_ark_state",
         lambda: (False, "missing", None, None),
     )
 
@@ -377,7 +377,7 @@ def test_wna16_cpu_gptq_prefers_ark_when_available(monkeypatch) -> None:
     monkeypatch.setattr(current_platform, "is_xpu", lambda: False)
     monkeypatch.setattr(current_platform, "is_cpu", lambda: True)
     monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.inc.schemes.inc_wna16_linear.get_ark_state",
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_ark_op.get_ark_state",
         lambda: (True, None, object(), DummyQuantLinear),
     )
 
@@ -398,7 +398,7 @@ def test_wna16_cpu_gptq_raises_when_ark_and_marlin_unavailable(
     monkeypatch.setattr(current_platform, "is_xpu", lambda: False)
     monkeypatch.setattr(current_platform, "is_cpu", lambda: True)
     monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.inc.schemes.inc_wna16_linear.get_ark_state",
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_ark_op.get_ark_state",
         lambda: (False, "missing", None, None),
     )
     monkeypatch.setattr(

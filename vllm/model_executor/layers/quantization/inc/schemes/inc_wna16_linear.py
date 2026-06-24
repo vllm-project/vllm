@@ -18,7 +18,6 @@ from vllm.model_executor.parameter import (
 )
 from vllm.scalar_type import scalar_types
 
-from .inc_ark_ops import get_ark_state, register_ark_custom_op_once
 from .inc_scheme import INCLinearScheme
 
 if TYPE_CHECKING:
@@ -285,13 +284,14 @@ class INCARKLinearMethod(INCXPULinearBase):
     def __init__(self, layer_config: "INCLayerConfig") -> None:
         super().__init__(layer_config)
 
+        from .inc_ark_ops import get_ark_state
+
         is_available, error_str, _, quant_linear_cls = get_ark_state()
         if not is_available or quant_linear_cls is None:
             reason = error_str or "unknown error"
             raise ImportError(f"Failed to import auto_round_kernel. {reason}")
 
         self.quant_linear_cls = quant_linear_cls
-        register_ark_custom_op_once()
 
     def create_weights(
         self,

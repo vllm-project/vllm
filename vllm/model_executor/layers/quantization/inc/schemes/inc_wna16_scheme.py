@@ -36,10 +36,10 @@ class INCWna16Scheme(INCScheme):
         del config, layer
         if current_platform.is_xpu():
             if layer_config.bits == 4 and layer_config.sym:
+                from .inc_ark_ops import get_ark_state
                 from .inc_wna16_linear import (
                     INCARKLinearMethod,
                     INCXPULinearMethod,
-                    get_ark_state,
                 )
 
                 is_ark_available, ark_error, _, _ = get_ark_state()
@@ -57,10 +57,10 @@ class INCWna16Scheme(INCScheme):
 
         if current_platform.is_cpu() and layer_config.is_gptq:
             if layer_config.bits == 4 and layer_config.sym:
+                from .inc_ark_ops import get_ark_state
                 from .inc_wna16_linear import (
                     INCARKLinearMethod,
                     INCWNA16LinearScheme,
-                    get_ark_state,
                 )
 
                 is_ark_available, ark_error, _, _ = get_ark_state()
