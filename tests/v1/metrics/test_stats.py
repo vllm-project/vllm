@@ -244,3 +244,50 @@ def test_prompt_token_stats_full_external_transfer_recompute():
     assert stats.external_kv_transfer == 999
     assert stats.cached_tokens == 999
     assert stats.total == 1000
+
+
+def test_prefill_stats_disagg_transfer_excluded_from_cached():
+    """Disagg transfer tokens are not counted as cached_tokens (issue #43370)."""
+    stats = PromptTokenStats()
+
+    # Cold disagg request: all prompt tokens (minus the recompute token) are
+    # transferred from the remote prefiller, with no real prefix-cache hit.
+    prefill_stats = PrefillStats()
+    prefill_stats.set(
+        num_prompt_tokens=100,
+        num_local_cached_tokens=0,
+        num_external_cached_tokens=0,
+        num_disagg_transfer_tokens=99,
+    )
+    stats.update_from_output(prefill_stats)
+
+    # cached_tokens must be 0 for a cold request, not ~prompt_tokens.
+    assert stats.cached_tokens == 0
+    assert stats.local_cache_hit == 0
+    # external_kv_transfer stays inclusive for Prometheus continuity...
+    assert stats.external_kv_transfer == 99
+    # ...while disagg_transfer isolates the transfer-only subset.
+    assert stats.disagg_transfer == 99
+    assert stats.computed == 1
+    assert stats.total == 100
+
+
+def test_prefill_stats_local_cache_hit_still_counted_with_disagg():
+    """A real local prefix-cache hit is still reported even on a disagg worker."""
+    stats = PromptTokenStats()
+
+    prefill_stats = PrefillStats()
+    prefill_stats.set(
+        num_prompt_tokens=100,
+        num_local_cached_tokens=40,
+        num_external_cached_tokens=0,
+        num_disagg_transfer_tokens=50,
+    )
+    stats.update_from_output(prefill_stats)
+
+    # Local APC hits remain in cached_tokens; only the transfer is excluded.
+    assert stats.cached_tokens == 40
+    assert stats.local_cache_hit == 40
+    assert stats.disagg_transfer == 50
+    assert stats.computed == 10
+    assert stats.total == 100

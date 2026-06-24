@@ -181,6 +181,21 @@ class KVConnectorBase_V1(ABC):
         """
         return False
 
+    @property
+    def is_disagg_prefill_transfer(self) -> bool:
+        """
+        Whether the tokens this connector reports via
+        get_num_new_matched_tokens are transferred from a disaggregated prefill
+        worker rather than served from a reusable KV cache.
+
+        Transfer tokens are moved from another engine for this request and are
+        not prefix-cache hits, so they must be excluded from the cached_tokens
+        reported in the API response (see #43370). Cache-store connectors (e.g.
+        LMCache, MooncakeStore) should leave this False, since their external
+        tokens are genuine cache hits. Defaults to False.
+        """
+        return False
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
