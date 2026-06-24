@@ -352,8 +352,11 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             layer._tq_Pi_half = H.to(torch.float16)
 
             # Centroids for Lloyd-Max quantization.
+            # Use query dtype (bf16) to enable bf16 Tensor Core in decode path.
+            # Centroids have only 3-4 bit precision (Lloyd-Max), so bf16's
+            # 7-bit mantissa is more than sufficient.
             layer._tq_centroids = get_centroids(D, self.tq_config.centroid_bits).to(
-                device=device, dtype=torch.float32
+                device=device, dtype=torch.bfloat16
             )
 
             c_sorted, _ = layer._tq_centroids.sort()

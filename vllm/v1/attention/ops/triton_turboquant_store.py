@@ -314,11 +314,11 @@ def _tq_fused_store_mse(
         tl.store(KV_cache_ptr + slot_base + grp_offs * 3 + 1, b1, mask=grp_mask)
         tl.store(KV_cache_ptr + slot_base + grp_offs * 3 + 2, b2, mask=grp_mask)
 
-    # ── 3. STORE vec_norm (fp16, 2 bytes) ─────────────────────────────
+    # ── 3. STORE vec_norm (bf16, 2 bytes) ─────────────────────────────
     norm_offset = MSE_BYTES
 
-    vn_f16 = tl.load(Norms_ptr + pid).to(tl.float16)
-    vn_u16 = vn_f16.to(tl.uint16, bitcast=True)
+    vn_bf16 = tl.load(Norms_ptr + pid).to(tl.bfloat16)
+    vn_u16 = vn_bf16.to(tl.uint16, bitcast=True)
     tl.store(KV_cache_ptr + slot_base + norm_offset, (vn_u16 & 0xFF).to(tl.uint8))
     tl.store(
         KV_cache_ptr + slot_base + norm_offset + 1, ((vn_u16 >> 8) & 0xFF).to(tl.uint8)
