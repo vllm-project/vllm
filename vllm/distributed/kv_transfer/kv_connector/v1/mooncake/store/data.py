@@ -132,21 +132,32 @@ class PoolKey:
             )
         )
 
-    def to_string(self) -> str:
-        prefix = (
-            f"{self.key_metadata.cache_prefix}@"
-            if self.key_metadata.cache_prefix
-            else ""
-        )
+    @staticmethod
+    def build_prefix(
+        key_metadata: KeyMetadata,
+        *,
+        tp_rank: int | None = None,
+        pp_rank: int | None = None,
+    ) -> str:
+        """Return the stable prefix for a Mooncake pool key."""
+        prefix = f"{key_metadata.cache_prefix}@" if key_metadata.cache_prefix else ""
         return (
             f"{prefix}"
-            f"{self.key_metadata.model_name}"
-            f"@tp_rank:{self.key_metadata.tp_rank}"
-            f"@pcp{self.key_metadata.pcp_rank}"
-            f"@dcp{self.key_metadata.dcp_rank}"
-            f"@pp_rank:{self.key_metadata.pp_rank}"
-            f"@group:{self.key_metadata.group_id}"
-            f"@{self.chunk_hash}"
+            f"{key_metadata.model_name}"
+            f"@tp_rank:{key_metadata.tp_rank if tp_rank is None else tp_rank}"
+            f"@pcp{key_metadata.pcp_rank}"
+            f"@dcp{key_metadata.dcp_rank}"
+            f"@pp_rank:{key_metadata.pp_rank if pp_rank is None else pp_rank}"
+            f"@group:{key_metadata.group_id}"
+        )
+
+    @staticmethod
+    def build_key_string(key_prefix: str, chunk_hash: str) -> str:
+        return f"{key_prefix}@{chunk_hash}"
+
+    def to_string(self) -> str:
+        return self.build_key_string(
+            self.build_prefix(self.key_metadata), self.chunk_hash
         )
 
 
