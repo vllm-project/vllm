@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
-from typing_extensions import LiteralString
 
 from vllm.platforms import current_platform
 
@@ -16,13 +15,17 @@ from ..utils import compare_two_settings, create_new_process_for_each_test
 )
 @pytest.mark.parametrize(
     "ATTN_BACKEND",
-    ["TRITON_ATTN"] if current_platform.is_rocm() else ["FLASH_ATTN"],
+    # The unified FLASH_ATTN backend is CUDA-only: on ROCm get_flash_attn_version()
+    # returns None and FlashAttentionImpl.forward() passes FA3/FA4-only kwargs that
+    # the upstream ROCm flash-attn does not accept. Pass None on ROCm so the platform
+    # attention selector (vllm/platforms/rocm.py) picks a valid backend (ROCM_ATTN).
+    [None] if current_platform.is_rocm() else ["FLASH_ATTN"],
 )
 @create_new_process_for_each_test()
 def test_pp_cudagraph(
     PP_SIZE: int,
     MODEL_NAME: str,
-    ATTN_BACKEND: LiteralString,
+    ATTN_BACKEND: str | None,
 ):
     cudagraph_args = [
         # use half precision for speed and memory savings in CI environment
@@ -32,8 +35,10 @@ def test_pp_cudagraph(
         str(PP_SIZE),
         "--distributed-executor-backend",
         "mp",
-        f"--attention-backend={ATTN_BACKEND}",
     ]
+    # On ROCm, defer to the platform attention selector instead of forcing a backend.
+    if ATTN_BACKEND is not None:
+        cudagraph_args.append(f"--attention-backend={ATTN_BACKEND}")
 
     eager_args = cudagraph_args + ["--enforce-eager"]
 
