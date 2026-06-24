@@ -5,6 +5,7 @@ from unittest.mock import patch
 import pytest
 
 from tests.kernels.moe.utils import make_dummy_moe_config
+from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     UnquantizedMoeBackend,
     select_unquantized_moe_backend,
@@ -197,7 +198,6 @@ def test_select_cuda_flashinfer_trtllm_modular_backend(
 @pytest.mark.parametrize(
     "all2all_backend",
     [
-        "allgather_reducescatter",
         "deepep_high_throughput",
         "mori_high_throughput",
         "mori_low_latency",
@@ -209,7 +209,7 @@ def test_select_cuda_flashinfer_trtllm_modular_for_standard_all2all(
     mock_supports_current_device,
     all2all_backend,
 ):
-    """Test standard-format all2all backends select TRTLLM modular BF16."""
+    """Test non-AG/RS standard-format all2all backends select modular BF16."""
     with (
         patch.object(current_platform, "is_cuda", return_value=True),
         patch.object(current_platform, "is_rocm", return_value=False),
@@ -235,6 +235,42 @@ def test_select_cuda_flashinfer_trtllm_modular_for_standard_all2all(
         assert selected_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM
         assert experts_cls is not None
         assert experts_cls.__name__ == "TrtLlmBf16ExpertsModular"
+
+
+@patch(
+    "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16ExpertsBase._supports_current_device",
+    return_value=True,
+)
+def test_select_cuda_flashinfer_trtllm_ag_rs_uses_monolithic(
+    mock_supports_current_device,
+):
+    """Test AG/RS stays on BF16 TRTLLM monolithic when TRTLLM is supported."""
+    with (
+        patch.object(current_platform, "is_cuda", return_value=True),
+        patch.object(current_platform, "is_rocm", return_value=False),
+        patch.object(current_platform, "is_cpu", return_value=False),
+        patch.object(current_platform, "is_xpu", return_value=False),
+        patch.object(current_platform, "is_tpu", return_value=False),
+        patch.object(current_platform, "is_out_of_tree", return_value=False),
+        patch.object(
+            current_platform, "is_device_capability_family", return_value=False
+        ),
+    ):
+        moe_config = make_dummy_moe_config(num_experts=4, num_local_experts=2)
+        moe_config.moe_backend = "flashinfer_trtllm"
+        moe_config.routing_method = RoutingMethodType.Renormalize
+        moe_config.moe_parallel_config.use_ep = True
+        moe_config.moe_parallel_config.dp_size = 2
+        moe_config.moe_parallel_config.ep_size = 2
+        moe_config.moe_parallel_config.all2all_backend = "allgather_reducescatter"
+
+        selected_backend, experts_cls = select_unquantized_moe_backend(
+            moe_config=moe_config
+        )
+
+        assert selected_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM
+        assert experts_cls is not None
+        assert experts_cls.__name__ == "TrtLlmBf16ExpertsMonolithic"
 
 
 @patch(
