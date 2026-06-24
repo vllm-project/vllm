@@ -69,7 +69,7 @@ else:
     me_models = LazyLoader("model_executor", globals(), "vllm.model_executor.models")
     LoadConfig = Any
     ParallelConfig = Any
-    QuantizationMethods = Any
+    QuantizationMethods = str
     LogitsProcessor = Any
 
 logger = init_logger(__name__)
@@ -984,6 +984,8 @@ class ModelConfig:
                 "auto_gptq",
                 "gptq",
                 "gptq_marlin",
+                "auto_awq",
+                "awq",
                 "awq_marlin",
                 "inc",
                 "moe_wna16",
