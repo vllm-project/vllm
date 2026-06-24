@@ -3540,7 +3540,6 @@ class GPUModelRunner(
         by extra_forward_use_argmax), avoiding GPU-CPU round-trips.
         All tokens are sent to CPU together afterward.
         """
-        import time as _time
         num_extra = self.tokens_per_step - 1
 
         with record_function_or_nullcontext("ExtraForwards"):
@@ -3629,9 +3628,7 @@ class GPUModelRunner(
                     extra_slot_mappings[layer_name] = (
                         extra_slot_bufs[gid][:extra_padded_size])
 
-            _step_logs = []
             for _extra_i in range(num_extra):
-                _t_i0 = _time.time()
                 extra_positions = extra_positions + 1
                 extra_pos_1d = extra_pos_1d + 1
                 exceeds = extra_pos_1d >= self.max_model_len
@@ -3645,14 +3642,12 @@ class GPUModelRunner(
                         exceeds,
                         torch.zeros_like(extra_pos_1d),
                         extra_pos_1d)
-                _t_pos = _time.time()
 
                 self.seq_lens[:batch_size].add_(1)
                 self.seq_lens[:batch_size].masked_fill_(exceeds, 1)
                 if extra_padded_size > batch_size:
                     self.seq_lens[
                         batch_size:extra_padded_size].fill_(0)
-                _t_seqlens = _time.time()
 
                 abs_positions = self.seq_lens[:batch_size] - 1
                 abs_positions = abs_positions.masked_fill(exceeds, 0)
@@ -3669,7 +3664,6 @@ class GPUModelRunner(
                 for meta in unique_metas:
                     meta.max_seq_len = min(
                         meta.max_seq_len + 1, self.max_model_len)
-                _t_slot = _time.time()
 
                 prev_tokens = all_token_ids[-1].squeeze(-1).int()
                 self.input_ids.gpu[:batch_size] = prev_tokens
@@ -3683,7 +3677,6 @@ class GPUModelRunner(
                         :, :extra_padded_size]
                 else:
                     fwd_positions = self.positions[:extra_padded_size]
-                _t_write_input = _time.time()
 
                 if self.supports_mm_inputs:
                     extra_embeds = self.model.embed_input_ids(
@@ -3695,7 +3688,6 @@ class GPUModelRunner(
                 else:
                     fwd_input_ids = self.input_ids.gpu[:extra_padded_size]
                     fwd_inputs_embeds = None
-                _t_embed = _time.time()
 
                 with set_forward_context(
                         attn_metadata, self.vllm_config,
@@ -3708,13 +3700,11 @@ class GPUModelRunner(
                         positions=fwd_positions,
                         inputs_embeds=fwd_inputs_embeds,
                     )
-                _t_model = _time.time()
 
                 if self.use_aux_hidden_state_outputs:
                     extra_hidden = extra_hidden[0]
                 extra_hidden = extra_hidden[:batch_size]
                 extra_logits = self.model.compute_logits(extra_hidden)
-                _t_logits = _time.time()
 
                 if self.extra_forward_use_argmax:
                     next_tokens = extra_logits.argmax(
@@ -3727,20 +3717,8 @@ class GPUModelRunner(
                     )
                     next_tokens = extra_sampler_output.sampled_token_ids
                 all_token_ids.append(next_tokens)
-                _t_argmax = _time.time()
 
-                _step_logs.append(
-                    f"    [extra_step_{_extra_i}] "
-                    f"pos={(_t_pos - _t_i0)*1000:.3f}ms "
-                    f"seqlens={(_t_seqlens - _t_pos)*1000:.3f}ms "
-                    f"slot={(_t_slot - _t_seqlens)*1000:.3f}ms "
-                    f"write_input={(_t_write_input - _t_slot)*1000:.3f}ms "
-                    f"embed={(_t_embed - _t_write_input)*1000:.3f}ms "
-                    f"model={(_t_model - _t_embed)*1000:.3f}ms "
-                    f"logits={(_t_logits - _t_model)*1000:.3f}ms "
-                    f"argmax={(_t_argmax - _t_logits)*1000:.3f}ms "
-                    f"step_total={(_t_argmax - _t_i0)*1000:.3f}ms\n"
-                )
+
 
             sampler_output.sampled_token_ids = torch.cat(
                 all_token_ids, dim=1)
@@ -3757,10 +3735,7 @@ class GPUModelRunner(
             for meta, saved in zip(unique_metas, saved_max_num_splits):
                 meta.max_num_splits = saved
 
-        with open("/root/youtu_res/test_output_fastdeploy.txt", "a",
-                  encoding="utf-8") as _f:
-            for _sl in _step_logs:
-                _f.write(_sl)
+
 
     def _bookkeeping_sync(
         self,
@@ -4631,21 +4606,12 @@ class GPUModelRunner(
             sampler_output = self._sample(logits, spec_decode_metadata)
 
         # --- Extra autoregressive forward passes ---
-        import time as _time_ef
         _extra_fwd_cond = (self.tokens_per_step > 1
                 and not self.is_pooling_model
                 and spec_decode_metadata is None
                 and scheduler_output.total_num_scheduled_tokens > 0
                 and logits is not None
                 and not isinstance(attn_metadata, list))
-        with open("/root/youtu_res/test_output_fastdeploy.txt", "a",
-                  encoding="utf-8") as _f:
-            _f.write(
-                f"[EXTRA_FWD_CHECK] tokens_per_step={self.tokens_per_step} "
-                f"async_scheduling={self.use_async_scheduling} "
-                f"spec_decode={spec_decode_metadata is not None} "
-                f"will_run_extra_fwd={_extra_fwd_cond}\n"
-            )
         if _extra_fwd_cond:
             self._run_extra_forwards(
                 sampler_output, attn_metadata, logits_indices)
