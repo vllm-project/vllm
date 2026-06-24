@@ -47,7 +47,6 @@ from vllm.v1.kv_offload.base import (
     BlockIDsLoadStoreSpec,
     CanonicalKVCaches,
     GroupTransfer,
-    LoadStoreSpec,
     LookupResult,
     OffloadingManager,
     OffloadingSpec,
