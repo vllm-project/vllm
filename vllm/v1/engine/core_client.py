@@ -362,7 +362,9 @@ class InprocClient(EngineCoreClient):
         return self.engine_core.collective_rpc(method, timeout, args, kwargs)
 
     def dp_engines_running(self) -> bool:
-        return False
+        # Signal to the outer loop that the scheduler still has pending work
+        # (e.g. finished requests waiting for delayed KV connector frees).
+        return self.engine_core.scheduler.has_requests()
 
 
 @dataclass
