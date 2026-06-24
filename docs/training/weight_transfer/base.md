@@ -18,16 +18,15 @@ Subclasses must implement these methods:
 | `init_transfer_engine(init_info)` | Inference | Initialize the communication channel on each inference worker |
 | `start_weight_update()` | Inference | Prepare for an update (e.g. begin layerwise reload); no-op for in-place engines |
 | `finish_weight_update()` | Inference | Finalize the update (e.g. finalize layerwise reload); no-op for in-place engines |
-| `receive_weights(update_info)` | Inference | Receive weights and load them into `self.model` incrementally |
+| `receive_weights(update_info)` | Inference | Receive weights and load them into `self.model` |
 | `shutdown()` | Inference | Clean up resources |
 | `trainer_send_weights(iterator, trainer_args)` | Trainer | Static method to send weights from the trainer process |
 
-The base class provides a concrete `update_weights(update_info_dict)` that parses
-the dict, calls `receive_weights`, and synchronizes the device — so subclasses
-only implement `receive_weights`. The session-active guard and error handling
-live in the worker, so `start_weight_update`/`finish_weight_update` must **not**
-chain to `super()`. Engines receive `config`, `vllm_config`, `device`, and
-`model` in their constructor; load weights directly into `self.model`.
+The base class provides two methods:
+
+1. `__init__` : Engines receive `config` (`WeightTransferConfig`),  `vllm_config` (`VllmConfig`), `device` (`torch.device`) and  `model` (`nn.Module`)  
+2. `update_weights(update_info_dict)`:  Thin wrapper for `receive_weights`: parses
+the dict into user-specified data type, calls `receive_weights`, and synchronizes the device. Subclasses implement `receive_weights`.
 
 ### Request Classes
 
@@ -103,8 +102,8 @@ class MyWeightTransferEngine(WeightTransferEngine[MyInitInfo, MyUpdateInfo]):
         ...
 
     def start_weight_update(self) -> None:
-        # Checkpoint-format engines: run initialize_layerwise_reload(self.model)
-        # under set_current_vllm_config(self.vllm_config). In-place engines: no-op
+        # Checkpoint-format engines: run initialize_layerwise_reload(self.model).
+        # In-place engines: no-op
         ...
 
     def finish_weight_update(self) -> None:
@@ -113,16 +112,14 @@ class MyWeightTransferEngine(WeightTransferEngine[MyInitInfo, MyUpdateInfo]):
         ...
 
     def receive_weights(self, update_info: MyUpdateInfo) -> None:
-        # Receive each weight and load it into self.model incrementally
-        from vllm.config import set_current_vllm_config
-
+        weights = []
         for name, dtype_name, shape in zip(
             update_info.names, update_info.dtype_names, update_info.shapes
         ):
             dtype = getattr(torch, dtype_name)
             weight = self._fetch_weight(name, shape, dtype)
-            with set_current_vllm_config(self.vllm_config), torch.device(self.device):
-                self.model.load_weights([(name, weight)])
+            weights.append((name, weight))
+        self.model.load_weights(weights)
 
     def shutdown(self) -> None:
         # Clean up resources
@@ -138,9 +135,6 @@ class MyWeightTransferEngine(WeightTransferEngine[MyInitInfo, MyUpdateInfo]):
             # Send tensor via custom transport
             ...
 ```
-
-!!! important
-    Load weights into `self.model` **incrementally** (one or a few weights at a time) rather than accumulating all weights first. This avoids GPU out-of-memory errors with large models. Wrap loading in `set_current_vllm_config(self.vllm_config)` so per-layer postprocessing can read the current vLLM config.
 
 ### 3. Register with the Factory
 

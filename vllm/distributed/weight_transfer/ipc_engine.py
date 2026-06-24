@@ -208,26 +208,19 @@ class IPCWeightTransferEngine(
 
     def start_weight_update(self) -> None:
         """Initialize layerwise reloading for the incoming checkpoint weights."""
-        from vllm.config import set_current_vllm_config
         from vllm.model_executor.model_loader.reload import (
             initialize_layerwise_reload,
         )
 
-        # set_current_vllm_config is required because the layerwise reload path
-        # may instantiate kernels (e.g. FlashInfer CUTLASS MoE) whose __init__
-        # reads get_current_vllm_config().
-        with set_current_vllm_config(self.vllm_config), torch.device(self.device):
-            initialize_layerwise_reload(self.model)
+        initialize_layerwise_reload(self.model)
 
     def finish_weight_update(self) -> None:
         """Finalize layerwise reloading after all weights have been received."""
-        from vllm.config import set_current_vllm_config
         from vllm.model_executor.model_loader.reload import (
             finalize_layerwise_reload,
         )
 
-        with set_current_vllm_config(self.vllm_config), torch.device(self.device):
-            finalize_layerwise_reload(self.model, self.model_config)
+        finalize_layerwise_reload(self.model, self.model_config)
 
     def receive_weights(self, update_info: IPCWeightTransferUpdateInfo) -> None:
         """
@@ -281,14 +274,7 @@ class IPCWeightTransferEngine(
                 weight = rebuild_cuda_tensor(*list_args)
                 weights.append((name, weight))
 
-        from vllm.config import set_current_vllm_config
-
-        # set_current_vllm_config is required because model.load_weights may run
-        # per-layer postprocessing (process_weights_after_loading) that
-        # instantiates kernels reading get_current_vllm_config() — e.g.
-        # FlashInfer CUTLASS MoE for unquantized MoE models.
-        with set_current_vllm_config(self.vllm_config), torch.device(self.device):
-            self.model.load_weights(weights)
+        self.model.load_weights(weights)
 
     def shutdown(self) -> None:
         pass

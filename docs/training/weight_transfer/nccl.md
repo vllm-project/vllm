@@ -11,7 +11,7 @@ The NCCL weight transfer engine uses [NCCL](https://developer.nvidia.com/nccl) b
 ## How It Works
 
 1. The trainer and all inference workers join a shared NCCL process group using `StatelessProcessGroup` (vLLM's torch.distributed-independent group abstraction).
-2. The trainer broadcasts weights to all workers simultaneously. Each worker receives and loads weights incrementally.
+2. The trainer broadcasts weights to all workers simultaneously. Each worker receives and loads the weights.
 3. Optionally, **packed tensor broadcasting** batches multiple small tensors into larger buffers with double/triple buffering and CUDA stream overlap for higher throughput. This implementation is based on [NeMo-RL's packed tensor](https://github.com/NVIDIA-NeMo/RL/blob/main/nemo_rl/utils/packed_tensor.py).
 
 ## Initialization

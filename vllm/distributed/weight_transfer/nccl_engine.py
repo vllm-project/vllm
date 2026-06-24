@@ -136,30 +136,23 @@ class NCCLWeightTransferEngine(
 
     def start_weight_update(self) -> None:
         """Initialize layerwise reloading for the incoming checkpoint weights."""
-        from vllm.config import set_current_vllm_config
         from vllm.model_executor.model_loader.reload import (
             initialize_layerwise_reload,
         )
 
-        # set_current_vllm_config is required because the layerwise reload path
-        # may instantiate kernels (e.g. FlashInfer CUTLASS MoE) whose __init__
-        # reads get_current_vllm_config().
-        with set_current_vllm_config(self.vllm_config), torch.device(self.device):
-            initialize_layerwise_reload(self.model)
+        initialize_layerwise_reload(self.model)
 
     def finish_weight_update(self) -> None:
         """Finalize layerwise reloading after all weights have been received."""
-        from vllm.config import set_current_vllm_config
         from vllm.model_executor.model_loader.reload import (
             finalize_layerwise_reload,
         )
 
-        with set_current_vllm_config(self.vllm_config), torch.device(self.device):
-            finalize_layerwise_reload(self.model, self.model_config)
+        finalize_layerwise_reload(self.model, self.model_config)
 
     def receive_weights(self, update_info: NCCLWeightTransferUpdateInfo) -> None:
         """
-        Receive weights from trainer via NCCL broadcast and load them incrementally.
+        Receive weights from trainer via NCCL broadcast.
 
         If update_info.packed is True, uses packed tensor broadcasting for
         efficient transfer of multiple weights in batches. Otherwise, uses simple
@@ -175,42 +168,35 @@ class NCCLWeightTransferEngine(
                 "Call init_transfer_engine() first."
             )
 
-        from vllm.config import set_current_vllm_config
-
-        # set_current_vllm_config is required because model.load_weights may run
-        # per-layer postprocessing (process_weights_after_loading) that
-        # instantiates kernels reading get_current_vllm_config() — e.g.
-        # FlashInfer CUTLASS MoE for unquantized MoE models.
-        with set_current_vllm_config(self.vllm_config), torch.device(self.device):
-            if update_info.packed:
-                # Build iterator of (name, (shape, dtype)) from update_info
-                def state_dict_info_iterator():
-                    for name, dtype_name, shape in zip(
-                        update_info.names, update_info.dtype_names, update_info.shapes
-                    ):
-                        dtype = getattr(torch, dtype_name)
-                        yield (name, (shape, dtype))
-
-                packed_nccl_broadcast_consumer(
-                    iterator=state_dict_info_iterator(),
-                    group=self.model_update_group,
-                    src=0,
-                    post_unpack_func=self.model.load_weights,
-                    buffer_size_bytes=update_info.packed_buffer_size_bytes,
-                    num_buffers=update_info.packed_num_buffers,
-                )
-            else:
-                # Use simple one-by-one broadcasting
+        if update_info.packed:
+            # Build iterator of (name, (shape, dtype)) from update_info
+            def state_dict_info_iterator():
                 for name, dtype_name, shape in zip(
                     update_info.names, update_info.dtype_names, update_info.shapes
                 ):
                     dtype = getattr(torch, dtype_name)
-                    weight = torch.empty(shape, dtype=dtype, device="cuda")
-                    self.model_update_group.broadcast(
-                        weight, src=0, stream=torch.cuda.current_stream()
-                    )
-                    self.model.load_weights([(name, weight)])
-                    del weight
+                    yield (name, (shape, dtype))
+
+            packed_nccl_broadcast_consumer(
+                iterator=state_dict_info_iterator(),
+                group=self.model_update_group,
+                src=0,
+                post_unpack_func=self.model.load_weights,
+                buffer_size_bytes=update_info.packed_buffer_size_bytes,
+                num_buffers=update_info.packed_num_buffers,
+            )
+        else:
+            # Use simple one-by-one broadcasting
+            for name, dtype_name, shape in zip(
+                update_info.names, update_info.dtype_names, update_info.shapes
+            ):
+                dtype = getattr(torch, dtype_name)
+                weight = torch.empty(shape, dtype=dtype, device="cuda")
+                self.model_update_group.broadcast(
+                    weight, src=0, stream=torch.cuda.current_stream()
+                )
+                self.model.load_weights([(name, weight)])
+                del weight
 
     def shutdown(self) -> None:
         if self.model_update_group is not None:

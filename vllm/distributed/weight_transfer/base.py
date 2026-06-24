@@ -64,10 +64,6 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
     `start_weight_update`/`finish_weight_update`. Engines that apply weights in
     place (e.g. sparse patches) leave those methods as no-ops.
 
-    Session lifecycle state (whether an update is active) is tracked by the
-    worker, not the engine, so subclasses do not need to chain to `super()` in
-    their lifecycle methods.
-
     Subclasses should define:
         init_info_cls: Type of backend-specific initialization info
         update_info_cls: Type of backend-specific update info
@@ -89,8 +85,7 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
 
         Args:
             config: The configuration for the weight transfer engine
-            vllm_config: The full vLLM config (provides parallel/model config and
-                is used to set the current config when running layerwise reload)
+            vllm_config: The full vLLM config (provides parallel/model config)
             device: The device this worker's model lives on
             model: The local model instance which will receive the weights
         """
@@ -157,9 +152,10 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         """
         Prepare the engine for a new weight update.
 
-        Checkpoint-format engines initialize layerwise reloading here; engines
-        that apply weights in place leave this as a no-op. Must not chain to
-        `super()`.
+        Engines that receive weights in checkpoint format initialize layerwise reloading
+        here, else this is typically a no-op.
+        See: https://docs.vllm.ai/en/latest/training/layerwise/
+        for more details.
         """
         raise NotImplementedError
 
@@ -169,19 +165,13 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         Finalize the current weight update.
 
         Checkpoint-format engines finalize layerwise reloading here; engines
-        that apply weights in place leave this as a no-op. Must not chain to
-        `super()`.
+        that apply weights in place leave this as a no-op.
         """
         raise NotImplementedError
 
     def update_weights(self, update_info: dict[str, Any]) -> None:
         """
         Receive one weight update chunk and load it into the model.
-
-        This is stateless orchestration: parse the backend-specific update info,
-        receive the weights, then synchronize so the new weights are visible to
-        the next forward pass. Session-lifecycle bookkeeping is handled by the
-        worker.
 
         Args:
             update_info: Dictionary containing backend-specific update info
@@ -196,9 +186,6 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
     def receive_weights(self, update_info: TUpdateInfo) -> None:
         """
         Receive weights from the trainer and load them into the model.
-
-        Implementations should load weights incrementally (one or a few at a
-        time) into `self.model` to avoid OOM.
 
         Args:
             update_info: Backend-specific update info containing parameter metadata
@@ -227,9 +214,7 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         to send weights to all inference workers.
 
         Args:
-            iterator: Iterator of backend-specific items to send. Dense engines
-                     iterate (name, tensor) tuples; sparse engines iterate
-                     patch objects. Tensors should be on the appropriate device.
+            iterator: Iterator of backend-specific items to send.
             trainer_args: Dictionary containing backend-specific arguments needed
                          to send weights. The structure depends on the backend:
                          - NCCL: Contains 'group', 'src', 'packed', etc.
