@@ -151,6 +151,33 @@ mod tests {
     }
 
     #[test]
+    fn prepare_generate_request_forwards_thinking_token_budget() {
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "token_ids": [11, 22, 33],
+            "sampling_params": {
+                "thinking_token_budget": 64
+            }
+        }))
+        .expect("parse request");
+
+        let prepared = prepare_generate_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("prepare");
+
+        // The raw inference route shares `vllm_text::SamplingParams`, so the
+        // field is carried through to lowering exactly like the OpenAI routes
+        // (normalization/validation then happens in `lower_sampling_params`).
+        assert_eq!(
+            prepared.text_request.sampling_params.thinking_token_budget,
+            Some(64)
+        );
+    }
+
+    #[test]
     fn prepare_generate_request_gates_continuous_usage_on_include_usage() {
         let request: GenerateRequest = serde_json::from_value(json!({
             "model": "Qwen/Qwen1.5-0.5B-Chat",
