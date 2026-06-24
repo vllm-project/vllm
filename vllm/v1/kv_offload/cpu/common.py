@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing_extensions import override
 
+from vllm.distributed.kv_events import MEDIUM_CPU
 from vllm.v1.kv_offload.base import BlockIDsLoadStoreSpec
 
 
@@ -18,4 +19,4 @@ class CPULoadStoreSpec(BlockIDsLoadStoreSpec):
     @staticmethod
     @override
     def medium() -> str:
-        return "CPU"
+        return MEDIUM_CPU

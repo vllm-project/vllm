@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 
 from typing_extensions import override
 
+from vllm.distributed.kv_events import MEDIUM_FS
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 from vllm.v1.kv_offload.file_mapper import FileMapper
@@ -79,6 +80,8 @@ class FileSystemTierManager(SecondaryTierManager):
         random bytes, producing different block filenames for identical token
         content.
     """
+
+    EVENT_MEDIUM = MEDIUM_FS
 
     def __init__(
         self,

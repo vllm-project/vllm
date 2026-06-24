@@ -239,7 +239,7 @@ class TieringOffloadingManager(OffloadingManager):
                         self.events.append(
                             OffloadingEvent(
                                 keys=list(job_metadata.keys),
-                                medium=tier.tier_type,
+                                medium=tier.medium,
                                 removed=False,
                             )
                         )

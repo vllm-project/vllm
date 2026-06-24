@@ -7,6 +7,7 @@ import time
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, NamedTuple
 
+from vllm.distributed.kv_events import MEDIUM_OBJ
 from vllm.distributed.nixl_utils import NixlWrapper as nixl_agent
 from vllm.distributed.nixl_utils import nixl_agent_config
 from vllm.logger import init_logger
@@ -88,6 +89,8 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     Handles CPU DRAM <-> S3 transfers only. GPU <-> CPU is managed by the
     primary tier. Object keys are formed as ``{prefix}/{hash_shard}/{hash}.bin``.
     """
+
+    EVENT_MEDIUM = MEDIUM_OBJ
 
     def __init__(
         self,
