@@ -216,17 +216,14 @@ def test_request_preemption(request_runner, async_scheduling: bool):
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
-def test_no_offload_call_after_on_request_finished(
+def test_on_request_finished_is_not_deferred_until_store_completion(
     request_runner, async_scheduling: bool
 ):
-    """on_request_finished is not issued before a per-request offload
-    call.
+    """on_request_finished fires when no more stores will be submitted.
 
-    A request can finish while its GPU->primary store is still in flight; the
-    later worker completion then drives complete_store. The scheduler defers
-    on_request_finished until the request is finished AND has no in-flight
-    transfer jobs, so complete_store is observed BEFORE on_request_finished,
-    and it is called exactly once.
+    A request can finish while its GPU->primary store is still in flight. The
+    manager-level hook should not wait for that completion; complete_store may
+    still arrive afterward for already-submitted transfer jobs.
     """
     block_size = 4
     block_size_factor = 3
@@ -263,16 +260,24 @@ def test_no_offload_call_after_on_request_finished(
         complete_transfers=False,
     )
 
-    # Finish the request, completing its pending stores. on_request_finished is
-    # deferred until the stores drain, so it lands after the last complete_store.
-    # 4 offloaded blocks are stored (2 prompt + 2 decode) -> 4 * block_size_factor
-    # GPU blocks.
+    # Finish the request while its stores are still in flight. The hook should
+    # fire immediately even though no complete_store has arrived yet.
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
-        expected_stored=tuple(range(4 * block_size_factor)),
+        complete_transfers=False,
     )
 
     req_id = str(runner.req_id)
+
+    assert calls == [("on_request_finished", req_id)], calls
+
+    # Drain the stores afterward. The already-submitted complete_store calls
+    # are allowed to arrive after on_request_finished.
+    runner.run(
+        decoded_tokens=[],
+        complete_transfers=True,
+        expected_stored=tuple(range(4 * block_size_factor)),
+    )
 
     # on_request_finished is issued exactly once.
     assert calls.count(("on_request_finished", req_id)) == 1, calls
@@ -280,10 +285,9 @@ def test_no_offload_call_after_on_request_finished(
     finished_idx = calls.index(("on_request_finished", req_id))
     store_indices = [i for i, c in enumerate(calls) if c == ("complete_store", req_id)]
 
-    # All of the request's complete_store calls must precede its single
-    # on_request_finished.
+    # The request-level hook no longer waits for already-submitted transfers.
     assert store_indices, calls
-    assert max(store_indices) < finished_idx, calls
+    assert finished_idx < min(store_indices), calls
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
@@ -1232,11 +1236,8 @@ def test_reset_cache(request_runner, async_scheduling: bool):
 def test_reset_cache_finalizes_finished_request_with_pending_store(
     request_runner, async_scheduling: bool
 ):
-    """reset_cache must finalize a finished request whose in-flight stores it
-    discards: call on_request_finished and drop its _req_status entry.
-
-    Otherwise the deferred hook (which waits for the now-discarded jobs to
-    complete) never fires and the entry leaks.
+    """reset_cache drops a finished request whose in-flight stores it discards
+    without calling on_request_finished twice.
     """
     block_size = 4
     block_size_factor = 3
@@ -1273,14 +1274,15 @@ def test_reset_cache_finalizes_finished_request_with_pending_store(
     assert any(job.is_store for job in cs._jobs.values())
 
     # Finish the request while its store is still in flight. request_finished
-    # takes the defer branch (pending jobs), so on_request_finished is NOT
-    # called yet and the entry stays tracked.
+    # fires the hook eagerly, but the entry stays tracked so later completions
+    # can still call complete_store().
     req_status.req.status = RequestStatus.FINISHED_STOPPED
     cs.request_finished(req_status.req)
-    assert finalized == []
+    assert finalized == [req_id]
     assert req_id in cs._req_status
 
-    # reset_cache discards the in-flight store; it must finalize the request.
+    # reset_cache discards the in-flight store and drops the state without a
+    # duplicate on_request_finished call.
     cs.reset_cache()
     assert finalized == [req_id]
     assert req_id not in cs._req_status
