@@ -17,13 +17,8 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     create_fp8_quant_key,
-    kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
-)
-from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    cutlass_block_fp8_supported,
-    cutlass_fp8_supported,
 )
 from vllm.model_executor.parameter import (
     BlockQuantScaleParameter,
@@ -45,22 +40,8 @@ class Fp8LinearMethod(LinearMethodBase):
     def __init__(self, quant_config: "DeepseekV4FP8Config"):
         self.quant_config = quant_config
         self.is_scale_e8m0 = getattr(quant_config, "is_scale_e8m0", False)
-        self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
         self.out_dtype = torch.get_default_dtype()
         self.input_dtype = get_current_vllm_config().model_config.dtype
-
-        # Marlin path is dropped on the hw-agnostic kernel selector; flag is
-        # kept for code-shape parity with upstream ``process_weights_after_loading``.
-        self.marlin_input_dtype = None
-        self.use_marlin = False
-
-        # ``use_deep_gemm`` is intentionally not mirrored on this class. The
-        # hw-agnostic kernel selector ``init_fp8_linear_kernel`` chooses the
-        # impl directly, and the only external read of
-        # ``quant_method.use_deep_gemm`` (in
-        # ``vllm/model_executor/layers/quantization/utils/quant_utils.py``)
-        # gates on ``isinstance(layer.quant_method, upstream.Fp8LinearMethod)``,
-        # which never matches our class.
 
         self.weight_block_size = self.quant_config.weight_block_size
         self.block_quant = self.weight_block_size is not None
@@ -69,7 +50,6 @@ class Fp8LinearMethod(LinearMethodBase):
         if self.block_quant:
             assert not self.act_q_static
             assert self.weight_block_size is not None
-
             self.activation_quant_key = create_fp8_quant_key(
                 static=self.act_q_static,
                 group_shape=GroupShape(1, self.weight_block_size[0]),
@@ -79,12 +59,11 @@ class Fp8LinearMethod(LinearMethodBase):
             )
         else:
             self.weight_quant_key = kFp8StaticTensorSym
-            if self.act_q_static:
-                self.activation_quant_key = kFp8StaticTensorSym
-            elif cutlass_fp8_supported():
-                self.activation_quant_key = kFp8DynamicTokenSym
-            else:
-                self.activation_quant_key = kFp8DynamicTensorSym
+            # Per-tensor for static activation, per-token for dynamic — the
+            # vendored Triton scaled-MM kernel handles both layouts.
+            self.activation_quant_key = (
+                kFp8StaticTensorSym if self.act_q_static else kFp8DynamicTokenSym
+            )
 
     def create_weights(
         self,

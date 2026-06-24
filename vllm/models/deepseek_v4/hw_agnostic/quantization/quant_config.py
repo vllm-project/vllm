@@ -2,12 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import torch
 
 from vllm.config import get_current_vllm_config
-from vllm.model_executor.layers.quantization import QuantizationMethods
+from vllm.model_executor.hw_agnostic.layers.attention import Attention
+from vllm.model_executor.hw_agnostic.layers.fused_moe.routed_experts import (
+    RoutedExperts,
+)
+from vllm.model_executor.hw_agnostic.layers.fused_moe.unquantized_fused_moe_method import (  # noqa: E501
+    UnquantizedFusedMoEMethod,
+)
+from vllm.model_executor.hw_agnostic.layers.linear import (
+    LinearBase,
+    UnquantizedLinearMethod,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
 )
@@ -19,16 +29,6 @@ from vllm.models.deepseek_v4.hw_agnostic.quantization.fp8_quant import (
     Fp8KVCacheMethod,
     Fp8MoEMethod,
     Fp8OnlineMoEMethod,
-)
-from vllm.model_executor.hw_agnostic.layers.fused_moe.routed_experts import (
-    RoutedExperts,
-)
-from vllm.model_executor.hw_agnostic.layers.fused_moe.unquantized_fused_moe_method import (  # noqa: E501
-    UnquantizedFusedMoEMethod,
-)
-from vllm.model_executor.hw_agnostic.layers.linear import (
-    LinearBase,
-    UnquantizedLinearMethod,
 )
 
 _DEEPSEEK_V4_EXPERT_DTYPES = ("fp4", "fp8")
@@ -108,13 +108,15 @@ class DeepseekV4FP8Config(Fp8Config):
         return self._nvfp4_config
 
     @classmethod
-    def get_name(cls) -> QuantizationMethods:
+    def get_name(cls) -> Literal["deepseek_v4_fp8"]:
+        # Inlined literal: avoids a module-level import of upstream's
+        # ``QuantizationMethods`` typing alias.
         return "deepseek_v4_fp8"
 
     @classmethod
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant, hf_config=None
-    ) -> QuantizationMethods | None:
+    ) -> str | None:
         if not (
             isinstance(hf_quant_cfg, dict)
             and hf_quant_cfg.get("quant_method") in ("fp8", "deepseek_v4_fp8")
@@ -136,6 +138,9 @@ class DeepseekV4FP8Config(Fp8Config):
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
             if self.expert_dtype == "fp4":
+                # FP4 has no Triton path on the hw-agnostic tree; route to
+                # the upstream method (lazy-imported so the dependency
+                # only loads when this branch is exercised).
                 if self.moe_quant_algo == "NVFP4":
                     from vllm.model_executor.layers.quantization.modelopt import (
                         ModelOptNvFp4FusedMoE,
@@ -162,17 +167,14 @@ class DeepseekV4FP8Config(Fp8Config):
             ):
                 return UnquantizedLinearMethod()
             if not self.is_checkpoint_fp8_serialized:
-                # BF16 → FP8 online quant uses the upstream per-tensor method.
-                # Lazy-imported to avoid pulling its module-level
-                # ``model_executor.kernels.linear`` dependency into hw_agnostic.
+                # BF16 -> FP8 online quant: lazy-imported so the linear-
+                # kernel registry doesn't load at hw_agnostic import time.
                 from vllm.model_executor.layers.quantization.online.fp8 import (
                     Fp8PerTensorOnlineLinearMethod,
                 )
 
                 return Fp8PerTensorOnlineLinearMethod()
             return Fp8LinearMethod(self)
-
-        from vllm.model_executor.layers.attention import Attention
 
         if isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)

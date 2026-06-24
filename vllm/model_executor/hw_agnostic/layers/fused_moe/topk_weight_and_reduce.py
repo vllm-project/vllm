@@ -9,20 +9,8 @@ import vllm.model_executor.hw_agnostic.layers.fused_moe.modular_kernel as mk
 
 
 class TopKWeightAndReduceDelegate(mk.TopKWeightAndReduce):
-    """
-    Useful in the case when some FusedMoEExpertsModular
-    implementation does not perform weight application and reduction
-    but cannot address the needs of all the compatible PrepareAndFinalize
-    implementations.
-    For example, BatchedTritonExperts is compatible with both batched
-    PrepareAndFinalize implementations like DeepEPLLPrepareAndFinalize and
-    BatchedPrepareAndFinalize. Some PrepareAndFinalize implementations do
-    the weight-application + reduction as part of the combine kernel, while
-    BatchedPrepareAndFinalize needs an explicit implementation. To facilitate
-    this case, the BatchedTritonExperts could use TopKWeightAndReduceDelegate
-    so the PrepareAndFinalize implementations could choose how to
-    weight + reduce.
-    """
+    """Sentinel: experts class defers weight-application + reduction to
+    the PrepareAndFinalize side."""
 
     def __eq__(self, other):
         return isinstance(other, TopKWeightAndReduceDelegate)

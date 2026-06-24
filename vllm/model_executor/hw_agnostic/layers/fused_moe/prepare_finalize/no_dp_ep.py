@@ -20,25 +20,18 @@ def _quantize_input(
     quant_config: FusedMoEQuantConfig,
     defer_input_quant: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    # Defer input quant to moe kernel for backends (e.g. AITER, FI)
-    # which use a single kernel call for quant + experts.
+    # ``defer_input_quant=True`` is used by experts kernels that fuse
+    # input-quant with the GEMM (e.g. LoRA + DP/EP all2all path).
     if defer_input_quant:
         return a1, None
 
-    input_sf = (
-        quant_config.a1_gscale if quant_config.use_nvfp4_w4a4 else quant_config.a1_scale
-    )
-    a1q, a1q_scale = moe_kernel_quantize_input(
+    return moe_kernel_quantize_input(
         a1,
-        input_sf,
+        quant_config.a1_scale,
         quant_dtype=quant_config.quant_dtype,
         per_act_token_quant=quant_config.per_act_token_quant,
         block_shape=quant_config.block_shape,
-        is_scale_swizzled=quant_config.is_scale_swizzled,
-        mx_alignment=quant_config.mx_alignment,
     )
-
-    return a1q, a1q_scale
 
 
 class MoEPrepareAndFinalizeNoDPEPModular(mk.FusedMoEPrepareAndFinalizeModular):

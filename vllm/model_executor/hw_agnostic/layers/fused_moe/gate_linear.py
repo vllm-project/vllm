@@ -5,7 +5,6 @@ from torch.nn.parameter import Parameter
 
 from vllm.model_executor.hw_agnostic.custom_op import PluggableLayer
 from vllm.model_executor.hw_agnostic.layers.linear import ReplicatedLinear
-from vllm.platforms import current_platform
 
 
 @PluggableLayer.register("gate_linear")
@@ -33,9 +32,11 @@ class GateLinear(ReplicatedLinear):
         )
         self.out_dtype = out_dtype
 
-        self.allow_cublas_router_gemm = (
-            current_platform.is_cuda_alike()
-            and not bias
+        # ``torch.mm(..., out_dtype=torch.float32)`` is the bf16-in / fp32-out
+        # matmul fast path; the active backend (cuBLAS / hipBLAS / oneMKL)
+        # picks the kernel.
+        self.allow_router_gemm = (
+            not bias
             and self.weight.dtype == torch.bfloat16
             and self.out_dtype == torch.float32
         )
@@ -45,15 +46,13 @@ class GateLinear(ReplicatedLinear):
             raise ValueError("out_dtype has already been set")
         self.out_dtype = out_dtype
 
-        if not self.allow_cublas_router_gemm and out_dtype == torch.float32:
-            self.allow_cublas_router_gemm = (
-                current_platform.is_cuda_alike() and self.weight.dtype == torch.bfloat16
-            )
+        if not self.allow_router_gemm and out_dtype == torch.float32:
+            self.allow_router_gemm = self.weight.dtype == torch.bfloat16
 
     def forward(
         self, x: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
-        if self.allow_cublas_router_gemm and x.dtype == torch.bfloat16:
+        if self.allow_router_gemm and x.dtype == torch.bfloat16:
             output = torch.mm(x, self.weight.T, out_dtype=torch.float32)
             return output, None
 

@@ -30,9 +30,6 @@ from vllm.model_executor.hw_agnostic.layers.fused_moe.config import (
 from vllm.model_executor.hw_agnostic.layers.fused_moe.fused_moe_method_base import (  # noqa: E501
     FusedMoEMethodBase,
 )
-from vllm.model_executor.hw_agnostic.layers.fused_moe.fused_moe_modular_method import (  # noqa: E501
-    FusedMoEModularMethod,
-)
 from vllm.model_executor.hw_agnostic.layers.fused_moe.routed_experts import (
     RoutedExperts,
 )
@@ -46,10 +43,10 @@ from vllm.model_executor.hw_agnostic.layers.fused_moe.runner.shared_experts impo
     SharedExperts,
     SharedExpertsOrder,
 )
-from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     _USE_LAYERNAME,
     LayerName,
+    direct_register_custom_op,
 )
 
 
@@ -58,6 +55,42 @@ class ZeroExpertRouter:  # noqa: N801 — upstream public name
 
 
 logger = init_logger(__name__)
+
+# Settings the hw-agnostic MoE pipeline accepts. Anything outside these
+# either fails loudly here or hits a deleted code path; we surface the
+# rejection at construction time so the user sees the right CLI flag.
+_SUPPORTED_MOE_BACKENDS = frozenset({"auto", "triton"})
+_SUPPORTED_ALL2ALL_BACKENDS = frozenset(
+    # 'naive' and 'pplx' are aliased to 'allgather_reducescatter' in
+    # ParallelConfig._validate_parallel_config, but accept them here for
+    # users following older docs.
+    {"allgather_reducescatter", "naive", "pplx"}
+)
+
+
+def _validate_supported_settings(vllm_config) -> None:
+    pc = vllm_config.parallel_config
+    kc = vllm_config.kernel_config
+    if kc.moe_backend not in _SUPPORTED_MOE_BACKENDS:
+        raise ValueError(
+            f"hw-agnostic FusedMoE only supports moe_backend in "
+            f"{sorted(_SUPPORTED_MOE_BACKENDS)}; got {kc.moe_backend!r}."
+        )
+    if pc.all2all_backend not in _SUPPORTED_ALL2ALL_BACKENDS:
+        raise ValueError(
+            f"hw-agnostic FusedMoE only supports all2all_backend in "
+            f"{sorted(_SUPPORTED_ALL2ALL_BACKENDS)}; got {pc.all2all_backend!r}. "
+            "Use --all2all-backend allgather_reducescatter."
+        )
+    if pc.expert_placement_strategy != "linear":
+        raise ValueError(
+            f"hw-agnostic FusedMoE only supports expert_placement_strategy="
+            f"'linear'; got {pc.expert_placement_strategy!r}."
+        )
+    if getattr(pc, "enable_dbo", False):
+        raise ValueError(
+            "DBO (--enable-dbo) is not supported on the hw-agnostic FusedMoE path."
+        )
 
 
 def register_layer_for_moe_forward_op(
@@ -193,7 +226,29 @@ def _moe_forward_shared_fake(
     return shared_out, fused_out
 
 
-# Custom ops are registered by upstream; reuse those registrations.
+# Register the forward ops in our own ``vllm_dsv4`` namespace so the op
+# body's ``isinstance(layer, MoERunnerInterface)`` check resolves against
+# the vendored ABC, not upstream's. The ops are opaque-body custom ops:
+# torch.compile sees them as a single boundary, preserving the LoRA
+# dual-stream and shared-experts overlap schedules.
+_VLLM_DSV4_LIB = torch.library.Library("vllm_dsv4", "FRAGMENT")  # noqa: TOR901
+
+direct_register_custom_op(
+    op_name="moe_forward",
+    op_func=_moe_forward,
+    mutates_args=["hidden_states"],
+    fake_impl=_moe_forward_fake,
+    target_lib=_VLLM_DSV4_LIB,
+    tags=(torch.Tag.needs_fixed_stride_order,),
+)
+
+direct_register_custom_op(
+    op_name="moe_forward_shared",
+    op_func=_moe_forward_shared,
+    fake_impl=_moe_forward_shared_fake,
+    target_lib=_VLLM_DSV4_LIB,
+    tags=(torch.Tag.needs_fixed_stride_order,),
+)
 
 
 def _unpack(
@@ -243,6 +298,7 @@ class MoERunner(MoERunnerInterface):
         routed_scaling_factor: float = 1.0,
     ):
         super().__init__()
+        _validate_supported_settings(get_current_vllm_config())
         self.moe_config = moe_config
         self.router = router
         self.routed_input_transform = routed_input_transform
@@ -263,12 +319,10 @@ class MoERunner(MoERunnerInterface):
 
         self._shared_experts: SharedExperts | None = None
         if shared_experts is not None:
-            can_overlap = lambda: self._quant_method.mk_can_overlap_shared_experts
             self._shared_experts = SharedExperts(
                 shared_experts,
                 moe_config=moe_config,
                 enable_dbo=enable_dbo,
-                mk_can_overlap_shared_experts=can_overlap,
             )
 
         # Needed for string -> MoERunner layer lookup in custom ops.
@@ -280,16 +334,10 @@ class MoERunner(MoERunnerInterface):
         register_layer_for_moe_forward_op(get_current_vllm_config(), self)
 
     def _select_forward(self) -> Callable:
-        if current_platform.is_tpu() or current_platform.is_cpu():
-            # TODO: Once the OOM issue for the TPU backend is resolved, we
-            # will switch to using the moe_forward custom op.
-            # Note: CPU doesn't require wrapped _forward_impl.
-            return _moe_forward if self._shared_experts is None else _moe_forward_shared
-
         return (
-            torch.ops.vllm.moe_forward
+            torch.ops.vllm_dsv4.moe_forward
             if self._shared_experts is None
-            else torch.ops.vllm.moe_forward_shared
+            else torch.ops.vllm_dsv4.moe_forward_shared
         )
 
     @property
@@ -642,10 +690,9 @@ class MoERunner(MoERunnerInterface):
             hidden_states
         )
 
-        # Record before `_maybe_pad_hidden_states` pads activations to match
-        # `moe_config.hidden_dim`, e.g. after `align_trtllm_fp4_moe_hidden_dim_for_fi`
-        # so routed output can be trimmed before
-        # shared+routed add / latent up proj if needed.
+        # Record the original hidden dim before _maybe_pad_hidden_states
+        # pads to moe_config.hidden_dim, so routed output can be trimmed
+        # before shared+routed add / latent up-proj if needed.
 
         hidden_states, og_hidden_dim_pre_xform, og_hidden_dim_post_xform = (
             self._maybe_pad_hidden_states(
@@ -817,49 +864,10 @@ class MoERunner(MoERunnerInterface):
                 hidden_states,
             )
 
-    #########################################################
-    #
-    # Old methods from FusedMoE layer. Remove when possible.
-    #
-    #########################################################
-
-    # Note: maybe_init_modular_kernel should only be called by
-    # prepare_communication_buffer_for_model.
-    # This is called after all weight loading and post-processing, so it
-    # should be safe to swap out the quant_method.
     def maybe_init_modular_kernel(self) -> None:
-        # NOTE(rob): WIP refactor. For quant methods that own the MK
-        # we create the MK during process_weights_after_loading.
-        if (
-            self.routed_experts.quant_method.supports_internal_mk
-            or self.routed_experts.quant_method.is_monolithic
-        ):
-            return None
-
-        self.routed_experts._ensure_moe_quant_config_init()
-        # routing_tables only needed for round-robin expert placement with
-        # DeepEP all2all backend.
-        routing_tables = self._expert_routing_tables()
-
-        if isinstance(self.routed_experts.quant_method, FusedMoEModularMethod):
-            base_quant_method = self.routed_experts.quant_method.old_quant_method
-        else:
-            base_quant_method = self.routed_experts.quant_method
-
-        prepare_finalize = base_quant_method.maybe_make_prepare_finalize(
-            routing_tables=routing_tables
-        )
-        if prepare_finalize is not None:
-            logger.debug(
-                "%s for %s(%s)", prepare_finalize.__class__.__name__, self, id(self)
-            )
-            self._replace_quant_method(
-                FusedMoEModularMethod.make(
-                    self.routed_experts,
-                    base_quant_method,
-                    prepare_finalize,
-                )
-            )
+        # All vendored quant methods build their own modular kernel in
+        # ``process_weights_after_loading``; no late init is needed.
+        return None
 
     #
     # Properties

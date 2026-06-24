@@ -14,7 +14,6 @@ from vllm.model_executor.hw_agnostic.layers.fused_moe.topk_weight_and_reduce imp
 from vllm.model_executor.hw_agnostic.layers.fused_moe.utils import (
     moe_kernel_quantize_input,
 )
-from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 
 
 def _quantize_and_setup_dispatch(
@@ -22,54 +21,21 @@ def _quantize_and_setup_dispatch(
     quant_config: FusedMoEQuantConfig,
     defer_input_quant: bool = False,
 ) -> tuple[torch.Tensor, list[torch.Tensor] | None, torch.Tensor | None]:
-    # Defer input quantization to the MoE kernel.
     if defer_input_quant:
-        a1q = a1
-        a1q_scale = None
-    else:
-        input_sf = (
-            quant_config.a1_gscale
-            if quant_config.use_nvfp4_w4a4
-            else quant_config.a1_scale
-        )
+        return a1, None, None
 
-        # NOTE: swizzling pads the scales to multiple of 128
-        # which makes the scales tensor different shape than
-        # the hidden states, breaking the A2A kernel. So, we
-        # delay the swizzling until after the A2A.
-        a1q, a1q_scale = moe_kernel_quantize_input(
-            a1,
-            input_sf,
-            quant_dtype=quant_config.quant_dtype,
-            per_act_token_quant=quant_config.per_act_token_quant,
-            block_shape=quant_config.block_shape,
-            is_scale_swizzled=False,
-            mx_alignment=quant_config.mx_alignment,
-        )
+    a1q, a1q_scale = moe_kernel_quantize_input(
+        a1,
+        quant_config.a1_scale,
+        quant_dtype=quant_config.quant_dtype,
+        per_act_token_quant=quant_config.per_act_token_quant,
+        block_shape=quant_config.block_shape,
+    )
 
-    # Skip gathering scales if we have static quantization
-    # (the scale is a scalar, replicated on all ranks) or
-    # if quantization is deferred.
+    # Static (scalar) scales are replicated on every rank — skip gathering.
     skip_gather_scales = a1q_scale is None or a1q_scale.ndim == 0
     scales = None if skip_gather_scales else [a1q_scale]
-
     return a1q, scales, a1q_scale
-
-
-def _unwrap_scale_and_prepare_for_moe(
-    scales: list[torch.Tensor] | None,
-    quant_config: FusedMoEQuantConfig,
-) -> torch.Tensor:
-    assert scales is not None and len(scales) == 1
-    a1q_scale = scales[0]
-    # Apply swizzling after a2a if the MoE kernel needs it.
-    if quant_config.quant_dtype == "nvfp4" and quant_config.is_scale_swizzled:
-        assert a1q_scale is not None
-        if a1q_scale.element_size() == 1:
-            a1q_scale = a1q_scale.view(torch.uint8)
-        a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
-
-    return a1q_scale
 
 
 class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular):
@@ -180,9 +146,8 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
                 assert lora_ctx is not None
                 lora_ctx.local_token_lora_mapping = dispatched_lora_mapping
             if scales is not None:
-                a1q_scale = _unwrap_scale_and_prepare_for_moe(
-                    gathered_extras, quant_config
-                )
+                assert len(gathered_extras) == 1
+                a1q_scale = gathered_extras[0]
             else:
                 a1q_scale = a1q_scale_orig
 
@@ -272,8 +237,9 @@ class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMono
             a1q_scale = a1q_scale_orig
         else:
             assert len(res) == 3
-            a1q, router_logits, scales = res
-            a1q_scale = _unwrap_scale_and_prepare_for_moe(scales, quant_config)
+            a1q, router_logits, gathered_scales = res
+            assert len(gathered_scales) == 1
+            a1q_scale = gathered_scales[0]
 
         return a1q, a1q_scale, router_logits
 

@@ -129,31 +129,15 @@ def moe_kernel_quantize_input(
     quant_dtype: None | torch.dtype | str,
     per_act_token_quant: bool,
     block_shape: list[int] | None = None,
-    is_scale_swizzled: bool = True,
-    ocp_mx_scheme: str | None = None,
-    quantization_emulation: bool = False,
-    mx_alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    if ocp_mx_scheme is not None:
-        raise NotImplementedError(
-            f"OCP MX schemes ({ocp_mx_scheme!r}) are not supported on the "
-            "DSv4 hw-agnostic FusedMoE path."
-        )
-
     if quant_dtype == current_platform.fp8_dtype():
-        if quantization_emulation:
-            raise NotImplementedError(
-                f"moe_kernel_quantize_input does not support quant_dtype={quant_dtype}"
-                " MOE quantization emulation. Please open an issue."
-            )
         return _fp8_quantize(A, A_scale, per_act_token_quant, block_shape)
-    elif quant_dtype is None:
+    if quant_dtype is None:
         return A, A_scale
-    else:
-        raise NotImplementedError(
-            f"DSv4 hw-agnostic FusedMoE supports only FP8 / unquantized "
-            f"experts; got quant_dtype={quant_dtype!r}."
-        )
+    raise NotImplementedError(
+        f"hw-agnostic FusedMoE supports only FP8 / unquantized inputs; "
+        f"got quant_dtype={quant_dtype!r}."
+    )
 
 
 def normalize_scales_shape(scales: torch.Tensor | None) -> torch.Tensor | None:
@@ -179,64 +163,6 @@ def normalize_batched_scales_shape(
             scales = scales.view(num_experts, -1, scales.size(-1))
 
     return scales
-
-
-@triton.jit
-def _pack_topk_ids_weights_kernel(
-    topk_ids_ptr,
-    topk_weights_ptr,
-    output_ptr,
-    n_elements,
-    BLOCK_SIZE: tl.constexpr,
-    USE_GDC: tl.constexpr,
-    launch_pdl: tl.constexpr,  # triton metadata
-):
-    pid = tl.program_id(axis=0)
-    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = offsets < n_elements
-    if USE_GDC:
-        tl.extra.cuda.gdc_launch_dependents()
-        tl.extra.cuda.gdc_wait()
-    expert_id = tl.load(topk_ids_ptr + offsets, mask=mask, other=0).to(tl.int32)
-    expert_id_shifted = expert_id << 16
-
-    weight = tl.load(topk_weights_ptr + offsets, mask=mask, other=0.0)
-    weight_bf16 = weight.to(tl.bfloat16)
-    weight_int16 = weight_bf16.to(tl.int16, bitcast=True)
-
-    weight_int32 = weight_int16.to(tl.int32) & 0xFFFF
-
-    packed = expert_id_shifted | weight_int32
-    tl.store(output_ptr + offsets, packed, mask=mask)
-
-
-def trtllm_moe_pack_topk_ids_weights(
-    topk_ids: torch.Tensor,
-    topk_weights: torch.Tensor,
-    block_size: int = 1024,
-) -> torch.Tensor:
-    assert topk_ids.shape == topk_weights.shape
-    assert topk_ids.is_contiguous() and topk_weights.is_contiguous()
-
-    original_shape = topk_ids.shape
-    ids_flat = topk_ids.reshape(-1)
-    weights_flat = topk_weights.reshape(-1)
-
-    n_elements = ids_flat.numel()
-    output = torch.empty(n_elements, dtype=torch.int32, device=topk_ids.device)
-
-    use_gdc = current_platform.is_cuda() and current_platform.has_device_capability(90)
-    grid = (triton.cdiv(n_elements, block_size),)
-    _pack_topk_ids_weights_kernel[grid](
-        ids_flat,
-        weights_flat,
-        output,
-        n_elements,
-        BLOCK_SIZE=block_size,
-        USE_GDC=use_gdc,
-        launch_pdl=use_gdc,
-    )
-    return output.reshape(original_shape)
 
 
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)

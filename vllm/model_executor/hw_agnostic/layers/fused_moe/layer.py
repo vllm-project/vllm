@@ -6,7 +6,6 @@ from typing import Any
 
 import torch
 
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import ParallelConfig, get_current_vllm_config
 from vllm.distributed import (
     get_dp_group,
@@ -76,30 +75,9 @@ def make_parallel_config(
 def determine_expert_counts(
     num_experts: int,
     num_redundant_experts: int,
-    n_shared_experts: int | None,
-    is_act_and_mul: bool,
-) -> tuple[int, int, int]:
-    global_num_experts = num_experts + num_redundant_experts
-    logical_num_experts = num_experts
-    # ROCm aiter shared experts fusion
-    # AITER only supports gated activations (silu/gelu), so disable it
-    # for non-gated MoE (is_act_and_mul=False)
-    aiter_fmoe_shared_expert_enabled = (
-        rocm_aiter_ops.is_fusion_moe_shared_experts_enabled() and is_act_and_mul
-    )
-
-    num_fused_shared_experts = (
-        n_shared_experts
-        if n_shared_experts is not None and aiter_fmoe_shared_expert_enabled
-        else 0
-    )
-    if not aiter_fmoe_shared_expert_enabled and num_fused_shared_experts != 0:
-        raise ValueError(
-            "n_shared_experts is only supported on ROCm aiter when "
-            "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled"
-        )
-
-    return global_num_experts, logical_num_experts, num_fused_shared_experts
+) -> tuple[int, int]:
+    """Returns (global_num_experts, logical_num_experts)."""
+    return num_experts + num_redundant_experts, num_experts
 
 
 # TODO: rename this
@@ -131,7 +109,6 @@ def FusedMoE(
     has_bias: bool = False,
     is_sequence_parallel: bool = False,
     expert_mapping: list[tuple[str, str, int, str]] | None = None,
-    n_shared_experts: int | None = None,
     router_logits_dtype: torch.dtype | None = None,
     gate: torch.nn.Module | None = None,
     shared_experts: torch.nn.Module | None = None,
@@ -188,7 +165,6 @@ def FusedMoE(
         has_bias: Whether expert layers have bias terms
         is_sequence_parallel: Whether sequence parallelism is enabled
         expert_mapping: Expert parameter mapping for weight loading
-        n_shared_experts: Number of shared experts (ROCm aiter only)
         router_logits_dtype: Data type for router logits buffers
         gate: Pre-configured gate module
         shared_experts: Pre-configured shared experts module
@@ -212,7 +188,6 @@ def FusedMoE(
     layer_name = prefix
 
     moe_activation = MoEActivation.from_str(activation)
-    is_act_and_mul = moe_activation.is_gated
 
     moe_parallel_config = make_parallel_config(
         tp_size=tp_size,
@@ -222,13 +197,9 @@ def FusedMoE(
         parallel_config=vllm_config.parallel_config,
     )
 
-    global_num_experts, logical_num_experts, num_fused_shared_experts = (
-        determine_expert_counts(
-            num_experts,
-            num_redundant_experts,
-            n_shared_experts,
-            is_act_and_mul,
-        )
+    global_num_experts, logical_num_experts = determine_expert_counts(
+        num_experts,
+        num_redundant_experts,
     )
 
     # Initialize EPLB manager (or None?)
@@ -262,8 +233,6 @@ def FusedMoE(
         moe_parallel_config=moe_parallel_config,
         placement_strategy=vllm_config.parallel_config.expert_placement_strategy,
         enable_eplb=eplb_state is not None,
-        num_fused_shared_experts=num_fused_shared_experts,
-        rocm_aiter_enabled=rocm_aiter_ops.is_fused_moe_enabled() and is_act_and_mul,
     )
 
     # TODO(bnell): we should not have to create a router if the kernel is
@@ -288,7 +257,6 @@ def FusedMoE(
             if not apply_routed_scale_to_output
             else 1.0,
             e_score_correction_bias=e_score_correction_bias,
-            num_fused_shared_experts=num_fused_shared_experts,
             zero_expert_type=zero_expert_type,
             num_logical_experts=logical_num_experts,
             hash_indices_table=hash_indices_table,

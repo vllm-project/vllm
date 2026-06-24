@@ -91,8 +91,6 @@ class RoutedExperts(PluggableLayer):
         # Register buffers for state_dict compatibility
         self.update_expert_map_info()
 
-        self.rocm_aiter_fmoe_enabled = moe_config.rocm_aiter_fmoe_enabled
-
         # It would be good to eventually codify these in FusedMoEConfig
         # or some other config.
         self.top_k = self.moe_config.experts_per_token
@@ -193,13 +191,11 @@ class RoutedExperts(PluggableLayer):
         assert isinstance(quant_method, FusedMoEMethodBase)
         return quant_method
 
-    # TODO(bnell): make this a method on quant_method
     def _needs_intermediate_size_param(self, quant_method: FusedMoEMethodBase) -> bool:
-        return quant_method.__class__.__name__ in (
-            "AutoGPTQMoEMethod",
-            "CompressedTensorsWNA16MarlinMoEMethod",
-            "CompressedTensorsWNA16MoEMethod",
-        )
+        # Vendor-marker quant methods that need the full pre-shard
+        # intermediate size (GPTQ act-order / Compressed-Tensors WNA16) are
+        # out of scope on the hw-agnostic path.
+        return False
 
     def _ensure_moe_quant_config_init(self):
         if self.quant_method.moe_quant_config is None:
@@ -215,16 +211,13 @@ class RoutedExperts(PluggableLayer):
 
     @property
     def expert_map(self) -> torch.Tensor | None:
-        return (
-            self._expert_map if not self.rocm_aiter_fmoe_enabled else self.expert_mask
-        )
+        return self._expert_map
 
     def update_expert_map_info(self):
         # Update local attributes from ExpertMapManager
         self.local_num_experts = self.expert_map_manager.local_num_experts
         self.expert_placement_strategy = self.expert_map_manager.placement_strategy
         self.register_buffer("_expert_map", self.expert_map_manager.expert_map)
-        self.register_buffer("expert_mask", self.expert_map_manager.expert_mask)
 
         # Get routing tables from ExpertMapManager
         routing_tables = self.expert_map_manager.routing_tables
@@ -405,11 +398,10 @@ class RoutedExperts(PluggableLayer):
     ) -> torch.Tensor:
         """Narrow expert_data to match loaded_weight for padded dimensions.
 
-        When backends (e.g., DeepEP) round up hidden_size, weight parameters
-        are larger than checkpoint weights. Narrow the padded hidden dimension
-        before copying. Similarly, when padding occurs on the shard
-        (intermediate) dimension (e.g. for MXFP4 GEMM), narrow that dimension
-        as well.
+        When backends round up hidden_size, weight parameters are larger
+        than checkpoint weights. Narrow the padded hidden dimension before
+        copying. Similarly, when padding occurs on the shard (intermediate)
+        dimension, narrow that dimension as well.
 
         Args:
             expert_data: The (possibly padded) parameter tensor to narrow.
@@ -574,18 +566,6 @@ class RoutedExperts(PluggableLayer):
         expert_id: int,
         return_success: bool = False,
     ) -> bool | None:
-        quant_config_name = self.quant_config and self.quant_config.get_name()
-        if quant_config_name == "gpt_oss_mxfp4":
-            # (FIXME) for gpt-oss all experts are combined
-            if "bias" in weight_name:
-                dim1 = loaded_weight.shape[1]
-                param.data[:, :dim1].copy_(loaded_weight)
-            else:
-                dim1 = loaded_weight.shape[1]
-                dim2 = loaded_weight.shape[2]
-                param.data[:, :dim1, :dim2].copy_(loaded_weight)
-            return True if return_success else None
-
         quant_method_name = self.quant_method.__class__.__name__
         global_expert_id = expert_id
         expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
@@ -600,23 +580,8 @@ class RoutedExperts(PluggableLayer):
             return False if return_success else None
         # Hereafter, `expert_id` is local physical id
 
-        # is_transposed: if the dim to shard the weight
-        # should be flipped. Required by GPTQ, compressed-tensors
-        # should be whatever dimension intermediate_size_per_partition is
+        # is_transposed: shard dim is flipped for transposed weights.
         is_transposed = getattr(param, "is_transposed", False)
-
-        # compressed-tensors checkpoints with packed weights are stored flipped
-        # TODO (mgoin): check self.quant_method.quant_config.quant_format
-        # against known CompressionFormat enum values that have this quality
-        if quant_method_name in (
-            "CompressedTensorsWNA16MarlinMoEMethod",
-            "CompressedTensorsWNA16MoEMethod",
-            "CompressedTensorsWNA16RDNA3MoEMethod",
-        ):
-            if is_transposed:
-                loaded_weight = loaded_weight.t().contiguous()
-            else:
-                loaded_weight = loaded_weight
 
         if shard_id not in ("w1", "w2", "w3"):
             raise ValueError(f"shard_id must be ['w1','w2','w3'] but got {shard_id}.")
@@ -640,18 +605,16 @@ class RoutedExperts(PluggableLayer):
                 if expert_data.shape != loaded_weight.shape:
                     raise ValueError(
                         "BitsAndBytes quantization with padded hidden_size "
-                        "(e.g., from DeepEP) is not supported. "
+                        "is not supported. "
                         f"Parameter shape {tuple(expert_data.shape)} != "
                         f"checkpoint shape {tuple(loaded_weight.shape)}"
                     )
                 expert_data.copy_(loaded_weight)
             elif shard_id in ("w1", "w3"):
-                # BnB stores weights as flat packed tensors.  _load_w13 is
-                # still used to split the w1/w3 portions along shard_dim.
-                # _narrow_expert_data_for_padding will be a no-op since
-                # packed sizes should already match; if DeepEP padding
-                # causes a mismatch the copy_() will fail with a clear
-                # shape error.
+                # BnB stores weights as flat packed tensors. _load_w13 is
+                # still used to split w1/w3 along shard_dim;
+                # _narrow_expert_data_for_padding is a no-op since packed
+                # sizes already match (any mismatch fails in copy_()).
                 full_load = True
                 self._load_w13(
                     shard_id=shard_id,

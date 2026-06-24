@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable
 from enum import IntEnum
 
 import torch
@@ -10,7 +9,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.hw_agnostic.layers.fused_moe.config import (
     FusedMoEConfig,
 )
-from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     aux_stream,
     current_stream,
@@ -26,13 +24,12 @@ class SharedExpertsOrder(IntEnum):
     # No shared experts.
     NONE = (0,)
 
-    # No overlap - defensively called before MK.
+    # Run shared experts on the main stream before the routed kernel.
     NO_OVERLAP = (1,)
 
-    # Overlapped with dispatch/combine in DP/EP - called by the MK.
-    MK_INTERNAL_OVERLAPPED = (2,)
-
-    # Overlapped with the gate, router, experts in aux stream.
+    # Run shared experts on aux_stream() in parallel with the router /
+    # routed kernel; the aux stream is None on platforms without one,
+    # in which case ``maybe_sync_shared_experts_stream`` is a no-op.
     MULTI_STREAM_OVERLAPPED = (3,)
 
 
@@ -42,31 +39,22 @@ class SharedExperts(torch.nn.Module):
         layer: torch.nn.Module,
         moe_config: FusedMoEConfig,
         enable_dbo: bool,
-        mk_can_overlap_shared_experts: Callable[[], bool],
     ):
         super().__init__()
 
-        # The SharedExperts need to handle DBO since they can be called from
-        # an MK's finalize method.  We keep a list of outputs indexed by current
-        # DBO ubatch id to handle this case.  If DBO is not enabled, the
-        # index is always 0 and the second output list element is ignored.
+        # SharedExperts can be called from an MK's finalize method, so we
+        # index outputs by the current DBO ubatch id. With DBO disabled,
+        # the index is always 0 and the second slot is ignored.
         self.enable_dbo = enable_dbo
         self._output: list[torch.Tensor | None] = [None, None]
         self._layer = layer
         self._moe_config = moe_config
 
-        self._mk_can_overlap_shared_experts = mk_can_overlap_shared_experts
-
-        # Allow disabling of the separate shared experts stream for
-        # debug purposes.
-        # TODO: Remove this after more extensive testings with TP/DP
-        # and other execution modes
         if envs.VLLM_DISABLE_SHARED_EXPERTS_STREAM:
             logger.debug_once("Disabling MoE shared_experts cuda stream")
             self._stream = None
         else:
-            # TODO(rob): enable shared expert overlap with non-cuda-alike.
-            # aux_stream() returns None on non-cuda-alike platforms.
+            # aux_stream() returns None on platforms without an aux stream.
             self._stream = aux_stream()
             if self._stream is not None:
                 logger.debug_once("Enabled separate cuda stream for MoE shared_experts")
@@ -75,38 +63,21 @@ class SharedExperts(torch.nn.Module):
     def _set_moe_config(self, new_moe_config: FusedMoEConfig):
         self.moe_config = new_moe_config
 
-    @property
-    def _disable_shared_experts_overlap(self) -> bool:
-        # Disable shared expert overlap if:
-        #   - we are using eplb with non-default backend, because of correctness issues
-        #   - we are using flashinfer with DP, since there nothing to gain
-        parallel_config = self._moe_config.moe_parallel_config
-        return (
-            parallel_config.enable_eplb
-            and parallel_config.all2all_backend != "allgather_reducescatter"
-        ) or parallel_config.use_fi_nvl_two_sided_kernels
-
     def _determine_shared_experts_order(
         self,
         hidden_states: torch.Tensor,
     ) -> SharedExpertsOrder:
-        if self._disable_shared_experts_overlap:
-            return SharedExpertsOrder.NO_OVERLAP
-
-        if self._mk_can_overlap_shared_experts():
-            return SharedExpertsOrder.MK_INTERNAL_OVERLAPPED
-
+        # ``aux_stream()`` is None on platforms without one — in that case
+        # the overlap path is unavailable and we fall back to NO_OVERLAP.
         should_run_shared_in_aux_stream = (
-            current_platform.is_cuda()
-            and self._stream is not None
+            self._stream is not None
             and hidden_states.shape[0]
             <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
         )
 
         if should_run_shared_in_aux_stream:
             return SharedExpertsOrder.MULTI_STREAM_OVERLAPPED
-        else:
-            return SharedExpertsOrder.NO_OVERLAP
+        return SharedExpertsOrder.NO_OVERLAP
 
     def maybe_sync_shared_experts_stream(
         self,

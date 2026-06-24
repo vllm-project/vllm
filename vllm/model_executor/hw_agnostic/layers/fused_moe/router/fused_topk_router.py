@@ -1,11 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable
-
 import torch
 
-import vllm._custom_ops as ops
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.hw_agnostic.layers.fused_moe.config import (
     RoutingMethodType,
@@ -14,58 +10,10 @@ from vllm.model_executor.hw_agnostic.layers.fused_moe.config import (
 from vllm.model_executor.hw_agnostic.layers.fused_moe.router.base_router import (  # noqa: E501
     BaseRouter,
 )
-
-
-def vllm_topk_softmax(
-    topk_weights: torch.Tensor,
-    topk_indices: torch.Tensor,
-    token_expert_indices: torch.Tensor,
-    gating_output: torch.Tensor,
-    renormalize: bool = False,
-) -> tuple[torch.Tensor, ...]:
-    ops.topk_softmax(
-        topk_weights,
-        topk_indices,
-        token_expert_indices,
-        gating_output,
-        renormalize,
-    )
-
-    return topk_weights, topk_indices
-
-
-def vllm_topk_sigmoid(
-    topk_weights: torch.Tensor,
-    topk_indices: torch.Tensor,
-    token_expert_indices: torch.Tensor,
-    gating_output: torch.Tensor,
-    renormalize: bool = False,
-) -> tuple[torch.Tensor, ...]:
-    ops.topk_sigmoid(
-        topk_weights,
-        topk_indices,
-        token_expert_indices,
-        gating_output,
-        renormalize,
-    )
-
-    return topk_weights, topk_indices
-
-
-def dispatch_topk_softmax_func(
-    use_rocm_aiter: bool = False,
-) -> Callable[..., tuple[torch.Tensor, ...]]:
-    if use_rocm_aiter:
-        return rocm_aiter_ops.topk_softmax
-    return vllm_topk_softmax
-
-
-def dispatch_topk_sigmoid_func(
-    use_rocm_aiter: bool = False,
-) -> Callable[..., tuple[torch.Tensor, ...]]:
-    if use_rocm_aiter:
-        return rocm_aiter_ops.topk_sigmoid
-    return vllm_topk_sigmoid
+from vllm.model_executor.hw_agnostic.layers.fused_moe.router.fused_topk_bias_router import (  # noqa: E501
+    vllm_topk_sigmoid,
+    vllm_topk_softmax,
+)
 
 
 def fused_topk(
@@ -94,25 +42,17 @@ def fused_topk(
     )
 
     if scoring_func == "softmax":
-        topk_func = dispatch_topk_softmax_func(
-            use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled()
-        )
-        topk_weights, topk_ids = topk_func(
+        topk_weights, topk_ids = vllm_topk_softmax(
             topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
         )
-
-        return topk_weights, topk_ids, token_expert_indices
     elif scoring_func == "sigmoid":
-        topk_func = dispatch_topk_sigmoid_func(
-            use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled()
-        )
-        topk_weights, topk_ids = topk_func(
+        topk_weights, topk_ids = vllm_topk_sigmoid(
             topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
         )
-
-        return topk_weights, topk_ids, token_expert_indices
     else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
+
+    return topk_weights, topk_ids, token_expert_indices
 
 
 class FusedTopKRouter(BaseRouter):
@@ -152,8 +92,7 @@ class FusedTopKRouter(BaseRouter):
         *,
         input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Compute routing using standard fused top-k."""
-        topk_weights, topk_ids, token_expert_indices = fused_topk(
+        topk_weights, topk_ids, _ = fused_topk(
             hidden_states=hidden_states,
             gating_output=router_logits,
             topk=self.top_k,
@@ -161,5 +100,4 @@ class FusedTopKRouter(BaseRouter):
             indices_type=indices_type,
             scoring_func=self.scoring_func,
         )
-
         return topk_weights, topk_ids

@@ -9,29 +9,32 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+import vllm.model_executor.hw_agnostic.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.config import (
+from vllm.model_executor.hw_agnostic.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
+from vllm.model_executor.hw_agnostic.layers.fused_moe.fused_moe_method_base import (  # noqa: E501
     FusedMoEMethodBase,
 )
-from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+from vllm.model_executor.hw_agnostic.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
     make_fp8_moe_quant_config,
     select_fp8_moe_backend,
 )
-from vllm.model_executor.layers.fused_moe.routed_experts import (
+from vllm.model_executor.hw_agnostic.layers.fused_moe.routed_experts import (
     FusedMoeWeightScaleSupported,
     RoutedExperts,
 )
-from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
+from vllm.model_executor.hw_agnostic.layers.fused_moe.runner.shared_experts import (  # noqa: E501
     SharedExperts,
+)
+from vllm.model_executor.hw_agnostic.model_loader.reload.layerwise import (
+    initialize_online_processing,
 )
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -47,17 +50,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticTensorSym,
 )
-from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    normalize_e4m3fn_to_e4m3fnuz,
-)
-from vllm.model_executor.model_loader.reload.layerwise import (
-    initialize_online_processing,
-)
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.model_executor.models.utils import WeightsMapper
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
@@ -103,10 +99,9 @@ class Fp8Config(QuantizationConfig):
                     f"{activation_scheme} activation scheme."
                 )
         self.weight_block_size = weight_block_size
-        self.use_deep_gemm: bool | None = None
 
     @classmethod
-    def get_name(cls) -> QuantizationMethods:
+    def get_name(cls) -> str:
         return "fp8"
 
     @classmethod
@@ -177,7 +172,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             config=self.moe,
             weight_key=weight_key,
             activation_key=activation_key,
-            allow_vllm_cutlass=False,
         )
 
     def create_weights(
@@ -331,10 +325,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_scale)
         replace_parameter(layer, f"w2_{self.weight_scale_name}", w2_scale)
 
-        if self.fp8_backend == Fp8MoeBackend.AITER:
-            layer.w13_weight.is_shuffled = True
-            layer.w2_weight.is_shuffled = True
-
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config:
             assert self.experts_cls is not None
@@ -353,14 +343,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         w2_scale = getattr(layer, f"w2_{self.weight_scale_name}")
         w13_input_scale = layer.w13_input_scale
         w2_input_scale = layer.w2_input_scale
-
-        if current_platform.is_fp8_fnuz():
-            w13, w13_scale, w13_input_scale = normalize_e4m3fn_to_e4m3fnuz(
-                w13, w13_scale, w13_input_scale
-            )
-            w2, w2_scale, w2_input_scale = normalize_e4m3fn_to_e4m3fnuz(
-                w2, w2_scale, w2_input_scale
-            )
 
         if self.quant_config.activation_scheme == "static":
             assert not self.block_quant

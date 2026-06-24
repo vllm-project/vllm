@@ -87,9 +87,10 @@ CHECK_IMPORTS = {
         pattern=(
             r"^\s*from\s+vllm\."
             r"(?:"
-            r"model_executor\.layers(?!\.utils\b)(?!\.quantization\.base_config\b)(?!\.quantization\.utils\.fp8_utils\b)(?!\.quantization\.utils\.quant_utils\b)(?!\.quantization\.utils\.w8a8_utils\b)(?!\.quantization\.utils\.layer_utils\b)(?!\.quantization\.input_quant_fp8\b)(?!\.quantization\.kv_cache\b)(?!\.quantization\.compressed_tensors\.triton_scaled_mm\b)(?!\.fusion\.quant_activation\b)(?!\.fused_moe\.activation\b)(?!\.fused_moe\.config\b)(?!\.fused_moe\.fused_moe_method_base\b)(?!\.fused_moe\.modular_kernel\b)(?!\.fused_moe\.oracle\.fp8\b)(?!\.fused_moe\.routed_experts\b)(?!\.fused_moe\.runner\.moe_runner_interface\b)(?!\.fused_moe\.runner\.shared_experts\b)(?!\.attention_layer_base\b)"
+            r"model_executor\.layers(?!\.utils\b)(?!\.quantization\.base_config\b)(?!\.quantization\.utils\.fp8_utils\b)(?!\.quantization\.utils\.quant_utils\b)(?!\.quantization\.utils\.w8a8_utils\b)(?!\.quantization\.utils\.layer_utils\b)(?!\.quantization\.input_quant_fp8\b)(?!\.quantization\.kv_cache\b)(?!\.quantization\.compressed_tensors\.triton_scaled_mm\b)(?!\.fusion\.quant_activation\b)(?!\.attention_layer_base\b)"
             r"|model_executor\.kernels\b"
             r"|model_executor\.models(?!\.utils\b)"
+            r"|model_executor\.model_loader\.reload\.layerwise\b"
             r"|models\.[^.]+(?!\.hw_agnostic\b)"
             r"|v1\.attention\.backends\b"
             r")"
@@ -97,7 +98,7 @@ CHECK_IMPORTS = {
         ),
         tip=(
             "hardware-agnostic modelling code must not import from "
-            "non-hardware=angnostic parts. The only exceptions are general "
+            "non-hardware-agnostic parts. The only exceptions are general "
             "utils.py files such as vllm.model_executor.layers.utils.py."
         ),
         applies_to=re.compile(
@@ -105,9 +106,33 @@ CHECK_IMPORTS = {
             r"/.*\.py$"
         ),
         allowed_files={
+            # DSv4 quant dispatcher: lazy-imports upstream FP4 / online-FP8
+            # methods inside ``get_quant_method`` (the FP4 path has no
+            # Triton kernel today; we keep the upstream escape hatch).
             "vllm/models/deepseek_v4/hw_agnostic/quantization/quant_config.py",
-            "vllm/models/deepseek_v4/hw_agnostic/quantization/fp8_quant.py",
+            # Re-export modules whose only job is to expose an upstream
+            # symbol under a hw_agnostic-shaped path (identity match for
+            # framework isinstance checks, or a process-wide registry).
+            "vllm/model_executor/hw_agnostic/layers/attention.py",
+            "vllm/model_executor/hw_agnostic/model_loader/reload/layerwise.py",
         },
+    ),
+    "hw_agnostic_no_vendor_utils": ForbiddenImport(
+        pattern=(
+            r"^\s*(?:from\s+vllm\.utils\."
+            r"(?:flashinfer|deep_gemm|cutlass|trtllm|deep_ep|aiter)\b"
+            r"|import\s+vllm\.utils\."
+            r"(?:flashinfer|deep_gemm|cutlass|trtllm|deep_ep|aiter)\b)"
+        ),
+        tip=(
+            "hardware-agnostic code must not import from vendor-specific "
+            "vllm.utils.* modules (flashinfer/deep_gemm/cutlass/trtllm/"
+            "deep_ep/aiter)."
+        ),
+        applies_to=re.compile(
+            r"^vllm/(?:models/[^/]+/hw_agnostic|model_executor/hw_agnostic)"
+            r"/.*\.py$"
+        ),
     ),
 }
 
@@ -190,6 +215,67 @@ def test_regex():
         ("from vllm.model_executor.layers.mhc import HCHeadOp", True),
         ("from vllm.model_executor.layers.linear import ColumnParallelLinear", True),
         ("from vllm.model_executor.layers.fused_moe import FusedMoE", True),
+        # Upstream Attention is forbidden — the vendored re-export at
+        # ``hw_agnostic/layers/attention.py`` is used instead.
+        ("from vllm.model_executor.layers.attention import Attention", True),
+        # initialize_online_processing is forbidden via upstream — the
+        # re-export at ``hw_agnostic/model_loader/reload/layerwise.py``
+        # is used instead.
+        (
+            "from vllm.model_executor.model_loader.reload.layerwise "
+            "import initialize_online_processing",
+            True,
+        ),
+        # The upstream Triton experts kernel is now vendored under
+        # ``hw_agnostic/layers/fused_moe/experts/triton_moe.py``; the
+        # upstream module is forbidden.
+        (
+            "from vllm.model_executor.layers.fused_moe.experts.triton_moe "
+            "import TritonExperts",
+            True,
+        ),
+        # All ``fused_moe.*`` upstream submodules are now vendored — the
+        # upstream paths are forbidden.
+        (
+            "from vllm.model_executor.layers.fused_moe.activation "
+            "import MoEActivation",
+            True,
+        ),
+        (
+            "from vllm.model_executor.layers.fused_moe.modular_kernel "
+            "import FusedMoEKernel",
+            True,
+        ),
+        (
+            "from vllm.model_executor.layers.fused_moe.fused_moe_method_base "
+            "import FusedMoEMethodBase",
+            True,
+        ),
+        (
+            "from vllm.model_executor.layers.fused_moe.runner.moe_runner_interface "
+            "import MoERunnerInterface",
+            True,
+        ),
+        (
+            "from vllm.model_executor.layers.fused_moe.oracle.fp8 "
+            "import Fp8MoeBackend",
+            True,
+        ),
+        (
+            "from vllm.model_executor.layers.fused_moe.routed_experts "
+            "import RoutedExperts",
+            True,
+        ),
+        (
+            "from vllm.model_executor.layers.fused_moe.runner.shared_experts "
+            "import SharedExperts",
+            True,
+        ),
+        (
+            "from vllm.model_executor.layers.fused_moe.config "
+            "import FusedMoEQuantConfig",
+            True,
+        ),
         (
             "from vllm.model_executor.layers.logits_processor import LogitsProcessor",
             True,
@@ -309,34 +395,16 @@ def test_regex():
             "import init_fp8_linear_kernel",
             False,
         ),
-        # FP8 MoE oracle and supporting modules — carved out for the
-        # vendored ``Fp8MoEMethod``.
+        # ``quantization.kv_cache`` is on the carve-out (the FP8 KV-cache
+        # method inherits from upstream ``BaseKVCacheMethod`` for registry
+        # identity).
         (
             "from vllm.model_executor.layers.quantization.kv_cache import "
             "BaseKVCacheMethod",
             False,
         ),
-        (
-            "from vllm.model_executor.layers.fused_moe.config import "
-            "FusedMoEQuantConfig",
-            False,
-        ),
-        (
-            "from vllm.model_executor.layers.fused_moe.oracle.fp8 import "
-            "select_fp8_moe_backend",
-            False,
-        ),
-        (
-            "from vllm.model_executor.layers.fused_moe.routed_experts import "
-            "RoutedExperts",
-            False,
-        ),
-        (
-            "from vllm.model_executor.layers.fused_moe.runner.shared_experts "
-            "import SharedExperts",
-            False,
-        ),
-        # Other fused_moe submodules remain forbidden.
+        # All ``fused_moe.experts.*`` upstream submodules are forbidden;
+        # the Triton path is vendored locally.
         (
             "from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe "
             "import X",
@@ -373,6 +441,25 @@ def test_regex():
         result = bool(rule_pattern.match(line))
         assert result == should_match, (
             f"hw_agnostic test case {i} failed: '{line}' "
+            f"(expected {should_match}, got {result})"
+        )
+
+    no_vendor_utils_cases = [
+        ("from vllm.utils.flashinfer import nvfp4_block_scale_interleave", True),
+        ("from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used", True),
+        ("from vllm.utils.cutlass import foo", True),
+        ("from vllm.utils.trtllm import foo", True),
+        ("import vllm.utils.flashinfer", True),
+        ("from vllm.utils.math_utils import cdiv", False),
+        ("from vllm.utils.torch_utils import aux_stream", False),
+        ("from vllm.utils.import_utils import has_triton_kernels", False),
+    ]
+    no_vendor_rule = CHECK_IMPORTS["hw_agnostic_no_vendor_utils"]
+    no_vendor_pattern = re.compile(no_vendor_rule.pattern, re.MULTILINE)
+    for i, (line, should_match) in enumerate(no_vendor_utils_cases):
+        result = bool(no_vendor_pattern.match(line))
+        assert result == should_match, (
+            f"no_vendor_utils test case {i} failed: '{line}' "
             f"(expected {should_match}, got {result})"
         )
 

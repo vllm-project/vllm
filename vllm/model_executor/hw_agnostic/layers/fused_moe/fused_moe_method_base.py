@@ -1,7 +1,165 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
-    FusedMoEMethodBase,
+
+from abc import abstractmethod
+from typing import TYPE_CHECKING
+
+import torch
+
+import vllm.model_executor.hw_agnostic.layers.fused_moe.modular_kernel as mk
+from vllm.logger import init_logger
+from vllm.model_executor.hw_agnostic.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
+)
+from vllm.model_executor.hw_agnostic.layers.fused_moe.modular_kernel import (
+    FusedMoEExpertsModular,
+    FusedMoEPrepareAndFinalizeModular,
+)
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizeMethodBase,
 )
 
-__all__ = ["FusedMoEMethodBase"]
+if TYPE_CHECKING:
+    from vllm.model_executor.hw_agnostic.layers.fused_moe.routed_experts import (
+        RoutedExperts,
+    )
+    from vllm.model_executor.hw_agnostic.layers.fused_moe.runner.shared_experts import (  # noqa: E501
+        SharedExperts,
+    )
+
+logger = init_logger(__name__)
+
+
+class FusedMoEMethodBase(QuantizeMethodBase):
+    """ABC for hw-agnostic FusedMoE quant methods.
+
+    Subclasses build their modular kernel in
+    ``process_weights_after_loading`` and expose ``apply`` (modular) or
+    ``apply_monolithic`` (router fused inside the kernel) accordingly.
+    """
+
+    def __init__(self, moe: FusedMoEConfig):
+        super().__init__()
+        self.moe: FusedMoEConfig = moe
+        self.moe_quant_config: FusedMoEQuantConfig | None = None
+        self.moe_kernel: mk.FusedMoEKernel | None = None
+
+    @property
+    def supports_internal_mk(self) -> bool:
+        # All vendored quant methods own their MK; True once it is built.
+        return self.moe_kernel is not None
+
+    @property
+    def mk_can_overlap_shared_experts(self) -> bool:
+        return (
+            self.moe_kernel is not None and self.moe_kernel.can_overlap_shared_experts
+        )
+
+    @abstractmethod
+    def create_weights(
+        self,
+        layer: "RoutedExperts",
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        raise NotImplementedError
+
+    def uses_weight_scale_2_pattern(self) -> bool:
+        """Whether weight scales follow the ``weight_scale_2`` checkpoint key
+        pattern (set by FP4 variants — overridden by subclasses)."""
+        return False
+
+    def maybe_roundup_sizes(
+        self,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        act_dtype: torch.dtype,
+        moe_parallel_config: FusedMoEParallelConfig,
+    ) -> tuple[int, int]:
+        # Naive AG/RS transport doesn't constrain hidden / intermediate.
+        return hidden_size, intermediate_size_per_partition
+
+    def maybe_make_prepare_finalize(
+        self,
+        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    ) -> FusedMoEPrepareAndFinalizeModular | None:
+        from vllm.model_executor.hw_agnostic.layers.fused_moe.all2all_utils import (
+            maybe_make_prepare_finalize,
+        )
+
+        pf = maybe_make_prepare_finalize(self.moe)
+        assert isinstance(pf, FusedMoEPrepareAndFinalizeModular)
+        return pf
+
+    def select_gemm_impl(
+        self,
+        prepare_finalize: FusedMoEPrepareAndFinalizeModular,
+        layer: "RoutedExperts",
+    ) -> FusedMoEExpertsModular:
+        raise ValueError(
+            f"{self.__class__.__name__} owns its modular kernel; "
+            "select_gemm_impl is unused on the hw-agnostic path."
+        )
+
+    @abstractmethod
+    def get_fused_moe_quant_config(
+        self, layer: "RoutedExperts"
+    ) -> FusedMoEQuantConfig | None:
+        raise NotImplementedError
+
+    @property
+    def topk_indices_dtype(self) -> torch.dtype | None:
+        if self.moe_kernel is not None:
+            return self.moe_kernel.prepare_finalize.topk_indices_dtype()
+        return None
+
+    @property
+    def skip_forward_padding(self) -> bool:
+        return False
+
+    @property
+    def has_unpadded_output(self) -> bool:
+        return False
+
+    @property
+    def supports_eplb(self) -> bool:
+        return False
+
+    @property
+    def method_name(self) -> str:
+        return self.__class__.__name__
+
+    @property
+    def is_monolithic(self) -> bool:
+        if self.moe_kernel is None:
+            if hasattr(self, "experts_cls"):
+                return self.experts_cls.is_monolithic()
+            return False
+        return self.moe_kernel.is_monolithic
+
+    def apply(
+        self,
+        layer: "RoutedExperts",
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts: "SharedExperts | None",
+        shared_experts_input: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Modular MoE forward (router runs first; pre-computed topk in)."""
+        raise NotImplementedError
+
+    def apply_monolithic(
+        self,
+        layer: "RoutedExperts",
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Monolithic MoE forward (router fused inside the kernel)."""
+        raise NotImplementedError

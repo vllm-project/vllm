@@ -4,12 +4,12 @@
 from typing import TYPE_CHECKING
 
 import torch
-import torch.nn.functional as F
 
-import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.model_executor.hw_agnostic.custom_op import CustomOp
+from vllm.model_executor.hw_agnostic.layers.fused_moe.all2all_utils import (
+    maybe_make_prepare_finalize,
+)
 from vllm.model_executor.hw_agnostic.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEConfig,
@@ -20,19 +20,12 @@ from vllm.model_executor.hw_agnostic.layers.fused_moe.fused_moe_method_base impo
     FusedMoEMethodBase,
 )
 from vllm.model_executor.hw_agnostic.layers.fused_moe.modular_kernel import (
-    FusedMoEExpertsModular,
-    FusedMoEPrepareAndFinalizeModular,
-)
-from vllm.model_executor.hw_agnostic.layers.fused_moe.oracle.unquantized import (  # noqa: E501
-    UnquantizedMoeBackend,
-    convert_to_unquantized_kernel_format,
-    make_unquantized_moe_kernel,
-    select_unquantized_moe_backend,
+    FusedMoEKernel,
 )
 from vllm.model_executor.hw_agnostic.layers.fused_moe.runner.shared_experts import (  # noqa: E501
     SharedExperts,
 )
-from vllm.platforms import current_platform
+from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 
 if TYPE_CHECKING:
     from vllm.model_executor.hw_agnostic.layers.fused_moe.routed_experts import (  # noqa: E501
@@ -42,25 +35,29 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _resolve_triton_experts_cls():
+    """Lazy-import the vendored Triton experts class.
+
+    Local import keeps module load free of triton_kernels side effects
+    (the kernel module touches the autotuner registry).
+    """
+    from vllm.model_executor.hw_agnostic.layers.fused_moe.experts.triton_moe import (
+        TritonExperts,
+    )
+
+    return TritonExperts
+
+
 # --8<-- [start:unquantized_fused_moe]
 @CustomOp.register("unquantized_fused_moe")
 class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
-    """MoE method without quantization."""
+    """MoE method without quantization (BF16/FP16 inputs and weights)."""
 
     # --8<-- [end:unquantized_fused_moe]
 
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
-        self.unquantized_backend, self.experts_cls = select_unquantized_moe_backend(
-            moe_config=self.moe,
-        )
-
-    @property
-    def is_monolithic(self) -> bool:
-        # Escape hatch for CPU, which stays on the old monolithic path.
-        if self.unquantized_backend == UnquantizedMoeBackend.CPU:
-            return True
-        return super().is_monolithic
+        self.experts_cls = _resolve_triton_experts_cls()
 
     @property
     def supports_eplb(self) -> bool:
@@ -71,19 +68,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ):
         raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel initialization "
-            "logic for all but the CPU backend. CPU backend is monolithic. "
-            "So this function should not be called."
-        )
-
-    def select_gemm_impl(
-        self,
-        prepare_finalize: FusedMoEPrepareAndFinalizeModular,
-        layer: "RoutedExperts",
-    ) -> FusedMoEExpertsModular:
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel initialization "
-            "logic. This function should not be called."
+            f"{self.__class__.__name__} builds its modular kernel directly "
+            "in process_weights_after_loading; this hook is unused."
         )
 
     def create_weights(
@@ -138,110 +124,45 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             layer.register_parameter("w2_bias", w2_bias)
             set_weight_attrs(w2_bias, extra_weight_attrs)
 
-    def _maybe_pad_weight(self, weight: torch.Tensor) -> torch.Tensor:
-        # Pad the weight tensor. This is an optimization on ROCm platform, which
-        # can benefit from tensors located far enough from one another in memory
-        if (
-            envs.VLLM_ROCM_MOE_PADDING
-            and current_platform.is_rocm()
-            and weight.stride(-1) == 1
-            and (weight.stride(-2) * weight.element_size()) % 512 == 0
-        ):
-            num_pad = 256 // weight.element_size()
-            weight = F.pad(weight, (0, num_pad), "constant", 0)[..., :-num_pad]
-            torch.accelerator.empty_cache()
-
-        return weight
-
     def _setup_kernel(
         self,
         layer: "RoutedExperts",
         w13: torch.Tensor,
         w2: torch.Tensor,
     ) -> None:
-        # Shuffle weights to runtime format.
-        w13_new, w2_new = convert_to_unquantized_kernel_format(
-            self.unquantized_backend,
-            layer=layer,
-            w13_weight=w13,
-            w2_weight=w2,
-        )
-        # `moe_kernel` is initialized to None in FusedMoEMethodBase.__init__;
-        # On the first call we replace the parameter normally. On subsequent
+        # ``moe_kernel`` is initialized to None in FusedMoEMethodBase. On
+        # the first call we replace the parameter normally; on subsequent
         # calls (e.g. RL weight updates that re-trigger
-        # process_weights_after_loading) the moe kernel has already been set
-        # up and CUDA graphs may have captured the parameter addresses, so
-        # we copy the shuffled data into the existing storage instead of
-        # re-registering a new Parameter.
+        # process_weights_after_loading) the kernel is already built and
+        # CUDA graphs may have captured parameter addresses, so we copy
+        # data into the existing storage instead of re-registering.
         is_weight_update = self.moe_kernel is not None  # type: ignore[has-type]
-        replace_parameter(layer, "w13_weight", w13_new, prefer_copy=is_weight_update)
-        replace_parameter(layer, "w2_weight", w2_new, prefer_copy=is_weight_update)
-
-        # AITER backend requires weights to be marked as shuffled.
-        if self.unquantized_backend == UnquantizedMoeBackend.AITER:
-            layer.w13_weight.is_shuffled = True
-            layer.w2_weight.is_shuffled = True
+        replace_parameter(
+            layer, "w13_weight", w13.contiguous(), prefer_copy=is_weight_update
+        )
+        replace_parameter(
+            layer, "w2_weight", w2.contiguous(), prefer_copy=is_weight_update
+        )
 
         if not is_weight_update:
-            # Setup moe kernel only on the first call. For the unquantized
-            # method, moe_quant_config is either the constant
-            # FUSED_MOE_UNQUANTIZED_CONFIG or biased_moe_quant_config(...)
-            # which references layer.w{13,2}_bias; since weight updates
-            # mutate those bias tensors in place, the kernel does not need
-            # to be re-built.
             self.moe_quant_config = self.get_fused_moe_quant_config(layer)
             assert self.moe_quant_config is not None
             assert self.experts_cls is not None
-            self.moe_kernel = make_unquantized_moe_kernel(
-                quant_config=self.moe_quant_config,
+            prepare_finalize = maybe_make_prepare_finalize(self.moe)
+            assert prepare_finalize is not None
+            experts = self.experts_cls(
                 moe_config=self.moe,
-                backend=self.unquantized_backend,
-                experts_cls=self.experts_cls,
-                routing_tables=layer._expert_routing_tables(),
+                quant_config=self.moe_quant_config,
             )
+            self.moe_kernel = FusedMoEKernel(prepare_finalize, experts)
 
     def process_weights_after_loading(self, layer: "RoutedExperts") -> None:
         super().process_weights_after_loading(layer)
-
-        # Padding the weight for better performance on ROCm.
-        # _maybe_pad_weight is idempotent: on the first call it allocates a
-        # padded storage and returns a strided view; on subsequent calls
-        # (weight updates) the stride condition no longer matches so it
-        # returns the input unchanged. The reassignment to .data is therefore
-        # a no-op on updates and preserves the storage address (data_ptr)
-        # used by captured CUDA graphs.
-        layer.w13_weight.data = self._maybe_pad_weight(layer.w13_weight.data)
-        layer.w2_weight.data = self._maybe_pad_weight(layer.w2_weight.data)
-
-        if self.unquantized_backend in [
-            UnquantizedMoeBackend.TPU,
-            UnquantizedMoeBackend.OOT,
-        ]:
-            # OOT handles internally.
-            return
-
-        elif self.unquantized_backend == UnquantizedMoeBackend.CPU:
-            raise NotImplementedError(
-                "CPU FusedMoE is not supported on the DSv4 hw-agnostic path."
-            )
-        elif self.unquantized_backend == UnquantizedMoeBackend.XPU:
-            w13 = layer.w13_weight
-            w2 = layer.w2_weight
-
-            w13.data = w13.transpose(-1, -2).contiguous()
-            w2.data = w2.transpose(-1, -2).contiguous()
-
-            self._setup_kernel(
-                layer=layer,
-                w13=w13,
-                w2=w2,
-            )
-        else:
-            self._setup_kernel(
-                layer=layer,
-                w13=layer.w13_weight,
-                w2=layer.w2_weight,
-            )
+        self._setup_kernel(
+            layer=layer,
+            w13=layer.w13_weight,
+            w2=layer.w2_weight,
+        )
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
         if self.moe.has_bias:
@@ -249,8 +170,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 layer.w13_bias,
                 layer.w2_bias,
             )
-        else:
-            return FUSED_MOE_UNQUANTIZED_CONFIG
+        return FUSED_MOE_UNQUANTIZED_CONFIG
 
     def apply(
         self,
@@ -293,48 +213,3 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
         )
-
-    def apply_monolithic(
-        self,
-        layer: "RoutedExperts",
-        x: torch.Tensor,
-        router_logits: torch.Tensor,
-        input_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        assert self.is_monolithic
-        if self.unquantized_backend == UnquantizedMoeBackend.CPU:
-            assert self.moe_kernel is None
-            return self.cpu_fused_moe(
-                layer,
-                x,
-                layer.use_grouped_topk,
-                layer.top_k,
-                router_logits,
-                layer.renormalize,
-                layer.topk_group,
-                layer.num_expert_group,
-                layer.global_num_experts,
-                layer.expert_map,
-                layer.custom_routing_function,
-                layer.scoring_func,
-                layer.routed_scaling_factor,
-                layer.e_score_correction_bias,
-                layer.apply_router_weight_on_input,
-                layer.activation,
-            )
-        else:
-            assert self.moe_kernel is not None
-            return self.moe_kernel.apply_monolithic(
-                x,
-                layer.w13_weight,
-                layer.w2_weight,
-                router_logits,
-                activation=layer.activation,
-                global_num_experts=layer.global_num_experts,
-                expert_map=layer.expert_map,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                num_expert_group=layer.num_expert_group,
-                topk_group=layer.topk_group,
-                e_score_correction_bias=layer.e_score_correction_bias,
-                routed_scaling_factor=layer.routed_scaling_factor,
-            )
