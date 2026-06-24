@@ -336,7 +336,6 @@ def flash_attn_varlen_func(
             softcap,
             return_softmax_lse and dropout_p > 0,
             num_splits,
-            None,
         )
     elif fa_version == 3:
         assert alibi_slopes is None, "Alibi is not supported in FA3"
@@ -487,7 +486,6 @@ def sparse_attn_func(
         causal,
         softcap,
         return_attn_probs and dropout_p > 0,
-        None,
     )
     return (out, softmax_lse) if return_softmax_lse else out
 
@@ -579,6 +577,5 @@ def sparse_attn_varlen_func(
         causal,
         softcap,
         return_attn_probs and dropout_p > 0,
-        None,
     )
     return (out, softmax_lse) if return_softmax_lse else out
