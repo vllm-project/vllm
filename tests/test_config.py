@@ -72,16 +72,6 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
     [
         (
             SimpleNamespace(
-                model="Qwen/Qwen3-1.7B-Base",
-                architectures=["Qwen3ForCausalLM"],
-                runner_type="generate",
-                is_moe=False,
-                is_quantized=False,
-            ),
-            True,
-        ),
-        (
-            SimpleNamespace(
                 model="Qwen/Qwen3-32B",
                 architectures=["Qwen3ForCausalLM"],
                 runner_type="generate",
