@@ -1534,30 +1534,38 @@ class MooncakeConnectorWorker:
             )
             await sock.send_multipart((identity, self._encoder.encode(response)))
             return
-        local_regions = self._get_transfer_regions(
-            self.kv_caches_base_addr,
-            self.block_len_per_layer,
-            self.kv_block_len_per_layer,
-            self.registered_layer_names,
-            self.registered_layer_indices,
-            self.registered_group_indices,
-            self.registered_layer_aliases,
-            self.registered_layer_index_aliases,
-            self.registered_logical_group_indices,
-            self.registered_alias_group_indices,
-        )
-        remote_regions = self._get_transfer_regions(
-            meta.kv_caches_base_addr,
-            meta.block_lens,
-            meta.kv_block_lens,
-            meta.registered_layer_names,
-            meta.registered_layer_indices,
-            meta.registered_group_indices,
-            meta.registered_layer_aliases,
-            meta.registered_layer_index_aliases,
-            meta.registered_logical_group_indices,
-            meta.registered_alias_group_indices,
-        )
+        try:
+            local_regions = self._get_transfer_regions(
+                self.kv_caches_base_addr,
+                self.block_len_per_layer,
+                self.kv_block_len_per_layer,
+                self.registered_layer_names,
+                self.registered_layer_indices,
+                self.registered_group_indices,
+                self.registered_layer_aliases,
+                self.registered_layer_index_aliases,
+                self.registered_logical_group_indices,
+                self.registered_alias_group_indices,
+            )
+            remote_regions = self._get_transfer_regions(
+                meta.kv_caches_base_addr,
+                meta.block_lens,
+                meta.kv_block_lens,
+                meta.registered_layer_names,
+                meta.registered_layer_indices,
+                meta.registered_group_indices,
+                meta.registered_layer_aliases,
+                meta.registered_layer_index_aliases,
+                meta.registered_logical_group_indices,
+                meta.registered_alias_group_indices,
+            )
+        except ValueError as e:
+            response = MooncakeXferResponse(
+                status=MooncakeXferResponseStatus.ERROR,
+                err_msg=str(e),
+            )
+            await sock.send_multipart((identity, self._encoder.encode(response)))
+            return
         local_regions, remote_regions, align_err = _align_transfer_regions(
             local_regions, remote_regions
         )
@@ -2526,6 +2534,19 @@ class MooncakeConnectorWorker:
         logical_group_indices: list[list[int]] | None = None,
         alias_group_indices: list[list[list[int]]] | None = None,
     ) -> list[TransferRegion]:
+        if (
+            layer_names is None
+            or layer_indices is None
+            or len(layer_names) != len(base_addrs)
+            or len(layer_indices) != len(base_addrs)
+        ):
+            raise ValueError(
+                "Mooncake transfer metadata shape mismatch: "
+                f"base_addrs={len(base_addrs)} "
+                f"layer_names={None if layer_names is None else len(layer_names)} "
+                f"layer_indices="
+                f"{None if layer_indices is None else len(layer_indices)}."
+            )
         if not group_indices:
             group_indices = [
                 self._layer_group_indices.get(layer_name, 0)

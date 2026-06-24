@@ -3,7 +3,6 @@
 
 import asyncio
 import contextlib
-import logging
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -511,6 +510,44 @@ def test_align_transfer_regions_rejects_single_alias_occurrence_mismatch():
     assert aligned_remote == []
     assert err is not None
     assert "duplicate alias group match" in err
+
+
+def test_align_transfer_regions_rejects_aliases_without_group_ownership():
+    local_regions = [
+        TransferRegion(
+            layer_name="model.layers.4.self_attn",
+            layer_index=4,
+            base_addr=0x1000,
+            block_len=4096,
+            kv_block_len=4096,
+            layer_aliases=("model.layers.4.self_attn",),
+            layer_indices=(4,),
+            logical_group_indices=(0,),
+        ),
+    ]
+    remote_regions = [
+        TransferRegion(
+            layer_name="model.layers.4.self_attn",
+            layer_index=4,
+            base_addr=0x2000,
+            block_len=4096,
+            kv_block_len=4096,
+            layer_aliases=("model.layers.4.self_attn",),
+            layer_indices=(4,),
+            logical_group_indices=(0,),
+            alias_group_indices=((0,),),
+        ),
+    ]
+
+    aligned_local, aligned_remote, err = _align_transfer_regions(
+        local_regions,
+        remote_regions,
+    )
+
+    assert aligned_local == []
+    assert aligned_remote == []
+    assert err is not None
+    assert "same Mooncake metadata schema" in err
 
 
 def test_basic_interface():
@@ -1510,7 +1547,7 @@ def test_get_transfer_regions_rejects_metadata_shape_mismatch():
     worker.is_kv_producer = True
     worker.transfer_topo = SimpleNamespace(virtually_split_kv_in_blocks=False)
 
-    with pytest.raises(AssertionError, match="matching metadata lengths"):
+    with pytest.raises(ValueError, match="metadata shape mismatch"):
         worker._get_transfer_regions(
             base_addrs=[0x1000],
             block_lens=[64],
@@ -1628,6 +1665,7 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
         prefill_worker.kv_block_len_per_layer = [local_block_len // 2]
         prefill_worker.registered_layer_names = ["model.layers.0.self_attn"]
         prefill_worker.registered_layer_indices = [0]
+        prefill_worker.registered_group_indices = [0]
 
         origin_sender_loop = prefill_worker.sender_loop
         prefill_worker.sender_loop = asyncio.get_event_loop()
@@ -1676,6 +1714,7 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
                     kv_block_lens=[remote_block_len // 2],
                     registered_layer_names=["model.layers.0.self_attn"],
                     registered_layer_indices=[0],
+                    registered_group_indices=[0],
                 )
 
                 mock_send_blocks.reset_mock()
