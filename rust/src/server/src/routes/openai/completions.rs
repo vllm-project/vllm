@@ -183,13 +183,16 @@ async fn collect_completion(
         info!(
             model = %response_model,
             prompt_tokens = usage.prompt_tokens,
+            output_tokens = usage.completion_tokens.unwrap_or(0),
+            %finish_reason,
+            "completion finished"
+        );
+        debug!(
             prompt_token_ids = %crate::config::format_prompt_token_ids_for_log(
                 &collected.prompt_token_ids,
                 max_log_len,
             ),
-            output_tokens = usage.completion_tokens.unwrap_or(0),
-            %finish_reason,
-            "completion finished"
+            "completion prompt token ids"
         );
     }
 

@@ -53,7 +53,9 @@ pub struct ApiServerOptions {
 /// Format `prompt_token_ids` for a per-request log line, truncating to at
 /// most `max_log_len` IDs and appending `...` when truncation happens.
 ///
-/// Mirrors the Python `--max-log-len` behavior for pre-tokenized prompts.
+/// Mirrors the Python `--max-log-len` behavior for pre-tokenized prompts,
+/// which only logs `prompt_token_ids` at DEBUG; callers should emit the
+/// result at DEBUG so INFO stays a summary.
 /// `None` means no truncation. An explicit `Some(0)` produces an empty list
 /// with `...`, matching how Python would render an empty slice followed by
 /// the truncation marker.
