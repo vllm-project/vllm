@@ -21,7 +21,7 @@ def _topk_log_softmax_kernel(
     BLOCK_SIZE: tl.constexpr,
     PADDED_TOPK: tl.constexpr,
 ):
-    req_idx = tl.program_id(0)
+    req_idx = tl.program_id(0).to(tl.int64)
     row_ptr = logits_ptr + req_idx * logits_stride
 
     max_val = float("-inf")
@@ -61,7 +61,7 @@ def _ranks_kernel(
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
 ):
-    req_idx = tl.program_id(0)
+    req_idx = tl.program_id(0).to(tl.int64)
     row_ptr = logits_ptr + req_idx * logits_stride
 
     token_id = tl.load(token_ids_ptr + req_idx)
