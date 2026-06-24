@@ -31,8 +31,9 @@ use crate::config::TlsConfig;
 /// unset), the mTLS client verifier, and an optional cipher list.
 ///
 /// Starts from the Mozilla intermediate baseline (forward-secret AEAD suites,
-/// TLS 1.2 floor, no compression), matching what the Python frontend uses by
-/// default; `--ssl-ciphers` overrides it.
+/// TLS 1.2 floor, server cipher preference, no compression), a slightly
+/// stricter subset of the Python frontend's default suites; `--ssl-ciphers`
+/// overrides it.
 pub(crate) fn build_server_config(tls: &TlsConfig) -> Result<SslContext> {
     let cert_file = tls.cert_file.as_deref().context("--ssl-certfile is required to enable TLS")?;
 

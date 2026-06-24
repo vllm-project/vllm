@@ -115,7 +115,7 @@ pub struct TlsConfig {
     /// 0 = none, 1 = optional, 2 = required.
     pub cert_reqs: i32,
     /// OpenSSL cipher string for TLS 1.2 and below, mirroring Python's
-    /// `ssl.set_ciphers`. `None` defers to the linked OpenSSL's default suites.
+    /// `ssl.set_ciphers`. `None` keeps the forward-secret AEAD default.
     pub ciphers: Option<String>,
 }
 
