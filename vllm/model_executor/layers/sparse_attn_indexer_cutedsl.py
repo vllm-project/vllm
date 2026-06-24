@@ -303,6 +303,11 @@ class StableTopKFromGatheredCandidatesKernel:
                 if count <= remaining or cutlass.const_expr(is_final_pass):
                     include_threshold_bin_smem.store(Int32(1))
                 threshold_found_smem.store(Int32(1))
+            # Barrier: every thread must finish reading running_count for this
+            # slice before tb_size-1 advances it, else a warp racing ahead to
+            # the store makes a lagging thread double-count the slice total
+            # (-> remaining too small -> threshold too high -> under-fill).
+            cute.arch.sync_threads()
             if tid == Int32(self.tb_size - 1):
                 running_count_smem.store(running_count + chunk_inclusive)
             cute.arch.sync_threads()
