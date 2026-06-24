@@ -244,7 +244,7 @@ RUN pip install pyyaml && cd aiter \
            export HIP_CLANG_PATH=/opt/sccache-wrappers \
            && sccache --show-stats; \
        fi \
-    && PREBUILD_KERNELS=1 GPU_ARCHS=${AITER_ROCM_ARCH} python3 setup.py bdist_wheel --dist-dir=dist \
+    && PREBUILD_KERNELS=1 AITER_USE_SYSTEM_TRITON=1 GPU_ARCHS=${AITER_ROCM_ARCH} python3 setup.py bdist_wheel --dist-dir=dist \
     && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
     && ls /app/aiter/dist/*.whl
 RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install
