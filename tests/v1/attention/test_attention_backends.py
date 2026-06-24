@@ -957,3 +957,80 @@ def test_non_causal_backend_correctness(
             causal=False,
             block_size=128,
         )
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+@pytest.mark.parametrize(
+    "batch_spec_name",
+    [
+        # Uniform query lengths route through the CuteDSL decode kernel;
+        # mixed_small is non-uniform and must fall back to non-causal prefill.
+        "small_decode",
+        "small_prefill",
+        "medium_prefill",
+        "mixed_small",
+    ],
+)
+@pytest.mark.parametrize("model", ["meta-llama/Meta-Llama-3-8B"])
+def test_non_causal_cutedsl_decode_correctness(
+    default_vllm_config, batch_spec_name: str, model: str, monkeypatch
+):
+    """Test FlashInfer CuteDSL non-causal decode path (DFlash)."""
+    from vllm.utils.flashinfer import has_flashinfer_cutedsl_decode
+    from vllm.v1.attention.backends.flashinfer import FlashInferMetadataBuilder
+
+    if not current_platform.is_device_capability_family(100):
+        pytest.skip("CuteDSL decode requires SM100.")
+    if not has_flashinfer_cutedsl_decode():
+        pytest.skip("flashinfer CuteDSL paged decode wrapper is not available.")
+
+    import unittest.mock
+
+    def bidirectional_mask_mod(
+        b: torch.Tensor,
+        h: torch.Tensor,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+        *,
+        context_len: int,
+    ):
+        return q_idx >= 0  # Always True
+
+    monkeypatch.setenv("VLLM_FLASHINFER_CUTEDSL_DECODE", "1")
+
+    # CuteDSL decode is gated off under full-decode CUDA graphs; force eager.
+    from vllm.config import CUDAGraphMode
+
+    orig_create_vllm_config = create_vllm_config
+
+    def eager_create_vllm_config(*args, **kwargs):
+        config = orig_create_vllm_config(*args, **kwargs)
+        config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        return config
+
+    monkeypatch.setattr(
+        "tests.v1.attention.test_attention_backends.create_vllm_config",
+        eager_create_vllm_config,
+    )
+
+    batch_spec = BATCH_SPECS[batch_spec_name]
+    uniform_q_len = len(set(batch_spec.query_lens)) == 1
+
+    with unittest.mock.patch.object(
+        FlashInferMetadataBuilder,
+        "_get_cutedsl_decode_wrapper",
+        autospec=True,
+        side_effect=FlashInferMetadataBuilder._get_cutedsl_decode_wrapper,
+    ) as spy:
+        _test_backend_correctness(
+            batch_spec,
+            model,
+            [AttentionBackendEnum.FLASHINFER],
+            bidirectional_mask_mod,
+            causal=False,
+        )
+
+    assert spy.called == uniform_q_len
