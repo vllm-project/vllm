@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import functools
 import json
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import regex as re
@@ -235,14 +236,17 @@ class Qwen3Parser(ParserEngine):
         self._tool_call_token_id: int | None = vocab.get(self.TOOL_START)
         self._tool_call_end_token_id: int | None = vocab.get(self.TOOL_END)
 
-    def extract_reasoning(
+    def extract_reasoning_with_token_ids(
         self,
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
+        token_ids: Sequence[int] = (),
     ) -> tuple[str | None, str | None]:
         if not self.thinking_enabled:
             return None, model_output
-        return super().extract_reasoning(model_output, request)
+        return super().extract_reasoning_with_token_ids(
+            model_output, request, token_ids
+        )
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         if super().is_reasoning_end(input_ids):

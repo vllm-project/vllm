@@ -4,7 +4,10 @@
 import pytest
 from transformers import AutoTokenizer
 
+from tests.parser.engine.replay_harness import MockTokenizer
 from tests.reasoning.utils import run_reasoning_extraction
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.parser.glm47_moe import Glm47MoeParser
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 
 parser_name = "glm45"
@@ -227,3 +230,37 @@ def test_is_reasoning_end_full_prompt(
     token_ids = glm45_tokenizer.convert_tokens_to_ids(tokens)
     check_is_reasoning_end = parser.is_reasoning_end(token_ids)
     assert check_is_reasoning_end == is_reasoning_end
+
+
+def test_extract_reasoning_with_token_ids_forwards_ids():
+    """Verify token_ids are forwarded (not dropped) to the engine."""
+    vocab: dict[str, int] = {
+        "<think>": 10,
+        "</think>": 11,
+        "<tool_call>": 20,
+        "</tool_call>": 21,
+        "<arg_key>": 30,
+        "</arg_key>": 31,
+        "<arg_value>": 32,
+        "</arg_value>": 33,
+    }
+    tokens: list[tuple[int, str]] = [
+        (10, "<think>"),
+        (99, "reasoning"),
+        (11, ""),  # empty text: tests token-ID-only terminal detection
+        (100, "content"),
+    ]
+    tok = MockTokenizer(vocab=vocab, tokens=tokens)
+    parser = Glm47MoeParser(tok)
+
+    text = "".join(t for _, t in tokens)
+    ids = [tid for tid, _ in tokens]
+
+    reasoning, content = parser.extract_reasoning_with_token_ids(
+        model_output=text,
+        request=ChatCompletionRequest(messages=[], model="test-model"),
+        token_ids=ids,
+    )
+
+    assert reasoning == "reasoning"
+    assert content == "content"

@@ -27,6 +27,10 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
+from vllm.parser.engine.adapters import (
+    ParserEngineReasoningAdapter,
+    ParserEngineToolAdapter,
+)
 from vllm.parser.metrics import record_tool_parser_invocation
 from vllm.parser.utils import count_history_tool_calls
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
@@ -387,8 +391,20 @@ class DelegatingParser(Parser):
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> tuple[str | None, str | None]:
+        return self.extract_reasoning_with_token_ids(model_output, request)
+
+    def extract_reasoning_with_token_ids(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest | ResponsesRequest,
+        token_ids: Sequence[int] = (),
+    ) -> tuple[str | None, str | None]:
         if self._reasoning_parser is None:
             return None, model_output
+        if isinstance(self._reasoning_parser, ParserEngineReasoningAdapter):
+            return self._reasoning_parser.extract_reasoning_with_token_ids(
+                model_output, request, token_ids
+            )
         return self._reasoning_parser.extract_reasoning(model_output, request)
 
     def _get_function_name(
@@ -419,6 +435,7 @@ class DelegatingParser(Parser):
         content: str | None,
         request: ChatCompletionRequest | ResponsesRequest,
         enable_auto_tools: bool = False,
+        token_ids: Sequence[int] = (),
     ) -> tuple[list[FunctionCall] | None, str | None]:
         tool_parser = self._tool_parser
         if tool_parser is None:
@@ -472,9 +489,10 @@ class DelegatingParser(Parser):
         elif is_auto_tool_choice:
             # Automatic Tool Call Parsing (also used as fallback for
             # required/named when supports_required_and_named=False)
-            tool_call_info = self.extract_tool_calls(
+            tool_call_info = self.extract_tool_calls_with_token_ids(
                 content if content is not None else "",
                 request=request,
+                token_ids=token_ids,
             )
             if tool_call_info is not None and tool_call_info.tools_called:
                 tool_calls.extend(
@@ -568,6 +586,14 @@ class DelegatingParser(Parser):
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> ExtractedToolCallInformation:
+        return self.extract_tool_calls_with_token_ids(model_output, request)
+
+    def extract_tool_calls_with_token_ids(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest | ResponsesRequest,
+        token_ids: Sequence[int] = (),
+    ) -> ExtractedToolCallInformation:
         if self._tool_parser is None:
             return ExtractedToolCallInformation(
                 tools_called=False, tool_calls=[], content=model_output
@@ -575,10 +601,17 @@ class DelegatingParser(Parser):
         result = None
         is_tool_called: bool | Exception = False
         try:
-            result = self._tool_parser.extract_tool_calls(
-                model_output,
-                request=request,  # type: ignore[arg-type]
-            )
+            if isinstance(self._tool_parser, ParserEngineToolAdapter):
+                result = self._tool_parser.extract_tool_calls_with_token_ids(
+                    model_output,
+                    request=request,  # type: ignore[arg-type]
+                    token_ids=token_ids,
+                )
+            else:
+                result = self._tool_parser.extract_tool_calls(
+                    model_output,
+                    request=request,  # type: ignore[arg-type]
+                )
             is_tool_called = bool(result.tools_called)
         except Exception as e:
             is_tool_called = e
@@ -776,11 +809,20 @@ class DelegatingParser(Parser):
         model_output_token_ids: Sequence[int] = (),
     ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
         self._initialize_history_tool_call_cnt(request)
-        reasoning, content = self.extract_reasoning(model_output, request)
+        token_ids = model_output_token_ids or ()
+
+        reasoning, content = self.extract_reasoning_with_token_ids(
+            model_output, request, token_ids
+        )
+
+        content_token_ids = (
+            self.extract_content_ids(list(token_ids)) if token_ids else []
+        )
         tool_calls, content = self._extract_tool_calls(
             content=content,
             request=request,
             enable_auto_tools=enable_auto_tools,
+            token_ids=content_token_ids,
         )
         return reasoning, content, tool_calls
 

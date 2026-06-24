@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import functools
 import json
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import regex as re
@@ -216,11 +217,14 @@ class Glm47MoeParser(ParserEngine):
             return input_ids
         return super().extract_content_ids(input_ids)
 
-    def extract_reasoning(
+    def extract_reasoning_with_token_ids(
         self,
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
+        token_ids: Sequence[int] = (),
     ) -> tuple[str | None, str | None]:
         if not self.thinking_enabled:
             return None, model_output
-        return super().extract_reasoning(model_output, request)
+        return super().extract_reasoning_with_token_ids(
+            model_output, request, token_ids
+        )

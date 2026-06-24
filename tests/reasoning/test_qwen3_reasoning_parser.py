@@ -4,12 +4,14 @@
 import pytest
 from transformers import AutoTokenizer
 
+from tests.parser.engine.replay_harness import MockTokenizer
 from tests.reasoning.utils import (
     StreamingReasoningReconstructor,
     run_reasoning_extraction,
     run_reasoning_extraction_streaming,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.parser.qwen3 import Qwen3Parser
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 
 parser_name = "qwen3"
@@ -326,6 +328,42 @@ def test_reasoning_streaming_multi_token_deltas(
     assert (reconstructor.other_content or None) == expected_content
 
 
+NONSTREAMING_CASES = [
+    (case.values[1], case.id)
+    for case in TEST_CASES
+    if case.values[0] is False  # streaming=False
+]
+
+
+@pytest.mark.parametrize(
+    "param_dict",
+    [pytest.param(d, id=name) for d, name in NONSTREAMING_CASES],
+)
+def test_reasoning_with_token_ids(
+    param_dict: dict,
+    qwen3_tokenizer,
+):
+    """Non-streaming extraction with token IDs via extract_reasoning_with_token_ids.
+
+    Verifies that passing token IDs (as DelegatingParser.parse() does)
+    produces the same result as the text-only path.
+    """
+    output = param_dict["output"]
+    token_ids = qwen3_tokenizer.encode(output, add_special_tokens=False)
+
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        qwen3_tokenizer
+    )
+
+    request = ChatCompletionRequest(messages=[], model="test-model")
+    reasoning, content = parser.extract_reasoning_with_token_ids(
+        model_output=output, request=request, token_ids=token_ids
+    )
+
+    assert reasoning == param_dict["reasoning"]
+    assert content == param_dict["content"]
+
+
 # --- Tests for enable_thinking=False (thinking explicitly disabled) ---
 
 
@@ -373,3 +411,33 @@ def test_reasoning_thinking_disabled(
 
     assert reasoning == expected_reasoning
     assert content == expected_content
+
+
+def test_extract_reasoning_with_token_ids_forwards_ids():
+    """Verify token_ids are forwarded (not dropped) to the engine."""
+    vocab: dict[str, int] = {
+        "<think>": 200,
+        "</think>": 201,
+        "<tool_call>": 202,
+        "</tool_call>": 203,
+    }
+    tokens: list[tuple[int, str]] = [
+        (200, "<think>"),
+        (10, "reasoning"),
+        (201, ""),
+        (11, "content"),
+    ]
+    tok = MockTokenizer(vocab=vocab, tokens=tokens)
+    parser = Qwen3Parser(tok)
+
+    text = "".join(t for _, t in tokens)
+    ids = [tid for tid, _ in tokens]
+
+    reasoning, content = parser.extract_reasoning_with_token_ids(
+        model_output=text,
+        request=ChatCompletionRequest(messages=[], model="test-model"),
+        token_ids=ids,
+    )
+
+    assert reasoning == "reasoning"
+    assert content == "content"

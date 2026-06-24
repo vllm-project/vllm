@@ -64,6 +64,10 @@ class MockTokenizer:
         "pad_token_id",
     )
 
+    eos_token_id: int | None
+    bos_token_id: int | None
+    pad_token_id: int | None
+
     def __init__(
         self,
         vocab: dict[str, int],
@@ -71,7 +75,11 @@ class MockTokenizer:
     ) -> None:
         self._vocab = vocab
         self._token_ids = [tid for tid, _ in tokens]
-        self._token_decode_map = {tid: text for tid, text in tokens}
+        # Seed decode map from vocab so any vocab token can be decoded
+        # even if it doesn't appear in the token stream (e.g. injected
+        # tokens from _preprocess_feed).
+        self._token_decode_map: dict[int, str] = {v: k for k, v in vocab.items()}
+        self._token_decode_map.update({tid: text for tid, text in tokens})
         self._special_ids = set(vocab.values())
         self.eos_token_id = None
         self.bos_token_id = None

@@ -217,12 +217,6 @@ class StreamingParserEngine:
 
         return events
 
-    def parse_complete(self, text: str) -> list[SemanticEvent]:
-        token_ids: list[int] = []
-        events = self.feed(text, token_ids)
-        events.extend(self.finish())
-        return events
-
     def _process_lex_tokens(self, tokens: list[LexToken]) -> list[SemanticEvent]:
         events: list[SemanticEvent] = []
         strict = self._token_id_terminal_names if self._ever_had_token_ids else None

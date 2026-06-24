@@ -71,79 +71,6 @@ def _think_config() -> ParserEngineConfig:
     )
 
 
-class TestNonStreaming:
-    def test_plain_text(self):
-        engine = StreamingParserEngine(_hermes_config(), tokenizer=None)
-        events = engine.parse_complete("Hello, world!")
-        assert len(events) == 1
-        assert events[0].type == EventType.TEXT_CHUNK
-        assert events[0].value == "Hello, world!"
-
-    def test_single_tool_call(self):
-        engine = StreamingParserEngine(_hermes_config(), tokenizer=None)
-        text = (
-            '<tool_call>{"name": "get_weather",'
-            ' "arguments": {"city": "SF"}}'
-            "</tool_call>"
-        )
-        events = engine.parse_complete(text)
-
-        types = [e.type for e in events]
-        assert EventType.TOOL_CALL_START in types
-        assert EventType.TOOL_CALL_END in types
-        assert EventType.ARG_VALUE_CHUNK in types
-
-        arg_text = "".join(
-            e.value for e in events if e.type == EventType.ARG_VALUE_CHUNK
-        )
-        assert '"name": "get_weather"' in arg_text
-        assert '"city": "SF"' in arg_text
-
-    def test_text_then_tool_call(self):
-        engine = StreamingParserEngine(_hermes_config(), tokenizer=None)
-        text = 'Sure!<tool_call>{"name": "add"}</tool_call>'
-        events = engine.parse_complete(text)
-
-        types = [e.type for e in events]
-        assert types[0] == EventType.TEXT_CHUNK
-        assert events[0].value == "Sure!"
-        assert EventType.TOOL_CALL_START in types
-        assert EventType.TOOL_CALL_END in types
-
-    def test_multiple_tool_calls(self):
-        engine = StreamingParserEngine(_hermes_config(), tokenizer=None)
-        text = (
-            '<tool_call>{"name": "a"}</tool_call><tool_call>{"name": "b"}</tool_call>'
-        )
-        events = engine.parse_complete(text)
-
-        starts = [e for e in events if e.type == EventType.TOOL_CALL_START]
-        ends = [e for e in events if e.type == EventType.TOOL_CALL_END]
-        assert len(starts) == 2
-        assert len(ends) == 2
-        assert starts[0].tool_index == 0
-        assert starts[1].tool_index == 1
-
-    def test_reasoning(self):
-        engine = StreamingParserEngine(_think_config(), tokenizer=None)
-        text = "<think>Let me think...</think>The answer is 42."
-        events = engine.parse_complete(text)
-
-        types = [e.type for e in events]
-        assert types[0] == EventType.REASONING_START
-        assert EventType.REASONING_CHUNK in types
-        assert EventType.REASONING_END in types
-        assert EventType.TEXT_CHUNK in types
-
-        reasoning = "".join(
-            e.value for e in events if e.type == EventType.REASONING_CHUNK
-        )
-        assert "Let me think..." in reasoning
-
-        content = "".join(e.value for e in events if e.type == EventType.TEXT_CHUNK)
-        assert "The answer is 42." in content
-
-
 class TestStreaming:
     @staticmethod
     def _feed_chars(
@@ -210,6 +137,31 @@ class TestStreaming:
         values = list(results.values())
         for v in values[1:]:
             assert v == values[0], f"Mismatch: {results}"
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "<think>Let me think about this.</think>The answer is 42.",
+            "<think>hmm</think>short",
+        ],
+        ids=["long_reasoning", "short_reasoning"],
+    )
+    def test_reasoning_chunk_sizes_produce_same_content(self, text):
+        """Different chunk sizes must produce identical reasoning + content."""
+        results = {}
+        config = _think_config()
+        for chunk_size in [1, 2, 3, 5, 7, len(text)]:
+            engine = StreamingParserEngine(config, tokenizer=None)
+            events = self._feed_chunks(engine, text, chunk_size)
+            reasoning = "".join(
+                e.value for e in events if e.type == EventType.REASONING_CHUNK
+            )
+            content = "".join(e.value for e in events if e.type == EventType.TEXT_CHUNK)
+            results[chunk_size] = (reasoning, content)
+
+        first = results[1]
+        for cs, val in results.items():
+            assert val == first, f"chunk_size={cs} mismatch: {val} != {first}"
 
     def test_prefix_buffering_prevents_premature_emit(self):
         """Text like '<tool_' should be buffered, not emitted as content."""
@@ -786,7 +738,8 @@ class TestMultiCharTerminalInArgs:
     def test_newline_in_args_parsed_correctly(self):
         engine = StreamingParserEngine(self._newline_config(), tokenizer=None)
         text = '<tool_call>{"name": "f",\n"arguments": {"a": 1}}</tool_call>'
-        events = engine.parse_complete(text)
+        events = engine.feed(text, [])
+        events.extend(engine.finish())
 
         arg_text = "".join(
             e.value for e in events if e.type == EventType.ARG_VALUE_CHUNK
@@ -815,7 +768,8 @@ class TestSkipToolParsing:
         engine.skip_tool_parsing = True
 
         text = '<tool_call>{"name": "f"}</tool_call>'
-        events = engine.parse_complete(text)
+        events = engine.feed(text, [])
+        events.extend(engine.finish())
 
         types = [e.type for e in events]
         assert EventType.TOOL_CALL_START not in types

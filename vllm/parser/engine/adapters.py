@@ -72,7 +72,23 @@ class ParserEngineReasoningAdapter(ReasoningParser):
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> tuple[str | None, str | None]:
         with self._skip_tool_parsing():
-            return self._parser_engine.extract_reasoning(model_output, request)
+            return self._parser_engine.extract_reasoning(
+                model_output,
+                request,
+            )
+
+    def extract_reasoning_with_token_ids(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest | ResponsesRequest,
+        token_ids: Sequence[int] = (),
+    ) -> tuple[str | None, str | None]:
+        with self._skip_tool_parsing():
+            return self._parser_engine.extract_reasoning_with_token_ids(
+                model_output,
+                request,
+                token_ids,
+            )
 
     def extract_reasoning_streaming(
         self,
@@ -160,7 +176,20 @@ class ParserEngineToolAdapter(ToolParser):
         request: ChatCompletionRequest,
     ) -> ExtractedToolCallInformation:
         return self._parser_engine.extract_tool_calls_from_content(
-            model_output, request
+            model_output,
+            request,
+        )
+
+    def extract_tool_calls_with_token_ids(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest,
+        token_ids: Sequence[int] = (),
+    ) -> ExtractedToolCallInformation:
+        return self._parser_engine.extract_tool_calls_from_content(
+            model_output,
+            request,
+            token_ids,
         )
 
     def extract_tool_calls_streaming(

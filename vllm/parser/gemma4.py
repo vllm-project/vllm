@@ -598,12 +598,15 @@ class Gemma4Parser(ParserEngine):
         delta.reasoning = self._reasoning_text
         return delta
 
-    def extract_reasoning(
+    def extract_reasoning_with_token_ids(
         self,
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
+        token_ids: Sequence[int] = (),
     ) -> tuple[str | None, str | None]:
-        reasoning, content = super().extract_reasoning(model_output, request)
+        reasoning, content = super().extract_reasoning_with_token_ids(
+            model_output, request, token_ids
+        )
         if reasoning:
             if reasoning.startswith(_GEMMA4_THOUGHT_PREFIX):
                 reasoning = reasoning[len(_GEMMA4_THOUGHT_PREFIX) :]

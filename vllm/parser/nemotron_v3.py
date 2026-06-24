@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from vllm.parser.qwen3 import Qwen3Parser, qwen3_config
@@ -98,12 +99,15 @@ class NemotronV3Parser(Qwen3Parser):
             return None
         return "".join(self._streamed_reasoning) or None
 
-    def extract_reasoning(
+    def extract_reasoning_with_token_ids(
         self,
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
+        token_ids: Sequence[int] = (),
     ) -> tuple[str | None, str | None]:
-        reasoning, content = super().extract_reasoning(model_output, request)
+        reasoning, content = super().extract_reasoning_with_token_ids(
+            model_output, request, token_ids
+        )
 
         if self._should_force_content(request) and (
             content is None or not content.strip()

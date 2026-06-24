@@ -262,6 +262,42 @@ def test_gemma4_adjust_request(generic_tokenizer):
     assert result is request
 
 
+NONSTREAMING_CASES = [
+    (case.values[1], case.id)
+    for case in TEST_CASES
+    if case.values[0] is False  # streaming=False
+]
+
+
+@pytest.mark.parametrize(
+    "param_dict",
+    [pytest.param(d, id=name) for d, name in NONSTREAMING_CASES],
+)
+def test_gemma4_reasoning_with_token_ids(
+    param_dict: dict,
+    generic_tokenizer,
+):
+    """Non-streaming extraction with token IDs via extract_reasoning_with_token_ids.
+
+    Verifies that passing token IDs (as DelegatingParser.parse() does)
+    produces the same result as the text-only path.
+    """
+    output = param_dict["output"]
+    output_tokens = gemma4_encode_output(generic_tokenizer, output)
+
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        generic_tokenizer
+    )
+
+    request = ChatCompletionRequest(messages=[], model="test-model")
+    reasoning, content = parser.extract_reasoning_with_token_ids(
+        model_output=output, request=request, token_ids=output_tokens
+    )
+
+    assert reasoning == param_dict["reasoning"]
+    assert content == param_dict["content"]
+
+
 def test_gemma4_previous_turn_reasoning_is_reasoning_end(generic_tokenizer):
     output = (
         "<|channel>thought\n1st thought<channel|>1st content<turn|>\n"

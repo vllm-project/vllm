@@ -477,8 +477,16 @@ class ParserEngine(Parser):
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> tuple[str | None, str | None]:
+        return self.extract_reasoning_with_token_ids(model_output, request)
+
+    def extract_reasoning_with_token_ids(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest | ResponsesRequest,
+        token_ids: Sequence[int] = (),
+    ) -> tuple[str | None, str | None]:
         self._reset()
-        events = self._feed(model_output, [])
+        events = self._feed(model_output, token_ids)
         events.extend(self._engine.finish())
 
         reasoning_parts: list[str] = []
@@ -521,6 +529,14 @@ class ParserEngine(Parser):
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> ExtractedToolCallInformation:
+        return self.extract_tool_calls_with_token_ids(model_output, request)
+
+    def extract_tool_calls_with_token_ids(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest | ResponsesRequest,
+        token_ids: Sequence[int] = (),
+    ) -> ExtractedToolCallInformation:
         self._reset()
         self._streaming_initialized = True
         result = self.extract_tool_calls_streaming(
@@ -528,8 +544,8 @@ class ParserEngine(Parser):
             current_text=model_output,
             delta_text=model_output,
             previous_token_ids=[],
-            current_token_ids=[],
-            delta_token_ids=[],
+            current_token_ids=token_ids,
+            delta_token_ids=token_ids,
             request=request,
         )
         finish_delta = self.finish_streaming()
@@ -539,6 +555,7 @@ class ParserEngine(Parser):
         self,
         content: str,
         request: ChatCompletionRequest,
+        token_ids: Sequence[int] = (),
     ) -> ExtractedToolCallInformation:
         """Extract tool calls from reasoning-stripped content.
 
@@ -549,7 +566,7 @@ class ParserEngine(Parser):
         self._check_skip_tool_parsing(request)
         _, parsed_content, tool_call_info = self._single_pass_parse(
             content,
-            [],
+            token_ids,
             initial_state=ParserState.CONTENT,
         )
         if parsed_content is not None and tool_call_info.content is None:

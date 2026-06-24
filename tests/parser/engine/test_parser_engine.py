@@ -14,7 +14,13 @@ from unittest.mock import MagicMock
 import pytest
 import regex as re
 
-from tests.parser.engine.conftest import make_mock_tokenizer
+from tests.parser.engine.conftest import (
+    VOCAB,
+    CombinedDelegating,
+    CombinedReasoningAdapter,
+    combined_config,
+    make_mock_tokenizer,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
@@ -33,58 +39,6 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
-
-# ── Shared test configs ──────────────────────────────────────────────
-
-_VOCAB: dict[str, int] = {
-    "<think>": 200,
-    "</think>": 201,
-    "<tool_call>": 202,
-    "</tool_call>": 203,
-}
-
-
-def _combined_config() -> ParserEngineConfig:
-    """Config with reasoning tags and tool-call tags."""
-    return ParserEngineConfig(
-        name="combined_test",
-        terminals={
-            "THINK_START": "<think>",
-            "THINK_END": "</think>",
-            "TOOL_START": "<tool_call>",
-            "TOOL_END": "</tool_call>",
-        },
-        token_id_terminals={
-            "THINK_START": "<think>",
-            "THINK_END": "</think>",
-            "TOOL_START": "<tool_call>",
-            "TOOL_END": "</tool_call>",
-        },
-        transitions={
-            (ParserState.REASONING, "THINK_END"): Transition(
-                ParserState.CONTENT,
-                (EventType.REASONING_END,),
-            ),
-            (ParserState.CONTENT, "THINK_START"): Transition(
-                ParserState.REASONING,
-                (EventType.REASONING_START,),
-            ),
-            (ParserState.CONTENT, "TOOL_START"): Transition(
-                ParserState.TOOL_ARGS,
-                (EventType.TOOL_CALL_START,),
-            ),
-            (ParserState.TOOL_ARGS, "TOOL_END"): Transition(
-                ParserState.CONTENT,
-                (EventType.TOOL_CALL_END,),
-            ),
-        },
-        initial_state=ParserState.REASONING,
-        content_events={
-            ParserState.CONTENT: EventType.TEXT_CHUNK,
-            ParserState.REASONING: EventType.REASONING_CHUNK,
-            ParserState.TOOL_ARGS: EventType.ARG_VALUE_CHUNK,
-        },
-    )
 
 
 def _hermes_config() -> ParserEngineConfig:
@@ -120,8 +74,8 @@ def _make_engine(
     config: ParserEngineConfig | None = None,
     tools: list | None = None,
 ) -> ParserEngine:
-    tokenizer = make_mock_tokenizer(_VOCAB)
-    cfg = config or _combined_config()
+    tokenizer = make_mock_tokenizer(VOCAB)
+    cfg = config or combined_config()
     return ParserEngine(
         tokenizer,
         tools=tools,
@@ -809,12 +763,12 @@ class TestEngineBasedPath:
         assert len(result.tool_calls) > 0
 
 
-# ── TestParseTokenIdPassthrough ────────────────────────────────────
+# ── TestNonStreamingTokenIds ───────────────────────────────────────
 
 
-class TestParseTokenIdPassthrough:
-    """parse() must forward model_output_token_ids to _single_pass_parse
-    so that token-ID-based strict terminal matching is active."""
+class TestNonStreamingTokenIds:
+    """Non-streaming extract methods must accept token IDs so that
+    token-ID-based strict terminal matching is active."""
 
     def test_literal_tool_tag_in_content_preserved_with_token_ids(self, mock_request):
         engine = _make_engine(_hermes_config())
@@ -870,23 +824,53 @@ class TestParseTokenIdPassthrough:
         assert len(tool_calls) == 1
         assert tool_calls[0].name == "g"
 
-
-# ── TestAdapterFinishOnStreamEnd ────────────────────────────────────
-
-
-class _CombinedTestEngine(ParserEngine):
-    def __init__(self, tokenizer, tools=None, **kwargs):
-        super().__init__(
-            tokenizer, tools, parser_engine_config=_combined_config(), **kwargs
+    def test_parse_multiple_tool_calls(self, mock_request):
+        engine = _make_engine(_hermes_config())
+        text = (
+            '<tool_call>{"name": "a", "arguments": {}}</tool_call>'
+            '<tool_call>{"name": "b", "arguments": {}}</tool_call>'
         )
 
+        _, content, tool_calls = engine.parse(text, mock_request)
 
-_CombinedReasoningAdapter, _CombinedToolAdapter = make_adapters(_CombinedTestEngine)
+        assert tool_calls is not None
+        assert len(tool_calls) == 2
+        assert tool_calls[0].name == "a"
+        assert tool_calls[1].name == "b"
+
+    def test_extract_tool_calls_uses_pending_token_ids(self, mock_request):
+        """extract_tool_calls() must consume pending token IDs so that
+        token-ID-based strict terminal matching is active."""
+        engine = _make_engine(_hermes_config())
+        text = (
+            "Use <tool_call> to call tools."
+            '<tool_call>{"name": "f", "arguments": {"a": 1}}</tool_call>'
+        )
+        token_ids = [
+            65,
+            66,
+            67,
+            68,
+            69,
+            70,
+            71,  # "Use <tool_call> to call tools."
+            202,  # real <tool_call>
+            72,
+            73,
+            74,  # '{"name": "f", ...}'
+            203,  # real </tool_call>
+        ]
+
+        result = engine.extract_tool_calls_with_token_ids(text, mock_request, token_ids)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "f"
+        assert result.content is not None
+        assert "<tool_call>" in result.content
 
 
-class _CombinedDelegating(DelegatingParser):
-    reasoning_parser_cls = _CombinedReasoningAdapter
-    tool_parser_cls = _CombinedToolAdapter
+# ── TestAdapterFinishOnStreamEnd ────────────────────────────────────
 
 
 def _make_delegating_request():
@@ -908,8 +892,8 @@ class TestAdapterFinishOnStreamEnd:
     def test_lexer_buffer_flushed_on_finished(self):
         """Text buffered as a potential terminal prefix must be emitted
         as content when the stream ends."""
-        tokenizer = make_mock_tokenizer(_VOCAB)
-        parser = _CombinedDelegating(tokenizer)
+        tokenizer = make_mock_tokenizer(VOCAB)
+        parser = CombinedDelegating(tokenizer)
         request = _make_delegating_request()
 
         # Feed reasoning then content with a trailing '<' that looks like
@@ -926,8 +910,8 @@ class TestAdapterFinishOnStreamEnd:
     def test_args_buffer_flushed_on_finished(self):
         """Pending arg buffer text must be emitted when stream ends
         mid-tool-call (closing brace held back in buffer)."""
-        tokenizer = make_mock_tokenizer(_VOCAB)
-        parser = _CombinedDelegating(tokenizer)
+        tokenizer = make_mock_tokenizer(VOCAB)
+        parser = CombinedDelegating(tokenizer)
         request = _make_delegating_request()
 
         parser.parse_delta("</think>", [201], request, finished=False)
@@ -948,7 +932,7 @@ class TestAdapterFinishOnStreamEnd:
 class _ReasoningOnlyDelegating(DelegatingParser):
     """DelegatingParser with reasoning adapter but NO tool adapter."""
 
-    reasoning_parser_cls = _CombinedReasoningAdapter
+    reasoning_parser_cls = CombinedReasoningAdapter
     tool_parser_cls = None
 
 
@@ -963,7 +947,7 @@ class TestReasoningOnlyEndTokenLeak:
     """
 
     def test_think_end_not_leaked_as_content(self):
-        tokenizer = make_mock_tokenizer(_VOCAB)
+        tokenizer = make_mock_tokenizer(VOCAB)
         parser = _ReasoningOnlyDelegating(tokenizer)
         request = _make_delegating_request()
 
@@ -1002,7 +986,7 @@ class TestReasoningOnlyEndTokenLeak:
 
     def test_streaming_content_matches_non_streaming(self):
         """Concatenated streaming content must match extract_reasoning."""
-        tokenizer = make_mock_tokenizer(_VOCAB)
+        tokenizer = make_mock_tokenizer(VOCAB)
         # No <think> in input: the combined config starts in REASONING
         # state, so all text before </think> is reasoning.
         full_text = "reasoning</think>\n\nHello!"
@@ -1039,7 +1023,7 @@ class TestReasoningOnlyEndTokenLeak:
 
     def test_multi_token_delta_preserves_content_after_think_end(self):
         """Content after </think> in the same delta must not be lost."""
-        tokenizer = make_mock_tokenizer(_VOCAB)
+        tokenizer = make_mock_tokenizer(VOCAB)
         parser = _ReasoningOnlyDelegating(tokenizer)
         request = _make_delegating_request()
 
@@ -1071,6 +1055,96 @@ class TestReasoningOnlyEndTokenLeak:
         assert "Hi!" in d2.content
 
 
+# ── TestStreamingNonStreamingParity ──────────────────────────────────
+
+
+class TestStreamingNonStreamingParity:
+    """parse() and streamed parse_delta() must produce identical results."""
+
+    @staticmethod
+    def _accumulate(delta, reasoning_parts, content_parts, tool_call_deltas):
+        if delta:
+            if delta.reasoning:
+                reasoning_parts.append(delta.reasoning)
+            if delta.content:
+                content_parts.append(delta.content)
+            if delta.tool_calls:
+                tool_call_deltas.extend(delta.tool_calls)
+
+    @pytest.mark.parametrize(
+        "config_fn, text",
+        [
+            (_hermes_config, "Hello, world!"),
+            (
+                _hermes_config,
+                '<tool_call>{"name": "get_weather", '
+                '"arguments": {"city": "SF"}}</tool_call>',
+            ),
+            (
+                _hermes_config,
+                'Sure!<tool_call>{"name": "add", "arguments": {}}</tool_call>',
+            ),
+            (
+                _hermes_config,
+                '<tool_call>{"name": "a", "arguments": {}}'
+                "</tool_call>"
+                '<tool_call>{"name": "b", "arguments": {}}'
+                "</tool_call>",
+            ),
+            (
+                combined_config,
+                "<think>Let me think...</think>The answer is 42.",
+            ),
+            (
+                combined_config,
+                "<think>Let me think</think>"
+                '<tool_call>{"name": "get_weather", '
+                '"arguments": {"city": "SF"}}</tool_call>',
+            ),
+        ],
+        ids=[
+            "plain_text",
+            "single_tool_call",
+            "text_then_tool_call",
+            "multiple_tool_calls",
+            "reasoning_and_content",
+            "reasoning_and_tool_call",
+        ],
+    )
+    def test_parity(self, config_fn, text, mock_request):
+        config = config_fn()
+
+        # Non-streaming
+        ns_engine = _make_engine(config)
+        reasoning_ns, content_ns, tools_ns = ns_engine.parse(text, mock_request)
+
+        # Streaming — feed char by char
+        s_engine = _make_engine(config)
+        s_engine.initialize_streaming()
+        reasoning_parts: list[str] = []
+        content_parts: list[str] = []
+        tool_call_deltas: list[DeltaToolCall] = []
+        for ch in text:
+            delta = s_engine.parse_delta(ch, [], mock_request, finished=False)
+            self._accumulate(delta, reasoning_parts, content_parts, tool_call_deltas)
+        final = s_engine.parse_delta("", [], mock_request, finished=True)
+        self._accumulate(final, reasoning_parts, content_parts, tool_call_deltas)
+
+        reasoning_s = "".join(reasoning_parts) or None
+        content_s = "".join(content_parts) or None
+
+        assert reasoning_s == reasoning_ns
+        assert content_s == content_ns
+
+        tool_names_ns = sorted(tc.name for tc in tools_ns) if tools_ns else []
+        tool_names_s = sorted(
+            tc.function.name
+            for tc in tool_call_deltas
+            if tc.function and tc.function.name
+        )
+        assert tool_names_s == tool_names_ns
+
+
 # ── TestToolAdapterForwardsKwargs ──────────────────────────────────
 
 
@@ -1099,6 +1173,47 @@ class TestToolAdapterForwardsKwargs:
         )
         engine = adapter._parser_engine
         assert engine.parser_engine_config.initial_state == expected_state
+
+    def test_extract_tool_calls_with_token_ids_delegates(self, mock_request):
+        """ToolAdapter must forward token_ids to the underlying engine."""
+        tokenizer = make_mock_tokenizer(VOCAB)
+
+        class _HermesEngine(ParserEngine):
+            def __init__(self, tok, tools=None, **kw):
+                kw.setdefault("parser_engine_config", _hermes_config())
+                super().__init__(tok, tools, **kw)
+
+        _, ToolAdapter = make_adapters(_HermesEngine)
+        adapter = ToolAdapter(tokenizer, tools=None)
+
+        text = (
+            "Use <tool_call> to call tools."
+            '<tool_call>{"name": "f", "arguments": {"a": 1}}</tool_call>'
+        )
+        token_ids = [
+            65,
+            66,
+            67,
+            68,
+            69,
+            70,
+            71,  # "Use <tool_call> to call tools."
+            202,  # real <tool_call>
+            72,
+            73,
+            74,  # '{"name": "f", ...}'
+            203,  # real </tool_call>
+        ]
+
+        result = adapter.extract_tool_calls_with_token_ids(
+            text, mock_request, token_ids
+        )
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "f"
+        assert result.content is not None
+        assert "<tool_call>" in result.content
 
 
 # ── TestExtractContentIdsNoEmptyReturn ─────────────────────────────

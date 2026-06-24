@@ -6,10 +6,12 @@ from typing import TypedDict
 import pytest
 import regex as re
 
+from tests.parser.engine.replay_harness import MockTokenizer
 from tests.reasoning.utils import run_reasoning_extraction
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.engine.registered_adapters import NemotronV3ParserReasoningAdapter
+from vllm.parser.nemotron_v3 import NemotronV3Parser
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 
 parser_name = "nemotron_v3"
@@ -290,3 +292,37 @@ def test_nemotron_v3_streaming_no_promotion_without_opt_in(
 
     assert reasoning == "4"
     assert content == ""
+
+
+def test_extract_reasoning_with_token_ids_forwards_ids():
+    """Verify token_ids are forwarded (not dropped) to the engine."""
+    vocab: dict[str, int] = {
+        "<think>": 1,
+        "</think>": 2,
+        "<tool_call>": 3,
+        "</tool_call>": 4,
+    }
+    tokens: list[tuple[int, str]] = [
+        (1, "<think>"),
+        (99, "reasoning"),
+        (2, ""),
+        (100, "content"),
+    ]
+    tok = MockTokenizer(vocab=vocab, tokens=tokens)
+    parser = NemotronV3Parser(tok)
+
+    text = "".join(t for _, t in tokens)
+    ids = [tid for tid, _ in tokens]
+
+    reasoning, content = parser.extract_reasoning_with_token_ids(
+        model_output=text,
+        request=ChatCompletionRequest(
+            model="test-model",
+            messages=[],
+            chat_template_kwargs={"force_nonempty_content": True},
+        ),
+        token_ids=ids,
+    )
+
+    assert reasoning == "reasoning"
+    assert content == "content"
