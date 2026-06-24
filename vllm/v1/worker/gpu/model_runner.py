@@ -27,6 +27,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -847,6 +848,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_tokens = scheduler_output.total_num_scheduled_tokens
         num_tokens_after_padding = batch_desc.num_tokens
         assert num_tokens > 0
+        if envs.VLLM_MOE_SKIP_PADDING:
+            # Mark trailing cudagraph-padding rows so kernels can skip work for
+            # them when supported.
+            self.input_buffers.is_padding[:num_tokens].fill_(False)
+            self.input_buffers.is_padding[num_tokens:num_tokens_after_padding].fill_(
+                True
+            )
         num_tokens_per_req = scheduler_output.num_scheduled_tokens
         num_reqs = len(num_tokens_per_req)
 
@@ -1001,6 +1009,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_seq_len_np=max_seq_len_np,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
+            is_padding=self.input_buffers.is_padding[:num_tokens_after_padding],
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
@@ -1220,7 +1229,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     scheduled_encoder_inputs=scheduler_output.scheduled_encoder_inputs,
                 )
             inputs_embeds = self.model_state.get_mm_embeddings(
-                scheduler_output.scheduled_encoder_inputs, input_batch
+                scheduler_output.scheduled_encoder_inputs, input_batch, self.req_states
             )
             if inputs_embeds is not None and not self.model.requires_raw_input_tokens:
                 input_ids = None
@@ -1277,6 +1286,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 batch_descriptor=batch_descriptor,
                 slot_mapping=slot_mappings_by_layer,
                 skip_compiled=skip_compiled,
+                is_padding=input_batch.is_padding,
             ):
                 self.kv_connector.pre_forward(scheduler_output)
                 if batch_desc.cg_mode == CUDAGraphMode.PIECEWISE:
@@ -1403,14 +1413,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Get cached multimodal embeddings for draft forward.
             # NOTE: This is done here because postprocess updates
             # num_computed_prefill_tokens.
-            mm_inputs = self.model_state.encoder_runner.gather_mm_embeddings(
-                input_batch.req_ids,
-                input_batch.num_tokens,
-                input_batch.num_scheduled_tokens,
-                input_batch.query_start_loc_np,
-                input_batch.prefill_len_np,
-                # +1 to consider the skew in eagle
-                input_batch.num_computed_prefill_tokens_np + 1,
+            # The EAGLE/MTP drafter reads one position ahead of the target.
+            mm_inputs = self.model_state.gather_mm_embeddings(
+                input_batch, draft_lookahead=1
             )
 
         # Postprocess results and update request states.

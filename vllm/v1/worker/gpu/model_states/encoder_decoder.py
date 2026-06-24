@@ -23,7 +23,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 
 @dataclass
-class WhisperAttnMetadata(ModelSpecificAttnMetadata):
+class EncoderDecoderAttnMetadata(ModelSpecificAttnMetadata):
     encoder_seq_lens: dict[int, tuple[torch.Tensor, np.ndarray]]
 
     def get_extra_common_attn_kwargs(
@@ -41,7 +41,11 @@ class WhisperAttnMetadata(ModelSpecificAttnMetadata):
         }
 
 
-class WhisperModelState(ModelState):
+class EncoderDecoderModelState(ModelState):
+    """ModelState for cross-attention encoder-decoder models
+    (Whisper, CohereASR, NemotronParse, FireRedLID, ...)
+    """
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -80,11 +84,11 @@ class WhisperModelState(ModelState):
 
         self.encoder_outputs: list[torch.Tensor] = []
 
-    def get_supported_generation_tasks(self):
-        return ("transcription",)
-
     def get_mm_embeddings(
-        self, scheduled_encoder_inputs: dict[str, list[int]], input_batch: InputBatch
+        self,
+        scheduled_encoder_inputs: dict[str, list[int]],
+        input_batch: InputBatch,
+        req_states: RequestState,
     ) -> None:
         # Ensure encoder inputs are ordered consistently with input_batch.req_ids.
         encoder_inputs: dict[str, list[int]] = {}
@@ -94,11 +98,11 @@ class WhisperModelState(ModelState):
                 encoder_inputs[req_id] = req_encoder_inputs
         _, mm_kwargs = self.encoder_runner.prepare_mm_inputs(encoder_inputs)
         if mm_kwargs:
-            # Whisper consumes encoder outputs through `encoder_outputs`, not
-            # `inputs_embeds`. Single modality (audio) so execute_mm_encoder
-            # preserves request order; use its return value directly.
-            # No need to store in encoder_cache: cross-attention K/V are written
-            # to the KV cache on the first step; decode steps use the cache.
+            # Encoder-decoder models consume encoder outputs through the
+            # `encoder_outputs` forward kwarg, not `inputs_embeds`. Single modality
+            # so execute_mm_encoder preserves request order; use its return value
+            # directly. No need to store in encoder_cache: cross-attention K/V are
+            # written to the KV cache on the first step; decode steps use the cache.
             self.encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
         else:
             # Decode steps: encoder K/V are in cross-attention KV cache.
@@ -131,7 +135,7 @@ class WhisperModelState(ModelState):
         else:
             num_reqs = input_batch.num_reqs
             num_tokens = input_batch.num_tokens
-        whisper_attn_metadata = WhisperAttnMetadata(
+        enc_dec_attn_metadata = EncoderDecoderAttnMetadata(
             self._get_encoder_seq_lens(
                 input_batch.req_ids, attn_groups, for_capture, num_reqs
             )
@@ -158,7 +162,7 @@ class WhisperModelState(ModelState):
             kv_cache_config=kv_cache_config,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
-            model_specific_attn_metadata=whisper_attn_metadata,
+            model_specific_attn_metadata=enc_dec_attn_metadata,
             for_cudagraph_capture=for_capture,
         )
         return attn_metadata

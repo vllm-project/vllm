@@ -52,6 +52,7 @@ from vllm.model_executor.parameter import ModelWeightParameter
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import per_block_cast_to_fp8
+from vllm.utils.math_utils import round_up
 
 # ---------------------------------------------------------------------------
 # Online FP8 Linear Methods
@@ -555,9 +556,63 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
             layer=layer,
         )
 
+    def maybe_roundup_sizes(
+        self,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        act_dtype: torch.dtype,
+        moe_parallel_config,
+    ) -> tuple[int, int]:
+        hidden_size, intermediate_size_per_partition = super().maybe_roundup_sizes(
+            hidden_size=hidden_size,
+            intermediate_size_per_partition=intermediate_size_per_partition,
+            act_dtype=act_dtype,
+            moe_parallel_config=moe_parallel_config,
+        )
+        assert self.weight_block_size is not None
+        block_size = self.weight_block_size[0]
+        return (
+            round_up(hidden_size, block_size),
+            round_up(intermediate_size_per_partition, block_size),
+        )
+
+    def _zero_padding(self, layer: Module) -> None:
+        hidden_size = layer.moe_config.hidden_dim_unpadded
+        intermediate_size = layer.moe_config.intermediate_size_per_partition_unpadded
+
+        w13_half_size = layer.w13_weight.shape[1] // 2
+        if w13_half_size > intermediate_size:
+            layer.w13_weight[:, intermediate_size:w13_half_size, :] = 0
+            layer.w13_weight[
+                :, w13_half_size + intermediate_size : 2 * w13_half_size, :
+            ] = 0
+        if layer.w13_weight.shape[2] > hidden_size:
+            layer.w13_weight[:, :, hidden_size:] = 0
+
+        if layer.w2_weight.shape[1] > hidden_size:
+            layer.w2_weight[:, hidden_size:, :] = 0
+        if layer.w2_weight.shape[2] > intermediate_size:
+            layer.w2_weight[:, :, intermediate_size:] = 0
+
+        if getattr(layer, "w13_bias", None) is not None:
+            w13_bias_half_size = layer.w13_bias.shape[1] // 2
+            if w13_bias_half_size > intermediate_size:
+                layer.w13_bias[:, intermediate_size:w13_bias_half_size] = 0
+                layer.w13_bias[
+                    :, w13_bias_half_size + intermediate_size : 2 * w13_bias_half_size
+                ] = 0
+
+        if (
+            getattr(layer, "w2_bias", None) is not None
+            and layer.w2_bias.shape[1] > hidden_size
+        ):
+            layer.w2_bias[:, hidden_size:] = 0
+
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
+
+        self._zero_padding(layer)
 
         fp8_dtype = current_platform.fp8_dtype()
         w13 = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)
