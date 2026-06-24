@@ -555,8 +555,6 @@ def select_mxfp4_moe_backend(
             f"weight_key=kMxfp4Static, activation_key={activation_key}. "
             "Native backends require specific hardware. "
             "Set `VLLM_LOGGING_LEVEL=DEBUG` to see detailed unsupported reasons. "
-            "To use the emulation backend for research/debugging, pass "
-            "--moe-backend emulation."
         )
 
     return Mxfp4MoeBackend.NONE, None
