@@ -61,4 +61,4 @@ class CustomRoutingRouter(BaseRouter):
 
         return topk_weights.to(torch.float32), topk_ids.to(
             torch.int32 if indices_type is None else indices_type
-        )
+        ), None
