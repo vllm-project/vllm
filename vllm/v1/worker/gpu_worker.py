@@ -82,6 +82,34 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
+def _apply_nccl_async_error_handling_policy() -> None:
+    """Apply vLLM's policy for NCCL_ASYNC_ERROR_HANDLING /
+    TORCH_NCCL_ASYNC_ERROR_HANDLING.
+
+    By default vLLM pops these env vars (originally set by Ray) because
+    enabling torch's NCCL watchdog has historically caused exceptions
+    during CUDA graph capture. Operators who would rather have the
+    watchdog auto-abort hung NCCL collectives (e.g. to mitigate PP/TP
+    P2P deadlocks like vllm-project/vllm#45094) can opt back in via
+    ``VLLM_NCCL_ENABLE_ASYNC_ERROR_HANDLING=1``, accepting the
+    graph-capture exception risk.
+    """
+    if not envs.VLLM_NCCL_ENABLE_ASYNC_ERROR_HANDLING:
+        # PyTorch renamed NCCL_ASYNC_ERROR_HANDLING ->
+        # TORCH_NCCL_ASYNC_ERROR_HANDLING; pop both for safety.
+        os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
+        os.environ.pop("TORCH_NCCL_ASYNC_ERROR_HANDLING", None)
+    else:
+        logger.warning(
+            "VLLM_NCCL_ENABLE_ASYNC_ERROR_HANDLING is set: preserving "
+            "NCCL_ASYNC_ERROR_HANDLING / TORCH_NCCL_ASYNC_ERROR_HANDLING "
+            "so torch's NCCL watchdog can abort hung collectives. This "
+            "trades deadlock recovery for potential exceptions during "
+            "CUDA graph capture; see "
+            "https://github.com/vllm-project/vllm/issues/45094."
+        )
+
+
 class AsyncIntermediateTensors(IntermediateTensors):
     """IntermediateTensors with lazy comm synchronization"""
 
@@ -249,8 +277,7 @@ class Worker(WorkerBase):
     @instrument(span_name="Init device")
     def init_device(self):
         if self.device_config.device_type == "cuda":
-            # This env var set by Ray causes exceptions with graph building.
-            os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
+            _apply_nccl_async_error_handling_policy()
             parallel_config = self.parallel_config
             if (
                 parallel_config.distributed_executor_backend
