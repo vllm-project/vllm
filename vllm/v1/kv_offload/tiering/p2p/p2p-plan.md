@@ -18,11 +18,11 @@ sequenceDiagram
     Note over Cons_TM,Cons_P2P: Step N — aggregate per-block lookups
 
     Cons_TM->>Cons_P2P: lookup(key, req_context) [per block]
-    Note right of Cons_P2P: kv_transfer_params:<br/>kv_request_id, do_p2p_fetch=true,<br/>remote_host, remote_port<br/>Returns None; entry registered<br/>at kv_request_id + block_hash
+    Note right of Cons_P2P: kv_transfer_params:<br/>kv_request_id, do_p2p_fetch=true,<br/>remote_host, remote_port<br/>Returns None; entry registered<br/>at kv_request_id, block_hash
 
     Cons_TM->>Cons_P2P: on_schedule_end()
     Cons_P2P->>Prod_P2P: 𝗖𝗧𝗥𝗟: LookupMsg(kv_request_id, [block_hashes…])
-    Note right of Cons_P2P: One LookupMsg per peer + kv_request_id<br/>per step that has unsent entries
+    Note right of Cons_P2P: One LookupMsg per peer, per kv_request_id<br/>per step that has unsent entries
 
     Note right of Prod_P2P: Match block_hashes against<br/>local CPU cache (hit/miss per hash)
 
