@@ -945,6 +945,9 @@ class AsyncLLM(EngineClient):
     async def is_sleeping(self) -> bool:
         return await self.engine_core.is_sleeping_async()
 
+    async def get_sleep_level(self) -> int | None:
+        return await self.engine_core.get_sleep_level_async()
+
     async def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""
         return await self.engine_core.add_lora_async(lora_request)
