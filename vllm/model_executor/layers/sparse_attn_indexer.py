@@ -78,6 +78,21 @@ def kv_cache_as_quant_view(
     return kv_cache.unsqueeze(-2)
 
 
+def _maybe_gather_pcp_indexer_cache_inputs(
+    k: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    layer_name: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    pcp_manager = get_forward_context().additional_kwargs.get("pcp_manager")
+    if pcp_manager is None:
+        return k, slot_mapping
+    return pcp_manager.gather_and_restore_indexer_cache_inputs(
+        k,
+        slot_mapping,
+        layer_name,
+    )
+
+
 @eager_break_during_capture
 def sparse_attn_indexer(
     hidden_states: torch.Tensor,
@@ -161,13 +176,19 @@ def sparse_attn_indexer(
         k = k[:num_tokens]
 
     if not skip_k_cache_insert:
+        assert k is not None
+        k, slot_mapping_for_cache = _maybe_gather_pcp_indexer_cache_inputs(
+            k,
+            slot_mapping,
+            k_cache_prefix,
+        )
         # scale_fmt can be None, but the function expects str
         assert scale_fmt is not None
         assert not use_fp4_cache, "Unfused FP4 Insert is not supported yet"
         ops.indexer_k_quant_and_cache(
             k,
             kv_cache,
-            slot_mapping,
+            slot_mapping_for_cache,
             quant_block_size,
             scale_fmt,
         )

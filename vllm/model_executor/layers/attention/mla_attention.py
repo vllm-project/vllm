@@ -189,9 +189,9 @@ return curr_o @ W_O
 
 import functools
 from abc import abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
-from typing import ClassVar, Generic, TypeVar, cast
+from typing import Any, ClassVar, Generic, TypeVar, cast
 
 import torch
 import torch.nn as nn
@@ -269,7 +269,7 @@ from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     split_decodes_and_prefills,
 )
-from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
+from vllm.v1.attention.ops.common import cp_lse_ag_out_ar, cp_lse_ag_out_rs
 from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.attention.selector import get_attn_backend
@@ -334,6 +334,40 @@ def _canonicalize_sparse_mla_kv_cache_dtype(
     ):
         return "fp8_ds_mla"
     return kv_cache_dtype
+
+
+def _maybe_gather_pcp_mla_latent_cache_inputs(
+    attn_layer,
+    attn_metadata: "MLACommonMetadata | None",
+    kv_c_normed: torch.Tensor,
+    k_pe: torch.Tensor,
+    layer_slot_mapping: torch.Tensor | None,
+    layer_name: str,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    pcp_manager = get_forward_context().additional_kwargs.get("pcp_manager")
+    if (
+        getattr(attn_layer.impl, "pcp_world_size", 1) <= 1
+        or attn_metadata is None
+        or pcp_manager is None
+    ):
+        return kv_c_normed, k_pe, layer_slot_mapping
+
+    assert layer_slot_mapping is not None
+    return pcp_manager.gather_and_restore_mla_latent_cache_inputs(
+        kv_c_normed,
+        k_pe,
+        layer_slot_mapping,
+        layer_name,
+    )
+
+
+@dataclass
+class _PCPDCPForwardInputs:
+    q: torch.Tensor
+    k_c_normed: torch.Tensor
+    k_pe: torch.Tensor
+    attn_metadata: "MLACommonMetadata"
+    same_head_dcp: bool
 
 
 class MLAAttention(nn.Module, AttentionLayerBase):
@@ -583,11 +617,22 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             assert isinstance(slot_mapping, dict), (
                 f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
             )
+            layer_slot_mapping = slot_mapping.get(self.layer_name)
+            kv_for_cache, kpe_for_cache, layer_slot_mapping = (
+                _maybe_gather_pcp_mla_latent_cache_inputs(
+                    self,
+                    attn_metadata,
+                    kv_c_normed,
+                    k_pe,
+                    layer_slot_mapping,
+                    self.layer_name,
+                )
+            )
             self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
-                kv_c_normed,
-                k_pe,
+                kv_for_cache,
+                kpe_for_cache,
                 self_kv_cache,
-                slot_mapping.get(self.layer_name),
+                layer_slot_mapping,
                 self.kv_cache_dtype,
                 self._k_scale,
             )
@@ -620,6 +665,85 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
             )
             return output
+
+    def _maybe_prepare_pcp_dcp_forward_inputs(
+        self,
+        q: torch.Tensor,
+        k_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        attn_metadata: "MLACommonMetadata",
+        quant_key: Any,
+    ) -> _PCPDCPForwardInputs:
+        pcp_manager = get_forward_context().additional_kwargs.get("pcp_manager")
+        if pcp_manager is None or getattr(pcp_manager, "dcp_world_size", 1) <= 1:
+            return _PCPDCPForwardInputs(
+                q=q,
+                k_c_normed=k_c_normed,
+                k_pe=k_pe,
+                attn_metadata=attn_metadata,
+                same_head_dcp=False,
+            )
+        if quant_key is not None:
+            raise NotImplementedError(
+                "MRV2 MLA PCP+DCP does not support fused output quantization yet."
+            )
+
+        return _PCPDCPForwardInputs(
+            q=q,
+            k_c_normed=k_c_normed,
+            k_pe=k_pe,
+            attn_metadata=attn_metadata,
+            same_head_dcp=True,
+        )
+
+    def _prepare_mqa_query_for_dcp(
+        self,
+        mqa_q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        fp8_attention: bool,
+        same_head_dcp: bool,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if self.impl.dcp_world_size <= 1:
+            return mqa_q
+
+        if same_head_dcp:
+            assert not self.dcp_a2a, (
+                "PCP-axis MLA DCP does not support A2A combine yet."
+            )
+            return mqa_q
+
+        assert not fp8_attention, "DCP not support fp8 kvcache now."
+        return get_dcp_group().all_gather(torch.cat(mqa_q, dim=-1), dim=1)
+
+    def _combine_mqa_dcp_output(
+        self,
+        attn_out: torch.Tensor,
+        lse: torch.Tensor | None,
+        same_head_dcp: bool,
+    ) -> torch.Tensor:
+        if self.impl.dcp_world_size <= 1:
+            return attn_out
+
+        assert lse is not None
+        if same_head_dcp:
+            return cp_lse_ag_out_ar(
+                attn_out,
+                lse,
+                get_dcp_group(),
+                is_lse_base_on_e=True,
+            )
+        if self.dcp_a2a:
+            return dcp_a2a_lse_reduce(
+                attn_out,
+                lse,
+                get_dcp_group(),
+                is_lse_base_on_e=True,
+            )
+        return cp_lse_ag_out_rs(
+            attn_out,
+            lse,
+            get_dcp_group(),
+            is_lse_base_on_e=True,
+        )
 
     def forward_impl(
         self,
@@ -681,7 +805,20 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
 
+        pcp_dcp_inputs = self._maybe_prepare_pcp_dcp_forward_inputs(
+            q,
+            k_c_normed,
+            k_pe,
+            attn_metadata,
+            quant_key,
+        )
+        q = pcp_dcp_inputs.q
+        k_c_normed = pcp_dcp_inputs.k_c_normed
+        k_pe = pcp_dcp_inputs.k_pe
+        attn_metadata = pcp_dcp_inputs.attn_metadata
+
         num_actual_toks = attn_metadata.num_actual_tokens
+        same_head_dcp = pcp_dcp_inputs.same_head_dcp
 
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output
@@ -734,6 +871,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self._k_scale,
                 output=mha_output[num_mqa_tokens:num_actual_toks],
                 output_scale=mha_output_scale,
+                same_head_dcp=same_head_dcp,
             )
 
         if num_mqa_tokens > 0:
@@ -799,34 +937,21 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
             else:
                 mqa_q = (mqa_ql_nope, mqa_q_pe)
-            if self.impl.dcp_world_size > 1:
-                if isinstance(mqa_q, tuple):
-                    # concatenate mqa_ql_nope and mqa_q_pe -> (B, N, L + P)
-                    mqa_q = torch.cat(mqa_q, dim=-1)
-                # mqa_q do allgather in head dim.
-                mqa_q = get_dcp_group().all_gather(mqa_q, dim=1)
+            mqa_q = self._prepare_mqa_query_for_dcp(
+                mqa_q,
+                fp8_attention,
+                same_head_dcp,
+            )
 
             # call decode attn
             if not is_sparse_impl:
                 assert attn_metadata.decode is not None
             attn_out, lse = self.impl.forward_mqa(mqa_q, kv_cache, attn_metadata, self)  # type: ignore[attr-defined]
-
-            # correct dcp attn_out with lse.
-            if self.impl.dcp_world_size > 1:
-                if self.dcp_a2a:
-                    attn_out = dcp_a2a_lse_reduce(
-                        attn_out,
-                        lse,
-                        get_dcp_group(),
-                        is_lse_base_on_e=True,
-                    )
-                else:
-                    attn_out = cp_lse_ag_out_rs(
-                        attn_out,
-                        lse,
-                        get_dcp_group(),
-                        is_lse_base_on_e=True,
-                    )
+            attn_out = self._combine_mqa_dcp_output(
+                attn_out,
+                lse,
+                same_head_dcp,
+            )
 
             # v_up projection
             self._v_up_proj(attn_out, out=mqa_output_slice)
@@ -870,6 +995,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 raise ValueError(f"Unsupported quant_key: {quant_key}")
             return quant_output
 
+        if output_padded.shape[0] > num_actual_toks:
+            output_padded[num_actual_toks:].zero_()
         return output_padded
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
@@ -1046,8 +1173,20 @@ def unified_mla_kv_cache_update(
     the data dependency between them to ensure torch.compile preserves ordering.
     """
     layer_name = _resolve_layer_name(layer_name)
-    _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
+    attn_metadata, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(
+        layer_name
+    )
     if layer_slot_mapping is not None:
+        kv_c_normed, k_pe, layer_slot_mapping = (
+            _maybe_gather_pcp_mla_latent_cache_inputs(
+                attn_layer,
+                attn_metadata,
+                kv_c_normed,
+                k_pe,
+                layer_slot_mapping,
+                layer_name,
+            )
+        )
         attn_layer.impl.do_kv_cache_update(  # type: ignore[attr-defined]
             kv_c_normed,
             k_pe,
@@ -1266,6 +1405,10 @@ class MLACommonPrefillMetadata:
         padded_local_token_to_seq: torch.Tensor | None = None
         cu_seq_lens_lst: list[list[int]] | None = None
         chunk_size: int | None = None
+        local_chunk_seq_lens: list[list[int]] | None = None
+        local_cu_seq_lens: torch.Tensor | None = None
+        local_seq_tot: list[int] | None = None
+        local_max_seq_lens: list[int] | None = None
         prefill_tokens_with_context: int | None = None
 
     block_table: torch.Tensor
@@ -1738,6 +1881,12 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                         None,
                         self.dcp_local_block_size,
                     )
+                    local_context_lens_cpu = get_dcp_local_seq_lens(
+                        context_lens_cpu,
+                        self.dcp_world_size,
+                        self.dcp_rank,
+                        self.dcp_local_block_size,
+                    )
                     # Note(qcs): The max local context lengths
                     # padded to `dcp_local_block_size`.
                     padded_local_context_lens_cpu: torch.Tensor = (
@@ -1791,6 +1940,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     padded_local_token_to_seq_tensor_cpu = torch.zeros(
                         [num_chunks, max_padded_local_tokens_over_chunk],
                         dtype=torch.int32,
+                        pin_memory=True,
                     )
                     for i in range(num_chunks):
                         chunk_token_to_seq_tensor = torch.repeat_interleave(
@@ -1800,6 +1950,23 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                         padded_local_token_to_seq_tensor_cpu[i, :chunk_len] = (
                             chunk_token_to_seq_tensor
                         )
+                    local_chunk_ends = torch.min(
+                        local_context_lens_cpu.unsqueeze(0),
+                        local_chunk_starts
+                        + padded_local_max_context_chunk_across_ranks,
+                    )
+                    local_chunk_seq_lens = (
+                        local_chunk_ends - local_chunk_starts
+                    ).clamp(min=0)
+                    local_cu_chunk_seq_lens_cpu = torch.zeros(
+                        num_chunks, num_prefills + 1, dtype=torch.int32, pin_memory=True
+                    )
+                    torch.cumsum(
+                        local_chunk_seq_lens,
+                        dim=1,
+                        out=local_cu_chunk_seq_lens_cpu[:, 1:],
+                        dtype=torch.int32,
+                    )
 
                 prefill_tokens_with_context = None
                 if num_prefills_with_context_cpu > 0:
@@ -1829,6 +1996,14 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                         ),
                         cu_seq_lens_lst=cu_seq_lens_cpu.tolist(),
                         chunk_size=padded_local_max_context_chunk_across_ranks,
+                        local_chunk_seq_lens=local_chunk_seq_lens.tolist(),
+                        local_cu_seq_lens=local_cu_chunk_seq_lens_cpu.to(
+                            device, non_blocking=True
+                        ),
+                        local_seq_tot=local_cu_chunk_seq_lens_cpu[:, -1].tolist(),
+                        local_max_seq_lens=local_chunk_seq_lens.max(
+                            dim=1
+                        ).values.tolist(),
                         prefill_tokens_with_context=prefill_tokens_with_context,
                     )
                 else:
@@ -1987,6 +2162,8 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+
+    supports_pcp: bool = True
 
     def fused_output_quant_supported(self, quant_key):
         return quant_key in (
@@ -2338,6 +2515,147 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
         return output, output_lse
 
+    def _empty_context_chunk_output(
+        self, q: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return (
+            q.new_zeros((q.shape[0], self.num_heads, self.v_head_dim)),
+            torch.full(
+                (self.num_heads, q.shape[0]),
+                -float("inf"),
+                dtype=torch.float32,
+                device=q.device,
+            ),
+        )
+
+    @staticmethod
+    def _unpad_dcp_local_kvcache(
+        local_kvcache: torch.Tensor,
+        padded_seq_lens: list[int],
+        local_seq_lens: list[int],
+        local_toks: int,
+    ) -> torch.Tensor:
+        if local_toks == local_kvcache.shape[0]:
+            return local_kvcache
+
+        kv_segments: list[torch.Tensor] = []
+        src_token_idx = 0
+        for padded_len, local_len in zip(padded_seq_lens, local_seq_lens):
+            if local_len:
+                kv_segments.append(
+                    local_kvcache[src_token_idx : src_token_idx + local_len]
+                )
+            src_token_idx += padded_len
+
+        local_kvcache = torch.cat(kv_segments, dim=0)
+        assert local_kvcache.shape[0] == local_toks
+        return local_kvcache
+
+    def _project_context_kv(
+        self, local_kvcache: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        kv_c_normed = local_kvcache[..., : self.kv_lora_rank]
+        k_pe = local_kvcache[..., self.kv_lora_rank :].unsqueeze(1)
+        kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
+            -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
+        )
+        k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        return self._concat_k_nope_k_pe(k_nope, k_pe), v
+
+    def _dcp_compute_local_prefill_context(
+        self,
+        q: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: MLACommonMetadata,
+    ):
+        assert attn_metadata.prefill is not None
+        prefill_metadata = attn_metadata.prefill
+        assert prefill_metadata.prefill_backend is not None
+        assert prefill_metadata.chunked_context is not None
+        chunked_context = prefill_metadata.chunked_context
+        assert chunked_context.padded_local_chunk_seq_lens is not None
+        assert chunked_context.padded_local_cu_seq_lens is not None
+        assert chunked_context.local_chunk_seq_lens is not None
+        assert chunked_context.local_cu_seq_lens is not None
+        assert chunked_context.local_seq_tot is not None
+        assert chunked_context.local_max_seq_lens is not None
+
+        local_chunked_context = replace(
+            chunked_context,
+            cu_seq_lens=chunked_context.local_cu_seq_lens,
+            seq_tot=chunked_context.local_seq_tot,
+            max_seq_lens=chunked_context.local_max_seq_lens,
+        )
+        local_prefill_metadata = replace(
+            prefill_metadata, chunked_context=local_chunked_context
+        )
+        prefill_metadata.prefill_backend.prepare_metadata(local_prefill_metadata)
+
+        output = None
+        merge_output = None
+        iters = len(chunked_context.seq_tot)
+        workspace = chunked_context.workspace
+
+        for i in range(iters):
+            padded_toks = chunked_context.seq_tot[i]
+            local_toks = chunked_context.local_seq_tot[i]
+            ops.cp_gather_cache(
+                src_cache=kv_c_and_k_pe_cache,
+                dst=workspace,
+                block_table=prefill_metadata.block_table,
+                cu_seq_lens=chunked_context.padded_local_cu_seq_lens[i],
+                batch_size=attn_metadata.num_prefills,
+                seq_starts=chunked_context.starts[i],
+            )
+
+            if local_toks == 0:
+                attn_output, attn_softmax_lse = self._empty_context_chunk_output(q)
+            else:
+                local_kvcache = self._unpad_dcp_local_kvcache(
+                    workspace[:padded_toks],
+                    chunked_context.padded_local_chunk_seq_lens[i],
+                    chunked_context.local_chunk_seq_lens[i],
+                    local_toks,
+                )
+                k, v = self._project_context_kv(local_kvcache)
+
+                attn_output, attn_softmax_lse = (
+                    prefill_metadata.prefill_backend.run_prefill_context_chunk(
+                        chunk_idx=i,
+                        q=q,
+                        k=k,
+                        v=v,
+                    )
+                )
+
+            if output is None:
+                output = attn_output
+                output_lse = attn_softmax_lse
+            else:
+                if merge_output is None:
+                    merge_output = torch.empty_like(output)
+                    merge_output_lse = torch.empty_like(output_lse)
+                merge_attn_states(
+                    output=merge_output,
+                    output_lse=merge_output_lse,
+                    prefix_output=output,
+                    prefix_lse=output_lse,
+                    suffix_output=attn_output,
+                    suffix_lse=attn_softmax_lse,
+                )
+                output, merge_output = merge_output, output
+                output_lse, merge_output_lse = merge_output_lse, output_lse
+
+        assert output is not None
+        output, output_lse_t = cp_lse_ag_out_ar(
+            output,
+            output_lse.transpose(0, 1),
+            get_dcp_group(),
+            return_lse=True,
+            is_lse_base_on_e=True,
+        )
+        return output, output_lse_t.transpose(0, 1)
+
     def forward_mha(
         self,
         q: torch.Tensor,
@@ -2348,12 +2666,14 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         k_scale: torch.Tensor,
         output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
+        same_head_dcp: bool = False,
     ) -> None:
         assert attn_metadata.prefill is not None
         assert self.dcp_world_size != -1
 
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata.prefill_backend is not None
+        prefill_metadata.prefill_backend.prepare_metadata(prefill_metadata)
         use_fp8_prefill = prefill_metadata.q_data_type == current_platform.fp8_dtype()
 
         # Convert q to FP8 if FP8 prefill attention is enabled
@@ -2392,15 +2712,24 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             assert prefill_metadata.chunked_context is not None
             suffix_output, suffix_lse = output_prefill
             if self.dcp_world_size > 1:
-                context_output, context_lse = (
-                    self._context_parallel_compute_prefill_context(
-                        q,
-                        kv_c_and_k_pe_cache,
-                        attn_metadata,
-                        k_scale=k_scale,
-                        dcp_world_size=self.dcp_world_size,
+                if same_head_dcp:
+                    context_output, context_lse = (
+                        self._dcp_compute_local_prefill_context(
+                            q,
+                            kv_c_and_k_pe_cache,
+                            attn_metadata,
+                        )
                     )
-                )
+                else:
+                    context_output, context_lse = (
+                        self._context_parallel_compute_prefill_context(
+                            q,
+                            kv_c_and_k_pe_cache,
+                            attn_metadata,
+                            k_scale=k_scale,
+                            dcp_world_size=self.dcp_world_size,
+                        )
+                    )
             else:
                 context_output, context_lse = self._compute_prefill_context(
                     q, kv_c_and_k_pe_cache, attn_metadata, k_scale

@@ -238,8 +238,11 @@ class FullAttentionSpec(AttentionSpec):
         max_model_len = vllm_config.model_config.max_model_len
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
         pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
+        if vllm_config.model_config.use_mla:
+            pcp_world_size = 1
         # Note(hc): each dcp rank only need save
-        # (max_model_len//dcp_world_size) tokens locally.
+        # (max_model_len//dcp_world_size) tokens locally. MLA PCP keeps a full
+        # gathered KV cache per PCP rank, so PCP does not reduce this budget.
         if dcp_world_size * pcp_world_size > 1:
             max_model_len = cdiv(max_model_len, dcp_world_size * pcp_world_size)
         return cdiv(max_model_len, self.block_size) * self.page_size_bytes
