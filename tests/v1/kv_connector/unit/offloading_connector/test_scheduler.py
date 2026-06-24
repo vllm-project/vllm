@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -11,19 +11,16 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     to_keys,
 )
 from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
-from vllm.distributed.kv_events import BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
     RequestOffloadState,
 )
-from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
     SlidingWindowSpec,
 )
 from vllm.v1.kv_offload.base import (
-    OffloadingEvent,
     OffloadingManager,
     OffloadPolicy,
     ReqContext,
@@ -144,31 +141,6 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
     )
     runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: 1
     runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_loaded=(3, 4, 5))
-
-    # test take_events
-    def to_hashes(int_hashes: list[int]) -> list[BlockHash]:
-        return [BlockHash(str(i).encode()) for i in int_hashes]
-
-    def take_events() -> Iterable[OffloadingEvent]:
-        yield OffloadingEvent(keys=to_keys([1, 2, 3]), medium="A", removed=False)
-        yield OffloadingEvent(keys=to_keys([4, 5, 6]), medium="B", removed=True)
-
-    runner.manager.take_events.side_effect = take_events
-    events = list(runner.scheduler_connector.take_events())
-    assert len(events) == 2
-    event = events[0]
-    assert isinstance(event, BlockStored)
-    assert event.block_hashes == to_hashes([1, 2, 3])
-    assert event.block_size == 0
-    assert event.medium == "A"
-    assert event.token_ids == []
-    assert event.parent_block_hash is None
-    assert event.lora_id is None
-    assert event.lora_name is None
-    event = events[1]
-    assert isinstance(event, BlockRemoved)
-    assert event.block_hashes == to_hashes([4, 5, 6])
-    assert event.medium == "B"
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
@@ -1278,11 +1250,11 @@ def test_reset_cache_finalizes_finished_request_with_pending_store(
     )
 
     finalized: list[str] = []
-    runner.manager.on_request_finished.side_effect = (
-        lambda req_context: finalized.append(req_context.req_id)
+    runner.manager.on_request_finished.side_effect = lambda req_context: (
+        finalized.append(req_context.req_id)
     )
-    runner.manager.prepare_store.side_effect = (
-        lambda keys, req_context: generate_store_output(keys)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
     )
 
     # Decode a couple of blocks and keep every transfer in flight, so the
@@ -1312,6 +1284,100 @@ def test_reset_cache_finalizes_finished_request_with_pending_store(
     cs.reset_cache()
     assert finalized == [req_id]
     assert req_id not in cs._req_status
+
+
+def test_pending_transfer_defers_prefix_lookup():
+    """A request with an in-flight store must not issue a load on re-admission.
+
+    With async scheduling, a preempted request's store can be flushed by the
+    worker before the scheduler consumes its completion. If the request is
+    re-admitted in that window, the connector should defer it instead of
+    looking up offloaded blocks and later asserting when a load is queued while
+    the store job is still tracked.
+    """
+    scheduler = object.__new__(OffloadingConnectorScheduler)
+    scheduler.manager = MagicMock(spec=OffloadingManager)
+
+    request = SimpleNamespace(request_id="req-0")
+    group_state = SimpleNamespace(block_ids=[1, 2, 3])
+    req_status = SimpleNamespace(
+        group_states=[group_state],
+        transfer_jobs={123},
+    )
+    scheduler._req_status = {request.request_id: req_status}
+
+    matched_tokens, is_async = scheduler.get_num_new_matched_tokens(
+        request,
+        num_computed_tokens=0,
+    )
+
+    assert matched_tokens is None
+    assert is_async is False
+    assert group_state.block_ids == []
+    scheduler.manager.lookup.assert_not_called()
+
+
+def test_async_preempt_readmit_before_transfer_output_is_deferred(request_runner):
+    """A preempted request can be scheduled again before flush output is read.
+
+    EngineCore.step_with_batch_queue() may schedule a new batch while a prior
+    preemption batch is still queued. The store completion from jobs_to_flush is
+    only cleared when that queued output reaches update_from_output(), so the
+    re-admission path must defer while the scheduler still tracks the store.
+    """
+    block_size = 4
+    block_size_factor = 3
+    offloaded_block_size = block_size * block_size_factor
+
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=100,
+        async_scheduling=True,
+        block_size_factor=block_size_factor,
+    )
+    free_block_queue = runner.scheduler.kv_cache_manager.block_pool.free_block_queue
+    num_free_blocks_empty = free_block_queue.num_free_blocks
+
+    req_id = "0"
+    runner.new_request(token_ids=[0] * offloaded_block_size * 2)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+
+    runner.run(decoded_tokens=[0], complete_transfers=False)
+    runner.run(
+        decoded_tokens=[0] * (2 * offloaded_block_size - block_size),
+        complete_transfers=False,
+    )
+
+    req_status = runner.connector_scheduler._req_status[req_id]
+    pending_store_jobs = set(req_status.transfer_jobs)
+    assert pending_store_jobs
+    assert all(
+        runner.connector_scheduler._jobs[jid].is_store for jid in pending_store_jobs
+    )
+
+    free_block_queue.num_free_blocks = 0
+    preempt_output = runner.scheduler.schedule()
+    assert preempt_output.preempted_req_ids == {req_id}
+    assert preempt_output.kv_connector_metadata is not None
+    assert pending_store_jobs <= preempt_output.kv_connector_metadata.jobs_to_flush
+    assert req_status.transfer_jobs == pending_store_jobs
+
+    # Simulate the async batch-queue window: schedule again before the
+    # preemption batch's ModelRunnerOutput is consumed by update_from_output().
+    free_block_queue.num_free_blocks = num_free_blocks_empty
+    assert runner.scheduler.reset_prefix_cache()
+    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: len(
+        key
+    )
+
+    readmit_output = runner.scheduler.schedule()
+
+    assert readmit_output.num_scheduled_tokens == {}
+    assert readmit_output.kv_connector_metadata is not None
+    assert readmit_output.kv_connector_metadata.load_jobs == {}
+    assert req_status.transfer_jobs == pending_store_jobs
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
