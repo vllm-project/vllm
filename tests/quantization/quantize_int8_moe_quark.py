@@ -4,17 +4,24 @@
 
 This produces a checkpoint compatible with ``QuarkW8A8Int8MoEMethod`` (the
 oracle/modular-kernel INT8 MoE path), i.e. per-channel INT8 weights with
-dynamic per-token INT8 activations.
+dynamic per-token INT8 activations (symmetric).
 
-It is intended to (re)generate the small model used by
-``tests/quantization/test_quark.py::test_quark_int8_w8a8_moe`` and the gsm8k
-eval config.
+IMPORTANT (transformers version): Quark's ``ModelQuantizer`` only quantizes
+``nn.Linear`` modules. transformers >= 5 fuses MoE experts into a single
+batched module (e.g. ``Qwen3MoeExperts`` with 3D weight tensors), which is
+NOT ``nn.Linear``, so the routed experts are silently left unquantized. To
+quantize the experts you must run this script in an environment with a
+transformers version that keeps experts as individual ``nn.Linear`` layers
+(~4.57, the version used to produce the reference test model
+``nameistoken/tiny-qwen3-moe-w8a8-int8-quark``). The resulting per-expert
+checkpoint then loads fine in current vLLM. Prefer a Qwen3-MoE model (no
+shared experts) to avoid the qwen2_moe shared-expert loader path.
 
 Usage:
     python tests/quantization/quantize_int8_moe_quark.py \
         --model Qwen/Qwen1.5-MoE-A2.7B-Chat \
         --output-dir /tmp/qwen-moe-w8a8-int8-quark \
-        --push-to-hub <org>/<repo>   # optional; requires `huggingface-cli login`
+        --push-to-hub <org>/<repo>   # optional; requires `hf auth login`
 
 Requires the `quark` package (bundled in the ROCm vLLM dev image):
     https://quark.docs.amd.com/
@@ -43,22 +50,36 @@ def main() -> None:
     parser.add_argument(
         "--num-calib-samples",
         type=int,
-        default=128,
-        help="Number of calibration samples for activation observers.",
+        default=32,
+        help="Number of calibration samples (used to run observers).",
+    )
+    parser.add_argument(
+        "--exclude",
+        nargs="*",
+        default=["lm_head"],
+        help=(
+            "Module name patterns to leave unquantized. Routers/gates and "
+            "(for architectures like qwen2_moe) the shared expert should be "
+            "excluded, e.g. --exclude lm_head '*.gate' '*.shared_expert.*' "
+            "'*.shared_expert_gate'."
+        ),
+    )
+    parser.add_argument(
+        "--seq-len",
+        type=int,
+        default=512,
+        help="Max sequence length per calibration sample.",
     )
     args = parser.parse_args()
 
     import torch
     from datasets import load_dataset
-    from quark.torch import ModelQuantizer
-    from quark.torch.export import ExporterConfig, JsonExporterConfig
-    from quark.torch.quantization import (
-        Config,
-        QuantizationConfig,
-        QuantizationSpec,
-    )
-    from quark.torch.quantization.config.type import Dtype, QSchemeType
+    from torch.utils.data import DataLoader
     from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    from quark.torch import ModelQuantizer, export_safetensors
+    from quark.torch.quantization import Int8PerChannelSpec
+    from quark.torch.quantization.config.config import Config, QuantizationConfig
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     model = AutoModelForCausalLM.from_pretrained(
@@ -66,51 +87,43 @@ def main() -> None:
     )
     model.eval()
 
-    # Per-channel INT8 weights (static) + per-token INT8 activations (dynamic),
-    # symmetric — matches QuarkW8A8Int8MoEMethod's supported scheme.
-    weight_spec = QuantizationSpec(
-        dtype=Dtype.int8,
-        qscheme=QSchemeType.per_channel,
-        symmetric=True,
-        is_dynamic=False,
-    )
-    act_spec = QuantizationSpec(
-        dtype=Dtype.int8,
-        qscheme=QSchemeType.per_channel,
-        symmetric=True,
-        is_dynamic=True,
-    )
-    global_cfg = QuantizationConfig(weight=weight_spec, input_tensors=act_spec)
-    quant_config = Config(
-        global_quant_config=global_cfg,
-        exclude=["lm_head"],
-    )
+    # Per-channel INT8 weights (static, ch_axis=0 = output channels) and
+    # per-token INT8 activations (dynamic, ch_axis=-1), both symmetric — this is
+    # exactly the scheme QuarkW8A8Int8MoEMethod supports.
+    weight_spec = Int8PerChannelSpec(
+        ch_axis=0, symmetric=True, is_dynamic=False
+    ).to_quantization_spec()
+    act_spec = Int8PerChannelSpec(
+        ch_axis=-1, symmetric=True, is_dynamic=True
+    ).to_quantization_spec()
 
-    # Calibration data.
+    global_cfg = QuantizationConfig(weight=weight_spec, input_tensors=act_spec)
+    quant_config = Config(global_quant_config=global_cfg, exclude=list(args.exclude))
+
+    # Calibration data (observers for the static per-channel weight scales).
     ds = load_dataset("mit-han-lab/pile-val-backup", split="validation")
-    samples = [
-        tokenizer(ds[i]["text"], return_tensors="pt").input_ids.to("cuda")
-        for i in range(min(args.num_calib_samples, len(ds)))
-    ]
+    samples = []
+    for i in range(min(args.num_calib_samples, len(ds))):
+        ids = tokenizer(
+            ds[i]["text"],
+            return_tensors="pt",
+            truncation=True,
+            max_length=args.seq_len,
+        ).input_ids
+        samples.append(ids.to("cuda"))
+    dataloader = DataLoader(samples, batch_size=1)
 
     quantizer = ModelQuantizer(quant_config)
-
-    def calib_iter():
-        for input_ids in samples:
-            yield {"input_ids": input_ids}
-
     with torch.no_grad():
-        model = quantizer.quantize_model(model, calib_iter())
-        model = quantizer.freeze(model)
+        model = quantizer.quantize_model(model, dataloader)
 
-    exporter_config = ExporterConfig(json_export_config=JsonExporterConfig())
-    from quark.torch import ModelExporter
-
-    exporter = ModelExporter(config=exporter_config, export_dir=args.output_dir)
-    with torch.no_grad():
-        exporter.export_safetensors_model(
-            model, quant_config=quant_config, tokenizer=tokenizer
-        )
+    export_safetensors(
+        model,
+        args.output_dir,
+        custom_mode="quark",
+        weight_format="real_quantized",
+        pack_method="reorder",
+    )
     tokenizer.save_pretrained(args.output_dir)
     print(f"Quantized checkpoint written to {args.output_dir}")
 
