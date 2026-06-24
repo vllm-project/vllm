@@ -352,13 +352,13 @@ def rocm_aiter_fused_experts(
         )
 
         # https://github.com/ROCm/aiter/pull/3123 specialized the AITER stage1 GEMMs
-        # for interleaved vs separated gate and up weights.
-        # For gpt-oss i.e. use_mxfp4_w4a16=True, the weights are shuffled by
-        # `rocm_aiter_ops.shuffle_weight_a16w4` in `oracle/mxfp4.py`,
-        # which always sets `is_guinterleave=True`.
-        # Hence, we pass in GateMode.INTERLEAVE to match the weight shuffling.
+        # for interleaved vs separated gate and up weights. Only pass
+        # GateMode.INTERLEAVE when the weights were actually shuffled into the
+        # gate-up interleaved layout (gpt-oss); models that keep the separated
+        # layout (e.g. DeepSeek-V4) set `gu_interleaved=False` and must use the
+        # default SEPARATED mode.
         gate_mode = ""
-        if quant_config.use_mxfp4_w4a16:
+        if quant_config.use_mxfp4_w4a16 and getattr(w1, "gu_interleaved", True):
             try:
                 from aiter.ops.flydsl.moe_common import GateMode
 

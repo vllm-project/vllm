@@ -705,6 +705,11 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         if self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
             layer.w13_weight.is_shuffled = True
             layer.w2_weight.is_shuffled = True
+            # This path keeps gate/up in the separated layout (unlike the
+            # gpt-oss gu-interleaved shuffle), so the AITER MoE dispatch must
+            # use GateMode.SEPARATED rather than INTERLEAVE.
+            layer.w13_weight.gu_interleaved = False
+            layer.w2_weight.gu_interleaved = False
 
         if w13_bias is not None and w2_bias is not None:
             replace_parameter(layer, "w13_bias", w13_bias)
