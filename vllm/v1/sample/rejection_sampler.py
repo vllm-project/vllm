@@ -297,7 +297,6 @@ class RejectionSampler(nn.Module):
                 sampling_metadata.spec_token_ids,
             )
 
-        holder = sampling_metadata.thinking_budget_state_holder
         # Calculate indices of target logits.
         repeat_indices: torch.Tensor | None = None
         need_repeat_indices = (
@@ -332,6 +331,7 @@ class RejectionSampler(nn.Module):
                 logits = processor.apply_with_spec_decode(
                     logits, metadata.num_draft_tokens
                 )
+        holder = sampling_metadata.thinking_budget_state_holder
         if holder is not None and holder.has_tracked_requests():
             logits = holder.apply_to_logits(
                 logits,
