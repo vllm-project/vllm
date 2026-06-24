@@ -432,7 +432,6 @@ class CanonicalKVCaches:
 
 
 TransferSpec = tuple[LoadStoreSpec, LoadStoreSpec]
-TransferType = tuple[str, str]
 
 
 @dataclass
@@ -441,7 +440,6 @@ class TransferResult:
     success: bool
     transfer_size: int | None = None
     transfer_time: float | None = None
-    transfer_type: TransferType | None = None
 
 
 class OffloadingWorker(ABC):

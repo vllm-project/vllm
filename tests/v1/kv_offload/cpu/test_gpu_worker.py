@@ -175,11 +175,6 @@ def test_transfer(
         if finished:
             assert finished[0].job_id == 1
             assert finished[0].success
-            assert (
-                finished[0].transfer_type == ("GPU", "CPU")
-                if gpu_to_cpu
-                else ("CPU", "GPU")
-            )
             assert finished[0].transfer_size == (
                 len(gpu_blocks)
                 * sum([x.page_size_bytes for x in handler.kv_cache_groups_data_refs[0]])

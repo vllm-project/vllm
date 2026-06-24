@@ -224,7 +224,6 @@ class SingleDirectionOffloadingHandler:
         self.src_block_size_factor = 1 if self.gpu_to_cpu else block_size_factor
         self.dst_block_size_factor = block_size_factor if self.gpu_to_cpu else 1
 
-        self.transfer_type = ("GPU", "CPU") if self.gpu_to_cpu else ("CPU", "GPU")
         # mmap_region to clean up on shutdown (gpu_to_cpu handler owns it)
         self._mmap_region = mmap_region
         # job_id -> event
@@ -432,7 +431,6 @@ class SingleDirectionOffloadingHandler:
                 success=True,
                 transfer_size=transfer.num_bytes,
                 transfer_time=transfer_time,
-                transfer_type=self.transfer_type,
             )
 
             results.append(result)

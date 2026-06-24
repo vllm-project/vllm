@@ -113,7 +113,6 @@ class MockOffloadingWorker(OffloadingWorker):
                     success=True,
                     transfer_size=None,
                     transfer_time=None,
-                    transfer_type=None,
                 )
                 self.completed_transfers.append(result)
 
