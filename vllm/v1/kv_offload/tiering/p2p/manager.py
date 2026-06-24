@@ -360,32 +360,32 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         keys = list(job_metadata.keys)
         block_ids = job_metadata.block_ids
 
-        prefill = _prefill_params(job_metadata.req_context.kv_transfer_params)
+        consumer = _consumer_params(job_metadata.req_context.kv_transfer_params)
         logger.debug(
             "P2P %s: submit_load ENTRY job_id=%d blocks=%d kv_request_id=%s peer=%s",
             self._local_id,
             job_id,
             len(block_ids),
-            (prefill or {}).get("kv_request_id"),
-            self._remote_id_from_params(prefill or {}),
+            (consumer or {}).get("kv_request_id"),
+            self._remote_id_from_params(consumer or {}),
         )
         if (
-            not prefill
-            or not prefill.get("remote_host")
-            or not prefill.get("remote_port")
-            or not prefill.get("kv_request_id")
+            not consumer
+            or not consumer.get("remote_host")
+            or not consumer.get("remote_port")
+            or not consumer.get("kv_request_id")
         ):
             logger.debug(
-                "P2P %s: submit_load job_id=%d FAILED missing prefill params",
+                "P2P %s: submit_load job_id=%d FAILED missing consumer params",
                 self._local_id,
                 job_id,
             )
             self._finished_jobs.append(JobResult(job_id=job_id, success=False))
             return
 
-        kv_request_id = prefill["kv_request_id"]
-        peer_id = self._remote_id_from_params(prefill)
-        assert peer_id is not None  # guaranteed by prefill checks above
+        kv_request_id = consumer["kv_request_id"]
+        peer_id = self._remote_id_from_params(consumer)
+        assert peer_id is not None  # guaranteed by consumer checks above
 
         if not keys:
             logger.debug(

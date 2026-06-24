@@ -292,6 +292,20 @@ class TestSubmitLoad:
         assert mgr._finished_jobs == []
         assert "req-42" not in mgr._failed_req_ids
 
+    def test_missing_consumer_flag_fails(self):
+        """Peer fields present but neither do_remote_prefill nor
+        do_p2p_fetch is set — submit_load fails the job rather than
+        emit a stray FetchMsg."""
+        mgr = _make_manager()
+        params = {
+            "remote_host": "10.0.0.1",
+            "remote_port": 8000,
+            "kv_request_id": "req-1",
+        }
+        job = _job_metadata(job_id=1, kv_params=params)
+        mgr.submit_load(job)
+        assert mgr._finished_jobs == [JobResult(job_id=1, success=False)]
+
 
 # ---------------------------------------------------------------------------
 # Tests for on_request_finished
