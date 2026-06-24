@@ -6,6 +6,11 @@ from typing import cast
 
 import torch
 
+import vllm.envs as envs
+from vllm.distributed import (
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import dequantize_and_gather_k_cache
@@ -30,6 +35,8 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_sparse_attn_prefill,
 )
 from vllm.v1.worker.workspace import current_workspace_manager
+
+_USE_AITER_ATTN_PRESHUFFLE = envs.VLLM_DSV4_AITER_ATTN_PRESHUFFLE
 
 
 def _build_indptr_from_lengths(lengths: torch.Tensor) -> torch.Tensor:
@@ -583,9 +590,59 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
 
     backend_cls = DeepseekV4ROCMAiterMLASparseBackend
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # (weight, scale) preshuffled at load; None when preshuffle is off.
+        self._wqa_wkv_pre: tuple[torch.Tensor, torch.Tensor] | None = None
+        self._wo_b_pre: tuple[torch.Tensor, torch.Tensor] | None = None
+
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
         return num_heads
+
+    def prepare_attn_preshuffle(self) -> None:
+        if not _USE_AITER_ATTN_PRESHUFFLE:
+            return
+        from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+            _upcast_e8m0_to_fp32,
+        )
+
+        def _prep(linear) -> tuple[torch.Tensor, torch.Tensor] | None:
+            w = getattr(linear, "weight", None)
+            if w is None or w.dim() != 2 or w.shape[-1] % 128 != 0:
+                return None
+            ws = getattr(linear, "weight_scale_inv", None)  # per-block scale
+            if ws is None:
+                return None
+            if ws.dtype == torch.float8_e8m0fnu:
+                ws = _upcast_e8m0_to_fp32(ws).contiguous()
+            return rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)), ws
+
+        self._wqa_wkv_pre = _prep(self.fused_wqa_wkv)
+        self._wo_b_pre = _prep(self.wo_b)
+
+    def _bpre_attn_gemm(
+        self,
+        pre: tuple[torch.Tensor, torch.Tensor],
+        x: torch.Tensor,
+        reduce_tp: bool,
+    ) -> torch.Tensor:
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        w_pre, w_scale = pre
+        x_fp8, x_scale = rocm_aiter_ops.group_fp8_quant_transpose_scale(x)
+        out = rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
+            x_fp8, w_pre, x_scale, w_scale, output_dtype=x.dtype
+        )
+        if reduce_tp and get_tensor_model_parallel_world_size() > 1:
+            out = tensor_model_parallel_all_reduce(out)
+        return out
+
+    def _fused_wqa_wkv_gemm(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if self._wqa_wkv_pre is not None and hidden_states.dim() == 2:
+            return self._bpre_attn_gemm(self._wqa_wkv_pre, hidden_states, False)
+        return super()._fused_wqa_wkv_gemm(hidden_states)
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         # ROCm BF16 reference wo_a path (inverse RoPE + einsum) + wo_b.
@@ -598,7 +655,10 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             self.o_lora_rank,
             self.wo_a,
         )
-        return self.wo_b(z.flatten(1))
+        zf = z.flatten(1)
+        if self._wo_b_pre is not None and zf.dim() == 2:
+            return self._bpre_attn_gemm(self._wo_b_pre, zf, True)
+        return self.wo_b(zf)
 
     def forward_mqa(
         self,
