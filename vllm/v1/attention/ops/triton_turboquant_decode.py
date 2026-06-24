@@ -230,9 +230,12 @@ def _tq_decode_stage1(
                     axis=1,
                 )
                 c_inv_norm = 1.0 / tl.sqrt(c_norm_sq + 1e-16)
-                c_vals = (c_vals.to(tl.float32) * c_inv_norm[:, None]).to(tl.bfloat16)
+                # Keep as fp32 for reconstruction (Path B)
+                c_vals_f32 = c_vals.to(tl.float32) * c_inv_norm[:, None]
+            else:
+                c_vals_f32 = c_vals.to(tl.float32)
 
-            # Load norms (bf16): norms are at MSE_BYTES offset
+            # Load norms (fp16): norms are at MSE_BYTES offset
             norm_bases = slot_bases + MSE_BYTES
             n_lo = tl.load(KV_cache_ptr + norm_bases, mask=kv_mask, other=0).to(
                 tl.uint16
@@ -240,10 +243,12 @@ def _tq_decode_stage1(
             n_hi = tl.load(KV_cache_ptr + norm_bases + 1, mask=kv_mask, other=0).to(
                 tl.uint16
             )
-            vec_norms = (n_lo | (n_hi << 8)).to(tl.bfloat16, bitcast=True)  # [BLOCK_N] bf16
+            vec_norms = (n_lo | (n_hi << 8)).to(tl.float16, bitcast=True)  # [BLOCK_N] fp16
 
-            # Reconstruct K: centroid * norm → bf16
-            k_bf16 = c_vals * vec_norms[:, None]  # [BLOCK_N, BLOCK_D] bf16
+            # Reconstruct K in fp32, then convert to bf16 (Path B)
+            vec_norms_f32 = vec_norms.to(tl.float32)
+            k_f32 = c_vals_f32 * vec_norms_f32[:, None]
+            k_bf16 = k_f32.to(tl.bfloat16)  # [BLOCK_N, BLOCK_D] bf16
 
             if BLOCK_N >= 16:
                 # TC path: tl.dot
@@ -465,7 +470,7 @@ def _tq_full_dequant_kv(
         norm_base = slot_base + MSE_BYTES
         n_lo = tl.load(KV_cache_ptr + norm_base).to(tl.uint16)
         n_hi = tl.load(KV_cache_ptr + norm_base + 1).to(tl.uint16)
-        vec_norm = (n_lo | (n_hi << 8)).to(tl.bfloat16, bitcast=True).to(tl.float32)
+        vec_norm = (n_lo | (n_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
 
         k_recon = vec_norm * k_mse
         tl.store(K_out_ptr + ko_base + d_offs, k_recon.to(tl.float16), mask=d_mask)

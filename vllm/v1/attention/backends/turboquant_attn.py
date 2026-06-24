@@ -831,9 +831,12 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         qdtype = query.dtype
         k_full = torch.empty(seq_len, Hk, D, dtype=qdtype, device=device)
         v_full = torch.empty(seq_len, Hk, D, dtype=qdtype, device=device)
-        k_full[:cached_len] = k_cached_trim.to(qdtype)
+        # Use in-place copy_ for fused copy+cast, avoiding extra allocation and memory bandwidth from .to()
+        # k_full[:cached_len] = k_cached_trim.to(qdtype)
+        k_full[:cached_len] = k_cached_trim
         k_full[cached_len:] = key_chunk
-        v_full[:cached_len] = v_cached_trim.to(qdtype)
+        # v_full[:cached_len] = v_cached_trim.to(qdtype)
+        v_full[:cached_len] = v_cached_trim
         v_full[cached_len:] = val_chunk
 
         # Attention: q_len queries attending to seq_len K/V with causal mask
