@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="arc-ray-qwen3-30b-rayclient-readiness-exact-iface-v3"
+SCRIPT_VERSION="arc-ray-qwen3-30b-rayclient-readiness-retry-exact-iface-v4"
 
 DEBUG_SLURM_SCRIPT="${DEBUG_SLURM_SCRIPT:-0}"
 NSYS_COPY_DEBUG="${NSYS_COPY_DEBUG:-0}"
@@ -25,6 +25,11 @@ NSYS_COPY_DEBUG="${NSYS_COPY_DEBUG:-0}"
 SRUN_COPY_TIMEOUT="${SRUN_COPY_TIMEOUT:-480s}"
 SERVER_SHUTDOWN_TIMEOUT_S="${SERVER_SHUTDOWN_TIMEOUT_S:-420}"
 HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-900}"
+
+RAY_CLIENT_PORT="${RAY_CLIENT_PORT:-10001}"
+RAY_CLIENT_READINESS_TIMEOUT_S="${RAY_CLIENT_READINESS_TIMEOUT_S:-360}"
+RAY_HEAD_START_SLEEP_S="${RAY_HEAD_START_SLEEP_S:-60}"
+RAY_WORKER_START_SLEEP_S="${RAY_WORKER_START_SLEEP_S:-30}"
 
 WORKER_NSYS_LIVE_COPY_INTERVAL="${WORKER_NSYS_LIVE_COPY_INTERVAL:-2}"
 WORKER_NSYS_FINALIZE_WAIT_S="${WORKER_NSYS_FINALIZE_WAIT_S:-180}"
@@ -38,10 +43,10 @@ export NSYS_ENABLE="${NSYS_ENABLE:-1}"
 export NSYS_PROFILE_WORKERS="${NSYS_PROFILE_WORKERS:-1}"
 export NSYS_PROFILE_RAY="${NSYS_PROFILE_RAY:-0}"
 
-# Keep Ray usage telemetry enabled, per your preference.
-export RAY_USAGE_STATS_ENABLED=1
+# Keep Ray usage telemetry enabled.
+export RAY_USAGE_STATS_ENABLED="${RAY_USAGE_STATS_ENABLED:-1}"
 
-# More useful logs for the next failure mode, once vLLM actually starts.
+# Debug logging for vLLM/NCCL/Ray.
 export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-DEBUG}"
 export VLLM_LOG_STATS_INTERVAL="${VLLM_LOG_STATS_INTERVAL:-1}"
 export TORCH_DISTRIBUTED_DEBUG="${TORCH_DISTRIBUTED_DEBUG:-DETAIL}"
@@ -164,6 +169,35 @@ configure_socket_ifnames() {
   export NCCL_SOCKET_FAMILY="${NCCL_SOCKET_FAMILY:-AF_INET}"
 
   echo "Socket interface for ${target_ip} on $(hostname): GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME} NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME} VLLM_HOST_IP=${VLLM_HOST_IP}"
+}
+
+network_debug_snapshot() {
+  local label="$1"
+
+  echo "=== network debug: ${label} ==="
+  echo "hostname=$(hostname)"
+  echo "hostname -s=$(hostname -s 2>/dev/null || true)"
+  echo "hostname -I=$(hostname -I 2>/dev/null || true)"
+  echo "HEAD_NODE=${HEAD_NODE:-}"
+  echo "WORKER_NODES=${WORKER_NODES:-}"
+  echo "HEAD_NODE_IP=${HEAD_NODE_IP:-}"
+  echo "VLLM_HOST_IP=${VLLM_HOST_IP:-}"
+  echo "HOST=${HOST:-}"
+  echo "PORT=${PORT:-}"
+  echo "RAY_ADDRESS=${RAY_ADDRESS:-}"
+  echo "RAY_PORT=${RAY_PORT:-}"
+  echo "RAY_CLIENT_PORT=${RAY_CLIENT_PORT:-}"
+  echo "GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-}"
+  echo "NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-}"
+  echo "NCCL_SOCKET_FAMILY=${NCCL_SOCKET_FAMILY:-}"
+  echo "NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-}"
+  echo "NCCL_NET=${NCCL_NET:-}"
+  echo "NCCL_IB_HCA=${NCCL_IB_HCA:-}"
+  echo "--- ip -o -4 addr show ---"
+  ip -o -4 addr show 2>/dev/null || true
+  echo "--- nvidia-smi -L ---"
+  nvidia-smi -L 2>/dev/null || true
+  echo "=== end network debug: ${label} ==="
 }
 
 copy_ray_nsight_locally_once() {
@@ -479,6 +513,7 @@ export RAY_PORT="${RAY_PORT:-6378}"
 export RAY_ADDRESS="${HEAD_NODE_IP}:${RAY_PORT}"
 
 echo "RAY_PORT=${RAY_PORT} RAY_ADDRESS=${RAY_ADDRESS}"
+echo "RAY_CLIENT_PORT=${RAY_CLIENT_PORT}"
 echo "TRACE_RUN_DIR=${TRACE_RUN_DIR}"
 echo "NSYS_DIR=${NSYS_DIR}"
 echo "NCCL_DEBUG_FILE=${NCCL_DEBUG_FILE}"
@@ -588,6 +623,7 @@ SERVE_SCRIPT="${REPO_ROOT}/serving_scripts/serve_ShareGPT_multi_node.sh"
 export MODEL_ID HOST PORT GPUS_PER_NODE NUM_NODES TP PP EP MAX_MODEL_LEN CPUS_PER_TASK SERVE_SCRIPT
 
 configure_socket_ifnames "${HEAD_NODE_IP}"
+network_debug_snapshot "batch-before-ray"
 
 echo "=== runtime knobs ==="
 echo "MODEL_ID=${MODEL_ID} HOST=${HOST} PORT=${PORT} TP=${TP} PP=${PP} EP=${EP}"
@@ -638,11 +674,21 @@ RAY_HEAD_CMD="$(
   declare -f interface_for_ip
   declare -f interface_has_ip
   declare -f configure_socket_ifnames
+  declare -f network_debug_snapshot
   declare -f copy_ray_nsight_locally_once
   declare -f copy_ray_nsight_locally_final
   declare -f start_ray_nsight_live_copier
 )
 source \"${VENV_DIR}/bin/activate\"
+
+export HEAD_NODE='${HEAD_NODE}'
+export WORKER_NODES='${WORKER_NODES}'
+export HEAD_NODE_IP='${HEAD_NODE_IP}'
+export HOST='${HOST}'
+export PORT='${PORT}'
+export RAY_PORT='${RAY_PORT}'
+export RAY_ADDRESS='${RAY_ADDRESS}'
+export RAY_CLIENT_PORT='${RAY_CLIENT_PORT}'
 
 export TRACE_RUN_DIR='${TRACE_RUN_DIR}'
 export SLURM_JOB_ID='${SLURM_JOB_ID:-unknown}'
@@ -651,7 +697,7 @@ export DEBUG_SLURM_SCRIPT='${DEBUG_SLURM_SCRIPT}'
 export WORKER_NSYS_LIVE_COPY_INTERVAL='${WORKER_NSYS_LIVE_COPY_INTERVAL}'
 export MIN_WORKER_NSYS_REP_BYTES='${MIN_WORKER_NSYS_REP_BYTES}'
 
-export RAY_USAGE_STATS_ENABLED=1
+export RAY_USAGE_STATS_ENABLED='${RAY_USAGE_STATS_ENABLED}'
 export VLLM_LOGGING_LEVEL='${VLLM_LOGGING_LEVEL}'
 export VLLM_LOG_STATS_INTERVAL='${VLLM_LOG_STATS_INTERVAL}'
 export TORCH_DISTRIBUTED_DEBUG='${TORCH_DISTRIBUTED_DEBUG}'
@@ -674,6 +720,7 @@ export NSYS_DIR='${NSYS_DIR}'
 unset GLOO_SOCKET_IFNAME
 unset NCCL_SOCKET_IFNAME
 configure_socket_ifnames \"${HEAD_NODE_IP}\"
+network_debug_snapshot \"ray-head-before-start\"
 
 start_ray_nsight_live_copier
 
@@ -711,7 +758,8 @@ srun \
 HEAD_RAY_PID=$!
 
 echo "HEAD_RAY_PID=${HEAD_RAY_PID}"
-sleep 20
+echo "Sleeping ${RAY_HEAD_START_SLEEP_S}s to let Ray head open GCS/Ray Client ports..."
+sleep "${RAY_HEAD_START_SLEEP_S}"
 
 if [ -n "${WORKER_NODES}" ]; then
   echo "=== Ray workers ==="
@@ -731,11 +779,21 @@ if [ -n "${WORKER_NODES}" ]; then
       declare -f interface_for_ip
       declare -f interface_has_ip
       declare -f configure_socket_ifnames
+      declare -f network_debug_snapshot
       declare -f copy_ray_nsight_locally_once
       declare -f copy_ray_nsight_locally_final
       declare -f start_ray_nsight_live_copier
 )
 source \"${VENV_DIR}/bin/activate\"
+
+export HEAD_NODE='${HEAD_NODE}'
+export WORKER_NODES='${WORKER_NODES}'
+export HEAD_NODE_IP='${HEAD_NODE_IP}'
+export HOST='${HOST}'
+export PORT='${PORT}'
+export RAY_PORT='${RAY_PORT}'
+export RAY_ADDRESS='${RAY_ADDRESS}'
+export RAY_CLIENT_PORT='${RAY_CLIENT_PORT}'
 
 export TRACE_RUN_DIR='${TRACE_RUN_DIR}'
 export SLURM_JOB_ID='${SLURM_JOB_ID:-unknown}'
@@ -744,7 +802,7 @@ export DEBUG_SLURM_SCRIPT='${DEBUG_SLURM_SCRIPT}'
 export WORKER_NSYS_LIVE_COPY_INTERVAL='${WORKER_NSYS_LIVE_COPY_INTERVAL}'
 export MIN_WORKER_NSYS_REP_BYTES='${MIN_WORKER_NSYS_REP_BYTES}'
 
-export RAY_USAGE_STATS_ENABLED=1
+export RAY_USAGE_STATS_ENABLED='${RAY_USAGE_STATS_ENABLED}'
 export VLLM_LOGGING_LEVEL='${VLLM_LOGGING_LEVEL}'
 export VLLM_LOG_STATS_INTERVAL='${VLLM_LOG_STATS_INTERVAL}'
 export TORCH_DISTRIBUTED_DEBUG='${TORCH_DISTRIBUTED_DEBUG}'
@@ -767,6 +825,7 @@ export NSYS_DIR='${NSYS_DIR}'
 unset GLOO_SOCKET_IFNAME
 unset NCCL_SOCKET_IFNAME
 configure_socket_ifnames \"${WORKER_IP}\"
+network_debug_snapshot \"ray-worker-before-start\"
 
 start_ray_nsight_live_copier
 
@@ -804,47 +863,88 @@ fi"
     echo "Worker Ray step pid: $! (WORKER_RAY_PIDS=${WORKER_RAY_PIDS})"
   done
 
-  sleep 20
+  echo "Sleeping ${RAY_WORKER_START_SLEEP_S}s to let Ray worker join..."
+  sleep "${RAY_WORKER_START_SLEEP_S}"
 fi
 
 echo "=== Ray cluster readiness via Ray Client ==="
-echo "Checking Ray resources through ray://${HEAD_NODE_IP}:10001 ..."
+echo "Waiting for Ray Client at ray://${HEAD_NODE_IP}:${RAY_CLIENT_PORT} ..."
 echo "This intentionally avoids ray status and ray.init(address=auto)."
 
-python - <<'PY'
+export HEAD_NODE_IP NUM_NODES GPUS_PER_NODE RAY_CLIENT_PORT RAY_CLIENT_READINESS_TIMEOUT_S
+
+python -u <<'PY'
 import os
 import sys
+import time
+import socket
 import ray
 
 head_ip = os.environ["HEAD_NODE_IP"]
 num_nodes = int(os.environ.get("NUM_NODES", "2"))
 gpus_per_node = int(os.environ.get("GPUS_PER_NODE", "1"))
 expected_gpus = num_nodes * gpus_per_node
+ray_client_port = int(os.environ.get("RAY_CLIENT_PORT", "10001"))
+timeout_s = int(os.environ.get("RAY_CLIENT_READINESS_TIMEOUT_S", "360"))
 
-ray.init(f"ray://{head_ip}:10001")
+deadline = time.time() + timeout_s
+last_error = None
 
-resources = ray.cluster_resources()
-available = ray.available_resources()
+print(f"Expected Ray resources: nodes={num_nodes}, GPUs={expected_gpus}")
+print(f"Waiting for TCP {head_ip}:{ray_client_port} ...")
 
-print("Ray cluster resources:", resources)
-print("Ray available resources:", available)
-
-actual_gpus = resources.get("GPU", 0)
-node_keys = [
-    k for k in resources
-    if k.startswith("node:") and k != "node:__internal_head__"
-]
-
-if actual_gpus < expected_gpus or len(node_keys) < num_nodes:
-    print(
-        f"ERROR: expected {num_nodes} nodes and {expected_gpus} GPUs, "
-        f"got nodes={node_keys}, GPUs={actual_gpus}",
-        file=sys.stderr,
-    )
+while time.time() < deadline:
+    try:
+        with socket.create_connection((head_ip, ray_client_port), timeout=5):
+            print(f"Ray Client TCP port is reachable: {head_ip}:{ray_client_port}")
+            break
+    except Exception as e:
+        last_error = repr(e)
+        print(f"Ray Client TCP port not ready yet: {last_error}")
+        time.sleep(5)
+else:
+    print(f"ERROR: Ray Client TCP port never became reachable: {head_ip}:{ray_client_port}", file=sys.stderr)
+    print(f"Last error: {last_error}", file=sys.stderr)
     sys.exit(1)
 
-ray.shutdown()
-print("Ray cluster is ready.")
+print(f"Connecting to ray://{head_ip}:{ray_client_port} ...")
+
+while time.time() < deadline:
+    try:
+        ray.init(f"ray://{head_ip}:{ray_client_port}")
+
+        resources = ray.cluster_resources()
+        available = ray.available_resources()
+
+        print("Ray cluster resources:", resources)
+        print("Ray available resources:", available)
+
+        actual_gpus = resources.get("GPU", 0)
+        node_keys = [
+            k for k in resources
+            if k.startswith("node:") and k != "node:__internal_head__"
+        ]
+
+        if actual_gpus >= expected_gpus and len(node_keys) >= num_nodes:
+            print("Ray cluster is ready.")
+            ray.shutdown()
+            sys.exit(0)
+
+        print(
+            f"Ray connected but resources not ready yet: "
+            f"nodes={node_keys}, GPUs={actual_gpus}; "
+            f"expected nodes={num_nodes}, GPUs={expected_gpus}"
+        )
+        ray.shutdown()
+    except Exception as e:
+        last_error = repr(e)
+        print(f"Ray Client connection/resources not ready yet: {last_error}")
+
+    time.sleep(5)
+
+print("ERROR: Ray cluster readiness timed out.", file=sys.stderr)
+print(f"Last error: {last_error}", file=sys.stderr)
+sys.exit(1)
 PY
 
 echo "=== vLLM api_server (background process; no outer nsys wrapper) ==="
