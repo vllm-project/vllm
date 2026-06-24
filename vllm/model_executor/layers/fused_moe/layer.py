@@ -79,14 +79,14 @@ def determine_expert_counts(
     global_num_experts = num_experts + num_redundant_experts
     logical_num_experts = num_experts
     # Shared-expert fusion: append the shared expert(s) as routed-expert slots
-    # so they run in the same grouped GEMM. Enabled by the ROCm aiter fused-MoE
-    # path (VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS + master switch) or by the
-    # backend-neutral router-append path (VLLM_ROCM_USE_FUSION_SHARED_EXPERTS;
-    # works on any gated grouped-MoE backend, e.g. the MM3 triton/flydsl mxfp8
-    # MoE, independent of the aiter master switch). Gated activations only.
+    # so they run in the same grouped GEMM. Gated by
+    # VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: either the native aiter fused-MoE
+    # path (env + master switch, via is_fusion_moe_shared_experts_enabled) or the
+    # backend-neutral router-append path (env alone, independent of the master
+    # switch; e.g. the MM3 triton/flydsl mxfp8 MoE). Gated activations only.
     fuse_shared_enabled = (
         rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
-        or envs.VLLM_ROCM_USE_FUSION_SHARED_EXPERTS
+        or envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
     ) and is_act_and_mul
 
     num_fused_shared_experts = (

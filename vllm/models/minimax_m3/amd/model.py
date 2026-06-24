@@ -109,16 +109,16 @@ from vllm.v1.kv_cache_interface import (
 def _fuse_shared_experts_enabled(config: PretrainedConfig) -> bool:
     """Whether to fuse the shared expert into the routed grouped MoE.
 
-    ROCm only. Opt-in via ``VLLM_ROCM_USE_FUSION_SHARED_EXPERTS`` (router-append
-    fusion on the triton/flydsl mxfp8 MoE, independent of the aiter master
-    switch); requires a shared expert and is disabled under expert parallelism
-    (the shared slot is appended to the routed top-k, which the EP expert-map
-    path does not handle).
+    ROCm only. Opt-in via ``VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS`` (the
+    router-append fusion runs on the triton/flydsl mxfp8 MoE independent of the
+    aiter master switch); requires a shared expert and is disabled under expert
+    parallelism (the shared slot is appended to the routed top-k, which the EP
+    expert-map path does not handle).
     """
     return bool(
         current_platform.is_rocm()
         and getattr(config, "n_shared_experts", None)
-        and envs.VLLM_ROCM_USE_FUSION_SHARED_EXPERTS
+        and envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
         and not get_current_vllm_config().parallel_config.enable_expert_parallel
     )
 
@@ -314,7 +314,7 @@ class MiniMaxM3MoE(nn.Module):
         )
 
         # Fuse the shared expert into the routed grouped GEMM when opted in via
-        # VLLM_ROCM_USE_FUSION_SHARED_EXPERTS: it becomes routed-expert slot
+        # VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: it becomes routed-expert slot
         # ``num_local_experts``, reached by every token, eliminating the
         # separate dense-MLP launches. Not supported under expert parallelism.
         self.fuse_shared_experts = _fuse_shared_experts_enabled(config)
