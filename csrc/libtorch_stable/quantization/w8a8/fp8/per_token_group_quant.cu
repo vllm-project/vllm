@@ -120,7 +120,7 @@ __global__ void per_token_group_quant_8bit_kernel(
   scale_element_t* scale_output;
 
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-  asm volatile("griddepcontrol.wait;");
+  cudaGridDependencySynchronize();
 #endif
 
   if constexpr (IS_COLUMN_MAJOR) {
@@ -159,7 +159,7 @@ __global__ void per_token_group_quant_8bit_kernel(
                               threads_per_group, y_s, min_8bit, max_8bit);
 
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-  asm volatile("griddepcontrol.launch_dependents;");
+  cudaTriggerProgrammaticLaunchCompletion();
 #endif
 }
 
@@ -326,12 +326,12 @@ __global__ void per_token_group_quant_8bit_packed_register_kernel(
   const int mn_idx = blockIdx.x * kRowsPerBlock + row_local;
 
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-  asm volatile("griddepcontrol.wait;");
+  cudaGridDependencySynchronize();
 #endif
 
   if (mn_idx >= tma_aligned_mn) {
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-    asm volatile("griddepcontrol.launch_dependents;");
+    cudaTriggerProgrammaticLaunchCompletion();
 #endif
     return;
   }
@@ -448,7 +448,7 @@ __global__ void per_token_group_quant_8bit_packed_register_kernel(
   *reinterpret_cast<uint4*>(group_output) = packed_out;
 
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-  asm volatile("griddepcontrol.launch_dependents;");
+  cudaTriggerProgrammaticLaunchCompletion();
 #endif
 }
 
