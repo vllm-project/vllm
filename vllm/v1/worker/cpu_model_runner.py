@@ -158,6 +158,8 @@ class CPUModelRunner(GPUModelRunner):
 
     def _zero_block_ids(self, block_ids: list[int]) -> None:
         # Zero full-attention blocks to prevent stale data corruption on partial writes.
+        # Encoder-only (runner-only) layers are not FullAttentionSpec, so the
+        # spec filter below already excludes them; no runner-only skip needed.
         seen_ptrs: set[int] = set()
         for group in self.kv_cache_config.kv_cache_groups:
             if not isinstance(group.kv_cache_spec, FullAttentionSpec):

@@ -5,6 +5,7 @@
 Contains replacement functions to fallback Triton usages in CPU backend
 """
 
+import ctypes
 from collections.abc import Callable
 
 import torch
@@ -339,8 +340,7 @@ sample_recovered_tokens_kernel = _FuncWrapper(_sample_recovered_tokens_kernel_im
 
 
 def _batch_memcpy_impl(src_ptrs, dst_ptrs, sizes, BLOCK_SIZE=None):
-    import ctypes
-
+    # BLOCK_SIZE is unused; kept for signature parity with the Triton kernel.
     for src, dst, size in zip(src_ptrs.tolist(), dst_ptrs.tolist(), sizes.tolist()):
         ctypes.memmove(dst, src, size)
 

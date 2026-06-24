@@ -513,3 +513,26 @@ def test_causal_conv1d_fwd_cpu_two_call_split(total_tokens: int, split: int) -> 
     out_split = torch.cat([out1, out2], dim=1)
 
     torch.testing.assert_close(out_split, out_full, atol=1e-2, rtol=1e-2)
+
+
+@torch.inference_mode()
+def test_batch_memcpy_cpu_fallback() -> None:
+    """The ctypes batch_memcpy fallback (used when triton-cpu is absent) must
+    copy each src into its dst, validating the (src_ptrs, dst_ptrs, sizes)
+    argument order against ctypes.memmove(dst, src, size).
+    """
+    from vllm.utils.cpu_triton_utils import batch_memcpy_kernel
+
+    # Varied byte sizes, including a non-power-of-two run.
+    sizes_bytes = [256, 1024, 17 * 4, 4096]
+    srcs = [torch.rand(n // 4, dtype=torch.float32) for n in sizes_bytes]
+    dsts = [torch.zeros_like(s) for s in srcs]
+
+    src_ptrs = torch.tensor([s.data_ptr() for s in srcs], dtype=torch.uint64)
+    dst_ptrs = torch.tensor([d.data_ptr() for d in dsts], dtype=torch.uint64)
+    sizes = torch.tensor(sizes_bytes, dtype=torch.int32)
+
+    batch_memcpy_kernel[(len(srcs),)](src_ptrs, dst_ptrs, sizes, BLOCK_SIZE=1024)
+
+    for src, dst in zip(srcs, dsts):
+        torch.testing.assert_close(dst, src)
