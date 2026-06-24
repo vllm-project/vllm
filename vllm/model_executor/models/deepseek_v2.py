@@ -363,7 +363,6 @@ class DeepseekV2MoE(nn.Module):
         self,
         hidden_states: torch.Tensor,
         already_sequence_parallel: bool = False,
-        gather_output: bool = True,
     ) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
@@ -383,13 +382,13 @@ class DeepseekV2MoE(nn.Module):
                 hidden_states=hidden_states, router_logits=router_logits
             )
 
-        if self.is_sequence_parallel and gather_output:
+        if self.is_sequence_parallel and not already_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(
                 final_hidden_states, 0
             )
             final_hidden_states = final_hidden_states[:num_tokens]
 
-        return final_hidden_states.view(num_tokens, hidden_dim)
+        return final_hidden_states.view(final_hidden_states.shape[0], hidden_dim)
 
 
 def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
@@ -1256,7 +1255,6 @@ class DeepseekV2DecoderLayer(nn.Module):
             hidden_states = self.mlp(
                 hidden_states,
                 already_sequence_parallel=True,
-                gather_output=False,
             )
         else:
             hidden_states = self.mlp(hidden_states)
