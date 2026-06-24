@@ -341,9 +341,8 @@ sample_recovered_tokens_kernel = _FuncWrapper(_sample_recovered_tokens_kernel_im
 def _batch_memcpy_impl(src_ptrs, dst_ptrs, sizes, BLOCK_SIZE=None):
     import ctypes
 
-    n = src_ptrs.shape[0]
-    for i in range(n):
-        ctypes.memmove(dst_ptrs[i].item(), src_ptrs[i].item(), int(sizes[i].item()))
+    for src, dst, size in zip(src_ptrs.tolist(), dst_ptrs.tolist(), sizes.tolist()):
+        ctypes.memmove(dst, src, size)
 
 
 batch_memcpy_kernel = _FuncWrapper(_batch_memcpy_impl)
