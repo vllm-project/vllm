@@ -8,7 +8,6 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
-import threading
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
@@ -583,10 +582,7 @@ class CPUOffloadingWorker(OffloadingWorker):
             num_pinned,
             time.monotonic() - t0,
         )
-        
-        if self.pin_thread is not None:
-            self.pin_thread.join()
-            logger.info("Background pin memory finished.")
+
     def submit_store(
         self, job_id: int, src_spec: GPULoadStoreSpec, dst_spec: LoadStoreSpec
     ) -> bool:
@@ -609,4 +605,3 @@ class CPUOffloadingWorker(OffloadingWorker):
     def shutdown(self) -> None:
         self._store_handler.shutdown()
         self._load_handler.shutdown()
-
