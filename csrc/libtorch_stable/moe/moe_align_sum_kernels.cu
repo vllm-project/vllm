@@ -350,9 +350,12 @@ __global__ void count_and_sort_expert_tokens_kernel(
       max_num_tokens_padded, nullptr, 0, topk_num, has_expert_map);
 }
 
-// Reduce the topk expert outputs per token (summed in fp32). A 16B-vectorized
-// path handles the common aligned case; a scalar kernel covers the rest. topk
-// is a compile-time constant for common values and runtime otherwise.
+// Reduce the topk expert outputs per token (summed in fp32). The output is
+// dense [num_tokens, d]; the input is addressed by its strides so non-
+// contiguous inputs work without a copy. A 16B-vectorized path is used when
+// the hidden dim is contiguous (innermost stride 1) and aligned; otherwise a
+// scalar kernel reads via arbitrary strides. topk is a compile-time constant
+// for common values and runtime otherwise.
 
 // Elements per 16-byte vector (8 for bf16/fp16, 4 for fp32).
 template <typename scalar_t>
@@ -360,9 +363,10 @@ constexpr int MOE_SUM_VEC = 16 / sizeof(scalar_t);
 
 template <typename scalar_t, int TOPK>
 __global__ void moe_sum_vec_kernel(
-    scalar_t* __restrict__ out,          // [num_tokens, d]
-    const scalar_t* __restrict__ input,  // [num_tokens, topk, d]
-    const int64_t num_tokens, const int d) {
+    scalar_t* __restrict__ out,          // [num_tokens, d], contiguous
+    const scalar_t* __restrict__ input,  // [num_tokens, topk, d], d contiguous
+    const int64_t num_tokens, const int d, const int64_t stride_token,
+    const int64_t stride_topk) {
   using vec_t = vllm::vec_n_t<scalar_t, MOE_SUM_VEC<scalar_t>>;  // 16-byte pack
   constexpr int VEC = MOE_SUM_VEC<scalar_t>;
   const int64_t n_vec = d / VEC;
@@ -371,7 +375,7 @@ __global__ void moe_sum_vec_kernel(
        i += (int64_t)gridDim.x * blockDim.x) {
     const int64_t token = i / n_vec;
     const int64_t v = i % n_vec;
-    const scalar_t* in_tok = input + token * (int64_t)TOPK * d + v * VEC;
+    const scalar_t* in_tok = input + token * stride_token + v * VEC;
 
     float acc[VEC];
 #pragma unroll
@@ -379,7 +383,7 @@ __global__ void moe_sum_vec_kernel(
 
 #pragma unroll
     for (int k = 0; k < TOPK; ++k) {
-      vec_t packed = *reinterpret_cast<const vec_t*>(in_tok + (int64_t)k * d);
+      vec_t packed = *reinterpret_cast<const vec_t*>(in_tok + k * stride_topk);
 #pragma unroll
       for (int j = 0; j < VEC; ++j) acc[j] += static_cast<float>(packed.val[j]);
     }
@@ -394,9 +398,10 @@ __global__ void moe_sum_vec_kernel(
 // Runtime-topk variant of the above.
 template <typename scalar_t>
 __global__ void moe_sum_vec_dynamic_kernel(
-    scalar_t* __restrict__ out,          // [num_tokens, d]
-    const scalar_t* __restrict__ input,  // [num_tokens, topk, d]
-    const int64_t num_tokens, const int d, const int topk) {
+    scalar_t* __restrict__ out,          // [num_tokens, d], contiguous
+    const scalar_t* __restrict__ input,  // [num_tokens, topk, d], d contiguous
+    const int64_t num_tokens, const int d, const int topk,
+    const int64_t stride_token, const int64_t stride_topk) {
   using vec_t = vllm::vec_n_t<scalar_t, MOE_SUM_VEC<scalar_t>>;
   constexpr int VEC = MOE_SUM_VEC<scalar_t>;
   const int64_t n_vec = d / VEC;
@@ -405,14 +410,14 @@ __global__ void moe_sum_vec_dynamic_kernel(
        i += (int64_t)gridDim.x * blockDim.x) {
     const int64_t token = i / n_vec;
     const int64_t v = i % n_vec;
-    const scalar_t* in_tok = input + token * (int64_t)topk * d + v * VEC;
+    const scalar_t* in_tok = input + token * stride_token + v * VEC;
 
     float acc[VEC];
 #pragma unroll
     for (int j = 0; j < VEC; ++j) acc[j] = 0.f;
 
     for (int k = 0; k < topk; ++k) {
-      vec_t packed = *reinterpret_cast<const vec_t*>(in_tok + (int64_t)k * d);
+      vec_t packed = *reinterpret_cast<const vec_t*>(in_tok + k * stride_topk);
 #pragma unroll
       for (int j = 0; j < VEC; ++j) acc[j] += static_cast<float>(packed.val[j]);
     }
@@ -424,18 +429,21 @@ __global__ void moe_sum_vec_dynamic_kernel(
   }
 }
 
-// Scalar fallback for hidden dims not divisible by the vector width.
+// Stride-aware scalar fallback: handles unaligned/non-vectorizable hidden dims
+// (including a non-contiguous hidden stride) via per-element strided reads.
 template <typename scalar_t>
 __global__ void moe_sum_scalar_kernel(
-    scalar_t* __restrict__ out,          // [num_tokens, d]
+    scalar_t* __restrict__ out,          // [num_tokens, d], contiguous
     const scalar_t* __restrict__ input,  // [num_tokens, topk, d]
-    const int d, const int topk) {
+    const int d, const int topk, const int64_t stride_token,
+    const int64_t stride_topk, const int64_t stride_hidden) {
   const int64_t token_idx = blockIdx.x;
+  const scalar_t* in_tok = input + token_idx * stride_token;
   for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
     float x = 0.f;
     for (int k = 0; k < topk; ++k) {
       x += static_cast<float>(
-          VLLM_LDG(&input[token_idx * (int64_t)topk * d + k * d + idx]));
+          VLLM_LDG(&in_tok[k * stride_topk + idx * stride_hidden]));
     }
     out[token_idx * d + idx] = static_cast<scalar_t>(x);
   }
@@ -702,19 +710,28 @@ void batched_moe_align_block_size(int64_t max_tokens_per_batch,
 void moe_sum(torch::stable::Tensor& input,   // [num_tokens, topk, hidden_size]
              torch::stable::Tensor& output)  // [num_tokens, hidden_size]
 {
+  // Output is dense and written in place, so it must be contiguous. The input
+  // is read by its strides (no copy); only the hidden dim needs to be
+  // contiguous to take the vectorized path.
+  STD_TORCH_CHECK(output.is_contiguous(),
+                  "moe_sum expects a contiguous output");
+
   const int hidden_size = input.size(-1);
   const int64_t num_tokens = output.numel() / hidden_size;
   const int topk = input.size(1);
+  const int64_t stride_token = input.stride(0);
+  const int64_t stride_topk = input.stride(1);
+  const int64_t stride_hidden = input.stride(2);
 
   const torch::stable::accelerator::DeviceGuard device_guard(
       output.get_device_index());
   const cudaStream_t stream =
       get_current_cuda_stream(output.get_device_index());
 
-#define LAUNCH_MOE_SUM_VEC(TOPK)                                      \
-  vllm::moe::moe_sum_vec_kernel<scalar_t, TOPK>                       \
-      <<<grid, dim3(block), 0, stream>>>(out_ptr, in_ptr, num_tokens, \
-                                         hidden_size)
+#define LAUNCH_MOE_SUM_VEC(TOPK)                \
+  vllm::moe::moe_sum_vec_kernel<scalar_t, TOPK> \
+      <<<grid, dim3(block), 0, stream>>>(       \
+          out_ptr, in_ptr, num_tokens, hidden_size, stride_token, stride_topk)
 
   VLLM_STABLE_DISPATCH_FLOATING_TYPES(input.scalar_type(), "moe_sum", [&] {
     constexpr int VEC = vllm::moe::MOE_SUM_VEC<scalar_t>;
@@ -722,9 +739,11 @@ void moe_sum(torch::stable::Tensor& input,   // [num_tokens, topk, hidden_size]
     auto* out_ptr = reinterpret_cast<scalar_t*>(output.mutable_data_ptr());
     auto* in_ptr = reinterpret_cast<const scalar_t*>(input.const_data_ptr());
 
-    // Vectorize only when hidden is a whole number of vectors and both
-    // buffers are 16B-aligned; otherwise use the scalar kernel.
-    const bool can_vec = (hidden_size % VEC == 0) &&
+    // Vectorize along hidden only when it is contiguous (innermost stride 1),
+    // a whole number of vectors, and every row offset stays 16B-aligned.
+    const bool can_vec = (stride_hidden == 1) && (hidden_size % VEC == 0) &&
+                         (stride_token % VEC == 0) &&
+                         (stride_topk % VEC == 0) &&
                          (reinterpret_cast<uintptr_t>(in_ptr) % WIDTH == 0) &&
                          (reinterpret_cast<uintptr_t>(out_ptr) % WIDTH == 0);
     if (can_vec) {
@@ -754,14 +773,16 @@ void moe_sum(torch::stable::Tensor& input,   // [num_tokens, topk, hidden_size]
         default:
           vllm::moe::moe_sum_vec_dynamic_kernel<scalar_t>
               <<<grid, dim3(block), 0, stream>>>(out_ptr, in_ptr, num_tokens,
-                                                 hidden_size, topk);
+                                                 hidden_size, topk,
+                                                 stride_token, stride_topk);
           break;
       }
     } else {
       dim3 grid(num_tokens);
       dim3 block(std::min(hidden_size, 1024));
-      vllm::moe::moe_sum_scalar_kernel<scalar_t>
-          <<<grid, block, 0, stream>>>(out_ptr, in_ptr, hidden_size, topk);
+      vllm::moe::moe_sum_scalar_kernel<scalar_t><<<grid, block, 0, stream>>>(
+          out_ptr, in_ptr, hidden_size, topk, stride_token, stride_topk,
+          stride_hidden);
     }
   });
 #undef LAUNCH_MOE_SUM_VEC
