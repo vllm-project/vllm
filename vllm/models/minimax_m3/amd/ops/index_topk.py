@@ -17,11 +17,19 @@ feed the block-sparse attention kernels in ``sparse_attn``.
 import torch
 
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import on_gfx942
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
 
 # One sparse block == one KV page.
 SPARSE_BLOCK_SIZE = 128
+
+# CDNA3 (gfx942 / MI300X): in the decode index-score path one query token
+# (BLOCK_SIZE_HQ == 1) is scored against [N, D] keys, so tl.dot([N,D] x [D,1]) is
+# a degenerate GEMV that wastes >90% of the MFMA tile. Replacing it with a
+# vectorized fp32 multiply + reduce (numerically equivalent) avoids the matrix
+# core entirely. Other AMD archs and NVIDIA keep the tl.dot path.
+_IS_ROCM_GFX942 = tl.constexpr(on_gfx942())
 
 
 # ---------------------------------------------------------------------------
@@ -373,7 +381,13 @@ def _decode_index_score_kernel(
             + off_k[:, None] * stride_ik_pos
             + off_d * stride_ik_d,
         )  # [N,D]
-        kq = tl.dot(k, q)  # [N,HQ]
+        if _IS_ROCM_GFX942 and BLOCK_SIZE_HQ == 1:
+            # Degenerate GEMV (q is [D,1]): vectorized fp32 multiply + reduce
+            # instead of an MFMA tile. Numerically equivalent to tl.dot.
+            q_vec = tl.sum(q, axis=1).to(tl.float32)  # [D]
+            kq = tl.sum(k.to(tl.float32) * q_vec[None, :], axis=1)[:, None]  # [N,1]
+        else:
+            kq = tl.dot(k, q)  # [N,HQ]
         kq = tl.where(pos_mask & q_mask[None, :], kq, float("-inf"))
         score = tl.max(kq, axis=0)  # [HQ]
         is_visible_block = blk < num_blocks_q

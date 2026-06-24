@@ -26,11 +26,22 @@ from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.models.minimax_m3.common.ops.index_topk import (
-    minimax_m3_index_decode,
-    minimax_m3_index_score,
-    minimax_m3_index_topk,
-)
+from vllm.platforms import current_platform
+
+# AMD/ROCm uses the gfx942-optimized lightning-indexer kernels in amd.ops;
+# every other platform uses the generic common.ops implementation.
+if current_platform.is_rocm():
+    from vllm.models.minimax_m3.amd.ops.index_topk import (
+        minimax_m3_index_decode,
+        minimax_m3_index_score,
+        minimax_m3_index_topk,
+    )
+else:
+    from vllm.models.minimax_m3.common.ops.index_topk import (
+        minimax_m3_index_decode,
+        minimax_m3_index_score,
+        minimax_m3_index_topk,
+    )
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
