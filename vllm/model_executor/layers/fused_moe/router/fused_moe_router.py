@@ -19,6 +19,15 @@ class FusedMoERouter(ABC):
         self._routing_replay_out: torch.Tensor | None = None
         self.eplb_state = eplb_state
 
+    @property
+    def hash_indices_table(self) -> torch.Tensor | None:
+        """DeepSeek-V4 hash-layer tid2eid table, or None.
+
+        Monolithic kernels read this to do the hash lookup themselves, since the
+        runner skips select_experts for them.
+        """
+        return getattr(self, "_hash_indices_table", None)
+
     @abstractmethod
     def set_capture_fn(
         self,

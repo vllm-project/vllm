@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -20,6 +22,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 
 __all__ = [
     "AiterW4A8ExpertsMonolithic",
+    "AiterMxfp4Mxfp8ExpertsMonolithic",
     "aiter_triton_kernel_w4a8_moe_forward",
 ]
 
@@ -292,4 +295,291 @@ class AiterW4A8ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             unpadded_K_w1=self.moe_config.hidden_dim_unpadded,
             unpadded_N_w2=self.moe_config.hidden_dim_unpadded,
             unpadded_K_w2=self.moe_config.intermediate_size_per_partition_unpadded,
+        )
+
+
+@functools.cache
+def _aiter_mxfp4_mxfp8_supported() -> bool:
+    """Whether the installed aiter exposes the routing APIs this backend needs."""
+    import inspect
+
+    try:
+        from aiter.ops.triton.moe.moe_routing.routing import (  # noqa: F401
+            routing,
+            routing_from_hash,
+        )
+
+        return "use_grouped_topk" in inspect.signature(routing).parameters
+    except Exception:
+        return False
+
+
+def _aiter_mxfp4_mxfp8_fused_experts(
+    hidden_states: torch.Tensor,
+    w1,  # Tensor or triton_kernels.Tensor
+    w2,  # Tensor or triton_kernels.Tensor
+    routing_data,  # RoutingData
+    gather_indx,  # GatherIndx
+    scatter_indx,  # ScatterIndx
+    quant_config: FusedMoEQuantConfig,
+    swiglu_alpha: float = 1.0,
+    swiglu_limit: float = 1e30,
+    apply_router_weight_on_input: bool = False,
+    a1q_scale: torch.Tensor | None = None,
+    unpadded_N_w1=None,
+    unpadded_K_w1=None,
+    unpadded_N_w2=None,
+    unpadded_K_w2=None,
+    fold_inter_stage_requant: bool = False,
+) -> torch.Tensor:
+    """MXFP4 weights + dynamic per-1x32 MXFP8 activations, two-stage moe_gemm_a8w4."""
+    assert quant_config is not None
+    assert quant_config.w1_bias is None or quant_config.w1_bias.dtype == torch.float32
+    assert quant_config.w2_bias is None or quant_config.w2_bias.dtype == torch.float32
+    assert hidden_states.shape[-1] == w1.shape[-2]
+    assert w2.shape[-1] == w1.shape[1]
+    assert quant_config.w1_precision is not None, (
+        "w1_precision in quant config can't be None"
+    )
+    assert quant_config.w2_precision is not None, (
+        "w2_precision in quant config can't be None"
+    )
+
+    gammas = routing_data.gate_scal if routing_data else None
+
+    from aiter.ops.triton.moe.moe_op_gemm_a8w4 import moe_gemm_a8w4
+    from aiter.ops.triton.moe.quant_moe import downcast_to_mxfp
+
+    from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+        should_use_cdna4_mx_scale_swizzle,
+    )
+
+    # Load-time scale swizzle (_swizzle_mxfp4) and this kernel arg must agree;
+    # both gate on the same predicate (gfx950 AND TP<=2).
+    swizzle = "CDNA4_SCALE" if should_use_cdna4_mx_scale_swizzle() else None
+
+    # Dual-mode input: a pre-quantized fp8 activation (+a1q_scale, e.g. from the
+    # prepare step) is used as-is; otherwise quantize the bf16 input here.
+    if hidden_states.dtype == torch.float8_e4m3fn:
+        assert a1q_scale is not None, "pre-quantized fp8 activations require a1q_scale"
+        x_q, x_sc = hidden_states, a1q_scale
+    else:
+        x_q, x_sc = downcast_to_mxfp(hidden_states, torch.float8_e4m3fn, axis=-1)
+
+    stage1 = moe_gemm_a8w4(
+        x_q,
+        w1.storage.data,
+        x_sc,
+        quant_config.w1_precision.weight_scale.storage.data,
+        None,
+        None,
+        quant_config.w1_bias,
+        routing_data,
+        gather_indx=gather_indx,
+        gammas=gammas if apply_router_weight_on_input else None,
+        swizzle_mx_scale=swizzle,
+        out_dtype=torch.bfloat16,
+        apply_swiglu=True,
+        alpha=swiglu_alpha,
+        limit=swiglu_limit,
+        swiglu_add_residual=False,
+        out_mx_quant=fold_inter_stage_requant,
+        unpadded_N=unpadded_N_w1,
+        unpadded_K=unpadded_K_w1,
+    )
+    if fold_inter_stage_requant:
+        inter_q, inter_sc = stage1
+    else:
+        inter_q, inter_sc = downcast_to_mxfp(stage1, torch.float8_e4m3fn, axis=-1)
+
+    return moe_gemm_a8w4(
+        inter_q,
+        w2.storage.data,
+        inter_sc,
+        quant_config.w2_precision.weight_scale.storage.data,
+        None,
+        None,
+        quant_config.w2_bias,
+        routing_data,
+        scatter_indx=scatter_indx,
+        gammas=None if apply_router_weight_on_input else gammas,
+        swizzle_mx_scale=swizzle,
+        out_dtype=torch.bfloat16,
+        unpadded_N=unpadded_N_w2,
+        unpadded_K=unpadded_K_w2,
+    )
+
+
+class AiterMxfp4Mxfp8ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
+    """
+    Monolithic MXFP4 W4A8 expert using AITER triton kernels, for DeepSeek-V4.
+
+    This backend uses:
+    - aiter.ops.triton.moe.moe_routing.routing for routing (DeepSeek-V4 noaux_tc)
+    - aiter.ops.triton.moe.moe_op_gemm_a8w4.moe_gemm_a8w4 for computation
+
+    Weight format: MXFP4 weights with GFX950 swizzle
+    Activation: Dynamic per-1x32 MXFP8 quantization
+    """
+
+    # Fold the inter-stage mxfp8 requant into stage1's out_mx_quant epilogue.
+    # That epilogue requires split_k == 1, which holds at decode (NK <= this);
+    # prefill (NK > this) uses the explicit 2-kernel requant instead.
+    _FOLD_REQUANT_MAX_NK = 4096
+
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        super().__init__(moe_config, quant_config)
+        self.topk = moe_config.experts_per_token
+
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.Standard
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        if not rocm_aiter_ops.is_enabled():
+            return False
+        from vllm.platforms.rocm import on_gfx950
+
+        return on_gfx950() and _aiter_mxfp4_mxfp8_supported()
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return False
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        # MXFP4 weights; FP8 activation is quantized dynamically in-class.
+        return (weight_key, activation_key) == (kMxfp4Static, None)
+
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation == MoEActivation.SILU
+
+    @staticmethod
+    def _supports_parallel_config(
+        moe_parallel_config: FusedMoEParallelConfig,
+    ) -> bool:
+        # aiter routing() has no expert_map argument -> TP only (no EP/DP).
+        return (
+            not moe_parallel_config.use_all2all_kernels
+            and not moe_parallel_config.enable_eplb
+            and moe_parallel_config.dp_size <= 1
+        )
+
+    @staticmethod
+    def _supports_routing_method(
+        routing_method: RoutingMethodType,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return routing_method == RoutingMethodType.DeepseekV4
+
+    @staticmethod
+    def _supports_router_logits_dtype(
+        router_logits_dtype: torch.dtype | None,
+        routing_method: RoutingMethodType,
+    ) -> bool:
+        return True
+
+    @property
+    def expects_unquantized_inputs(self) -> bool:
+        # Take bf16 and self-quantize to per-1x32 mxfp8
+        return True
+
+    def apply(
+        self,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        router_logits: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        apply_router_weight_on_input: bool,
+        # grouped topk + fused topk bias parameters
+        num_expert_group: int | None = None,
+        e_score_correction_bias: torch.Tensor | None = None,
+        routed_scaling_factor: float | None = None,
+        topk_group: int | None = None,
+        # DeepSeek-V4 hash-layer routing
+        input_ids: torch.Tensor | None = None,
+        hash_indices_table: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        import triton
+        from aiter.ops.triton.moe.moe_routing.routing import routing
+
+        qc = self.quant_config
+        assert qc is not None and qc.use_mxfp4_w4a8 and rocm_aiter_ops.is_enabled()
+        assert self.moe_config.intermediate_size_per_partition_unpadded is not None
+        assert self.moe_config.hidden_dim_unpadded is not None
+
+        rsf = routed_scaling_factor or 1.0
+        if hash_indices_table is not None:
+            # DSv4 hash layer: experts come from the tid2eid table (by token id),
+            # not logits top-k
+            assert input_ids is not None, "DSv4 hash MoE routing requires input_ids"
+            from aiter.ops.triton.moe.moe_routing.routing import routing_from_hash
+
+            E = global_num_experts if global_num_experts > 0 else w1.shape[0]
+            M = router_logits.shape[0]
+            block_m = max(
+                16, min(triton.next_power_of_2(max(M * self.topk // E, 1)), 128)
+            )
+            routing_data, gather_idx, scatter_idx = routing_from_hash(
+                router_logits,
+                hash_indices_table,
+                input_ids,
+                self.topk,
+                block_m,
+                score_mode="sqrtsoftplus",
+                renorm=True,
+                routed_scaling_factor=rsf,
+            )
+        else:
+            use_grouped = num_expert_group is not None and num_expert_group > 1
+            routing_data, gather_idx, scatter_idx = routing(
+                router_logits,
+                self.topk,
+                score_mode="sqrtsoftplus",
+                bias=e_score_correction_bias,
+                renorm=True,
+                routed_scaling_factor=rsf,
+                use_grouped_topk=use_grouped,
+                num_expert_group=num_expert_group,
+                topk_group=topk_group,
+            )
+
+        unpadded_i = self.moe_config.intermediate_size_per_partition_unpadded
+        unpadded_h = self.moe_config.hidden_dim_unpadded
+        nk = router_logits.shape[0] * self.topk
+        fold = nk <= self._FOLD_REQUANT_MAX_NK
+        swiglu_limit = (
+            qc.gemm1_clamp_limit if qc.gemm1_clamp_limit is not None else 1e30
+        )
+        return _aiter_mxfp4_mxfp8_fused_experts(
+            hidden_states,
+            w1,
+            w2,
+            routing_data,
+            gather_idx,
+            scatter_idx,
+            quant_config=qc,
+            swiglu_alpha=1.0,
+            swiglu_limit=swiglu_limit,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            a1q_scale=a1q_scale,
+            unpadded_N_w1=unpadded_i * 2,
+            unpadded_K_w1=unpadded_h,
+            unpadded_N_w2=unpadded_h,
+            unpadded_K_w2=unpadded_i,
+            fold_inter_stage_requant=fold,
         )
