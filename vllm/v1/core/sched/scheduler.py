@@ -64,6 +64,9 @@ from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
 
+DEFERRED_WAIT_REASON_GRAMMAR = "grammar"
+DEFERRED_WAIT_REASON_REMOTE_KV = "remote_kv"
+
 
 class Scheduler(SchedulerInterface):
     def __init__(
@@ -181,6 +184,7 @@ class Scheduler(SchedulerInterface):
         self.waiting = create_request_queue(self.policy)
         # requests skipped in waiting flow due async deps or constraints.
         self.skipped_waiting = create_request_queue(self.policy)
+        self.deferred_wait_times: dict[str, list[float]] = defaultdict(list)
         self.running: list[Request] = []
 
         # The request IDs that are finished in between the previous and the
@@ -732,6 +736,9 @@ class Scheduler(SchedulerInterface):
                             # the KVConnector couldn't determine
                             # the number of matched tokens.
                             request_queue.pop_request()
+                            request.deferred_wait_reason = (
+                                DEFERRED_WAIT_REASON_REMOTE_KV
+                            )
                             step_skipped_waiting.prepend_request(request)
                             continue
 
@@ -936,6 +943,7 @@ class Scheduler(SchedulerInterface):
                     self._inflight_prefills.add(request)
                     continue
 
+                self._record_deferred_wait_end(request, scheduled_timestamp)
                 self.running.append(request)
                 if self.log_stats:
                     request.record_event(
@@ -978,7 +986,9 @@ class Scheduler(SchedulerInterface):
 
             # re-queue requests skipped in this pass ahead of older skipped items.
             if step_skipped_waiting:
-                self.skipped_waiting.prepend_requests(step_skipped_waiting)
+                self._prepend_skipped_waiting_requests(
+                    step_skipped_waiting, scheduled_timestamp
+                )
 
             # DP prefill balancing: on a step that admitted prefills (release),
             # record whether it was capacity-bound.
@@ -1809,8 +1819,51 @@ class Scheduler(SchedulerInterface):
             RequestStatus.WAITING_FOR_STREAMING_REQ,
         )
 
+    @staticmethod
+    def _deferred_wait_reason(status: RequestStatus) -> str | None:
+        if status == RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR:
+            return DEFERRED_WAIT_REASON_GRAMMAR
+        if status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+            return DEFERRED_WAIT_REASON_REMOTE_KV
+        return None
+
+    def _record_deferred_wait_start(
+        self,
+        request: Request,
+        timestamp: float | None = None,
+        reason: str | None = None,
+    ) -> None:
+        reason = (
+            reason
+            if reason is not None
+            else request.deferred_wait_reason
+            or self._deferred_wait_reason(request.status)
+        )
+        if reason is not None:
+            request.start_deferred_wait(timestamp, reason)
+
+    def _record_deferred_wait_end(
+        self, request: Request, timestamp: float | None = None
+    ) -> None:
+        reason = request.deferred_wait_reason or self._deferred_wait_reason(
+            request.status
+        )
+        if reason is None:
+            return
+        wait_time = request.take_deferred_wait_time(timestamp)
+        if wait_time is not None:
+            self.deferred_wait_times[reason].append(wait_time)
+
+    def _prepend_skipped_waiting_requests(
+        self, requests: RequestQueue, timestamp: float | None = None
+    ) -> None:
+        for request in requests:
+            self._record_deferred_wait_start(request, timestamp)
+        self.skipped_waiting.prepend_requests(requests)
+
     def _enqueue_waiting_request(self, request: Request) -> None:
         if self._is_blocked_waiting_status(request.status):
+            self._record_deferred_wait_start(request)
             self.skipped_waiting.add_request(request)
         else:
             self.waiting.add_request(request)
@@ -2035,6 +2088,7 @@ class Scheduler(SchedulerInterface):
         # Second pass: set status and free requests
         for request in valid_requests:
             delay_free_blocks = False
+            self._record_deferred_wait_end(request)
             if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                 delay_free_blocks = (
                     request.request_id not in self.finished_recving_kv_req_ids
@@ -2248,10 +2302,17 @@ class Scheduler(SchedulerInterface):
         connector_stats_payload = (
             kv_connector_stats.data if kv_connector_stats else None
         )
+        deferred_wait_times = {
+            reason: wait_times.copy()
+            for reason, wait_times in self.deferred_wait_times.items()
+            if wait_times
+        }
+        self.deferred_wait_times.clear()
         return SchedulerStats(
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
             num_skipped_waiting_reqs=len(self.skipped_waiting),
+            deferred_wait_times=deferred_wait_times,
             kv_cache_usage=self.kv_cache_manager.usage,
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
@@ -2396,6 +2457,7 @@ class Scheduler(SchedulerInterface):
             if request.request_id not in self.finished_recving_kv_req_ids:
                 return False
             self._update_waiting_for_remote_kv(request)
+            self._record_deferred_wait_end(request)
             if request.num_preemptions:
                 request.status = RequestStatus.PREEMPTED
             else:
@@ -2406,6 +2468,7 @@ class Scheduler(SchedulerInterface):
             structured_output_req = request.structured_output_request
             if not (structured_output_req and structured_output_req.grammar):
                 return False
+            self._record_deferred_wait_end(request)
             request.status = RequestStatus.WAITING
             return True
 
