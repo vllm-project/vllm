@@ -459,3 +459,12 @@ def test_token_id_helpers_enabled_mode():
     assert parser.count_reasoning_tokens(open_reasoning_ids) == len(
         tokenizer.encode("abc")
     )
+
+
+def test_is_reasoning_end_ignores_paired_prompt_examples_with_thinking_enabled():
+    parser, tokenizer = make_parser(chat_template_kwargs={"thinking_mode": "enabled"})
+    prompt_ids = tokenizer.encode(
+        "Use <mm:think></mm:think> for reasoning.", add_special_tokens=False
+    )
+
+    assert not parser.is_reasoning_end(prompt_ids)

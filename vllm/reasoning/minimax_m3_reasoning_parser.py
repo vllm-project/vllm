@@ -311,10 +311,23 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         return count
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        start_index = self._rfind_token_sequence(input_ids, self._start_token_ids)
-        end_index = self._rfind_token_sequence(input_ids, self._end_token_ids)
-        if end_index < 0:
-            return False
-        if start_index < 0:
-            return True
-        return end_index > start_index
+        depth = 1 if self._initial_in_reasoning else 0
+        saw_start = self._initial_in_reasoning
+        i = 0
+        while i < len(input_ids):
+            if tuple(input_ids[i : i + len(self._start_token_ids)]) == (
+                self._start_token_ids
+            ):
+                depth += 1
+                saw_start = True
+                i += len(self._start_token_ids)
+                continue
+            if tuple(input_ids[i : i + len(self._end_token_ids)]) == (
+                self._end_token_ids
+            ):
+                if depth > 0:
+                    depth -= 1
+                i += len(self._end_token_ids)
+                continue
+            i += 1
+        return depth == 0 and saw_start
