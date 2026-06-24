@@ -25,7 +25,9 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
             if vllm_config.speculative_config is not None and interleave_size > 1:
                 assert layer_impl.supports_mtp_with_cp_non_trivial_interleave_size, (
                     "MTP with cp_kv_cache_interleave_size > 1 is not "
-                    f"supported in {layer_impl.__class__.__name__}."
+                    f"supported in {layer_impl.__class__.__name__}. "
+                    "Set --cp-kv-cache-interleave-size 1, or disable "
+                    "speculative decoding."
                 )
             if dcp_size > 1:
                 assert layer_impl.need_to_return_lse_for_decode, (
@@ -38,9 +40,10 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
 
             if pcp_size > 1:
                 assert layer_impl.supports_pcp, (
-                    "PCP requires attention impls' support, "
-                    f"but the impl {layer_impl.__class__.__name__} "
-                    "does not support PCP."
+                    "Prefill Context Parallelism (PCP) requires attention "
+                    "implementation support, but "
+                    f"{layer_impl.__class__.__name__} does not support PCP. "
+                    "Disable PCP by setting --prefill-context-parallel-size 1."
                 )
 
 
