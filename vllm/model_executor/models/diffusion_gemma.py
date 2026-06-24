@@ -28,6 +28,7 @@ from transformers import AutoModel
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -499,9 +500,9 @@ def _compiled_sample_step(
     entropy_bound: float,
     # Tensor-parallel vocab sharding for the self-conditioning matmul.
     # ``embed_weight`` is vocab-sharded ([vocab/tp, hidden]) while ``probs``
-    # spans the full vocab; [vocab_start, vocab_end) is this rank's slice.
-    vocab_start: int,
-    vocab_end: int,
+    # spans the full vocab; [sc_vocab_start, sc_vocab_end) is this rank's slice.
+    sc_vocab_start: int,
+    sc_vocab_end: int,
     tp_size: int,
     tp_group_name: str,
 ) -> torch.Tensor:
@@ -637,9 +638,11 @@ def _compiled_sample_step(
     # Self-conditioning soft embed = probs @ embed_tokens.weight. Under tensor
     # parallelism the embedding is vocab-sharded ([vocab/tp, hidden]) while
     # probs spans the full vocab, so each rank multiplies its local vocab slice
-    # [vocab_start, vocab_end) and the partial products are summed across ranks.
-    local_probs = probs[..., vocab_start:vocab_end].to(embed_weight.dtype)
-    soft_embeds = torch.matmul(local_probs, embed_weight[: vocab_end - vocab_start])
+    # [sc_vocab_start, sc_vocab_end) and the partials are summed across ranks.
+    local_probs = probs[..., sc_vocab_start:sc_vocab_end].to(embed_weight.dtype)
+    soft_embeds = torch.matmul(
+        local_probs, embed_weight[: sc_vocab_end - sc_vocab_start]
+    )
     if tp_size > 1:
         soft_embeds = torch.ops.vllm.all_reduce(soft_embeds, group_name=tp_group_name)
     soft_embeds = soft_embeds * normalizer
@@ -859,8 +862,6 @@ class DiffusionGemmaModelState(ModelState):
         # The self-conditioning matmul (probs @ embed_tokens.weight) runs over a
         # vocab-parallel embedding shard. Hand the sampler this rank's vocab
         # slice and TP group so it can all-reduce the partial products.
-        from vllm.distributed.parallel_state import get_tp_group
-
         embed_tokens = self.model.model.embed_tokens
         shard = embed_tokens.shard_indices
         tp_group = get_tp_group()
@@ -875,8 +876,8 @@ class DiffusionGemmaModelState(ModelState):
             confidence_threshold=gen["confidence_threshold"],
             embed_weight=embed_tokens.weight,
             normalizer=self.model.model.normalizer,
-            vocab_start=shard.org_vocab_start_index,
-            vocab_end=shard.org_vocab_end_index,
+            sc_vocab_start=shard.org_vocab_start_index,
+            sc_vocab_end=shard.org_vocab_end_index,
             tp_size=tp_group.world_size,
             tp_group_name=tp_group.unique_name,
         ), None
@@ -1081,8 +1082,8 @@ class DiffusionSampler:
         entropy_bound: float,
         embed_weight: torch.Tensor,
         normalizer: torch.Tensor,
-        vocab_start: int = 0,
-        vocab_end: int | None = None,
+        sc_vocab_start: int = 0,
+        sc_vocab_end: int | None = None,
         tp_size: int = 1,
         tp_group_name: str = "",
     ):
@@ -1090,12 +1091,13 @@ class DiffusionSampler:
         self.req_states = sampler.req_states
         # Self-conditioning soft embed = probs @ embed_weight * normalizer,
         # computed in the sampler (see _compiled_sample_step). ``embed_weight``
-        # is the vocab-parallel shard; [vocab_start, vocab_end) is this rank's
-        # slice of the full vocab and tp_* drive the cross-rank all-reduce.
+        # is the vocab-parallel shard; [sc_vocab_start, sc_vocab_end) is this
+        # rank's slice of the full vocab and tp_* drive the cross-rank
+        # all-reduce.
         self.embed_weight = embed_weight
         self.normalizer = normalizer
-        self.vocab_start = vocab_start
-        self.vocab_end = vocab_end if vocab_end is not None else vocab_size
+        self.sc_vocab_start = sc_vocab_start
+        self.sc_vocab_end = sc_vocab_end if sc_vocab_end is not None else vocab_size
         self.tp_size = tp_size
         self.tp_group_name = tp_group_name
         self.canvas_length = (
@@ -1336,8 +1338,8 @@ class DiffusionSampler:
             CL=self.canvas_length,
             ST=states.stability_threshold,
             entropy_bound=self.entropy_bound,
-            vocab_start=self.vocab_start,
-            vocab_end=self.vocab_end,
+            sc_vocab_start=self.sc_vocab_start,
+            sc_vocab_end=self.sc_vocab_end,
             tp_size=self.tp_size,
             tp_group_name=self.tp_group_name,
         )
