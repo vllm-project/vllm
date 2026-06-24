@@ -5,6 +5,7 @@ from collections.abc import Iterable
 
 import torch
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
@@ -45,6 +46,17 @@ class MambaBase(AttentionLayerBase):
         mamba_block_size = vllm_config.cache_config.mamba_block_size
         assert mamba_block_size is not None
         page_size_padded = vllm_config.cache_config.mamba_page_size_padded
+        num_speculative_blocks = (
+            vllm_config.speculative_config.num_speculative_tokens
+            if vllm_config.speculative_config
+            else 0
+        )
+        if (
+            envs.VLLM_MAMBA_MTP_REPLAY
+            and vllm_config.speculative_config
+            and vllm_config.cache_config.mamba_cache_mode == "none"
+        ):
+            num_speculative_blocks = 0
         return MambaSpec(
             shapes=tuple(self.get_state_shape()),
             dtypes=self.get_state_dtype(),
@@ -52,11 +64,7 @@ class MambaBase(AttentionLayerBase):
             page_size_padded=page_size_padded,
             mamba_type=self.mamba_type,
             mamba_cache_mode=vllm_config.cache_config.mamba_cache_mode,
-            num_speculative_blocks=(
-                vllm_config.speculative_config.num_speculative_tokens
-                if vllm_config.speculative_config
-                else 0
-            ),
+            num_speculative_blocks=num_speculative_blocks,
         )
 
     def get_attn_backend(self) -> type[AttentionBackend]:
