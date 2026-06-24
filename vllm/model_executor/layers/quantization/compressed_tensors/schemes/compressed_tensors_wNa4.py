@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Weight N-bit INT scheme with INT4 activation quant via Humming kernel.
+"""Weight N-bit INT scheme with symmetric INT4 activation quant via Humming.
 
-Handles compressed-tensors INT weight checkpoints with INT4 input activation
-quantization. The activation quant config is passed to the Humming kernel
-which applies it natively.
+Handles compressed-tensors pack-quantized INT weight checkpoints (2-8 bit)
+with INT4 symmetric input activation quantization (dynamic or static,
+per-tensor or per-group). Zero-point / asymmetric activation quantization
+is not supported by the Humming kernel. The activation quant config is
+passed to the Humming kernel which applies it natively.
 """
 
 import math
