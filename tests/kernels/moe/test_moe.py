@@ -1510,7 +1510,12 @@ def test_batched_fused_marlin_moe(
             return gather_outputs
 
         def run(
-            self, hidden_states: torch.Tensor, fused_marlin_moe_kwargs: dict[Any, Any]
+            self,
+            hidden_states: torch.Tensor,
+            fused_marlin_moe_kwargs: dict[Any, Any],
+            *,
+            use_expert_num_tokens_cpu: bool = False,
+            use_topk_ids_metadata: bool = False,
         ) -> torch.Tensor:
             assert hidden_states.ndim == 2
             assert self.is_valid()
@@ -1521,6 +1526,10 @@ def test_batched_fused_marlin_moe(
                 "hidden_states": batched_hidden_states,
                 "expert_num_tokens": self.expert_num_tokens_cpu.to("cuda"),
             }
+            if use_expert_num_tokens_cpu:
+                kwargs["expert_num_tokens_cpu"] = self.expert_num_tokens_cpu
+            if use_topk_ids_metadata:
+                kwargs["topk_ids"] = self.topk_ids_cpu.to("cuda")
             batched_outputs = batched_fused_marlin_moe(**kwargs)
 
             output = torch.zeros_like(hidden_states)
@@ -1566,8 +1575,10 @@ def test_batched_fused_marlin_moe(
     br = BatchedRun(max_tokens_per_batch, e, topk_ids, topk_weights)
     if not br.is_valid():
         pytest.skip("Cannot represent data in Batched Format.")
-    marlin_output = br.run(a, kwargs)
+    marlin_output = br.run(a, kwargs, use_expert_num_tokens_cpu=True)
+    torch.testing.assert_close(marlin_output, ref_marlin_output, atol=atol, rtol=0)
 
+    marlin_output = br.run(a, kwargs, use_topk_ids_metadata=True)
     torch.testing.assert_close(marlin_output, ref_marlin_output, atol=atol, rtol=0)
 
 
