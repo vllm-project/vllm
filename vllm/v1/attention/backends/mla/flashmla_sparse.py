@@ -160,6 +160,7 @@ class FlashMLASparseMetadata(AttentionMetadata):
     block_size: int = 64
     topk_tokens: int = 2048
     cp_kv_cache_interleave_size: int = 1
+    sparse_indexer_mode: str = "union"
 
     @dataclass
     class FP8KernelMetadata:
@@ -263,6 +264,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         self.cp_kv_cache_interleave_size = (
             parallel_config.cp_kv_cache_interleave_size
         )
+        self.sparse_indexer_mode = parallel_config.dcp_sparse_indexer_mode
 
         sm_count = num_compute_units(device.index)
 
@@ -577,6 +579,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             block_size=self.kv_cache_spec.block_size,
             topk_tokens=self.topk_tokens,
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
+            sparse_indexer_mode=self.sparse_indexer_mode,
             fp8_extra_metadata=fp8_extra_metadata,
             fp8_use_mixed_batch=fp8_use_mixed_batch,
         )
@@ -672,7 +675,9 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
         # Convert per-request indices to physical slots. Under DCP the indexer
         # emits GLOBAL absolute ids and we re-localize to this rank's slots
         # (front-packed valid + trailing -1 sentinels); otherwise the non-DCP
-        # converter maps to global cache slots.
+        # converter maps to global cache slots. union's ids are all this rank's
+        # own with -1 already trailing, so the front-pack compaction is a no-op:
+        # skip it (the explicit topk_length still carries per-row valid counts).
         if self.dcp_world_size > 1:
             topk_indices, topk_length = triton_filter_and_convert_dcp_index(
                 attn_metadata.req_id_per_token,
@@ -686,7 +691,7 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
                 BLOCK_SIZE=attn_metadata.block_size,
                 NUM_TOPK_TOKENS=topk_indices.shape[1],
                 return_valid_counts=True,
-                compact_valid_to_front=True,
+                compact_valid_to_front=attn_metadata.sparse_indexer_mode != "union",
             )
         else:
             topk_indices, topk_length = triton_convert_req_index_to_global_index(
@@ -859,8 +864,10 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
         # Convert per-request indices to physical slots. Under DCP the indexer
         # emits GLOBAL absolute ids and we re-localize to this rank's slots; the
         # fp8 kernel carries per-row length only via trailing -1 sentinels, so we
-        # front-pack valid slots (compact_valid_to_front=True) and drop the
-        # explicit valid_counts.
+        # front-pack valid slots (compact_valid_to_front) and drop the explicit
+        # valid_counts. union emits only this rank's own ids (never remote) with
+        # -1 padding already trailing, so the front-pack is a no-op there; skip
+        # it to cut the per-call argsort+gather (the de-localize kernel stays).
         if self.dcp_world_size > 1:
             topk_indices, _ = triton_filter_and_convert_dcp_index(
                 attn_metadata.req_id_per_token,
@@ -874,7 +881,7 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
                 BLOCK_SIZE=attn_metadata.block_size,
                 NUM_TOPK_TOKENS=topk_indices.shape[1],
                 return_valid_counts=True,
-                compact_valid_to_front=True,
+                compact_valid_to_front=attn_metadata.sparse_indexer_mode != "union",
             )
         else:
             # Convert per-request indices to global slots (decode) or workspace
