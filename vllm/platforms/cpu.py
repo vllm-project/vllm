@@ -154,7 +154,7 @@ class CpuPlatform(Platform):
             parallel_config.worker_cls = "vllm.v1.worker.cpu_worker.CPUWorker"
         # Disable DBO
         if parallel_config.enable_dbo:
-            logger.warning("Dual-Batch Overlap is not supported on CPU, disabled.")
+            logger.warning_once("Dual-Batch Overlap is not supported on CPU, disabled.")
             parallel_config.enable_dbo = False
 
         if torch.cpu._is_amx_tile_supported() and (
@@ -166,7 +166,7 @@ class CpuPlatform(Platform):
         ):
             cache_config.enable_prefix_caching = False
             scheduler_config.enable_chunked_prefill = False
-            logger.warning(
+            logger.warning_once(
                 "Disabled unsupported prefix caching and chunked prefill "
                 "for linear attention on AMX CPU platforms."
             )
@@ -309,7 +309,7 @@ class CpuPlatform(Platform):
         )
 
         if model_config is not None and model_config.use_mla:
-            logger.info(
+            logger.info_once(
                 "MLA is enabled on a non-GPU platform; forcing chunked "
                 "prefill and prefix caching to be disabled."
             )
@@ -431,13 +431,13 @@ class CpuPlatform(Platform):
                     try:
                         import vllm._C  # noqa: F401
                     except ImportError as e:
-                        logger.warning("Failed to import from vllm._C: %r", e)
+                        logger.warning_once("Failed to import from vllm._C: %r", e)
                 else:
                     try:
                         import vllm._C_AVX512  # noqa: F401
                     except ImportError as e:
                         if ignored_msg not in e.msg:
-                            logger.warning(
+                            logger.warning_once(
                                 "Failed to import from vllm._C_AVX512: %r", e
                             )
             else:
@@ -445,12 +445,12 @@ class CpuPlatform(Platform):
                     import vllm._C_AVX2  # noqa: F401
                 except ImportError as e:
                     if ignored_msg not in e.msg:
-                        logger.warning("Failed to import from vllm._C_AVX2: %r", e)
+                        logger.warning_once("Failed to import from vllm._C_AVX2: %r", e)
         else:
             try:
                 import vllm._C  # noqa: F401
             except ImportError as e:
-                logger.warning("Failed to import from vllm._C: %r", e)
+                logger.warning_once("Failed to import from vllm._C: %r", e)
 
     @classmethod
     def pack_kv_cache(
