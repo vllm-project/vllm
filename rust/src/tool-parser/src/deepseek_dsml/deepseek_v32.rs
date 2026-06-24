@@ -1,5 +1,5 @@
 use super::{DeepSeekDsmlToolParser, DsmlTokens};
-use crate::{Result, Tool, ToolParser, ToolParserOutput};
+use crate::{Result, StructuralTagModel, Tool, ToolParser, ToolParserOutput};
 
 /// Tool parser for DeepSeek V3.2 models.
 ///
@@ -42,6 +42,10 @@ impl ToolParser for DeepSeekV32ToolParser {
 
     fn preserve_special_tokens(&self) -> bool {
         true
+    }
+
+    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
+        Some(StructuralTagModel::DeepSeekV32)
     }
 
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
