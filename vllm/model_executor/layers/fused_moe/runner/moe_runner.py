@@ -12,6 +12,7 @@ from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.distributed import (
     get_ep_group,
     get_pcp_group,
+    get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
 from vllm.distributed.eplb.eplb_state import EplbLayerState
@@ -422,15 +423,6 @@ class MoERunner(MoERunnerInterface):
         * If we have SP (TP=N, DP=M, EP), there is a separate AG step handled
           in the model.
         """
-        # A combine kernel that already reduces the fused output is
-        # incompatible with deferring the all-reduce (reduce_results=False,
-        # e.g. fusing it into a subsequent GemmaRMSNorm): the deferred
-        # all-reduce would double-reduce the fused output.
-        assert not (self._fused_output_is_reduced and not self.reduce_results), (
-            "reduce_results=False is incompatible with a combine kernel that "
-            "already reduces the fused output (e.g. DeepEP/Mori/NIXL/"
-            "FlashInfer-NVLink all2all backends)."
-        )
         if (
             shared_output is not None
             and not self.moe_config.is_sequence_parallel
@@ -463,6 +455,19 @@ class MoERunner(MoERunnerInterface):
             states = tensor_model_parallel_all_reduce(states)
 
         return states[..., :trunc_size] if trunc_size is not None else states
+
+    def _validate_reduction_config(self) -> None:
+        if get_tensor_model_parallel_world_size() == 1:
+            return
+        # A combine kernel that already reduces the fused output is
+        # incompatible with deferring the all-reduce (reduce_results=False,
+        # e.g. fusing it into a subsequent GemmaRMSNorm): the deferred
+        # all-reduce would double-reduce the fused output.
+        assert not (self._fused_output_is_reduced and not self.reduce_results), (
+            "reduce_results=False is incompatible with a combine kernel that "
+            "already reduces the fused output within the TP group (e.g. "
+            "DeepEP/Mori/NIXL/FlashInfer-NVLink all2all backends)."
+        )
 
     def _encode_layer_name(self) -> str | LayerName:
         if _USE_LAYERNAME:
@@ -662,6 +667,7 @@ class MoERunner(MoERunnerInterface):
         1. pytorch cannot handle union types in custom op signatures so
            _moe_forward and _moe_forward_shared must be split.
         """
+        self._validate_reduction_config()
 
         # Apply transform for routed experts (e.g., latent projection
         # for latent MoE)
