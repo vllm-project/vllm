@@ -24,6 +24,7 @@ tools = [
             "description": "Get the current weather in a given location",
             "parameters": {
                 "type": "object",
+                "strict": True,
                 "properties": {
                     "city": {
                         "type": "string",
