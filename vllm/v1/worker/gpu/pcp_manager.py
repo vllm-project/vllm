@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from typing import Any
 
 import numpy as np
 import torch
 
+from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_pcp_group
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
+from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
@@ -15,6 +18,14 @@ from vllm.v1.worker.gpu.input_batch import (
     prepare_prefill_inputs_with_start_pos,
 )
 from vllm.v1.worker.gpu.states import RequestState
+
+
+@dataclass(frozen=True)
+class PCPRunnerConfig:
+    manager: "PCPManager | None"
+    max_num_input_reqs: int
+    kv_cp_size: int
+    kv_cp_rank: int
 
 
 class PCPManager:
@@ -31,19 +42,72 @@ class PCPManager:
         pcp_rank: int,
         device: torch.device,
         dcp_world_size: int = 1,
+        dcp_rank: int = 0,
+        cp_interleave: int = 1,
     ) -> None:
         self.pcp_world_size = pcp_world_size
         self.pcp_rank = pcp_rank
         self.device = device
         self.dcp_world_size = dcp_world_size
+        self.dcp_rank = dcp_rank
+        self.cp_interleave = cp_interleave
         self.dcp_passthrough = False
 
         self._physical_batch: InputBatch | None = None
         self._physical_slot_mappings_by_layer: dict[str, torch.Tensor] | None = None
-        self._physical_attn_metadata_by_layer: dict[str, object] | None = None
         self._hidden_restore_idx: torch.Tensor | None = None
         self._local_virtual_to_physical_idx: torch.Tensor | None = None
         self._per_rank_num_tokens: list[int] | None = None
+        self._restored_slot_mapping_cache: dict[
+            tuple[int, torch.dtype, int], torch.Tensor
+        ] = {}
+
+    @staticmethod
+    def validate_config(
+        vllm_config: VllmConfig,
+        dcp_size: int,
+        use_pp: bool,
+        is_encoder_decoder: bool,
+        supports_mm_inputs: bool,
+        lora_config: Any,
+        speculative_config: Any,
+    ) -> None:
+        parallel_config = vllm_config.parallel_config
+        model_config = vllm_config.model_config
+        pcp_size = parallel_config.prefill_context_parallel_size
+        if pcp_size <= 1:
+            return
+
+        if not model_config.use_mla:
+            raise NotImplementedError("MRV2 PCP currently supports MLA models only.")
+        if use_pp:
+            raise NotImplementedError("MRV2 PCP does not support PP yet.")
+        if is_encoder_decoder:
+            raise NotImplementedError(
+                "MRV2 PCP does not support encoder-decoder models yet."
+            )
+        if supports_mm_inputs:
+            raise NotImplementedError("MRV2 PCP does not support MM inputs yet.")
+        if lora_config is not None:
+            raise NotImplementedError("MRV2 PCP does not support LoRA yet.")
+        if speculative_config is not None:
+            raise NotImplementedError(
+                "MRV2 PCP does not support speculative decoding yet."
+            )
+        if dcp_size > 1:
+            if dcp_size != pcp_size:
+                raise NotImplementedError(
+                    "MRV2 MLA PCP+DCP currently supports DCP that spans the PCP "
+                    "axis only, so decode_context_parallel_size must equal "
+                    "prefill_context_parallel_size."
+                )
+            if parallel_config.dcp_comm_backend != "ag_rs":
+                raise NotImplementedError(
+                    "MRV2 MLA PCP+DCP currently supports only the ag_rs DCP "
+                    "communication backend."
+                )
+        if vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs():
+            raise NotImplementedError("MRV2 PCP does not support full CUDA graphs yet.")
 
     def _pad_num_reqs(self, num_reqs: int) -> int:
         return (
@@ -197,6 +261,23 @@ class PCPManager:
         )
         return gathered[self._hidden_restore_idx]
 
+    def _allgather_and_restore_token_tensors(
+        self,
+        tensors: tuple[torch.Tensor, ...],
+    ) -> tuple[torch.Tensor, ...]:
+        if self._hidden_restore_idx is None or self._per_rank_num_tokens is None:
+            return tensors
+        local_num_tokens = self._local_num_tokens()
+        local_tensors = [tensor[:local_num_tokens].contiguous() for tensor in tensors]
+        gathered_tensors = get_pcp_group().all_gatherv(
+            local_tensors,
+            dim=0,
+            sizes=self._per_rank_num_tokens,
+        )
+        return tuple(
+            gathered[self._hidden_restore_idx] for gathered in gathered_tensors
+        )
+
     def gather_and_restore_tokens(self, tensor: torch.Tensor) -> torch.Tensor:
         return self._allgather_and_restore_tokens(tensor)
 
@@ -222,21 +303,22 @@ class PCPManager:
     ) -> None:
         self._physical_slot_mappings_by_layer = slot_mappings_by_layer
 
-    def set_physical_attn_metadata(
-        self,
-        attn_metadata_by_layer: dict[str, object],
-    ) -> None:
-        self._physical_attn_metadata_by_layer = attn_metadata_by_layer
-
-    def get_physical_attn_metadata(self, layer_name: str | None) -> object | None:
-        if layer_name is None or self._physical_attn_metadata_by_layer is None:
-            return None
-        return self._physical_attn_metadata_by_layer.get(layer_name)
-
     def _get_physical_slot_mapping(self, layer_name: str | None) -> torch.Tensor | None:
         if layer_name is None or self._physical_slot_mappings_by_layer is None:
             return None
         return self._physical_slot_mappings_by_layer.get(layer_name)
+
+    def _get_or_gather_restored_slot_mapping(
+        self,
+        slot_mapping: torch.Tensor,
+    ) -> torch.Tensor:
+        local_num_tokens = self._local_num_tokens()
+        key = (slot_mapping.data_ptr(), slot_mapping.dtype, local_num_tokens)
+        restored_slots = self._restored_slot_mapping_cache.get(key)
+        if restored_slots is None:
+            restored_slots = self._allgather_and_restore_tokens(slot_mapping)
+            self._restored_slot_mapping_cache[key] = restored_slots
+        return restored_slots
 
     def gather_and_restore_mla_latent_cache_inputs(
         self,
@@ -253,20 +335,20 @@ class PCPManager:
         """
         num_tokens = kv_c_normed.shape[0]
         slot_mapping = slot_mapping[:num_tokens]
-        kv_combined = torch.cat(
-            (kv_c_normed, k_pe.reshape(num_tokens, -1)),
-            dim=-1,
-        )
-        restored_kv = self._allgather_and_restore_tokens(kv_combined)
         restored_slots = self._get_physical_slot_mapping(layer_name)
+        k_pe_flat = k_pe.reshape(num_tokens, -1)
         if restored_slots is None:
-            restored_slots = self._allgather_and_restore_tokens(slot_mapping)
+            restored_kv_c, restored_k_pe_flat = (
+                self._allgather_and_restore_token_tensors((kv_c_normed, k_pe_flat))
+            )
+            restored_slots = self._get_or_gather_restored_slot_mapping(slot_mapping)
         else:
-            restored_slots = restored_slots[: restored_kv.shape[0]]
+            restored_kv_c, restored_k_pe_flat = (
+                self._allgather_and_restore_token_tensors((kv_c_normed, k_pe_flat))
+            )
+            restored_slots = restored_slots[: restored_kv_c.shape[0]]
 
-        kv_lora_rank = kv_c_normed.shape[-1]
-        restored_kv_c = restored_kv[..., :kv_lora_rank]
-        restored_k_pe = restored_kv[..., kv_lora_rank:].view(
+        restored_k_pe = restored_k_pe_flat.view(
             -1,
             *k_pe.shape[1:],
         )
@@ -302,7 +384,7 @@ class PCPManager:
         restored_k = self._allgather_and_restore_tokens(k)
         restored_slots = self._get_physical_slot_mapping(layer_name)
         if restored_slots is None:
-            restored_slots = self._allgather_and_restore_tokens(
+            restored_slots = self._get_or_gather_restored_slot_mapping(
                 slot_mapping[:num_tokens]
             )
         else:
@@ -324,6 +406,7 @@ class PCPManager:
 
         physical_batch = self._copy_physical_batch(input_batch)
         self._physical_batch = physical_batch
+        self._restored_slot_mapping_cache.clear()
 
         num_scheduled_tokens = physical_batch.num_scheduled_tokens
         num_computed_tokens = physical_batch.num_computed_tokens_np
@@ -453,6 +536,20 @@ class PCPManager:
             virtual_start_pos_np + virtual_num_scheduled
         )
 
+        dcp_local_seq_lens = None
+        if self.dcp_world_size > 1:
+            prepare_dcp_local_seq_lens(
+                input_buffers.dcp_local_seq_lens,
+                seq_lens,
+                num_virtual_reqs,
+                self.dcp_world_size,
+                self.dcp_rank,
+                self.cp_interleave,
+            )
+            dcp_local_seq_lens = input_buffers.dcp_local_seq_lens[
+                :num_virtual_reqs_padded
+            ]
+
         return replace(
             input_batch,
             req_ids=virtual_req_ids,
@@ -473,7 +570,7 @@ class PCPManager:
             query_start_loc_np=query_start_loc_np[: num_virtual_reqs_padded + 1],
             seq_lens=seq_lens,
             seq_lens_cpu_upper_bound=torch.from_numpy(seq_lens_cpu_upper_bound_np),
-            dcp_local_seq_lens=None,
+            dcp_local_seq_lens=dcp_local_seq_lens,
             num_computed_tokens_np=virtual_start_pos_np,
             prefill_len_np=virtual_prefill_len_np,
             num_computed_prefill_tokens_np=virtual_num_computed_prefill_tokens_np,
@@ -504,5 +601,50 @@ class PCPManager:
         assert self._physical_batch is not None
         physical_batch = self._physical_batch
         self._physical_slot_mappings_by_layer = None
-        self._physical_attn_metadata_by_layer = None
+        self._restored_slot_mapping_cache.clear()
         return self.restore_hidden_states(hidden_states), physical_batch
+
+
+def build_pcp_runner_config(
+    vllm_config: VllmConfig,
+    device: torch.device,
+    max_num_reqs: int,
+    dcp_size: int,
+    dcp_rank: int,
+    use_pp: bool,
+    is_encoder_decoder: bool,
+    supports_mm_inputs: bool,
+    lora_config: Any,
+    speculative_config: Any,
+) -> PCPRunnerConfig:
+    parallel_config = vllm_config.parallel_config
+    model_config = vllm_config.model_config
+    pcp_size = parallel_config.prefill_context_parallel_size
+    pcp_rank = get_pcp_group().rank_in_group if pcp_size > 1 else 0
+    total_cp_size = pcp_size * dcp_size
+    total_cp_rank = pcp_rank * dcp_size + dcp_rank
+    kv_cp_size = dcp_size if model_config.use_mla else total_cp_size
+    kv_cp_rank = dcp_rank if model_config.use_mla else total_cp_rank
+    if pcp_size <= 1:
+        return PCPRunnerConfig(None, max_num_reqs, kv_cp_size, kv_cp_rank)
+
+    PCPManager.validate_config(
+        vllm_config,
+        dcp_size,
+        use_pp,
+        is_encoder_decoder,
+        supports_mm_inputs,
+        lora_config,
+        speculative_config,
+    )
+
+    manager = PCPManager(
+        pcp_world_size=pcp_size,
+        pcp_rank=pcp_rank,
+        device=device,
+        dcp_world_size=dcp_size,
+        dcp_rank=dcp_rank,
+        cp_interleave=parallel_config.cp_kv_cache_interleave_size,
+    )
+    max_num_input_reqs = max_num_reqs * 2 + pcp_size - 1
+    return PCPRunnerConfig(manager, max_num_input_reqs, kv_cp_size, kv_cp_rank)

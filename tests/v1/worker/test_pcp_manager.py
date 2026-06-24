@@ -135,15 +135,19 @@ def test_dcp_uses_virtual_token_mapping() -> None:
     assert manager._local_virtual_to_physical_idx.tolist() == [0, 3, 4, 5, 6]
 
 
-def test_mla_cache_gather_exchanges_single_latent_payload() -> None:
+def test_mla_cache_gather_exchanges_grouped_latent_payloads() -> None:
     manager = _manager(rank=0)
-    gathered_payloads: list[torch.Tensor] = []
+    gathered_payloads: list[tuple[torch.Tensor, ...]] = []
 
-    def fake_allgather_and_restore_tokens(tensor: torch.Tensor) -> torch.Tensor:
-        gathered_payloads.append(tensor.clone())
-        return torch.flip(tensor, dims=(0,))
+    def fake_allgather_and_restore_token_tensors(
+        tensors: tuple[torch.Tensor, ...],
+    ) -> tuple[torch.Tensor, ...]:
+        gathered_payloads.append(tuple(tensor.clone() for tensor in tensors))
+        return tuple(torch.flip(tensor, dims=(0,)) for tensor in tensors)
 
-    manager._allgather_and_restore_tokens = fake_allgather_and_restore_tokens  # type: ignore[method-assign]
+    manager._allgather_and_restore_token_tensors = (  # type: ignore[method-assign]
+        fake_allgather_and_restore_token_tensors
+    )
     manager.set_physical_slot_mappings(
         {
             "layer": torch.tensor([40, 41, 42, 43], dtype=torch.int64),
@@ -164,9 +168,9 @@ def test_mla_cache_gather_exchanges_single_latent_payload() -> None:
     )
 
     assert len(gathered_payloads) == 1
-    assert gathered_payloads[0].shape == (4, 5)
-    torch.testing.assert_close(gathered_payloads[0][:, :3], kv_c_normed)
-    torch.testing.assert_close(gathered_payloads[0][:, 3:], k_pe.view(4, 2))
+    assert len(gathered_payloads[0]) == 2
+    torch.testing.assert_close(gathered_payloads[0][0], kv_c_normed)
+    torch.testing.assert_close(gathered_payloads[0][1], k_pe.view(4, 2))
     torch.testing.assert_close(restored_kv_c, torch.flip(kv_c_normed, dims=(0,)))
     torch.testing.assert_close(restored_k_pe, torch.flip(k_pe, dims=(0,)))
     torch.testing.assert_close(restored_slots, torch.tensor([40, 41, 42, 43]))
@@ -200,3 +204,46 @@ def test_indexer_cache_gather_exchanges_only_latent_k() -> None:
     torch.testing.assert_close(gathered_payloads[0], k)
     torch.testing.assert_close(restored_k, torch.flip(k, dims=(0,)))
     torch.testing.assert_close(restored_slots, torch.tensor([80, 81, 82, 83]))
+
+
+def test_restored_slot_mapping_is_cached_for_step() -> None:
+    manager = _manager(rank=0)
+    manager._per_rank_num_tokens = [4, 4]
+    gathered_payloads: list[torch.Tensor] = []
+
+    def fake_allgather_and_restore_tokens(tensor: torch.Tensor) -> torch.Tensor:
+        gathered_payloads.append(tensor.clone())
+        return torch.flip(tensor, dims=(0,))
+
+    def fake_allgather_and_restore_token_tensors(
+        tensors: tuple[torch.Tensor, ...],
+    ) -> tuple[torch.Tensor, ...]:
+        return tuple(torch.flip(tensor, dims=(0,)) for tensor in tensors)
+
+    manager._allgather_and_restore_tokens = fake_allgather_and_restore_tokens  # type: ignore[method-assign]
+    manager._allgather_and_restore_token_tensors = (  # type: ignore[method-assign]
+        fake_allgather_and_restore_token_tensors
+    )
+
+    kv_c_normed = torch.arange(12, dtype=torch.float32).view(4, 3)
+    k_pe = torch.arange(8, dtype=torch.float32).view(4, 1, 2)
+    k = torch.arange(16, dtype=torch.float32).view(4, 4)
+    slot_mapping = torch.arange(4, dtype=torch.int64)
+
+    _, _, mla_slots = manager.gather_and_restore_mla_latent_cache_inputs(
+        kv_c_normed,
+        k_pe,
+        slot_mapping,
+        "layer",
+    )
+    _, indexer_slots = manager.gather_and_restore_indexer_cache_inputs(
+        k,
+        slot_mapping,
+        "indexer.k_cache",
+    )
+
+    assert len(gathered_payloads) == 2
+    torch.testing.assert_close(gathered_payloads[0], slot_mapping)
+    torch.testing.assert_close(gathered_payloads[1], k)
+    torch.testing.assert_close(mla_slots, torch.flip(slot_mapping, dims=(0,)))
+    torch.testing.assert_close(indexer_slots, torch.flip(slot_mapping, dims=(0,)))

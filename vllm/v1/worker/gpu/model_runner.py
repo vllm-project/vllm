@@ -21,7 +21,6 @@ import functools
 import gc
 import time
 from copy import deepcopy
-from dataclasses import replace
 from typing import Any, NamedTuple
 
 import numpy as np
@@ -34,7 +33,6 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import (
     get_dcp_group,
-    get_pcp_group,
     get_pp_group,
     prepare_communication_buffer_for_model,
 )
@@ -98,7 +96,7 @@ from vllm.v1.worker.gpu.lora_utils import (
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
-from vllm.v1.worker.gpu.pcp_manager import PCPManager
+from vllm.v1.worker.gpu.pcp_manager import build_pcp_runner_config
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import PPHandler
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
@@ -178,20 +176,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.use_dcp = self.dcp_size > 1
         self.dcp_rank = get_dcp_group().rank_in_group if self.use_dcp else 0
         self.cp_interleave = self.parallel_config.cp_kv_cache_interleave_size
-        self.pcp_size = self.parallel_config.prefill_context_parallel_size
-        self.use_pcp = self.pcp_size > 1
-        self.pcp_rank = get_pcp_group().rank_in_group if self.use_pcp else 0
-        self.total_cp_size = self.pcp_size * self.dcp_size
-        self.total_cp_rank = self.pcp_rank * self.dcp_size + self.dcp_rank
-        self.kv_cp_size = (
-            self.dcp_size if self.model_config.use_mla else self.total_cp_size
-        )
-        self.kv_cp_rank = (
-            self.dcp_rank if self.model_config.use_mla else self.total_cp_rank
-        )
-        self.max_num_virtual_reqs = self.max_num_reqs
-        if self.use_pcp:
-            self.max_num_virtual_reqs = self.max_num_reqs * 2 + self.pcp_size - 1
 
         # Multimodal
         self.mm_registry = MULTIMODAL_REGISTRY
@@ -222,41 +206,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
 
-        if self.use_pcp:
-            if not self.model_config.use_mla:
-                raise NotImplementedError(
-                    "MRV2 PCP currently supports MLA models only."
-                )
-            if self.use_pp:
-                raise NotImplementedError("MRV2 PCP does not support PP yet.")
-            if self.is_encoder_decoder:
-                raise NotImplementedError(
-                    "MRV2 PCP does not support encoder-decoder models yet."
-                )
-            if self.supports_mm_inputs:
-                raise NotImplementedError("MRV2 PCP does not support MM inputs yet.")
-            if self.lora_config is not None:
-                raise NotImplementedError("MRV2 PCP does not support LoRA yet.")
-            if self.speculative_config is not None:
-                raise NotImplementedError(
-                    "MRV2 PCP does not support speculative decoding yet."
-                )
-            if self.use_dcp:
-                if self.dcp_size != self.pcp_size:
-                    raise NotImplementedError(
-                        "MRV2 MLA PCP+DCP currently supports DCP that spans "
-                        "the PCP axis only, so decode_context_parallel_size "
-                        "must equal prefill_context_parallel_size."
-                    )
-                if self.parallel_config.dcp_comm_backend != "ag_rs":
-                    raise NotImplementedError(
-                        "MRV2 MLA PCP+DCP currently supports only the ag_rs "
-                        "DCP communication backend."
-                    )
-            if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
-                raise NotImplementedError(
-                    "MRV2 PCP does not support full CUDA graphs yet."
-                )
+        pcp_runner_config = build_pcp_runner_config(
+            self.vllm_config,
+            self.device,
+            self.max_num_reqs,
+            self.dcp_size,
+            self.dcp_rank,
+            self.use_pp,
+            self.is_encoder_decoder,
+            self.supports_mm_inputs,
+            self.lora_config,
+            self.speculative_config,
+        )
+        self.pcp_manager = pcp_runner_config.manager
+        self.kv_cp_size = pcp_runner_config.kv_cp_size
+        self.kv_cp_rank = pcp_runner_config.kv_cp_rank
 
         # Pooling models.
         self.is_pooling_model = self.model_config.runner_type == "pooling"
@@ -272,18 +236,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             device=self.device,
         )
         self.input_buffers = InputBuffers(
-            max_num_reqs=self.max_num_virtual_reqs,
+            max_num_reqs=pcp_runner_config.max_num_input_reqs,
             max_num_tokens=self.max_num_tokens,
             device=self.device,
         )
-        self.pcp_manager: PCPManager | None = None
-        if self.use_pcp:
-            self.pcp_manager = PCPManager(
-                pcp_world_size=self.pcp_size,
-                pcp_rank=self.pcp_rank,
-                device=self.device,
-                dcp_world_size=self.dcp_size,
-            )
 
         if self.use_pp:
             self.pp_handler = PPHandler(
@@ -505,7 +461,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         self.block_tables = BlockTables(
             block_sizes=block_sizes,
-            max_num_reqs=self.max_num_virtual_reqs,
+            max_num_reqs=self.input_buffers.max_num_reqs,
             max_num_batched_tokens=self.max_num_tokens,
             max_num_blocks_per_group=max_num_blocks_per_group,
             device=self.device,
@@ -1097,26 +1053,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         return block_tables, slot_mappings
 
-    def _prepare_dcp_local_seq_lens_for_batch(
-        self,
-        input_batch: InputBatch,
-    ) -> InputBatch:
-        if not self.use_dcp:
-            return input_batch
-
-        prepare_dcp_local_seq_lens(
-            self.input_buffers.dcp_local_seq_lens,
-            input_batch.seq_lens,
-            input_batch.num_reqs,
-            self.dcp_size,
-            self.dcp_rank,
-            self.cp_interleave,
-        )
-        return replace(
-            input_batch,
-            dcp_local_seq_lens=self.input_buffers.dcp_local_seq_lens[
-                : input_batch.num_reqs_after_padding
-            ],
+    def _snapshot_pcp_physical_slot_mappings(self, input_batch: InputBatch) -> None:
+        assert self.pcp_manager is not None
+        _, slot_mappings = self.prepare_attn(input_batch)
+        # compute_slot_mappings writes into a reusable buffer; keep the physical
+        # view before PCP partitioning prepares the executable virtual batch.
+        self.pcp_manager.set_physical_slot_mappings(
+            build_slot_mappings_by_layer(
+                slot_mappings.clone(),
+                self.kv_cache_config,
+            ),
         )
 
     def prepare_dummy_attn(
@@ -1255,34 +1201,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch = self.prepare_inputs(scheduler_output, batch_desc)
             if self.pcp_manager is not None:
                 if self.use_dcp:
-                    physical_block_tables, physical_slot_mappings = self.prepare_attn(
-                        input_batch
-                    )
-                    physical_block_tables = tuple(
-                        block_table.clone() for block_table in physical_block_tables
-                    )
-                    physical_slot_mappings = physical_slot_mappings.clone()
-                    self.pcp_manager.set_physical_slot_mappings(
-                        build_slot_mappings_by_layer(
-                            physical_slot_mappings,
-                            self.kv_cache_config,
-                        )
-                    )
-                    physical_attn_metadata = self.model_state.prepare_attn(
-                        input_batch,
-                        batch_desc.cg_mode,
-                        physical_block_tables,
-                        physical_slot_mappings,
-                        self.attn_groups,
-                        self.kv_cache_config,
-                    )
-                    self.pcp_manager.set_physical_attn_metadata(physical_attn_metadata)
+                    self._snapshot_pcp_physical_slot_mappings(input_batch)
                 input_batch = self.pcp_manager.partition_input_batch(
                     input_batch,
                     self.req_states,
                     self.input_buffers,
                 )
-                input_batch = self._prepare_dcp_local_seq_lens_for_batch(input_batch)
             block_tables, slot_mappings = self.prepare_attn(input_batch)
 
             if self.lora_config:
@@ -1391,11 +1315,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 has_lora=self.lora_config is not None,
                 num_active_loras=batch_desc.num_active_loras,
             )
-            additional_forward_kwargs = None
-            if self.pcp_manager is not None:
-                additional_forward_kwargs = {
-                    "pcp_manager": None if dummy_run else self.pcp_manager,
-                }
+            additional_forward_kwargs = (
+                {"pcp_manager": self.pcp_manager}
+                if self.pcp_manager is not None and not dummy_run
+                else None
+            )
 
             with set_forward_context(
                 attn_metadata,
