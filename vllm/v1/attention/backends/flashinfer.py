@@ -849,12 +849,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     ) -> AttentionCGSupport:
         """Get the cudagraph support level for FlashInfer attention.
 
-        This depends on whether we can use TRTLLM attention for decodes, since we can
-        only do UNIFORM_SINGLE_TOKEN_DECODE if it is unavailable.
-        To check this, we must call can_use_trtllm_attention with the number of KV
-        heads from the kv_cache_spec. We check all available KV cache specs and
-        only return UNIFORM_BATCH if all of them support TRTLLM attention.
+        The SM90 XQA integration only enables single-token decode today. Keep
+        specdec CUDA graphs limited to trtllm-gen until vLLM wires the XQA
+        specdec mask.
         """
+        if current_platform.is_device_capability(90):
+            return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+
         # For UniformTypeKVCacheSpecs, check all contained specs
         kv_specs = (
             kv_cache_spec.kv_cache_specs.values()
@@ -2050,7 +2051,7 @@ class FlashInferImpl(AttentionImpl):
 
                 if decode_with_xqa and q_len_per_req > 1:
                     raise NotImplementedError(
-                        "FlashInfer XQA speculative decode is not supported yet."
+                        "FlashInfer XQA speculative decode is not wired in vLLM yet."
                     )
 
                 trtllm_batch_decode_with_kv_cache(
@@ -2069,6 +2070,7 @@ class FlashInferImpl(AttentionImpl):
                     o_sf_scale=self.o_sf_scale,
                     out=out,
                     kv_layout=get_kv_cache_layout(),
+                    backend=attn_metadata.decode.kernel.value,
                     q_len_per_req=q_len_per_req,
                     kv_cache_sf=(
                         nvfp4_kv_block_scales if self.is_kvcache_nvfp4 else None

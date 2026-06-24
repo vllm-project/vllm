@@ -24,7 +24,11 @@ from vllm.utils.torch_utils import (
     is_torch_equal_or_newer,
     set_random_seed,
 )
-from vllm.v1.attention.backend import AttentionType, CommonAttentionMetadata
+from vllm.v1.attention.backend import (
+    AttentionCGSupport,
+    AttentionType,
+    CommonAttentionMetadata,
+)
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.utils import (
     set_kv_cache_layout,
@@ -698,6 +702,12 @@ def test_flashinfer_sm90_xqa_decode_correctness(default_vllm_config):
             )
             attn_metadata = builder.build(0, common_attn_metadata)
 
+    assert (
+        flashinfer_backend.FlashInferMetadataBuilder.get_cudagraph_support(
+            vllm_config, kv_cache_spec
+        )
+        == AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    )
     assert isinstance(
         attn_metadata.decode,
         flashinfer_backend.FlashInferTrtllmAPIDecode,
