@@ -309,8 +309,10 @@ class MediaConnector:
                     timeout=fetch_timeout,
                     allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
                 )
-            except TimeoutError:
-                raise ValueError(f"Timeout while accessing resource '{url}'")
+            except Exception as e:
+                raise ValueError(
+                    f"Failed to fetch resource from URL '{url}': {e}"
+                ) from e
 
             self._put_cached_bytes(url, data)
             return media_io.load_bytes(data)
@@ -357,8 +359,10 @@ class MediaConnector:
                     timeout=fetch_timeout,
                     allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
                 )
-            except TimeoutError:
-                raise ValueError(f"Timeout while accessing resource '{url}'")
+            except Exception as e:
+                raise ValueError(
+                    f"Failed to fetch resource from URL '{url}': {e}"
+                ) from e
 
             await loop.run_in_executor(
                 global_thread_pool, self._put_cached_bytes, url, data
