@@ -143,12 +143,8 @@ class LLMEngine:
 
         # Trigger snapshot if enabled
         additional_config = self.vllm_config.additional_config
-        enable_snapshot = False
         snapshot_provider = None
         if isinstance(additional_config, dict):
-            enable_snapshot = additional_config.get(
-                "enable_snapshot_post_startup", False
-            )
             snapshot_provider = additional_config.get("snapshot_provider", None)
 
         api_process_rank = getattr(
@@ -159,7 +155,7 @@ class LLMEngine:
         )
         is_primary_dp = dp_rank_local <= 0 if dp_rank_local is not None else True
         self.snapshot_manager = None
-        if enable_snapshot and api_process_rank <= 0 and is_primary_dp:
+        if snapshot_provider is not None and api_process_rank <= 0 and is_primary_dp:
             self.snapshot_manager = SnapshotManager(snapshot_provider)
             logger.info("Triggering post-startup snapshot for LLMEngine...")
             self.run_snapshot()

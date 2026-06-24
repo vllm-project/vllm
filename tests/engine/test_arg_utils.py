@@ -861,18 +861,13 @@ def test_snapshot_args():
     # Default values
     args = parser.parse_args([])
     engine_args = EngineArgs.from_cli_args(args=args)
-    assert not engine_args.enable_snapshot_post_startup
     assert engine_args.snapshot_provider is None
 
     # Set CLI arguments
-    args = parser.parse_args(
-        ["--enable-snapshot-post-startup", "--snapshot-provider", "dummy"]
-    )
+    args = parser.parse_args(["--snapshot-provider", "dummy"])
     engine_args = EngineArgs.from_cli_args(args=args)
-    assert engine_args.enable_snapshot_post_startup is True
     assert engine_args.snapshot_provider == "dummy"
 
     # Verify propagation into VllmConfig additional_config
     config = engine_args.create_engine_config()
-    assert config.additional_config.get("enable_snapshot_post_startup") is True
     assert config.additional_config.get("snapshot_provider") == "dummy"

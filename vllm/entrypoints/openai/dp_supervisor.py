@@ -125,7 +125,7 @@ def _build_vllm_dp_server_args(
     child_args.data_parallel_multi_port_external_lb = False
     child_args.data_parallel_supervisor_port = None
     child_args.api_server_count = 1
-    child_args.enable_snapshot_post_startup = False
+    child_args.snapshot_provider = None
     child_args.device_ids = _build_device_ids(args, local_rank)
     return child_args
 
@@ -392,15 +392,13 @@ class DPSupervisor:
                     # This conditional avoids a potential race condition
                     # where shutdown is set, THEN the probe returns true.
                     if not self._shutdown_event.is_set():
-                        if not self._is_ready and getattr(
-                            self.args, "enable_snapshot_post_startup", False
-                        ):
+                        provider = getattr(self.args, "snapshot_provider", None)
+                        if not self._is_ready and provider is not None:
                             from vllm.engine.snapshot.manager import (
                                 SnapshotManager,
                             )
 
                             logger.info("All DP children ready. Triggering snapshot...")
-                            provider = getattr(self.args, "snapshot_provider", None)
                             mgr = SnapshotManager(provider)
                             await asyncio.to_thread(mgr.run_snapshot)
                         self._is_ready = True

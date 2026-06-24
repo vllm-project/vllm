@@ -211,7 +211,7 @@ class APIServerProcessManager:
 
         snapshot_barrier = (
             spawn_context.Barrier(num_servers)
-            if num_servers > 1 and getattr(args, "enable_snapshot_post_startup", False)
+            if num_servers > 1 and getattr(args, "snapshot_provider", None) is not None
             else None
         )
 

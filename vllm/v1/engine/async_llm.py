@@ -201,12 +201,8 @@ class AsyncLLM(EngineClient):
 
         # Setup snapshot manager if enabled
         additional_config = self.vllm_config.additional_config
-        enable_snapshot = False
         snapshot_provider = None
         if isinstance(additional_config, dict):
-            enable_snapshot = additional_config.get(
-                "enable_snapshot_post_startup", False
-            )
             snapshot_provider = additional_config.get("snapshot_provider", None)
 
         api_process_rank = getattr(
@@ -218,7 +214,7 @@ class AsyncLLM(EngineClient):
         is_primary_dp = dp_rank_local <= 0 if dp_rank_local is not None else True
         self.snapshot_manager = None
         if (
-            enable_snapshot
+            snapshot_provider is not None
             and client_index <= 0
             and api_process_rank <= 0
             and is_primary_dp

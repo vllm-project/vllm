@@ -14,7 +14,7 @@ class SnapshotManager:
         if not provider_name:
             raise ValueError(
                 "A snapshot provider must be specified (--snapshot-provider) "
-                "when post-startup snapshotting is enabled."
+                "to enable post-startup snapshotting."
             )
         self.provider = self._find_provider(provider_name)
         if self.provider is None:

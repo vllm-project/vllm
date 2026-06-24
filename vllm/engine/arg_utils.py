@@ -724,7 +724,6 @@ class EngineArgs:
 
     fail_on_environ_validation: bool = False
     gdn_prefill_backend: Literal["flashinfer", "triton", "cutedsl"] | None = None
-    enable_snapshot_post_startup: bool = False
     snapshot_provider: str | None = None
 
     def __post_init__(self):
@@ -1582,16 +1581,10 @@ class EngineArgs:
         )
 
         parser.add_argument(
-            "--enable-snapshot-post-startup",
-            action="store_true",
-            help="Enable taking a snapshot after startup.",
-        )
-
-        parser.add_argument(
             "--snapshot-provider",
             type=str,
             default=None,
-            help="The cloud provider for snapshotting.",
+            help="The cloud provider for post-startup snapshotting.",
         )
         return parser
 
@@ -2337,9 +2330,6 @@ class EngineArgs:
         if self.gdn_prefill_backend is not None:
             self.additional_config["gdn_prefill_backend"] = self.gdn_prefill_backend
 
-        self.additional_config["enable_snapshot_post_startup"] = (
-            self.enable_snapshot_post_startup
-        )
         self.additional_config["snapshot_provider"] = self.snapshot_provider
 
         config = VllmConfig(

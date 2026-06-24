@@ -101,20 +101,19 @@ def test_snapshot_manager_multi_worker_filtering():
 
     mock_config = MagicMock()
     mock_config.additional_config = {
-        "enable_snapshot_post_startup": True,
         "snapshot_provider": "dummy",
     }
 
     # Primary worker (_api_process_rank == 0, client_index == 0)
     mock_config.parallel_config._api_process_rank = 0
-    enable = mock_config.additional_config.get("enable_snapshot_post_startup")
+    provider = mock_config.additional_config.get("snapshot_provider")
     rank = getattr(mock_config.parallel_config, "_api_process_rank", 0)
-    assert enable and rank <= 0
+    assert provider is not None and rank <= 0
 
     # Secondary worker (_api_process_rank == 1)
     mock_config.parallel_config._api_process_rank = 1
     rank_sec = getattr(mock_config.parallel_config, "_api_process_rank", 0)
-    assert not (enable and rank_sec <= 0)
+    assert not (provider is not None and rank_sec <= 0)
 
 
 @pytest.mark.cpu_test
@@ -143,7 +142,6 @@ def test_snapshot_manager_dp_filtering():
 
     mock_config = MagicMock()
     mock_config.additional_config = {
-        "enable_snapshot_post_startup": True,
         "snapshot_provider": "dummy",
     }
     mock_config.parallel_config._api_process_rank = 0
@@ -151,10 +149,10 @@ def test_snapshot_manager_dp_filtering():
     # Local DP Rank 0 (even if global DP rank is > 0)
     mock_config.parallel_config.data_parallel_rank = 2
     mock_config.parallel_config.data_parallel_rank_local = 0
-    enable = mock_config.additional_config.get("enable_snapshot_post_startup")
+    provider = mock_config.additional_config.get("snapshot_provider")
     dp_local = getattr(mock_config.parallel_config, "data_parallel_rank_local", None)
     is_primary = dp_local <= 0 if dp_local is not None else True
-    assert enable and is_primary
+    assert provider is not None and is_primary
 
     # Local DP Rank 1
     mock_config.parallel_config.data_parallel_rank_local = 1
@@ -162,7 +160,7 @@ def test_snapshot_manager_dp_filtering():
         mock_config.parallel_config, "data_parallel_rank_local", None
     )
     is_primary_sec = dp_local_sec <= 0 if dp_local_sec is not None else True
-    assert not (enable and is_primary_sec)
+    assert not (provider is not None and is_primary_sec)
 
 
 @pytest.mark.cpu_test
@@ -174,7 +172,6 @@ def test_dp_supervisor_disables_child_snapshots():
 
     args = argparse.Namespace(
         port=8000,
-        enable_snapshot_post_startup=True,
         snapshot_provider="dummy",
         data_parallel_size=2,
         data_parallel_size_local=2,
@@ -186,7 +183,7 @@ def test_dp_supervisor_disables_child_snapshots():
     )
 
     child_args = _build_vllm_dp_server_args(args, local_rank=0)
-    assert child_args.enable_snapshot_post_startup is False
+    assert child_args.snapshot_provider is None
 
 
 @pytest.mark.cpu_test
@@ -196,7 +193,6 @@ def test_api_server_process_manager_snapshot_barrier():
     import multiprocessing
 
     args = argparse.Namespace(
-        enable_snapshot_post_startup=True,
         snapshot_provider="dummy",
     )
     spawn_context = multiprocessing.get_context("spawn")
@@ -204,7 +200,7 @@ def test_api_server_process_manager_snapshot_barrier():
     num_servers = 2
     barrier = (
         spawn_context.Barrier(num_servers)
-        if num_servers > 1 and getattr(args, "enable_snapshot_post_startup", False)
+        if num_servers > 1 and getattr(args, "snapshot_provider", None) is not None
         else None
     )
     assert barrier is not None
@@ -239,7 +235,6 @@ async def test_dp_supervisor_reraises_probe_exception():
         device_ids=[0, 1],
         tensor_parallel_size=1,
         pipeline_parallel_size=1,
-        enable_snapshot_post_startup=True,
         snapshot_provider="dummy",
     )
     supervisor = DPSupervisor(args)
@@ -268,7 +263,7 @@ def test_validate_parsed_serve_args_unsupported_frontends():
         enable_auto_tool_choice=False,
         enable_log_outputs=False,
         data_parallel_multi_port_external_lb=False,
-        enable_snapshot_post_startup=True,
+        snapshot_provider="dummy",
         headless=True,
         grpc=False,
     )

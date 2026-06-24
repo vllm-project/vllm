@@ -398,19 +398,16 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     if args.enable_log_outputs and not args.enable_log_requests:
         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
 
-    if getattr(args, "enable_snapshot_post_startup", False):
+    if getattr(args, "snapshot_provider", None) is not None:
         if getattr(args, "headless", False):
             raise ValueError(
-                "Error: --enable-snapshot-post-startup cannot be used with --headless"
+                "Error: --snapshot-provider cannot be used with --headless"
             )
         if getattr(args, "grpc", False):
-            raise ValueError(
-                "Error: --enable-snapshot-post-startup cannot be used with --grpc"
-            )
+            raise ValueError("Error: --snapshot-provider cannot be used with --grpc")
         if envs.VLLM_RUST_FRONTEND_PATH:
             raise ValueError(
-                "Error: --enable-snapshot-post-startup cannot be used with "
-                "VLLM_RUST_FRONTEND_PATH"
+                "Error: --snapshot-provider cannot be used with VLLM_RUST_FRONTEND_PATH"
             )
 
     if args.data_parallel_multi_port_external_lb:
