@@ -125,14 +125,16 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
 
 def _specs_to_key_order_block_ids(
     keys: Collection[OffloadKey],
-    specs: list[BlockIDsLoadStoreSpec],
+    specs: list[LoadStoreSpec],
 ) -> np.ndarray:
     """Rebuild per key block IDs in key order from per group specs.
 
     prepare_read() partitions block_ids by KV cache group index. This
     reassembles them so that block_ids[i] corresponds to keys[i].
     """
-    group_iters = [iter(spec.block_ids) for spec in specs]
+    assert all(isinstance(s, BlockIDsLoadStoreSpec) for s in specs)
+    block_id_specs = [s for s in specs if isinstance(s, BlockIDsLoadStoreSpec)]
+    group_iters = [iter(spec.block_ids) for spec in block_id_specs]
     return np.array(
         [int(next(group_iters[get_offload_group_idx(k)])) for k in keys],
         dtype=np.int64,
@@ -377,7 +379,7 @@ class TieringOffloadingManager(OffloadingManager):
     @override
     def prepare_load(
         self, keys: Collection[OffloadKey], req_context: ReqContext
-    ) -> list[BlockIDsLoadStoreSpec]:
+    ) -> list[LoadStoreSpec]:
         """
         Prepare blocks to be loaded from primary tier to GPU.
 
@@ -552,7 +554,6 @@ class TieringOffloadingManager(OffloadingManager):
                 job_id = self._next_job_id()
 
                 # Track this store job
-                assert isinstance(primary_blocks_spec, CPULoadStoreSpec)
                 job_metadata = JobMetadata(
                     job_id=job_id,
                     keys=keys,

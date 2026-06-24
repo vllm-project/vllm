@@ -20,7 +20,6 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
-from vllm.v1.kv_offload.worker.worker import TransferSpec
 
 NUM_GPU_BLOCKS = [64]
 NUM_CPU_BLOCKS = [256]
@@ -117,7 +116,7 @@ def test_transfer(
     cpu_blocks = random.sample(range(num_cpu_blocks), num_mappings)
 
     # expand cpu blocks to gpu-page granularity for uniform comparison:
-    # each cpu block maps to block_size_factor consecutive sub-blocks
+    # each cpu block maps to block_size_factor consecutive sub blocks
     cpu_blocks_expanded = [
         cpu_block * block_size_factor + j
         for cpu_block in cpu_blocks
@@ -130,22 +129,21 @@ def test_transfer(
         gpu_blocks = gpu_blocks[blocks_to_skip:]
         cpu_blocks_expanded = cpu_blocks_expanded[blocks_to_skip:]
 
-    # Build the per-group transfer spec.
+    # Build the per group transfer descriptor.
     cpu_spec = CPULoadStoreSpec(cpu_blocks)
     cpu_spec.set_gpu_block_offset(blocks_to_skip)
     group = GroupTransfer(
         gpu_spec=GPULoadStoreSpec(gpu_blocks),
         offload_spec=cpu_spec,
     )
-    transfer_spec = TransferSpec(groups=[group], is_store=gpu_to_cpu)
 
     # set transfer direction
     if gpu_to_cpu:
-        handler = worker.gpu_to_cpu_handler
+        handler = worker._store_handler
         dst_to_src = dict(zip(cpu_blocks_expanded, gpu_blocks))
         num_dst_sub_blocks = num_gpu_blocks
     else:
-        handler = worker.cpu_to_gpu_handler
+        handler = worker._load_handler
         dst_to_src = dict(zip(gpu_blocks, cpu_blocks_expanded))
         num_dst_sub_blocks = num_gpu_blocks
 
@@ -162,9 +160,9 @@ def test_transfer(
     # call transfer function via public API
     start_time = time.time()
     if gpu_to_cpu:
-        assert worker.submit_store(1, src_spec, dst_spec)
+        assert worker.submit_store(1, [group])
     else:
-        assert worker.submit_load(1, src_spec, dst_spec)
+        assert worker.submit_load(1, [group])
     assert {x.job_id for x in handler._transfers} == {1}
 
     # wait for transfer to complete
@@ -238,7 +236,7 @@ def test_transfer_multi_group(
     - Group 0: aligned transfer with num_mappings_per_group blocks
     - Group 1: zero blocks (empty group)
     - Group 2: unaligned CPU->GPU transfer (logical_offset=block_size_factor-1,
-      causing the implementation to skip source sub-blocks) with
+      causing the implementation to skip source sub blocks) with
       num_mappings_per_group blocks
     """
     set_random_seed(seed)
@@ -312,7 +310,7 @@ def test_transfer_multi_group(
         for cpu_blocks in cpu_blocks_per_group
     ]
 
-    # skip sub-blocks from group 2 to test unaligned transfers.
+    # skip sub blocks from group 2 to test unaligned transfers.
     sub_blocks_to_skip = block_size_factor - 1  # e.g. 2 when block_size_factor=3
     if sub_blocks_to_skip > 0:
         gpu_blocks_per_group[2] = gpu_blocks_per_group[2][
@@ -336,15 +334,9 @@ def test_transfer_multi_group(
                 offload_spec=cpu_spec,
             )
         )
-    transfer_spec = TransferSpec(groups=groups, is_store=gpu_to_cpu)
-
     if gpu_to_cpu:
         handler = worker._store_handler
-        src_spec = GPULoadStoreSpec(
-            gpu_blocks, group_sizes=group_sizes, block_indices=block_indices
-        )
-        dst_spec = CPULoadStoreSpec(cpu_blocks)
-        # per-group mapping: cpu sub-block -> gpu sub-block
+        # per group mapping: cpu sub block -> gpu sub block
         dst_to_src_per_group = [
             dict(zip(expanded, gpu_blks))
             for expanded, gpu_blks in zip(
@@ -354,11 +346,7 @@ def test_transfer_multi_group(
         num_dst_sub_blocks = num_cpu_blocks * block_size_factor
     else:
         handler = worker._load_handler
-        src_spec = CPULoadStoreSpec(cpu_blocks)
-        dst_spec = GPULoadStoreSpec(
-            gpu_blocks, group_sizes=group_sizes, block_indices=block_indices
-        )
-        # per-group mapping: gpu sub-block -> cpu sub-block
+        # per group mapping: gpu sub block -> cpu sub block
         dst_to_src_per_group = [
             dict(zip(gpu_blks, expanded))
             for gpu_blks, expanded in zip(
@@ -377,9 +365,9 @@ def test_transfer_multi_group(
     orig_dst_tensors = [x.clone() for x in handler.dst_tensors]
 
     if gpu_to_cpu:
-        assert worker.submit_store(1, src_spec, dst_spec)
+        assert worker.submit_store(1, groups)
     else:
-        assert worker.submit_load(1, src_spec, dst_spec)
+        assert worker.submit_load(1, groups)
     assert {x.job_id for x in handler._transfers} == {1}
 
     end_time = time.time() + 10
@@ -391,9 +379,7 @@ def test_transfer_multi_group(
             expected_bytes = sum(
                 len(group.gpu_spec.block_ids)
                 * sum(x.page_size_bytes for x in data_refs)
-                for group, data_refs in zip(
-                    transfer_spec.groups, handler.kv_cache_groups_data_refs
-                )
+                for group, data_refs in zip(groups, handler.kv_cache_groups_data_refs)
             )
             assert finished[0].transfer_size == expected_bytes
             break

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import defaultdict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import MagicMock
@@ -46,7 +46,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_offload.base import (
     BlockIDsLoadStoreSpec,
     CanonicalKVCaches,
-    GPULoadStoreSpec,
+    GroupTransfer,
     LoadStoreSpec,
     LookupResult,
     OffloadingManager,
@@ -89,7 +89,8 @@ class MockLoadStoreSpec(BlockIDsLoadStoreSpec):
 
 class MockOffloadingWorker(OffloadingWorker):
     def __init__(self):
-        self.transfer_specs: dict[int, tuple[LoadStoreSpec, LoadStoreSpec]] = {}
+        # Maps job_id -> (groups, is_store)
+        self.transfer_specs: dict[int, tuple[Sequence[GroupTransfer], bool]] = {}
         self.completed_transfers: list[TransferResult] = []
         self.waiting_jobs: set[int] = set()
         self.completed_jobs: list[int] = []
@@ -100,17 +101,13 @@ class MockOffloadingWorker(OffloadingWorker):
         self.completed_transfers = []
         return finished
 
-    def submit_store(
-        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec
-    ) -> bool:  # type: ignore[override]
-        self.transfer_specs[job_id] = (src_spec, dst_spec)
+    def submit_store(self, job_id: int, groups: Sequence[GroupTransfer]) -> bool:
+        self.transfer_specs[job_id] = (groups, True)
         self.waiting_jobs.add(job_id)
         return True
 
-    def submit_load(
-        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec
-    ) -> bool:  # type: ignore[override]
-        self.transfer_specs[job_id] = (src_spec, dst_spec)
+    def submit_load(self, job_id: int, groups: Sequence[GroupTransfer]) -> bool:
+        self.transfer_specs[job_id] = (groups, False)
         self.waiting_jobs.add(job_id)
         return True
 
@@ -167,7 +164,9 @@ class MockOffloadingSpec(OffloadingSpec):
     def complete_transfers(self):
         self.handler.complete_jobs(self.handler.waiting_jobs.copy())
 
-    def get_completed_transfers(self) -> list[tuple[LoadStoreSpec, LoadStoreSpec]]:
+    def get_completed_transfers(
+        self,
+    ) -> list[tuple[Sequence[GroupTransfer], bool]]:
         specs = [
             self.handler.transfer_specs[job_id]
             for job_id in self.handler.completed_jobs
@@ -175,7 +174,9 @@ class MockOffloadingSpec(OffloadingSpec):
         self.handler.completed_jobs.clear()
         return specs
 
-    def get_flushed_transfers(self) -> list[tuple[LoadStoreSpec, LoadStoreSpec]]:
+    def get_flushed_transfers(
+        self,
+    ) -> list[tuple[Sequence[GroupTransfer], bool]]:
         specs = [
             self.handler.transfer_specs[job_id] for job_id in self.handler.flushed_jobs
         ]
@@ -388,22 +389,20 @@ class RequestRunner:
         self.scheduler.add_request(req)
 
     def _parse_transfers(self):
-        for transfer_spec in self.offloading_spec.get_flushed_transfers():
-            # TransferSpec(groups=..., is_store=...) collect all GPU block IDs.
-            for group in transfer_spec.groups:
+        for groups, _is_store in self.offloading_spec.get_flushed_transfers():
+            for group in groups:
                 for block_id in group.gpu_spec.block_ids:
                     self.flushed_gpu_blocks.add(self.gpu_blocks[block_id.item()])
 
         block_size_factor = self.block_size_factor
 
-        for transfer_spec in self.offloading_spec.get_completed_transfers():
-            assert len(transfer_spec.groups) == self.num_kv_groups
-            store = transfer_spec.is_store
+        for groups, store in self.offloading_spec.get_completed_transfers():
+            assert len(groups) == self.num_kv_groups
 
             gpu_blocks: list[GPUBlock] = []
             offload_addresses: list[Any] = []
 
-            for group in transfer_spec.groups:
+            for group in groups:
                 gpu_spec = group.gpu_spec
                 offload_spec = group.offload_spec
                 assert isinstance(offload_spec, MockLoadStoreSpec)

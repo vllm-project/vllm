@@ -10,7 +10,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
 from vllm.v1.kv_offload.base import (
-    BlockIDsLoadStoreSpec,   
     LoadStoreSpec,
     LookupResult,
     OffloadingEvent,
@@ -108,7 +107,7 @@ class CPUOffloadingManager(OffloadingManager):
         self,
         keys: Iterable[OffloadKey],
         blocks: Iterable[BlockStatus],
-    ) -> list[BlockIDsLoadStoreSpec]:
+    ) -> list[LoadStoreSpec]:
         """Return one CPULoadStoreSpec per KV group, partitioned by group index."""
         by_group: dict[int, list[int]] = defaultdict(list)
         for key, block in zip(keys, blocks):
@@ -143,7 +142,7 @@ class CPUOffloadingManager(OffloadingManager):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
-    ) -> list[BlockIDsLoadStoreSpec]:
+    ) -> list[LoadStoreSpec]:
         blocks = []
         for key in keys:
             block = self._policy.get(key)

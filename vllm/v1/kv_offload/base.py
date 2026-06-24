@@ -5,7 +5,7 @@ Core abstractions for KV cache offloading in vLLM v1.
 """
 
 from abc import ABC, abstractmethod
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, NewType
@@ -82,6 +82,25 @@ class LoadStoreSpec(ABC):
     to load, and optionally also to store, blocks of KV data.
     """
 
+    def __init__(self) -> None:
+        # Logical offset (in GPU blocks) of this group's first block within
+        # the request. Meaningful only on the offloaded (larger block) side,
+        # where blocks_to_skip = gpu_block_offset % block_size_factor selects
+        # how many GPU-sized sub blocks of the first offloaded block to skip.
+        # 0 == block-aligned (the common case). Defined here so that any
+        # offloaded medium (block-ID-based or file/object-based) can carry it.
+        self._gpu_block_offset: int = 0
+
+    def set_gpu_block_offset(self, offset: int) -> "LoadStoreSpec":
+        """Record this group's first block GPU offset. Returns self for
+        chaining. No-op semantics for block aligned specs."""
+        self._gpu_block_offset = offset
+        return self
+
+    @property
+    def gpu_block_offset(self) -> int:
+        return self._gpu_block_offset
+
     @staticmethod
     @abstractmethod
     def medium() -> str:
@@ -95,10 +114,10 @@ class LoadStoreSpec(ABC):
 @dataclass
 class PrepareStoreOutput:
     keys_to_store: list[OffloadKey]
-    # One offloaded side spec per KV cache group, positionally aligned with
-    # kv_cache_groups. Each carries that group's block_ids. The scheduler
-    # stamps the per group gpu_block_offset via set_gpu_block_offset(...).
-    store_specs: "list[BlockIDsLoadStoreSpec]"
+    # One offloaded-side spec per KV cache group, positionally aligned with
+    # kv_cache_groups. The scheduler stamps the per-group gpu_block_offset
+    # via set_gpu_block_offset(...) on each returned spec.
+    store_specs: list[LoadStoreSpec]
     evicted_keys: list[OffloadKey]
 
 
@@ -190,7 +209,7 @@ class OffloadingManager(ABC):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
-    ) -> "list[BlockIDsLoadStoreSpec]":
+    ) -> list[LoadStoreSpec]:
         """
         Prepare the given blocks to be read.
         The given blocks will be protected from eviction until
@@ -202,10 +221,9 @@ class OffloadingManager(ABC):
             req_context: per-request context (e.g. kv_transfer_params).
 
         Returns:
-            One BlockIDsLoadStoreSpec per KV cache group, positionally aligned
-            with kv_cache_groups. Each spec carries that group's block_ids for
-            the requested keys groups with no matching keys get an empty spec.
-            The caller stamps the per group alignment offset via
+            One LoadStoreSpec per KV cache group, positionally aligned with
+            kv_cache_groups. Groups with no matching keys get an empty spec.
+            The caller stamps the per-group alignment offset via
             set_gpu_block_offset() on each returned spec.
         """
         pass
@@ -350,23 +368,8 @@ class BlockIDsLoadStoreSpec(LoadStoreSpec, ABC):
     """
 
     def __init__(self, block_ids: list[int]):
+        super().__init__()
         self.block_ids = np.array(block_ids, dtype=np.int64)
-        # Logical offset (in GPU blocks) of this group's first block within
-        # the request. Meaningful only on the offloaded (larger-block) side,
-        # where blocks_to_skip = gpu_block_offset % block_size_factor selects
-        # how many GPU sized sub blocks of the first offloaded block to skip.
-        # 0 == block-aligned (the common case).
-        self._gpu_block_offset: int = 0
-
-    def set_gpu_block_offset(self, offset: int) -> "BlockIDsLoadStoreSpec":
-        """Record this group's first block GPU offset. Returns self for
-        chaining at construction. No-op semantics for block aligned specs."""
-        self._gpu_block_offset = offset
-        return self
-
-    @property
-    def gpu_block_offset(self) -> int:
-        return self._gpu_block_offset
 
     def __repr__(self) -> str:
         return repr(self.block_ids)
@@ -395,15 +398,14 @@ class GPULoadStoreSpec(BlockIDsLoadStoreSpec):
 class GroupTransfer:
     """One KV cache group's transfer descriptor.
 
-    Direction neutral: the worker method
-    (submit_store vs submit_load, Task 7 in #33689)
-    or TransferSpec.is_store decides which side is src vs dst.
-    The offloaded spec carries the per-group alignment offset via
-    set_gpu_block_offset(). The GPU spec's block_size_factor is always 1.
+    Direction is encoded by the worker method: submit_store (GPU → offloaded)
+    or submit_load (offloaded → GPU). The offloaded spec carries the per group
+    alignment offset via set_gpu_block_offset(). The GPU spec's
+    block_size_factor is always 1.
     """
 
     gpu_spec: GPULoadStoreSpec
-    offload_spec: BlockIDsLoadStoreSpec
+    offload_spec: LoadStoreSpec
 
 
 @dataclass
@@ -470,16 +472,12 @@ class OffloadingWorker(ABC):
     submit_load, so there is no (src_medium, dst_medium) routing."""
 
     @abstractmethod
-    def submit_store(
-        self, job_id: int, src_spec: GPULoadStoreSpec, dst_spec: LoadStoreSpec
-    ) -> bool:
-        """Async GPU -> offloaded medium."""
+    def submit_store(self, job_id: int, groups: Sequence[GroupTransfer]) -> bool:
+        """Async GPU -> offloaded medium. One GroupTransfer per KV cache group."""
 
     @abstractmethod
-    def submit_load(
-        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: GPULoadStoreSpec
-    ) -> bool:
-        """Async offloaded medium -> GPU."""
+    def submit_load(self, job_id: int, groups: Sequence[GroupTransfer]) -> bool:
+        """Async offloaded medium -> GPU. One GroupTransfer per KV cache group."""
 
     @abstractmethod
     def get_finished(self) -> list[TransferResult]: ...

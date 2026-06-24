@@ -45,7 +45,6 @@ from vllm.v1.kv_offload.base import (
     RequestOffloadingContext,
     make_offload_key,
 )
-from vllm.v1.kv_offload.worker.worker import TransferSpec
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
@@ -779,7 +778,8 @@ class OffloadingConnectorScheduler:
         load_job_id = self._generate_job_id()
         self._current_batch_load_jobs[load_job_id] = TransferJob(
             req_id=request.request_id,
-            transfer_spec=TransferSpec(groups=groups, is_store=False),
+            groups=groups,
+            is_store=False,
         )
         # a load can only be issued when no other jobs are pending.
         assert not req_status.transfer_jobs
@@ -1014,7 +1014,8 @@ class OffloadingConnectorScheduler:
 
             store_jobs[job_id] = TransferJob(
                 req_id=req_id,
-                transfer_spec=TransferSpec(groups=groups, is_store=True),
+                groups=groups,
+                is_store=True,
             )
 
             logger.debug(

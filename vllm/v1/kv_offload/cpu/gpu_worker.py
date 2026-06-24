@@ -4,6 +4,7 @@ import functools
 import threading
 import time
 from collections import deque
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -15,10 +16,10 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.kv_offload.base import (
+    BlockIDsLoadStoreSpec,
     CanonicalKVCacheRef,
     CanonicalKVCaches,
-    GPULoadStoreSpec,
-    LoadStoreSpec,
+    GroupTransfer,
     OffloadingWorker,
     TransferResult,
 )
@@ -210,12 +211,7 @@ class SingleDirectionOffloadingHandler:
         # list of pinned descriptor buffer sets available for re-use
         self._buffer_pool: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
 
-    def transfer_async(
-        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec
-    ) -> bool:
-        assert isinstance(src_spec, BlockIDsLoadStoreSpec)
-        assert isinstance(dst_spec, BlockIDsLoadStoreSpec)
-
+    def transfer_async(self, job_id: int, groups: Sequence[GroupTransfer]) -> bool:
         # There are 2 types of transfers: GPU->CPU (store) and CPU->GPU (load).
         # The offloaded (CPU) side may have larger blocks than the GPU side
         # (block_size_factor > 1). The first offloaded block of each group
@@ -224,9 +220,7 @@ class SingleDirectionOffloadingHandler:
 
         # Pre-compute total copy operations for buffer sizing.
         num_copy_ops = 0
-        for group, group_data_refs in zip(
-            transfer_spec.groups, self.kv_cache_groups_data_refs
-        ):
+        for group, group_data_refs in zip(groups, self.kv_cache_groups_data_refs):
             num_copy_ops += len(group.gpu_spec.block_ids) * len(group_data_refs)
 
         # reuse a pooled buffer set, growing it if this transfer needs more room
@@ -255,9 +249,7 @@ class SingleDirectionOffloadingHandler:
             else self.src_block_size_factor
         )
 
-        for group, group_data_refs in zip(
-            transfer_spec.groups, self.kv_cache_groups_data_refs
-        ):
+        for group, group_data_refs in zip(groups, self.kv_cache_groups_data_refs):
             gpu_spec = group.gpu_spec
             offload_spec = group.offload_spec
             group_size = len(gpu_spec.block_ids)
@@ -266,6 +258,7 @@ class SingleDirectionOffloadingHandler:
 
             offload_skip = offload_spec.gpu_block_offset % offload_bsf
 
+            assert isinstance(offload_spec, BlockIDsLoadStoreSpec)
             src_bsf = self.src_block_size_factor
             dst_bsf = self.dst_block_size_factor
             if self.gpu_to_cpu:
@@ -547,17 +540,13 @@ class CPUOffloadingWorker(OffloadingWorker):
             time.monotonic() - t0,
         )
 
-    def submit_store(
-        self, job_id: int, src_spec: GPULoadStoreSpec, dst_spec: LoadStoreSpec
-    ) -> bool:
+    def submit_store(self, job_id: int, groups: Sequence[GroupTransfer]) -> bool:
         """Async GPU -> CPU."""
-        return self._store_handler.transfer_async(job_id, src_spec, dst_spec)
+        return self._store_handler.transfer_async(job_id, groups)
 
-    def submit_load(
-        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: GPULoadStoreSpec
-    ) -> bool:
+    def submit_load(self, job_id: int, groups: Sequence[GroupTransfer]) -> bool:
         """Async CPU -> GPU."""
-        return self._load_handler.transfer_async(job_id, src_spec, dst_spec)
+        return self._load_handler.transfer_async(job_id, groups)
 
     def get_finished(self) -> list[TransferResult]:
         return self._store_handler.get_finished() + self._load_handler.get_finished()
