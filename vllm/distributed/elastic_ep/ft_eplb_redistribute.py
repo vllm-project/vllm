@@ -43,6 +43,16 @@ def compute_dead_ep_ranks(
     return dead_ep
 
 
+def compute_dead_dp_ranks_from_mask(
+    mask: list[int],
+    tp_size: int,
+    exclude_dp_rank: int,
+) -> list[int]:
+    """Derive dead DP ranks from an all2all active mask."""
+    dead_ep = [i for i, v in enumerate(mask) if v != 0]
+    return sorted(set(r // tp_size for r in dead_ep) - {exclude_dp_rank})
+
+
 def mark_dead_columns_inplace(
     physical_to_logical_map: torch.Tensor,
     dead_ep_ranks: set[int],

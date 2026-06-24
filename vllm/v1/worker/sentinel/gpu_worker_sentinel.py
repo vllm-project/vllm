@@ -48,7 +48,6 @@ class WorkerSentinel:
             return run_method(self, ft_request.instruction, (ft_request,), {})
 
     def retry(self, ft_request: FaultToleranceRequest):
-        torch.accelerator.synchronize()
         params = ft_request.params
         self._clean_worker_state()
         self._reset_eplb_async_state()
@@ -77,7 +76,6 @@ class WorkerSentinel:
         new_dp_rank = params["new_dp_rank"]
         tp_size = self.worker.parallel_config.tensor_parallel_size
 
-        torch.accelerator.synchronize()
         self._clean_worker_state()
         mgr = self._get_all2all_manager()
         mgr.clean_buffers()
@@ -199,6 +197,7 @@ class WorkerSentinel:
         return {"mask": mask.tolist()}
 
     def _clean_worker_state(self):
+        torch.accelerator.synchronize()
         self.worker.model_runner.execute_model_state = None
         self.worker.model_runner.kv_connector_output = None
         input_batch = self.worker.model_runner.input_batch

@@ -8,6 +8,9 @@ from typing import TYPE_CHECKING
 
 from vllm.config import set_current_vllm_config
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
+from vllm.distributed.elastic_ep.ft_eplb_redistribute import (
+    compute_dead_dp_ranks_from_mask,
+)
 from vllm.distributed.utils import stateless_init_torch_distributed_process_group
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_open_port
@@ -103,16 +106,13 @@ class EngineCoreSentinel:
         executor = engine.model_executor
 
         with set_current_vllm_config(engine.vllm_config):
-            ft_request.params.update(self._reinit_dp_group())
+            ft_request.params.update(self._reinit_groups_and_coordinate_ports())
         if hasattr(engine, "step_counter"):
             engine.step_counter = 0
 
         executor.collective_rpc("handle_ft_command", args=(ft_request,))
 
-        self.status_type = EngineStatusType.HEALTHY
-        logger.info("[FT] Engine %d status -> HEALTHY", self.engine_index)
-        self.resumed.set()
-        return {"request_id": ft_request.request_id, "success": True}
+        return self._mark_healthy_and_resume(ft_request)
 
     def scale_down(self, ft_request: FaultToleranceRequest) -> dict:
         engine = self.engine
@@ -160,7 +160,7 @@ class EngineCoreSentinel:
             )
 
         with set_current_vllm_config(engine.vllm_config):
-            reinit_result = self._reinit_dp_group(
+            reinit_result = self._reinit_groups_and_coordinate_ports(
                 new_dp_size=new_dp_size,
                 new_dp_rank=new_dp_rank,
             )
@@ -178,7 +178,6 @@ class EngineCoreSentinel:
 
         engine.model_executor.collective_rpc("handle_ft_command", args=(ft_request,))
 
-        self.status_type = EngineStatusType.HEALTHY
         logger.info(
             "[FT] Engine %d scale_down complete: dp_size %d->%d, "
             "dp_rank %d->%d, removed %s",
@@ -189,6 +188,12 @@ class EngineCoreSentinel:
             new_dp_rank,
             removed_dp_ranks,
         )
+        return self._mark_healthy_and_resume(ft_request)
+
+    def _mark_healthy_and_resume(self, ft_request: FaultToleranceRequest) -> dict:
+        """Set status to HEALTHY, signal the busy-loop wrapper to resume."""
+        self.status_type = EngineStatusType.HEALTHY
+        logger.info("[FT] Engine %d status -> HEALTHY", self.engine_index)
         self.resumed.set()
         return {"request_id": ft_request.request_id, "success": True}
 
@@ -208,6 +213,7 @@ class EngineCoreSentinel:
         - Non-zero entries → scale_down with the dead DP ranks.
         """
         mask = self._query_mask()
+        # TODO: Currently cannot handle cases where masks differ across ranks.
 
         if all(v == 0 for v in mask):
             logger.info("[FT] Auto-recovery: mask is all zeros, retrying")
@@ -218,8 +224,7 @@ class EngineCoreSentinel:
         parallel_config = self.engine.vllm_config.parallel_config
         tp_size = parallel_config.tensor_parallel_size
         my_dp_rank = parallel_config.data_parallel_rank
-        dead_ep_ranks = [i for i, v in enumerate(mask) if v != 0]
-        dead_dp_ranks = sorted(set(r // tp_size for r in dead_ep_ranks) - {my_dp_rank})
+        dead_dp_ranks = compute_dead_dp_ranks_from_mask(mask, tp_size, my_dp_rank)
 
         logger.info("[FT] Auto-recovery: dead_dp_ranks=%s, scaling down", dead_dp_ranks)
         ft_request = FaultToleranceRequest(
@@ -248,12 +253,13 @@ class EngineCoreSentinel:
             timeout=timedelta(seconds=self.engine_recovery_timeout_sec),
         )
 
-    def _reinit_dp_group(
+    def _reinit_groups_and_coordinate_ports(
         self,
         new_dp_size: int | None = None,
         new_dp_rank: int | None = None,
     ) -> dict:
-        """Reinit DP process group. Returns worker params."""
+        """Reinit the engine's DP group and negotiate fresh ports for all
+        worker Gloo groups (DP, and optionally EP/EPLB) via TCPStore."""
         engine = self.engine
         if not hasattr(engine, "dp_group") or not hasattr(engine, "dp_store"):
             return {}
