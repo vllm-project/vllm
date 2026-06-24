@@ -372,6 +372,16 @@ impl EngineCoreSamplingParams {
     }
 }
 
+/// Extra kwargs consumed by engine-side reasoning parsers.
+///
+/// Original Python construction point:
+/// <https://github.com/vllm-project/vllm/blob/cec2ec11760f9f3beabd4c90451936078bf91533/vllm/entrypoints/openai/chat_completion/serving.py#L367-L369>
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReasoningParserKwargs {
+    /// Effective kwargs visible to the chat template for this request.
+    pub chat_template_kwargs: HashMap<String, serde_json::Value>,
+}
+
 /// Engine-core add-request payload sent from frontend to engine.
 ///
 /// Original Python definition:
@@ -421,10 +431,10 @@ pub struct EngineCoreRequest {
     pub external_req_id: Option<String>,
     #[serde(default)]
     pub reasoning_ended: Option<bool>,
-    /// Opaque reasoning-parser kwargs forwarded from the frontend to the
+    /// Reasoning-parser kwargs forwarded from the frontend to the
     /// structured-output backend.
     #[serde(default)]
-    pub reasoning_parser_kwargs: Option<OpaqueValue>,
+    pub reasoning_parser_kwargs: Option<ReasoningParserKwargs>,
     /// If `true`, the request should be added to the scheduler's waiting queue
     /// and immediately aborted, so connector-side cleanup runs via the
     /// standard `request_finished` hook.
