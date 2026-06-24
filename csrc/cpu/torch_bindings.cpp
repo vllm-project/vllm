@@ -146,6 +146,8 @@ at::Tensor causal_conv1d_update_cpu(
 void activation_lut_bf16(torch::Tensor& out, torch::Tensor& input,
                          const std::string& activation);
 
+bool cpu_attn_has_isa(const std::string& isa);
+
 torch::Tensor get_scheduler_metadata(
     const int64_t num_req, const int64_t num_heads_q,
     const int64_t num_heads_kv, const int64_t head_dim,
@@ -497,6 +499,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("fused_gdn_gating_cpu", torch::kCPU, &fused_gdn_gating_cpu);
 
   // CPU attention kernels
+  ops.def("cpu_attn_has_isa(str isa) -> bool", &cpu_attn_has_isa);
   ops.def(
       "get_scheduler_metadata(int num_req, int num_heads_q, int num_heads_kv, "
       "int head_dim, Tensor seq_lens, ScalarType dtype, Tensor "
@@ -535,7 +538,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 #endif
 
   // fused moe
-#if defined(__AVX512F__)
+#if defined(__AVX512F__) || (defined(ARM_BF16_SUPPORT))
   ops.def(
       "prepack_moe_weight(Tensor weight, Tensor(a1!) packed_weight, str isa) "
       "-> ()");
@@ -546,7 +549,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "bool skip_weighted, "
       "str act, str isa) -> ()");
   ops.impl("cpu_fused_moe", torch::kCPU, &cpu_fused_moe);
-#endif
+#endif  // #if defined(__AVX512F__) || (defined(ARM_BF16_SUPPORT))
   ops.def(
       "mla_decode_kvcache("
       "   Tensor! out, Tensor query, Tensor kv_cache,"

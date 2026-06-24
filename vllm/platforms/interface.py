@@ -30,6 +30,33 @@ else:
 
 logger = init_logger(__name__)
 
+_assigned_physical_gpu_ids: list[int] | None = None
+
+
+def set_assigned_physical_gpu_ids(ids: list[int]) -> None:
+    """Set the physical GPU IDs assigned to this worker process.
+    Called during worker init so that device_id_to_physical_device_id()
+    can map local_rank to the correct physical device without relying
+    on CUDA_VISIBLE_DEVICES.
+
+    Idempotent: a second call with the same value is a no-op.
+    Raises RuntimeError if called again with a different value.
+
+    This is expected to run during single-threaded worker initialization."""
+    global _assigned_physical_gpu_ids
+    if _assigned_physical_gpu_ids is not None:
+        if _assigned_physical_gpu_ids != ids:
+            raise RuntimeError(
+                f"set_assigned_physical_gpu_ids called with conflicting values: "
+                f"existing={_assigned_physical_gpu_ids}, new={ids}"
+            )
+        return
+    _assigned_physical_gpu_ids = ids
+
+
+def get_assigned_physical_gpu_ids() -> list[int] | None:
+    return _assigned_physical_gpu_ids
+
 
 @functools.cache
 def in_wsl() -> bool:
@@ -234,7 +261,33 @@ class Platform:
         import vllm.kernels  # noqa: F401
 
     @classmethod
+    def device_control_id_to_physical_device_id(cls, device_id: str) -> int:
+        """Map one device-control env entry to an integer physical device ID."""
+        try:
+            return int(device_id)
+        except ValueError as e:
+            raise ValueError(
+                f"Non-integer device ID {device_id!r} is not supported by "
+                f"{cls.device_name}."
+            ) from e
+
+    @classmethod
     def device_id_to_physical_device_id(cls, device_id: int):
+        """Map a vLLM-local logical device ID to a physical device ID.
+
+        The input is a logical local ID (e.g. a local rank), NOT a visible
+        device ordinal; for the latter use
+        visible_device_id_to_physical_device_id(). The two coincide only
+        when no logical-to-physical mapping is in effect.
+        """
+        if _assigned_physical_gpu_ids is not None:
+            if device_id >= len(_assigned_physical_gpu_ids):
+                raise IndexError(
+                    f"device_id {device_id} is out of range for "
+                    f"assigned_physical_gpu_ids {_assigned_physical_gpu_ids} "
+                    f"({len(_assigned_physical_gpu_ids)} devices assigned)"
+                )
+            return _assigned_physical_gpu_ids[device_id]
         # Treat empty device control env var as unset. This is a valid
         # configuration in Ray setups where the engine is launched in
         # a CPU-only placement group located on a GPU node.
@@ -244,9 +297,57 @@ class Platform:
         ):
             device_ids = os.environ[cls.device_control_env_var].split(",")
             physical_device_id = device_ids[device_id]
-            return int(physical_device_id)
+            return cls.device_control_id_to_physical_device_id(physical_device_id)
         else:
             return device_id
+
+    @classmethod
+    def logical_device_id_to_visible_device_id(cls, device_id: int) -> int:
+        """Map a vLLM-local logical device ID to the current process's
+        visible accelerator ordinal.
+
+        vLLM internals use logical local IDs. Physical IDs are used only
+        at platform/topology boundaries. This helper performs the final
+        translation needed by APIs such as ``torch.device("cuda:N")``.
+        """
+        physical_device_id = cls.device_id_to_physical_device_id(device_id)
+        device_control_env = os.environ.get(cls.device_control_env_var, "")
+        if not device_control_env:
+            return physical_device_id
+
+        visible_physical_device_ids = [
+            cls.device_control_id_to_physical_device_id(physical_id)
+            for physical_id in device_control_env.split(",")
+        ]
+        if physical_device_id not in visible_physical_device_ids:
+            raise RuntimeError(
+                f"Physical device {physical_device_id} for logical device "
+                f"{device_id} is not visible in {cls.device_control_env_var}="
+                f"{device_control_env}"
+            )
+        return visible_physical_device_ids.index(physical_device_id)
+
+    @classmethod
+    def visible_device_id_to_physical_device_id(cls, device_id: int) -> int:
+        """Map a visible accelerator ordinal (e.g. ``torch.device.index``)
+        to a physical device ID.
+
+        This is the inverse of the env-var translation performed by
+        logical_device_id_to_visible_device_id() and is independent of any
+        logical-to-physical mapping set via set_assigned_physical_gpu_ids().
+        """
+        device_control_env = os.environ.get(cls.device_control_env_var, "")
+        if not device_control_env:
+            return device_id
+        visible_device_ids = device_control_env.split(",")
+        if device_id >= len(visible_device_ids):
+            raise IndexError(
+                f"visible device ordinal {device_id} is out of range for "
+                f"{cls.device_control_env_var}={device_control_env}"
+            )
+        return cls.device_control_id_to_physical_device_id(
+            visible_device_ids[device_id]
+        )
 
     @classmethod
     def import_kernels(cls) -> None:
@@ -254,7 +355,7 @@ class Platform:
         try:
             import vllm._C  # noqa: F401
         except ImportError as e:
-            logger.warning("Failed to import from vllm._C: %r", e)
+            logger.warning_once("Failed to import from vllm._C: %r", e)
         with contextlib.suppress(ImportError):
             import vllm._moe_C_stable_libtorch  # noqa: F401
 
@@ -758,7 +859,7 @@ class Platform:
             # Pinned memory support under WSL depends on the vendor and driver
             # version. Conservative default: return False. Platform subclasses
             # that can verify support (e.g. CudaPlatformBase) override this.
-            logger.warning(
+            logger.warning_once(
                 "Using 'pin_memory=False' as WSL is detected. "
                 "This may slow down performance."
             )
@@ -902,7 +1003,7 @@ class Platform:
             if attr is not None:
                 return attr
 
-        logger.warning(
+        logger.warning_once(
             "Current platform %s does not have '%s' attribute.",
             self.device_type,
             key,

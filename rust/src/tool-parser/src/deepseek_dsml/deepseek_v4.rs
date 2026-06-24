@@ -1,5 +1,5 @@
 use super::{DeepSeekDsmlToolParser, DsmlTokens};
-use crate::{Result, Tool, ToolParser, ToolParserOutput};
+use crate::{Result, StructuralTagModel, Tool, ToolParser, ToolParserOutput};
 
 /// Tool parser for DeepSeek V4 models.
 ///
@@ -47,6 +47,10 @@ impl ToolParser for DeepSeekV4ToolParser {
         true
     }
 
+    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
+        Some(StructuralTagModel::DeepSeekV4)
+    }
+
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         self.0.parse_into(chunk, output)
     }
@@ -65,8 +69,8 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::DeepSeekV4ToolParser;
-    use crate::ToolParserTestExt as _;
     use crate::test_utils::{collect_stream, test_tools};
+    use crate::{StructuralTagModel, ToolParser, ToolParserTestExt as _};
 
     fn build_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {
         let params = params
@@ -81,6 +85,16 @@ mod tests {
         format!(
             "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"{function_name}\">\n{params}\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>"
         )
+    }
+
+    #[test]
+    fn deepseek_v4_exposes_structural_tag_model() {
+        let parser = DeepSeekV4ToolParser::new(&test_tools());
+
+        assert_eq!(
+            parser.structural_tag_model(),
+            Some(StructuralTagModel::DeepSeekV4)
+        );
     }
 
     #[test]
