@@ -545,6 +545,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             attn_type,
             kv_sharing_target_layer_name,
             indexer=indexer,
+            topk_indices_buffer=topk_indices_buffer,
             **mla_args,
         )
         # Prefill BF16 kernel requires 64 on Hopper, 128 on Blackwell
@@ -589,18 +590,20 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
     ) -> torch.Tensor:
         # Convert per-request indices to global slots (decode) or workspace
         # offsets (prefill).
-        topk_indices = triton_convert_req_index_to_global_index(
+        topk_indices, topk_length = triton_convert_req_index_to_global_index(
             attn_metadata.req_id_per_token,
             attn_metadata.block_table,
             topk_indices,
             BLOCK_SIZE=attn_metadata.block_size,
             NUM_TOPK_TOKENS=topk_indices.shape[1],
+            return_valid_counts=True,
         )
 
         return self._bf16_flash_mla_kernel(
             q,
             kv_c_and_k_pe_cache,
             topk_indices,
+            topk_length,
         )
 
     def _forward_fp8_kv_separate_prefill_decode(
@@ -628,7 +631,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         # For BF16 cache: always use global cache slots (no workspace)
         # prefill_workspace_starts has been adjusted in-place per chunk so
         # prefill indices automatically come out chunk-local
-        topk_indices = triton_convert_req_index_to_global_index(
+        topk_indices, topk_length = triton_convert_req_index_to_global_index(
             attn_metadata.req_id_per_token,
             attn_metadata.block_table,
             topk_indices,
@@ -637,6 +640,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             HAS_PREFILL_WORKSPACE=has_prefill_workspace,
             prefill_workspace_request_ids=prefill_request_ids,
             prefill_workspace_starts=prefill_workspace_starts,
+            return_valid_counts=True,
         )
 
         fp8_metadata = attn_metadata.fp8_extra_metadata
@@ -699,11 +703,13 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
 
                 chunk_q = q[chunk.tokens_slice]
                 chunk_topk_indices_workspace = topk_indices[chunk.tokens_slice]
+                chunk_topk_length = topk_length[chunk.tokens_slice]
 
                 attn_out[chunk.tokens_slice] = self._bf16_flash_mla_kernel(
                     chunk_q,
                     chunk_workspace,
                     chunk_topk_indices_workspace,
+                    chunk_topk_length,
                 )
 
         return attn_out
@@ -791,6 +797,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         q: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
         topk_indices: torch.Tensor,
+        topk_length: torch.Tensor | None = None,
     ) -> torch.Tensor:
         num_tokens = q.shape[0]
         kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
@@ -810,9 +817,13 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             q = q_padded
 
         topk_indices = topk_indices.view(num_tokens, 1, -1)
-        output = flash_mla_sparse_fwd(q, kv_c_and_k_pe_cache, topk_indices, self.scale)[
-            0
-        ]
+        output = flash_mla_sparse_fwd(
+            q,
+            kv_c_and_k_pe_cache,
+            topk_indices,
+            self.scale,
+            topk_length=topk_length,
+        )[0]
         output = output[:, : self.num_heads, :]
         return output
 

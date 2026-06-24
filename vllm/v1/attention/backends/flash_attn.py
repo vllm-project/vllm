@@ -267,7 +267,7 @@ class FlashAttentionMetadata:
     prefix_scheduler_metadata: torch.Tensor | None = None
     max_num_splits: int = 0
 
-    causal: bool = True
+    causal: bool | torch.Tensor = True
 
     # PrefixLM bidirectional ranges for multimodal tokens.
     # Shape: (num_seqs, max_ranges, 2) int32, [start, end] per range.
@@ -312,7 +312,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
     #  https://github.com/vllm-project/vllm/issues/22945
     _cudagraph_support = (
         AttentionCGSupport.ALWAYS
-        if get_flash_attn_version() == 3 or current_platform.is_xpu()
+        if get_flash_attn_version() == 3
         else AttentionCGSupport.UNIFORM_BATCH
     )
     supports_update_block_table: bool = True
@@ -570,6 +570,9 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             self.scheduler_metadata[n:] = 0
             scheduler_metadata = self.scheduler_metadata[:n]
 
+        if isinstance(causal, torch.Tensor) and causal.dtype != torch.int32:
+            causal = causal.to(torch.int32)
+
         attn_metadata = FlashAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
@@ -824,17 +827,45 @@ class FlashAttentionImpl(AttentionImpl):
                     if self.sliding_window is not None
                     else None
                 )
+
+                causal = attn_metadata.causal
+                is_dynamic_causal = isinstance(causal, torch.Tensor)
+
+                # For non-causal (bidirectional) attention, make the
+                # sliding window symmetric so queries attend in both
+                # directions.
+                if (
+                    sliding_window_size is not None
+                    and sliding_window_size[1] == 0
+                    and (is_dynamic_causal or causal is False)
+                ):
+                    sliding_window_size = [
+                        sliding_window_size[0],
+                        sliding_window_size[0],
+                    ]
+
                 mm_prefix_ranges = attn_metadata.mm_prefix_range_tensor
                 mm_mask_mod = None
                 mm_aux = None
                 if (
                     mm_prefix_ranges is not None
-                    and attn_metadata.causal
+                    and not is_dynamic_causal
+                    and causal is True
                     and self.vllm_flash_attn_version == 4
                 ):
                     max_ranges = mm_prefix_ranges.shape[1]
                     mm_mask_mod = _make_mm_prefix_mask_mod(max_ranges)
                     mm_aux = [mm_prefix_ranges]
+
+                dynamic_causal = None
+                if isinstance(causal, torch.Tensor):
+                    if self.vllm_flash_attn_version != 4:
+                        raise NotImplementedError(
+                            "Per-sequence causal requires FA4. Current version: "
+                            f"FA{self.vllm_flash_attn_version}"
+                        )
+                    dynamic_causal = causal
+                    causal = False
 
                 flash_attn_varlen_func(
                     q=query[:num_actual_tokens],
@@ -846,7 +877,7 @@ class FlashAttentionImpl(AttentionImpl):
                     seqused_k=seqused_k,
                     max_seqlen_k=max_seqlen_k,
                     softmax_scale=self.scale,
-                    causal=attn_metadata.causal,
+                    causal=causal,
                     alibi_slopes=self.alibi_slopes,
                     window_size=sliding_window_size,
                     block_table=block_table,
@@ -856,6 +887,7 @@ class FlashAttentionImpl(AttentionImpl):
                     q_descale=q_descale,
                     k_descale=k_descale,
                     v_descale=v_descale,
+                    dynamic_causal=dynamic_causal,
                     num_splits=attn_metadata.max_num_splits,
                     s_aux=self.sinks,
                     mask_mod=mm_mask_mod,

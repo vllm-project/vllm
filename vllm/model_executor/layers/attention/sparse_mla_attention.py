@@ -11,7 +11,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import get_mla_dims
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import has_flashinfer
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.utils.torch_utils import is_quantized_kv_cache, np_to_pinned_tensor
 from vllm.v1.attention.backend import (
     AttentionMetadata,
     AttentionMetadataBuilder,
@@ -66,7 +66,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         )
         self.req_id_per_token_buffer.fill_(0)
         self.req_id_per_token_buffer[: req_id_per_token.shape[0]].copy_(
-            torch.from_numpy(req_id_per_token), non_blocking=True
+            np_to_pinned_tensor(req_id_per_token), non_blocking=True
         )
         return self.req_id_per_token_buffer[:num_tokens]
 
@@ -254,6 +254,7 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
         v_head_dim: int,
         kv_b_proj: "ColumnParallelLinear",
         indexer: object | None = None,
+        topk_indices_buffer: torch.Tensor | None = None,
         q_pad_num_heads: int | None = None,
     ) -> None:
         self.num_heads = num_heads
@@ -269,8 +270,14 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
         self.v_head_dim = v_head_dim
         self.kv_b_proj = kv_b_proj
 
-        assert indexer is not None
-        self.topk_indices_buffer: torch.Tensor | None = indexer.topk_indices_buffer  # type: ignore[attr-defined]
+        # The indexer carries the shared buffer for normal layers and tests;
+        # the explicitly-passed buffer covers backbone skip layers, whose
+        # indexer is not constructed (see deepseek_v2.py).
+        self.topk_indices_buffer: torch.Tensor | None = (
+            indexer.topk_indices_buffer  # type: ignore[attr-defined]
+            if indexer is not None
+            else topk_indices_buffer
+        )
 
         fa_version = get_flash_attn_version(head_size=qk_head_dim)
         self._fa4_available = fa_version is not None and fa_version >= 4
