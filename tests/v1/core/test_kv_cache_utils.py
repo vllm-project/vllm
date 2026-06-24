@@ -47,6 +47,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpecKind,
     KVCacheTensor,
     MambaSpec,
+    MemoryModel,
     MLAAttentionSpec,
     SinkFullAttentionSpec,
     SlidingWindowMLASpec,
@@ -1864,6 +1865,70 @@ def test_get_kv_cache_configs_attention_free():
     ]
 
 
+def test_request_constant_mamba_does_not_reduce_attention_pool():
+    model_config = ModelConfig(max_model_len=64)
+    scheduler_config = SchedulerConfig(
+        max_num_batched_tokens=64,
+        max_num_seqs=4,
+        max_model_len=model_config.max_model_len,
+        is_encoder_decoder=model_config.is_encoder_decoder,
+    )
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        scheduler_config=scheduler_config,
+    )
+
+    attention_spec = new_kv_cache_spec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.float16,
+    )
+    mamba_spec = new_mamba_spec(
+        block_size=16,
+        shapes=((8,),),
+        dtypes=(torch.float16,),
+        num_speculative_blocks=0,
+        mamba_cache_mode="none",
+        page_size_padded=attention_spec.page_size_bytes,
+    )
+    request_blocks = scheduler_config.max_num_seqs * mamba_spec.blocks_per_request + 1
+    attention_blocks = 20
+    available_memory = (
+        attention_spec.page_size_bytes * attention_blocks
+        + mamba_spec.page_size_bytes * request_blocks
+    )
+
+    kv_cache_config = get_kv_cache_configs(
+        vllm_config,
+        [{"attn": attention_spec, "mamba": mamba_spec}],
+        [available_memory],
+    )[0]
+
+    assert [pool.memory_model for pool in kv_cache_config.pool_configs] == [
+        MemoryModel.TOKEN_PROPORTIONAL,
+        MemoryModel.REQUEST_CONSTANT,
+    ]
+    assert [pool.num_blocks for pool in kv_cache_config.pool_configs] == [
+        attention_blocks,
+        request_blocks,
+    ]
+    assert kv_cache_config.group_to_pool_id == [0, 1]
+    assert kv_cache_config.kv_cache_tensors == [
+        KVCacheTensor(
+            size=attention_spec.page_size_bytes * attention_blocks,
+            shared_by=["attn"],
+        ),
+        KVCacheTensor(
+            size=mamba_spec.page_size_bytes * request_blocks,
+            shared_by=["mamba"],
+        ),
+    ]
+
+    _, max_concurrency = get_kv_cache_capacity(vllm_config, kv_cache_config)
+    assert max_concurrency == scheduler_config.max_num_seqs
+
+
 def test_generate_uniform_type_kv_cache_specs():
     # All layers are full attention, can be merged
     kv_cache_specs = {
@@ -2265,7 +2330,16 @@ def test_auto_fit_max_model_len_with_hybrid():
     model_config = ModelConfig(max_model_len=8192)
     # Simulate the user passing -1 by setting original_max_model_len
     model_config.original_max_model_len = -1
-    vllm_config = VllmConfig(model_config=model_config)
+    scheduler_config = SchedulerConfig(
+        max_num_batched_tokens=model_config.max_model_len,
+        max_num_seqs=4,
+        max_model_len=model_config.max_model_len,
+        is_encoder_decoder=model_config.is_encoder_decoder,
+    )
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        scheduler_config=scheduler_config,
+    )
 
     mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2  # 16KB per block per layer
     gamma = 2
@@ -2274,7 +2348,8 @@ def test_auto_fit_max_model_len_with_hybrid():
         "layer_2": new_kv_cache_spec(),
     }
 
-    available_memory = mem_per_block_per_layer * (1024 // 16 + 1 + gamma)
+    mamba_request_blocks = scheduler_config.max_num_seqs * (1 + gamma) + 1
+    available_memory = mem_per_block_per_layer * (1024 // 16 + mamba_request_blocks)
     _kv_cache_configs = get_kv_cache_configs(
         vllm_config, [kv_cache_specs], [available_memory]
     )

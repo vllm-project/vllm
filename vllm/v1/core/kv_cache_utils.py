@@ -26,9 +26,11 @@ from vllm.v1.kv_cache_interface import (
     HiddenStateCacheSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCachePoolConfig,
     KVCacheSpec,
     KVCacheTensor,
     MambaSpec,
+    MemoryModel,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
@@ -916,12 +918,95 @@ def is_kv_cache_spec_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
     return True
 
 
+def _get_groups_by_memory_model(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> tuple[list[tuple[int, KVCacheGroupSpec]], list[tuple[int, KVCacheGroupSpec]]]:
+    token_groups: list[tuple[int, KVCacheGroupSpec]] = []
+    request_groups: list[tuple[int, KVCacheGroupSpec]] = []
+    for group_id, group in enumerate(kv_cache_groups):
+        if group.kv_cache_spec.memory_model == MemoryModel.REQUEST_CONSTANT:
+            request_groups.append((group_id, group))
+        else:
+            token_groups.append((group_id, group))
+    return token_groups, request_groups
+
+
+def _has_request_constant_groups(kv_cache_groups: list[KVCacheGroupSpec]) -> bool:
+    return any(
+        group.kv_cache_spec.memory_model == MemoryModel.REQUEST_CONSTANT
+        for group in kv_cache_groups
+    )
+
+
+def _request_constant_num_blocks(
+    vllm_config: VllmConfig, kv_cache_group: KVCacheGroupSpec
+) -> int:
+    return (
+        vllm_config.scheduler_config.max_num_seqs
+        * kv_cache_group.kv_cache_spec.blocks_per_request
+        + 1
+    )
+
+
+def _request_constant_reserved_bytes(
+    vllm_config: VllmConfig, kv_cache_groups: list[KVCacheGroupSpec]
+) -> int:
+    total_bytes = 0
+    for group in kv_cache_groups:
+        if group.kv_cache_spec.memory_model != MemoryModel.REQUEST_CONSTANT:
+            continue
+        num_blocks = _request_constant_num_blocks(vllm_config, group)
+        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
+            per_layer_specs = group.kv_cache_spec.kv_cache_specs
+            total_bytes += num_blocks * sum(
+                per_layer_specs[layer_name].page_size_bytes
+                for layer_name in group.layer_names
+            )
+        else:
+            total_bytes += (
+                num_blocks
+                * group.kv_cache_spec.page_size_bytes
+                * len(group.layer_names)
+            )
+    return total_bytes
+
+
 def get_max_concurrency_for_kv_cache_config(
     vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
 ) -> float:
     """
     Get the maximum concurrency for the given KV cache configuration.
     """
+    if _has_request_constant_groups(kv_cache_config.kv_cache_groups):
+        max_concurrencies: list[float] = []
+        for pool_config in kv_cache_config.pool_configs:
+            groups = [
+                kv_cache_config.kv_cache_groups[group_id]
+                for group_id in pool_config.group_ids
+            ]
+            active_groups = [group for group in groups if group.layer_names]
+            if not active_groups:
+                continue
+            if pool_config.memory_model == MemoryModel.REQUEST_CONSTANT:
+                blocks_per_request = sum(
+                    group.kv_cache_spec.blocks_per_request for group in active_groups
+                )
+                max_concurrencies.append(
+                    (pool_config.num_blocks - 1) / blocks_per_request
+                )
+                continue
+
+            num_layer_per_group = max(len(group.layer_names) for group in active_groups)
+            max_memory_usage_per_request = num_layer_per_group * max_memory_usage_bytes(
+                vllm_config, (group.kv_cache_spec for group in active_groups)
+            )
+            memory_per_block = _pool_bytes_per_block(vllm_config, active_groups)
+            num_block_per_request = cdiv(max_memory_usage_per_request, memory_per_block)
+            max_concurrencies.append(pool_config.num_blocks / num_block_per_request)
+        if not max_concurrencies:
+            return 0.0
+        return min(max_concurrencies)
+
     num_layer_per_group = max(
         len(group.layer_names) for group in kv_cache_config.kv_cache_groups
     )
@@ -1315,7 +1400,7 @@ def _get_kv_cache_config_packed(
 _get_kv_cache_config_deepseek_v4 = _get_kv_cache_config_packed
 
 
-def get_kv_cache_config_from_groups(
+def _get_token_proportional_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
@@ -1397,6 +1482,110 @@ def get_kv_cache_config_from_groups(
         num_blocks=num_blocks,
         kv_cache_tensors=kv_cache_tensors,
         kv_cache_groups=kv_cache_groups,
+    )
+
+
+def _get_kv_cache_config_with_request_constant_groups(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    available_memory: int,
+) -> KVCacheConfig:
+    token_groups_with_ids, request_groups_with_ids = _get_groups_by_memory_model(
+        kv_cache_groups
+    )
+    request_groups = [group for _, group in request_groups_with_ids]
+    request_reserved_bytes = _request_constant_reserved_bytes(
+        vllm_config, request_groups
+    )
+    if request_reserved_bytes > available_memory:
+        raise ValueError(
+            "Not enough KV cache memory for request-bounded KV cache groups: "
+            f"need {format_gib(request_reserved_bytes)} GiB but only "
+            f"{format_gib(available_memory)} GiB is available."
+        )
+
+    kv_cache_tensors: list[KVCacheTensor] = []
+    pool_configs: list[KVCachePoolConfig] = []
+    group_to_pool_id = [-1] * len(kv_cache_groups)
+
+    num_blocks = 1
+    next_pool_id = 0
+    if token_groups_with_ids:
+        token_group_ids = [group_id for group_id, _ in token_groups_with_ids]
+        token_groups = [group for _, group in token_groups_with_ids]
+        token_config = _get_token_proportional_kv_cache_config_from_groups(
+            vllm_config,
+            token_groups,
+            available_memory - request_reserved_bytes,
+        )
+        num_blocks = token_config.num_blocks
+        kv_cache_tensors.extend(token_config.kv_cache_tensors)
+        pool_configs.append(
+            KVCachePoolConfig(
+                pool_id=next_pool_id,
+                memory_model=MemoryModel.TOKEN_PROPORTIONAL,
+                group_ids=token_group_ids,
+                num_blocks=token_config.num_blocks,
+            )
+        )
+        for group_id in token_group_ids:
+            group_to_pool_id[group_id] = next_pool_id
+        next_pool_id += 1
+
+    for group_id, group in request_groups_with_ids:
+        group_num_blocks = _request_constant_num_blocks(vllm_config, group)
+        if not token_groups_with_ids and not pool_configs:
+            num_blocks = group_num_blocks
+        pool_configs.append(
+            KVCachePoolConfig(
+                pool_id=next_pool_id,
+                memory_model=MemoryModel.REQUEST_CONSTANT,
+                group_ids=[group_id],
+                num_blocks=group_num_blocks,
+            )
+        )
+        group_to_pool_id[group_id] = next_pool_id
+        next_pool_id += 1
+
+        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
+            per_layer_specs = group.kv_cache_spec.kv_cache_specs
+            for layer_name in group.layer_names:
+                kv_cache_tensors.append(
+                    KVCacheTensor(
+                        size=per_layer_specs[layer_name].page_size_bytes
+                        * group_num_blocks,
+                        shared_by=[layer_name],
+                    )
+                )
+        else:
+            for layer_name in group.layer_names:
+                kv_cache_tensors.append(
+                    KVCacheTensor(
+                        size=group.kv_cache_spec.page_size_bytes * group_num_blocks,
+                        shared_by=[layer_name],
+                    )
+                )
+
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=kv_cache_tensors,
+        kv_cache_groups=kv_cache_groups,
+        pool_configs=pool_configs,
+        group_to_pool_id=group_to_pool_id,
+    )
+
+
+def get_kv_cache_config_from_groups(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    available_memory: int,
+) -> KVCacheConfig:
+    if _has_request_constant_groups(kv_cache_groups):
+        return _get_kv_cache_config_with_request_constant_groups(
+            vllm_config, kv_cache_groups, available_memory
+        )
+    return _get_token_proportional_kv_cache_config_from_groups(
+        vllm_config, kv_cache_groups, available_memory
     )
 
 
@@ -1812,6 +2001,20 @@ def _max_memory_usage_bytes_from_groups(
     if not kv_cache_groups:
         return 0
 
+    if _has_request_constant_groups(kv_cache_groups):
+        token_groups_with_ids, request_groups_with_ids = _get_groups_by_memory_model(
+            kv_cache_groups
+        )
+        request_reserved_bytes = _request_constant_reserved_bytes(
+            vllm_config, [group for _, group in request_groups_with_ids]
+        )
+        token_groups = [group for _, group in token_groups_with_ids]
+        if not token_groups:
+            return request_reserved_bytes
+        return request_reserved_bytes + _max_memory_usage_bytes_from_groups(
+            vllm_config, token_groups
+        )
+
     if len(kv_cache_groups) == 1 and isinstance(
         kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs
     ):
@@ -2002,6 +2205,48 @@ def _project_kv_cache_groups_to_worker(
     return projected_groups
 
 
+def _shrink_kv_cache_configs_to_min_blocks(
+    kv_cache_configs: list[KVCacheConfig],
+) -> None:
+    min_blocks_by_pool_id: dict[int, int] = {}
+    for kv_cache_config in kv_cache_configs:
+        for pool_config in kv_cache_config.pool_configs:
+            pool_id = pool_config.pool_id
+            min_blocks_by_pool_id[pool_id] = min(
+                min_blocks_by_pool_id.get(pool_id, pool_config.num_blocks),
+                pool_config.num_blocks,
+            )
+
+    for kv_cache_config in kv_cache_configs:
+        old_blocks_by_pool_id = {
+            pool_config.pool_id: pool_config.num_blocks
+            for pool_config in kv_cache_config.pool_configs
+        }
+        for pool_config in kv_cache_config.pool_configs:
+            pool_config.num_blocks = min_blocks_by_pool_id[pool_config.pool_id]
+        if kv_cache_config.pool_configs:
+            kv_cache_config.num_blocks = kv_cache_config.pool_configs[0].num_blocks
+
+        layer_to_group_id: dict[str, int] = {}
+        for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+            for layer_name in group.layer_names:
+                layer_to_group_id[layer_name] = group_id
+
+        for tensor in kv_cache_config.kv_cache_tensors:
+            tensor_pool_id: int | None = None
+            for layer_name in tensor.shared_by:
+                tensor_group_id = layer_to_group_id.get(layer_name)
+                if tensor_group_id is not None:
+                    tensor_pool_id = kv_cache_config.group_to_pool_id[tensor_group_id]
+                    break
+            if tensor_pool_id is None:
+                continue
+            num_blocks_old = old_blocks_by_pool_id[tensor_pool_id]
+            num_blocks_new = min_blocks_by_pool_id[tensor_pool_id]
+            assert tensor.size % num_blocks_old == 0
+            tensor.size = tensor.size // num_blocks_old * num_blocks_new
+
+
 def get_kv_cache_configs(
     vllm_config: VllmConfig,
     kv_cache_specs: list[dict[str, KVCacheSpec]],
@@ -2080,13 +2325,24 @@ def get_kv_cache_configs(
             if not groups:
                 adjusted_memory.append(avail_mem)
                 continue
-            bytes_per_block = _pool_bytes_per_block(vllm_config, groups)
+            (
+                token_groups_with_ids,
+                request_groups_with_ids,
+            ) = _get_groups_by_memory_model(groups)
+            request_reserved_bytes = _request_constant_reserved_bytes(
+                vllm_config, [group for _, group in request_groups_with_ids]
+            )
+            token_groups = [group for _, group in token_groups_with_ids]
+            if not token_groups:
+                adjusted_memory.append(avail_mem)
+                continue
+            bytes_per_block = _pool_bytes_per_block(vllm_config, token_groups)
             logger.info(
                 "Overriding num_gpu_blocks=%d with num_gpu_blocks_override=%d",
-                avail_mem // bytes_per_block,
+                max(avail_mem - request_reserved_bytes, 0) // bytes_per_block,
                 override,
             )
-            adjusted_memory.append(override * bytes_per_block)
+            adjusted_memory.append(request_reserved_bytes + override * bytes_per_block)
         available_memory = adjusted_memory
 
     if vllm_config.model_config.original_max_model_len == -1:
@@ -2121,18 +2377,8 @@ def get_kv_cache_configs(
     # Change the num_blocks of each rank to the smallest among all ranks.
     # We also need to shrink the tensor size proportionally to avoid
     # allocating unused memory.
-    min_num_blocks = min(
-        kv_cache_config.num_blocks for kv_cache_config in kv_cache_configs
-    )
+    _shrink_kv_cache_configs_to_min_blocks(kv_cache_configs)
     for kv_cache_config in kv_cache_configs:
-        num_blocks_old = kv_cache_config.num_blocks
-        kv_cache_config.num_blocks = min_num_blocks
-
-        # Shrink tensor size proportionally
-        for tensor in kv_cache_config.kv_cache_tensors:
-            assert tensor.size % num_blocks_old == 0
-            tensor.size = tensor.size // num_blocks_old * min_num_blocks
-
         if len(kv_cache_config.kv_cache_groups) > 0:
             max_model_len = vllm_config.model_config.max_model_len
             # GPU KV cache size in tokens = max_concurrency * max_model_len:
