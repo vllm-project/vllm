@@ -1638,3 +1638,65 @@ def test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks():
 
         with pytest.raises(ValueError, match="max_num_seqs"):
             runner.initialize_kv_cache(kv_cache_config)
+
+
+def _make_structured_output():
+    return SimpleNamespace(
+        structured_output_request_ids={},
+        grammar_bitmask=torch.empty((0,), dtype=torch.int32),
+    )
+
+
+def _make_runner_for_structured_output(logits: torch.Tensor | None):
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner as V2GPUModelRunner
+
+    runner = V2GPUModelRunner.__new__(V2GPUModelRunner)
+    runner.vocab_size = 11
+    runner.model = SimpleNamespace(compute_logits=lambda _: logits)
+    runner.structured_outputs_worker = Mock()
+    runner.rejection_sampler = None
+    runner.sampler = Mock(
+        return_value=SimpleNamespace(num_sampled=0, num_rejected=0)
+    )
+    return runner
+
+
+def _make_input_batch_for_structured_output(req_id: str):
+    return SimpleNamespace(
+        logits_indices=torch.tensor([0]),
+        num_draft_tokens=0,
+        num_reqs=1,
+        req_ids=[req_id],
+    )
+
+
+def test_v2_model_runner_rejects_structured_outputs_for_hidden_states():
+    runner = _make_runner_for_structured_output(torch.empty((1, 7)))
+    input_batch = _make_input_batch_for_structured_output("real-request")
+
+    with pytest.raises(ValueError, match="Structured outputs require"):
+        runner.sample(torch.empty((1, 7)), input_batch, _make_structured_output())
+
+    runner.structured_outputs_worker.apply_grammar_bitmask.assert_not_called()
+    runner.sampler.assert_not_called()
+
+
+def test_v2_model_runner_skips_structured_output_warmup_for_hidden_states():
+    runner = _make_runner_for_structured_output(torch.empty((1, 7)))
+    input_batch = _make_input_batch_for_structured_output("_warmup_0_")
+
+    runner.sample(torch.empty((1, 7)), input_batch, _make_structured_output())
+
+    runner.structured_outputs_worker.apply_grammar_bitmask.assert_not_called()
+    runner.sampler.assert_called_once()
+
+
+def test_v2_model_runner_applies_structured_outputs_to_materialized_logits():
+    runner = _make_runner_for_structured_output(torch.empty((1, 11)))
+    input_batch = _make_input_batch_for_structured_output("real-request")
+    grammar_output = _make_structured_output()
+
+    runner.sample(torch.empty((1, 7)), input_batch, grammar_output)
+
+    runner.structured_outputs_worker.apply_grammar_bitmask.assert_called_once()
+    runner.sampler.assert_called_once()

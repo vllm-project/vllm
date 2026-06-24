@@ -371,6 +371,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def get_model(self) -> nn.Module:
         return self.model
 
+    def get_extra_non_kv_cache_memory_bytes(self) -> int:
+        return self.model_state.get_extra_non_kv_cache_memory_bytes()
+
     def reload_weights(self, *args, **kwargs) -> None:
         # TODO(Wentao): Use full version instead of import when fully migrated to v2
         from vllm.v1.worker.gpu_model_runner import GPUModelRunner as GPUModelRunnerV1
@@ -1054,14 +1057,32 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         sample_hidden_states = hidden_states[input_batch.logits_indices]
         logits = self.model.compute_logits(sample_hidden_states)
         if grammar_output is not None:
-            # Apply grammar bitmask to the logits in-place.
-            assert self.structured_outputs_worker is not None
-            self.structured_outputs_worker.apply_grammar_bitmask(
-                logits,
-                input_batch,
-                grammar_output.structured_output_request_ids,
-                grammar_output.grammar_bitmask,
+            logits_are_materialized = (
+                logits is not None and logits.shape[-1] == self.vocab_size
             )
+            is_sampler_warmup = input_batch.num_reqs > 0 and all(
+                str(req_id).startswith("_warmup_")
+                for req_id in input_batch.req_ids[: input_batch.num_reqs]
+            )
+            if not logits_are_materialized:
+                if not is_sampler_warmup:
+                    raise ValueError(
+                        "Structured outputs require materialized vocab logits; "
+                        "disable any model-specific sampler backend that returns "
+                        "hidden states from compute_logits."
+                    )
+            else:
+                # Apply grammar bitmask to the logits in-place. Warmup may use a
+                # model-specific sampler path that intentionally returns hidden
+                # states instead of vocab logits; skip the synthetic grammar
+                # exercise there rather than forcing a full materialized sampler.
+                assert self.structured_outputs_worker is not None
+                self.structured_outputs_worker.apply_grammar_bitmask(
+                    logits,
+                    input_batch,
+                    grammar_output.structured_output_request_ids,
+                    grammar_output.grammar_bitmask,
+                )
 
         if input_batch.num_draft_tokens == 0 or self.rejection_sampler is None:
             assert self.sampler is not None
