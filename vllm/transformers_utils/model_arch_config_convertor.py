@@ -580,6 +580,50 @@ class Gemma4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return max(head_dim, global_head_dim) or super().get_head_size()
 
 
+class MossAudioModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def _language_config(self) -> PretrainedConfig:
+        return self.hf_config.language_config
+
+    def get_num_hidden_layers(self) -> int:
+        return getattr(self._language_config(), "num_hidden_layers", 0)
+
+    def get_total_num_attention_heads(self) -> int:
+        return getattr(self._language_config(), "num_attention_heads", 0)
+
+    def get_vocab_size(self) -> int:
+        return getattr(self._language_config(), "vocab_size", 0)
+
+    def get_hidden_size(self) -> int:
+        return getattr(self._language_config(), "hidden_size", 0)
+
+    def get_head_size(self) -> int:
+        head_dim = getattr(self._language_config(), "head_dim", None)
+        if head_dim is not None:
+            return head_dim
+        total_num_attention_heads = self.get_total_num_attention_heads()
+        if total_num_attention_heads == 0:
+            return 0
+        return self.get_hidden_size() // total_num_attention_heads
+
+    def get_total_num_kv_heads(self) -> int:
+        return getattr(
+            self._language_config(),
+            "num_key_value_heads",
+            self.get_total_num_attention_heads(),
+        )
+
+    def derive_max_model_len_and_key(self) -> tuple[float, str | None]:
+        language_config = self._language_config()
+        max_position_embeddings = getattr(
+            language_config,
+            "max_position_embeddings",
+            None,
+        )
+        if max_position_embeddings is None:
+            return super().derive_max_model_len_and_key()
+        return max_position_embeddings, "language_config.max_position_embeddings"
+
+
 # hf_config.model_type -> convertor class
 MODEL_ARCH_CONFIG_CONVERTORS = {
     "cohere_asr": CohereAsrModelArchConfigConvertor,
@@ -604,6 +648,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "mimo_v2_flash": MimoV2ModelArchConfigConvertor,
     "mimo_v2_mtp": MimoV2MTPModelArchConfigConvertor,
     "mimo_v2_omni_mtp": MimoV2MTPModelArchConfigConvertor,
+    "moss_audio": MossAudioModelArchConfigConvertor,
     "mpt": MPTModelArchConfigConvertor,
     "nemotron-nas": NemotronNasModelArchConfigConvertor,
     "pangu_ultra_moe_mtp": PanguUltraMoeMTPModelArchConfigConvertor,

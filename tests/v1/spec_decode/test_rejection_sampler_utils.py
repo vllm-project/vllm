@@ -280,3 +280,32 @@ def test_synthetic_rejection_sample(
             f"Step {i}: observed rate {observed_rate:.4f} deviates from "
             f"expected rate {expected_rate:.4f} by more than {deviation_tol}."
         )
+
+
+def test_placeholder_draft_token_rejected():
+    """A placeholder draft id (-1) must be rejected without reading the logit
+    tensors out of bounds, for any sampling method.
+    """
+    torch.manual_seed(0)
+    device = "cuda"
+    num_trials = 64
+    K = 1
+    temperature = 0.6
+
+    target_logits_1d = torch.randn(VOCAB_SIZE, device=device) / temperature
+    draft_logits_1d = torch.randn(VOCAB_SIZE, device=device) / temperature
+
+    inputs = _build_rejection_sample_inputs(
+        target_logits_1d,
+        draft_logits_1d,
+        K,
+        temperature=temperature,
+        num_trials=num_trials,
+    )
+    inputs["draft_sampled"].view(num_trials, K + 1)[:, 1:] = -1
+
+    sampled, num_sampled = rejection_sample(**inputs, num_speculative_steps=K)
+
+    assert torch.equal(num_sampled, torch.ones_like(num_sampled))
+    recovered = sampled[:, 0]
+    assert (recovered >= 0).all() and (recovered < VOCAB_SIZE).all()
