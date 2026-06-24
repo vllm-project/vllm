@@ -249,6 +249,8 @@ class CuMemAllocator:
         backup_bytes = 0
 
         for ptr, data in self.pointer_to_data.items():
+            if data.is_asleep:
+                continue
             handle = data.handle
             total_bytes += handle[1]
             if data.tag in offload_tags:
@@ -279,6 +281,44 @@ class CuMemAllocator:
 
         gc.collect()
         torch.cuda.empty_cache()
+
+
+    def discard(self, tags: tuple[str, ...] | str) -> None:
+        """
+        Release GPU memory for allocations with the specified tags
+        without backing up to CPU.
+
+        Unlike ``sleep()``, which operates on **all** allocations (offloading
+        some and discarding the rest), ``discard()`` only touches the
+        allocations that match the given *tags* and leaves everything else
+        mapped and usable.  This is useful when stale data (e.g. a previous
+        model's KV cache) should be freed to make room for new allocations
+        while the current model's weights remain on GPU.
+
+        The discarded allocations keep their virtual-address reservation so
+        that ``wake_up()`` can later remap them (with zeroed content).
+
+        Args:
+            tags: One tag or a tuple of tags whose GPU physical memory should
+                be released.
+        """
+        if isinstance(tags, str):
+            tags = (tags,)
+
+        discarded_bytes = 0
+        for ptr, data in self.pointer_to_data.items():
+            if data.tag in tags and not data.is_asleep:
+                try:
+                    unmap_and_release(data.handle)
+                finally:
+                    data.is_asleep = True
+                discarded_bytes += data.handle[1]
+
+        logger.info(
+            "CuMemAllocator: discarded %.2f GiB for tags %s.",
+            discarded_bytes / 1024**3,
+            tags,
+        )
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         """
