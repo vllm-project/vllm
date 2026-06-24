@@ -6,6 +6,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from functools import lru_cache
 
 import torch
+import torch.nn.functional as F
 from huggingface_hub import hf_hub_download
 from torch import nn
 from transformers import BatchFeature, PretrainedConfig
@@ -158,11 +159,14 @@ class OmniASRModel(nn.Module):
         self.encoder_frontend = Wav2Vec2Frontend(config)
         self.encoder = Wav2Vec2TransformerEncoder(config)
         self.encoder_proj = ColumnParallelLinear(
-            config.encoder_embed_dim, config.projection_dim, bias=True
+            config.encoder_embed_dim * config.encoder_stacking,
+            config.projection_dim,
+            bias=True,
         )
         self.lang_embeddings = VocabParallelEmbedding(
             config.num_languages, config.text_config.hidden_size
         )
+        self.encoder_stacking = config.encoder_stacking
 
     def forward(self, audio: torch.Tensor) -> torch.Tensor:
         """
@@ -177,6 +181,15 @@ class OmniASRModel(nn.Module):
         """
         x = self.encoder_frontend(audio)
         x = self.encoder(x)
+        if x.size(1) % self.encoder_stacking != 0:
+            n_padding = self.encoder_stacking - (x.size(1) % self.encoder_stacking)
+            x = F.pad(x, (0, 0, 0, n_padding))
+        assert x.shape[1] % self.encoder_stacking == 0
+        x = x.view(
+            x.size(0),
+            x.size(1) // self.encoder_stacking,
+            x.size(-1) * self.encoder_stacking,
+        )
         x, _ = self.encoder_proj(x)
 
         return x  # [batch, seq, config.projection_dim] ready for LLaMA decoder
@@ -284,6 +297,11 @@ class Wav2Vec2FeatureExtractor(nn.Module):
             seq_len = (
                 seq_len + 2 * padding - dilation * (kernel_size - 1) - 1
             ) // stride + 1
+        stacking = config.encoder_stacking
+        if seq_len % stacking == 0:
+            seq_len = seq_len // stacking
+        else:
+            seq_len = seq_len // stacking + 1
         return seq_len
 
 
@@ -701,7 +719,6 @@ class OmniAsrForConditionalGeneration(
         else:
             encoder_out = self.model.forward(input_features)
             audio_embs = list(encoder_out.unbind(dim=0))
-
         if not audio_embs:
             return []
         device = audio_embs[0].device
