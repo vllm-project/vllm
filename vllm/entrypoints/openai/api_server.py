@@ -73,6 +73,244 @@ logger = init_logger("vllm.entrypoints.openai.api_server")
 _FALLBACK_SUPPORTED_TASKS: tuple[SupportedTask, ...] = ("generate",)
 
 
+# Sidecar tokenizer/config filenames that vLLM re-opens shortly after the
+# engine starts. Kept as a literal set (not glob output) so we de-duplicate
+# overlapping patterns like ``*tokenizer*`` + ``tokenizer.json``.
+_PREFETCH_SIDECAR_NAMES: frozenset[str] = frozenset({
+    "tokenizer.json",
+    "tokenizer.model",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "added_tokens.json",
+    "chat_template.json",
+    "chat_template.jinja",
+    "config.json",
+    "generation_config.json",
+    "preprocessor_config.json",
+    "processor_config.json",
+})
+
+_PREFETCH_WEIGHT_EXTS: tuple[str, ...] = (
+    ".safetensors",
+    ".bin",
+    ".gguf",
+    ".pt",
+)
+
+
+def _prefetch_is_on_nfs(path: str) -> bool:
+    """Best-effort NFS detection. Returns False on any exception."""
+    try:
+        import os
+        st = os.statvfs(path)
+        # NFS reports magic via /proc/mounts on Linux. Cheap fallback:
+        # check the device backing the path.
+        with open("/proc/mounts", "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                mount_point, fstype = parts[1], parts[2]
+                if path.startswith(mount_point) and fstype.startswith("nfs"):
+                    return True
+        # Suppress the unused statvfs result.
+        _ = st
+    except Exception:
+        pass
+    return False
+
+
+def _startup_prefetch_weights(vllm_config: "VllmConfig") -> None:
+    """Kick off reading model weight shards into the OS page cache from the
+    parent APIServer. EngineCore will read the same files a few seconds
+    later from the child; by then the kernel already has them ready.
+
+    All work (directory resolution, HF/ModelScope cache lookup, globbing,
+    and the reads themselves) runs inside the background thread so we do
+    not block the asyncio event loop. The thread is marked daemon so it
+    cannot keep the parent alive past shutdown, and its inner workers are
+    daemon threads too (so clean process exit is never blocked).
+
+    Best-effort: any failure (unknown model location, permission, NFS
+    contention, etc.) is swallowed — vLLM's existing in-child prefetch
+    then runs normally.
+
+    Skipped automatically when:
+      - VLLM_DISABLE_STARTUP_PREFETCH=1 (operator override)
+      - the resolved cache dir lives on NFS AND TP*PP > 1 (parent-side
+        reads contend with the engine's own readers and on lock-heavy
+        NFS exports they can hurt rather than help)
+    """
+    import os
+    import threading
+
+    if os.environ.get("VLLM_DISABLE_STARTUP_PREFETCH", "") not in ("", "0"):
+        return
+
+    # Capture only the small scalar fields the thread needs. Avoid holding
+    # a reference to vllm_config (which contains unpicklable objects) for
+    # longer than necessary.
+    model_ref = vllm_config.model_config.model
+    revision = vllm_config.model_config.revision
+    download_dir = vllm_config.load_config.download_dir
+    tp_size = getattr(vllm_config.parallel_config, "tensor_parallel_size", 1) or 1
+    pp_size = getattr(vllm_config.parallel_config, "pipeline_parallel_size", 1) or 1
+    world_size = tp_size * pp_size
+
+    def _resolve_cache_dir() -> "str | None":
+        """Resolve a HF/ModelScope repo id to its on-disk snapshot dir.
+
+        Acquires the HF cache filelock in the *caller's thread* (the
+        background prefetch worker) — we deliberately do NOT use any
+        forked child here. Resolution is read-only (``local_files_only``
+        snapshot lookup), so file-lock contention is bounded by the few
+        ms it takes to walk the snapshot symlink tree.
+        """
+        if os.path.isdir(model_ref):
+            return model_ref
+
+        try:
+            from vllm import envs
+
+            if envs.VLLM_USE_MODELSCOPE:
+                from modelscope.hub.snapshot_download import (
+                    snapshot_download as ms_snapshot_download,
+                )
+
+                return ms_snapshot_download(
+                    model_id=model_ref,
+                    revision=revision,
+                    cache_dir=download_dir,
+                    local_files_only=True,
+                )
+
+            # Use vLLM's shared HfApi singleton so we share connection
+            # pools / configured endpoint with the rest of the engine.
+            from vllm.transformers_utils.repo_utils import hf_api
+
+            return hf_api().snapshot_download(
+                repo_id=model_ref,
+                revision=revision,
+                cache_dir=download_dir,
+                allow_patterns=[
+                    "*.safetensors",
+                    "*.bin",
+                    "*.gguf",
+                    "*.json",
+                    "*.jinja",
+                    "tokenizer.model",
+                ],
+                local_files_only=True,
+            )
+        except Exception:
+            return None
+
+    def _prefetch_worker() -> None:
+        candidate_dir = _resolve_cache_dir()
+        if not candidate_dir or not os.path.isdir(candidate_dir):
+            return
+
+        # NFS + multi-rank: bail. Parent-side reads contend with engine
+        # readers on lock-heavy exports, often making cold-loads slower.
+        if world_size > 1 and _prefetch_is_on_nfs(candidate_dir):
+            logger.debug(
+                "Parent-side prefetch skipped: NFS-backed cache + "
+                "world_size=%d (TP=%d * PP=%d)",
+                world_size, tp_size, pp_size,
+            )
+            return
+
+        # Walk the snapshot tree (HF/ModelScope use symlink farms; GGUF
+        # repos place shards in subdirs). os.walk follows symlinks by
+        # default which is what we want for HF cache layouts.
+        weight_paths: list[str] = []
+        sidecar_paths: list[str] = []
+        seen: set[str] = set()
+        try:
+            for root, _dirs, files in os.walk(
+                candidate_dir, followlinks=True
+            ):
+                for fname in files:
+                    full = os.path.join(root, fname)
+                    real = os.path.realpath(full)
+                    if real in seen:
+                        continue
+                    seen.add(real)
+                    lower = fname.lower()
+                    if any(lower.endswith(e) for e in _PREFETCH_WEIGHT_EXTS):
+                        weight_paths.append(real)
+                    elif lower in _PREFETCH_SIDECAR_NAMES:
+                        sidecar_paths.append(real)
+        except Exception:
+            return
+
+        # Sidecars first (small, completing them frees the kernel to
+        # focus on the large shards). De-dup is via the `seen` set above.
+        all_paths = sorted(sidecar_paths) + sorted(weight_paths)
+        if not all_paths:
+            return
+
+        logger.debug(
+            "Parent-side weight prefetch starting for %d files in %s "
+            "(%d weight shards, %d sidecars)",
+            len(all_paths), candidate_dir,
+            len(weight_paths), len(sidecar_paths),
+        )
+
+        block_size = 16 * 1024 * 1024  # 16 MB
+
+        def read_one(p: str) -> None:
+            try:
+                with open(p, "rb") as f:
+                    while f.read(block_size):
+                        pass
+            except Exception:
+                pass
+
+        # Use raw daemon threads (NOT ThreadPoolExecutor) for the inner
+        # workers so process exit is never blocked. ThreadPoolExecutor's
+        # workers are non-daemon by default and its atexit hook will
+        # join() them — combined with us already running on a daemon
+        # outer thread, that turns SIGTERM during prefetch into a hang.
+        max_workers = 8
+        sem = threading.BoundedSemaphore(max_workers)
+        worker_threads: list[threading.Thread] = []
+
+        def _bounded_read(p: str) -> None:
+            try:
+                read_one(p)
+            finally:
+                sem.release()
+
+        for p in all_paths:
+            sem.acquire()
+            t = threading.Thread(
+                target=_bounded_read,
+                args=(p,),
+                daemon=True,
+                name="vllm-prefetch-reader",
+            )
+            t.start()
+            worker_threads.append(t)
+
+        # Best-effort join with a wall-clock cap so a hung NFS read
+        # cannot keep the outer daemon thread alive forever. The cap is
+        # generous because real cold-load reads on slow disks can take
+        # 60+ s for big shards.
+        deadline_s = 600.0
+        for t in worker_threads:
+            remaining = max(0.0, deadline_s)
+            t.join(timeout=remaining)
+
+    threading.Thread(
+        target=_prefetch_worker,
+        daemon=True,
+        name="vllm-parent-weight-prefetch",
+    ).start()
+
+
+
+
 @asynccontextmanager
 async def build_async_engine_client(
     args: Namespace,
@@ -121,6 +359,21 @@ async def build_async_engine_client_from_engine_args(
 
     # Create the EngineConfig (determines if we can use V1).
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+
+    # [startup] Start prefetching model weight shards into the OS page
+    # cache in a daemon thread from the PARENT APIServer process.
+    # EngineCore will page-fault on these same files ~10-15 s later
+    # (after fork + CUDA init + distributed init + model init). For
+    # large-weight cases (tens of GB) this parent-side head start
+    # meaningfully shrinks the prefetch+load phase that the engine's
+    # in-child prefetch otherwise barely overlaps.
+    #
+    # Skip in API-only workers that connect to an already-running
+    # EngineCore (multi-API-server / disaggregated setups): those
+    # processes never load weights, and prefetching from all of them
+    # would contend with the engine's own read.
+    if not (client_config and client_config.get("input_address")):
+        _startup_prefetch_weights(vllm_config)
 
     from vllm.v1.engine.async_llm import AsyncLLM
 
