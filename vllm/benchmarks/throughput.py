@@ -21,6 +21,7 @@ from vllm.benchmarks.datasets import (
     BenchmarkDataset,
     BurstGPTDataset,
     ConversationDataset,
+    CustomAudioDataset,
     InstructCoderDataset,
     MultiModalConversationDataset,
     PrefixRepetitionRandomDataset,
@@ -257,9 +258,24 @@ def _run_vllm_chat_requests(
 ) -> tuple[float, list[RequestOutput]]:
     from vllm import SamplingParams
 
-    prompts = [request.prompt for request in requests]
+    prompts = []
     sampling_params: list[SamplingParams] = []
     for request in requests:
+        if isinstance(request.prompt, list):
+            prompts.append(request.prompt)
+        else:
+            content: list[dict[str, Any]] = [{"type": "text", "text": request.prompt}]
+            if request.multi_modal_data is not None:
+                if isinstance(request.multi_modal_data, list):
+                    content.extend(request.multi_modal_data)
+                elif isinstance(request.multi_modal_data, dict):
+                    content.append(request.multi_modal_data)
+                else:
+                    raise TypeError(
+                        "Could not process multimodal content of type: "
+                        f"{type(request.multi_modal_data)}"
+                    )
+            prompts.append([{"role": "user", "content": content}])
         sampling_params.append(
             SamplingParams(
                 n=n,
@@ -533,6 +549,7 @@ def get_requests(args, tokenizer):
         "max_loras": args.max_loras,
         "lora_assignment": getattr(args, "lora_assignment", "random"),
         "num_requests": args.num_prompts,
+        "no_oversample": getattr(args, "no_oversample", False),
     }
 
     if args.dataset_name == "random" or (
@@ -573,6 +590,16 @@ def get_requests(args, tokenizer):
             sample_kwargs["output_len"] = args.output_len
     elif args.dataset_name == "burstgpt":
         dataset_cls = BurstGPTDataset
+    elif args.dataset_name == "custom_audio":
+        dataset_cls = CustomAudioDataset
+        sample_kwargs["enable_multimodal_chat"] = getattr(
+            args, "enable_multimodal_chat", False
+        )
+        custom_output_len = getattr(args, "custom_output_len", None)
+        if custom_output_len is not None:
+            sample_kwargs["output_len"] = custom_output_len
+        elif args.output_len is not None:
+            sample_kwargs["output_len"] = args.output_len
     elif args.dataset_name == "hf":
         if args.output_len is not None:
             sample_kwargs["output_len"] = args.output_len
@@ -917,6 +944,7 @@ def add_cli_args(parser: FlexibleArgumentParser):
             "prefix_repetition",
             "random-mm",
             "random-rerank",
+            "custom_audio",
         ],
         help="Name of the dataset to benchmark on.",
         default="sharegpt",
@@ -932,6 +960,22 @@ def add_cli_args(parser: FlexibleArgumentParser):
     )
     parser.add_argument(
         "--dataset-path", type=str, default=None, help="Path to the dataset"
+    )
+    parser.add_argument(
+        "--no-oversample",
+        action="store_true",
+        help="Do not oversample if the dataset has fewer samples than num-prompts.",
+    )
+    parser.add_argument(
+        "--enable-multimodal-chat",
+        action="store_true",
+        help="Enable multimodal chat transformation for datasets that support it.",
+    )
+    parser.add_argument(
+        "--custom-output-len",
+        type=int,
+        default=None,
+        help="Number of output tokens per request for custom datasets.",
     )
     parser.add_argument(
         "--input-len",

@@ -7,7 +7,7 @@ use winnow::token::{literal, rest, take_until};
 use super::parameters::ToolSchemas;
 use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len, take_until_marker};
 use super::{Result, ToolCallDelta, ToolParser, ToolParserOutput};
-use crate::Tool;
+use crate::{StructuralTagModel, Tool};
 
 const TOOL_CALL_START: &str = "<minimax:tool_call>";
 const TOOL_CALL_END: &str = "</minimax:tool_call>";
@@ -110,6 +110,10 @@ impl ToolParser for MinimaxM2ToolParser {
         Self: Sized + 'static,
     {
         Ok(Box::new(Self::new(tools)))
+    }
+
+    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
+        Some(StructuralTagModel::Minimax)
     }
 
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
