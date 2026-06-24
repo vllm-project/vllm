@@ -112,6 +112,33 @@ def _find_deepseek_v4_model(model: torch.nn.Module) -> torch.nn.Module | None:
     return None
 
 
+def _mhc_pre_kwargs(
+    layer: torch.nn.Module,
+    norm: torch.nn.Module | None = None,
+) -> dict[str, object]:
+    kwargs: dict[str, object] = {}
+    if all(
+        hasattr(layer, attr)
+        for attr in (
+            "rms_norm_eps",
+            "hc_eps",
+            "hc_post_alpha",
+            "hc_sinkhorn_iters",
+        )
+    ):
+        kwargs.update(
+            rms_eps=layer.rms_norm_eps,
+            hc_pre_eps=layer.hc_eps,
+            hc_sinkhorn_eps=layer.hc_eps,
+            hc_post_mult_value=layer.hc_post_alpha,
+            sinkhorn_repeat=layer.hc_sinkhorn_iters,
+        )
+    if norm is not None and hasattr(norm, "weight"):
+        kwargs["norm_weight"] = norm.weight.data
+        kwargs["norm_eps"] = getattr(norm, "variance_epsilon", 1e-6)
+    return kwargs
+
+
 def _warmup_layer_mhc(
     layer: torch.nn.Module,
     token_sizes: list[int],
@@ -130,17 +157,36 @@ def _warmup_layer_mhc(
 
     for size in token_sizes:
         residual_slice = residual[:size]
-        for fn, scale, base in (
-            (layer.hc_attn_fn, layer.hc_attn_scale, layer.hc_attn_base),
-            (layer.hc_ffn_fn, layer.hc_ffn_scale, layer.hc_ffn_base),
+        for fn, scale, base, norm in (
+            (
+                layer.hc_attn_fn,
+                layer.hc_attn_scale,
+                layer.hc_attn_base,
+                getattr(layer, "attn_norm", None),
+            ),
+            (
+                layer.hc_ffn_fn,
+                layer.hc_ffn_scale,
+                layer.hc_ffn_base,
+                getattr(layer, "ffn_norm", None),
+            ),
         ):
-            layer_input, post_mix, comb_mix = layer.hc_pre(
+            post_mix, comb_mix, layer_input = layer.hc_pre(
                 residual_slice,
                 fn,
                 scale,
                 base,
             )
             layer.hc_post(layer_input, residual_slice, post_mix, comb_mix)
+            if norm is not None:
+                post_mix, comb_mix, layer_input = layer.hc_pre(
+                    residual_slice,
+                    fn,
+                    scale,
+                    base,
+                    **_mhc_pre_kwargs(layer, norm),
+                )
+                layer.hc_post(layer_input, residual_slice, post_mix, comb_mix)
 
 
 def _warmup_hc_head(
