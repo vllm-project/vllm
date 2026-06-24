@@ -327,48 +327,6 @@ class Scheduler(SchedulerInterface):
         # async KV loads). Their remaining-block reservation gates async loads.
         self._inflight_prefills: set[Request] = set()
 
-    def _pad_spec_decode(self, request: Request, num_computed_tokens: int) -> bool:
-        """Pad a single (first) decode step with placeholder spec tokens (-1),
-        to ensure uniform decode batches that use full cudagraphs.
-        """
-        pad_spec_decode = (
-            (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
-            # Exactly one real token to compute this step. Use num_tokens
-            # rather than num_prompt_tokens to also cover preemption resumes.
-            and num_computed_tokens == request.num_tokens - 1
-            and request.num_tokens
-            + self.num_spec_tokens
-            + self.num_sampled_tokens_per_step
-            <= self.max_model_len
-        )
-        if pad_spec_decode and not request.spec_token_ids:
-            # Pad with the placeholder draft id (-1).
-            request.spec_token_ids = [-1] * self.num_spec_tokens
-
-        return pad_spec_decode
-
-    @staticmethod
-    def _schedule_spec_tokens(
-        request: Request,
-        num_new_tokens: int,
-        scheduled_spec_decode_tokens: dict[str, list[int]],
-    ) -> None:
-        """Record this step's draft tokens for `request` and clear them."""
-        num_scheduled_spec_tokens = (
-            num_new_tokens
-            + request.num_computed_tokens
-            - (request.num_tokens + request.num_output_placeholders)
-        )
-        if num_scheduled_spec_tokens > 0:
-            spec_token_ids = request.spec_token_ids
-            if len(spec_token_ids) > num_scheduled_spec_tokens:
-                spec_token_ids = spec_token_ids[:num_scheduled_spec_tokens]
-            scheduled_spec_decode_tokens[request.request_id] = spec_token_ids
-
-        # New spec tokens will be set in `update_draft_token_ids` before the
-        # next step when applicable.
-        request.spec_token_ids = []
-
     def _mamba_block_aligned_split(
         self,
         request: Request,
@@ -626,9 +584,21 @@ class Scheduler(SchedulerInterface):
 
             # Speculative decode related.
             if request.spec_token_ids:
-                self._schedule_spec_tokens(
-                    request, num_new_tokens, scheduled_spec_decode_tokens
+                num_scheduled_spec_tokens = (
+                    num_new_tokens
+                    + request.num_computed_tokens
+                    - request.num_tokens
+                    - request.num_output_placeholders
                 )
+                if num_scheduled_spec_tokens > 0:
+                    spec_token_ids = request.spec_token_ids
+                    if len(spec_token_ids) > num_scheduled_spec_tokens:
+                        spec_token_ids = spec_token_ids[:num_scheduled_spec_tokens]
+                    scheduled_spec_decode_tokens[request.request_id] = spec_token_ids
+
+                # New spec tokens will be set in `update_draft_token_ids` before the
+                # next step when applicable.
+                request.spec_token_ids = []
 
             # Encoder-related.
             if encoder_inputs_to_schedule:
@@ -811,6 +781,7 @@ class Scheduler(SchedulerInterface):
                 encoder_inputs_to_schedule = None
                 external_load_encoder_input = []
                 new_encoder_compute_budget = encoder_compute_budget
+                pad_spec_decode = False
 
                 if load_kv_async:
                     # KVTransfer: loading remote KV, do not allocate for new work.
@@ -828,13 +799,21 @@ class Scheduler(SchedulerInterface):
                     # requests, which have output tokens.
                     num_new_tokens = request.num_tokens - num_computed_tokens
 
-                    if scheduled_running_reqs and not prefill_scheduled:  # noqa: SIM102
-                        # Pad new decode requests to uniform spec decoding size to
-                        # preserve full cudagraph for this step.
-                        if self._pad_spec_decode(request, num_computed_tokens):
-                            num_new_tokens += len(request.spec_token_ids)
-                            if num_new_tokens > token_budget:
-                                break
+                    # Pad new decode requests to uniform spec decoding size to
+                    # preserve full cudagraph for this step.
+                    if (
+                        (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
+                        and (prefill_scheduled and scheduled_running_reqs)
+                        and num_computed_tokens == request.num_tokens - 1
+                        and request.num_tokens
+                        + self.num_spec_tokens
+                        + self.num_sampled_tokens_per_step
+                        <= self.max_model_len
+                    ):
+                        num_new_tokens += self.num_spec_tokens
+                        if num_new_tokens > token_budget:
+                            break
+                        pad_spec_decode = True
 
                     threshold = self.scheduler_config.long_prefill_token_threshold
                     if 0 < threshold < num_new_tokens:
@@ -1000,10 +979,10 @@ class Scheduler(SchedulerInterface):
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
-                if request.spec_token_ids:
-                    self._schedule_spec_tokens(
-                        request, num_new_tokens, scheduled_spec_decode_tokens
-                    )
+                if pad_spec_decode:
+                    scheduled_spec_decode_tokens[request_id] = [
+                        -1
+                    ] * self.num_spec_tokens
                 # Only track requests that will still be prefilling after this chunk.
                 if num_computed_tokens + num_new_tokens < request.num_tokens:
                     self._inflight_prefills.add(request)
