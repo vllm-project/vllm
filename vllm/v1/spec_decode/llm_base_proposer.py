@@ -29,6 +29,7 @@ from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.model_executor.models.qwen3_eagle3 import Eagle3Qwen3ForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -1696,6 +1697,13 @@ class SpecDecodeBaseProposer:
         num_tokens: int,
         use_cudagraphs: bool = True,
     ) -> tuple[CUDAGraphMode, int, torch.Tensor | None]:
+        # DSV4 eager mHC sequence parallelism shards the token dim across the
+        # TP group, so the draft's token count must be a multiple of tp_size
+        # (matching the target runner's padding). Captured cudagraph sizes are
+        # already tp-aligned; pre-pad here to also cover the eager (NONE) path.
+        parallel_config = self.vllm_config.parallel_config
+        if parallel_config.enable_sequence_parallel_mhc:
+            num_tokens = round_up(num_tokens, parallel_config.tensor_parallel_size)
         cudagraph_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
             num_tokens,
             valid_modes=({CUDAGraphMode.NONE} if not use_cudagraphs else None),

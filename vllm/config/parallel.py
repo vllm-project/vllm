@@ -207,6 +207,14 @@ class ParallelConfig:
 
     enable_dbo: bool = False
     """Enable dual batch overlap for the model executor."""
+
+    use_sequence_parallel_mhc: bool = False
+    """Shard the per-token mHC residual stream of DeepSeek V4 across the TP
+    group (Megatron-style sequence parallelism) so the replicated mHC kernels
+    and RMSNorms run on 1/tp of the tokens. Unlike the SP compilation pass this
+    is applied eagerly in the model forward, so it works with DSV4's eager
+    attention + CUDA graphs. Opt-in; only takes effect when
+    `tensor_parallel_size > 1`."""
     ubatch_size: int = Field(default=0, ge=0)
     """Number of ubatch size."""
 
@@ -654,6 +662,12 @@ class ParallelConfig:
             and self.tensor_parallel_size > 1
             and self.data_parallel_size > 1
         )
+
+    @property
+    def enable_sequence_parallel_mhc(self) -> bool:
+        # Resolved gate for DSV4 mHC sequence parallelism: only active when the
+        # user opted in and there is more than one TP rank to shard across.
+        return self.use_sequence_parallel_mhc and self.tensor_parallel_size > 1
 
     @property
     def use_batched_dp_moe(self) -> bool:

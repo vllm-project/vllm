@@ -45,7 +45,7 @@ from vllm.model_executor.model_loader import get_model_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import PIN_MEMORY, STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -463,6 +463,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.parallel_config.tensor_parallel_size,
             self.kv_cache_config,
             self.max_num_reqs,
+            require_tp_aligned_capture_sizes=(
+                self.parallel_config.enable_sequence_parallel_mhc
+            ),
         )
         self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,
@@ -1142,6 +1145,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_toks = scheduler_output.total_num_scheduled_tokens
         max_query_len = max(scheduler_output.num_scheduled_tokens.values())
         uniform_tok_count = get_uniform_token_count(num_reqs, num_toks, max_query_len)
+
+        # DSV4 mHC sequence parallelism shards the token dim across the TP
+        # group, so the forward must run on a multiple of tp_size tokens. Pad
+        # the dispatch token count (captured cudagraph sizes are already
+        # tp-aligned; this covers the eager / non-captured path). The extra
+        # rows are flagged as padding below.
+        if self.parallel_config.enable_sequence_parallel_mhc:
+            num_toks = round_up(num_toks, self.parallel_config.tensor_parallel_size)
 
         num_active_loras = 0
         if self.lora_config:

@@ -15,6 +15,7 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
 )
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.forward_context import get_forward_context, is_forward_context_available
@@ -57,6 +58,7 @@ from vllm.model_executor.models.utils import (
     is_pp_missing_parameter,
     make_layers,
     maybe_prefix,
+    sequence_parallel_chunk,
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
@@ -798,6 +800,15 @@ class DeepseekV4DecoderLayer(nn.Module):
         config = vllm_config.model_config.hf_config
         self.hidden_size = config.hidden_size
 
+        # When set, the per-token mHC residual stream is sharded across the TP
+        # group: attention/ffn inputs are all-gathered to full and their full
+        # outputs are sliced back to this rank's token shard, so the mHC ops and
+        # RMSNorms run on 1/tp of the tokens. See ParallelConfig
+        # .enable_sequence_parallel_mhc.
+        self.is_sequence_parallel = (
+            vllm_config.parallel_config.enable_sequence_parallel_mhc
+        )
+
         self.rms_norm_eps = config.rms_norm_eps
         self.attn = _select_dsv4_attn_cls(vllm_config)(
             vllm_config,
@@ -906,7 +917,13 @@ class DeepseekV4DecoderLayer(nn.Module):
             )
 
         # attn_norm is fused into mhc_pre_tilelang / mhc_fused_post_pre above.
+        # Under SP, x is sharded along the token dim: gather to full tokens for
+        # attention, then slice the full output back to this rank's shard.
+        if self.is_sequence_parallel:
+            x = tensor_model_parallel_all_gather(x, dim=0)
         x = self.attn(positions, x, None)
+        if self.is_sequence_parallel:
+            x = sequence_parallel_chunk(x)
 
         ffn_norm_weight = self.ffn_norm.weight.data
         ffn_norm_eps = self.ffn_norm.variance_epsilon
@@ -929,7 +946,11 @@ class DeepseekV4DecoderLayer(nn.Module):
             norm_eps=ffn_norm_eps,
         )
 
+        if self.is_sequence_parallel:
+            x = tensor_model_parallel_all_gather(x, dim=0)
         x = self.ffn(x, input_ids)
+        if self.is_sequence_parallel:
+            x = sequence_parallel_chunk(x)
         return x, residual, post_mix, res_mix
 
 
@@ -1043,10 +1064,15 @@ class DeepseekV4Model(nn.Module):
         # of shape (num_tokens, hc_mult, hidden_size) — V4 expands the
         # token embedding to hc_mult streams before the first decoder
         # layer and keeps that shape until hc_head() collapses it.
+        # Under mHC sequence parallelism the stream is token-sharded across the
+        # TP group, so the per-rank PP buffer holds num_tokens / tp_size rows.
+        num_tokens = batch_size
+        if self.parallel_config.enable_sequence_parallel_mhc:
+            num_tokens = cdiv(batch_size, get_tensor_model_parallel_world_size())
         return IntermediateTensors(
             {
                 "hidden_states": torch.zeros(
-                    (batch_size, self.hc_mult, self.config.hidden_size),
+                    (num_tokens, self.hc_mult, self.config.hidden_size),
                     dtype=dtype,
                     device=device,
                 ),
@@ -1066,6 +1092,12 @@ class DeepseekV4Model(nn.Module):
             else:
                 hidden_states = self.embed_input_ids(input_ids)
             hidden_states = hidden_states.unsqueeze(-2).repeat(1, self.hc_mult, 1)
+            # Shard the mHC residual stream along the token dim; it stays
+            # sharded through every layer (the runner pads num_tokens to a
+            # multiple of tp_size, so the chunk is exact). Non-first PP ranks
+            # already receive a sharded stream from the previous rank.
+            if self.parallel_config.enable_sequence_parallel_mhc:
+                hidden_states = sequence_parallel_chunk(hidden_states)
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
@@ -1090,6 +1122,11 @@ class DeepseekV4Model(nn.Module):
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
+
+        # Reassemble the full token stream before the MTP buffer copy and the
+        # hc_head collapse (both need all tokens on this rank).
+        if self.parallel_config.enable_sequence_parallel_mhc:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
 
         # Stash pre-hc_head residual for the MTP draft (captured copy_).
         num_tokens = hidden_states.shape[0]

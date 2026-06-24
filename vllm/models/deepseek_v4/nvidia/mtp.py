@@ -22,6 +22,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
@@ -40,7 +41,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import get_spec_layer_idx_from_weight_name
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.utils import maybe_prefix, sequence_parallel_chunk
 from vllm.models.deepseek_v4.common.ops import (
     fused_mtp_input_rmsnorm,
     mtp_shared_head_rmsnorm,
@@ -80,6 +81,11 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         self.config = config
         quant_config = vllm_config.quant_config
         self.rms_norm_eps = config.rms_norm_eps
+        # Mirrors DeepseekV4DecoderLayer: when set, the mtp_block runs with the
+        # mHC residual stream token-sharded across the TP group.
+        self.is_sequence_parallel = (
+            vllm_config.parallel_config.enable_sequence_parallel_mhc
+        )
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -157,10 +163,18 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         hidden_states = self.h_proj(previous_hidden_states) + self.e_proj(
             inputs_embeds
         ).unsqueeze(-2)
+        # The mtp_block is sharded-in / sharded-out under mHC SP: shard the
+        # token dim before it and reassemble the full stream after the final
+        # mhc_post (which runs on the sharded stream). num_input_tokens is
+        # padded to a multiple of tp_size, so the chunk is exact.
+        if self.is_sequence_parallel:
+            hidden_states = sequence_parallel_chunk(hidden_states)
         hidden_states, residual, post_mix, res_mix = self.mtp_block(
             positions=positions, x=hidden_states, input_ids=None
         )
         hidden_states = mhc_post_tilelang(hidden_states, residual, post_mix, res_mix)
+        if self.is_sequence_parallel:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
         # Return the flat pre-hc_head residual so it can be re-fed as the
         # next spec step's `previous_hidden_states` when
         # num_speculative_tokens > 1. hc_head is deferred to compute_logits.
