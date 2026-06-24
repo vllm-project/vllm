@@ -10,6 +10,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     USE_FP32_REDUCE_DEFAULT,
     get_marlin_input_dtype,
     marlin_make_workspace_new,
+    marlin_moe_padded_intermediate,
     marlin_pad_dim,
     marlin_pad_qweight,
     marlin_pad_scales,
@@ -216,6 +217,25 @@ def prepare_fp8_layer_for_marlin(
         replace_parameter(layer, "bias", bias)
 
 
+def _moe_pad_shard_rows(x: torch.Tensor, n: int, padded_n: int) -> torch.Tensor:
+    """Zero-pad each gate/up shard of a ``(E, 2 * n, ...)`` tensor to padded_n
+    rows. FP8 zero decodes to 0.0, so the padded rows contribute nothing."""
+    if padded_n == n:
+        return x
+    e = x.size(0)
+    rest = x.shape[2:]
+    x = x.view(e, 2, n, *rest)
+    x = torch.nn.functional.pad(x, (0, 0) * len(rest) + (0, padded_n - n))
+    return x.reshape(e, 2 * padded_n, *rest)
+
+
+def _moe_pad_last(x: torch.Tensor, n: int, padded_n: int) -> torch.Tensor:
+    """Zero-pad the last dim of a ``(E, ..., n)`` tensor to padded_n."""
+    if padded_n == n:
+        return x
+    return torch.nn.functional.pad(x, (0, padded_n - n))
+
+
 def prepare_fp8_moe_layer_for_marlin(
     layer: torch.nn.Module,
     w13_weight: torch.Tensor,
@@ -246,6 +266,15 @@ def prepare_fp8_moe_layer_for_marlin(
     n = layer.intermediate_size_per_partition
     w13_n = w13_weight.size(1)
     weight_block_size = getattr(layer, "weight_block_size", None)
+    group_size = -1 if weight_block_size is None else weight_block_size[1]
+
+    # Pad a tile-misaligned intermediate size to a valid Marlin thread tile.
+    # FP8 zero decodes to 0.0, so padded weights drop out; the converted scales
+    # are padded to match below (the padded values are irrelevant).
+    padded_n = marlin_moe_padded_intermediate(n, group_size)
+    if padded_n != n:
+        w13_weight = _moe_pad_shard_rows(w13_weight, n, padded_n)
+        w2_weight = _moe_pad_last(w2_weight, n, padded_n)
 
     # WORKSPACE
     device = layer.w13_weight.device
@@ -258,13 +287,7 @@ def prepare_fp8_moe_layer_for_marlin(
     # Repack weights to marlin format
     def repack_weight(name: str, weight: torch.Tensor) -> torch.Tensor:
         tensor_list = []
-        if "w13" in name:
-            size_n, size_k = w13_n, k
-        else:
-            size_n, size_k = k, n
-
-        assert weight.shape == (e, size_n, size_k)
-
+        size_n, size_k = weight.size(1), weight.size(2)
         for i in range(e):
             qweight = pack_fp8_to_int32(weight[i], size_k_first=False)
             qweight = qweight.T.contiguous()
@@ -280,9 +303,7 @@ def prepare_fp8_moe_layer_for_marlin(
     w2_weight = repack_weight("w2", w2_weight)
 
     # WEIGHT SCALES
-    # Permute scales
-    group_size = -1 if weight_block_size is None else weight_block_size[1]
-
+    # Permute scales (convert at the original size, then pad to the tile).
     def permute_scales(scales: torch.Tensor, name: str) -> torch.Tensor:
         scales = scales.to(layer.orig_dtype)
         tensor_list = []
@@ -319,6 +340,20 @@ def prepare_fp8_moe_layer_for_marlin(
             scales = scales.repeat_interleave(block_n, 2)
             # size_n may not divisible by block_size[0]
             scales = scales[..., :size_n].contiguous()
+
+        # Pad the converted (E, G, size_n) scales to the padded thread tile.
+        if padded_n != n:
+            if "w13" in name:
+                g = scales.size(1)
+                scales = scales.view(e, g, 2, n)
+                scales = torch.nn.functional.pad(scales, (0, padded_n - n))
+                scales = scales.reshape(e, g, 2 * padded_n)
+                size_n = 2 * padded_n
+            else:
+                if group_size > 0:
+                    pad_groups = (padded_n - n) // group_size
+                    scales = torch.nn.functional.pad(scales, (0, 0, 0, pad_groups))
+                size_k = padded_n
 
         for i in range(e):
             marlin_scales = marlin_permute_scales(
@@ -497,9 +532,18 @@ def prepare_mxfp8_moe_layer_for_marlin(
     """
     group_size = 32
     e = w13.shape[0]
-    w13_n = w13.shape[1]
     k = w13.shape[2]
     n = w2.shape[2]
+
+    # Pad a tile-misaligned intermediate size to a valid Marlin thread tile.
+    padded_n = marlin_moe_padded_intermediate(n, group_size)
+    if padded_n != n:
+        w13 = _moe_pad_shard_rows(w13, n, padded_n)
+        w13_scale = _moe_pad_shard_rows(w13_scale, n, padded_n)
+        w2 = _moe_pad_last(w2, n, padded_n)
+        w2_scale = _moe_pad_last(w2_scale, n // group_size, padded_n // group_size)
+        n = padded_n
+    w13_n = w13.shape[1]
 
     device = w13.device
     param_dtype = torch.get_default_dtype()
