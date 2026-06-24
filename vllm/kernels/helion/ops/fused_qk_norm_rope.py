@@ -19,7 +19,9 @@ if not has_helion():
 import helion
 import helion.language as hl
 
+from vllm import ir
 from vllm.kernels.helion.register import register_kernel
+from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 
 logger = init_logger(__name__)
 
@@ -188,19 +190,24 @@ def baseline(
     position_ids: torch.Tensor,  # [num_tokens],
     forced_token_heads_per_warp: int = -1,  # dummy
 ) -> None:
-    torch.ops._C.fused_qk_norm_rope(
-        qkv,
-        num_heads_q,
-        num_heads_k,
-        num_heads_v,
-        head_dim,
-        eps,
-        q_weight,
-        k_weight,
-        cos_sin_cache,
-        is_neox,
-        position_ids,
+    q_size = num_heads_q * head_dim
+    kv_size = num_heads_k * head_dim
+
+    q, k, v = qkv.split([q_size, kv_size, kv_size], dim=-1)
+
+    q_by_head = q.view(*q.shape[:-1], q.shape[-1] // head_dim, head_dim)
+    q_by_head = ir.ops.rms_norm(q_by_head, q_weight, eps)
+    q = q_by_head.view(q.shape)
+
+    k_by_head = k.view(*k.shape[:-1], k.shape[-1] // head_dim, head_dim)
+    k_by_head = ir.ops.rms_norm(k_by_head, k_weight, eps)
+    k = k_by_head.view(k.shape)
+
+    q, k = RotaryEmbedding.forward_static(
+        position_ids, q, k, head_dim, cos_sin_cache.shape[1], cos_sin_cache, is_neox
     )
+    qkv[:, :q_size].copy_(q)
+    qkv[:, q_size : q_size + kv_size].copy_(k)
 
 
 # Overwrite autotune_baseline_atol and autotune_baseline_rtol
