@@ -11,6 +11,11 @@ steps:
   - tests/benchmarks/
   commands:
   - pytest -v -s benchmarks/
+  mirror:
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
 
 - label: Attention Benchmarks Smoke Test (B200)
   key: attention-benchmarks-smoke-test-b200

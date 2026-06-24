@@ -428,8 +428,8 @@ class TestPreProcessCohereOnline:
         handler._get_task_instruction_prefix = lambda _input_type: None
         handler._has_chat_template = lambda: False
         handler._preprocess_cmpl_online = preprocess_cmpl_online
-        handler._batch_render_chat = lambda *_args, **_kwargs: (
-            pytest.fail("text-only request should not require chat rendering")
+        handler._batch_render_chat = lambda *_args, **_kwargs: pytest.fail(
+            "text-only request should not require chat rendering"
         )
 
         handler._pre_process_cohere_online(ctx)
@@ -448,8 +448,8 @@ class TestPreProcessCohereOnline:
 
         handler._get_task_instruction_prefix = lambda _input_type: "query: "
         handler._has_chat_template = lambda: False
-        handler._batch_render_chat = lambda *_args, **_kwargs: (
-            pytest.fail("chat rendering should be skipped without a template")
+        handler._batch_render_chat = lambda *_args, **_kwargs: pytest.fail(
+            "chat rendering should be skipped without a template"
         )
         handler._preprocess_cmpl_online = preprocess_cmpl
 
@@ -485,8 +485,8 @@ class TestPreProcessCohereOnline:
         handler._get_task_instruction_prefix = lambda _input_type: "query: "
         handler._has_chat_template = lambda: True
         handler._batch_render_chat = batch_render_chat
-        handler._preprocess_cmpl_online = lambda *_args, **_kwargs: (
-            pytest.fail("completion path should be skipped when a template exists")
+        handler._preprocess_cmpl_online = lambda *_args, **_kwargs: pytest.fail(
+            "completion path should be skipped when a template exists"
         )
 
         handler._pre_process_cohere_online(ctx)
