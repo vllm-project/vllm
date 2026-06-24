@@ -2042,6 +2042,11 @@ class FlashInferImpl(AttentionImpl):
                 else:
                     q_len_per_req = num_decode_tokens // attn_metadata.num_decodes
 
+                if decode_with_xqa and q_len_per_req > 1:
+                    raise NotImplementedError(
+                        "FlashInfer XQA speculative decode is not supported yet."
+                    )
+
                 trtllm_batch_decode_with_kv_cache(
                     query=decode_query,
                     kv_cache=(
