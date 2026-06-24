@@ -199,8 +199,7 @@ class MarkdownFormatter(HelpFormatter):
                 self._markdown_output.append(f":   Possible choices: {choices}\n\n")
 
             if action.help:
-                help_text = action.help.replace("%%", "%")
-                help_dd = ":" + textwrap.indent(help_text, "    ")[1:]
+                help_dd = ":" + textwrap.indent(action.help, "    ")[1:]
                 self._markdown_output.append(f"{help_dd}\n\n")
 
             # None usually means the default is determined at runtime
