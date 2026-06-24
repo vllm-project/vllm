@@ -782,8 +782,41 @@ class EngineCore:
         if tags is None or tags:
             self.model_executor.wake_up(tags)
 
-        # Resume scheduling (applies to all levels)
-        self.resume_scheduler()
+        # A partial wake (e.g. wake_up(tags=["weights"])) intentionally keeps
+        # some allocations -- notably the KV cache -- released. The executor
+        # reports is_sleeping == True until every sleeping tag has been woken
+        # (see Executor.wake_up in vllm/v1/executor/abstract.py). Resuming the
+        # scheduler while the executor is still partially asleep lets the engine
+        # step against a released KV cache (including the DP lockstep
+        # execute_dummy_batch path on idle ranks), which writes the KV slot
+        # mapping into freed memory and crashes with an illegal memory access.
+        # Only resume once the executor is fully resident; the final
+        # wake_up(tags=["kv_cache"]) / full wake clears the last tag and resumes.
+        #
+        # DP note: in a data-parallel deployment every wake_up(tags=...) call is
+        # broadcast to all DP ranks and awaited together by the client
+        # (DPLBAsyncMPClient.call_utility_async fans out via asyncio.gather and
+        # waits for all engines). The next wake_up cannot be issued until the
+        # current one has completed on every rank, so all ranks reach the final
+        # wake -- and DPEngineCoreProc.resume_scheduler()'s has_unfinished_dp
+        # all-reduce barrier -- in lockstep. Deferring resume to the final tag
+        # therefore does not desynchronize the DP collective: it fires on the
+        # same wake call on every rank, exactly as the unconditional resume did.
+        if not self.model_executor.is_sleeping:
+            self.resume_scheduler()
+        elif tags:
+            # Protocol guard: a caller that wakes a subset of tags (e.g.
+            # ["weights"]) and never sends the completing wake leaves the
+            # scheduler paused indefinitely. Log the partially-resident state
+            # so the paused-scheduler condition is observable rather than a
+            # silent hang.
+            logger.warning(
+                "wake_up(tags=%s) left the executor partially asleep "
+                "(remaining sleeping tags pending); the scheduler stays "
+                "paused until a completing wake_up (e.g. tags=['kv_cache']) "
+                "or a full wake_up() is issued.",
+                tags,
+            )
 
     def is_sleeping(self) -> bool:
         """Check if engine is sleeping at any level."""
