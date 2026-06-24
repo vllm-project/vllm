@@ -46,29 +46,43 @@ class ModelState(ABC):
     ) -> None:
         raise NotImplementedError
 
-    @abstractmethod
+    model: nn.Module
+
     def get_supported_generation_tasks(self) -> tuple[GenerationTask, ...]:
-        raise NotImplementedError
+        from vllm.model_executor.models.interfaces import (
+            supports_realtime,
+            supports_transcription,
+        )
+        from vllm.model_executor.models.interfaces_base import is_text_generation_model
+
+        supported_tasks = list[GenerationTask]()
+        if is_text_generation_model(self.model):
+            supported_tasks.append("generate")
+        if supports_transcription(self.model):
+            if self.model.supports_transcription_only:
+                return ("transcription",)
+            supported_tasks.append("transcription")
+        if supports_realtime(self.model):
+            supported_tasks.append("realtime")
+        return tuple(supported_tasks)
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
+        return None
+
+    def remove_request(self, req_id: str) -> None:
         return None
 
     def apply_staged_writes(self) -> None:
         return None
 
     def postprocess_state(
-        self,
-        input_batch: InputBatch,
-        num_sampled: torch.Tensor,
+        self, idx_mapping: torch.Tensor, num_sampled: torch.Tensor
     ) -> None:
         return None
 
     @abstractmethod
     def get_mm_embeddings(
-        self,
-        scheduled_encoder_inputs: dict[str, list[int]],
-        input_batch: InputBatch,
-        req_states: RequestState,
+        self, scheduled_encoder_inputs: dict[str, list[int]], input_batch: InputBatch
     ) -> torch.Tensor | None:
         raise NotImplementedError
 
@@ -94,3 +108,16 @@ class ModelState(ABC):
         for_capture: bool = False,
     ) -> dict[str, Any]:
         raise NotImplementedError
+
+    def custom_sampler(self, sampler: Any) -> tuple[Any, Any] | None:
+        """Wrap or replace the default sampler.
+
+        Called after model loading with the already-constructed base
+        ``Sampler``.  Return ``None`` to keep the defaults, or
+        ``(sampler, rejection_sampler | None)`` to override.
+        """
+        return None
+
+    num_new_sampled_tokens_per_step: int = 1
+    """New tokens sampled on each decode step 
+    (excluding accepted draft tokens, a.k.a num bonus tokens)."""

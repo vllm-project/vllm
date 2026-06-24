@@ -47,14 +47,6 @@ def test_tokenizer_like_protocol():
     assert "DSV32" in tokenizer.__class__.__name__
     _assert_tokenizer_like(tokenizer)
 
-    tokenizer = get_tokenizer(
-        "Qwen/Qwen-VL",
-        tokenizer_mode="qwen_vl",
-        trust_remote_code=True,
-    )
-    assert isinstance(tokenizer, HfTokenizer)
-    assert "WithoutImagePad" in tokenizer.__class__.__name__
-
 
 @pytest.mark.parametrize("tokenizer_name", ["facebook/opt-125m", "gpt2"])
 def test_tokenizer_revision(tokenizer_name: str):

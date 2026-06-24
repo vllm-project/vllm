@@ -206,6 +206,25 @@ def test_get_kwargs():
     assert kwargs["nested_config"]["type"]('{"field": 2}') == NestedConfig(2)  # type: ignore[call-arg]
 
 
+def test_jit_monitor_verbose_arg():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(["--jit-monitor-verbose"])
+
+    assert args.jit_monitor_verbose
+    assert EngineArgs(model="test", jit_monitor_verbose=True).jit_monitor_verbose
+
+
+@pytest.mark.parametrize("mode", ["warn", "error"])
+def test_jit_monitor_mode_arg(mode):
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(["--jit-monitor-mode", mode])
+
+    assert args.jit_monitor_mode == mode
+    engine_args = EngineArgs(model="test", jit_monitor_mode=mode)
+    assert engine_args.jit_monitor_mode == mode
+    assert engine_args.create_observability_config().jit_monitor_mode == mode
+
+
 def test_hf_token_get_kwargs():
     kwargs = get_kwargs(ModelConfig)["hf_token"]
 
@@ -613,3 +632,224 @@ def test_ir_op_priority():
 )
 def test_expand_json_human_readable_numbers(input_json, expected_json):
     assert _expand_json_human_readable_numbers(input_json) == expected_json
+
+
+@pytest.mark.parametrize(
+    "uri",
+    ["s3://bucket/model", "gs://bucket/model", "az://container/model"],
+)
+def test_cloud_storage_uri_skips_get_model_path(uri, monkeypatch):
+    """Cloud storage URIs should not be passed to get_model_path()
+    when HF_HUB_OFFLINE=1, as they are not valid HF repo IDs."""
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", True)
+
+    args = EngineArgs(model=uri)
+    # model should remain the original cloud URI, not raise
+    assert args.model == uri
+
+
+def test_cloud_storage_tokenizer_skips_get_model_path(monkeypatch):
+    """Cloud storage tokenizer URI should not be passed to
+    get_model_path() when HF_HUB_OFFLINE=1."""
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", True)
+
+    args = EngineArgs(model="s3://bucket/model", tokenizer="s3://bucket/tokenizer")
+    assert args.model == "s3://bucket/model"
+    assert args.tokenizer == "s3://bucket/tokenizer"
+
+
+class TestDeviceIds:
+    def test_device_ids_with_cvd_out_of_range(self, monkeypatch):
+        """--device-ids index beyond the CVD set raises ValueError."""
+        from vllm.platforms import current_platform
+
+        key = current_platform.device_control_env_var
+        monkeypatch.setenv(key, "4,5")
+        args = EngineArgs(model="m", device_ids=[0, 2])
+        with pytest.raises(ValueError, match="out of range"):
+            args._resolve_device_ids()
+
+    def test_device_ids_with_cvd_resolve_to_physical_ids(self, monkeypatch):
+        """--device-ids are CVD-local indices resolved to physical ids."""
+        from vllm.platforms import current_platform
+
+        key = current_platform.device_control_env_var
+        monkeypatch.setenv(key, "4,5")
+        args = EngineArgs(model="m", device_ids=[0, 1])
+        assert args._resolve_device_ids() == [4, 5]
+
+    def test_device_ids_with_uuid_cvd_resolve_to_physical_ids(self, monkeypatch):
+        """--device-ids support UUID CVD values resolved by the platform."""
+        from vllm.platforms import current_platform
+
+        key = current_platform.device_control_env_var
+        monkeypatch.setenv(key, "GPU-abcd1234,GPU-ef567890")
+        monkeypatch.setattr(
+            type(current_platform),
+            "device_control_id_to_physical_device_id",
+            classmethod(
+                lambda cls, device_id: {"GPU-abcd1234": 4, "GPU-ef567890": 5}[device_id]
+            ),
+        )
+
+        args = EngineArgs(model="m", device_ids=[0, 1])
+        assert args._resolve_device_ids() == [4, 5]
+
+    def test_device_ids_with_uuid_args_resolve_to_physical_ids(self, monkeypatch):
+        """UUID --device-ids are resolved to physical IDs immediately."""
+        from vllm.platforms import current_platform
+
+        monkeypatch.setattr(
+            type(current_platform),
+            "device_control_id_to_physical_device_id",
+            classmethod(lambda cls, device_id: {"GPU-abcd1234": 4}[device_id]),
+        )
+
+        args = EngineArgs(model="m", device_ids=["GPU-abcd1234"])
+        assert args._resolve_device_ids() == [4]
+
+    def test_device_ids_reject_mixed_integer_and_uuid_args(self):
+        """--device-ids must not mix CVD indices and UUIDs."""
+        args = EngineArgs(model="m", device_ids=[0, "GPU-abcd1234"])
+        with pytest.raises(ValueError, match="must not mix"):
+            args._resolve_device_ids()
+
+    def test_no_device_ids(self):
+        """No --device-ids returns None."""
+        args = EngineArgs(model="m")
+        assert args._resolve_device_ids() is None
+
+    def test_cli_parsing(self):
+        """--device-ids parses comma-separated string from CLI."""
+        parser = FlexibleArgumentParser()
+        EngineArgs.add_cli_args(parser)
+        parsed = parser.parse_args(["--model", "m", "--device-ids", "0,2,4"])
+        assert parsed.device_ids == [0, 2, 4]
+
+    def test_cli_parsing_uuid(self):
+        """--device-ids parses comma-separated UUID strings from CLI."""
+        parser = FlexibleArgumentParser()
+        EngineArgs.add_cli_args(parser)
+        parsed = parser.parse_args(
+            ["--model", "m", "--device-ids", "GPU-abcd1234,GPU-ef567890"]
+        )
+        assert parsed.device_ids == ["GPU-abcd1234", "GPU-ef567890"]
+
+    def test_assigned_physical_gpu_ids_are_physical_with_cvd(self, monkeypatch):
+        """assigned_physical_gpu_ids are already physical and not composed with CVD."""
+        import vllm.platforms.interface as platform_interface
+        from vllm.platforms import current_platform
+
+        monkeypatch.setattr(platform_interface, "_assigned_physical_gpu_ids", [4, 5])
+        monkeypatch.setenv(current_platform.device_control_env_var, "4,5")
+
+        assert current_platform.device_id_to_physical_device_id(0) == 4
+        assert current_platform.device_id_to_physical_device_id(1) == 5
+        assert current_platform.logical_device_id_to_visible_device_id(0) == 0
+        assert current_platform.logical_device_id_to_visible_device_id(1) == 1
+
+    def test_assigned_physical_gpu_ids_map_to_visible_uuid_cvd(self, monkeypatch):
+        """Physical IDs map back to visible ordinals when CVD uses UUIDs."""
+        import vllm.platforms.interface as platform_interface
+        from vllm.platforms import current_platform
+
+        monkeypatch.setattr(platform_interface, "_assigned_physical_gpu_ids", [5])
+        monkeypatch.setenv(
+            current_platform.device_control_env_var,
+            "GPU-abcd1234,GPU-ef567890",
+        )
+        monkeypatch.setattr(
+            type(current_platform),
+            "device_control_id_to_physical_device_id",
+            classmethod(
+                lambda cls, device_id: {"GPU-abcd1234": 4, "GPU-ef567890": 5}[device_id]
+            ),
+        )
+
+        assert current_platform.logical_device_id_to_visible_device_id(0) == 1
+
+    def test_device_ids_reject_duplicates(self):
+        """--device-ids must not contain duplicate entries."""
+        args = EngineArgs(model="m", device_ids=[2, 2])
+        with pytest.raises(ValueError, match="duplicates"):
+            args._resolve_device_ids()
+
+    def test_cli_parsing_strips_whitespace(self):
+        """--device-ids tolerates whitespace around commas."""
+        parser = FlexibleArgumentParser()
+        EngineArgs.add_cli_args(parser)
+        parsed = parser.parse_args(["--model", "m", "--device-ids", "0, 2, 4"])
+        assert parsed.device_ids == [0, 2, 4]
+
+    def test_visible_ordinal_to_physical_ignores_assigned_ids(self, monkeypatch):
+        """visible_device_id_to_physical_device_id maps torch device ordinals,
+        independent of the logical-to-physical mapping.
+
+        Regression test: CustomAllreduce passes device.index (a visible
+        ordinal) and must not index into assigned_physical_gpu_ids, which
+        raised IndexError for non-identity --device-ids like [2, 3].
+        """
+        import vllm.platforms.interface as platform_interface
+        from vllm.platforms import current_platform
+
+        monkeypatch.setattr(platform_interface, "_assigned_physical_gpu_ids", [2, 3])
+        monkeypatch.delenv(current_platform.device_control_env_var, raising=False)
+
+        # CVD unset: visible ordinal == physical ID, even beyond the
+        # assigned list's length.
+        assert current_platform.visible_device_id_to_physical_device_id(2) == 2
+        assert current_platform.visible_device_id_to_physical_device_id(3) == 3
+
+        monkeypatch.setenv(current_platform.device_control_env_var, "4,5")
+        assert current_platform.visible_device_id_to_physical_device_id(1) == 5
+        with pytest.raises(IndexError, match="out of range"):
+            current_platform.visible_device_id_to_physical_device_id(2)
+
+
+class TestDpDeviceIdSharding:
+    def test_dp_supervisor_device_ids_stay_env_relative(self):
+        """Regression test: the DP supervisor must pass env-relative indices,
+        not physical IDs, because each child re-resolves --device-ids
+        against its inherited device-control env var."""
+        import argparse
+
+        from vllm.entrypoints.openai.dp_supervisor import _build_device_ids
+
+        args = argparse.Namespace(
+            tensor_parallel_size=2, pipeline_parallel_size=1, device_ids=None
+        )
+        assert _build_device_ids(args, local_rank=0) == [0, 1]
+        assert _build_device_ids(args, local_rank=1) == [2, 3]
+
+    def test_dp_supervisor_shards_user_device_ids(self):
+        """User-provided --device-ids are sharded across DP children."""
+        import argparse
+
+        from vllm.entrypoints.openai.dp_supervisor import _build_device_ids
+
+        args = argparse.Namespace(
+            tensor_parallel_size=2, pipeline_parallel_size=1, device_ids=[4, 5, 6, 7]
+        )
+        assert _build_device_ids(args, local_rank=0) == [4, 5]
+        assert _build_device_ids(args, local_rank=1) == [6, 7]
+        with pytest.raises(ValueError, match="needs devices"):
+            _build_device_ids(args, local_rank=2)
+
+    def test_dp_rank_shards_user_assigned_gpu_ids(self):
+        """get_physical_gpu_ids_for_local_dp_rank slices the user-provided
+        --device-ids list instead of recomputing from the env var."""
+        from vllm.platforms import current_platform
+        from vllm.v1.engine.utils import get_physical_gpu_ids_for_local_dp_rank
+
+        evar = current_platform.device_control_env_var
+        assert get_physical_gpu_ids_for_local_dp_rank(
+            evar, local_dp_rank=1, world_size=2, user_assigned_gpu_ids=[4, 5, 6, 7]
+        ) == [6, 7]
+        with pytest.raises(ValueError, match="needs devices"):
+            get_physical_gpu_ids_for_local_dp_rank(
+                evar, local_dp_rank=2, world_size=2, user_assigned_gpu_ids=[4, 5, 6, 7]
+            )

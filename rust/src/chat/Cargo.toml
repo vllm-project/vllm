@@ -10,6 +10,7 @@ asynk-strim-attr.workspace = true
 easy-ext.workspace = true
 futures.workspace = true
 half.workspace = true
+indexmap.workspace = true
 itertools.workspace = true
 llm-multimodal.workspace = true
 minijinja.workspace = true
@@ -33,14 +34,16 @@ vllm-reasoning-parser.workspace = true
 vllm-text.workspace = true
 vllm-tokenizer.workspace = true
 vllm-tool-parser.workspace = true
+xgrammar-structural-tag.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
 bytes.workspace = true
 clap.workspace = true
 expect-test.workspace = true
+paste.workspace = true
 rmp-serde.workspace = true
-serial_test = { workspace = true, features = ["file_locks"] }
+serial_test.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 tracing-subscriber.workspace = true

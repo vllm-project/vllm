@@ -5,8 +5,8 @@ use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until};
 
 use super::parameters::ToolSchemas;
-use super::utils::{parse_buffered_event, safe_text_len, xml_unescape};
-use super::{Result, ToolCallDelta, ToolParseResult};
+use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len, take_until_marker};
+use super::{Result, ToolCallDelta, ToolParserOutput};
 use crate::Tool;
 
 mod deepseek_v32;
@@ -39,10 +39,10 @@ impl DsmlTokens {
     };
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum DsmlMode {
     Text,
-    ToolBlock,
+    ToolBlock { invoke_end_scan: MarkerScanState },
     Done,
 }
 
@@ -89,12 +89,16 @@ impl DeepSeekDsmlToolParser {
     }
 
     /// Apply one parsed DSML event to parser state and output.
-    fn apply_event(&mut self, event: DsmlEvent, result: &mut ToolParseResult) -> Result<()> {
+    fn apply_event(&mut self, event: DsmlEvent, output: &mut ToolParserOutput) -> Result<()> {
         match event {
             DsmlEvent::Text { len: consumed_len } => {
-                result.normal_text.push_str(&self.buffer[..consumed_len]);
+                output.normal_text.push_str(&self.buffer[..consumed_len]);
             }
-            DsmlEvent::ToolCallsStart => self.mode = DsmlMode::ToolBlock,
+            DsmlEvent::ToolCallsStart => {
+                self.mode = DsmlMode::ToolBlock {
+                    invoke_end_scan: MarkerScanState::default(),
+                };
+            }
             DsmlEvent::Invoke { name, raw_params } => {
                 let mut arguments = serde_json::Map::with_capacity(raw_params.len());
                 for param in raw_params {
@@ -104,7 +108,7 @@ impl DeepSeekDsmlToolParser {
                         self.tool_parameters.convert_param_with_schema(
                             &name,
                             &param.name,
-                            &param.value,
+                            param.value,
                         )
                     };
                     arguments.insert(param.name, value);
@@ -112,7 +116,7 @@ impl DeepSeekDsmlToolParser {
                 let arguments = serde_json::to_string(&arguments)
                     .map_err(|error| parsing_failed!("failed to serialize arguments: {}", error))?;
 
-                result.calls.push(ToolCallDelta {
+                output.calls.push(ToolCallDelta {
                     tool_index: self.emitted_invoke_count,
                     name: Some(name),
                     arguments,
@@ -125,58 +129,55 @@ impl DeepSeekDsmlToolParser {
         Ok(())
     }
 
-    /// Reset all streaming state.
-    fn reset(&mut self) {
-        self.buffer.clear();
+    fn reset(&mut self) -> String {
         self.mode = DsmlMode::Text;
         self.emitted_invoke_count = 0;
+        std::mem::take(&mut self.buffer)
     }
 
-    /// Push one decoded text chunk through the DSML parser.
-    fn push(&mut self, chunk: &str) -> Result<ToolParseResult> {
+    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         // Extract tool calls from streaming model output.
         //
         // Uses a buffer-until-complete-invoke strategy: text is buffered until
         // a complete invoke block is available, then parsed and emitted in one
         // shot.
         self.buffer.push_str(chunk);
-        let mut result = ToolParseResult::default();
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
-            parse_next_dsml_event(input, self.mode, self.tokens)
+            parse_next_dsml_event(input, &mut self.mode, self.tokens)
         })? {
-            self.apply_event(event, &mut result)?;
+            self.apply_event(event, output)?;
             self.buffer.drain(..consumed_len);
         }
 
-        Ok(result)
+        Ok(())
     }
 
-    /// Flush buffered text and reset parser state.
-    fn finish(&mut self) -> Result<ToolParseResult> {
-        let mut result = ToolParseResult::default();
+    fn finish(&mut self) -> Result<ToolParserOutput> {
+        let mut output = ToolParserOutput::default();
         match self.mode {
-            DsmlMode::Text => result.normal_text.push_str(&self.buffer),
+            DsmlMode::Text => output.normal_text.push_str(&self.buffer),
             DsmlMode::Done => {}
-            DsmlMode::ToolBlock => {
-                self.reset();
+            DsmlMode::ToolBlock { .. } => {
                 return Err(parsing_failed!("incomplete DeepSeek DSML tool call"));
             }
         }
-        self.reset();
-        Ok(result)
+        let _ = self.reset();
+        Ok(output)
     }
 }
 
 /// Parse a DSML event for the current parser mode.
 fn parse_next_dsml_event(
     input: &mut DsmlInput<'_>,
-    mode: DsmlMode,
+    mode: &mut DsmlMode,
     tokens: DsmlTokens,
 ) -> ModalResult<DsmlEvent> {
     match mode {
         DsmlMode::Text => parse_text_event(input, tokens),
-        DsmlMode::ToolBlock => parse_tool_block_event(input, tokens),
+        DsmlMode::ToolBlock { invoke_end_scan } => {
+            parse_tool_block_event(input, tokens, invoke_end_scan)
+        }
         DsmlMode::Done => ignored_rest_event(input),
     }
 }
@@ -191,11 +192,16 @@ fn parse_text_event(input: &mut DsmlInput<'_>, tokens: DsmlTokens) -> ModalResul
 }
 
 /// Parse a tool-block DSML event.
-fn parse_tool_block_event(input: &mut DsmlInput<'_>, tokens: DsmlTokens) -> ModalResult<DsmlEvent> {
+fn parse_tool_block_event(
+    input: &mut DsmlInput<'_>,
+    tokens: DsmlTokens,
+    invoke_end_scan: &mut MarkerScanState,
+) -> ModalResult<DsmlEvent> {
     ws0.void().parse_next(input)?;
-    alt((invoke_event, |input: &mut DsmlInput<'_>| {
-        tool_calls_end_event(input, tokens)
-    }))
+    alt((
+        |input: &mut DsmlInput<'_>| invoke_event(input, invoke_end_scan),
+        |input: &mut DsmlInput<'_>| tool_calls_end_event(input, tokens),
+    ))
     .parse_next(input)
 }
 
@@ -222,14 +228,17 @@ fn safe_text_event(input: &mut DsmlInput<'_>, tokens: DsmlTokens) -> ModalResult
 }
 
 /// Parse a DSML invoke block.
-fn invoke_event(input: &mut DsmlInput<'_>) -> ModalResult<DsmlEvent> {
+fn invoke_event(
+    input: &mut DsmlInput<'_>,
+    invoke_end_scan: &mut MarkerScanState,
+) -> ModalResult<DsmlEvent> {
     let (name, body) = seq!(
         _: literal(INVOKE_START),
         _: ws1,
         dsml_name_attr,
         _: ws0,
         _: ">",
-        take_until(0.., INVOKE_END),
+        take_until_marker(INVOKE_END, invoke_end_scan),
         _: literal(INVOKE_END),
     )
     .parse_next(input)?;
@@ -256,7 +265,7 @@ fn parse_parameter(input: &mut &str) -> ModalResult<DsmlParameter> {
         is_string: string_attr.map(|value| value == "true"),
         _: ws0,
         _: ">",
-        value: take_until(0.., PARAMETER_END).map(xml_unescape).map(|value| value.into_owned()),
+        value: take_until(0.., PARAMETER_END).map(str::to_string),
         _: literal(PARAMETER_END),
     }}
     .parse_next(input)

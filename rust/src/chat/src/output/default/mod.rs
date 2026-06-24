@@ -1,6 +1,7 @@
 //! Default output processing pipeline.
 
 mod reasoning;
+mod structural_tag;
 mod tool;
 
 use std::sync::Once;
@@ -11,6 +12,7 @@ use trait_set::trait_set;
 use vllm_text::tokenizer::DynTokenizer;
 
 use self::reasoning::reasoning_event_stream;
+use self::structural_tag::apply_structural_tag_constraint;
 use self::tool::tool_event_stream;
 use super::structured::structured_chat_event_stream;
 use crate::error::Result;
@@ -21,7 +23,7 @@ use crate::output::{
 use crate::parser::ParserSelection;
 use crate::parser::reasoning::{ReasoningParser, ReasoningParserFactory};
 use crate::parser::tool::{ToolParser, ToolParserFactory};
-use crate::request::{ChatRequest, ChatToolChoice};
+use crate::request::ChatRequest;
 use crate::{Error, Result as ChatResult};
 
 trait_set! {
@@ -37,6 +39,7 @@ trait_set! {
 pub struct DefaultChatOutputProcessor {
     reasoning_parser: Option<Box<dyn ReasoningParser>>,
     tool_parser: Option<Box<dyn ToolParser>>,
+    parallel_tool_calls: bool,
 }
 
 impl DefaultChatOutputProcessor {
@@ -53,8 +56,7 @@ impl DefaultChatOutputProcessor {
         tool_call_parser: &ParserSelection,
         reasoning_parser: &ParserSelection,
     ) -> ChatResult<Self> {
-        let tool_parsing_enabled =
-            matches!(request.tool_choice, ChatToolChoice::Auto) && !request.tools.is_empty();
+        let tool_parsing_enabled = request.tool_parsing_enabled();
         let tool_parser = if tool_parsing_enabled {
             Some(Self::resolve_tool_parser(
                 request,
@@ -74,6 +76,7 @@ impl DefaultChatOutputProcessor {
         Ok(Self {
             reasoning_parser,
             tool_parser,
+            parallel_tool_calls: request.parallel_tool_calls,
         })
     }
 
@@ -86,6 +89,7 @@ impl DefaultChatOutputProcessor {
         Self {
             reasoning_parser: None,
             tool_parser: None,
+            parallel_tool_calls: true,
         }
     }
 
@@ -111,6 +115,8 @@ impl DefaultChatOutputProcessor {
         if parser.preserve_special_tokens() {
             request.decode_options.skip_special_tokens = false;
         }
+
+        apply_structural_tag_constraint(request, parser.as_ref())?;
 
         TOOL_PARSER_LOG_ONCE.call_once(|| info!(parser_name, "using tool parser"));
         Ok(parser)
@@ -159,7 +165,7 @@ impl ChatOutputProcessor for DefaultChatOutputProcessor {
     fn process(self: Box<Self>, decoded: DynDecodedTextEventStream) -> Result<DynChatEventStream> {
         let reasoning = reasoning_event_stream(decoded, self.reasoning_parser);
         let tool = tool_event_stream(reasoning, self.tool_parser);
-        let structured = structured_chat_event_stream(tool);
+        let structured = structured_chat_event_stream(tool, self.parallel_tool_calls);
 
         Ok(structured.boxed())
     }

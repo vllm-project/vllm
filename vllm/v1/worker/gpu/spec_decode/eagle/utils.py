@@ -5,6 +5,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_pp_group
+from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.model_loader import get_model
 
 
@@ -48,6 +49,13 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
         target_embed = getattr(target_inner, "embed_tokens", None) or getattr(
             target_inner, "embedding", None
         )
+        # If the target's embedding is LoRA-wrapped, share the underlying base
+        # layer. The draft is not part of the LoRA adapter; sharing the wrapper
+        # would make the draft run the LoRA embedding kernel with the target's
+        # punica metadata (sized for the target's token count), causing an
+        # out-of-bounds GPU access during multi-step draft decode.
+        if isinstance(target_embed, BaseLayerWithLoRA):
+            target_embed = target_embed.base_layer
         draft_embed = getattr(draft_inner, "embed_tokens", None)
         if target_embed is not None and _should_share(
             eagle_model, "has_own_embed_tokens", draft_embed, target_embed
@@ -76,10 +84,15 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
                     del sh.head
                     sh.head = target_lm_head
 
-    # MTP also shares a topk_indices_buffer between target and draft.
+    # MTP shares topk_indices_buffer with the target model. We update
+    # every module in the draft that holds a buffer reference so that
+    # the per-layer indexer and sparse-attention backends all point to
+    # the target's buffer.
     if hasattr(target_inner, "topk_indices_buffer"):
-        if hasattr(draft_inner, "topk_indices_buffer"):
-            del draft_inner.topk_indices_buffer
-        draft_inner.topk_indices_buffer = target_inner.topk_indices_buffer
+        target_buffer = target_inner.topk_indices_buffer
+        if target_buffer is not None:
+            for _, module in draft_inner.named_modules():
+                if hasattr(module, "topk_indices_buffer"):
+                    module.topk_indices_buffer = target_buffer
 
     return eagle_model

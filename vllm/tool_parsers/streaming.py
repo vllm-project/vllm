@@ -14,7 +14,6 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     DeltaToolCall,
 )
-from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
 from vllm.tool_parsers.utils import partial_json_loads
 from vllm.utils.mistral import is_mistral_tokenizer
 
@@ -24,14 +23,33 @@ else:
     TokenizerLike = object
 
 
+def _bracket_level_state(
+    s: str, opening: str = "{", closing: str = "}"
+) -> tuple[int, bool, bool]:
+    level = 0
+    in_string = False
+    escaped = False
+    for char in s:
+        if escaped:
+            escaped = False
+            continue
+        if in_string and char == "\\":
+            escaped = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if not in_string:
+            if char == opening:
+                level += 1
+            elif char == closing:
+                level -= 1
+    return level, in_string, escaped
+
+
 def _bracket_level(s: str, opening: str = "{", closing: str = "}") -> int:
     """Calculate the current level of nested brackets in a string."""
-    level = 0
-    for char in s:
-        if char == opening:
-            level += 1
-        elif char == closing:
-            level -= 1
+    level, _, _ = _bracket_level_state(s, opening, closing)
     return level
 
 
@@ -40,11 +58,20 @@ def filter_delta_text(
     previous_text: str,
 ) -> tuple[str, bool]:
     """Trim trailing tool-list delimiters from required-tool streaming text."""
-    bracket_level = _bracket_level(previous_text)
+    bracket_level, in_string, escaped = _bracket_level_state(previous_text)
     updated_delta = ""
     passed_zero = False
     for char in delta_text:
-        if char == "{":
+        if escaped:
+            escaped = False
+        elif in_string:
+            if char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char == "{":
             bracket_level += 1
             passed_zero = bracket_level == 0
         elif char == "}":
@@ -54,7 +81,7 @@ def filter_delta_text(
         if bracket_level != 0:
             updated_delta += char
         else:
-            if char == ",":
+            if not in_string and char == ",":
                 break
     return updated_delta, passed_zero
 
@@ -77,6 +104,9 @@ def extract_named_tool_call_streaming(
         )
     else:
         if is_mistral_tokenizer(tokenizer):
+            # Import mistral_common only if we need it.
+            from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
+
             tool_call_id = MistralToolCall.generate_random_id()
         else:
             tool_call_id = make_tool_call_id(
@@ -144,8 +174,12 @@ def extract_required_tool_call_streaming(
                 param_match = re.search(
                     r'.*"parameters":\s*(.*)', current_text, re.DOTALL
                 )
-                arguments = param_match.group(1) if param_match else ""
-                arguments, _ = filter_delta_text(arguments, previous_text)
+                if param_match:
+                    arguments = param_match.group(1)
+                    arguments_prefix = current_text[: param_match.start(1)]
+                    arguments, _ = filter_delta_text(arguments, arguments_prefix)
+                else:
+                    arguments = ""
 
                 # if this iteration finishes a previous tool call but a
                 # new incomplete tool is already generated, take the
