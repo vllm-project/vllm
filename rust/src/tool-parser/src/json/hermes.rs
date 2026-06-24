@@ -1,5 +1,5 @@
 use super::{JsonToolCallConfig, JsonToolCallParser, JsonToolCallWhitespace};
-use crate::{Result, Tool, ToolParser, ToolParserOutput};
+use crate::{Result, StructuralTagModel, Tool, ToolParser, ToolParserOutput};
 
 const HERMES_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
     parser_name: "Hermes",
@@ -8,7 +8,7 @@ const HERMES_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
     marker_whitespace: JsonToolCallWhitespace::Optional,
     delimiter: None,
     name_key: "name",
-    arguments_key: "arguments",
+    arguments_key: &["arguments"],
 };
 
 /// Tool parser for Hermes XML-wrapped JSON tool calls.
@@ -43,6 +43,10 @@ impl ToolParser for HermesToolParser {
         Self: Sized + 'static,
     {
         Ok(Box::new(Self::new(tools)))
+    }
+
+    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
+        Some(StructuralTagModel::Hermes)
     }
 
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {

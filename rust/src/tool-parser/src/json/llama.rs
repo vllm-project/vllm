@@ -9,7 +9,7 @@ use super::{
     argument_delta_event, tool_call_header_event,
 };
 use crate::utils::{JsonObjectScanState, parse_buffered_event};
-use crate::{Result, Tool, ToolCallDelta, ToolParser, ToolParserOutput};
+use crate::{Result, StructuralTagModel, Tool, ToolCallDelta, ToolParser, ToolParserOutput};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LlamaJsonMode {
@@ -133,6 +133,10 @@ impl ToolParser for Llama3JsonToolParser {
         Ok(Box::new(Self::new(tools)))
     }
 
+    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
+        Some(StructuralTagModel::Llama)
+    }
+
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         self.buffer.push_str(chunk);
 
@@ -203,7 +207,7 @@ fn llama_tool_call_header_event(input: &mut JsonToolInput<'_>) -> ModalResult<Ll
         marker_whitespace: JsonToolCallWhitespace::Optional,
         delimiter: Some(";"),
         name_key: "name",
-        arguments_key: "parameters",
+        arguments_key: &["parameters"],
     };
 
     match tool_call_header_event(input, CONFIG)? {

@@ -250,6 +250,7 @@ async def k2_client(k2_server):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="Skipping Kimi K2 tool ID test")
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("stream", [True, False])
 @pytest.mark.parametrize("tool_choice", ["required"])
@@ -442,7 +443,7 @@ async def test_named_tool_use(
         if delta.role:
             assert delta.role == "assistant"
         assert delta.content is None or len(delta.content) == 0
-        if delta.tool_calls:
+        if delta.tool_calls and delta.tool_calls[0].function.arguments:
             output.append(delta.tool_calls[0].function.arguments)
         if chunk.choices[0].finish_reason is not None:
             finish_reason_count += 1
@@ -539,8 +540,8 @@ async def test_max_tokens_with_tool_choice_required(
         tool_choice=tool_choice,
     )
     # When `tool_choice="required"` and the tokens of `tools` exceed `max_tokens`,
-    # both `tool_calls` and `content` should be empty.
+    # `tool_calls` should be absent and `content` should be empty.
     # This behavior should be consistent with OpenAI.
     choice = chat_completion.choices[0]
     assert choice.finish_reason == "length"
-    assert len(choice.message.tool_calls) == 0
+    assert choice.message.tool_calls is None

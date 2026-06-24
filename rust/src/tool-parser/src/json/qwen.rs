@@ -1,5 +1,5 @@
 use super::{JsonToolCallConfig, JsonToolCallParser, JsonToolCallWhitespace};
-use crate::{Result, Tool, ToolParser, ToolParserOutput};
+use crate::{Result, StructuralTagModel, Tool, ToolParser, ToolParserOutput};
 
 const QWEN_XML_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
     parser_name: "Qwen XML",
@@ -8,7 +8,7 @@ const QWEN_XML_CONFIG: JsonToolCallConfig = JsonToolCallConfig {
     marker_whitespace: JsonToolCallWhitespace::Exact("\n"),
     delimiter: None,
     name_key: "name",
-    arguments_key: "arguments",
+    arguments_key: &["arguments"],
 };
 
 /// Tool parser for Qwen XML-wrapped JSON tool calls.
@@ -45,6 +45,10 @@ impl ToolParser for Qwen3XmlToolParser {
         Self: Sized + 'static,
     {
         Ok(Box::new(Self::new(tools)))
+    }
+
+    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
+        Some(StructuralTagModel::Qwen3)
     }
 
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
