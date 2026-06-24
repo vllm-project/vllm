@@ -71,13 +71,14 @@ from .utils import (
 # - Adds a partial_rotary_factor to RoPE
 
 
-def _cast_if_autocast_enabled(*args):
-    if not torch.is_autocast_enabled():
+def _cast_if_autocast_enabled(device_type: str, *args):
+    if not torch.is_autocast_enabled(device_type):
         return args
-    else:
-        return torch.amp.autocast_mode._cast(
-            args, device_type="cuda", dtype=torch.get_autocast_gpu_dtype()
-        )
+    return torch.amp.autocast_mode._cast(
+        args,
+        device_type=device_type,
+        dtype=torch.get_autocast_dtype(device_type),
+    )
 
 
 class NemotronLayerNorm1P(nn.LayerNorm):
@@ -100,10 +101,11 @@ class NemotronLayerNorm1P(nn.LayerNorm):
         if residual is not None:
             x = x + residual
             residual = x
+        device_type = x.device.type
         args = _cast_if_autocast_enabled(
-            x, self.normalized_shape, self.weight + 1, self.bias, self.eps
+            device_type, x, self.normalized_shape, self.weight + 1, self.bias, self.eps
         )
-        with torch.amp.autocast("cuda", enabled=False):
+        with torch.amp.autocast(device_type, enabled=False):
             x = torch.nn.functional.layer_norm(*args)
             return x if residual is None else (x, residual)
 
