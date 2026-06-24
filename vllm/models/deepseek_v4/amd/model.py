@@ -814,6 +814,9 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self, skip_substrs=["mtp."])
         loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        for module in self.modules():
+            if isinstance(module, DeepseekV4ROCMAiterMLAAttention):
+                module.prepare_attn_preshuffle()
         return loaded_params
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
