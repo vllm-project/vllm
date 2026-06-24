@@ -310,6 +310,16 @@ mod tests {
     }
 
     impl vllm_parser::unified::UnifiedParser for ScriptedParser {
+        fn create(
+            _tools: &[vllm_parser::tool::Tool],
+            _tokenizer: vllm_tokenizer::DynTokenizer,
+        ) -> vllm_parser::unified::Result<Box<dyn vllm_parser::unified::UnifiedParser>>
+        where
+            Self: Sized + 'static,
+        {
+            unreachable!("ScriptedParser is constructed directly in tests")
+        }
+
         fn parse_into(
             &mut self,
             _delta: &str,
