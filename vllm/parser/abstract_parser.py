@@ -340,6 +340,18 @@ class Parser:
         tool call extraction via internal stream state.
         """
 
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        """
+        Count the number of reasoning tokens in a sequence of token IDs.
+
+        Args:
+            token_ids: A sequence of token IDs.
+
+        Returns:
+            The number of reasoning tokens.
+        """
+        return 0
+
 
 class DelegatingParser(Parser):
     """
@@ -733,7 +745,39 @@ class DelegatingParser(Parser):
         enable_auto_tools: bool = False,
         model_output_token_ids: Sequence[int] = (),
     ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
-        reasoning, content = self.extract_reasoning(model_output, request)
+        # Non-streaming engine-based parsers still need the streaming engine
+        # when token IDs are available, so reasoning token counts follow the
+        # same token-aware boundaries as streaming. Callers must provide a
+        # parser instance scoped to one output choice.
+        if (
+            self._reasoning_parser is not None
+            and self._reasoning_parser.engine_based_streaming
+            and model_output_token_ids
+        ):
+            delta = self.extract_reasoning_streaming(
+                previous_text="",
+                current_text=model_output,
+                delta_text=model_output,
+                previous_token_ids=[],
+                current_token_ids=model_output_token_ids,
+                delta_token_ids=model_output_token_ids,
+            )
+            finish = getattr(self._reasoning_parser, "finish_streaming", None)
+            finish_delta = finish() if finish is not None else None
+
+            reasoning_parts = []
+            content_parts = []
+            for message in (delta, finish_delta):
+                if message is None:
+                    continue
+                if message.reasoning:
+                    reasoning_parts.append(message.reasoning)
+                if message.content:
+                    content_parts.append(message.content)
+            reasoning = "".join(reasoning_parts) or None
+            content = "".join(content_parts) or None
+        else:
+            reasoning, content = self.extract_reasoning(model_output, request)
         tool_calls, content = self._extract_tool_calls(
             content=content,
             request=request,
@@ -906,3 +950,8 @@ class DelegatingParser(Parser):
                         delta_message.tool_calls or []
                     ) + flush_delta.tool_calls
         return delta_message
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        if self._reasoning_parser is None:
+            return 0
+        return self._reasoning_parser.count_reasoning_tokens(token_ids)

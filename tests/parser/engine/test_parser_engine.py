@@ -129,6 +129,111 @@ def _make_engine(
     )
 
 
+class TestCountReasoningTokens:
+    def test_counts_initial_reasoning_until_end_token(self):
+        engine = _make_engine()
+        engine.parse(
+            "ab</think>c",
+            MagicMock(),
+            model_output_token_ids=[ord("a"), ord("b"), 201, ord("c")],
+        )
+
+        assert engine.count_reasoning_tokens() == 2
+        assert engine.count_reasoning_tokens([ord("a"), ord("b"), 201]) == 2
+
+    def test_counts_reasoning_after_start_token(self):
+        config = ParserEngineConfig(
+            name="content_start_test",
+            terminals={
+                "THINK_START": "<think>",
+                "THINK_END": "</think>",
+            },
+            token_id_terminals={
+                "THINK_START": "<think>",
+                "THINK_END": "</think>",
+            },
+            transitions={
+                (ParserState.CONTENT, "THINK_START"): Transition(
+                    ParserState.REASONING,
+                    (EventType.REASONING_START,),
+                ),
+                (ParserState.REASONING, "THINK_END"): Transition(
+                    ParserState.CONTENT,
+                    (EventType.REASONING_END,),
+                ),
+            },
+        )
+        engine = _make_engine(config)
+        engine.parse(
+            "<think>ab</think>",
+            MagicMock(),
+            model_output_token_ids=[200, ord("a"), ord("b"), 201],
+        )
+
+        assert engine.count_reasoning_tokens() == 2
+
+    def test_tool_start_implicitly_ends_reasoning(self):
+        config = ParserEngineConfig(
+            name="implicit_tool_end_test",
+            terminals={
+                "TOOL_START": "<tool_call>",
+                "TOOL_END": "</tool_call>",
+            },
+            token_id_terminals={
+                "TOOL_START": "<tool_call>",
+                "TOOL_END": "</tool_call>",
+            },
+            transitions={
+                (ParserState.REASONING, "TOOL_START"): Transition(
+                    ParserState.TOOL_ARGS,
+                    (EventType.REASONING_END, EventType.TOOL_CALL_START),
+                ),
+                (ParserState.TOOL_ARGS, "TOOL_END"): Transition(
+                    ParserState.CONTENT,
+                    (EventType.TOOL_CALL_END,),
+                ),
+            },
+            initial_state=ParserState.REASONING,
+            content_events={
+                ParserState.CONTENT: EventType.TEXT_CHUNK,
+                ParserState.REASONING: EventType.REASONING_CHUNK,
+                ParserState.TOOL_ARGS: EventType.ARG_VALUE_CHUNK,
+            },
+        )
+        engine = _make_engine(config)
+        engine.parse(
+            "a<tool_call>b</tool_call>",
+            MagicMock(),
+            model_output_token_ids=[ord("a"), 202, ord("b"), 203],
+        )
+
+        assert engine.count_reasoning_tokens() == 1
+
+    def test_split_text_terminal_is_not_counted_as_reasoning(self):
+        config = ParserEngineConfig(
+            name="text_terminal_test",
+            terminals={
+                "THINK_END": "</think>",
+            },
+            transitions={
+                (ParserState.REASONING, "THINK_END"): Transition(
+                    ParserState.CONTENT,
+                    (EventType.REASONING_END,),
+                ),
+            },
+            initial_state=ParserState.REASONING,
+        )
+        engine = _make_engine(config)
+        split_end = [ord(ch) for ch in "</think>"]
+        engine.parse(
+            "a</think>b",
+            MagicMock(),
+            model_output_token_ids=[ord("a"), *split_end, ord("b")],
+        )
+
+        assert engine.count_reasoning_tokens() == 1
+
+
 # ── TestEventsToDelta ────────────────────────────────────────────────
 
 

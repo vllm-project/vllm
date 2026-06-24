@@ -441,6 +441,54 @@ class TestTokenIdFiltering:
         assert sum(1 for e in all_events if e.type == EventType.TOOL_CALL_END) == 1
 
 
+class TestEventTokenCounts:
+    def test_reasoning_chunk_token_count_excludes_boundaries(self):
+        engine = StreamingParserEngine(_think_config(), _make_think_tokenizer())
+
+        events = engine.feed(
+            "<think>tok1tok2</think>tok3",
+            [_START_ID, 1, 2, _END_ID, 3],
+        )
+        events.extend(engine.finish())
+
+        reasoning_chunks = [
+            event for event in events if event.type == EventType.REASONING_CHUNK
+        ]
+        assert "".join(event.value for event in reasoning_chunks) == "tok1tok2"
+        assert sum(event.token_count for event in reasoning_chunks) == 2
+
+        content_chunks = [
+            event for event in events if event.type == EventType.TEXT_CHUNK
+        ]
+        assert "".join(event.value for event in content_chunks) == "tok3"
+        assert sum(event.token_count for event in content_chunks) == 1
+
+    def test_deferred_terminal_preserves_prefix_token_count(self):
+        config = ParserEngineConfig(
+            name="token_id_think_end_test",
+            terminals={"THINK_END": "</think>"},
+            token_id_terminals={"THINK_END": "</think>"},
+            transitions={
+                (ParserState.REASONING, "THINK_END"): Transition(
+                    ParserState.CONTENT,
+                    (EventType.REASONING_END,),
+                ),
+            },
+            initial_state=ParserState.REASONING,
+        )
+        engine = StreamingParserEngine(config, _make_think_tokenizer())
+
+        assert engine.feed("", [1, _END_ID]) == []
+        events = engine.feed("tok1</think>tok2", [2])
+        events.extend(engine.finish())
+
+        reasoning_chunks = [
+            event for event in events if event.type == EventType.REASONING_CHUNK
+        ]
+        assert "".join(event.value for event in reasoning_chunks) == "tok1"
+        assert sum(event.token_count for event in reasoning_chunks) == 1
+
+
 def _func_prefix_config() -> ParserEngineConfig:
     """Config mixing token-ID terminals (TOOL_START/END) with
     text-only terminals (FUNC_PREFIX) and fallback transitions."""

@@ -598,24 +598,9 @@ class ParserEngine(Parser):
     ) -> str | None:
         return None
 
-    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
-        start_id = self._reasoning_start_token_id
-        end_id = self._reasoning_end_token_id
-        if start_id is None or end_id is None:
-            return 0
-        count = 0
-        depth = 0
-        for token_id in token_ids:
-            if token_id == start_id:
-                depth += 1
-                continue
-            if token_id == end_id:
-                if depth > 0:
-                    depth -= 1
-                continue
-            if depth > 0:
-                count += 1
-        return count
+    def count_reasoning_tokens(self, token_ids: Sequence[int] | None = None) -> int:
+        """Return reasoning tokens observed by the parser engine so far."""
+        return self._engine.reasoning_token_count
 
     # ── Single-pass parse helper ────────────────────────────────────────
 

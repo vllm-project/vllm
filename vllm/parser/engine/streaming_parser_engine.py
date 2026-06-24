@@ -105,6 +105,17 @@ class StreamingParserEngine:
         self.skip_tool_parsing = False
         self.reset(initial_state=initial_state)
 
+    @property
+    def reasoning_token_count(self) -> int:
+        return self._reasoning_token_count
+
+    def _record_reasoning_token_count(self, events: list[SemanticEvent]) -> None:
+        self._reasoning_token_count += sum(
+            event.token_count
+            for event in events
+            if event.type == EventType.REASONING_CHUNK
+        )
+
     def _reset_args_state(self) -> None:
         self._args_buffer: str = ""
         self._args_safe_end: int = 0
@@ -124,6 +135,7 @@ class StreamingParserEngine:
         )
         self.tool_index = -1
         self._ever_had_token_ids = False
+        self._reasoning_token_count = 0
         # DO NOT reset skip_tool_parsing here — callers set it before
         # calling methods that trigger reset() (e.g. extract_reasoning),
         # and clearing it silently breaks non-streaming tool-call-as-
@@ -154,18 +166,37 @@ class StreamingParserEngine:
                     has_special = True
                     break
             if not has_special:
-                return self._emit_for_state(delta_text)
+                events = self._emit_for_state(
+                    delta_text,
+                    token_count=len(delta_token_ids),
+                )
+                self._record_reasoning_token_count(events)
+                return events
 
         scanner_items = self._scanner.scan(delta_text, delta_token_ids)
 
         if len(scanner_items) == 1 and isinstance(scanner_items[0], TextChunk):
-            lex_tokens = self._lexer.feed(scanner_items[0].text)
+            item = scanner_items[0]
+            lex_tokens = self._lexer.feed(
+                item.text,
+                token_texts=item.token_texts,
+                token_count=item.token_count,
+            )
             if len(lex_tokens) == 1 and lex_tokens[0].terminal == CONTENT_TERMINAL:
                 text = lex_tokens[0].value
-                return self._emit_for_state(text)
-            return self._process_lex_tokens(lex_tokens)
+                events = self._emit_for_state(
+                    text,
+                    token_count=lex_tokens[0].token_count,
+                )
+                self._record_reasoning_token_count(events)
+                return events
+            events = self._process_lex_tokens(lex_tokens)
+            self._record_reasoning_token_count(events)
+            return events
 
-        return self._process_scanner_items(scanner_items)
+        events = self._process_scanner_items(scanner_items)
+        self._record_reasoning_token_count(events)
+        return events
 
     def _process_scanner_items(
         self, items: Sequence[LexerInput]
@@ -174,9 +205,23 @@ class StreamingParserEngine:
         for item in items:
             if isinstance(item, PreLexedTerminal):
                 events.extend(self._process_lex_tokens(self._lexer.flush()))
-                events.extend(self._on_terminal(item.terminal, item.text))
+                events.extend(
+                    self._on_terminal(
+                        item.terminal,
+                        item.text,
+                        token_count=item.token_count,
+                    )
+                )
             elif isinstance(item, TextChunk):
-                events.extend(self._process_lex_tokens(self._lexer.feed(item.text)))
+                events.extend(
+                    self._process_lex_tokens(
+                        self._lexer.feed(
+                            item.text,
+                            token_texts=item.token_texts,
+                            token_count=item.token_count,
+                        )
+                    )
+                )
         return events
 
     def finish(self) -> list[SemanticEvent]:
@@ -190,6 +235,7 @@ class StreamingParserEngine:
                     EventType.ARG_VALUE_CHUNK,
                     value=self._args_buffer,
                     tool_index=self.tool_index,
+                    token_count=0,
                 )
             )
             self._args_buffer = ""
@@ -215,6 +261,7 @@ class StreamingParserEngine:
             )
             self.state = ParserState.CONTENT
 
+        self._record_reasoning_token_count(events)
         return events
 
     def parse_complete(self, text: str) -> list[SemanticEvent]:
@@ -228,9 +275,15 @@ class StreamingParserEngine:
         strict = self._token_id_terminal_names if self._ever_had_token_ids else None
         for tok in tokens:
             if tok.terminal == CONTENT_TERMINAL or (strict and tok.terminal in strict):
-                events.extend(self._on_content(tok.value))
+                events.extend(self._on_content(tok.value, token_count=tok.token_count))
             else:
-                events.extend(self._on_terminal(tok.terminal, tok.value))
+                events.extend(
+                    self._on_terminal(
+                        tok.terminal,
+                        tok.value,
+                        token_count=tok.token_count,
+                    )
+                )
         return events
 
     _TOOL_STATES = frozenset(
@@ -242,12 +295,17 @@ class StreamingParserEngine:
         }
     )
 
-    def _on_terminal(self, terminal: str, value: str) -> list[SemanticEvent]:
+    def _on_terminal(
+        self,
+        terminal: str,
+        value: str,
+        token_count: int = 0,
+    ) -> list[SemanticEvent]:
         key = (self.state, terminal)
         transition = self.config.transitions.get(key)
 
         if transition is None:
-            return self._emit_for_state(value)
+            return self._emit_for_state(value, token_count=token_count)
 
         if self.skip_tool_parsing and terminal in self._tool_terminals:
             if EventType.REASONING_END in transition.events:
@@ -257,50 +315,74 @@ class StreamingParserEngine:
                         EventType.REASONING_END,
                         value=value,
                         tool_index=self.tool_index,
+                        token_count=token_count,
                     ),
                     SemanticEvent(
                         EventType.TEXT_CHUNK,
                         value=value,
                         tool_index=self.tool_index,
+                        token_count=token_count,
                     ),
                 ]
             content_type = self.config.content_events.get(self.state)
             if content_type is not None:
                 return [
-                    SemanticEvent(content_type, value=value, tool_index=self.tool_index)
+                    SemanticEvent(
+                        content_type,
+                        value=value,
+                        tool_index=self.tool_index,
+                        token_count=token_count,
+                    )
                 ]
             return []
 
         if transition.skip_in_token_id_mode and self._ever_had_token_ids:
-            return self._emit_for_state(value)
+            return self._emit_for_state(value, token_count=token_count)
 
-        return self._apply_transition(transition, value)
+        return self._apply_transition(transition, value, token_count=token_count)
 
-    def _emit_for_state(self, text: str) -> list[SemanticEvent]:
+    def _emit_for_state(
+        self,
+        text: str,
+        token_count: int = 0,
+    ) -> list[SemanticEvent]:
         if self.state == ParserState.TOOL_ARGS:
             if self.config.tool_args_json:
-                return self._feed_args_text(text)
+                return self._feed_args_text(text, token_count=token_count)
             return [
                 SemanticEvent(
                     EventType.ARG_VALUE_CHUNK,
                     value=text,
                     tool_index=self.tool_index,
+                    token_count=token_count,
                 )
             ]
         content_type = self.config.content_events.get(self.state)
         if content_type is not None:
-            return [SemanticEvent(content_type, value=text, tool_index=self.tool_index)]
+            return [
+                SemanticEvent(
+                    content_type,
+                    value=text,
+                    tool_index=self.tool_index,
+                    token_count=token_count,
+                )
+            ]
         return []
 
-    def _on_content(self, text: str) -> list[SemanticEvent]:
+    def _on_content(
+        self,
+        text: str,
+        token_count: int = 0,
+    ) -> list[SemanticEvent]:
         if not text:
             return []
-        return self._emit_for_state(text)
+        return self._emit_for_state(text, token_count=token_count)
 
     def _apply_transition(
         self,
         transition: Transition,
         value: str,
+        token_count: int = 0,
     ) -> list[SemanticEvent]:
         events: list[SemanticEvent] = []
 
@@ -314,6 +396,7 @@ class StreamingParserEngine:
                     EventType.ARG_VALUE_CHUNK,
                     value=self._args_buffer,
                     tool_index=self.tool_index,
+                    token_count=0,
                 )
             )
             self._args_buffer = ""
@@ -328,6 +411,7 @@ class StreamingParserEngine:
                     event_type,
                     value=value,
                     tool_index=self.tool_index,
+                    token_count=token_count,
                 )
             )
 
@@ -339,25 +423,41 @@ class StreamingParserEngine:
 
         return events
 
-    def _feed_args_text(self, text: str) -> list[SemanticEvent]:
+    def _feed_args_text(
+        self,
+        text: str,
+        token_count: int = 0,
+    ) -> list[SemanticEvent]:
         """Feed text into the JSON argument streaming buffer.
 
         Streams argument characters incrementally while holding back
         closing braces/brackets that might change as more input arrives.
         """
         events: list[SemanticEvent] = []
-        for ch in text:
-            result = self._feed_args_char(ch)
+        char_token_counts = self._char_token_counts(text, token_count)
+        for ch, char_token_count in zip(text, char_token_counts):
+            result = self._feed_args_char(ch, token_count=char_token_count)
             events.extend(result)
         return events
 
-    def _feed_args_char(self, ch: str) -> list[SemanticEvent]:
+    @staticmethod
+    def _char_token_counts(text: str, token_count: int) -> list[int]:
+        counts = [0] * len(text)
+        if text and token_count:
+            counts[0] = token_count
+        return counts
+
+    def _feed_args_char(
+        self,
+        ch: str,
+        token_count: int = 0,
+    ) -> list[SemanticEvent]:
         self._args_buffer += ch
 
         if self._args_escape_next:
             self._args_escape_next = False
             self._args_safe_end = len(self._args_buffer)
-            return self._flush_safe_args()
+            return self._flush_safe_args(token_count=token_count)
 
         if self._args_in_string:
             if ch == "\\":
@@ -365,17 +465,17 @@ class StreamingParserEngine:
             elif ch == '"':
                 self._args_in_string = False
             self._args_safe_end = len(self._args_buffer)
-            return self._flush_safe_args()
+            return self._flush_safe_args(token_count=token_count)
 
         if ch == '"':
             self._args_in_string = True
             self._args_safe_end = len(self._args_buffer)
-            return self._flush_safe_args()
+            return self._flush_safe_args(token_count=token_count)
 
         if ch in ("{", "["):
             self._args_brace_depth += 1
             self._args_safe_end = len(self._args_buffer)
-            return self._flush_safe_args()
+            return self._flush_safe_args(token_count=token_count)
 
         if ch in ("}", "]"):
             if self._args_brace_depth > 0:
@@ -383,12 +483,12 @@ class StreamingParserEngine:
             if self._args_brace_depth == 0:
                 return []
             self._args_safe_end = len(self._args_buffer)
-            return self._flush_safe_args()
+            return self._flush_safe_args(token_count=token_count)
 
         self._args_safe_end = len(self._args_buffer)
-        return self._flush_safe_args()
+        return self._flush_safe_args(token_count=token_count)
 
-    def _flush_safe_args(self) -> list[SemanticEvent]:
+    def _flush_safe_args(self, token_count: int = 0) -> list[SemanticEvent]:
         """Emit buffered argument characters up to the safe-end watermark.
 
         Top-level closing braces are held back (safe_end not advanced)
@@ -404,5 +504,6 @@ class StreamingParserEngine:
                 EventType.ARG_VALUE_CHUNK,
                 value=to_emit,
                 tool_index=self.tool_index,
+                token_count=token_count,
             )
         ]

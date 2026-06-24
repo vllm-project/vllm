@@ -24,6 +24,7 @@ class TerminalDef:
 class LexToken:
     terminal: str
     value: str
+    token_count: int = 0
 
 
 class LexerShape:
@@ -104,6 +105,7 @@ class IncrementalLexer:
         self.terminals = shape.terminals
         self.content_terminal = content_terminal
         self.buffer = ""
+        self._token_counts: list[int] = []
 
         self._literal_strings = shape.literal_strings
         self._max_literal_len = shape.max_literal_len
@@ -114,15 +116,23 @@ class IncrementalLexer:
 
     def reset(self) -> None:
         self.buffer = ""
+        self._token_counts.clear()
 
-    def feed(self, text: str) -> list[LexToken]:
+    def feed(
+        self,
+        text: str,
+        token_texts: tuple[str, ...] = (),
+        token_count: int = 0,
+    ) -> list[LexToken]:
+        char_token_counts = self._char_token_counts(text, token_texts, token_count)
         if not self.buffer and self._has_only_literals and self._literal_first_chars:
             for ch in text:
                 if ch in self._literal_first_chars:
                     break
             else:
-                return [LexToken(self.content_terminal, text)]
+                return [LexToken(self.content_terminal, text, sum(char_token_counts))]
         self.buffer += text
+        self._token_counts.extend(char_token_counts)
         return self._drain()
 
     def flush(self) -> list[LexToken]:
@@ -130,9 +140,52 @@ class IncrementalLexer:
         if self.buffer:
             tokens.extend(self._drain(final=True))
         if self.buffer:
-            tokens.append(LexToken(self.content_terminal, self.buffer))
+            tokens.append(
+                LexToken(
+                    self.content_terminal,
+                    self.buffer,
+                    sum(self._token_counts),
+                )
+            )
             self.buffer = ""
+            self._token_counts.clear()
         return tokens
+
+    @staticmethod
+    def _char_token_counts(
+        text: str,
+        token_texts: tuple[str, ...],
+        token_count: int,
+    ) -> list[int]:
+        counts = [0] * len(text)
+        if not text:
+            return counts
+
+        if token_texts:
+            pos = 0
+            assigned = 0
+            for token_text in token_texts:
+                if not token_text:
+                    continue
+                found = text.find(token_text, pos)
+                if found < 0:
+                    continue
+                counts[found] += 1
+                assigned += 1
+                pos = found + len(token_text)
+            missing = (token_count or len(token_texts)) - assigned
+            if missing > 0:
+                counts[0] += missing
+            return counts
+
+        if token_count:
+            counts[0] = token_count
+        return counts
+
+    def _pop_token_count(self, length: int) -> int:
+        token_count = sum(self._token_counts[:length])
+        del self._token_counts[:length]
+        return token_count
 
     def _drain(self, *, final: bool = False) -> list[LexToken]:
         tokens: list[LexToken] = []
@@ -150,8 +203,15 @@ class IncrementalLexer:
                         has_potential = True
                         break
                 if not has_potential:
-                    tokens.append(LexToken(content_terminal, self.buffer))
+                    tokens.append(
+                        LexToken(
+                            content_terminal,
+                            self.buffer,
+                            sum(self._token_counts),
+                        )
+                    )
                     self.buffer = ""
+                    self._token_counts.clear()
                     break
 
             best_match: tuple[str, str, int] | None = None
@@ -175,23 +235,49 @@ class IncrementalLexer:
                             longer_match = True
                             break
                     if not longer_match:
-                        tokens.append(LexToken(best_match[0], best_match[1]))
-                        self.buffer = self.buffer[best_match[2] :]
+                        match_len = best_match[2]
+                        tokens.append(
+                            LexToken(
+                                best_match[0],
+                                best_match[1],
+                                self._pop_token_count(match_len),
+                            )
+                        )
+                        self.buffer = self.buffer[match_len:]
                         continue
                     break
                 else:
                     break
 
             if best_match is not None:
-                tokens.append(LexToken(best_match[0], best_match[1]))
+                match_len = best_match[2]
+                tokens.append(
+                    LexToken(
+                        best_match[0],
+                        best_match[1],
+                        self._pop_token_count(match_len),
+                    )
+                )
                 self.buffer = self.buffer[best_match[2] :]
             else:
                 content_end = self._find_content_boundary()
                 if content_end > 0:
-                    tokens.append(LexToken(content_terminal, self.buffer[:content_end]))
+                    tokens.append(
+                        LexToken(
+                            content_terminal,
+                            self.buffer[:content_end],
+                            self._pop_token_count(content_end),
+                        )
+                    )
                     self.buffer = self.buffer[content_end:]
                 else:
-                    tokens.append(LexToken(content_terminal, self.buffer[0]))
+                    tokens.append(
+                        LexToken(
+                            content_terminal,
+                            self.buffer[0],
+                            self._pop_token_count(1),
+                        )
+                    )
                     self.buffer = self.buffer[1:]
 
         return tokens

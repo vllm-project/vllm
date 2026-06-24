@@ -120,7 +120,7 @@ class ParserEngineReasoningAdapter(ReasoningParser):
     ) -> str | None:
         return self._parser_engine.get_streaming_fallback_content(text, request)
 
-    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+    def count_reasoning_tokens(self, token_ids: Sequence[int] | None = None) -> int:
         return self._parser_engine.count_reasoning_tokens(token_ids)
 
 
