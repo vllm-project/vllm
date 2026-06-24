@@ -9,6 +9,7 @@ using fake transport and session objects.
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -614,7 +615,12 @@ class TestShutdownDrain:
         monkeypatch.setattr(manager_module, "_SHUTDOWN_DRAIN_TIMEOUT_S", 0.05)
         monkeypatch.setattr(manager_module, "_DRAIN_SLEEP_S", 0.0)
         times = iter([100.0, 100.0, 100.06])
-        monkeypatch.setattr(manager_module.time, "monotonic", lambda: next(times))
+        # Patch via a fake module on `manager_module.time` so we do not mutate
+        # the global `time` module — other code in the process (e.g. the
+        # buildkite test collector's pytest_runtest_logreport hook) calls
+        # time.monotonic() before monkeypatch teardown.
+        fake_time = SimpleNamespace(monotonic=lambda: next(times), sleep=time.sleep)
+        monkeypatch.setattr(manager_module, "time", fake_time)
 
         mgr, data, control = self._prep(
             still_queue=[[42]],
@@ -1118,7 +1124,6 @@ class TestDrainJobs:
                 return 106.0
 
         monkeypatch.setattr(manager_module, "_DRAIN_SLEEP_S", 0.0)
-        monkeypatch.setattr(manager_module.time, "monotonic", fake_monotonic)
 
         # Spy on the warning logger directly — vllm's logger does not
         # propagate to root, so caplog can't see it.
@@ -1138,7 +1143,12 @@ class TestDrainJobs:
             n_sleeps += 1
             sess._server._inflight = {}
 
-        monkeypatch.setattr(manager_module.time, "sleep", clearing_sleep)
+        # Patch via a fake module on `manager_module.time` so we do not mutate
+        # the global `time` module — other code in the process (e.g. the
+        # buildkite test collector's pytest_runtest_logreport hook) calls
+        # time.monotonic() before monkeypatch teardown.
+        fake_time = SimpleNamespace(monotonic=fake_monotonic, sleep=clearing_sleep)
+        monkeypatch.setattr(manager_module, "time", fake_time)
 
         mgr.drain_jobs()
 
