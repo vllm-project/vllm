@@ -17,7 +17,7 @@ from vllm.v1.kv_offload.base import ReqContext
 from vllm.v1.kv_offload.tiering.base import JobMetadata, JobResult
 from vllm.v1.kv_offload.tiering.p2p import manager as manager_module
 from vllm.v1.kv_offload.tiering.p2p.manager import (
-    _PENDING_SESSION_TIMEOUT_S,
+    _UNBOUND_STORE_TIMEOUT_S,
     P2PSecondaryTierManager,
 )
 from vllm.v1.kv_offload.tiering.p2p.session import LoadResult, StoreResult
@@ -73,7 +73,8 @@ def _make_manager() -> P2PSecondaryTierManager:
     mgr._finished_jobs = []
     mgr._failed_req_ids = set()
     mgr._sessions = {}
-    mgr._pending_session_created_at = {}
+    mgr._kv_to_session = {}
+    mgr._unbound_stores = {}
     return mgr
 
 
@@ -170,56 +171,68 @@ class TestSubmitStore:
         mgr.submit_store(job)
         assert mgr._finished_jobs == [JobResult(job_id=1, success=False)]
 
-    def test_no_session_creates_pending_session(self):
-        """Without an existing session, submit_store lazily creates a pending
-        one so blocks can be buffered until the decoder connects.
-        """
-
-        class FakeData:
-            block_len = 4096
-
+    def test_no_binding_yet_parks_in_unbound_stores(self):
+        """submit_store without a bound session buffers the batch keyed
+        by kv_request_id; no session is pre-created (peer_id is unknown
+        to the producer at store time)."""
         mgr = _make_manager()
-        mgr._data = FakeData()  # type: ignore[assignment]
-        job = _job_metadata(job_id=1, kv_params=_kv_params())
-        mgr.submit_store(job)
-
-        peer_id = "10.0.0.1:8000"
-        assert peer_id in mgr._sessions
-        # Pending: no connection attached yet.
-        assert not mgr._sessions[peer_id].connected
-        # The job is buffered, not completed yet.
-        assert mgr._finished_jobs == []
-
-    def test_routes_to_existing_session(self):
-        """submit_store on a peer with an existing session forwards to
-        session.add_stored_blocks and does NOT create a pending session."""
-        mgr = _make_manager()
-        peer_id = "10.0.0.1:8000"
-        existing = _FakeSession(peer_id=peer_id, connected=True)
-        mgr._sessions[peer_id] = existing  # type: ignore[assignment]
         job = _job_metadata(
-            job_id=7, keys=[b"k1", b"k2"], block_ids=[3, 4], kv_params=_kv_params()
+            job_id=1,
+            keys=[b"k1", b"k2"],
+            block_ids=[3, 4],
+            kv_params=_kv_params(kv_request_id="req-1"),
         )
         mgr.submit_store(job)
 
-        assert len(existing.stores_added) == 1
-        kv_req_id, keys, _, job_id = existing.stores_added[0]
+        assert mgr._sessions == {}
+        assert mgr._finished_jobs == []
+        batches = mgr._unbound_stores["req-1"]
+        assert len(batches) == 1
+        assert (
+            batches[0].job_id,
+            list(batches[0].keys),
+            list(batches[0].block_ids),
+        ) == (
+            1,
+            [b"k1", b"k2"],
+            [3, 4],
+        )
+
+    def test_routes_to_bound_session(self):
+        """If a session has already received FetchMsg for this
+        kv_request_id (so _kv_to_session is populated), submit_store
+        forwards directly to that session rather than re-buffering."""
+        mgr = _make_manager()
+        bound = _FakeSession(peer_id="10.0.0.1:8000", connected=True)
+        mgr._kv_to_session["req-1"] = bound  # type: ignore[assignment]
+        # Note: _sessions is intentionally untouched — this test isolates
+        # the kv_request_id → session fast path.
+        job = _job_metadata(
+            job_id=7,
+            keys=[b"k1", b"k2"],
+            block_ids=[3, 4],
+            kv_params=_kv_params(kv_request_id="req-1"),
+        )
+        mgr.submit_store(job)
+
+        assert len(bound.stores_added) == 1
+        kv_req_id, keys, _, job_id = bound.stores_added[0]
         assert (kv_req_id, keys, job_id) == ("req-1", [b"k1", b"k2"], 7)
-        # Existing session means no fresh pending stamp.
-        assert peer_id not in mgr._pending_session_created_at
-        # Routed to session, not finalized here.
+        assert mgr._unbound_stores == {}
         assert mgr._finished_jobs == []
 
-    def test_remote_host_missing_fails(self):
-        """do_remote_decode=True but no remote_host: cannot derive peer_id,
-        so the job is failed immediately rather than silently dropped."""
+    def test_peer_fields_are_ignored(self):
+        """Producer-side kv_transfer_params no longer carries peer info,
+        but a stale caller that still passes remote_host/remote_port must
+        not change behavior — submit_store ignores them and parks the
+        batch keyed only by kv_request_id."""
         mgr = _make_manager()
-        params = _kv_params()
-        del params["remote_host"]
+        params = _kv_params()  # includes remote_host/remote_port
         job = _job_metadata(job_id=1, kv_params=params)
         mgr.submit_store(job)
-        assert mgr._finished_jobs == [JobResult(job_id=1, success=False)]
+        # No session pre-created, no peer-keyed state.
         assert mgr._sessions == {}
+        assert "req-1" in mgr._unbound_stores
 
 
 # ---------------------------------------------------------------------------
@@ -299,16 +312,65 @@ class TestOnRequestFinished:
         mgr.on_request_finished(ctx)
         assert "req-1" in mgr._failed_req_ids
 
-    def test_calls_session_finish_request(self):
-        """on_request_finished forwards to session.finish_request,
-        which handles both client-role cancel and server-role early-fail."""
+    def test_decoder_side_calls_session_finish_request(self):
+        """Decoder-side finish (do_remote_prefill=True) still routes via
+        peer_id because the consumer addresses the producer it loaded
+        from. The session's finish_request cancels the client-role load."""
         mgr = _make_manager()
         peer_id = "10.0.0.1:8000"
         session = _FakeSession(peer_id=peer_id)
         mgr._sessions[peer_id] = session
-        ctx = _req_context(kv_params=_kv_params(kv_request_id="req-1"))
+        ctx = _req_context(
+            kv_params=_kv_params(
+                kv_request_id="req-1",
+                do_remote_decode=False,
+                do_remote_prefill=True,
+            )
+        )
         mgr.on_request_finished(ctx)
         assert session.finishes == ["req-1"]
+
+    def test_prefiller_bound_id_routes_via_kv_to_session(self):
+        """Prefiller-side finish for an id whose session is already bound
+        (FetchMsg received) routes via _kv_to_session and pops the entry."""
+        mgr = _make_manager()
+        bound = _FakeSession(peer_id="some-peer:1", connected=True)
+        mgr._kv_to_session["req-1"] = bound  # type: ignore[assignment]
+        ctx = _req_context(
+            kv_params=_kv_params(
+                kv_request_id="req-1",
+                do_remote_decode=True,
+                do_remote_prefill=False,
+            )
+        )
+        mgr.on_request_finished(ctx)
+        assert bound.finishes == ["req-1"]
+        assert "req-1" not in mgr._kv_to_session
+
+    def test_prefiller_unbound_id_drops_batches_as_failed(self):
+        """Prefiller-side finish for an id with parked unbound batches
+        and no session binding drops the batches and surfaces them as
+        failed jobs (so the engine doesn't wait for the unbound-store
+        timeout)."""
+        from vllm.v1.kv_offload.tiering.p2p.manager import _UnboundStoreBatch
+
+        mgr = _make_manager()
+        mgr._unbound_stores["req-1"] = [
+            _UnboundStoreBatch(job_id=10, keys=[b"k"], block_ids=[0]),
+            _UnboundStoreBatch(job_id=11, keys=[b"k2"], block_ids=[1]),
+        ]
+        ctx = _req_context(
+            kv_params=_kv_params(
+                kv_request_id="req-1",
+                do_remote_decode=True,
+                do_remote_prefill=False,
+            )
+        )
+        mgr.on_request_finished(ctx)
+        assert "req-1" not in mgr._unbound_stores
+        outcomes = {(r.job_id, r.success) for r in mgr._finished_jobs}
+        assert (10, False) in outcomes
+        assert (11, False) in outcomes
 
 
 # ---------------------------------------------------------------------------
@@ -434,61 +496,51 @@ class TestGetFinished:
         assert "dead:1234" not in mgr._sessions
         assert "req-load" in mgr._failed_req_ids
 
-    def test_pending_sessions_are_not_reaped(self):
-        """Fresh pending (unconnected) sessions stay across a poll."""
+    def test_unbound_store_kept_within_timeout(self):
+        """Recently-parked unbound stores stay across a poll."""
         mgr = self._make()
-        pending = _FakeSession(peer_id="pending:1", alive=True, connected=False)
-        mgr._sessions["pending:1"] = pending  # type: ignore[assignment]
-        mgr._pending_session_created_at["pending:1"] = time.monotonic()
+        from vllm.v1.kv_offload.tiering.p2p.manager import _UnboundStoreBatch
+
+        mgr._unbound_stores["req-fresh"] = [
+            _UnboundStoreBatch(job_id=99, keys=[b"k"], block_ids=[0])
+        ]
         list(mgr.get_finished_jobs())
-        assert "pending:1" in mgr._sessions
-        assert "pending:1" in mgr._pending_session_created_at
+        assert "req-fresh" in mgr._unbound_stores
 
-    def test_pending_session_reaped_after_timeout(self):
-        """Pending session whose stamp is older than _PENDING_SESSION_TIMEOUT_S
-        is reaped, surfacing its buffered store/load jobs as failures."""
-
-        class FakeData:
-            def remove_remote_peer(self, pid):
-                pass
+    def test_unbound_store_reaped_after_timeout(self):
+        """Unbound stores past _UNBOUND_STORE_TIMEOUT_S surface as failed
+        and their kv_request_id lands in _failed_req_ids so a late
+        FetchMsg/lookup doesn't try to satisfy them."""
+        from vllm.v1.kv_offload.tiering.p2p.manager import _UnboundStoreBatch
 
         mgr = self._make()
-        mgr._data = FakeData()  # type: ignore[assignment]
-        stale = _FakeSession(
-            peer_id="pending:stale",
-            alive=True,
-            connected=False,
-            close_loads=[(20, "req-load")],
-            close_stores=[10, 11],
-        )
-        mgr._sessions["pending:stale"] = stale  # type: ignore[assignment]
-        # Backdate so the stamp is past the deadline.
-        mgr._pending_session_created_at["pending:stale"] = (
-            time.monotonic() - _PENDING_SESSION_TIMEOUT_S - 1.0
-        )
+        stale = _UnboundStoreBatch(job_id=10, keys=[b"k"], block_ids=[0])
+        # Backdate the submission so the head batch is past the deadline.
+        stale.submitted_at = time.monotonic() - _UNBOUND_STORE_TIMEOUT_S - 1.0
+        mgr._unbound_stores["req-stale"] = [
+            stale,
+            _UnboundStoreBatch(job_id=11, keys=[b"k2"], block_ids=[1]),
+        ]
 
         results = list(mgr.get_finished_jobs())
 
-        assert "pending:stale" not in mgr._sessions
-        assert "pending:stale" not in mgr._pending_session_created_at
-        # 2 baseline + 1 buffered load + 2 buffered stores
+        assert "req-stale" not in mgr._unbound_stores
+        # 2 baseline + 2 buffered stores
         assert JobResult(job_id=10, success=False) in results
         assert JobResult(job_id=11, success=False) in results
-        assert JobResult(job_id=20, success=False) in results
-        assert "req-load" in mgr._failed_req_ids
+        assert "req-stale" in mgr._failed_req_ids
 
-    def test_submit_store_records_pending_stamp(self):
-        """submit_store stamps the creation time so the pending sweep can
-        find sessions that have been stranded long enough to reap."""
-
-        class FakeData:
-            block_len = 4096
-
+    def test_submit_store_parks_unbound_batch(self):
+        """submit_store on an unbound id appends a batch with a fresh
+        submitted_at stamp so the unbound-store sweep can age it out."""
         mgr = _make_manager()
-        mgr._data = FakeData()  # type: ignore[assignment]
-        job = _job_metadata(job_id=1, kv_params=_kv_params())
+        job = _job_metadata(job_id=1, kv_params=_kv_params(kv_request_id="req-1"))
+        before = time.monotonic()
         mgr.submit_store(job)
-        assert "10.0.0.1:8000" in mgr._pending_session_created_at
+        after = time.monotonic()
+        batches = mgr._unbound_stores["req-1"]
+        assert len(batches) == 1
+        assert before <= batches[0].submitted_at <= after
 
 
 # ---------------------------------------------------------------------------
@@ -948,23 +1000,48 @@ class TestAcceptNewPeers:
         # Session map unchanged.
         assert mgr._sessions[peer_id] is existing
 
-    def test_attaches_to_pending_session(self):
-        """Inbound conn for an existing PENDING session promotes it via
-        attach_connection — this is the prefiller-side rendezvous."""
+    def test_creates_session_for_new_peer(self):
+        """An inbound conn from a peer with no existing session creates
+        a fresh connected session and registers it under conn.peer_id.
+        The prefiller has no pre-created pending session anymore — the
+        first signal of a peer's existence is its inbound connection."""
+
+        class FakeData:
+            block_len = 4096
+            base_addr = 0x1000
+            num_blocks = 16
+            config_fingerprint = ""
+
+            def get_agent_metadata(self):
+                return b"meta"
+
+            def add_remote_peer(self, *args, **kwargs):
+                pass
+
         mgr = _make_manager()
+        mgr._data = FakeData()  # type: ignore[assignment]
         peer_id = "10.0.0.1:8000"
-        pending = _FakeSession(peer_id=peer_id, connected=False)
-        mgr._sessions[peer_id] = pending  # type: ignore[assignment]
-        mgr._pending_session_created_at[peer_id] = time.monotonic()
 
-        new_conn = _RecordingConn(peer_id)
-        mgr._accept_new_peers([new_conn])
+        # Real ControlConnection-shaped fake: send/close/peer_id only.
+        sent: list[dict] = []
 
-        assert pending.attached == [new_conn]
-        assert pending.connected is True
-        # Pending stamp is cleared once promoted.
-        assert peer_id not in mgr._pending_session_created_at
-        assert new_conn.close_calls == 0
+        class _Conn:
+            def __init__(self, pid: str) -> None:
+                self.peer_id = pid
+                self.alive = True
+
+            def send(self, msg: dict) -> None:
+                sent.append(msg)
+
+            def close(self) -> None:
+                self.alive = False
+
+        mgr._accept_new_peers([_Conn(peer_id)])  # type: ignore[arg-type]
+
+        assert peer_id in mgr._sessions
+        assert mgr._sessions[peer_id].connected is True
+        # Session sent its ConnectMsg on the new connection.
+        assert any(m for m in sent)
 
 
 # ---------------------------------------------------------------------------
@@ -978,12 +1055,6 @@ class TestPollOnce:
 
     def test_orchestrates_accept_poll_and_reap(self):
         mgr = _make_manager()
-
-        # Pending session waiting for an inbound conn.
-        peer_pending = "10.0.0.1:8000"
-        pending = _FakeSession(peer_id=peer_pending, connected=False)
-        mgr._sessions[peer_pending] = pending  # type: ignore[assignment]
-        mgr._pending_session_created_at[peer_pending] = time.monotonic()
 
         # Alive session whose poll() returns one load + one store.
         peer_alive = "10.0.0.2:9000"
@@ -1007,12 +1078,9 @@ class TestPollOnce:
         )
         mgr._sessions[peer_dead] = dead  # type: ignore[assignment]
 
-        # Control transport delivers the inbound conn for the pending peer.
-        new_conn = _RecordingConn(peer_pending)
-
         class _Ctrl:
             def poll(self_inner):
-                return [new_conn]
+                return []
 
         class _Data:
             def remove_remote_peer(self_inner, pid):
@@ -1023,11 +1091,8 @@ class TestPollOnce:
 
         mgr._poll_once()
 
-        # Phase 1: accept_new_peers attached the inbound to the pending session.
-        assert pending.attached == [new_conn]
-        assert pending.connected is True
-        # Phase 2: every session was polled — alive's results landed.
-        # Phase 3: dead session was reaped — its close() failures landed.
+        # Every session was polled — alive's results landed.
+        # Dead session was reaped — its close() failures landed.
         finished = mgr._finished_jobs
         ok = {(r.job_id, r.success) for r in finished}
         assert (11, True) in ok  # alive load result
@@ -1036,7 +1101,6 @@ class TestPollOnce:
         assert (44, False) in ok  # dead session's pending store
         assert "req-33" in mgr._failed_req_ids
         assert peer_dead not in mgr._sessions
-        assert peer_pending in mgr._sessions  # pending was just promoted
         assert peer_alive in mgr._sessions
 
     def test_failed_load_records_kv_request_id(self):
@@ -1112,10 +1176,10 @@ class TestDrainJobs:
         sess._server._inflight = {1: object()}  # non-empty
         mgr._sessions["peer:1"] = sess  # type: ignore[assignment]
 
-        # Synthetic monotonic clock: returns 100.0 for the start stamp and
-        # the first elapsed-check, then 106.0 to push us past the 5s warning
-        # threshold, then steady at 106.0 for any later checks.
-        clock = iter([100.0, 100.0, 106.0])
+        # Synthetic monotonic clock: 100.0 for the start stamp, then 106.0
+        # for the first elapsed-check (past the 5s warning threshold), then
+        # steady at 106.0 for any later checks.
+        clock = iter([100.0, 106.0])
 
         def fake_monotonic() -> float:
             try:
@@ -1178,10 +1242,13 @@ class TestOnScheduleEnd:
 
 
 class TestConnectionDeathMidTransfer:
-    """When a peer's control connection dies while transfers are in flight,
-    pending stores AND pending loads must surface as failed JobResults and
-    the kv_request_ids must be recorded in _failed_req_ids so future
-    lookups route to local prefill."""
+    """When a peer's control connection dies while a load is in flight,
+    the load surfaces as failed and its kv_request_id lands in
+    _failed_req_ids so future lookups route to local prefill. The
+    prefiller-side store no longer travels through the session at store
+    time (it's parked in _unbound_stores keyed by kv_request_id), so its
+    cleanup on connection death is via on_request_finished or the
+    unbound-store timeout — covered separately below."""
 
     def test_dead_connection_with_pending_work_surfaces_failures(self):
         mgr_a, mgr_b = _build_paired_managers()
@@ -1224,21 +1291,36 @@ class TestConnectionDeathMidTransfer:
         # before the remote side has had time to complete the transfers.
         list(mgr_a.get_finished_jobs())
 
+        # Sanity: store 900 is parked in unbound_stores, not in any
+        # session — the producer no longer learns the peer at store time.
+        assert "req-store" in mgr_a._unbound_stores
+
         # Kill the control connection out from under the session.
         peer_id = "B:2"
         sess = mgr_a._sessions[peer_id]
         assert sess._conn is not None
         sess._conn.mark_dead()
 
-        # Next poll must reap the session and surface both pending jobs as
-        # failures.
+        # Reap surfaces the load (which lived inside the session) as
+        # failed. The store 900 is not session-scoped — it survives the
+        # session reap and waits for on_request_finished or the unbound
+        # timeout.
         results: list[JobResult] = []
         for _ in range(3):
             results.extend(list(mgr_a.get_finished_jobs()))
 
         outcomes = {(r.job_id, r.success) for r in results}
-        assert (900, False) in outcomes, f"store should fail: {outcomes}"
         assert (901, False) in outcomes, f"load should fail: {outcomes}"
+        assert (900, False) not in outcomes, f"store should still be parked: {outcomes}"
         assert "req-load" in mgr_a._failed_req_ids
         # Session removed.
         assert peer_id not in mgr_a._sessions
+        # Store batch is still parked.
+        assert "req-store" in mgr_a._unbound_stores
+
+        # The engine signals the producer's request is done. That drops
+        # the parked batch and surfaces 900 as a failure.
+        mgr_a.on_request_finished(_req_context(a_prefiller_params))
+        finishes = {(r.job_id, r.success) for r in mgr_a._finished_jobs}
+        assert (900, False) in finishes
+        assert "req-store" not in mgr_a._unbound_stores

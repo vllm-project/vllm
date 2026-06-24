@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from typing_extensions import override
@@ -36,12 +37,12 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Reap pending (not-yet-connected) sessions older than this. Protects
-# against the prefiller buffering blocks for a decoder that never
-# connects (decoder died, network partition, lost kv_request_id).
-# Must be longer than the per-store deadline so the store-timeout path
-# fires first for individual jobs.
-_PENDING_SESSION_TIMEOUT_S = 60.0
+# Reap unbound store batches that have been parked without a FetchMsg
+# binding them to a session for longer than this. Protects against the
+# prefiller buffering blocks for a decoder that never asks (decoder died,
+# network partition, lost kv_request_id). Must be longer than the per-store
+# deadline so the store-timeout path fires first for individual jobs.
+_UNBOUND_STORE_TIMEOUT_S = 60.0
 
 # Time we wait during shutdown for inflight transfers to drain via
 # cancel(mode="wait") before falling back to mode="immediate". Bounded
@@ -52,6 +53,22 @@ _SHUTDOWN_DRAIN_TIMEOUT_S = 3.0
 # _drain_inflight_for_shutdown(). Short enough to keep latency low, long
 # enough to avoid busy-spinning the scheduler thread.
 _DRAIN_SLEEP_S = 0.001
+
+
+@dataclass
+class _UnboundStoreBatch:
+    """A submit_store batch parked at the manager before any peer has fetched.
+
+    Indexed by kv_request_id only — the prefiller no longer learns the peer
+    identity at store time. When a FetchMsg(kv_request_id) arrives on some
+    session, the manager binds the kv_request_id to that session and replays
+    every parked batch into ServerRole via session.add_stored_blocks.
+    """
+
+    job_id: int
+    keys: list[OffloadKey]
+    block_ids: Sequence[int]
+    submitted_at: float = field(default_factory=time.monotonic)
 
 
 class P2PSecondaryTierManager(SecondaryTierManager):
@@ -125,11 +142,17 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         self._control: ControlTransport = ZmqTransport(self._local_id, host, port)
 
         self._sessions: dict[str, P2PSession] = {}
-        # peer_id → time.monotonic() at which a pending (not-yet-connected)
-        # session was created. Cleared when the peer's connection arrives
-        # (in _accept_new_peers) or when the session is reaped. Used by
-        # _reap_dead_sessions to time out stranded pending sessions.
-        self._pending_session_created_at: dict[str, float] = {}
+        # kv_request_id → session, set when the bound session has received
+        # FetchMsg for that id. submit_store after binding routes directly
+        # to the session; before binding, batches are parked in
+        # _unbound_stores below. Stays in sync with _sessions: entries
+        # pointing to a reaped session are purged in _reap_dead_sessions.
+        self._kv_to_session: dict[str, P2PSession] = {}
+        # kv_request_id → list of batches submit_store'd before any peer
+        # asked for that id. Drained into a session by _on_session_fetch
+        # when the corresponding FetchMsg arrives, or surfaced as failures
+        # by _reap_unbound_stores after _UNBOUND_STORE_TIMEOUT_S.
+        self._unbound_stores: dict[str, list[_UnboundStoreBatch]] = {}
 
         self._finished_jobs: list[JobResult] = []
         # kv_request_ids that hit a transport/session failure; On load lookup()
@@ -157,24 +180,32 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
-        """Ensure a session exists for the remote peer.
+        """Open the outbound session toward the producer if needed.
 
-        On the decoder side (do_remote_prefill), create a session and
-        initiate the connection if one doesn't already exist. On the
-        prefiller side, the session is created lazily by submit_store
-        in pending mode and promoted to connected when the decoder's
-        inbound connection arrives.
+        On the decoder side (do_remote_prefill), open a session toward
+        the producer at remote_host:remote_port so submit_load can issue
+        FetchMsg as soon as it fires. On the prefiller side, sessions
+        are created when the consumer's inbound connection arrives in
+        _accept_new_peers — submit_store no longer pre-creates anything.
         """
         kv_params = req_context.kv_transfer_params
         if kv_params and kv_params.get("do_remote_prefill"):
             peer_id = self._remote_id_from_params(kv_params)
             if peer_id:
-                self._get_or_create_session(peer_id, initiate_connect=True)
+                self._get_or_create_session(peer_id)
         return RequestOffloadingContext()
 
     @override
     def on_request_finished(self, req_context: ReqContext) -> None:
-        """Cancels pending loads and prunes state."""
+        """Cancels pending loads and prunes state.
+
+        Decoder side (do_remote_prefill): looks up the session by peer_id
+        because the producer's address is what addresses the client-role
+        load to cancel. Prefiller side (do_remote_decode): looks up via
+        kv_request_id because peer_id is no longer carried on store-time
+        kv_transfer_params; if no session has bound the id yet, drop any
+        unbound batches and surface their jobs as failed.
+        """
         kv_params = req_context.kv_transfer_params
         if not kv_params:
             return
@@ -182,11 +213,25 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         if not kv_request_id:
             return
         self._failed_req_ids.discard(kv_request_id)
-        peer_id = self._remote_id_from_params(kv_params)
-        if peer_id:
-            session = self._sessions.get(peer_id)
-            if session is not None:
-                session.finish_request(kv_request_id)
+
+        if kv_params.get("do_remote_prefill"):
+            peer_id = self._remote_id_from_params(kv_params)
+            if peer_id:
+                session = self._sessions.get(peer_id)
+                if session is not None:
+                    session.finish_request(kv_request_id)
+            return
+
+        # Prefiller-side finish: identify the session via kv_request_id.
+        session = self._kv_to_session.pop(kv_request_id, None)
+        if session is not None:
+            session.finish_request(kv_request_id)
+            return
+
+        # Never bound to a session — drop any unbound stores and fail their
+        # jobs so the caller doesn't wait for the unbound-store timeout.
+        for batch in self._unbound_stores.pop(kv_request_id, []):
+            self._finished_jobs.append(JobResult(job_id=batch.job_id, success=False))
 
     @override
     def submit_store(self, job_metadata: JobMetadata) -> None:
@@ -199,46 +244,50 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         kv_params = job_metadata.req_context.kv_transfer_params
         logger.debug(
             "P2P %s: submit_store ENTRY job_id=%d blocks=%d "
-            "do_remote_decode=%s kv_request_id=%s peer=%s",
+            "do_remote_decode=%s kv_request_id=%s",
             self._local_id,
             job_id,
             len(block_ids),
             bool(kv_params and kv_params.get("do_remote_decode")),
             (kv_params or {}).get("kv_request_id"),
-            self._remote_id_from_params(kv_params or {}),
         )
         if not kv_params or not kv_params.get("do_remote_decode"):
             self._finished_jobs.append(JobResult(job_id=job_id, success=True))
             return
 
         kv_request_id = kv_params.get("kv_request_id")
-        peer_id = self._remote_id_from_params(kv_params)
-        if not kv_request_id or not peer_id:
+        if not kv_request_id:
             logger.warning(
-                "P2P %s: submit_store missing kv_request_id or peer",
+                "P2P %s: submit_store missing kv_request_id",
                 self._local_id,
             )
             self._finished_jobs.append(JobResult(job_id=job_id, success=False))
             return
 
-        # Lazy session creation: prefiller-first mode finishes prefill
-        # (and submit_store) before the decoder connects. Create a
-        # pending session here so blocks can be buffered; the inbound
-        # connect from the decoder will be attached in _accept_new_peers.
-        session = self._sessions.get(peer_id)
-        if session is None:
-            session = self._make_pending_session(peer_id)
-            self._sessions[peer_id] = session
-            self._pending_session_created_at[peer_id] = time.monotonic()
-            logger.info(
-                "P2P %s: created pending session for peer %s "
-                "(kv_request_id=%s, %d blocks)",
-                self._local_id,
-                peer_id,
-                kv_request_id,
-                len(block_ids),
+        # Fast path: a session has already received FetchMsg for this id,
+        # so we can route the batch straight into its ServerRole.
+        session = self._kv_to_session.get(kv_request_id)
+        if session is not None:
+            session.add_stored_blocks(kv_request_id, keys, block_ids, job_id)
+            return
+
+        # No session bound yet — park the batch keyed by kv_request_id.
+        # _on_session_fetch drains it on the first FetchMsg; if no peer
+        # ever asks, _reap_unbound_stores surfaces the job as failed.
+        self._unbound_stores.setdefault(kv_request_id, []).append(
+            _UnboundStoreBatch(
+                job_id=job_id,
+                keys=keys,
+                block_ids=block_ids,
             )
-        session.add_stored_blocks(kv_request_id, keys, block_ids, job_id)
+        )
+        logger.info(
+            "P2P %s: parked submit_store kv_request_id=%s job_id=%d blocks=%d",
+            self._local_id,
+            kv_request_id,
+            job_id,
+            len(block_ids),
+        )
 
     @override
     def submit_load(self, job_metadata: JobMetadata) -> None:
@@ -368,41 +417,45 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             return f"{host}:{port}"
         return None
 
-    def _make_pending_session(self, peer_id: str) -> P2PSession:
-        return P2PSession(
-            peer_id=peer_id,
-            local_id=self._local_id,
-            transport=self._data,
-            local_block_len=self._data.block_len,
-        )
+    def _on_session_fetch(self, kv_request_id: str, session: P2PSession) -> None:
+        """Bind a kv_request_id to a session on its first FetchMsg.
 
-    def _get_or_create_session(
-        self, peer_id: str, *, initiate_connect: bool
-    ) -> P2PSession:
-        """Return the existing session for peer_id, or create a new one.
+        Called from P2PSession._dispatch_message before ServerRole.on_fetch
+        runs, so any submit_store batches parked in _unbound_stores get
+        replayed into ServerRole's `available` map in time for
+        add_fetch_demand to match them against the incoming demand.
 
-        If initiate_connect is True and no session exists, opens an
-        outbound ControlConnection, builds a connected session (which
-        sends our ConnectMsg immediately), and stores it.
+        Idempotent on the binding — a duplicate FetchMsg for the same id
+        is rejected by ServerRole.on_fetch as a protocol violation.
+        """
+        self._kv_to_session[kv_request_id] = session
+        batches = self._unbound_stores.pop(kv_request_id, ())
+        for batch in batches:
+            session.add_stored_blocks(
+                kv_request_id, batch.keys, batch.block_ids, batch.job_id
+            )
 
-        If initiate_connect is False and no session exists, returns a
-        pending session (no connection yet).
+    def _get_or_create_session(self, peer_id: str) -> P2PSession:
+        """Return the existing session for peer_id, or open one outbound.
+
+        Decoder-side helper for on_new_request: when do_remote_prefill is
+        set, the consumer must reach the producer at peer_id. If we
+        already have a session toward that peer (from a prior load or a
+        peer-initiated inbound), reuse it; otherwise open an outbound
+        ControlConnection and build a connected session.
         """
         session = self._sessions.get(peer_id)
         if session is not None:
             return session
-        if initiate_connect:
-            conn = self._control.connect(peer_id)
-            session = P2PSession(
-                peer_id=peer_id,
-                local_id=self._local_id,
-                transport=self._data,
-                local_block_len=self._data.block_len,
-                conn=conn,
-            )
-        else:
-            session = self._make_pending_session(peer_id)
-            self._pending_session_created_at[peer_id] = time.monotonic()
+        conn = self._control.connect(peer_id)
+        session = P2PSession(
+            peer_id=peer_id,
+            local_id=self._local_id,
+            transport=self._data,
+            local_block_len=self._data.block_len,
+            conn=conn,
+            on_fetch_received=self._on_session_fetch,
+        )
         self._sessions[peer_id] = session
         return session
 
@@ -416,67 +469,47 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             try:
                 existing = self._sessions.get(conn.peer_id)
                 if existing is not None:
-                    if existing.connected:
-                        raise ValueError(f"duplicate connection from {conn.peer_id}")
-                    existing.attach_connection(conn)
-                    self._pending_session_created_at.pop(conn.peer_id, None)
-                    logger.info(
-                        "P2P %s: attached connection to pending session for %s",
-                        self._local_id,
-                        conn.peer_id,
-                    )
-                else:
-                    self._sessions[conn.peer_id] = P2PSession(
-                        peer_id=conn.peer_id,
-                        local_id=self._local_id,
-                        transport=self._data,
-                        local_block_len=self._data.block_len,
-                        conn=conn,
-                    )
-                    logger.info(
-                        "P2P %s: created connected session for %s",
-                        self._local_id,
-                        conn.peer_id,
-                    )
+                    raise ValueError(f"duplicate connection from {conn.peer_id}")
+                self._sessions[conn.peer_id] = P2PSession(
+                    peer_id=conn.peer_id,
+                    local_id=self._local_id,
+                    transport=self._data,
+                    local_block_len=self._data.block_len,
+                    conn=conn,
+                    on_fetch_received=self._on_session_fetch,
+                )
+                logger.info(
+                    "P2P %s: created connected session for %s",
+                    self._local_id,
+                    conn.peer_id,
+                )
             except (ValueError, KeyError, TypeError, AssertionError) as exc:
                 logger.error("P2P %s: rejecting peer: %s", self._local_id, exc)
                 conn.close()
 
     def _reap_dead_sessions(self) -> None:
-        # Two reasons to reap:
-        #   1. Connected session whose connection died — peer is gone.
-        #   2. Pending session that has been waiting longer than
-        #      _PENDING_SESSION_TIMEOUT_S for a connection that never
-        #      arrived (decoder died, partition, lost kv_request_id).
-        # If a late connect arrives after a pending reap, _accept_new_peers
-        # will create a fresh connected session for it; the buffered work
-        # is gone (already surfaced as failures via session.close()) and
-        # _failed_req_ids steers any pending lookup to local prefill.
+        # Reap connected sessions whose connection died — peer is gone.
+        # Stranded prefiller-side stores are no longer tracked through a
+        # session (they live in _unbound_stores keyed by kv_request_id);
+        # _reap_unbound_stores handles their timeout independently.
         dead: list[str] | None = None
-        deadline = time.monotonic() - _PENDING_SESSION_TIMEOUT_S
         for pid, s in self._sessions.items():
             if s.connected and not s.alive:
                 if dead is None:
                     dead = []
                 dead.append(pid)
-            elif not s.connected:
-                created_at = self._pending_session_created_at.get(pid)
-                if created_at is not None and created_at <= deadline:
-                    logger.warning(
-                        "P2P %s: pending session for peer %s timed out "
-                        "after %.0fs without connection — reaping",
-                        self._local_id,
-                        pid,
-                        _PENDING_SESSION_TIMEOUT_S,
-                    )
-                    if dead is None:
-                        dead = []
-                    dead.append(pid)
         if dead is None:
             return
         for pid in dead:
             session = self._sessions.pop(pid)
-            self._pending_session_created_at.pop(pid, None)
+            # Purge any kv_request_id → session entries pointing at this
+            # session so subsequent submit_stores fall back to the unbound
+            # path (which will time out into failure if no peer rebinds).
+            stale_kv_ids = [
+                kid for kid, s in self._kv_to_session.items() if s is session
+            ]
+            for kid in stale_kv_ids:
+                del self._kv_to_session[kid]
             failed_loads, failed_stores = session.close()
             for job_id, kv_request_id in failed_loads:
                 self._finished_jobs.append(JobResult(job_id=job_id, success=False))
@@ -485,6 +518,42 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 self._finished_jobs.append(JobResult(job_id=job_id, success=False))
             self._data.remove_remote_peer(pid)
             logger.warning("P2P %s: peer %s down", self._local_id, pid)
+
+    def _reap_unbound_stores(self) -> None:
+        """Time out submit_store batches that no peer has ever fetched.
+
+        Walks `_unbound_stores` for entries whose oldest batch is older
+        than `_UNBOUND_STORE_TIMEOUT_S`. Drops the kv_request_id, surfaces
+        every batched job as failed, and adds the id to `_failed_req_ids`
+        so a late inbound FetchMsg short-circuits to a clean rejection.
+        """
+        if not self._unbound_stores:
+            return
+        deadline = time.monotonic() - _UNBOUND_STORE_TIMEOUT_S
+        expired: list[str] | None = None
+        for kid, batches in self._unbound_stores.items():
+            # Batches are appended in arrival order, so the head is oldest.
+            if batches and batches[0].submitted_at <= deadline:
+                if expired is None:
+                    expired = []
+                expired.append(kid)
+        if expired is None:
+            return
+        for kid in expired:
+            batches = self._unbound_stores.pop(kid)
+            self._failed_req_ids.add(kid)
+            for batch in batches:
+                self._finished_jobs.append(
+                    JobResult(job_id=batch.job_id, success=False)
+                )
+            logger.warning(
+                "P2P %s: unbound store kv_request_id=%s timed out after %.0fs "
+                "without a fetch — failing %d job(s)",
+                self._local_id,
+                kid,
+                _UNBOUND_STORE_TIMEOUT_S,
+                len(batches),
+            )
 
     # ------------------------------------------------------------------
     # Polling
@@ -522,6 +591,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 )
 
         self._reap_dead_sessions()
+        self._reap_unbound_stores()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -533,7 +603,15 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         for session in self._sessions.values():
             session.close()
         self._sessions.clear()
-        self._pending_session_created_at.clear()
+        self._kv_to_session.clear()
+        # Surface buffered store jobs as failed so the engine doesn't
+        # leak them; the manager is going away after this call.
+        for batches in self._unbound_stores.values():
+            for batch in batches:
+                self._finished_jobs.append(
+                    JobResult(job_id=batch.job_id, success=False)
+                )
+        self._unbound_stores.clear()
         self._control.close()
         self._data.close()
 

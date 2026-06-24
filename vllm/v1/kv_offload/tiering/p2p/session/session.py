@@ -19,7 +19,7 @@ received our ConnectMsg, after which queued outgoing messages are flushed.
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
@@ -78,6 +78,7 @@ class P2PSession:
         transport: DataTransport,
         local_block_len: int,
         conn: ControlConnection | None = None,
+        on_fetch_received: Callable[[str, P2PSession], None] | None = None,
     ) -> None:
         self.peer_id = peer_id
         self._local_id = local_id
@@ -91,6 +92,12 @@ class P2PSession:
 
         # Consecutive non-protocol dispatch errors. Reset on success.
         self._dispatch_error_count: int = 0
+
+        # Manager-supplied hook invoked once per (kv_request_id, session)
+        # the first time a FetchMsg arrives for that id. Lets the manager
+        # bind the kv_request_id to this session and replay any
+        # submit_store batches that were parked before the binding existed.
+        self._on_fetch_received = on_fetch_received
 
         self._client = ClientRole(peer_id=peer_id, send=self._send)
         self._server = ServerRole(peer_id=peer_id, transport=transport, send=self._send)
@@ -273,6 +280,12 @@ class P2PSession:
                 for bh in msg[FetchMsg.BLOCK_HASHES]
             ]
             block_indexes = msg[FetchMsg.BLOCK_INDEXES]
+            # Bind kv_request_id → session and replay any parked
+            # submit_store batches before on_fetch matches demand against
+            # supply. Order matters: replay must populate ServerRole's
+            # `available` map before add_fetch_demand consumes it.
+            if self._on_fetch_received is not None:
+                self._on_fetch_received(kv_request_id, self)
             self._server.on_fetch(kv_request_id, block_hashes, block_indexes)
         elif msg_type == AbortFetchMsg.TYPE:
             AbortFetchMsg.validate(msg)
