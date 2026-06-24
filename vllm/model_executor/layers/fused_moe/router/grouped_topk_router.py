@@ -303,7 +303,7 @@ class GroupedTopKRouter(BaseRouter):
 
         if not valid_grouping():
             if self.e_score_correction_bias is not None:
-                topk_weights, topk_ids = fused_topk_bias(
+                topk_weights, topk_ids, _ = fused_topk_bias(
                     hidden_states=hidden_states,
                     gating_output=router_logits,
                     scoring_func=self.scoring_func,
@@ -321,7 +321,7 @@ class GroupedTopKRouter(BaseRouter):
                     renormalize=self.renormalize,
                     indices_type=indices_type,
                 )
-            return topk_weights, topk_ids
+            return topk_weights, topk_ids, None
 
         # Select grouped_topk implementation
         if rocm_aiter_ops.is_fused_moe_enabled():
@@ -346,4 +346,4 @@ class GroupedTopKRouter(BaseRouter):
             e_score_correction_bias=self.e_score_correction_bias,
         )
 
-        return topk_weights, topk_ids
+        return topk_weights, topk_ids, None

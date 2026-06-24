@@ -135,4 +135,4 @@ class AiterSharedRoutedFusedMoERouter(BaseRouter):
                 shared_expert_weights=shared_weights,
             )
 
-        return topk_weights, topk_ids
+        return topk_weights, topk_ids, None

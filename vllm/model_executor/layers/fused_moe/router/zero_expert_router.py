@@ -49,7 +49,6 @@ class ZeroExpertRouter(BaseRouter):
         self.scoring_func = scoring_func
         self.renormalize = renormalize
         self.routed_scaling_factor = routed_scaling_factor
-        self._zero_expert_output: torch.Tensor | None = None
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
@@ -69,10 +68,14 @@ class ZeroExpertRouter(BaseRouter):
         indices_type: torch.dtype | None,
         *,
         input_ids: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Compute routing with full bias, compute zero expert output,
-        mask zero expert IDs."""
-        topk_weights, topk_ids = fused_topk_bias(
+        mask zero expert IDs.
+
+        Returns:
+            tuple of (topk_weights, topk_ids, zero_expert_output)
+        """
+        topk_weights, topk_ids, _ = fused_topk_bias(
             hidden_states=hidden_states,
             gating_output=router_logits,
             e_score_correction_bias=self.e_score_correction_bias.data,
@@ -88,7 +91,7 @@ class ZeroExpertRouter(BaseRouter):
         # Compute zero expert output using pre-EPLB topk_ids/weights.
         # zero_experts_compute_triton modifies its inputs in-place, so
         # pass clones.
-        self._zero_expert_output = zero_experts_compute_triton(
+        zero_expert_output = zero_experts_compute_triton(
             expert_indices=topk_ids.clone(),
             expert_scales=topk_weights.clone(),
             num_experts=self.num_logical_experts,
@@ -102,11 +105,4 @@ class ZeroExpertRouter(BaseRouter):
         topk_ids[zero_mask] = 0
         topk_weights[zero_mask] = 0.0
 
-        return topk_weights, topk_ids
-
-    @property
-    def zero_expert_output(self) -> torch.Tensor | None:
-        """Retrieve and clear the zero expert output."""
-        output = self._zero_expert_output
-        self._zero_expert_output = None
-        return output
+        return topk_weights, topk_ids, zero_expert_output
