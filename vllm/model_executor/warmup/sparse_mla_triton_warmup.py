@@ -225,7 +225,9 @@ def _warm_combine_topk_swa_indices_kernel(
         return topk_indices
 
     query_start_loc = torch.tensor([0, num_tokens], dtype=torch.int32, device=device)
-    seq_lens = torch.tensor([window_size + num_tokens], dtype=torch.int32, device=device)
+    seq_lens = torch.tensor(
+        [window_size + num_tokens], dtype=torch.int32, device=device
+    )
     gather_lens = torch.tensor(
         [min(window_size + num_tokens, window_size + num_tokens - 1)],
         dtype=torch.int32,
