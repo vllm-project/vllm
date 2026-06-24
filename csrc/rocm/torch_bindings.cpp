@@ -52,6 +52,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("gptq_gemm_rdna3_wmma", torch::kCUDA, &gptq_gemm_rdna3_wmma);
 
   rocm_ops.def(
+      "mxfp4_gemm_rdna3(Tensor a, Tensor b_q_weight, "
+      "Tensor b_scales_e8m0) -> Tensor");
+  rocm_ops.impl("mxfp4_gemm_rdna3", torch::kCUDA, &mxfp4_gemm_rdna3);
+
+  rocm_ops.def(
       "moe_gptq_gemm_rdna3(Tensor a, Tensor! c, Tensor b_q_weight, "
       "Tensor b_scales, Tensor b_qzeros, Tensor topk_weights, "
       "Tensor sorted_token_ids, Tensor expert_ids, "
