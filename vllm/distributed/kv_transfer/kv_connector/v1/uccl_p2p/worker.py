@@ -1708,22 +1708,30 @@ class UcclP2pConnectorWorker:
         assert self.use_host_buffer
         assert self.copy_blocks is not None
 
-        local_block_ids = meta.local_physical_block_ids
-        # TODO (NickLucche) D2H<>H2D ops could benefit from coalescing io across groups
-        for group_block_ids in local_block_ids:
-            self.copy_blocks(
-                self.host_xfer_buffers,
-                self.device_kv_caches,
-                group_block_ids,
-                group_block_ids,
-                "h2d",
-            )
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(
-                "synced recved kv of request[%s] to device kv buffer,"
-                "local_block_ids: %s. ",
-                req_id,
-                ",".join(map(str, local_block_ids)),
+        t0 = time.perf_counter()
+        try:
+            local_block_ids = meta.local_physical_block_ids
+            # TODO (NickLucche) D2H<>H2D ops could benefit from coalescing io
+            # across groups.
+            for group_block_ids in local_block_ids:
+                self.copy_blocks(
+                    self.host_xfer_buffers,
+                    self.device_kv_caches,
+                    group_block_ids,
+                    group_block_ids,
+                    "h2d",
+                )
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "synced recved kv of request[%s] to device kv buffer,"
+                    "local_block_ids: %s. ",
+                    req_id,
+                    ",".join(map(str, local_block_ids)),
+                )
+        finally:
+            _timing(
+                f"sync_recved_kv_to_device_req={req_id}_groups={len(meta.local_physical_block_ids)}",
+                (time.perf_counter() - t0) * 1e6,
             )
 
     def save_kv_to_host(self, metadata: UcclP2pConnectorMetadata):
@@ -1731,26 +1739,33 @@ class UcclP2pConnectorWorker:
         assert self.use_host_buffer
         assert self.copy_blocks is not None
 
-        for req_id, meta in metadata.reqs_to_save.items():
-            meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
-                meta.local_block_ids
+        t0 = time.perf_counter()
+        try:
+            for req_id, meta in metadata.reqs_to_save.items():
+                meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
+                    meta.local_block_ids
+                )
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "save_load_kv for request[%s] to host xfer buffer."
+                        "local_block_ids: %s. ",
+                        req_id,
+                        ",".join(map(str, meta.local_physical_block_ids)),
+                    )
+                # blocking
+                for group_block_ids in meta.local_physical_block_ids:
+                    self.copy_blocks(
+                        self.device_kv_caches,
+                        self.host_xfer_buffers,
+                        group_block_ids,
+                        group_block_ids,
+                        "d2h",
+                    )
+        finally:
+            _timing(
+                f"save_kv_to_host_reqs={len(metadata.reqs_to_save)}",
+                (time.perf_counter() - t0) * 1e6,
             )
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    "save_load_kv for request[%s] to host xfer buffer."
-                    "local_block_ids: %s. ",
-                    req_id,
-                    ",".join(map(str, meta.local_physical_block_ids)),
-                )
-            # blocking
-            for group_block_ids in meta.local_physical_block_ids:
-                self.copy_blocks(
-                    self.device_kv_caches,
-                    self.host_xfer_buffers,
-                    group_block_ids,
-                    group_block_ids,
-                    "d2h",
-                )
 
     def post_process_device_kv_on_receive(
         self,
@@ -1839,96 +1854,102 @@ class UcclP2pConnectorWorker:
         to track which workers are done.
         """
         assert self.transfer_topo is not None
-        done_sending = self._get_new_notifs()
-        done_recving = self._pop_done_transfers(self._recving_transfers)
+        t0 = time.perf_counter()
+        try:
+            done_sending = self._get_new_notifs()
+            done_recving = self._pop_done_transfers(self._recving_transfers)
 
-        # Drain queue of requests where handshake or transfer setup failed.
-        failed_recv_reqs = set[ReqId]()
-        while not self._failed_recv_reqs.empty():
-            try:
-                failed_recv_reqs.add(self._failed_recv_reqs.get_nowait())
-            except queue.Empty:
-                break
+            # Drain queue of requests where handshake or transfer setup failed.
+            failed_recv_reqs = set[ReqId]()
+            while not self._failed_recv_reqs.empty():
+                try:
+                    failed_recv_reqs.add(self._failed_recv_reqs.get_nowait())
+                except queue.Empty:
+                    break
 
-        # Add failed requests to done_recving for scheduler tracking
-        # (blocks are already marked invalid, scheduler will handle recompute)
-        done_recving.update(failed_recv_reqs)
+            # Add failed requests to done_recving for scheduler tracking
+            # (blocks are already marked invalid, scheduler will handle recompute)
+            done_recving.update(failed_recv_reqs)
 
-        if len(done_sending) > 0 or len(done_recving) > 0:
-            logger.debug(
-                "Rank %s, get_finished: %s requests done sending "
-                "and %s requests done recving (%s failed)",
-                self.tp_rank,
-                len(done_sending),
-                len(done_recving),
-                len(failed_recv_reqs),
-            )
+            if len(done_sending) > 0 or len(done_recving) > 0:
+                logger.debug(
+                    "Rank %s, get_finished: %s requests done sending "
+                    "and %s requests done recving (%s failed)",
+                    self.tp_rank,
+                    len(done_sending),
+                    len(done_recving),
+                    len(failed_recv_reqs),
+                )
 
-        block_ids_for_blocksize_post_process = defaultdict(list)
-        block_ids_for_heterogeneous_attn_post_process = list[list[int]]()
-        for req_id in done_recving:
-            # clean up metadata for completed requests
-            meta = self._recving_metadata.pop(req_id, None)
-            assert meta is not None, f"{req_id} not found in recving_metadata list"
+            block_ids_for_blocksize_post_process = defaultdict(list)
+            block_ids_for_heterogeneous_attn_post_process = list[list[int]]()
+            for req_id in done_recving:
+                # clean up metadata for completed requests
+                meta = self._recving_metadata.pop(req_id, None)
+                assert meta is not None, f"{req_id} not found in recving_metadata list"
 
-            # Skip KV sync and post-processing for failed requests
-            if req_id in failed_recv_reqs:
+                # Skip KV sync and post-processing for failed requests
+                if req_id in failed_recv_reqs:
+                    logger.warning(
+                        "Skipping KV post-processing for failed request %s",
+                        req_id,
+                    )
+                    continue
+
+                assert meta.remote is not None
+                if self.use_host_buffer:
+                    self.sync_recved_kv_to_device(req_id, meta)
+
+                # post processing for heteroblocksize
+                remote_info = self.transfer_topo.get_engine_info(meta.remote.engine_id)
+                block_size_ratio = self.transfer_topo.block_size_ratio(
+                    remote_info.remote_block_size
+                )
+                if not self.use_mla and (
+                    block_size_ratio > 1 or self.enable_permute_local_kv
+                ):
+                    assert not self._is_hma_required
+                    block_ids_for_blocksize_post_process[block_size_ratio].append(
+                        meta.local_physical_block_ids[0]
+                    )
+                # post processing for heterogeneous attention
+                if self.enable_heterogeneous_attn_post_process:
+                    block_ids_for_heterogeneous_attn_post_process.append(
+                        meta.local_physical_block_ids[0]
+                    )
+            for (
+                block_size_ratio,
+                block_ids_list,
+            ) in block_ids_for_blocksize_post_process.items():
+                self.post_process_device_kv_on_receive(block_size_ratio, block_ids_list)
+
+            for block_ids in block_ids_for_heterogeneous_attn_post_process:
+                self.post_process_device_kv_on_receive_heterogeneous_attn(block_ids)
+
+            # Handle timeout to avoid stranding blocks on remote.
+            now = time.perf_counter()
+            while self._reqs_to_send:
+                req_id, expires = next(iter(self._reqs_to_send.items()))
+                # Sorted dict, oldest requests are put first so we can exit early.
+                if now < expires:
+                    break
+                count = self.consumer_notification_counts_by_req.pop(req_id, 0)
+                self.xfer_stats.record_kv_expired_req()
                 logger.warning(
-                    "Skipping KV post-processing for failed request %s",
+                    "Releasing expired KV blocks for request %s which were "
+                    "retrieved by %d remote worker(s) before lease expired.",
                     req_id,
+                    count,
                 )
-                continue
+                self._reqs_to_send.pop(req_id, None)
+                self._reqs_to_process.discard(req_id)
 
-            assert meta.remote is not None
-            if self.use_host_buffer:
-                self.sync_recved_kv_to_device(req_id, meta)
-
-            # post processing for heteroblocksize
-            remote_info = self.transfer_topo.get_engine_info(meta.remote.engine_id)
-            block_size_ratio = self.transfer_topo.block_size_ratio(
-                remote_info.remote_block_size
+            return done_sending, done_recving
+        finally:
+            _timing(
+                f"get_finished_send={len(done_sending)}_recv={len(done_recving)}",
+                (time.perf_counter() - t0) * 1e6,
             )
-            if not self.use_mla and (
-                block_size_ratio > 1 or self.enable_permute_local_kv
-            ):
-                assert not self._is_hma_required
-                block_ids_for_blocksize_post_process[block_size_ratio].append(
-                    meta.local_physical_block_ids[0]
-                )
-            # post processing for heterogeneous attention
-            if self.enable_heterogeneous_attn_post_process:
-                block_ids_for_heterogeneous_attn_post_process.append(
-                    meta.local_physical_block_ids[0]
-                )
-        for (
-            block_size_ratio,
-            block_ids_list,
-        ) in block_ids_for_blocksize_post_process.items():
-            self.post_process_device_kv_on_receive(block_size_ratio, block_ids_list)
-
-        for block_ids in block_ids_for_heterogeneous_attn_post_process:
-            self.post_process_device_kv_on_receive_heterogeneous_attn(block_ids)
-
-        # Handle timeout to avoid stranding blocks on remote.
-        now = time.perf_counter()
-        while self._reqs_to_send:
-            req_id, expires = next(iter(self._reqs_to_send.items()))
-            # Sorted dict, oldest requests are put first so we can exit early.
-            if now < expires:
-                break
-            count = self.consumer_notification_counts_by_req.pop(req_id, 0)
-            self.xfer_stats.record_kv_expired_req()
-            logger.warning(
-                "Releasing expired KV blocks for request %s which were "
-                "retrieved by %d remote worker(s) before lease expired.",
-                req_id,
-                count,
-            )
-            self._reqs_to_process.remove(req_id)
-            del self._reqs_to_send[req_id]
-            done_sending.add(req_id)
-
-        return done_sending, done_recving
 
     def _get_new_notifs(self) -> set[str]:
         """
@@ -2113,90 +2134,112 @@ class UcclP2pConnectorWorker:
         Start loading by triggering non-blocking uccl_p2p_xfer.
         We check for these trnxs to complete in each step().
         """
-        for req_id, meta in metadata.reqs_to_recv.items():
-            meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
-                meta.local_block_ids
+        t0 = time.perf_counter()
+        try:
+            for req_id, meta in metadata.reqs_to_recv.items():
+                meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
+                    meta.local_block_ids
+                )
+                assert meta.remote is not None
+                # Remote block IDs are kept logical here; expanded in
+                # _read_blocks_for_req using the remote engine's phys ratio.
+                remote_engine_id = meta.remote.engine_id
+                logger.debug(
+                    "start_load_kv for request %s from remote engine %s. "
+                    "Num local_block_ids: %s. Num remote_block_ids: %s. ",
+                    req_id,
+                    remote_engine_id,
+                    len(meta.local_physical_block_ids),
+                    len(meta.remote.block_ids),
+                )
+                # always store metadata for failure recovery
+                self._recving_metadata[req_id] = meta
+                if remote_engine_id not in self._remote_agents:
+                    # Initiate handshake with remote engine to exchange metadata.
+                    with self._handshake_lock:
+                        if remote_engine_id not in self._remote_agents:
+                            self._background_uccl_p2p_handshake(
+                                req_id, remote_engine_id, meta
+                            )
+                            continue
+
+                # Handshake already completed, start async read xfer.
+                self._read_blocks_for_req(req_id, meta)
+
+            # Start transfers for requests whose handshakes have now finished.
+            while not self._ready_requests.empty():
+                self._read_blocks_for_req(*self._ready_requests.get_nowait())
+
+            # Keep around the requests that have been part of a batch. This is
+            # needed because async scheduling pushes the misalignment between the
+            # moment in which requests expiration is set (P side) and the moment in
+            # which blocks are read from D. As P can now more easily lag behind D
+            # while processing the next batch, we make sure to only set an
+            # expiration for requests that have not been read from D yet.
+            for req_id in metadata.reqs_in_batch:
+                self._reqs_to_process.add(req_id)
+
+            # Remove all requests that are not to be processed (eg aborted).
+            for req_id in metadata.reqs_not_processed:
+                self._reqs_to_process.discard(req_id)
+                # We should never get an abort after setting an expiry timer
+                assert req_id not in self._reqs_to_send
+
+            # Add to requests that are waiting to be read and track expiration.
+            for req_id, expiration_time in metadata.reqs_to_send.items():
+                if req_id in self._reqs_to_process:
+                    self._reqs_to_send[req_id] = expiration_time
+
+            # Send heartbeats to P-side engines to keep KV blocks alive while
+            # requests sit in the D scheduler WAITING queue.
+            self._send_heartbeats(metadata)
+        finally:
+            _timing(
+                f"start_load_kv_reqs={len(metadata.reqs_to_recv)}",
+                (time.perf_counter() - t0) * 1e6,
             )
-            assert meta.remote is not None
-            # Remote block IDs are kept logical here; expanded in
-            # _read_blocks_for_req using the remote engine's phys ratio.
-            remote_engine_id = meta.remote.engine_id
-            logger.debug(
-                "start_load_kv for request %s from remote engine %s. "
-                "Num local_block_ids: %s. Num remote_block_ids: %s. ",
-                req_id,
-                remote_engine_id,
-                len(meta.local_physical_block_ids),
-                len(meta.remote.block_ids),
-            )
-            # always store metadata for failure recovery
-            self._recving_metadata[req_id] = meta
-            if remote_engine_id not in self._remote_agents:
-                # Initiate handshake with remote engine to exchange metadata.
-                with self._handshake_lock:
-                    if remote_engine_id not in self._remote_agents:
-                        self._background_uccl_p2p_handshake(
-                            req_id, remote_engine_id, meta
-                        )
-                        continue
-
-            # Handshake already completed, start async read xfer.
-            self._read_blocks_for_req(req_id, meta)
-
-        # Start transfers for requests whose handshakes have now finished.
-        while not self._ready_requests.empty():
-            self._read_blocks_for_req(*self._ready_requests.get_nowait())
-
-        # Keep around the requests that have been part of a batch. This is
-        # needed because async scheduling pushes the misalignment between the
-        # moment in which requests expiration is set (P side) and the moment in
-        # which blocks are read from D. As P can now more easily lag behind D
-        # while processing the next batch, we make sure to only set an
-        # expiration for requests that have not been read from D yet.
-        for req_id in metadata.reqs_in_batch:
-            self._reqs_to_process.add(req_id)
-
-        # Remove all requests that are not to be processed (eg aborted).
-        for req_id in metadata.reqs_not_processed:
-            self._reqs_to_process.discard(req_id)
-            # We should never get an abort after setting an expiry timer
-            assert req_id not in self._reqs_to_send
-
-        # Add to requests that are waiting to be read and track expiration.
-        for req_id, expiration_time in metadata.reqs_to_send.items():
-            if req_id in self._reqs_to_process:
-                self._reqs_to_send[req_id] = expiration_time
-
-        # Send heartbeats to P-side engines to keep KV blocks alive while
-        # requests sit in the D scheduler WAITING queue.
-        self._send_heartbeats(metadata)
 
     def _send_heartbeats(self, metadata: UcclP2pConnectorMetadata) -> None:
         """
         Send heartbeat notifications to remote engines, extending lease on KV blocks.
         """
-        for engine_id, hb_info in metadata.heartbeat_by_engine.items():
-            # Proactive handshake (this request may still be in waiting queue) so
-            # the **next** heartbeat for this remote can go through.
-            if (
-                self._ensure_handshake(
-                    engine_id, hb_info.host, hb_info.port, hb_info.tp_size
-                )
-                is not None
-            ):
-                continue  # handshake is still pending
-
-            # Build the heartbeat message: "HB:req1,req2,..."
-            hb_msg = ("HB:" + ",".join(hb_info.req_ids)).encode()
-            for agent_name in self._remote_agents[engine_id].values():
-                try:
-                    self.uccl_p2p_wrapper.send_notif(agent_name, notif_msg=hb_msg)
-                except Exception:
-                    logger.debug(
-                        "Failed to send heartbeat to engine %s",
-                        engine_id,
-                        exc_info=True,
+        t0 = time.perf_counter()
+        try:
+            for engine_id, hb_info in metadata.heartbeat_by_engine.items():
+                # Proactive handshake (this request may still be in waiting queue) so
+                # the **next** heartbeat for this remote can go through.
+                if (
+                    self._ensure_handshake(
+                        engine_id, hb_info.host, hb_info.port, hb_info.tp_size
                     )
+                    is not None
+                ):
+                    continue  # handshake is still pending
+
+                remote_agents = self._remote_agents.get(engine_id)
+                if not remote_agents:
+                    continue
+
+                # Send heartbeat to all remote agents for this engine.
+                hb_msg = (
+                    "HB:" + ",".join(metadata.reqs_to_send.keys())
+                ).encode()
+                for agent_name in remote_agents.values():
+                    try:
+                        self.uccl_p2p_wrapper.send_notif(
+                            agent_name, notif_msg=hb_msg
+                        )
+                    except Exception:
+                        logger.debug(
+                            "Failed to send heartbeat to engine %s",
+                            engine_id,
+                            exc_info=True,
+                        )
+        finally:
+            _timing(
+                f"_send_heartbeats_engines={len(metadata.heartbeat_by_engine)}",
+                (time.perf_counter() - t0) * 1e6,
+            )
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         t0 = time.perf_counter()
