@@ -89,6 +89,9 @@ impl ToolParserOutput {
     }
 
     /// Return all plain assistant text committed by this output.
+    ///
+    /// Texts before and after tool calls will be concatenated into a single string. To preserve
+    /// the original order of the text and tool-call events, directly access `events` instead.
     pub fn normal_text(&self) -> String {
         self.events
             .iter()
