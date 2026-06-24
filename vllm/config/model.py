@@ -289,6 +289,19 @@ class ModelConfig:
     enable_sleep_mode: bool = False
     """Enable sleep mode for the engine (only cuda and
     hip platforms are supported)."""
+    sleep_mode_backend: str = "cumem"
+    """Mechanism used to free and restore GPU state for sleep mode. ``"cumem"``
+    (default) uses the built-in ``CuMemAllocator`` and is behavior-compatible
+    with prior releases. Additional backends (CUDA checkpoint, CRIU, durable
+    snapshot) may be registered in-tree or by plugins (RFC #34303)."""
+    sleep_mode_backend_options: dict[str, Any] = field(default_factory=dict)
+    """Backend-specific options forwarded to the selected
+    ``sleep_mode_backend``'s constructor. The factory ``**``-unpacks this dict
+    into the backend class, so the accepted keys are defined by each backend
+    (e.g. ``cumem_tag`` accepts ``suspend_tags``). Validation lives in the
+    concrete backend's ``__init__``; ``ModelConfig`` does not enforce a schema.
+    Defaults to an empty dict, which preserves prior behavior for every
+    registered backend."""
     enable_cumem_allocator: bool = False
     """Enable the custom cumem allocator to leverage advanced GPU memory
     allocation features such as multi-node NVLink support.
