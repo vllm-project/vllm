@@ -104,7 +104,11 @@ class TrtLlmBf16ExpertsModular(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsModular)
     def _supports_parallel_config(
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> bool:
-        return not moe_parallel_config.enable_eplb
+        return (
+            moe_parallel_config.use_all2all_kernels
+            and not moe_parallel_config.use_ag_rs_all2all_kernels
+            and not moe_parallel_config.enable_eplb
+        )
 
     def moe_problem_size(
         self,
@@ -200,9 +204,10 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
     def _supports_parallel_config(
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> bool:
-        """Monolithic kernel so only use without DP/EP all2all."""
+        """Monolithic kernel supports no-all2all and AG/RS paths."""
         return (
             not moe_parallel_config.use_all2all_kernels
+            or moe_parallel_config.use_ag_rs_all2all_kernels
         ) and not moe_parallel_config.enable_eplb
 
     @staticmethod
