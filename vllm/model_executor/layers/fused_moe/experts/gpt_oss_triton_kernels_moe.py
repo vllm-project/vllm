@@ -4,7 +4,6 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -815,6 +814,85 @@ def make_routing_data(
     return routing_data, gather_indx, scatter_indx
 
 
+@triton.jit
+def _masked_topk_sum_kernel(
+    inp_ptr,  # (M, topk, K) contiguous
+    topk_ids_ptr,  # (M, topk) int: -1 marks an invalid / non-local slot
+    out_ptr,  # (M, K), same dtype as inp
+    K,
+    topk: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    pid_m = tl.program_id(0).to(tl.int64)
+    k = tl.program_id(1) * BLOCK_K + tl.arange(0, BLOCK_K)
+    k_mask = k < K
+    base = pid_m * topk
+    acc = tl.zeros((BLOCK_K,), dtype=tl.float32)
+    for j in tl.static_range(topk):
+        eid = tl.load(topk_ids_ptr + base + j)
+        # NOTE: This is NaN-safe because the invalid slots are skipped.
+        if eid >= 0:
+            x = tl.load(inp_ptr + (base + j) * K + k, mask=k_mask)
+            acc += x.to(tl.float32)
+    tl.store(out_ptr + pid_m * K + k, acc.to(out_ptr.dtype.element_ty), mask=k_mask)
+
+
+def masked_moe_sum(
+    intermediate: torch.Tensor,  # (M, topk, K)
+    topk_ids: torch.Tensor,  # (M, topk) int, -1 = invalid / non-local slot
+    output: torch.Tensor,  # (M, K)
+) -> None:
+    M, topk, K = intermediate.shape
+    BLOCK_K = 1024
+    grid = (M, triton.cdiv(K, BLOCK_K))
+    _masked_topk_sum_kernel[grid](
+        intermediate, topk_ids, output, K, topk=topk, BLOCK_K=BLOCK_K
+    )
+
+
+@triton.jit
+def _remap_topk_to_local_kernel(
+    topk_ids_ptr,  # [n] global expert IDs (-1 = invalid)
+    expert_map_ptr,  # [num_experts] global->local (-1 for non-local)
+    out_ptr,  # [n] int64 local expert IDs (-1 for invalid/non-local)
+    n_elements,
+    BLOCK: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < n_elements
+    tid = tl.load(topk_ids_ptr + offs, mask=mask, other=-1)
+    # Gather expert_map[tid] for valid (tid >= 0); clamp the index so invalid
+    # rows don't read OOB, then select -1 for them. Matches
+    # torch.where(tid >= 0, expert_map[clamp(tid, 0)], -1) -- preserving -1 (a
+    # plain expert_map[-1] would wrap to a valid local id and misroute).
+    valid = tid >= 0
+    idx = tl.where(valid, tid, 0)
+    local = tl.load(expert_map_ptr + idx, mask=mask, other=-1)
+    out = tl.where(valid, local.to(tl.int64), -1)
+    tl.store(out_ptr + offs, out, mask=mask)
+
+
+def remap_topk_to_local(
+    topk_ids: torch.Tensor, expert_map: torch.Tensor
+) -> torch.Tensor:
+    """Fused global->local expert-id mapping over a topk_ids tensor, preserving -1.
+
+    Replaces ``torch.where(topk_ids >= 0, expert_map[topk_ids.clamp(min=0)], -1)``
+    with one kernel. Returns a NEW int64 tensor -- the caller keeps the original
+    ``topk_ids`` as ``global_topk_ids``, so this must not write in place.
+
+    (Distinct from ``deep_gemm_utils.apply_expert_map``, which is a scalar
+    ``@triton.jit`` device helper called from within other kernels.)
+    """
+    out = torch.empty_like(topk_ids, dtype=torch.int64)
+    n = topk_ids.numel()
+    BLOCK = 1024
+    grid = (triton.cdiv(n, BLOCK),)
+    _remap_topk_to_local_kernel[grid](topk_ids, expert_map, out, n, BLOCK=BLOCK)
+    return out
+
+
 class BaseOAITritonExperts(mk.FusedMoEExpertsModular):
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -946,7 +1024,9 @@ class OAITritonExperts(BaseOAITritonExperts):
             self.quant_config: FusedMoEQuantConfig = FUSED_MOE_UNQUANTIZED_CONFIG
 
         if expert_map is not None:
-            topk_ids = expert_map[topk_ids]
+            # Preserve -1 (invalid / non-local slots, e.g. from EP dispatch):
+            # make_routing_data treats -1 as the skip sentinel.
+            topk_ids = remap_topk_to_local(topk_ids, expert_map)
 
         local_num_experts = w1.shape[0]
         if global_num_experts == -1:
@@ -1018,9 +1098,6 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
         output = (M, K)
         return (workspace1, workspace2, output)
 
-    def moe_sum(self, input: torch.Tensor, output: torch.Tensor):
-        ops.moe_sum(input, output)
-
     def activation(
         self,
         activation: MoEActivation,
@@ -1091,7 +1168,9 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
 
         global_topk_ids = topk_ids
         if expert_map is not None:
-            topk_ids = expert_map[topk_ids]
+            # Preserve -1 (invalid / non-local slots, e.g. from EP dispatch):
+            # make_routing_data treats -1 as the skip sentinel.
+            topk_ids = remap_topk_to_local(topk_ids, expert_map)
 
         local_num_experts = w1.shape[0]
         if global_num_experts == -1:
@@ -1214,7 +1293,9 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
                 top_k_num=topk,
             )
 
-        self.moe_sum(intermediate_cache3.view(-1, topk, K), output)
+        # matmul_ogs leaves invalid (-1 / non-local EP) slots unwritten.
+        # Reduce over topk skipping those slots.
+        masked_moe_sum(intermediate_cache3.view(-1, topk, K), topk_ids, output)
 
 
 class OAITritonMxfp4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
