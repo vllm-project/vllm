@@ -34,6 +34,8 @@ from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
     ConnectMsg,
     DisconnectMsg,
     FetchMsg,
+    LookupMsg,
+    LookupRespMsg,
     TransferDoneMsg,
 )
 from vllm.v1.kv_offload.tiering.p2p.session.server import (
@@ -183,12 +185,32 @@ class P2PSession:
     def finish_request(self, kv_request_id: str) -> None:
         """Called when the request is finishing locally.
 
-        Cancels any inbound load (client role) and finalizes any
+        Cancels any inbound load (client role), drops any pending
+        symmetric-P2P lookup state (client role), and finalizes any
         outbound serving (server role) for this id. Roles that aren't
         active for this id are silent no-ops.
         """
         self._client.cancel(kv_request_id)
+        self._client.cancel_lookups(kv_request_id)
         self._server.finish(kv_request_id)
+
+    def register_lookup(self, kv_request_id: str, block_hash: bytes) -> bool | None:
+        """Register or resolve one (kv_request_id, block_hash) probe.
+
+        Called from the manager's lookup() for symmetric-P2P consumers
+        (``p2p`` sub-dict in kv_transfer_params). See
+        ``ClientRole.register_lookup`` for the state-machine contract.
+        """
+        return self._client.register_lookup(kv_request_id, block_hash)
+
+    def flush_pending_lookups(self) -> None:
+        """Flush any aggregated symmetric-P2P lookups for this peer.
+
+        Called once per scheduler step from the manager's
+        ``on_schedule_end()``. Send-gating is handled inside the
+        client's ``_send`` callback (queues until ConnectAckMsg).
+        """
+        self._client.flush_pending_lookups()
 
     def poll(self) -> SessionPollResult:
         """Process incoming messages, drive transfers, apply timeouts."""
@@ -324,6 +346,23 @@ class P2PSession:
         elif msg_type == AbortAckMsg.TYPE:
             AbortAckMsg.validate(msg)
             self._client.on_abort_ack(msg[AbortAckMsg.KV_REQUEST_ID])
+        elif msg_type == LookupMsg.TYPE:
+            LookupMsg.validate(msg)
+            kv_request_id = msg[LookupMsg.KV_REQUEST_ID]
+            block_hashes = [
+                OffloadKey(bh if isinstance(bh, bytes) else bytes(bh))
+                for bh in msg[LookupMsg.BLOCK_HASHES]
+            ]
+            self._server.on_lookup(kv_request_id, block_hashes)
+        elif msg_type == LookupRespMsg.TYPE:
+            LookupRespMsg.validate(msg)
+            kv_request_id = msg[LookupRespMsg.KV_REQUEST_ID]
+            block_hashes = [
+                OffloadKey(bh if isinstance(bh, bytes) else bytes(bh))
+                for bh in msg[LookupRespMsg.BLOCK_HASHES]
+            ]
+            hits = msg[LookupRespMsg.HITS]
+            self._client.on_lookup_resp(kv_request_id, block_hashes, hits)
         elif msg_type == DisconnectMsg.TYPE:
             if self._conn is not None:
                 self._conn.mark_dead()

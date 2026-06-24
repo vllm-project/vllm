@@ -27,6 +27,7 @@ from vllm.v1.kv_offload.base import OffloadKey
 from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
     TYPE_KEY,
     AbortAckMsg,
+    LookupRespMsg,
     TransferDoneMsg,
 )
 
@@ -244,6 +245,28 @@ class ServerRole:
         # deadline.
         self._pending_aborts.setdefault(kv_request_id, time.monotonic())
         self._drain_abort(kv_request_id)
+
+    def on_lookup(
+        self,
+        kv_request_id: str,
+        block_hashes: Sequence[OffloadKey],
+    ) -> None:
+        """Handle a LookupMsg from a symmetric-P2P consumer.
+
+        Stub for this phase: reply immediately with hits=[False, ...]
+        for every requested hash. Real producer-side hash → block_id
+        resolution lands in a later phase; the stub keeps the wire
+        round-trip closed so the consumer state machine is exercisable
+        end-to-end.
+        """
+        self._send(
+            {
+                TYPE_KEY: LookupRespMsg.TYPE,
+                LookupRespMsg.KV_REQUEST_ID: kv_request_id,
+                LookupRespMsg.BLOCK_HASHES: list(block_hashes),
+                LookupRespMsg.HITS: [False] * len(block_hashes),
+            }
+        )
 
     def finish(self, kv_request_id: str) -> None:
         """Mark an outbound request finishing.

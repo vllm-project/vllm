@@ -33,6 +33,8 @@ from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
     ConnectMsg,
     DisconnectMsg,
     FetchMsg,
+    LookupMsg,
+    LookupRespMsg,
     TransferDoneMsg,
 )
 from vllm.v1.kv_offload.tiering.p2p.session.server import (
@@ -432,6 +434,149 @@ class TestClientFlows:
         loads = session.poll().loads
         assert loads == [LoadResult(job_id=8, kv_request_id="req-8", success=False)]
         assert "req-8" not in session._client._inbound
+
+
+# ---------------------------------------------------------------------------
+# Symmetric-P2P lookup flow (do_p2p_fetch)
+# ---------------------------------------------------------------------------
+
+
+class TestLookupFlow:
+    """Consumer-side state machine for do_p2p_fetch lookups."""
+
+    def test_aggregate_flush_resolve_round_trip(self):
+        """register_lookup → flush sends one LookupMsg → response
+        resolves entries → register_lookup pops and returns the bool."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        # Aggregate two hashes for the same kv_request_id; both return None.
+        assert session.register_lookup("req-1", b"hA") is None
+        assert session.register_lookup("req-1", b"hB") is None
+
+        # Flush sends one LookupMsg with both hashes.
+        sent_before = len(conn._sent)
+        session.flush_pending_lookups()
+        new = conn._sent[sent_before:]
+        assert len(new) == 1
+        msg = new[0]
+        assert msg[TYPE_KEY] == LookupMsg.TYPE
+        assert msg[LookupMsg.KV_REQUEST_ID] == "req-1"
+        assert sorted(msg[LookupMsg.BLOCK_HASHES]) == [b"hA", b"hB"]
+
+        # Idempotent re-flush sends nothing — the entries are now in-flight.
+        sent_before = len(conn._sent)
+        session.flush_pending_lookups()
+        assert conn._sent[sent_before:] == []
+
+        # While in-flight, register_lookup keeps returning None.
+        assert session.register_lookup("req-1", b"hA") is None
+
+        # Peer answers: hA hit, hB miss.
+        conn.enqueue(
+            {
+                TYPE_KEY: LookupRespMsg.TYPE,
+                LookupRespMsg.KV_REQUEST_ID: "req-1",
+                LookupRespMsg.BLOCK_HASHES: [b"hA", b"hB"],
+                LookupRespMsg.HITS: [True, False],
+            }
+        )
+        session.poll()
+
+        # Next register_lookup pops and returns the bool.
+        assert session.register_lookup("req-1", b"hA") is True
+        assert session.register_lookup("req-1", b"hB") is False
+        # Entries are gone — a fresh register starts a new pending entry.
+        assert session.register_lookup("req-1", b"hA") is None
+
+    def test_one_lookup_msg_per_kv_request_id(self):
+        """Hashes for different kv_request_ids flush as separate LookupMsgs."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        session.register_lookup("req-A", b"h1")
+        session.register_lookup("req-B", b"h2")
+        session.register_lookup("req-A", b"h3")
+
+        sent_before = len(conn._sent)
+        session.flush_pending_lookups()
+        sent = [m for m in conn._sent[sent_before:] if m[TYPE_KEY] == LookupMsg.TYPE]
+        assert len(sent) == 2
+        by_req = {m[LookupMsg.KV_REQUEST_ID]: m[LookupMsg.BLOCK_HASHES] for m in sent}
+        assert sorted(by_req["req-A"]) == [b"h1", b"h3"]
+        assert by_req["req-B"] == [b"h2"]
+
+    def test_split_response_resolves_across_messages(self):
+        """Producer may answer one LookupMsg's hashes across multiple
+        LookupRespMsgs — pairs are self-describing so each lands."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        session.register_lookup("req-1", b"hA")
+        session.register_lookup("req-1", b"hB")
+        session.flush_pending_lookups()
+
+        # Two responses, each carrying one of the two hashes.
+        conn.enqueue(
+            {
+                TYPE_KEY: LookupRespMsg.TYPE,
+                LookupRespMsg.KV_REQUEST_ID: "req-1",
+                LookupRespMsg.BLOCK_HASHES: [b"hA"],
+                LookupRespMsg.HITS: [True],
+            }
+        )
+        conn.enqueue(
+            {
+                TYPE_KEY: LookupRespMsg.TYPE,
+                LookupRespMsg.KV_REQUEST_ID: "req-1",
+                LookupRespMsg.BLOCK_HASHES: [b"hB"],
+                LookupRespMsg.HITS: [False],
+            }
+        )
+        session.poll()
+
+        assert session.register_lookup("req-1", b"hA") is True
+        assert session.register_lookup("req-1", b"hB") is False
+
+    def test_finish_request_cancels_pending_lookups(self):
+        """finish_request drops every pending lookup for the kv_request_id."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        session.register_lookup("req-1", b"hA")
+        session.register_lookup("req-1", b"hB")
+        session.register_lookup("req-2", b"hC")
+        session.finish_request("req-1")
+
+        # req-1 entries gone, req-2 untouched.
+        assert ("req-1", b"hA") not in session._client._lookups
+        assert ("req-1", b"hB") not in session._client._lookups
+        assert ("req-2", b"hC") in session._client._lookups
+
+    def test_server_stub_replies_with_all_misses(self):
+        """Producer-side stub: incoming LookupMsg yields LookupRespMsg
+        echoing the same hashes with hits=[False, ...]."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        sent_before = len(conn._sent)
+        conn.enqueue(
+            {
+                TYPE_KEY: LookupMsg.TYPE,
+                LookupMsg.KV_REQUEST_ID: "req-1",
+                LookupMsg.BLOCK_HASHES: [b"hX", b"hY", b"hZ"],
+            }
+        )
+        session.poll()
+
+        resps = [
+            m for m in conn._sent[sent_before:] if m[TYPE_KEY] == LookupRespMsg.TYPE
+        ]
+        assert len(resps) == 1
+        resp = resps[0]
+        assert resp[LookupRespMsg.KV_REQUEST_ID] == "req-1"
+        assert resp[LookupRespMsg.BLOCK_HASHES] == [b"hX", b"hY", b"hZ"]
+        assert resp[LookupRespMsg.HITS] == [False, False, False]
 
 
 # ---------------------------------------------------------------------------

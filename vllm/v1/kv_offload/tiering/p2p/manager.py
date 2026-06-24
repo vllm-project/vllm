@@ -219,6 +219,25 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         kv_request_id = consumer["kv_request_id"]
         if kv_request_id in self._failed_req_ids:
             return LookupResult.MISS
+
+        # Symmetric-P2P consumer (``p2p`` sub-dict): probe the peer
+        # asynchronously. First call registers the (kv_request_id,
+        # block_hash) entry and returns RETRY; flush_pending_lookups()
+        # in on_schedule_end batches the LookupMsg; a later step's
+        # lookup() returns HIT/MISS once LookupRespMsg has arrived.
+        # PD path (``prefill`` sub-dict only) keeps the eager HIT today.
+        if _p2p_params(req_context.kv_transfer_params):
+            peer_id = self._remote_id_from_params(consumer)
+            session = self._sessions.get(peer_id) if peer_id else None
+            if session is None:
+                return LookupResult.MISS
+            result = session.register_lookup(kv_request_id, key)
+            if result is True:
+                return LookupResult.HIT
+            if result is False:
+                return LookupResult.MISS
+            return LookupResult.RETRY
+
         return LookupResult.HIT
 
     @override
@@ -449,7 +468,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
     @override
     def on_schedule_end(self) -> None:
-        return
+        # Flush any do_p2p_fetch lookups aggregated during this step.
+        # One LookupMsg per (peer, kv_request_id) with unsent entries;
+        # send-gating happens inside the session if not yet ready.
+        for session in self._sessions.values():
+            session.flush_pending_lookups()
 
     # ------------------------------------------------------------------
     # Internal

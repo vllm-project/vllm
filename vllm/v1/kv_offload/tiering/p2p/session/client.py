@@ -21,6 +21,7 @@ from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
     TYPE_KEY,
     AbortFetchMsg,
     FetchMsg,
+    LookupMsg,
 )
 
 if TYPE_CHECKING:
@@ -40,6 +41,22 @@ class _InboundRequestState:
     kv_request_id: str
     submitted_at: float
     aborted_at: float | None = None
+
+
+@dataclass
+class _LookupState:
+    """Client-role state for a single (kv_request_id, block_hash) probe.
+
+    submitted_at: when the manager first registered the lookup.
+    sent_at: when the LookupMsg carrying this hash was emitted, or
+        None while still in the local batch awaiting flush.
+    result: True/False once a LookupRespMsg resolved this hash, or
+        None while still in-flight.
+    """
+
+    submitted_at: float
+    sent_at: float | None = None
+    result: bool | None = None
 
 
 class LoadResult(NamedTuple):
@@ -63,6 +80,8 @@ class ClientRole:
         self._send = send
         self._inbound: dict[str, _InboundRequestState] = {}
         self._completed_loads: list[LoadResult] = []
+        # Symmetric-P2P lookup state, keyed by (kv_request_id, block_hash).
+        self._lookups: dict[tuple[str, bytes], _LookupState] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -156,12 +175,86 @@ class ClientRole:
                 kv_request_id,
             )
 
+    # ------------------------------------------------------------------
+    # Symmetric-P2P lookup (do_p2p_fetch=true)
+    # ------------------------------------------------------------------
+
+    def register_lookup(self, kv_request_id: str, block_hash: bytes) -> bool | None:
+        """Register or resolve one (kv_request_id, block_hash) probe.
+
+        Idempotent across scheduler steps:
+        - First call: creates a pending entry, returns None.
+        - Subsequent calls while in-flight: returns None.
+        - Once a LookupRespMsg has resolved the entry: pops and
+          returns the bool result.
+        """
+        key = (kv_request_id, block_hash)
+        state = self._lookups.get(key)
+        if state is not None and state.result is not None:
+            del self._lookups[key]
+            return state.result
+        if state is None:
+            self._lookups[key] = _LookupState(submitted_at=time.monotonic())
+        return None
+
+    def flush_pending_lookups(self) -> None:
+        """Send one LookupMsg per kv_request_id covering all unsent entries.
+
+        Called once per scheduler step from the manager's
+        ``on_schedule_end()``. Send-gating is handled by the injected
+        ``_send`` callback (queues until ConnectAckMsg if needed).
+        """
+        by_request: dict[str, list[bytes]] = {}
+        for (req_id, block_hash), state in self._lookups.items():
+            if state.sent_at is None:
+                by_request.setdefault(req_id, []).append(block_hash)
+        if not by_request:
+            return
+        now = time.monotonic()
+        for req_id, hashes in by_request.items():
+            self._send(
+                {
+                    TYPE_KEY: LookupMsg.TYPE,
+                    LookupMsg.KV_REQUEST_ID: req_id,
+                    LookupMsg.BLOCK_HASHES: list(hashes),
+                }
+            )
+            for h in hashes:
+                self._lookups[(req_id, h)].sent_at = now
+
+    def on_lookup_resp(
+        self,
+        kv_request_id: str,
+        block_hashes: Sequence[bytes],
+        hits: Sequence[bool],
+    ) -> None:
+        """Apply per-pair hit/miss results from a peer.
+
+        Pairs that don't match a known entry (already cancelled, timed
+        out, or never asked) are silently dropped — the producer is
+        free to split or coalesce responses.
+        """
+        for h, hit in zip(block_hashes, hits):
+            state = self._lookups.get((kv_request_id, h))
+            if state is None:
+                continue
+            state.result = hit
+
+    def cancel_lookups(self, kv_request_id: str) -> None:
+        """Drop every pending lookup entry for this kv_request_id."""
+        keys = [k for k in self._lookups if k[0] == kv_request_id]
+        for k in keys:
+            del self._lookups[k]
+
     def collect_results(self) -> list[LoadResult]:
         """Walk timeouts and drain completed loads.
 
         Active requests past ``_LOAD_TIMEOUT_S`` get an AbortFetchMsg
         sent and enter the aborting phase. Aborting requests past
         ``_ABORT_ACK_TIMEOUT_S`` are surfaced as failed loads.
+        Lookup entries past ``_LOAD_TIMEOUT_S`` since send are
+        resolved as misses (False) so the caller falls back to local
+        prefill.
         """
         now = time.monotonic()
         to_remove: list[str] = []
@@ -198,6 +291,18 @@ class ClientRole:
         for req_id in to_remove:
             self._inbound.pop(req_id)
 
+        # Lookup timeout sweep: entries that were sent more than
+        # _LOAD_TIMEOUT_S ago without a response resolve to miss so
+        # the next register_lookup() returns False and the caller
+        # falls back to local prefill.
+        for state in self._lookups.values():
+            if (
+                state.result is None
+                and state.sent_at is not None
+                and now - state.sent_at >= _LOAD_TIMEOUT_S
+            ):
+                state.result = False
+
         results = self._completed_loads
         self._completed_loads = []
         return results
@@ -207,4 +312,5 @@ class ClientRole:
         failed = [(req.job_id, req.kv_request_id) for req in self._inbound.values()]
         self._inbound.clear()
         self._completed_loads.clear()
+        self._lookups.clear()
         return failed

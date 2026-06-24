@@ -196,6 +196,68 @@ class FetchMsg:
                 raise ValueError(f"block_indexes: invalid index {idx!r}")
 
 
+class LookupMsg:
+    """Client → Server: probe which block hashes the peer holds.
+
+    Sent on the consumer side under symmetric P2P (do_p2p_fetch=true)
+    after the consumer has aggregated per-block lookups across a
+    scheduler step. The producer replies with one or more LookupRespMsg
+    covering the requested hashes.
+
+    Fields:
+        KV_REQUEST_ID: Identifies this lookup transaction.
+        BLOCK_HASHES: List of block keys (OffloadKey bytes) to probe.
+    """
+
+    TYPE = "lookup"
+    KV_REQUEST_ID = "kv_request_id"
+    BLOCK_HASHES = "block_hashes"
+
+    @staticmethod
+    def validate(msg: dict) -> None:
+        """Raise ValueError if any field has an invalid type or value."""
+        _require(msg, LookupMsg.KV_REQUEST_ID, str)
+        _require_list(msg, LookupMsg.BLOCK_HASHES)
+
+
+class LookupRespMsg:
+    """Server → Client: per-hash hit/miss answer for a prior LookupMsg.
+
+    Carries two parallel arrays of equal length so each (block_hash,
+    hit) pair is self-describing. The producer is free to split or
+    coalesce responses across multiple LookupMsgs for the same
+    KV_REQUEST_ID — the consumer matches each pair back to its
+    pending entry by (KV_REQUEST_ID, block_hash).
+
+    Fields:
+        KV_REQUEST_ID: The lookup transaction this responds to.
+        BLOCK_HASHES: List of block keys answered by this message.
+        HITS: Parallel list of bools — True if the producer holds the
+            corresponding block, False otherwise.
+    """
+
+    TYPE = "lookup_resp"
+    KV_REQUEST_ID = "kv_request_id"
+    BLOCK_HASHES = "block_hashes"
+    HITS = "hits"
+
+    @staticmethod
+    def validate(msg: dict) -> None:
+        """Raise ValueError if any field has an invalid type or value."""
+        _require(msg, LookupRespMsg.KV_REQUEST_ID, str)
+        _require_list(msg, LookupRespMsg.BLOCK_HASHES)
+        _require_list(msg, LookupRespMsg.HITS)
+        hashes = msg[LookupRespMsg.BLOCK_HASHES]
+        hits = msg[LookupRespMsg.HITS]
+        if len(hashes) != len(hits):
+            raise ValueError(
+                f"block_hashes/hits length mismatch: {len(hashes)} vs {len(hits)}"
+            )
+        for hit in hits:
+            if not isinstance(hit, bool):
+                raise ValueError(f"hits: invalid value {hit!r}")
+
+
 class TransferDoneMsg:
     """Server → Client: all blocks transferred for a request.
 
