@@ -382,7 +382,7 @@ class GPULoadStoreSpec(BlockIDsLoadStoreSpec):
     One instance per KV cache group. group packing (group_sizes) and the
     per group logical block offset (block_indices) have been removed.
     The alignment offset is now carried by the paired offloaded side spec
-    via BlockIDsLoadStoreSpec.set_gpu_block_offset().
+    via LoadStoreSpec.set_gpu_block_offset().
     """
 
     def __init__(self, block_ids: list[int]):

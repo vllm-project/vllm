@@ -62,7 +62,6 @@ class TransferJob:
 
     req_id: ReqId
     groups: Sequence[GroupTransfer]
-    is_store: bool
 
 
 @dataclass

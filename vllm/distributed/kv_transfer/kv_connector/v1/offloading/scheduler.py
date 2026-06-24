@@ -779,7 +779,6 @@ class OffloadingConnectorScheduler:
         self._current_batch_load_jobs[load_job_id] = TransferJob(
             req_id=request.request_id,
             groups=groups,
-            is_store=False,
         )
         # a load can only be issued when no other jobs are pending.
         assert not req_status.transfer_jobs
@@ -1015,7 +1014,6 @@ class OffloadingConnectorScheduler:
             store_jobs[job_id] = TransferJob(
                 req_id=req_id,
                 groups=groups,
-                is_store=True,
             )
 
             logger.debug(
