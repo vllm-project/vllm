@@ -103,6 +103,10 @@ class CPUModelRunner(GPUModelRunner):
             cpu_tl.sample_recovered_tokens_kernel
         )
 
+        import vllm.v1.worker.mamba_utils
+
+        vllm.v1.worker.mamba_utils.batch_memcpy_kernel = cpu_tl.batch_memcpy_kernel
+
     @instrument(span_name="Loading (CPU)")
     def load_model(self, load_dummy_weights: bool = False) -> None:
         if load_dummy_weights:
