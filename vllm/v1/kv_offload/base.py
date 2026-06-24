@@ -7,7 +7,7 @@ Core abstractions for KV cache offloading in vLLM v1.
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
-from enum import Enum
+from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, NewType
 
 import numpy as np
@@ -51,6 +51,15 @@ def get_offload_group_idx(key: OffloadKey) -> int:
 class ReqContext:
     req_id: str
     kv_transfer_params: dict[str, Any] | None = None
+
+
+class LookupResult(Enum):
+    """Result of OffloadingManager.lookup()."""
+
+    MISS = auto()
+    HIT = auto()
+    HIT_PENDING = auto()
+    RETRY = auto()
 
 
 class OffloadPolicy(Enum):
@@ -158,7 +167,7 @@ class OffloadingKVEventsConfig:
 
 class OffloadingManager(ABC):
     @abstractmethod
-    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         """
         Checks whether a single block is offloaded and ready to be read.
 
@@ -167,10 +176,9 @@ class OffloadingManager(ABC):
             req_context: per-request context (e.g. kv_transfer_params).
 
         Returns:
-            True if the block is offloaded and ready, False if not,
-            or None if the lookup should be retried later.
-            Returning None will delay the request handling by the vLLM
-            scheduler.
+            HIT if the block is offloaded and ready, MISS if not found,
+            HIT_PENDING if found but not yet readable, or RETRY if the
+            lookup should be retried later.
         """
         pass
 
