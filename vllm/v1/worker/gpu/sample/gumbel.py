@@ -23,7 +23,7 @@ def _temperature_kernel(
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
 ):
-    token_idx = tl.program_id(0)
+    token_idx = tl.program_id(0).to(tl.int64)
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
     temperature = tl.load(temperature_ptr + req_state_idx).to(tl.float32)
     if temperature == 0.0 or temperature == 1.0:
@@ -91,7 +91,7 @@ def gumbel_block_argmax(
     USE_FP64: tl.constexpr,
     PER_TOKEN_COL: tl.constexpr = False,
 ):
-    req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx).to(tl.int64)
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
     if temp != 0.0 and APPLY_TEMPERATURE:
         # Apply temperature.
@@ -169,7 +169,7 @@ def _gumbel_sample_kernel(
     USE_FP64: tl.constexpr,
     PER_TOKEN_COL: tl.constexpr,
 ):
-    token_idx = tl.program_id(0)
+    token_idx = tl.program_id(0).to(tl.int64)
     block_idx = tl.program_id(1)
     block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = block < vocab_size
