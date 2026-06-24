@@ -775,6 +775,8 @@ def build_prefill_chunk_metadata(
     torch.cumsum(compressed_seq_lens[start_idx:end_idx], dim=0, out=cu_seq_lens[1:])
 
     local_cu_seq_lens: torch.Tensor | None = None
+    local_cu_seq_len_ks: torch.Tensor | None = None
+    local_cu_seq_len_ke: torch.Tensor | None = None
     local_total_seq_lens = 0
     max_local_total_seq_lens = 0
     if dcp_world_size > 1:
@@ -918,9 +920,8 @@ def _build_prefill_chunk_metadata_kernel(
         # Compute cu_seq_len_ks
         tl.store(cu_compressed_seq_len_ks_ptr + out_pos, seq_start, mask=mask)
 
-        # Compute cu_seq_len_ke. The sparse indexer prefill path gathers K
-        # from all DCP ranks back into global order before computing logits,
-        # so this must remain the global causal bound.
+        # Compute global cu_seq_len_ke. DCP prefill stores local row bounds
+        # below when DCP_WORLD > 1.
         global_ctx = start_pos + 1 + offset
         seq_len_per_token = global_ctx // COMPRESS_RATIO
         tl.store(
