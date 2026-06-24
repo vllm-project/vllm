@@ -8,7 +8,6 @@ from torch.utils._python_dispatch import TorchDispatchMode
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm import _custom_ops as ops
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
@@ -74,9 +73,6 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_block_fp8_supported,
     cutlass_fp8_supported,
     normalize_e4m3fn_to_e4m3fnuz,
-)
-from vllm.model_executor.model_loader.reload.layerwise import (
-    initialize_online_processing,
 )
 from vllm.model_executor.parameter import (
     BlockQuantScaleParameter,
@@ -213,10 +209,13 @@ class Fp8Config(QuantizationConfig):
 
                 return Mxfp4MoEMethod(layer.moe_config)
             if self.is_checkpoint_fp8_serialized:
-                moe_quant_method = Fp8MoEMethod(self, layer)
+                return Fp8MoEMethod(self, layer)
             else:
-                moe_quant_method = Fp8OnlineMoEMethod(self, layer)
-            return moe_quant_method
+                from vllm.model_executor.layers.quantization.online.fp8 import (
+                    Fp8PerTensorOnlineMoEMethod,
+                )
+
+                return Fp8PerTensorOnlineMoEMethod(layer=layer)
         elif isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
         return None
@@ -486,9 +485,6 @@ class Fp8LinearMethod(LinearMethodBase):
                         # Fallback
                         weight_bf16 = weight_fp8 * weight_scale
                 return torch.nn.functional.linear(x, weight_bf16.t(), bias)
-
-        if self.use_marlin:
-            return self.fp8_linear.apply_weights(layer, x, bias)
 
         return self.fp8_linear.apply_weights(layer, x, bias)
 
@@ -871,6 +867,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             a2_scale=a2_scale,
             block_shape=self.weight_block_size,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
+            gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+            gemm1_beta=getattr(layer, "swiglu_beta", None),
         )
 
         # Inject biases into the quant config if the model has them
