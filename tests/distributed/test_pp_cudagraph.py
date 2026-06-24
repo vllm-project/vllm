@@ -3,6 +3,8 @@
 import pytest
 from typing_extensions import LiteralString
 
+from vllm.platforms import current_platform
+
 from ..utils import compare_two_settings, create_new_process_for_each_test
 
 
@@ -14,9 +16,10 @@ from ..utils import compare_two_settings, create_new_process_for_each_test
 )
 @pytest.mark.parametrize(
     "ATTN_BACKEND",
-    [
-        "FLASH_ATTN",
-    ],
+    # The unified FLASH_ATTN backend is CUDA-only: on ROCm get_flash_attn_version()
+    # returns None and FlashAttentionImpl.forward() passes FA3/FA4-only kwargs that
+    # the upstream ROCm flash-attn does not accept. Use the ROCm-native backend.
+    ["TRITON_ATTN"] if current_platform.is_rocm() else ["FLASH_ATTN"],
 )
 @create_new_process_for_each_test()
 def test_pp_cudagraph(
