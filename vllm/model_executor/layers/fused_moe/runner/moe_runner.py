@@ -37,9 +37,6 @@ from vllm.model_executor.layers.fused_moe.routed_experts import (
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
-from vllm.model_executor.layers.fused_moe.router.zero_expert_router import (
-    ZeroExpertRouter,
-)
 from vllm.model_executor.layers.fused_moe.runner.moe_runner_interface import (
     MoERunnerInterface,
 )
@@ -145,7 +142,8 @@ def _moe_forward_fake(
     # as an op arg (not peeked from the layer registry) to keep the fake
     # a pure shape function of its inputs and preserve subgraph dedup.
     if hidden_dim_unpadded > 0:
-        fused_out = hidden_states.new_empty((*hidden_states.shape[:-1], hidden_dim_unpadded))
+        fused_out = hidden_states.new_empty(
+            (*hidden_states.shape[:-1], hidden_dim_unpadded))
     else:
         fused_out = torch.empty_like(hidden_states)
     # Return zero tensor for zero_expert_output (not used in monolithic path)

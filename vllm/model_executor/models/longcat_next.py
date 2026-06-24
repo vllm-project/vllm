@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only LongCat-Next unified multimodal model."""
 
+import contextlib
 import os
 import tempfile
 from collections.abc import Iterable, Iterator, Mapping, Sequence
@@ -1146,9 +1147,8 @@ class LongcatNextWhisperEncoder(WhisperEncoder):
             embeds = nn.functional.gelu(self.conv2(embeds))
             embeds = embeds.transpose(-1, -2)  # [seq_len, d_model]
             # Match original: float32 addition for numerical precision
-            embeds = (embeds.float() + self.embed_positions.weight[: embeds.size(0)]).to(
-                embeds.dtype
-            )
+            pos_embed = self.embed_positions.weight[:embeds.size(0)]
+            embeds = (embeds.float() + pos_embed).to(embeds.dtype)
             hidden_states_list.append(embeds)
         # [bs, max_seq_len, d_model]
         hidden_states = torch.stack(hidden_states_list, dim=0)
@@ -1835,10 +1835,8 @@ class LongcatNextMultiModalProcessor(
             finally:
                 # Clean up all temporary files
                 for path in audio_paths:
-                    try:
+                    with contextlib.suppress(OSError):
                         os.unlink(path)
-                    except OSError:
-                        pass
 
         return BatchFeature(
             data=merged_data,
@@ -2252,10 +2250,10 @@ class LongcatNextForCausalLM(
 
         # Configure multimodal token handling
         # CRITICAL: Use text_vocab_size (131072), NOT vocab_size (282624).
-        # All multimodal tokens (131103-131109, 131116, 131120-131124) are >= text_vocab_size, so
-        # _has_oov_mm_tokens becomes True. This causes _embed_text_input_ids
-        # to mask them to 0 BEFORE ngram embedding, matching the HF model
-        # which explicitly zeroes them at line 153:
+        # All multimodal tokens (131103-131109, 131116, 131120-131124) are
+        # >= text_vocab_size, so _has_oov_mm_tokens becomes True. This causes
+        # _embed_text_input_ids to mask them to 0 BEFORE ngram embedding,
+        # matching the HF model which explicitly zeroes them at line 153:
         #   input_ids[:, special_audio_mask | special_visual_mask] = 0
         # Without this, the multimodal token IDs pollute the n-gram hash
         # context for surrounding text tokens, degrading output quality.

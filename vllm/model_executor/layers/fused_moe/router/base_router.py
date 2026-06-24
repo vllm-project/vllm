@@ -272,7 +272,8 @@ class BaseRouter(FusedMoERouter):
 
         This method implements the template method pattern:
         1. Validates EPLB state
-        2. Calls _compute_routing() to get topk_weights, topk_ids, and zero_expert_output
+        2. Calls _compute_routing() to get topk_weights, topk_ids,
+           and zero_expert_output
         3. Applies EPLB mapping if enabled
         4. Converts indices dtype if needed
 
