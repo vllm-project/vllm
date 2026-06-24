@@ -23,6 +23,14 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
 )
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
+    CompressedTensorsMoEMethod,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kNvfp4Dynamic,
+    kNvfp4Static,
+)
+from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 
 # Backends for which we've verified EPLB rearrangement preserves the
 # layout the kernel expects (registered Parameters are per-expert
@@ -34,14 +42,6 @@ _EPLB_SUPPORTED_NVFP4_BACKENDS = frozenset(
         NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED,
     }
 )
-from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
-    CompressedTensorsMoEMethod,
-)
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    kNvfp4Dynamic,
-    kNvfp4Static,
-)
-from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 
 logger = init_logger(__name__)
 
