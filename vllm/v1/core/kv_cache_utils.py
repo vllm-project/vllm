@@ -2235,3 +2235,22 @@ class BlockHashListWithBlockSize:
 
 
 BlockHashList = list[BlockHash] | BlockHashListWithBlockSize
+
+
+def resolve_block_hashes(
+    request: Request,
+    hash_block_size: int,
+    block_size: int,
+) -> BlockHashList:
+    """Resolve the block-hash view for ``request`` at ``block_size``.
+
+    When ``block_size`` equals ``hash_block_size``, reuse the request's
+    precomputed ``block_hashes`` directly; otherwise recalculate at
+    ``block_size`` granularity (``block_size`` must be a multiple of
+    ``hash_block_size``, which happens when KV cache groups differ in
+    block size).
+    """
+    if block_size == hash_block_size:
+        return request.block_hashes
+    assert block_size % hash_block_size == 0
+    return BlockHashListWithBlockSize(request.block_hashes, hash_block_size, block_size)

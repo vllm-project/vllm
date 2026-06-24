@@ -14,8 +14,6 @@ from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
-    BlockHashList,
-    BlockHashListWithBlockSize,
     BlockHashWithGroupId,
     ExternalBlockHash,
     FreeKVCacheBlockQueue,
@@ -25,6 +23,7 @@ from vllm.v1.core.kv_cache_utils import (
     get_group_id,
     make_block_hash_with_group_id,
     maybe_convert_block_hash,
+    resolve_block_hashes,
 )
 from vllm.v1.request import Request
 
@@ -261,7 +260,7 @@ class BlockPool:
             return
         new_full_blocks = blocks[num_cached_blocks:num_full_blocks]
         assert block_mask is None or len(block_mask) == len(new_full_blocks)
-        block_hashes = self._resolve_block_hashes(request, block_size)
+        block_hashes = resolve_block_hashes(request, self.hash_block_size, block_size)
 
         new_block_hashes = block_hashes[num_cached_blocks:]
         new_hashes: list[ExternalBlockHash] | None = (
@@ -340,26 +339,6 @@ class BlockPool:
                 )
             )
 
-    def _resolve_block_hashes(
-        self,
-        request: Request,
-        block_size: int,
-    ) -> BlockHashList:
-        """Resolve the block-hash view for ``request`` at ``block_size``.
-
-        When ``block_size`` equals ``hash_block_size``, reuse the request's
-        precomputed ``block_hashes`` directly; otherwise recalculate at
-        ``block_size`` granularity (``block_size`` must be a multiple of
-        ``hash_block_size``, which happens when KV cache groups differ in
-        block size).
-        """
-        if block_size == self.hash_block_size:
-            return request.block_hashes
-        assert block_size % self.hash_block_size == 0
-        return BlockHashListWithBlockSize(
-            request.block_hashes, self.hash_block_size, block_size
-        )
-
     def _build_block_stored_event(
         self,
         request: Request,
@@ -411,7 +390,7 @@ class BlockPool:
         if not self.enable_kv_cache_events or num_cached_blocks == 0:
             return
 
-        block_hashes = self._resolve_block_hashes(request, block_size)
+        block_hashes = resolve_block_hashes(request, self.hash_block_size, block_size)
 
         # Collect external hashes and extra_keys for cached blocks.
         cached_hashes: list[ExternalBlockHash] = []
