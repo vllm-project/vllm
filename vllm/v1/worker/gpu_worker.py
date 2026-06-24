@@ -287,10 +287,101 @@ class Worker(WorkerBase):
 
             current_platform.check_if_supports_dtype(self.model_config.dtype)
 
+            # Optionally take the memory snapshot *before* NCCL initialization.
+            #
+            # By default vLLM takes the snapshot *after* NCCL init so that the
+            # post-NCCL "free" reading already accounts for the per-rank NCCL
+            # workspace. That works well on homogeneous server GPUs where the
+            # NCCL workspace is small and roughly symmetric across ranks.
+            #
+            # On consumer / smaller-VRAM cards running TP+PP, the NCCL
+            # workspace per rank can be asymmetric: PP-terminal ranks (the last
+            # PP stage) and the rank that wins extra TP channels can end up
+            # several GiB heavier than the rank-0 worker (~8.8 GiB observed on
+            # cuda:2 with TP=2 PP=2 on 4x 24GB GPUs, vs. ~1-2 GiB on rank 0).
+            # When `gpu_memory_utilization` is computed against the post-NCCL
+            # "free" reading, the heaviest rank's KV-cache ask can exceed its
+            # remaining free memory and the engine OOMs at init with a
+            # confusing "free on cuda:N is less than desired" message even
+            # though aggregate VRAM was sufficient.
+            #
+            # Setting VLLM_INIT_SNAPSHOT_BEFORE_NCCL=1 takes the snapshot
+            # immediately after device selection (pre-NCCL), so the
+            # `gpu_memory_utilization` budget is computed against the truly
+            # free VRAM at process start and the NCCL workspace is accounted
+            # against the *user-requested* GMU rather than silently consuming
+            # it. Default OFF — upstream behavior unchanged unless opted in.
+            #
+            # NCCL allocation timing assumption (MED-4): at the time of
+            # writing (NCCL 2.21+), the bulk of per-rank workspace (proxy
+            # buffers, comm channels, internal scratch) is allocated EAGERLY
+            # during `init_distributed_environment` /
+            # `ensure_model_parallel_initialized`. Some collectives may grow
+            # workspace lazily on first use; any such late allocation is
+            # captured later by `non_torch_increase` in the memory profiler,
+            # so the budget remains correct (more conservative if NCCL
+            # allocates lazily). The only thing this snapshot-ordering
+            # changes is whether the EAGER NCCL workspace is paid out of
+            # `gpu_memory_utilization` (post-NCCL snapshot, default) or out
+            # of headroom OUTSIDE GMU (pre-NCCL snapshot, this branch).
+            # Lazy NCCL allocation is therefore safe for both code paths.
+            # MED-B (round-N+4): gate the three new `_startup_*` attrs
+            # behind the env flag so the default-off path does NOT add
+            # `_startup_free_bytes`/`_startup_total_bytes`/`_startup_snapshot`
+            # to every Worker. Test fixtures and external callers that
+            # use `hasattr(worker, '_startup_free_bytes')` for feature
+            # detection then continue to see False on the default path,
+            # preserving introspection compatibility. Readers should use
+            # `getattr(self, '_startup_free_bytes', None)` to defend
+            # against this.
+            snapshot_before_nccl = envs.VLLM_INIT_SNAPSHOT_BEFORE_NCCL
+            if snapshot_before_nccl:
+                # MED-3: stash the actual MemorySnapshot OBJECT taken pre-NCCL
+                # so the regression test can assert OBJECT IDENTITY (not just
+                # value equality) that `self.init_snapshot` is the reused
+                # pre-NCCL snapshot. A regression that constructs a fresh
+                # post-NCCL snapshot and copies its free_memory field would
+                # defeat a value-only check; an `is` check cannot be defeated.
+                gc.collect()
+                torch.accelerator.empty_cache()
+                pre_nccl_snapshot = MemorySnapshot(device=self.device)
+                self._startup_snapshot: MemorySnapshot | None = pre_nccl_snapshot
+                self._startup_free_bytes: int | None = (
+                    pre_nccl_snapshot.free_memory
+                )
+                self._startup_total_bytes: int | None = (
+                    pre_nccl_snapshot.total_memory
+                )
+                logger.info(
+                    "VLLM_INIT_SNAPSHOT_BEFORE_NCCL=1: pre-NCCL free memory "
+                    "on %s = %.2f GiB (rank=%d local_rank=%d)",
+                    self.device,
+                    pre_nccl_snapshot.free_memory / GiB_bytes,
+                    self.rank,
+                    self.local_rank,
+                )
+                # MED-1: surface the pre-NCCL startup snapshot as a
+                # Prometheus gauge so operators on multi-rank consumer-GPU
+                # boxes can SEE the asymmetric per-rank free-VRAM at startup
+                # (the very signal this env flag is built around).
+                #
+                # HIGH (round-N+4): the gauge wiring auto-detects whether
+                # PROMETHEUS_MULTIPROC_DIR is set (multi-API-server path)
+                # and falls back to a regular non-multiprocess Gauge in
+                # the single-API-server case (the standard TP+PP target).
+                # Without that fallback the gauge silently dies on the
+                # exact deployment shape this PR is meant to instrument.
+                _emit_startup_free_bytes_gauge(
+                    rank=self.rank,
+                    free_bytes=pre_nccl_snapshot.free_memory,
+                    total_bytes=pre_nccl_snapshot.total_memory,
+                    served_model_name=self.model_config.served_model_name,
+                )
+
             # Initialize the distributed environment BEFORE taking
-            # memory snapshot
+            # memory snapshot (default upstream behavior).
             # This ensures NCCL buffers are allocated before we measure
-            # available memory
+            # available memory.
             init_worker_distributed_environment(
                 self.vllm_config,
                 self.rank,
@@ -310,7 +401,16 @@ class Worker(WorkerBase):
             torch.accelerator.empty_cache()
 
             # take current memory snapshot
-            self.init_snapshot = init_snapshot = MemorySnapshot(device=self.device)
+            if snapshot_before_nccl:
+                # Reuse the pre-NCCL snapshot for memory budgeting, so the GMU
+                # ask is computed against truly-free VRAM rather than against
+                # the post-NCCL free reading (which is asymmetric across ranks
+                # on consumer GPUs running TP+PP).
+                self.init_snapshot = init_snapshot = pre_nccl_snapshot
+            else:
+                self.init_snapshot = init_snapshot = MemorySnapshot(
+                    device=self.device
+                )
             self.requested_memory = request_memory(init_snapshot, self.cache_config)
             logger.debug("worker init memory snapshot: %r", self.init_snapshot)
             logger.debug(
@@ -449,9 +549,29 @@ class Worker(WorkerBase):
         free_gpu_memory = profile_result.after_profile.free_memory
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
-        assert self.init_snapshot.free_memory >= free_gpu_memory, (
+        #
+        # MED-C (round-N+4): with VLLM_INIT_SNAPSHOT_BEFORE_NCCL=1,
+        # `self.init_snapshot` is the PRE-NCCL snapshot, so
+        # `init_snapshot.free_memory >= profile_result.after_profile.free_memory`
+        # is trivially true (pre-NCCL free >> post-profile free) and the
+        # concurrent-GPU guard the original assertion was meant to enforce
+        # gets silently disarmed. Use the POST-NCCL baseline
+        # (`profile_result.before_profile`, taken at the start of
+        # `memory_profiling` so it reflects post-NCCL state for both code
+        # paths) as the diagnostic baseline. This preserves the
+        # concurrent-GPU check on both default-off and env-on paths, while
+        # `self.init_snapshot` remains the budget baseline.
+        #
+        # On the default-off path `before_profile.free_memory` matches the
+        # historical `init_snapshot.free_memory` byte-for-byte (both are
+        # post-NCCL, taken at roughly the same point), so behavior is
+        # preserved. On the env-on path the assertion is the only one
+        # actually catching concurrent-GPU regressions.
+        concurrent_gpu_baseline = profile_result.before_profile.free_memory
+        assert concurrent_gpu_baseline >= free_gpu_memory, (
             "Error in memory profiling. "
-            f"Initial free memory {format_gib(self.init_snapshot.free_memory)} GiB, "
+            f"Initial free memory (post-NCCL baseline) "
+            f"{format_gib(concurrent_gpu_baseline)} GiB, "
             f"current free memory {format_gib(free_gpu_memory)} GiB. "
             "This happens when other processes sharing the same container "
             "release GPU memory while vLLM is profiling during initialization. "
@@ -463,6 +583,56 @@ class Worker(WorkerBase):
             - profile_result.non_kv_cache_memory
             - cudagraph_memory_estimate_applied
         )
+
+        # MED-2: when the GMU-derived budget cannot even cover the non-KV
+        # needs (model weights + activations + non-torch incl. NCCL
+        # workspace + cudagraph estimate), the downstream
+        # `_check_enough_kv_cache_memory(available_memory <= 0, ...)` raises
+        # "Try increasing gpu_memory_utilization" — which is the OPPOSITE
+        # of the actual remediation when NCCL workspace inflation is the
+        # cause. Detect this case here, where we still have all components
+        # in scope, and emit an actionable message instead.
+        if self.available_kv_cache_memory_bytes <= 0:
+            model_mem = int(self.model_runner.model_memory_usage)
+            non_torch_mem = int(profile_result.non_torch_increase)
+            activation_mem = int(profile_result.torch_peak_increase)
+            cg_mem = int(cudagraph_memory_estimate_applied)
+            non_kv = model_mem + non_torch_mem + activation_mem + cg_mem
+            shortfall = non_kv - int(self.requested_memory)
+
+            # Estimate the GMU value that would just-barely fit non-KV
+            # plus a tiny KV slice (5% of total memory floor), so the
+            # suggestion is concretely actionable.
+            total = int(self.init_snapshot.total_memory)
+            min_kv_slice = total // 20  # 5% of total
+            min_required = non_kv + min_kv_slice
+            suggested_gmu = min(round(min_required / max(total, 1), 4), 1.0)
+
+            raise ValueError(
+                "GPU memory utilization budget is too low to accommodate "
+                "non-KV-cache needs on "
+                f"{getattr(self.init_snapshot, 'device_', self.device)}: "
+                f"model weights {format_gib(model_mem)} GiB + "
+                f"peak activations {format_gib(activation_mem)} GiB + "
+                f"non-torch (incl. NCCL workspace) "
+                f"{format_gib(non_torch_mem)} GiB + "
+                f"CUDAGraph estimate {format_gib(cg_mem)} GiB = "
+                f"{format_gib(non_kv)} GiB, but the GMU-derived budget is "
+                f"only {format_gib(self.requested_memory)} GiB "
+                f"(shortfall: {format_gib(shortfall)} GiB). "
+                "Either RAISE --gpu-memory-utilization (current: "
+                f"{self.cache_config.gpu_memory_utilization}, suggested: "
+                f">= {suggested_gmu}) so the budget covers non-KV plus a "
+                "KV slice, REDUCE --tensor-parallel-size or "
+                "--pipeline-parallel-size (less NCCL workspace per rank), "
+                "or use a smaller model. NOTE: lowering "
+                "gpu_memory_utilization here will make this WORSE, not "
+                "better. Consider also setting "
+                "VLLM_INIT_SNAPSHOT_BEFORE_NCCL=1 if you are on a "
+                "multi-rank consumer-GPU setup; that path budgets GMU "
+                "against pre-NCCL free VRAM and pays the NCCL workspace "
+                "out of headroom."
+            )
 
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
         logger.debug(
@@ -1202,3 +1372,102 @@ def init_worker_distributed_environment(
     # Init ec connector here before KV caches init
     # NOTE: We do not init KV caches for Encoder-only instance in EPD disagg mode
     ensure_ec_transfer_initialized(vllm_config)
+
+
+# ---------------------------------------------------------------------------
+# Startup observability — Prometheus gauge for pre-NCCL free-VRAM per rank.
+# Wired by Worker.init_device when VLLM_INIT_SNAPSHOT_BEFORE_NCCL=1, so
+# operators on TP+PP consumer-GPU setups can see the per-rank asymmetric
+# free-memory the env flag is meant to defend against.
+#
+# Workers run in subprocesses; the API-server-side prometheus_client
+# multiprocess collector aggregates these via PROMETHEUS_MULTIPROC_DIR
+# (set up by setup_multiprocess_prometheus() before workers spawn) when
+# `num_api_servers > 1`. In the single-API-server case (the standard
+# TP+PP deployment we target), PROMETHEUS_MULTIPROC_DIR is NOT set, so
+# we fall back to a non-multiprocess Gauge that still scrapes via the
+# local registry on the rank that emits. See HIGH finding (round-N+4).
+# Module-level "registered once" guard avoids duplicate-collector errors
+# if init_device is invoked twice in a long-lived process (e.g. tests).
+# ---------------------------------------------------------------------------
+_STARTUP_FREE_BYTES_GAUGE: Any | None = None
+_STARTUP_TOTAL_BYTES_GAUGE: Any | None = None
+
+
+def _emit_startup_free_bytes_gauge(
+    rank: int,
+    free_bytes: int,
+    total_bytes: int,
+    served_model_name: str,
+) -> None:
+    """Emit per-rank pre-NCCL startup free-VRAM as a Prometheus gauge.
+
+    Best-effort — if `prometheus_client` is unavailable in the worker
+    process or registration fails (e.g. a duplicate collector with the
+    same name from a previous incarnation), we log and move on. We never
+    let an observability hiccup break worker init.
+    """
+    global _STARTUP_FREE_BYTES_GAUGE, _STARTUP_TOTAL_BYTES_GAUGE
+    try:
+        from prometheus_client import Gauge as _PromGauge
+    except Exception as exc:  # pragma: no cover - prometheus is a hard dep
+        logger.debug(
+            "prometheus_client unavailable; skipping startup_free_bytes "
+            "gauge: %s",
+            exc,
+        )
+        return
+
+    # HIGH (round-N+4): in single-API-server deployments
+    # (`num_api_servers <= 1`), `setup_multiprocess_prometheus()` is NEVER
+    # invoked, so `PROMETHEUS_MULTIPROC_DIR` is unset. Registering a Gauge
+    # with `multiprocess_mode="mostrecent"` in that environment causes
+    # `prometheus_client` to raise (or, worse, silently no-op on `set()`)
+    # because the multiprocess machinery has no shared dir to write to.
+    # The standard TP+PP single-API-server case is precisely the target
+    # user of this PR — the gauge MUST emit there. Detect at gauge-create
+    # time whether multiproc mode is active; if not, fall back to a
+    # regular non-multiprocess Gauge that still scrapes via the local
+    # registry on the rank that emits.
+    multiproc_dir = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
+    gauge_kwargs_extra: dict[str, str] = {}
+    if multiproc_dir:
+        gauge_kwargs_extra["multiprocess_mode"] = "mostrecent"
+
+    try:
+        if _STARTUP_FREE_BYTES_GAUGE is None:
+            _STARTUP_FREE_BYTES_GAUGE = _PromGauge(
+                name="vllm:startup_free_bytes",
+                documentation=(
+                    "Pre-NCCL free GPU memory in bytes captured at worker "
+                    "init when VLLM_INIT_SNAPSHOT_BEFORE_NCCL=1. Used to "
+                    "diagnose asymmetric per-rank NCCL workspace on TP+PP "
+                    "consumer-GPU setups."
+                ),
+                labelnames=["rank", "model_name"],
+                **gauge_kwargs_extra,
+            )
+        if _STARTUP_TOTAL_BYTES_GAUGE is None:
+            _STARTUP_TOTAL_BYTES_GAUGE = _PromGauge(
+                name="vllm:startup_total_bytes",
+                documentation=(
+                    "Total GPU memory in bytes at worker init "
+                    "(reported alongside vllm:startup_free_bytes when "
+                    "VLLM_INIT_SNAPSHOT_BEFORE_NCCL=1)."
+                ),
+                labelnames=["rank", "model_name"],
+                **gauge_kwargs_extra,
+            )
+        _STARTUP_FREE_BYTES_GAUGE.labels(
+            rank=str(rank), model_name=served_model_name
+        ).set(free_bytes)
+        _STARTUP_TOTAL_BYTES_GAUGE.labels(
+            rank=str(rank), model_name=served_model_name
+        ).set(total_bytes)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug(
+            "Failed to register/set vllm:startup_free_bytes gauge "
+            "(rank=%d): %s",
+            rank,
+            exc,
+        )

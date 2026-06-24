@@ -135,6 +135,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
+    VLLM_INIT_SNAPSHOT_BEFORE_NCCL: bool = False
     VLLM_DISABLE_COMPILE_CACHE: bool = False
     VLLM_USE_LAYERNAME: bool = True
     Q_SCALE_CONSTANT: int = 200
@@ -1238,6 +1239,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_LOG_BATCHSIZE_INTERVAL": lambda: float(
         os.getenv("VLLM_LOG_BATCHSIZE_INTERVAL", "-1")
+    ),
+    # If set to 1, take the worker's init-time memory snapshot *before* NCCL
+    # initialization, so the gpu_memory_utilization budget is computed against
+    # truly-free VRAM rather than the post-NCCL "free" reading. Default 0
+    # preserves upstream behavior. Useful on consumer GPUs running TP+PP where
+    # the per-rank NCCL workspace is asymmetric and the heaviest rank
+    # (typically the last PP stage) would otherwise OOM at init even though
+    # aggregate VRAM is sufficient. See the comment in
+    # vllm/v1/worker/gpu_worker.py::init_device for details.
+    "VLLM_INIT_SNAPSHOT_BEFORE_NCCL": lambda: bool(
+        int(os.getenv("VLLM_INIT_SNAPSHOT_BEFORE_NCCL", "0"))
     ),
     "VLLM_DISABLE_COMPILE_CACHE": disable_compile_cache,
     # If set to "0", disable LayerName opaque type for layer_name
