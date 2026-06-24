@@ -1996,14 +1996,16 @@ class DPEngineCoreProc(EngineCoreProc):
                 # Execute a dummy pass when no ready requests ran, unless the
                 # engine is sleeping.
                 elif not self.model_executor.is_sleeping:
-                  pending_iteration = self._start_iteration_details(None)
-                  self.execute_dummy_batch()
-                  iteration_details = self._finish_iteration_details(pending_iteration)
-                  if iteration_details is not None and not self.has_coordinator:
-                    stats = self._make_iteration_details_stats(iteration_details)
-                    self.output_queue.put_nowait(
-                        (0, EngineCoreOutputs(scheduler_stats=stats))
+                    pending_iteration = self._start_iteration_details(None)
+                    self.execute_dummy_batch()
+                    iteration_details = self._finish_iteration_details(
+                        pending_iteration
                     )
+                    if iteration_details is not None and not self.has_coordinator:
+                        stats = self._make_iteration_details_stats(iteration_details)
+                        self.output_queue.put_nowait(
+                            (0, EngineCoreOutputs(scheduler_stats=stats))
+                        )
 
             # 3) All-reduce operation to determine global unfinished reqs.
             self.engines_running = self._has_global_unfinished_reqs(
