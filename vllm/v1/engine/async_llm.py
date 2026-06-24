@@ -67,6 +67,95 @@ class InputStreamError(Exception):
         super().__init__(str(cause))
 
 
+class DecodeLivenessTracker:
+    """API-process-local forward-progress bookkeeping for /health/decode.
+
+    Every signal here is written within the API server process and does NOT
+    depend on EngineCore (a separate process) producing output. That is the
+    whole point: when EngineCore deadlocks (e.g. the PP/NCCL collective hang
+    at decode step 0 in vllm-project/vllm#45094), ``get_output_async()`` never
+    returns, so the StatLoggerManager heartbeat — driven by ``record()`` in
+    the ``output_handler`` loop — freezes and ``/health/decode`` could only
+    ever observe a stale "idle" state. The counters here instead advance at
+    request *admission* time (which runs in this process, before the ZMQ send
+    to EngineCore), so the route can detect "work was admitted but the engine
+    has produced nothing for it past the stall threshold".
+
+    Kept as a standalone object (not methods on AsyncLLM) so the
+    ``output_handler`` background task can capture it directly without forming
+    a circular reference back to the AsyncLLM instance (which would defeat
+    garbage collection — see ``_run_output_handler``).
+    """
+
+    def __init__(self) -> None:
+        # Number of requests admitted to this process that have not finished.
+        self._inflight_count: int = 0
+        # req_ids of all admitted-but-not-finished requests. Used to make
+        # finish accounting idempotent (an abort racing the terminal output
+        # must not double-decrement).
+        self._inflight_ids: set[str] = set()
+        # req_id -> monotonic() admission time, for in-flight requests that
+        # have received ZERO outputs so far. Removed on the request's first
+        # output (it has now progressed) or on finish/abort without output.
+        self._admission_times: dict[str, float] = {}
+        # monotonic() of the most recent get_output_async() return that
+        # carried ANY output (a pure prefill chunk with 0 generation tokens
+        # still counts). None until the engine produces its first output.
+        self._last_progress_time: float | None = None
+
+    def record_admission(self, request_id: str) -> None:
+        """Called at request admission (API process, pre-EngineCore-send)."""
+        if request_id in self._inflight_ids:
+            return
+        self._inflight_ids.add(request_id)
+        self._inflight_count += 1
+        self._admission_times[request_id] = time.monotonic()
+
+    def record_progress(self) -> None:
+        """Called on EVERY get_output_async() return that has output."""
+        self._last_progress_time = time.monotonic()
+
+    def mark_request_progressed(self, request_id: str) -> None:
+        """Called when a request receives any output — it is no longer an
+        un-progressed admission."""
+        self._admission_times.pop(request_id, None)
+
+    def record_finished(self, request_id: str) -> None:
+        """Called when a request finishes or is aborted. Idempotent: only the
+        first call for a given request decrements the in-flight count, so an
+        abort racing the terminal output can't double-count."""
+        self._admission_times.pop(request_id, None)
+        if request_id in self._inflight_ids:
+            self._inflight_ids.discard(request_id)
+            self._inflight_count = max(0, self._inflight_count - 1)
+
+    def snapshot(self) -> tuple[int, float | None, float | None]:
+        """Return ``(inflight_count, last_progress_age,
+        oldest_unprogressed_admission_age)``.
+
+        * ``inflight_count``: admitted-but-not-finished request count.
+        * ``last_progress_age``: seconds since the last output of any kind,
+          or ``None`` if the engine has never produced output.
+        * ``oldest_unprogressed_admission_age``: seconds since the admission
+          of the oldest in-flight request that has received ZERO outputs, or
+          ``None`` if every in-flight request has produced at least one
+          output (or there are none).
+        """
+        now = time.monotonic()
+        last_progress_age = (
+            None
+            if self._last_progress_time is None
+            else max(0.0, now - self._last_progress_time)
+        )
+        if self._admission_times:
+            oldest_unprogressed_age = max(
+                0.0, now - min(self._admission_times.values())
+            )
+        else:
+            oldest_unprogressed_age = None
+        return self._inflight_count, last_progress_age, oldest_unprogressed_age
+
+
 class AsyncLLM(EngineClient):
     """An asynchronous wrapper for the vLLM engine."""
 
@@ -166,6 +255,10 @@ class AsyncLLM(EngineClient):
             self.logger_manager.log_engine_initialized()
 
         self._client_count = client_count
+
+        # API-process-local forward-progress tracker for /health/decode. See
+        # DecodeLivenessTracker for why this must NOT depend on EngineCore.
+        self._decode_liveness = DecodeLivenessTracker()
 
         self.output_handler: asyncio.Task | None = None
         try:
@@ -408,6 +501,11 @@ class AsyncLLM(EngineClient):
         # Add the request to OutputProcessor (this process).
         self.output_processor.add_request(request, prompt, parent_req, index, queue)
 
+        # API-process-local forward-progress admission heartbeat. This runs
+        # in THIS process, before (and independent of) the ZMQ send to
+        # EngineCore below, so it advances even when EngineCore is wedged.
+        self._decode_liveness.record_admission(request.request_id)
+
         # Add the EngineCoreRequest to EngineCore (separate process).
         await self.engine_core.add_request_async(request)
 
@@ -645,6 +743,9 @@ class AsyncLLM(EngineClient):
         engine_core = self.engine_core
         output_processor = self.output_processor
         log_stats = self.log_stats
+        # Capture the tracker locally (not via self) for the same
+        # no-circular-ref reason as the other locals here.
+        decode_liveness = self._decode_liveness
         # We use a mutable list for logger_manager so that it can be updated
         # during elastic EP scaling (see scale_elastic_ep) without creating
         # a circular reference via self.
@@ -659,6 +760,21 @@ class AsyncLLM(EngineClient):
                     # 1) Pull EngineCoreOutputs from the EngineCore.
                     outputs = await engine_core.get_output_async()
                     num_outputs = len(outputs.outputs)
+
+                    # API-local forward-progress heartbeat: ANY output (even a
+                    # pure prefill chunk with 0 generation tokens) is progress.
+                    # Also clear each output's request from the "un-progressed
+                    # admission" set and decrement in-flight on its terminal
+                    # output. Done here — directly off get_output_async() —
+                    # rather than inside process_outputs(), so a deadlock that
+                    # starves get_output_async() leaves these signals frozen
+                    # (which is exactly what /health/decode keys off of).
+                    if num_outputs:
+                        decode_liveness.record_progress()
+                        for eco in outputs.outputs:
+                            decode_liveness.mark_request_progressed(eco.request_id)
+                            if eco.finish_reason is not None:
+                                decode_liveness.record_finished(eco.request_id)
 
                     iteration_stats = (
                         IterationStats() if (log_stats and num_outputs) else None
@@ -716,6 +832,12 @@ class AsyncLLM(EngineClient):
         )
         all_request_ids = self.output_processor.abort_requests(request_ids, internal)
         await self.engine_core.abort_requests_async(all_request_ids)
+
+        # Release in-flight liveness accounting for aborted requests. Idempotent
+        # with the terminal-output path in output_handler, so double-counting is
+        # not possible if an abort races a finishing output.
+        for rid in all_request_ids:
+            self._decode_liveness.record_finished(rid)
 
         if self.log_requests:
             logger.info("Aborted request(s) %s.", ",".join(request_ids))
@@ -901,6 +1023,31 @@ class AsyncLLM(EngineClient):
         logger.debug("Called check_health.")
         if self.errored:
             raise self.dead_error
+
+    async def get_decode_liveness(self) -> tuple[int, float | None, float | None]:
+        """Snapshot of API-process-local forward-progress liveness.
+
+        Returns ``(inflight_count, last_progress_age,
+        oldest_unprogressed_admission_age)``:
+
+        * ``inflight_count``: requests admitted to THIS process that have not
+          finished. Counted at admission and at finish entirely within the
+          API process — it does NOT come from EngineCore's
+          ``scheduler_stats.num_running_reqs`` (which freezes when EngineCore
+          deadlocks).
+        * ``last_progress_age``: seconds since the last output of ANY kind
+          arrived from EngineCore, or ``None`` if none ever has.
+        * ``oldest_unprogressed_admission_age``: seconds since the oldest
+          in-flight request that has received ZERO outputs was admitted, or
+          ``None``. This is what catches a decode-step-0 deadlock, where work
+          is in flight but ``last_progress_age`` is ``None`` because the engine
+          never emitted anything.
+
+        Because every signal advances without EngineCore cooperation, the
+        /health/decode route can detect a stall even when EngineCore is wedged
+        and the StatLoggerManager heartbeat is frozen.
+        """
+        return self._decode_liveness.snapshot()
 
     async def start_profile(self, profile_prefix: str | None = None) -> None:
         coros = [self.engine_core.profile_async(True, profile_prefix)]

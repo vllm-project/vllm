@@ -220,3 +220,320 @@ async def test_health_check_engine_dead_error():
 
     # Assert that it returns 503 Service Unavailable
     assert response.status_code == 503
+
+
+def _make_decode_request(
+    inflight: int,
+    last_progress_age: float | None,
+    oldest_unprogressed_age: float | None,
+) -> Mock:
+    """Build a mock Request whose engine_client.get_decode_liveness()
+    returns ``(inflight, last_progress_age, oldest_unprogressed_age)``."""
+    mock_request = Mock(spec=Request)
+    mock_app_state = Mock()
+    mock_engine_client = AsyncMock()
+    mock_engine_client.get_decode_liveness.return_value = (
+        inflight,
+        last_progress_age,
+        oldest_unprogressed_age,
+    )
+    mock_app_state.engine_client = mock_engine_client
+    mock_request.app.state = mock_app_state
+    return mock_request
+
+
+@pytest.mark.asyncio
+async def test_health_decode_ok_when_progressing():
+    """inflight > 0 + recent progress => 200 ok."""
+    from vllm.entrypoints.serve.instrumentator.health import health_decode
+
+    response = await health_decode(
+        _make_decode_request(
+            inflight=3, last_progress_age=0.5, oldest_unprogressed_age=None
+        )
+    )
+    assert response.status_code == 200
+    import json
+
+    body = json.loads(response.body)
+    assert body["status"] == "ok"
+    assert body["inflight"] == 3
+    assert body["last_progress_age_seconds"] == 0.5
+    assert body["stall_threshold_seconds"] > 0
+
+
+@pytest.mark.asyncio
+async def test_health_decode_idle_when_no_inflight():
+    """inflight == 0 is idle, not stalled, even with a huge last_progress_age."""
+    from vllm.entrypoints.serve.instrumentator.health import health_decode
+
+    response = await health_decode(
+        _make_decode_request(
+            inflight=0, last_progress_age=9999.0, oldest_unprogressed_age=None
+        )
+    )
+    assert response.status_code == 200
+    import json
+
+    body = json.loads(response.body)
+    assert body["status"] == "idle"
+    assert body["inflight"] == 0
+
+
+@pytest.mark.asyncio
+async def test_health_decode_idle_when_cold_start():
+    """Nothing ever admitted (cold start) => idle, 200."""
+    from vllm.entrypoints.serve.instrumentator.health import health_decode
+
+    response = await health_decode(
+        _make_decode_request(
+            inflight=0, last_progress_age=None, oldest_unprogressed_age=None
+        )
+    )
+    assert response.status_code == 200
+    import json
+
+    body = json.loads(response.body)
+    assert body["status"] == "idle"
+    assert body["last_progress_age_seconds"] is None
+
+
+@pytest.mark.asyncio
+async def test_health_decode_ok_when_long_prefill_under_threshold(monkeypatch):
+    """inflight > 0, no progress yet (long prefill on the first request), but
+    the admission age is UNDER the threshold => 200 ok, NOT stalled. A legit
+    slow prefill must not false-positive."""
+    import vllm.envs as envs
+
+    monkeypatch.setattr(envs, "VLLM_DECODE_LIVENESS_STALL_SECONDS", 60.0)
+    from vllm.entrypoints.serve.instrumentator.health import health_decode
+
+    response = await health_decode(
+        _make_decode_request(
+            inflight=1, last_progress_age=None, oldest_unprogressed_age=5.0
+        )
+    )
+    assert response.status_code == 200
+    import json
+
+    body = json.loads(response.body)
+    assert body["status"] == "ok"
+    assert body["inflight"] == 1
+
+
+@pytest.mark.asyncio
+async def test_health_decode_stalled_when_running_and_old_progress(monkeypatch):
+    """inflight > 0 + last progress older than threshold => 503 stalled
+    (mid-stream stall rule a)."""
+    import vllm.envs as envs
+
+    # Tighten the threshold for the test so we don't need to mock 60+ seconds.
+    monkeypatch.setattr(envs, "VLLM_DECODE_LIVENESS_STALL_SECONDS", 1.0)
+    from vllm.entrypoints.serve.instrumentator.health import health_decode
+
+    response = await health_decode(
+        _make_decode_request(
+            inflight=2, last_progress_age=5.0, oldest_unprogressed_age=None
+        )
+    )
+    assert response.status_code == 503
+    import json
+
+    body = json.loads(response.body)
+    assert body["status"] == "stalled"
+    assert body["inflight"] == 2
+    assert body["last_progress_age_seconds"] == 5.0
+    assert body["stall_threshold_seconds"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_health_decode_stalled_when_inflight_but_never_progressed(monkeypatch):
+    """The decode-step-0 deadlock case (#45094): a request is in flight,
+    NO output has ever been produced for it (last_progress_age is None), and
+    its admission is older than the threshold => 503 stalled (rule b).
+
+    This is the regression the pre-fix tree gets WRONG: the old
+    ``last_token_age is None`` branch returned 200 "idle" unconditionally,
+    masking the deadlock. With the API-process-local admission heartbeat we
+    correctly report 503 stalled."""
+    import vllm.envs as envs
+
+    monkeypatch.setattr(envs, "VLLM_DECODE_LIVENESS_STALL_SECONDS", 60.0)
+    from vllm.entrypoints.serve.instrumentator.health import health_decode
+
+    response = await health_decode(
+        _make_decode_request(
+            inflight=1, last_progress_age=None, oldest_unprogressed_age=120.0
+        )
+    )
+    assert response.status_code == 503
+    import json
+
+    body = json.loads(response.body)
+    assert body["status"] == "stalled"
+    assert body["inflight"] == 1
+    assert body["last_progress_age_seconds"] is None
+    assert body["oldest_unprogressed_admission_age_seconds"] == 120.0
+    assert body["stall_threshold_seconds"] == 60.0
+
+
+@pytest.mark.asyncio
+async def test_health_decode_stalled_when_oldest_unprogressed_over_threshold_with_recent_other_progress(  # noqa: E501
+    monkeypatch,
+):
+    """A subtle real case: many requests are flowing (last_progress_age is
+    recent because OTHER requests keep producing tokens) but ONE admitted
+    request has never produced a single output and has been waiting past the
+    threshold. Rule (b) must still fire — last_progress_age alone would miss
+    it."""
+    import vllm.envs as envs
+
+    monkeypatch.setattr(envs, "VLLM_DECODE_LIVENESS_STALL_SECONDS", 60.0)
+    from vllm.entrypoints.serve.instrumentator.health import health_decode
+
+    response = await health_decode(
+        _make_decode_request(
+            inflight=4, last_progress_age=0.2, oldest_unprogressed_age=90.0
+        )
+    )
+    assert response.status_code == 503
+    import json
+
+    body = json.loads(response.body)
+    assert body["status"] == "stalled"
+
+
+@pytest.mark.asyncio
+async def test_health_decode_handles_client_failure():
+    """If get_decode_liveness() raises, the endpoint returns 503 (treating
+    "engine can't tell us its liveness" as stalled) rather than 500."""
+    from vllm.entrypoints.serve.instrumentator.health import health_decode
+
+    mock_request = Mock(spec=Request)
+    mock_app_state = Mock()
+    mock_engine_client = AsyncMock()
+    mock_engine_client.get_decode_liveness.side_effect = RuntimeError("kaboom")
+    mock_app_state.engine_client = mock_engine_client
+    mock_request.app.state = mock_app_state
+
+    response = await health_decode(mock_request)
+    assert response.status_code == 503
+    import json
+
+    body = json.loads(response.body)
+    assert body["status"] == "stalled"
+    assert "kaboom" in body["error"]
+
+
+def test_decode_liveness_tracker_admission_advances_without_engine_output():
+    """The admission heartbeat advances in the API process WITHOUT any
+    record()/output delivery — proving the write is OUTSIDE the
+    EngineCore-gated output_handler path. This is the core property that
+    makes the step-0 deadlock detectable."""
+    import time
+
+    from vllm.v1.engine.async_llm import DecodeLivenessTracker
+
+    tracker = DecodeLivenessTracker()
+
+    # Cold: nothing admitted, nothing ever progressed.
+    inflight, last_progress_age, oldest_unprogressed_age = tracker.snapshot()
+    assert inflight == 0
+    assert last_progress_age is None
+    assert oldest_unprogressed_age is None
+
+    # Admit a request. NO output is delivered (no record_progress call).
+    tracker.record_admission("req-1")
+    time.sleep(0.01)
+    inflight, last_progress_age, oldest_unprogressed_age = tracker.snapshot()
+    assert inflight == 1
+    # last_progress_age stays None: the engine has produced nothing.
+    assert last_progress_age is None
+    # The admission age advances purely from wall-clock, with zero engine
+    # cooperation.
+    assert oldest_unprogressed_age is not None
+    assert oldest_unprogressed_age > 0.0
+
+
+def test_decode_liveness_tracker_inflight_decrements_on_finish():
+    """record_finished decrements inflight and is idempotent (an abort racing
+    the terminal output must not double-decrement)."""
+    from vllm.v1.engine.async_llm import DecodeLivenessTracker
+
+    tracker = DecodeLivenessTracker()
+    tracker.record_admission("a")
+    tracker.record_admission("b")
+    assert tracker.snapshot()[0] == 2
+
+    tracker.record_finished("a")
+    assert tracker.snapshot()[0] == 1
+
+    # Idempotent: finishing "a" again does nothing.
+    tracker.record_finished("a")
+    assert tracker.snapshot()[0] == 1
+
+    tracker.record_finished("b")
+    assert tracker.snapshot()[0] == 0
+
+    # Never goes negative.
+    tracker.record_finished("ghost")
+    assert tracker.snapshot()[0] == 0
+
+
+def test_decode_liveness_tracker_progress_resets_on_any_output():
+    """record_progress() advances last_progress_age regardless of token count
+    (a prefill-only chunk with num_generation_tokens == 0 still counts), and
+    mark_request_progressed clears a request from the un-progressed set so
+    rule (b) no longer fires for it."""
+    import time
+
+    from vllm.v1.engine.async_llm import DecodeLivenessTracker
+
+    tracker = DecodeLivenessTracker()
+    tracker.record_admission("req-1")
+    time.sleep(0.01)
+
+    # Before any output: un-progressed admission age is set, no progress yet.
+    _, last_progress_age, oldest_unprogressed_age = tracker.snapshot()
+    assert last_progress_age is None
+    assert oldest_unprogressed_age is not None
+
+    # A prefill-only output arrives (the caller does NOT gate this on
+    # generation-token count — record_progress is called for ANY output).
+    tracker.record_progress()
+    tracker.mark_request_progressed("req-1")
+
+    inflight, last_progress_age, oldest_unprogressed_age = tracker.snapshot()
+    assert inflight == 1  # still in flight
+    # Progress is now recent.
+    assert last_progress_age is not None
+    assert last_progress_age >= 0.0
+    assert last_progress_age < 1.0
+    # The request has progressed, so it is no longer an un-progressed admission
+    # — rule (b) will not fire for it.
+    assert oldest_unprogressed_age is None
+
+
+def test_decode_liveness_tracker_oldest_unprogressed_is_oldest():
+    """oldest_unprogressed_admission_age reflects the OLDEST still-un-progressed
+    in-flight request, and ignores requests that have already progressed."""
+    import time
+
+    from vllm.v1.engine.async_llm import DecodeLivenessTracker
+
+    tracker = DecodeLivenessTracker()
+    tracker.record_admission("old")
+    time.sleep(0.02)
+    tracker.record_admission("new")
+
+    # Both un-progressed: oldest is "old".
+    _, _, oldest_old = tracker.snapshot()
+    assert oldest_old is not None
+
+    # "old" progresses; only "new" remains un-progressed, so the reported age
+    # drops to "new"'s (younger) admission age.
+    tracker.mark_request_progressed("old")
+    _, _, oldest_new = tracker.snapshot()
+    assert oldest_new is not None
+    assert oldest_new < oldest_old
+
