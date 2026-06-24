@@ -138,6 +138,10 @@ def _wait_for_prefix_cache_reset(llm: LLM) -> None:
 
 
 def _latency_test(llm: LLM, subscriber: MockSubscriber | None):
+    # TODO: Reintroduce latency test on ROCm once MRV2 supports cross
+    # layer KV Cache. See https://github.com/vllm-project/vllm/pull/45947
+    if current_platform.is_rocm():
+        return
     sampling_params = SamplingParams(max_tokens=1)
 
     num_times_cpu_better_than_cold = 0
@@ -382,22 +386,6 @@ def test_cpu_offloading_metrics() -> None:
                             continue
                         total += sample.value
             return total
-
-        # Stats are drained asynchronously — if the transfer finishes
-        # after the last engine step for that generate() call, the metrics
-        # won't appear until a subsequent step.  Retry with dummy generates
-        # to force additional stats drains.
-        deadline = time.monotonic() + _RESET_CACHE_TIMEOUT
-        while time.monotonic() < deadline:
-            store_bytes = _get_counter_value("vllm:kv_offload_store_bytes")
-            load_bytes = _get_counter_value("vllm:kv_offload_load_bytes")
-            if store_bytes > 0 and load_bytes > 0:
-                break
-            llm.generate(
-                [TokensPrompt(prompt_token_ids=[0])],
-                SamplingParams(max_tokens=1),
-                use_tqdm=False,
-            )
 
         # New flat counter metrics
         store_bytes = _get_counter_value("vllm:kv_offload_store_bytes")
