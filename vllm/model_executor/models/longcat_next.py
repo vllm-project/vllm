@@ -28,6 +28,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -63,9 +64,11 @@ from .utils import (
     PPMissingLayer,
     WeightsMapper,
     _merge_multimodal_embeddings,
+    cast_overflow_tensors,
     isin_list,
     maybe_prefix,
 )
+from .whisper import WhisperEncoder
 
 # Magic number constants for clarity
 _INT4_QUANTIZATION_CHUNK_ROWS = 1_048_576  # ~512 MiB bf16 per chunk
@@ -1199,174 +1202,160 @@ class LongcatNextVisualTokenizer(nn.Module):
         return loaded_params
 
 
-class LongcatNextAudioEncoderAttention(nn.Module):
-    """Multi-head self-attention matching the Whisper checkpoint layout."""
+class LongcatNextWhisperEncoder(WhisperEncoder):
+    """WhisperEncoder subclass for LongCat-Next with cu_seqlens-based masking.
 
-    def __init__(self, embed_dim: int, num_heads: int) -> None:
-        super().__init__()
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.head_dim = embed_dim // num_heads
-        self.scale = self.head_dim**-0.5
-
-        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=True)
-        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=False)
-        self.v_proj = nn.Linear(embed_dim, embed_dim, bias=True)
-        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=True)
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        bsz, tgt_len, _ = hidden_states.size()
-
-        query = self.q_proj(hidden_states)
-        key = self.k_proj(hidden_states)
-        value = self.v_proj(hidden_states)
-
-        query = query.view(bsz, tgt_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key = key.view(bsz, tgt_len, self.num_heads, self.head_dim).transpose(1, 2)
-        value = value.view(bsz, tgt_len, self.num_heads, self.head_dim).transpose(1, 2)
-
-        attn_weights = torch.matmul(query, key.transpose(-1, -2)) * self.scale
-        if attention_mask is not None:
-            attn_weights = attn_weights + attention_mask
-        attn_weights = nn.functional.softmax(attn_weights, dim=-1)
-
-        attn_output = torch.matmul(attn_weights, value)
-        attn_output = (
-            attn_output.transpose(1, 2).contiguous().view(bsz, tgt_len, self.embed_dim)
-        )
-        attn_output = self.out_proj(attn_output)
-        return attn_output
-
-
-class LongcatNextAudioEncoderLayer(nn.Module):
-    """Single Whisper-style encoder layer."""
-
-    def __init__(self, config: Any) -> None:
-        super().__init__()
-        self.self_attn_layer_norm = nn.LayerNorm(config.d_model)
-        self.self_attn = LongcatNextAudioEncoderAttention(
-            config.d_model, config.encoder_attention_heads
-        )
-        self.fc1 = nn.Linear(config.d_model, config.encoder_ffn_dim)
-        self.fc2 = nn.Linear(config.encoder_ffn_dim, config.d_model)
-        self.final_layer_norm = nn.LayerNorm(config.d_model)
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        residual = hidden_states
-        hidden_states = self.self_attn_layer_norm(hidden_states)
-        hidden_states = self.self_attn(hidden_states, attention_mask)
-        hidden_states = residual + hidden_states
-
-        residual = hidden_states
-        hidden_states = self.final_layer_norm(hidden_states)
-        hidden_states = self.fc2(nn.functional.gelu(self.fc1(hidden_states)))
-        hidden_states = residual + hidden_states
-        return hidden_states
-
-
-class LongcatNextAudioEncoder(nn.Module):
-    """Audio encoder for LongCat-Next (Whisper-style with sinusoidal positions).
-
-    Matches the HF modular_longcat_next_audio.py encoder layout:
-    conv1 -> conv2 -> positional_embedding -> Transformer layers -> layer_norm.
+    Reuses vLLM's TP-aware WhisperEncoder (QKVParallelLinear, MMEncoderAttention)
+    with pack/unpack logic for variable-length audio via FlashAttention cu_seqlens.
     """
 
-    def __init__(self, config: Any, prefix: str = "") -> None:
-        super().__init__()
-        self.config = config
-        self.d_model = config.d_model
-        self.num_mel_bins = getattr(config, "num_mel_bins", 128)
+    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
-        self.conv1 = nn.Conv1d(
-            self.num_mel_bins, self.d_model, kernel_size=3, padding=1
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ) -> None:
+        audio_config = vllm_config.model_config.hf_config.audio_config
+        # Ensure WhisperEncoder-required defaults on the audio config.
+        if not hasattr(audio_config, "max_source_positions"):
+            audio_config.max_source_positions = 1500
+        if not hasattr(audio_config, "scale_embedding"):
+            audio_config.scale_embedding = False
+        if not hasattr(audio_config, "activation_function"):
+            audio_config.activation_function = "gelu"
+        if not hasattr(audio_config, "pos_embed"):
+            audio_config.pos_embed = "sinusoidal"
+        super().__init__(
+            vllm_config=vllm_config.with_hf_config(audio_config),
+            prefix=prefix,
         )
-        self.conv2 = nn.Conv1d(
-            self.d_model, self.d_model, kernel_size=3, stride=2, padding=1
-        )
-
-        max_source_positions = getattr(config, "max_source_positions", 1500)
-        self.register_buffer(
-            "positional_embedding",
-            self._sinusoids(max_source_positions, self.d_model),
-        )
-
-        self.layers = nn.ModuleList(
-            [
-                LongcatNextAudioEncoderLayer(config)
-                for _ in range(getattr(config, "encoder_layers", 32))
-            ]
-        )
-        self.layer_norm = nn.LayerNorm(self.d_model)
-
-    @staticmethod
-    def _sinusoids(
-        length: int, channels: int, max_timescale: float = _SINUSOID_MAX_TIMESCALE
-    ) -> torch.Tensor:
-        assert channels % 2 == 0
-        log_timescale_increment = np.log(max_timescale) / (channels // 2 - 1)
-        inv_timescales = torch.exp(
-            -log_timescale_increment * torch.arange(channels // 2)
-        )
-        scaled_time = torch.arange(length)[:, None] * inv_timescales[None, :]
-        return torch.cat([torch.sin(scaled_time), torch.cos(scaled_time)], dim=1)
 
     def forward(
         self,
         input_features: torch.Tensor,
         output_length: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Encode audio features.
+        """Encode audio features with variable-length masking.
 
         Args:
             input_features: [bs, num_mel_bins, frames]
-            output_length: [bs] or None
+            output_length: [bs] valid lengths after conv, or None
 
         Returns:
-            Hidden states of shape [bs, frames', d_model]
+            Hidden states [bs, max_frames', d_model]
         """
-        # Align input dtype with the convolution weights (fp16/bf16).
         input_features = input_features.to(dtype=self.conv1.weight.dtype)
-        inputs_embeds = nn.functional.gelu(self.conv1(input_features))
-        inputs_embeds = nn.functional.gelu(self.conv2(inputs_embeds))
-        inputs_embeds = inputs_embeds.permute(0, 2, 1)  # [bs, frames', d_model]
 
-        bsz, tgt_len, _ = inputs_embeds.size()
-        if tgt_len < self.positional_embedding.shape[0]:
-            pos_emb = self.positional_embedding[:tgt_len]
+        # Step 1: conv + positional embedding (reuse parent components)
+        hidden_states_list = []
+        for features in input_features:
+            embeds = nn.functional.gelu(self.conv1(features))
+            embeds = nn.functional.gelu(self.conv2(embeds))
+            embeds = embeds.transpose(-1, -2)  # [seq_len, d_model]
+            # Match original: float32 addition for numerical precision
+            embeds = (embeds.float() + self.embed_positions.weight[: embeds.size(0)]).to(
+                embeds.dtype
+            )
+            hidden_states_list.append(embeds)
+        # [bs, max_seq_len, d_model]
+        hidden_states = torch.stack(hidden_states_list, dim=0)
+
+        bs, max_len, dim = hidden_states.shape
+
+        # Step 2: Pack valid tokens + build cu_seqlens
+        if output_length is not None:
+            packed_parts = []
+            for i in range(bs):
+                length = output_length[i]
+                packed_parts.append(hidden_states[i, :length])
+            packed_hidden = torch.cat(packed_parts, dim=0)  # [total_valid, dim]
+
+            cu_seqlens = torch.zeros(
+                bs + 1, dtype=torch.int32, device=output_length.device
+            )
+            cu_seqlens[1:] = output_length.cumsum(0).to(torch.int32)
+            max_seqlen = output_length.max()  # Keep as tensor for FlashAttention
         else:
-            pos_emb = self.positional_embedding
-        hidden_states = (inputs_embeds.float() + pos_emb).to(inputs_embeds.dtype)
-
-        attention_mask = None
-        if output_length is not None:
-            mask = (
-                torch.arange(tgt_len, device=hidden_states.device)[None, :]
-                < output_length[:, None]
+            packed_hidden = hidden_states.reshape(-1, dim)
+            cu_seqlens = torch.arange(
+                bs + 1, dtype=torch.int32, device=hidden_states.device
             )
-            attention_mask = (~mask).to(hidden_states.dtype) * -1e9
-            attention_mask = attention_mask.unsqueeze(1).unsqueeze(1)
+            max_seqlen = max_len
 
-        for layer in self.layers:
-            hidden_states = layer(hidden_states, attention_mask)
+        # Step 3: Run encoder layers with cu_seqlens (TP-aware attention)
+        for encoder_layer in self.layers:
+            packed_hidden = encoder_layer(
+                packed_hidden,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+            )
 
-        hidden_states = self.layer_norm(hidden_states)
+        # Step 4: Layer norm + unpack to batched format
+        packed_hidden = self.layer_norm(packed_hidden)
+        packed_hidden = cast_overflow_tensors(packed_hidden)
 
         if output_length is not None:
-            mask = (
-                torch.arange(tgt_len, device=hidden_states.device)[None, :, None]
-                < output_length[:, None, None]
-            )
-            hidden_states = torch.where(mask, hidden_states, 0)
+            result = hidden_states.new_zeros(bs, max_len, dim)
+            for i in range(bs):
+                start = int(cu_seqlens[i])
+                end = int(cu_seqlens[i + 1])
+                result[i, :end - start] = packed_hidden[start:end]
+            # Padded positions remain zero (implicit mask)
+        else:
+            result = packed_hidden.view(bs, max_len, dim)
+        return result
 
-        return hidden_states
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        """Load weights with remapping from checkpoint to vLLM WhisperEncoder.
+
+        Remapping:
+        - q_proj/k_proj/v_proj → qkv_proj (pad k_proj bias with zeros)
+        - fc1/fc2 → mlp.fc1/mlp.fc2
+        - positional_embedding → embed_positions.weight
+        """
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+        ]
+        name_remap = {
+            "fc1.": "mlp.fc1.",
+            "fc2.": "mlp.fc2.",
+            "positional_embedding": "embed_positions.weight",
+        }
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+        for name, loaded_weight in weights:
+            # Apply name remapping
+            for old, new in name_remap.items():
+                name = name.replace(old, new)
+
+            # Handle stacked QKV params
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                # k_proj has no bias in checkpoint; QKVParallelLinear
+                # expects unified bias — pad with zeros.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                param = params_dict[name]
+                weight_loader = getattr(
+                    param, "weight_loader", default_weight_loader
+                )
+                weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
 
 
 class AudioEuclideanCodebook(nn.Module):
@@ -1562,11 +1551,16 @@ class LongcatNextAudioTokenizer(nn.Module):
     Combines: AudioEncoder -> AudioVQBridger
     """
 
-    def __init__(self, config: PretrainedConfig, prefix: str = "") -> None:
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
         self.config = config
-        self.audio_model = LongcatNextAudioEncoder(
-            config.audio_config,
+        self.audio_model = LongcatNextWhisperEncoder(
+            vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "audio_model"),
         )
         self.audio_bridge_model = LongcatNextAudioVQBridger(
@@ -1613,12 +1607,19 @@ class LongcatNextAudioTokenizer(nn.Module):
             # audio_decoder / audio_flow_matching_decoder weights are loaded by
             # the HF generation pipeline, not by vLLM's prefill tower.
 
-        for key in ["audio_model", "audio_bridge_model"]:
-            if model_weights[key]:
-                submodule = getattr(self, key)
-                loader = AutoWeightsLoader(submodule)
-                loaded = loader.load_weights(model_weights[key])
-                loaded_params.update(f"{key}.{n}" for n in loaded)
+        # audio_model is a LongcatNextWhisperEncoder with custom load_weights
+        # (name remapping: q_proj/k_proj/v_proj → qkv_proj, fc1 → mlp.fc1, etc.)
+        # Call it directly since AutoWeightsLoader skips load_weights when
+        # module == self.module.
+        if model_weights["audio_model"]:
+            loaded = self.audio_model.load_weights(model_weights["audio_model"])
+            loaded_params.update(f"audio_model.{n}" for n in loaded)
+
+        if model_weights["audio_bridge_model"]:
+            submodule = self.audio_bridge_model
+            loader = AutoWeightsLoader(submodule)
+            loaded = loader.load_weights(model_weights["audio_bridge_model"])
+            loaded_params.update(f"audio_bridge_model.{n}" for n in loaded)
 
         return loaded_params
 
@@ -2415,7 +2416,9 @@ class LongcatNextForCausalLM(
 
             # Audio Tower
             with self._mark_tower_model(vllm_config, "audio"):
-                self.audio_tower = self._build_audio_tower(config, prefix)
+                self.audio_tower = self._build_audio_tower(
+                    config, vllm_config, prefix
+                )
         else:
             self.visual = None
             self.audio_tower = None
@@ -2985,7 +2988,7 @@ class LongcatNextForCausalLM(
             prefix=maybe_prefix(prefix, "visual"),
         )
 
-    def _build_audio_tower(self, config, prefix):
+    def _build_audio_tower(self, config, vllm_config, prefix):
         """Build the audio tower (audio encoder).
 
         LongCat-Next's audio pipeline (from HF modular_longcat_next_audio.py):
@@ -3004,6 +3007,7 @@ class LongcatNextForCausalLM(
         """
         return LongcatNextAudioTokenizer(
             config=config,
+            vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "audio_tower"),
         )
 
