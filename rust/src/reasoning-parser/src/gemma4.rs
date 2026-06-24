@@ -119,7 +119,7 @@ mod tests {
     use vllm_tokenizer::Tokenizer;
 
     use super::Gemma4ReasoningParser;
-    use crate::ReasoningParser;
+    use crate::{ReasoningParser, tests::run_streaming};
 
     struct FakeTokenizer;
 
@@ -150,36 +150,6 @@ mod tests {
                 _ => None,
             }
         }
-    }
-
-    fn run_streaming(output: &[&str]) -> (Option<String>, Option<String>) {
-        let tokenizer = Arc::new(FakeTokenizer);
-        let mut parser = Gemma4ReasoningParser::new(tokenizer).unwrap();
-        let mut reasoning = String::new();
-        let mut content = String::new();
-
-        for delta in output {
-            let result = parser.push(delta).unwrap();
-            if let Some(next) = result.reasoning {
-                reasoning.push_str(&next);
-            }
-            if let Some(next) = result.content {
-                content.push_str(&next);
-            }
-        }
-
-        let final_delta = parser.finish().unwrap();
-        if let Some(next) = final_delta.reasoning {
-            reasoning.push_str(&next);
-        }
-        if let Some(next) = final_delta.content {
-            content.push_str(&next);
-        }
-
-        (
-            (!reasoning.is_empty()).then_some(reasoning),
-            (!content.is_empty()).then_some(content),
-        )
     }
 
     #[test]
@@ -249,7 +219,8 @@ mod tests {
         ];
 
         for (name, output, expected_reasoning, expected_content) in cases {
-            let (reasoning, content) = run_streaming(&output);
+            let mut parser = Gemma4ReasoningParser::new(Arc::new(FakeTokenizer)).unwrap();
+            let (reasoning, content) = run_streaming(&mut parser, &output);
             assert_eq!(reasoning.as_deref(), expected_reasoning, "{name}");
             assert_eq!(content.as_deref(), expected_content, "{name}");
         }
@@ -257,8 +228,11 @@ mod tests {
 
     #[test]
     fn gemma4_strips_thought_prefix_even_when_split_across_deltas() {
-        let (reasoning, content) =
-            run_streaming(&["<|channel>thou", "ght", "\nabc", "<channel|>done"]);
+        let mut parser = Gemma4ReasoningParser::new(Arc::new(FakeTokenizer)).unwrap();
+        let (reasoning, content) = run_streaming(
+            &mut parser,
+            &["<|channel>thou", "ght", "\nabc", "<channel|>done"],
+        );
         assert_eq!(reasoning.as_deref(), Some("abc"));
         assert_eq!(content.as_deref(), Some("done"));
     }
