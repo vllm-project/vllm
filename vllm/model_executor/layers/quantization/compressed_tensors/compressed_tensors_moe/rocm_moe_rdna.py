@@ -28,6 +28,29 @@ def is_supported(weight_quant) -> bool:
     )
 
 
+def is_supported_mxfp4(weight_quant) -> bool:
+    """Check if the native RDNA3 MXFP4 MoE kernel is available."""
+    from vllm.platforms.rocm import on_gfx1100
+
+    return (
+        on_gfx1100()
+        and hasattr(torch.ops, "_rocm_C")
+        and hasattr(torch.ops._rocm_C, "moe_mxfp4_gemm_rdna3")
+    )
+
+
+def make_mxfp4_method(moe_config):
+    """Create the native RDNA3 MXFP4 MoE method. Call after is_supported_mxfp4."""
+    from .compressed_tensors_moe_w4a4_mxfp4_rdna3 import (
+        CompressedTensorsW4A4Mxfp4RDNA3MoEMethod,
+    )
+
+    logger.info_once(
+        "Using CompressedTensorsW4A4Mxfp4RDNA3MoEMethod (native RDNA3 HIP kernel)"
+    )
+    return CompressedTensorsW4A4Mxfp4RDNA3MoEMethod(moe_config)
+
+
 def make_method(weight_quant, input_quant, moe_config):
     """Create the native ROCm MoE method. Call only after is_supported()."""
     from vllm.platforms.rocm import on_gfx1100

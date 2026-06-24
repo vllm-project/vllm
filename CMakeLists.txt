@@ -1353,7 +1353,8 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/rocm/q_gemm_rdna3.cu"
       "csrc/rocm/q_gemm_rdna3_wmma.cu"
       "csrc/rocm/mxfp4_gemm_rdna3.cu"
-      "csrc/rocm/moe_q_gemm_rdna3.cu")
+      "csrc/rocm/moe_q_gemm_rdna3.cu"
+      "csrc/rocm/moe_mxfp4_gemm_rdna3.cu")
   endif()
 
   define_extension_target(
