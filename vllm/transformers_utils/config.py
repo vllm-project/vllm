@@ -839,6 +839,15 @@ def get_pooling_config(
 
         config: dict[str, Any] = {"use_activation": normalize}
         for key, val in pooling_dict.items():
+            if key == "pooling_mode" and isinstance(val, str):
+                pooling_type = parse_pooling_type(val)
+                if pooling_type in SEQ_POOLING_TYPES:
+                    config["seq_pooling_type"] = pooling_type
+                elif pooling_type in TOK_POOLING_TYPES:
+                    config["tok_pooling_type"] = pooling_type
+                else:
+                    logger.debug("Skipping unsupported pooling mode: %r", val)
+
             if val is True:
                 pooling_type = parse_pooling_type(key)
                 if pooling_type in SEQ_POOLING_TYPES:
@@ -847,6 +856,13 @@ def get_pooling_config(
                     config["tok_pooling_type"] = pooling_type
                 else:
                     logger.debug("Skipping unrelated field: %r=%r", key, val)
+
+        if "seq_pooling_type" not in config and "tok_pooling_type" not in config:
+            logger.warning(
+                "Found pooling configuration for %s, but could not derive a "
+                "supported pooling type. Falling back to the architecture default.",
+                model,
+            )
 
         return config
 

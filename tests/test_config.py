@@ -34,6 +34,7 @@ from vllm.config.vllm import (
     OptimizationLevel,
 )
 from vllm.platforms import current_platform
+from vllm.transformers_utils.config import get_pooling_config
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -429,6 +430,53 @@ def test_get_pooling_config():
     assert model_config.pooler_config.use_activation
     assert model_config.pooler_config.seq_pooling_type == "MEAN"
     assert model_config.pooler_config.tok_pooling_type == "ALL"
+
+
+@pytest.mark.parametrize(
+    ("pooling_mode", "expected_pooling_type"),
+    [
+        ("cls", "CLS"),
+        ("mean", "MEAN"),
+        ("lasttoken", "LAST"),
+    ],
+)
+def test_get_pooling_config_from_compact_sentence_transformers_schema(
+    tmp_path, pooling_mode, expected_pooling_type
+):
+    pooling_dir = tmp_path / "1_Pooling"
+    pooling_dir.mkdir()
+    (tmp_path / "modules.json").write_text(
+        """
+        [
+            {
+                "path": "1_Pooling",
+                "type": "sentence_transformers.models.Pooling"
+            },
+            {
+                "path": "2_Normalize",
+                "type": "sentence_transformers.models.Normalize"
+            }
+        ]
+        """,
+        encoding="utf-8",
+    )
+    (pooling_dir / "config.json").write_text(
+        f"""
+        {{
+            "embedding_dimension": 384,
+            "pooling_mode": "{pooling_mode}",
+            "include_prompt": true
+        }}
+        """,
+        encoding="utf-8",
+    )
+
+    config = get_pooling_config(str(tmp_path))
+
+    assert config == {
+        "seq_pooling_type": expected_pooling_type,
+        "use_activation": True,
+    }
 
 
 @pytest.mark.skipif(
