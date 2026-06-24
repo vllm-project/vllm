@@ -1291,7 +1291,7 @@ def test_token_logprobs_large_batch_int64_row_offset():
     logits = torch.randn(batch_size, vocab_size, device=device, dtype=torch.float32)
     token_ids = torch.full((batch_size, 1), 7, device=device, dtype=torch.int64)
     logprobs = compute_token_logprobs(logits, token_ids)
-    torch.cuda.synchronize()  # surface any async illegal memory access
+    torch.accelerator.synchronize()  # surface any async illegal memory access
     last = batch_size - 1
     ref = torch.log_softmax(logits[last].float(), dim=-1)[7]
     assert torch.allclose(logprobs[last, 0], ref, atol=1e-2), (

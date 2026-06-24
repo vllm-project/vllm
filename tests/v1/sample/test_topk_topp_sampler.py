@@ -435,7 +435,7 @@ class TestTritonTopkTopp:
         logits[batch_size - 1] = logits[0]
         k = torch.full((batch_size,), 5, dtype=torch.int32)
         result = apply_top_k_top_p_triton(logits, k, None)
-        torch.cuda.synchronize()  # surface any async illegal memory access
+        torch.accelerator.synchronize()  # surface any async illegal memory access
         kept_first = (result[0] > float("-inf")).nonzero(as_tuple=True)[0]
         kept_last = (result[batch_size - 1] > float("-inf")).nonzero(as_tuple=True)[0]
         assert kept_first.numel() == 5, f"row 0 kept {kept_first.numel()}, expected 5"
