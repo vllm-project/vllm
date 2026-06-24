@@ -8,7 +8,7 @@ from typing import Any, ClassVar, Generic, TypeVar
 import torch
 from typing_extensions import Self
 
-from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.model_executor.hw_agnostic.quantization.quant_keys import QuantKey
 
 
 @dataclass

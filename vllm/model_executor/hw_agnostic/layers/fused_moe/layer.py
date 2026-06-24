@@ -14,9 +14,6 @@ from vllm.distributed import (
 )
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig,
-)
 from vllm.model_executor.hw_agnostic.layers.fused_moe.activation import (
     MoEActivation,
 )
@@ -38,6 +35,9 @@ from vllm.model_executor.hw_agnostic.layers.fused_moe.router.router_factory impo
 )
 from vllm.model_executor.hw_agnostic.layers.fused_moe.runner.moe_runner import (  # noqa: E501
     MoERunner,
+)
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig,
 )
 
 logger = init_logger(__name__)

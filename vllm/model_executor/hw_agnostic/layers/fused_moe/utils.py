@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+from vllm.model_executor.hw_agnostic.quantization.fp8_utils import (
     per_token_group_quant_fp8,
 )
 from vllm.platforms import current_platform

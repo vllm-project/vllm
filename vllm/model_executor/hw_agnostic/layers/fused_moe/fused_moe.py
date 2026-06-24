@@ -10,21 +10,9 @@ from typing import Any
 import torch
 
 import vllm.envs as envs
-import vllm.model_executor.hw_agnostic.layers.fused_moe.modular_kernel as mk
-from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.model_executor.hw_agnostic.layers.fused_moe.activation import (
-    MoEActivation,
-    apply_moe_activation,
-)
-from vllm.model_executor.hw_agnostic.layers.fused_moe.config import (
-    _get_config_dtype_str,
-)
 from vllm.model_executor.hw_agnostic.layers.fused_moe.moe_align_block_size import (  # noqa: E501
     moe_align_block_size,
-)
-from vllm.model_executor.hw_agnostic.layers.fused_moe.utils import (
-    moe_kernel_quantize_input,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton

@@ -9,9 +9,6 @@ import torch
 
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig,
-)
 from vllm.model_executor.hw_agnostic.custom_op import PluggableLayer
 from vllm.model_executor.hw_agnostic.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -24,6 +21,9 @@ from vllm.model_executor.hw_agnostic.layers.fused_moe.fused_moe_method_base impo
 )
 from vllm.model_executor.hw_agnostic.layers.fused_moe.unquantized_fused_moe_method import (  # noqa: E501
     UnquantizedFusedMoEMethod,
+)
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig,
 )
 
 if TYPE_CHECKING:

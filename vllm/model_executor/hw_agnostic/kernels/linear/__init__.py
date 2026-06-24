@@ -7,7 +7,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.model_executor.hw_agnostic.quantization.quant_keys import QuantKey
 from vllm.platforms import PlatformEnum, current_platform
 
 from .base import MMLinearKernel, MMLinearLayerConfig

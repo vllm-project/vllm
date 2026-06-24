@@ -87,7 +87,7 @@ CHECK_IMPORTS = {
         pattern=(
             r"^\s*from\s+vllm\."
             r"(?:"
-            r"model_executor\.layers(?!\.utils\b)(?!\.quantization\.base_config\b)(?!\.quantization\.utils\.fp8_utils\b)(?!\.quantization\.utils\.quant_utils\b)(?!\.quantization\.utils\.w8a8_utils\b)(?!\.quantization\.utils\.layer_utils\b)(?!\.quantization\.input_quant_fp8\b)(?!\.quantization\.kv_cache\b)(?!\.quantization\.compressed_tensors\.triton_scaled_mm\b)(?!\.fusion\.quant_activation\b)(?!\.attention_layer_base\b)"
+            r"model_executor\.layers(?!\.utils\b)(?!\.quantization\.base_config\b)(?!\.quantization\.kv_cache\b)(?!\.attention_layer_base\b)"
             r"|model_executor\.kernels\b"
             r"|model_executor\.models(?!\.utils\b)"
             r"|model_executor\.model_loader\.reload\.layerwise\b"
@@ -106,15 +106,14 @@ CHECK_IMPORTS = {
             r"/.*\.py$"
         ),
         allowed_files={
-            # DSv4 quant dispatcher: lazy-imports upstream FP4 / online-FP8
-            # methods inside ``get_quant_method`` (the FP4 path has no
-            # Triton kernel today; we keep the upstream escape hatch).
-            "vllm/models/deepseek_v4/hw_agnostic/quantization/quant_config.py",
             # Re-export modules whose only job is to expose an upstream
             # symbol under a hw_agnostic-shaped path (identity match for
             # framework isinstance checks, or a process-wide registry).
             "vllm/model_executor/hw_agnostic/layers/attention.py",
             "vllm/model_executor/hw_agnostic/model_loader/reload/layerwise.py",
+            "vllm/model_executor/hw_agnostic/quantization/quant_keys.py",
+            "vllm/model_executor/hw_agnostic/quantization/input_quant_fp8.py",
+            "vllm/model_executor/hw_agnostic/quantization/quant_activation.py",
         },
     ),
     "hw_agnostic_no_vendor_utils": ForbiddenImport(
@@ -342,41 +341,45 @@ def test_regex():
             "QuantizationConfig, QuantizeMethodBase",
             False,
         ),
-        # FP8 quant primitives carve-out: per_token_group_quant_fp8 is the
-        # generic FP8 quant op the vendored fused_moe.utils needs.
+        # FP8 helpers / Triton kernels are now vendored under
+        # ``hw_agnostic/quantization/fp8_utils.py``; the upstream module is
+        # forbidden everywhere except its own re-export shim.
         (
             "from vllm.model_executor.layers.quantization.utils.fp8_utils import "
             "per_token_group_quant_fp8",
-            False,
+            True,
         ),
-        # Vendored kernels.linear carve-outs: the kernel ABCs reach a small
-        # set of pure-data / pure-helper modules that don't pull in
-        # platform-specific kernel code.
+        # ``quant_utils``, ``input_quant_fp8`` and ``fusion.quant_activation``
+        # are reached only via the re-export shims in
+        # ``hw_agnostic/quantization/{quant_keys,input_quant_fp8,
+        # quant_activation}.py`` (those files are on the per-file allowlist).
         (
             "from vllm.model_executor.layers.quantization.utils.quant_utils import X",
-            False,
-        ),
-        (
-            "from vllm.model_executor.layers.quantization.utils.w8a8_utils import X",
-            False,
-        ),
-        (
-            "from vllm.model_executor.layers.quantization.utils.layer_utils import X",
-            False,
+            True,
         ),
         (
             "from vllm.model_executor.layers.quantization.input_quant_fp8 import "
             "QuantFP8",
-            False,
+            True,
+        ),
+        (
+            "from vllm.model_executor.layers.fusion.quant_activation import X",
+            True,
+        ),
+        # ``w8a8_utils``, ``layer_utils``, ``triton_scaled_mm`` are no longer
+        # consumed by hw_agnostic code at all.
+        (
+            "from vllm.model_executor.layers.quantization.utils.w8a8_utils import X",
+            True,
+        ),
+        (
+            "from vllm.model_executor.layers.quantization.utils.layer_utils import X",
+            True,
         ),
         (
             "from vllm.model_executor.layers.quantization.compressed_tensors."
             "triton_scaled_mm import triton_scaled_mm",
-            False,
-        ),
-        (
-            "from vllm.model_executor.layers.fusion.quant_activation import X",
-            False,
+            True,
         ),
         # model_executor.kernels: forbidden everywhere on hw_agnostic.
         # The vendored kernel selector lives under

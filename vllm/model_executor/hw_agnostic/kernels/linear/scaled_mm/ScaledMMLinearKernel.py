@@ -8,12 +8,12 @@ from typing import Generic, TypeVar
 
 import torch
 
-from vllm.model_executor.layers.fusion.quant_activation import (
+from vllm.model_executor.hw_agnostic.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.hw_agnostic.quantization.quant_activation import (
     QuantizedActivation,
     as_quantized_activation,
 )
-from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.model_executor.hw_agnostic.quantization.quant_keys import QuantKey
 from vllm.platforms import current_platform
 
 from ..base import MMLinearLayerConfig

@@ -32,7 +32,7 @@ from vllm.model_executor.hw_agnostic.layers.fused_moe.utils import (
     moe_kernel_quantize_input,
     swiglu_limit_func,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
+from vllm.model_executor.hw_agnostic.quantization.quant_keys import (
     QuantKey,
     kFp8Dynamic128Sym,
     kFp8DynamicTensorSym,

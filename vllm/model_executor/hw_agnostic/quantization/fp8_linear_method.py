@@ -1,20 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING
-
 import torch
 
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+from vllm.model_executor.hw_agnostic.kernels.linear import (
+    init_fp8_linear_kernel,
+)
+from vllm.model_executor.hw_agnostic.layers.linear import LinearMethodBase
+from vllm.model_executor.hw_agnostic.quantization.fp8_config import Fp8Config
+from vllm.model_executor.hw_agnostic.quantization.fp8_utils import (
     create_fp8_input_scale,
     create_fp8_scale_parameter,
     create_fp8_weight_parameter,
     process_fp8_weight_tensor_strategy,
     validate_fp8_block_shape,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
+from vllm.model_executor.hw_agnostic.quantization.quant_keys import (
     GroupShape,
     create_fp8_quant_key,
     kFp8DynamicTokenSym,
@@ -25,19 +28,12 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
-from vllm.model_executor.hw_agnostic.kernels.linear import (
-    init_fp8_linear_kernel,
-)
-from vllm.model_executor.hw_agnostic.layers.linear import LinearMethodBase
-
-if TYPE_CHECKING:
-    from .quant_config import DeepseekV4FP8Config
 
 
 class Fp8LinearMethod(LinearMethodBase):
-    """Block-scaled FP8 linear method for the DSv4 hw-agnostic path."""
+    """Block-scaled FP8 linear method for the hw-agnostic path."""
 
-    def __init__(self, quant_config: "DeepseekV4FP8Config"):
+    def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
         self.is_scale_e8m0 = getattr(quant_config, "is_scale_e8m0", False)
         self.out_dtype = torch.get_default_dtype()

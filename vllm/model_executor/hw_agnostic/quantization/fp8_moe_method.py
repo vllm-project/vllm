@@ -1,30 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""DSv4 hw-agnostic FP8 config / MoE method / KV-cache method."""
+"""Hw-agnostic FP8 MoE method (offline-quantized + online-quantized)."""
 
 from __future__ import annotations
-
-from typing import TYPE_CHECKING, Any
 
 import torch
 
 import vllm.model_executor.hw_agnostic.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.logger import init_logger
+from vllm.model_executor.hw_agnostic.layers.fused_moe.all2all_utils import (
+    maybe_make_prepare_finalize,
+)
 from vllm.model_executor.hw_agnostic.layers.fused_moe.config import (
     FusedMoEQuantConfig,
+    fp8_w8a8_moe_quant_config,
+)
+from vllm.model_executor.hw_agnostic.layers.fused_moe.experts.triton_moe import (
+    TritonExperts,
 )
 from vllm.model_executor.hw_agnostic.layers.fused_moe.fused_moe_method_base import (  # noqa: E501
     FusedMoEMethodBase,
-)
-from vllm.model_executor.hw_agnostic.layers.fused_moe.oracle.fp8 import (
-    Fp8MoeBackend,
-    convert_to_fp8_moe_kernel_format,
-    make_fp8_moe_kernel,
-    make_fp8_moe_quant_config,
-    select_fp8_moe_backend,
 )
 from vllm.model_executor.hw_agnostic.layers.fused_moe.routed_experts import (
     FusedMoeWeightScaleSupported,
@@ -36,109 +33,13 @@ from vllm.model_executor.hw_agnostic.layers.fused_moe.runner.shared_experts impo
 from vllm.model_executor.hw_agnostic.model_loader.reload.layerwise import (
     initialize_online_processing,
 )
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig,
-)
-from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+from vllm.model_executor.hw_agnostic.quantization.fp8_config import Fp8Config
+from vllm.model_executor.hw_agnostic.quantization.utils import (
     process_fp8_input_tensor_strategy_moe,
     process_fp8_weight_tensor_strategy_moe,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    kFp8Dynamic128Sym,
-    kFp8DynamicTensorSym,
-    kFp8Static128BlockSym,
-    kFp8StaticTensorSym,
-)
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
-
-if TYPE_CHECKING:
-    from vllm.model_executor.models.utils import WeightsMapper
-
-ACTIVATION_SCHEMES = ["static", "dynamic"]
-
-logger = init_logger(__name__)
-
-
-class Fp8Config(QuantizationConfig):
-    """FP8 quantization config."""
-
-    def __init__(
-        self,
-        is_checkpoint_fp8_serialized: bool = False,
-        activation_scheme: str = "dynamic",
-        ignored_layers: list[str] | None = None,
-        weight_block_size: list[int] | None = None,
-        store_dtype: str | None = None,
-    ) -> None:
-        super().__init__()
-
-        self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
-
-        if activation_scheme not in ACTIVATION_SCHEMES:
-            raise ValueError(f"Unsupported activation scheme {activation_scheme}")
-        self.activation_scheme = activation_scheme
-        self.ignored_layers = ignored_layers or []
-        self.store_dtype = store_dtype
-        if weight_block_size is not None:
-            if not is_checkpoint_fp8_serialized:
-                raise ValueError(
-                    "The block-wise quantization only supports fp8-serialized "
-                    "checkpoint for now."
-                )
-            if len(weight_block_size) != 2:
-                raise ValueError(
-                    "The quantization block size of weight must have 2 "
-                    f"dimensions, but got {len(weight_block_size)} dimensions"
-                )
-            if activation_scheme != "dynamic":
-                raise ValueError(
-                    "The block-wise quantization only supports "
-                    "dynamic activation scheme for now, but got "
-                    f"{activation_scheme} activation scheme."
-                )
-        self.weight_block_size = weight_block_size
-
-    @classmethod
-    def get_name(cls) -> str:
-        return "fp8"
-
-    @classmethod
-    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
-        return [torch.bfloat16, torch.half]
-
-    @classmethod
-    def get_min_capability(cls) -> int:
-        return 75
-
-    @classmethod
-    def get_config_filenames(cls) -> list[str]:
-        return []
-
-    def apply_vllm_mapper(self, hf_to_vllm_mapper: WeightsMapper):
-        if self.ignored_layers is not None:
-            self.ignored_layers = hf_to_vllm_mapper.apply_list(self.ignored_layers)
-
-    @classmethod
-    def from_config(cls, config: dict[str, Any]) -> Fp8Config:
-        quant_method = cls.get_from_keys(config, ["quant_method"])
-        is_checkpoint_fp8_serialized = "fp8" in quant_method
-        activation_scheme = cls.get_from_keys(config, ["activation_scheme"])
-        ignored_layers = cls.get_from_keys_or(config, ["ignored_layers"], None)
-        weight_block_size = cls.get_from_keys_or(config, ["weight_block_size"], None)
-        store_dtype = cls.get_from_keys_or(config, ["store_dtype"], None)
-        if not ignored_layers:
-            ignored_layers = cls.get_from_keys_or(
-                config, ["modules_to_not_convert"], None
-            )
-        return cls(
-            is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
-            activation_scheme=activation_scheme,
-            ignored_layers=ignored_layers,
-            weight_block_size=weight_block_size,
-            store_dtype=store_dtype,
-        )
 
 
 class Fp8MoEMethod(FusedMoEMethodBase):
@@ -156,23 +57,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self.weight_scale_name = (
             "weight_scale_inv" if self.block_quant else "weight_scale"
         )
-
-        if self.block_quant:
-            weight_key = kFp8Static128BlockSym
-            activation_key = kFp8Dynamic128Sym
-        else:
-            weight_key = kFp8StaticTensorSym
-            activation_key = (
-                kFp8StaticTensorSym
-                if self.quant_config.activation_scheme == "static"
-                else kFp8DynamicTensorSym
-            )
-
-        self.fp8_backend, self.experts_cls = select_fp8_moe_backend(
-            config=self.moe,
-            weight_key=weight_key,
-            activation_key=activation_key,
-        )
+        self.experts_cls = TritonExperts
 
     def create_weights(
         self,
@@ -309,32 +194,18 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         w13_input_scale: torch.Tensor | None,
         w2_input_scale: torch.Tensor | None,
     ) -> None:
-        w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
-            fp8_backend=self.fp8_backend,
-            layer=layer,
-            w13=w13,
-            w2=w2,
-            w13_scale=w13_scale,
-            w2_scale=w2_scale,
-            w13_input_scale=w13_input_scale,
-            w2_input_scale=w2_input_scale,
-        )
-
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w2_weight", w2)
         replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_scale)
         replace_parameter(layer, f"w2_{self.weight_scale_name}", w2_scale)
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if self.moe_quant_config:
-            assert self.experts_cls is not None
-            self.moe_kernel = make_fp8_moe_kernel(
-                moe_quant_config=self.moe_quant_config,
-                moe_config=self.moe,
-                fp8_backend=self.fp8_backend,
-                experts_cls=self.experts_cls,
-                routing_tables=layer._expert_routing_tables(),
+        if self.moe_quant_config is not None:
+            prepare_finalize = maybe_make_prepare_finalize(self.moe)
+            experts = self.experts_cls(
+                moe_config=self.moe, quant_config=self.moe_quant_config
             )
+            self.moe_kernel = mk.FusedMoEKernel(prepare_finalize, experts)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         w13 = layer.w13_weight
@@ -373,24 +244,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         )
 
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
-        w1_scale = getattr(layer, f"w13_{self.weight_scale_name}")
-        w2_scale = getattr(layer, f"w2_{self.weight_scale_name}")
-        a1_scale = layer.w13_input_scale
-        a2_scale = layer.w2_input_scale
-
-        quant_config = make_fp8_moe_quant_config(
-            fp8_backend=self.fp8_backend,
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            a1_scale=a1_scale,
-            a2_scale=a2_scale,
+        quant_config = fp8_w8a8_moe_quant_config(
+            w1_scale=getattr(layer, f"w13_{self.weight_scale_name}"),
+            w2_scale=getattr(layer, f"w2_{self.weight_scale_name}"),
+            a1_scale=layer.w13_input_scale,
+            a2_scale=layer.w2_input_scale,
             block_shape=self.weight_block_size,
-            swiglu_limit=getattr(layer, "swiglu_limit", None),
-            gemm1_alpha=getattr(layer, "swiglu_alpha", None),
-            gemm1_beta=getattr(layer, "swiglu_beta", None),
+            gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
         )
 
-        if quant_config is not None and self.moe.has_bias:
+        if self.moe.has_bias:
             w13_bias = getattr(layer, "w13_bias", None)
             w2_bias = getattr(layer, "w2_bias", None)
             if w13_bias is not None:
@@ -568,10 +431,3 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
         )
 
         layer._already_called_process_weights_after_loading = True
-
-
-class Fp8KVCacheMethod(BaseKVCacheMethod):
-    """KV-cache scaling for FP8 checkpoints (hw-agnostic vendored copy)."""
-
-    def __init__(self, quant_config: Fp8Config):
-        super().__init__(quant_config)

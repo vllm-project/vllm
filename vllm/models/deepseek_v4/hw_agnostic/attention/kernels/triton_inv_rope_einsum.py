@@ -9,11 +9,10 @@ import torch
 
 def _decode_e8m0_scales(scale: torch.Tensor) -> torch.Tensor:
     if scale.dtype == torch.float8_e8m0fnu:
-        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-            _upcast_e8m0_to_fp32,
-        )
-
-        return _upcast_e8m0_to_fp32(scale).contiguous()
+        # E8M0 stores only the 8-bit biased exponent (bias=127). Place those
+        # bits into the FP32 exponent field (bits 23-30) with sign=0 mantissa=0.
+        exp_bits = scale.view(torch.uint8).to(torch.int32)
+        return (exp_bits << 23).view(torch.float32).contiguous()
     return scale.to(torch.float32)
 
 

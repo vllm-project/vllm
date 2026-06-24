@@ -8,10 +8,10 @@ from typing import ClassVar
 import torch
 from typing_extensions import Self
 
-from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+from vllm.model_executor.hw_agnostic.quantization.fp8_utils import (
     process_fp8_weight_block_strategy,
 )
+from vllm.model_executor.hw_agnostic.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.utils import replace_parameter
 
 from ..base import (

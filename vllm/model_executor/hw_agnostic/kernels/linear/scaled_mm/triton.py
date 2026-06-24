@@ -3,7 +3,7 @@
 
 import torch
 
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+from vllm.model_executor.hw_agnostic.quantization.fp8_utils import (
     w8a8_triton_block_scaled_mm,
 )
 from vllm.platforms import current_platform

@@ -29,7 +29,7 @@ from vllm.model_executor.hw_agnostic.layers.fused_moe.runner.shared_experts impo
 from vllm.model_executor.hw_agnostic.layers.fused_moe.utils import (
     _resize_cache,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
+from vllm.model_executor.hw_agnostic.quantization.quant_keys import (
     QuantKey,
 )
 from vllm.platforms import current_platform
