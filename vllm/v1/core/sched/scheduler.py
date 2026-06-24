@@ -807,7 +807,11 @@ class Scheduler(SchedulerInterface):
                         and (scheduled_running_reqs and not prefill_scheduled)
                     ):
                         num_new_tokens = 1 + self.num_spec_tokens
-                        if num_new_tokens > token_budget:
+                        if (
+                            num_new_tokens > token_budget
+                            or num_computed_tokens + num_new_tokens > self.max_model_len
+                        ):
+                            # Prefer to not schedule than schedule un-padded here.
                             break
                         pad_spec_decode = True
 
