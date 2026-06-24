@@ -468,24 +468,30 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             {
                 "image_grid_thw",
                 "video_grid_thw",
-                "mm_token_type_ids",
                 "second_per_grid_ts",
                 "audio_feature_lengths",
                 "use_audio_in_video",
             },
         )
-        if any(
-            v
-            for k, v in kwargs.items()
-            if k not in {"image_grid_thw", "mm_token_type_ids"}
-        ):
+        if any(v for k, v in kwargs.items() if k not in {"image_grid_thw"}):
             raise NotImplementedError(
                 "Transformers modeling backend only supports images."
             )
 
         image_grid_thw = kwargs.get("image_grid_thw", [])
         video_grid_thw = kwargs.get("video_grid_thw", [])
-        mm_token_type_ids = kwargs.get("mm_token_type_ids")
+
+        # Recompute `mm_token_type_ids` based on `mm_position`s
+        # Note: mm_features.data["mm_token_type_ids"] is not a reliable source to
+        # compute `mm_token_type_ids` since it might contain stale tensors from previous
+        # prompts in the case of per-image cache hits.
+        # `mm_features.mm_position` on the contrary is re-computed per-request.
+        mm_token_type_ids = torch.zeros((1, len(input_tokens)), dtype=torch.int)
+        modality_str_to_int = {"image": 1, "video": 2, "audio": 3}
+        for f in mm_features:
+            t = modality_str_to_int[f.modality]
+            p = f.mm_position
+            mm_token_type_ids[0, p.offset : p.offset + p.length] = t
 
         image_grid_thw = (torch.stack if image_grid_thw else torch.tensor)(
             image_grid_thw
@@ -507,11 +513,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
                 or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
             )
         if self._get_rope_index_accepts_mm_token_type_ids:
-            if mm_token_type_ids:
-                kwargs["mm_token_type_ids"] = torch.cat(mm_token_type_ids)
-            else:
-                shape = (1, len(input_tokens))
-                kwargs["mm_token_type_ids"] = torch.zeros(*shape, dtype=torch.int)
+            kwargs["mm_token_type_ids"] = mm_token_type_ids
 
         mrope_positions, mrope_position_delta = self.model.get_rope_index(
             input_ids=torch.tensor(input_tokens).unsqueeze(0),
