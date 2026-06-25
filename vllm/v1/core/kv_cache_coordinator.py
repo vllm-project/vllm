@@ -15,6 +15,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
+    RSWAManager,
     SingleTypeKVCacheManager,
     get_manager_for_kv_cache_spec,
 )
@@ -341,6 +342,28 @@ class KVCacheCoordinator(ABC):
         """
         for manager in self.single_type_managers:
             manager.remove_skipped_blocks(request_id, total_computed_tokens)
+
+    def remove_gap_blocks(
+        self,
+        request_id: str,
+        prefix_len: int,
+        total_computed_tokens: int,
+    ) -> None:
+        """Free R-SWA gap blocks (between prefill tail and decode window).
+
+        Only RSWAManager instances perform actual eviction; other manager types
+        are silently skipped.
+
+        Args:
+            request_id: The request ID.
+            prefix_len: Number of prompt tokens (the R-SWA evict floor).
+            total_computed_tokens: Tokens whose KV has been written so far.
+        """
+        for manager in self.single_type_managers:
+            if isinstance(manager, RSWAManager):
+                manager.remove_gap_blocks(
+                    request_id, prefix_len, total_computed_tokens
+                )
 
     def get_blocks(self, request_id: str) -> tuple[list[KVCacheBlock], ...]:
         """

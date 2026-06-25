@@ -20,6 +20,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
+    RSWAMLASpec,
     SinkFullAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
@@ -596,6 +597,62 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             else:
                 break
         return num_common_blocks
+
+
+class RSWAManager(FullAttentionManager):
+    """KV cache manager for Reference Sliding Window Attention (R-SWA).
+
+    Extends FullAttentionManager with ``remove_gap_blocks``: after each decode
+    step, blocks that fall in the gap between the prefill region and the
+    current decode window are freed and replaced with ``null_block``.  This
+    bounds per-request KV memory at O(prefix_len + rswa_window) instead of
+    growing linearly with decode length.
+    """
+
+    def __init__(self, kv_cache_spec: RSWAMLASpec, **kwargs) -> None:
+        super().__init__(kv_cache_spec, **kwargs)
+        self.rswa_window: int = kv_cache_spec.rswa_window
+
+    def remove_gap_blocks(
+        self,
+        request_id: str,
+        prefix_len: int,
+        total_computed_tokens: int,
+    ) -> None:
+        """Free gap blocks that are no longer needed for attention.
+
+        Gap = blocks entirely within
+            [ceil(prefix_len / block_size) * block_size,
+             max(prefix_len, total_computed_tokens - rswa_window))
+
+        Freed blocks are replaced with null_block in req_to_blocks so the
+        block_table passed to FA4 is valid (null_block KV is all-zero;
+        rswa_mask_mod marks gap positions as non-visible so FA4 skips them).
+
+        Args:
+            request_id: The request ID.
+            prefix_len: Number of prompt tokens (the R-SWA evict floor).
+            total_computed_tokens: Tokens whose KV has been written so far.
+        """
+        if request_id not in self.req_to_blocks:
+            return
+        blocks = self.req_to_blocks[request_id]
+        bs = self.block_size
+        # First block fully after the prefill boundary.
+        first_gap_block = cdiv(prefix_len, bs)
+        # Decode window start position; blocks before this are evictable.
+        window_start = max(prefix_len, total_computed_tokens - self.rswa_window)
+        last_gap_block = window_start // bs  # exclusive upper bound
+
+        freed: list[KVCacheBlock] = []
+        for i in range(first_gap_block, min(last_gap_block, len(blocks))):
+            if blocks[i] == self._null_block:
+                # Already evicted; earlier blocks were evicted in a prior call.
+                break
+            freed.append(blocks[i])
+            blocks[i] = self._null_block
+        if freed:
+            self.block_pool.free_blocks(freed)
 
 
 class SlidingWindowManager(SingleTypeKVCacheManager):
@@ -1344,10 +1401,13 @@ def get_manager_for_kv_cache_spec(
     assert manager_class is not None, (
         f"No manager registered for KVCacheSpec {type(kv_cache_spec)}"
     )
-    # SlidingWindow / ChunkedLocalAttention managers recycle blocks across
-    # chunks; the runtime admission cap must match the recycling-aware bound
-    # the startup pool sizer uses (single source of truth: the spec method).
-    if isinstance(kv_cache_spec, (SlidingWindowSpec, ChunkedLocalAttentionSpec)):
+    # SlidingWindow / ChunkedLocalAttention / RSWA managers recycle blocks;
+    # the runtime admission cap must match the recycling-aware bound the
+    # startup pool sizer uses (single source of truth: the spec method).
+    if isinstance(
+        kv_cache_spec,
+        (SlidingWindowSpec, ChunkedLocalAttentionSpec, RSWAMLASpec),
+    ):
         kwargs["max_admission_blocks_per_request"] = (
             kv_cache_spec.max_admission_blocks_per_request(
                 max_num_batched_tokens=max_num_batched_tokens,
@@ -1399,6 +1459,9 @@ def register_all_kvcache_specs(vllm_config):
     )
     KVCacheSpecRegistry.register(
         MLAAttentionSpec, FullAttentionManager, uniform_type_base_spec=FullAttentionSpec
+    )
+    KVCacheSpecRegistry.register(
+        RSWAMLASpec, RSWAManager, uniform_type_base_spec=FullAttentionSpec
     )
     # NOTE(Mengqing): HiddenStateCacheSpec won't take part in
     # grouping, thus the uniform_type_base_spec is just a

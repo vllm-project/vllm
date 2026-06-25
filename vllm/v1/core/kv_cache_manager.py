@@ -406,6 +406,14 @@ class KVCacheManager:
             request.request_id, total_computed_tokens
         )
 
+        # R-SWA gap eviction: free blocks between the prefill tail and the
+        # current decode window.  This is a no-op for non-RSWAManager groups.
+        self.coordinator.remove_gap_blocks(
+            request.request_id,
+            prefix_len=request.num_prompt_tokens,
+            total_computed_tokens=total_computed_tokens,
+        )
+
         num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
             request_id=request.request_id,
             num_tokens=num_tokens_need_slot,

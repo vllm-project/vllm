@@ -438,6 +438,31 @@ class HiddenStateCacheSpec(MLAAttentionSpec):
 
 
 @dataclass(frozen=True, kw_only=True)
+class RSWAMLASpec(MLAAttentionSpec):
+    """KV cache spec for Reference Sliding Window Attention (R-SWA) with MLA.
+
+    Prefill (image + text prompt) tokens are always globally visible.
+    Only the last ``rswa_window`` generated tokens are kept in the KV cache;
+    gap blocks (between the prefill tail and the current decode window) are
+    evicted during each decode step to bound memory at O(prefix + rswa_window).
+    """
+
+    rswa_window: int
+
+    def max_admission_blocks_per_request(
+        self, max_num_batched_tokens: int, max_model_len: int
+    ) -> int:
+        """Per-request KV block cap.
+
+        Steady-state decode holds prefix blocks + window blocks + 2 boundary
+        blocks.  We conservatively cap at max_model_len + rswa_window to allow
+        any prefix length; RSWAManager.remove_gap_blocks keeps the actual
+        in-flight count at prefix_blocks + window_blocks.
+        """
+        return cdiv(max_model_len + self.rswa_window, self.block_size) + 2
+
+
+@dataclass(frozen=True, kw_only=True)
 class ChunkedLocalAttentionSpec(AttentionSpec):
     attention_chunk_size: int
 
