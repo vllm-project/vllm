@@ -119,7 +119,7 @@ For further details on profiling vLLM, please refer to [this page](../../contrib
 - `/ping` - SageMaker health check
 - `/invocations` - SageMaker-compatible endpoint (routes to the same inference functions as `/v1` endpoints)
 
-## Disaggregated Everything
+## Scale out APIs
 
 ### Tokens IN <> Tokens OUT
 
