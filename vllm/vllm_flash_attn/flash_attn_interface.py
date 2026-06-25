@@ -390,6 +390,15 @@ def flash_attn_varlen_func(
         )
     elif fa_version == 4:
         assert alibi_slopes is None, "Alibi is not supported in FA4"
+        if block_sparse_tensors is not None:
+            assert block_sparse_tensors.full_block_cnt is not None, (
+                "FA4 block_sparse_tensors must materialize empty full_block_cnt "
+                "instead of passing None"
+            )
+            assert block_sparse_tensors.full_block_idx is not None, (
+                "FA4 block_sparse_tensors must materialize empty full_block_idx "
+                "instead of passing None"
+            )
 
         from vllm.vllm_flash_attn.cute.interface import _flash_attn_fwd
 

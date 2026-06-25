@@ -359,7 +359,7 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
                 fa_version=4,
             )
         else:
-            from vllm.vllm_flash_attn.cute.dense_mask import (
+            from vllm.model_executor.layers.attention.sparse_mla_mask import (
                 dense_mask_mod,
                 dense_mask_to_block_sparse,
             )
