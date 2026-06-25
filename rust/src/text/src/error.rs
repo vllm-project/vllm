@@ -3,7 +3,7 @@ use vllm_engine_core_client::Error as EngineCoreError;
 use vllm_llm::Error as LlmError;
 
 pub use crate::lower::logprobs::LogprobsError;
-pub use crate::lower::token_ids::OutOfVocabError;
+pub use crate::lower::token_ids::TokenIdsError;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -19,7 +19,9 @@ pub enum Error {
     #[error(transparent)]
     Logprobs(#[from] LogprobsError),
     #[error(transparent)]
-    OutOfVocab(#[from] OutOfVocabError),
+    TokenIds(#[from] TokenIdsError),
+    #[error("`thinking_token_budget` must be a non-negative integer or -1 for unlimited.")]
+    InvalidThinkingTokenBudget,
     #[error("text request stream `{request_id}` closed before terminal output")]
     StreamClosedBeforeTerminalOutput { request_id: String },
     #[error(transparent)]
