@@ -74,12 +74,11 @@ def main() -> None:
 
     import torch
     from datasets import load_dataset
-    from torch.utils.data import DataLoader
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-
     from quark.torch import ModelQuantizer, export_safetensors
     from quark.torch.quantization import Int8PerChannelSpec
     from quark.torch.quantization.config.config import Config, QuantizationConfig
+    from torch.utils.data import DataLoader
+    from transformers import AutoModelForCausalLM, AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     model = AutoModelForCausalLM.from_pretrained(
