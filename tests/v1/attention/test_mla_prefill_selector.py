@@ -369,10 +369,7 @@ class TestROCmAiterFAPrefillSelection:
 
         # gfx gating is simulated via the mocked validate_configuration, not the capability.
         capability = MagicMock()
-        selector_config = MLAPrefillSelectorConfig(
-            dtype=torch.bfloat16,
-            is_r1_compatible=True,
-        )
+        selector_config = MLAPrefillSelectorConfig(dtype=torch.bfloat16)
 
         with (
             patch("vllm.platforms.current_platform") as mock_platform,
@@ -399,10 +396,7 @@ class TestROCmAiterFAPrefillSelection:
 
         # the fallback is forced by the mocked validate_configuration, not the capability.
         capability = MagicMock()
-        selector_config = MLAPrefillSelectorConfig(
-            dtype=torch.bfloat16,
-            is_r1_compatible=True,
-        )
+        selector_config = MLAPrefillSelectorConfig(dtype=torch.bfloat16)
 
         with (
             patch("vllm.platforms.current_platform") as mock_platform,
