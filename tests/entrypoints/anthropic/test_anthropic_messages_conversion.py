@@ -16,6 +16,7 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicMessagesRequest,
@@ -1420,3 +1421,33 @@ class TestMessagesFullConverter:
         assert len(result.content) == 1
         assert result.content[0].type == "text"
         assert result.content[0].text == ""
+
+
+class TestCacheSaltPassthrough:
+    """cache_salt on the Anthropic Messages API must flow into the underlying
+    ChatCompletionRequest, mirroring the OpenAI route. See #46688."""
+
+    _messages = [{"role": "user", "content": "hi"}]
+
+    def test_cache_salt_field_accepted(self):
+        req = _make_request(self._messages, cache_salt="my-salt")
+        assert req.cache_salt == "my-salt"
+
+    def test_cache_salt_defaults_to_none(self):
+        assert _make_request(self._messages).cache_salt is None
+
+    def test_cache_salt_passed_to_chat_request(self):
+        req = _make_request(self._messages, cache_salt="abc123")
+        chat_req = AnthropicServingMessages._build_base_request(req, self._messages)
+        assert chat_req.cache_salt == "abc123"
+
+    def test_no_cache_salt_passed_as_none(self):
+        req = _make_request(self._messages)
+        chat_req = AnthropicServingMessages._build_base_request(req, self._messages)
+        assert chat_req.cache_salt is None
+
+    def test_empty_cache_salt_rejected_at_request_validation(self):
+        # Rejected by the request model (FastAPI -> 422) rather than falling
+        # through to a 500 from the Messages router.
+        with pytest.raises(ValidationError):
+            _make_request(self._messages, cache_salt="")

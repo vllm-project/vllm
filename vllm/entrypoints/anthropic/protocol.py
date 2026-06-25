@@ -144,6 +144,17 @@ class AnthropicMessagesRequest(BaseModel):
             "Will be accessible by the template."
         ),
     )
+    cache_salt: str | None = Field(
+        default=None,
+        description=(
+            "If specified, the prefix cache will be salted with the provided "
+            "string to prevent an attacker to guess prompts in multi-user "
+            "environments. The salt should be random, protected from "
+            "access by 3rd parties, and long enough to be "
+            "unpredictable (e.g., 43 characters base64-encoded, corresponding "
+            "to 256 bit). Mirrors the OpenAI-compatible Chat Completions API."
+        ),
+    )
 
     @field_validator("model")
     @classmethod
@@ -157,6 +168,17 @@ class AnthropicMessagesRequest(BaseModel):
     def validate_max_tokens(cls, v):
         if v <= 0:
             raise ValueError("max_tokens must be positive")
+        return v
+
+    @field_validator("cache_salt")
+    @classmethod
+    def validate_cache_salt(cls, v):
+        # Reject at request-validation time (HTTP 422) instead of letting the
+        # empty string fall through to the ChatCompletionRequest validator,
+        # which would surface as a 500 from the Messages router. Mirrors the
+        # OpenAI route's non-empty requirement.
+        if v is not None and (not isinstance(v, str) or not v):
+            raise ValueError("cache_salt must be a non-empty string if provided.")
         return v
 
 
