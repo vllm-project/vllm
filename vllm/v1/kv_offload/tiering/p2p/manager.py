@@ -17,6 +17,7 @@ from typing_extensions import override
 
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
+    LookupResult,
     OffloadKey,
     ReqContext,
     RequestOffloadingContext,
@@ -164,7 +165,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     # ------------------------------------------------------------------
 
     @override
-    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         kv_params = req_context.kv_transfer_params
         if (
             not kv_params
@@ -173,10 +174,12 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             or not kv_params.get("remote_port")
             or not kv_params.get("kv_request_id")
         ):
-            return False
+            return LookupResult.MISS
 
         kv_request_id = kv_params["kv_request_id"]
-        return kv_request_id not in self._failed_req_ids
+        if kv_request_id in self._failed_req_ids:
+            return LookupResult.MISS
+        return LookupResult.HIT
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
