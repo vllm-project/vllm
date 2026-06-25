@@ -1496,7 +1496,8 @@ void hier_allreduce(int64_t handle, torch::Tensor& data) {
   rwr.wr_id = 1;
   rwr.num_sge = 0;
   rwr.sg_list = nullptr;
-  ibv_post_recv(ibv.qp, &rwr, &bad_r);
+  ret = ibv_post_recv(ibv.qp, &rwr, &bad_r);
+  TORCH_CHECK(ret == 0, "ibv_post_recv failed, ret=", ret);
 
   // Step 5: Signal SHM slot is complete
   std::atomic_thread_fence(std::memory_order_release);
