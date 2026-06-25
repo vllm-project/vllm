@@ -404,9 +404,7 @@ class TestTileLangHook:
             impl = JITImpl(FakeFunc(), inspect.signature(tilelang_fn))
 
             jit_monitor.activate()
-            with mock.patch.object(
-                jit_monitor.logger, "warning_once"
-            ) as warning_once:
+            with mock.patch.object(jit_monitor.logger, "warning_once") as warning_once:
                 impl(tensor, n_splits=2)
                 impl(tensor, n_splits=2)
 
