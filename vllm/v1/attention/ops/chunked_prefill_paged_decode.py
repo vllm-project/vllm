@@ -280,20 +280,22 @@ def chunked_prefill_paged_decode(
         sliding_window = 0
 
     has_native_layout = has_native_kv_cache_layout(key_cache, value_cache)
-    if has_native_layout and max_query_len > 1:
-        raise NotImplementedError(
-            "Native ROCm paged attention layout is only supported for decode."
-        )
 
     if max_query_len > 1:
+        if has_native_layout:
+            prefill_key_cache = key_cache
+            prefill_value_cache = value_cache
+        else:
+            prefill_key_cache = key_cache.transpose(2, 3)
+            prefill_value_cache = value_cache.transpose(2, 3)
         context_attention_fwd(
             q=query,
             k=key,
             v=value,
             o=output,
             kv_cache_dtype=kv_cache_dtype,
-            k_cache=key_cache.transpose(2, 3),
-            v_cache=value_cache.transpose(2, 3),
+            k_cache=prefill_key_cache,
+            v_cache=prefill_value_cache,
             b_loc=block_table,
             b_start_loc=query_start_loc,
             b_seq_len=seq_lens,
@@ -355,7 +357,7 @@ def chunked_prefill_paged_decode(
 
     is_pow2 = block_size > 0 and (block_size & (block_size - 1) == 0)
 
-    if use_custom and is_pow2 and max_query_len == 1 and has_native_layout:
+    if use_custom and is_pow2 and has_native_layout:
         _PARTITION_SIZE_ROCM = 256
         max_num_partitions = (
             max_seq_len + _PARTITION_SIZE_ROCM - 1
