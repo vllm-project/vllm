@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #SBATCH --nodelist=htc-g[060]
-#SBATCH --job-name=r128_sp512_sd128_tp4_qwen3_30b
+#SBATCH --job-name=r128_sp512_sd128_tp8_qwen3_30b
 #SBATCH --nodes=1
 #SBATCH --partition=short
-#SBATCH --gres=gpu:h100:4
+#SBATCH --gres=gpu:h100:8
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=64
 #SBATCH --mem=512G
@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="arc-ray-qwen3-30b-a3b-r128-sp512-sd128-tp4-pp1-from-test-ip-v1"
+SCRIPT_VERSION="arc-ray-qwen3-30b-a3b-r128-sp512-sd128-tp8-pp1-from-test-ip-v1"
 
 DEBUG_SLURM_SCRIPT="${DEBUG_SLURM_SCRIPT:-0}"
 NSYS_COPY_DEBUG="${NSYS_COPY_DEBUG:-0}"
@@ -628,9 +628,9 @@ export VLLM_DEEP_GEMM_WARMUP="${VLLM_DEEP_GEMM_WARMUP:-skip}"
 MODEL_ID="${MODEL_ID:-Qwen/Qwen3-30B-A3B-Instruct-2507}"
 HOST="${HOST:-${HEAD_NODE_IP}}"
 PORT="${PORT:-8000}"
-GPUS_PER_NODE="${GPUS_PER_NODE:-4}"
+GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
 NUM_NODES="${SLURM_JOB_NUM_NODES:-${SLURM_NNODES:-2}}"
-TP="${TP:-4}"
+TP="${TP:-8}"
 PP="${PP:-1}"
 EP="${EP:-1}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
