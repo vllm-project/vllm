@@ -891,7 +891,16 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         # R-SWA uses q_block_size=1 so block lists are not merged across requests
         # in a q-group (mixed-length batches otherwise gather foreign paged-KV).
         self.max_num_rswa_query_groups = max_num_batched_tokens
-        self.max_num_rswa_kv_indices = max_num_pages_per_seq
+        # +1 sentinel column: the flex-attention kernel's get_offset_for_next_block
+        # always prefetches kv_indices[q, kv_num_blocks] (one past the last valid
+        # entry) to compute the jump offset for the next loop iteration.  When
+        # kv_num_blocks[q] == W (every page of the sequence is live), that prefetch
+        # reads column W of the persistent buffer.  Without the extra column this
+        # would land on stale data from a previous step (the buffer is wider than W
+        # but is never fully zeroed), producing an out-of-bounds K/V pointer and a
+        # CUDA illegal memory access.  Allocating W_max+1 columns and initialising
+        # the whole buffer to -1 ensures the sentinel slot is always safe to read.
+        self.max_num_rswa_kv_indices = max_num_pages_per_seq + 1
         self.persistent_kv_num_blocks = torch.empty(
             self.max_num_query_groups, dtype=torch.int32, device=device
         )
@@ -1040,9 +1049,11 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
                 device=self.device,
             )
         if self.persistent_rswa_kv_indices is None:
-            self.persistent_rswa_kv_indices = torch.empty(
-                self.max_num_rswa_query_groups,
-                self.max_num_rswa_kv_indices,
+            # Initialise to -1 so the +1 sentinel column (see max_num_rswa_kv_indices)
+            # is always a safe pad value for the flex kernel's prefetch.
+            self.persistent_rswa_kv_indices = torch.full(
+                (self.max_num_rswa_query_groups, self.max_num_rswa_kv_indices),
+                fill_value=-1,
                 dtype=torch.int32,
                 device=self.device,
             )
