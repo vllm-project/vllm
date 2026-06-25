@@ -359,6 +359,7 @@ class KVTransferThread(threading.Thread):
         ready_event: threading.Event,
         name: str,
         record_operation: Callable[..., None] | None = None,
+        request_queue: queue.Queue[Any] | None = None,
     ):
         super().__init__(daemon=True, name=name)
         self.store = store
@@ -368,7 +369,7 @@ class KVTransferThread(threading.Thread):
         self.token_databases = token_databases
         self._record_operation_cb = record_operation
         self.done_task_lock = threading.Lock()
-        self.request_queue: queue.Queue[Any] = queue.Queue()
+        self.request_queue: queue.Queue[Any] = request_queue or queue.Queue()
         self.finished_requests: set[str] = set()
         self.kv_event_lock = threading.Lock()
         self.kv_events: list[BlockStored] = []
@@ -749,6 +750,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         ready_event: threading.Event,
         disk_offload_buffer_budget_bytes: int | None = None,
         record_operation: Callable[..., None] | None = None,
+        request_queue: queue.Queue[Any] | None = None,
     ):
         super().__init__(
             store,
@@ -758,6 +760,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             ready_event,
             name="KVCacheStoreRecvingThread",
             record_operation=record_operation,
+            request_queue=request_queue,
         )
         # _invalid_block_ids can be access by both the Worker and RecvingThread
         self._invalid_block_ids_lock = threading.Lock()
@@ -1101,7 +1104,10 @@ class MooncakeStoreWorker:
             self.enable_kv_events = True
 
         self.kv_send_thread: KVCacheStoreSendingThread | None = None
-        self.kv_recv_thread: KVCacheStoreRecvingThread | None = None
+        # Pool of load-receive threads
+        self.kv_recv_threads: list[KVCacheStoreRecvingThread] = []
+        self.num_recv_threads = max(1, envs.VLLM_MOONCAKE_LOAD_RECV_THREADS)
+        self.recv_request_queue: queue.Queue[ReqMeta] = queue.Queue()
         self.finished_store_req: set[str] = set()
         self._kv_connector_stats_lock = threading.Lock()
         self.kv_connector_stats = MooncakeStoreConnectorStats()
@@ -1260,19 +1266,30 @@ class MooncakeStoreWorker:
             )
             self.kv_send_thread.start()
 
-        ready_event_recving = threading.Event()
-        self.kv_recv_thread = KVCacheStoreRecvingThread(
-            self.store,
-            self.coord,
-            self.token_dbs,
-            self.block_size,
-            self.tp_rank,
-            ready_event_recving,
-            disk_offload_buffer_budget_bytes=self.disk_offload_buffer_budget_bytes,
-            record_operation=self._record_kv_connector_operation,
+        self.kv_recv_threads = []
+        ready_events_recving = []
+        for i in range(self.num_recv_threads):
+            ready_event_recving = threading.Event()
+            recv_thread = KVCacheStoreRecvingThread(
+                self.store,
+                self.coord,
+                self.token_dbs,
+                self.block_size,
+                self.tp_rank,
+                ready_event_recving,
+                disk_offload_buffer_budget_bytes=self.disk_offload_buffer_budget_bytes,
+                record_operation=self._record_kv_connector_operation,
+                request_queue=self.recv_request_queue,
+            )
+            recv_thread.name = f"KVCacheStoreRecvingThread-{i}"
+            recv_thread.start()
+            self.kv_recv_threads.append(recv_thread)
+            ready_events_recving.append(ready_event_recving)
+        for ready_event_recving in ready_events_recving:
+            ready_event_recving.wait()
+        logger.info(
+            "Started %d Mooncake KV-load receive thread(s)", self.num_recv_threads
         )
-        self.kv_recv_thread.start()
-        ready_event_recving.wait()
 
     def start_load_kv(
         self,
@@ -1306,9 +1323,7 @@ class MooncakeStoreWorker:
                 continue
 
             load_spec.token_len = load_spec.kvpool_cached_tokens
-
-            assert self.kv_recv_thread is not None
-            self.kv_recv_thread.add_request(request)
+            self.recv_request_queue.put(request)
 
         assert self.load_async, "load_async must be True for better performance."
         # Issue stores with CUDA event synchronization
@@ -1335,11 +1350,10 @@ class MooncakeStoreWorker:
             else set()
         )
 
-        done_recving = (
-            self.kv_recv_thread.get_and_clear_finished_requests()
-            if self.load_async and self.kv_recv_thread is not None
-            else set()
-        )
+        done_recving: set[str] = set()
+        if self.load_async:
+            for recv_thread in self.kv_recv_threads:
+                done_recving |= recv_thread.get_and_clear_finished_requests()
 
         logger.debug(
             "Completed send: %d, recv: %d, tp_rank: %d",
@@ -1350,9 +1364,10 @@ class MooncakeStoreWorker:
         return done_sending, done_recving
 
     def get_block_ids_with_load_errors(self) -> set[int]:
-        if self.kv_recv_thread is None:
-            return set()
-        return self.kv_recv_thread.get_and_clear_block_ids_with_load_errors()
+        block_ids: set[int] = set()
+        for recv_thread in self.kv_recv_threads:
+            block_ids |= recv_thread.get_and_clear_block_ids_with_load_errors()
+        return block_ids
 
     def _record_kv_connector_operation(
         self,
