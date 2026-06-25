@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="arc-ray-qwen3-30b-tcp-preflight-vllm-driver-exact-iface-v7-health1200-engine2400"
+SCRIPT_VERSION="arc-ray-qwen3-30b-tcp-preflight-vllm-driver-exact-iface-v8-health1200-engine2400-bench-knobs"
 
 DEBUG_SLURM_SCRIPT="${DEBUG_SLURM_SCRIPT:-0}"
 NSYS_COPY_DEBUG="${NSYS_COPY_DEBUG:-0}"
@@ -43,8 +43,32 @@ WORKER_NSYS_FINALIZE_WAIT_S="${WORKER_NSYS_FINALIZE_WAIT_S:-180}"
 WORKER_NSYS_FINALIZE_POLL_S="${WORKER_NSYS_FINALIZE_POLL_S:-5}"
 MIN_WORKER_NSYS_REP_BYTES="${MIN_WORKER_NSYS_REP_BYTES:-1024}"
 
+# Benchmark/workload knobs owned by this host Slurm file.
+# These are passed into serving_scripts/serve_ShareGPT_multi_node.sh below.
 SP="${SP:-128}"
 SD="${SD:-128}"
+
+NUM_PROMPTS="${NUM_PROMPTS:-100}"
+REQUEST_RATE="${REQUEST_RATE:-1}"
+BURSTINESS="${BURSTINESS:-1.0}"
+SEED="${SEED:-100}"
+
+ENDPOINT="${ENDPOINT:-/v1/completions}"
+
+AUTO_GENERATE_DATASET="${AUTO_GENERATE_DATASET:-1}"
+DATASET_NAME="${DATASET_NAME:-Aeala/ShareGPT_Vicuna_unfiltered}"
+DATASET_SPLIT="${DATASET_SPLIT:-train}"
+DATASET_MAX_PER_BUCKET="${DATASET_MAX_PER_BUCKET:-1000}"
+DATASET_MAX_SOURCE_ROWS="${DATASET_MAX_SOURCE_ROWS:-200000}"
+
+# Leave DATASET_PATH empty to let the serving file derive the default from MODEL_ID/SP/SD.
+DATASET_PATH="${DATASET_PATH:-}"
+
+SAVE_RESULT="${SAVE_RESULT:-0}"
+SAVE_DETAILED="${SAVE_DETAILED:-0}"
+RESULT_ROOT="${RESULT_ROOT:-}"
+RESULT_DIR="${RESULT_DIR:-}"
+RESULT_FILENAME="${RESULT_FILENAME:-}"
 
 export NSYS_ENABLE="${NSYS_ENABLE:-1}"
 export NSYS_PROFILE_WORKERS="${NSYS_PROFILE_WORKERS:-1}"
@@ -207,7 +231,7 @@ copy_ray_nsight_locally_once() {
   live_sessions="$(
     ps -eo args 2>/dev/null |
       grep -E 'ray|vllm|EngineCore|worker_process|nsys' |
-      grep -oE 'session_[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}_[0-9]+_[0-9]+' |
+      grep -oE 'session_[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}_[0-9]+_[0-9]+' |
       sort -u
   )"
 
@@ -613,7 +637,23 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 CPUS_PER_TASK="${CPUS_PER_TASK:-${SLURM_CPUS_PER_TASK:-1}}"
 SERVE_SCRIPT="${REPO_ROOT}/serving_scripts/serve_ShareGPT_multi_node.sh"
 
+if [ -z "${RESULT_ROOT}" ]; then
+  RESULT_ROOT="${REPO_ROOT}/traces/bench_results"
+fi
+
+if [ -z "${RESULT_DIR}" ]; then
+  MODEL_SLUG_FOR_RESULT="$(printf '%s' "${MODEL_ID}" | sed -E 's#[/:]+#_#g; s#[^A-Za-z0-9._-]+#_#g')"
+  RESULT_DIR="${RESULT_ROOT}/${MODEL_SLUG_FOR_RESULT}_sp${SP}_sd${SD}_np${NUM_PROMPTS}_rr${REQUEST_RATE}_job${SLURM_JOB_ID}"
+fi
+
+if [ -z "${RESULT_FILENAME}" ]; then
+  RESULT_FILENAME="sharegpt_sp${SP}_sd${SD}_np${NUM_PROMPTS}_rr${REQUEST_RATE}_job${SLURM_JOB_ID}.json"
+fi
+
 export MODEL_ID HOST PORT GPUS_PER_NODE NUM_NODES TP PP EP MAX_MODEL_LEN CPUS_PER_TASK SERVE_SCRIPT
+export SP SD NUM_PROMPTS REQUEST_RATE BURSTINESS SEED ENDPOINT
+export AUTO_GENERATE_DATASET DATASET_NAME DATASET_SPLIT DATASET_MAX_PER_BUCKET DATASET_MAX_SOURCE_ROWS DATASET_PATH
+export SAVE_RESULT SAVE_DETAILED RESULT_ROOT RESULT_DIR RESULT_FILENAME
 
 configure_socket_ifnames "${HEAD_NODE_IP}"
 network_debug_snapshot "batch-before-ray"
@@ -629,6 +669,25 @@ echo "NCCL_SOCKET_FAMILY=${NCCL_SOCKET_FAMILY} NCCL_SOCKET_IFNAME=${NCCL_SOCKET_
 echo "GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME} VLLM_HOST_IP=${VLLM_HOST_IP}"
 echo "NCCL_DEBUG=${NCCL_DEBUG} NCCL_DEBUG_SUBSYS=${NCCL_DEBUG_SUBSYS}"
 echo "SERVE_SCRIPT=${SERVE_SCRIPT}"
+
+echo "=== benchmark knobs owned by host script ==="
+echo "SP=${SP} SD=${SD}"
+echo "NUM_PROMPTS=${NUM_PROMPTS}"
+echo "REQUEST_RATE=${REQUEST_RATE}"
+echo "BURSTINESS=${BURSTINESS}"
+echo "SEED=${SEED}"
+echo "ENDPOINT=${ENDPOINT}"
+echo "AUTO_GENERATE_DATASET=${AUTO_GENERATE_DATASET}"
+echo "DATASET_NAME=${DATASET_NAME}"
+echo "DATASET_SPLIT=${DATASET_SPLIT}"
+echo "DATASET_MAX_PER_BUCKET=${DATASET_MAX_PER_BUCKET}"
+echo "DATASET_MAX_SOURCE_ROWS=${DATASET_MAX_SOURCE_ROWS}"
+echo "DATASET_PATH=${DATASET_PATH:-<derived by serving file>}"
+echo "SAVE_RESULT=${SAVE_RESULT}"
+echo "SAVE_DETAILED=${SAVE_DETAILED}"
+echo "RESULT_ROOT=${RESULT_ROOT}"
+echo "RESULT_DIR=${RESULT_DIR}"
+echo "RESULT_FILENAME=${RESULT_FILENAME}"
 
 if [ -n "${HF_TOKEN:-}" ]; then
   echo "HF_TOKEN is set"
@@ -990,13 +1049,34 @@ unset _health_wait_n
 unset _health_deadline
 
 echo "Server is healthy. Running ${SERVE_SCRIPT} ..."
-echo "SP=${SP} SD=${SD}"
+echo "SP=${SP} SD=${SD} NUM_PROMPTS=${NUM_PROMPTS} REQUEST_RATE=${REQUEST_RATE}"
 
-HOST="${HEAD_NODE_IP}" PORT="${PORT}" MODEL_ID="${MODEL_ID}" \
-  SP="${SP}" SD="${SD}" \
-  HEAD_NODE_IP="${HEAD_NODE_IP}" \
-  GPUS_PER_NODE="${GPUS_PER_NODE}" CPUS_PER_TASK="${CPUS_PER_TASK}" \
-  RAY_PORT="${RAY_PORT}" bash "${SERVE_SCRIPT}" "${SLURM_JOB_ID}" "${HEAD_NODE}"
+HOST="${HEAD_NODE_IP}" \
+PORT="${PORT}" \
+MODEL_ID="${MODEL_ID}" \
+SP="${SP}" \
+SD="${SD}" \
+NUM_PROMPTS="${NUM_PROMPTS}" \
+REQUEST_RATE="${REQUEST_RATE}" \
+BURSTINESS="${BURSTINESS}" \
+SEED="${SEED}" \
+ENDPOINT="${ENDPOINT}" \
+AUTO_GENERATE_DATASET="${AUTO_GENERATE_DATASET}" \
+DATASET_NAME="${DATASET_NAME}" \
+DATASET_SPLIT="${DATASET_SPLIT}" \
+DATASET_MAX_PER_BUCKET="${DATASET_MAX_PER_BUCKET}" \
+DATASET_MAX_SOURCE_ROWS="${DATASET_MAX_SOURCE_ROWS}" \
+DATASET_PATH="${DATASET_PATH}" \
+SAVE_RESULT="${SAVE_RESULT}" \
+SAVE_DETAILED="${SAVE_DETAILED}" \
+RESULT_ROOT="${RESULT_ROOT}" \
+RESULT_DIR="${RESULT_DIR}" \
+RESULT_FILENAME="${RESULT_FILENAME}" \
+HEAD_NODE_IP="${HEAD_NODE_IP}" \
+GPUS_PER_NODE="${GPUS_PER_NODE}" \
+CPUS_PER_TASK="${CPUS_PER_TASK}" \
+RAY_PORT="${RAY_PORT}" \
+bash "${SERVE_SCRIPT}" "${SLURM_JOB_ID}" "${HEAD_NODE}"
 
 echo "Workload finished. Stopping vLLM server process cleanly..."
 
