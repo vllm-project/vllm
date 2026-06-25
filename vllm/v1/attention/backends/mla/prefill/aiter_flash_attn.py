@@ -75,7 +75,6 @@ class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
         out: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-
         assert output_scale is None, (
             "AiterFlashAttnPrefillBackend does not support fused quantized output."
         )
