@@ -46,6 +46,7 @@ from .interfaces import (
     MultiModalEmbeddings,
     SupportsMRoPE,
     SupportsMultiModal,
+    SupportsLoRA,
     SupportsPP,
     _require_is_multimodal,
 )
@@ -921,6 +922,7 @@ class MiniCPMV4_6Merger(nn.Module):
 class MiniCPMV4_6ForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
+    SupportsLoRA,
     SupportsPP,
     HasInnerState,
     IsHybrid,
