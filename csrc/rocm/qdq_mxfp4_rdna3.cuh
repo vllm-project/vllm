@@ -102,6 +102,19 @@ MXFP4_D void dequant_mxfp4_8_fp16(uint32_t qa, int32_t bias_u16,
   }
 }
 
+// LUT decode: `lut` holds the 16 E2M1 magnitude bit-patterns for T (filled once
+// from mxfp4_e2m1_to_{bf16,fp16}_bits), so per nibble we skip the arithmetic
+// field construction and just apply the E8M0 exponent add. T = bf16_t or half.
+template <typename T>
+MXFP4_D void dequant_mxfp4_8_lut(uint32_t qa, int32_t bias_u16,
+                                 const uint16_t* lut, T (&dq)[8]) {
+#pragma unroll
+  for (int i = 0; i < 8; i++) {
+    uint16_t b = mxfp4_apply_e8m0_bits(lut[(qa >> (4 * i)) & 0xFu], bias_u16);
+    __builtin_memcpy(&dq[i], &b, sizeof(T));
+  }
+}
+
 // fp32 output (bf16 bits widened by a free <<16) for a scalar dot path.
 MXFP4_D void dequant_mxfp4_8_f32(uint32_t qa, int32_t bias_u16,
                                  float (&dq)[8]) {

@@ -120,6 +120,9 @@ struct WmmaNative<bf16_t> {
 
 using mxfp4_rdna3::dequant_mxfp4_8_bf16;
 using mxfp4_rdna3::dequant_mxfp4_8_fp16;
+using mxfp4_rdna3::dequant_mxfp4_8_lut;
+using mxfp4_rdna3::mxfp4_e2m1_to_bf16_bits;
+using mxfp4_rdna3::mxfp4_e2m1_to_fp16_bits;
 
 template <typename FROM, typename TO>
 __device__ __forceinline__ TO wmoe_bitcast(FROM x) {
@@ -191,6 +194,11 @@ __global__ void moe_gemm_mxfp4_wmma_kernel_rdna3(
 
   v8fp32 c_acc = {0, 0, 0, 0, 0, 0, 0, 0};
   __shared__ T b_lds[16][16];
+  __shared__ uint16_t w_lut[16];  // E2M1 magnitude bits for T, filled once
+  if (lane < 16)
+    w_lut[lane] = std::is_same<T, half>::value ? mxfp4_e2m1_to_fp16_bits(lane)
+                                               : mxfp4_e2m1_to_bf16_bits(lane);
+  __syncthreads();
   const int actual_n = n_tile + lane_lo;  // this lane's N column for B-dequant
 
   for (int k_tile = 0; k_tile < size_k; k_tile += 16) {
@@ -201,17 +209,10 @@ __global__ void moe_gemm_mxfp4_wmma_kernel_rdna3(
       const int32_t bias = mxfp4_e8m0_bias(
           expert_scales[(k_tile / groupsize) * size_n + actual_n], mant_bits);
       const int k_base = my_k_octet * 8;
-      if constexpr (std::is_same<T, half>::value) {
-        half dq[8];
-        dequant_mxfp4_8_fp16(qa, bias, dq);
+      T dq[8];
+      dequant_mxfp4_8_lut<T>(qa, bias, w_lut, dq);
   #pragma unroll
-        for (int i = 0; i < 8; i++) b_lds[k_base + i][lane_lo] = dq[i];
-      } else {
-        bf16_t dq[8];
-        dequant_mxfp4_8_bf16(qa, bias, dq);
-  #pragma unroll
-        for (int i = 0; i < 8; i++) b_lds[k_base + i][lane_lo] = dq[i];
-      }
+      for (int i = 0; i < 8; i++) b_lds[k_base + i][lane_lo] = dq[i];
     }
     // Single wave: lanes that wrote b_lds are the same wave that reads it; the
     // WMMA reads all 16 rows, so a wave barrier is needed for cross-lane reads.

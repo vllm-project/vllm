@@ -29,6 +29,9 @@ using bf16_t = __hip_bfloat16;
 using mxfp4_rdna3::dequant_mxfp4_8_bf16;
 using mxfp4_rdna3::dequant_mxfp4_8_f32;
 using mxfp4_rdna3::dequant_mxfp4_8_fp16;
+using mxfp4_rdna3::dequant_mxfp4_8_lut;
+using mxfp4_rdna3::mxfp4_e2m1_to_bf16_bits;
+using mxfp4_rdna3::mxfp4_e2m1_to_fp16_bits;
 using mxfp4_rdna3::mxfp4_e8m0_bias;
 
 // K-split heuristic: more blocks along gridDim.z → more resident waves. Mirror
@@ -131,6 +134,11 @@ __global__ void gemm_mxfp4_wmma_kernel_16x16_1w(
   const int k_end = k_start + k_per_split;
 
   __shared__ T b_lds[16][16];
+  __shared__ uint16_t w_lut[16];  // E2M1 magnitude bits for T, filled once
+  if (lane < 16)
+    w_lut[lane] = std::is_same<T, half>::value ? mxfp4_e2m1_to_fp16_bits(lane)
+                                               : mxfp4_e2m1_to_bf16_bits(lane);
+  __syncthreads();
 
   for (int k_tile = k_start; k_tile < k_end; k_tile += 16) {
     // ---- Dequant 16x16 B tile into LDS ----
@@ -151,17 +159,10 @@ __global__ void gemm_mxfp4_wmma_kernel_16x16_1w(
 
       const int k_base = my_k_octet * 8;
 
-      if constexpr (std::is_same<T, half>::value) {
-        half dq[8];
-        dequant_mxfp4_8_fp16(qa, bias_u16, dq);
+      T dq[8];
+      dequant_mxfp4_8_lut<T>(qa, bias_u16, w_lut, dq);
   #pragma unroll
-        for (int i = 0; i < 8; i++) b_lds[k_base + i][my_n] = dq[i];
-      } else {
-        bf16_t dq[8];
-        dequant_mxfp4_8_bf16(qa, bias_u16, dq);
-  #pragma unroll
-        for (int i = 0; i < 8; i++) b_lds[k_base + i][my_n] = dq[i];
-      }
+      for (int i = 0; i < 8; i++) b_lds[k_base + i][my_n] = dq[i];
     }
 
     // Single-wave block: no __syncthreads needed.
@@ -286,6 +287,11 @@ __global__ void gemm_mxfp4_wmma_kernel_32x16_2w(
   const int k_end = k_start + k_per_split;
 
   __shared__ T b_lds[2][16][16];
+  __shared__ uint16_t w_lut[16];  // E2M1 magnitude bits for T, filled once
+  if (tid < 16)
+    w_lut[tid] = std::is_same<T, half>::value ? mxfp4_e2m1_to_fp16_bits(tid)
+                                              : mxfp4_e2m1_to_bf16_bits(tid);
+  __syncthreads();
 
   auto dequant_into = [&](int buf, int k_tile) {
     if (wave_id != 0) return;
@@ -298,17 +304,10 @@ __global__ void gemm_mxfp4_wmma_kernel_32x16_2w(
     const uint32_t s8 = b_scales_e8m0[g * size_n + actual_n];
     const int32_t bias = mxfp4_e8m0_bias(s8, mant_bits);
     const int k_base = lane_hi * 8;
-    if constexpr (std::is_same<T, half>::value) {
-      half dq[8];
-      dequant_mxfp4_8_fp16(qa, bias, dq);
+    T dq[8];
+    dequant_mxfp4_8_lut<T>(qa, bias, w_lut, dq);
   #pragma unroll
-      for (int i = 0; i < 8; i++) b_lds[buf][k_base + i][my_n] = dq[i];
-    } else {
-      bf16_t dq[8];
-      dequant_mxfp4_8_bf16(qa, bias, dq);
-  #pragma unroll
-      for (int i = 0; i < 8; i++) b_lds[buf][k_base + i][my_n] = dq[i];
-    }
+    for (int i = 0; i < 8; i++) b_lds[buf][k_base + i][my_n] = dq[i];
   };
 
   dequant_into(0, k_start);
@@ -409,6 +408,12 @@ __global__ void gemm_mxfp4_wmma_kernel_64x64_4w(
   const int k_end = k_start + k_per_split;
 
   __shared__ T b_lds[2][16][64];
+  __shared__ uint16_t w_lut[16];  // E2M1 magnitude bits for T, filled once
+  if (threadIdx.x < 16)
+    w_lut[threadIdx.x] = std::is_same<T, half>::value
+                             ? mxfp4_e2m1_to_fp16_bits(threadIdx.x)
+                             : mxfp4_e2m1_to_bf16_bits(threadIdx.x);
+  __syncthreads();
 
   auto dequant_into = [&](int buf, int k_tile) {
     const int my_n_in_tile = wave_id * 16 + lane_lo;
@@ -420,17 +425,10 @@ __global__ void gemm_mxfp4_wmma_kernel_64x64_4w(
     const uint32_t s8 = b_scales_e8m0[g * size_n + actual_n];
     const int32_t bias = mxfp4_e8m0_bias(s8, mant_bits);
     const int k_base = lane_hi * 8;
-    if constexpr (std::is_same<T, half>::value) {
-      half dq[8];
-      dequant_mxfp4_8_fp16(qa, bias, dq);
+    T dq[8];
+    dequant_mxfp4_8_lut<T>(qa, bias, w_lut, dq);
   #pragma unroll
-      for (int i = 0; i < 8; i++) b_lds[buf][k_base + i][my_n_in_tile] = dq[i];
-    } else {
-      bf16_t dq[8];
-      dequant_mxfp4_8_bf16(qa, bias, dq);
-  #pragma unroll
-      for (int i = 0; i < 8; i++) b_lds[buf][k_base + i][my_n_in_tile] = dq[i];
-    }
+    for (int i = 0; i < 8; i++) b_lds[buf][k_base + i][my_n_in_tile] = dq[i];
   };
 
   dequant_into(0, k_start);
@@ -982,7 +980,9 @@ torch::Tensor mxfp4_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
   // -> WMMA. The scalar path is O(M) per weight read, so it degrades fast with
   // batch; the WMMA 16x16 tile is flat ~constant up to M=16 and far faster
   // (e.g. M=8: 205us scalar -> ~49us WMMA on a 7900 XTX).
-  const bool use_scalar = size_m == 1;
+  // The LUT decode made the scalar GEMV fast enough to beat the WMMA 16-tile up
+  // to M~8 (1.3-1.6x at M=4/8 on gfx1100); above that the matrix engine wins.
+  const bool use_scalar = size_m <= 8;
   if (a.scalar_type() == torch::kHalf) {
     namespace mx = vllm::mxfp4_rdna3_wmma;
     auto* ap = (const half*)a.data_ptr();
