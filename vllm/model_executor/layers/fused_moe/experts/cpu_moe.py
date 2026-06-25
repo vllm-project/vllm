@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU quantized fused MoE experts (FP8 W8A16 / MXFP4 W4A16 / INT8 W8A8)."""
+"""CPU quantized fused MoE experts."""
 
 import torch
 
@@ -22,13 +22,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
     kFp8Static128BlockSym,
+    kInt4Static,
     kInt8DynamicTokenSym,
     kInt8StaticChannelSym,
-    kInt4Static,
     kMxfp4Static,
 )
 from vllm.platforms import current_platform
-
 
 # ===========================================================================
 # FP8 W8A16 MoE
@@ -339,7 +338,7 @@ class CPUExpertsMxfp4(mk.FusedMoEExpertsMonolithic):
 
 
 # ===========================================================================
-# MINT4 W4A16 MoE
+# INT4 W4A16 MoE
 # ===========================================================================
 
 
@@ -546,8 +545,8 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
             None,  # limit
             True,  # is_vnni
         )
-      
-      
+
+
 # ===========================================================================
 # INT8 W8A8 MoE
 # ===========================================================================

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for CPU quantized fused MoE kernels (FP8 W8A16 / MXFP4 W4A16 / INT8 W8A8)."""
+"""Tests for CPU quantized fused MoE kernels."""
 
 import math
 import sys
@@ -500,7 +500,7 @@ def test_mxfp4_cpu_fused_moe_bias_swiglu(M, N, K, E, topk, seed):
 
     torch.testing.assert_close(ref_out.bfloat16(), out, atol=1e-2, rtol=1e-2)
 
-    
+
 # ===========================================================================
 # INT4 W4A16 MoE
 # ===========================================================================
@@ -882,6 +882,7 @@ def test_int8_w8a8_cpu_fused_moe(M, N, K, E, topk, seed, is_vnni, inplace):
         atol=2e-1,
         rtol=2e-1,
     )
-    
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
