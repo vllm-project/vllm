@@ -387,7 +387,21 @@ class DelegatingParser(Parser):
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> tuple[str | None, str | None]:
-        return self.extract_reasoning_with_token_ids(model_output, request)
+        return self._do_extract_reasoning(model_output, request)
+
+    def _do_extract_reasoning(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest | ResponsesRequest,
+        token_ids: Sequence[int] = (),
+    ) -> tuple[str | None, str | None]:
+        if self._reasoning_parser is None:
+            return None, model_output
+        if hasattr(self._reasoning_parser, "extract_reasoning_with_token_ids"):
+            return self._reasoning_parser.extract_reasoning_with_token_ids(
+                model_output, request, token_ids
+            )
+        return self._reasoning_parser.extract_reasoning(model_output, request)
 
     def extract_reasoning_with_token_ids(
         self,
@@ -400,11 +414,7 @@ class DelegatingParser(Parser):
             if type(self).extract_reasoning is not DelegatingParser.extract_reasoning:
                 return self.extract_reasoning(model_output, request)
             return None, model_output
-        if hasattr(self._reasoning_parser, "extract_reasoning_with_token_ids"):
-            return self._reasoning_parser.extract_reasoning_with_token_ids(
-                model_output, request, token_ids
-            )
-        return self._reasoning_parser.extract_reasoning(model_output, request)
+        return self._do_extract_reasoning(model_output, request, token_ids)
 
     def _get_function_name(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -580,14 +590,7 @@ class DelegatingParser(Parser):
             delta_token_ids,
         )
 
-    def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest | ResponsesRequest,
-    ) -> ExtractedToolCallInformation:
-        return self.extract_tool_calls_with_token_ids(model_output, request)
-
-    def extract_tool_calls_with_token_ids(
+    def _do_extract_tool_calls_non_streaming(
         self,
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
@@ -622,6 +625,23 @@ class DelegatingParser(Parser):
                 request=request,
             )
         return result
+
+    def extract_tool_calls(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest | ResponsesRequest,
+    ) -> ExtractedToolCallInformation:
+        return self._do_extract_tool_calls_non_streaming(model_output, request)
+
+    def extract_tool_calls_with_token_ids(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest | ResponsesRequest,
+        token_ids: Sequence[int] = (),
+    ) -> ExtractedToolCallInformation:
+        return self._do_extract_tool_calls_non_streaming(
+            model_output, request, token_ids
+        )
 
     def extract_tool_calls_streaming(
         self,
