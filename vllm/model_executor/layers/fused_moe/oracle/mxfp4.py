@@ -121,6 +121,8 @@ class Mxfp4MoeBackend(Enum):
     EMULATION = "EMULATION"
     # Humming
     HUMMING = "HUMMING"
+    # TokenSpeed
+    TOKENSPEED = "TOKENSPEED"
 
 
 # AITER backends group
@@ -203,6 +205,13 @@ def backend_to_kernel_cls(
             HummingGroupedExperts,
             HummingIndexedExperts,
         ]
+
+    elif backend == Mxfp4MoeBackend.TOKENSPEED:
+        from vllm.model_executor.layers.fused_moe.experts.tokenspeed_mxfp4_moe import (
+            TokenSpeedMxfp4ExpertsMonolithic,
+        )
+
+        return [TokenSpeedMxfp4ExpertsMonolithic]
 
     elif backend == Mxfp4MoeBackend.MARLIN:
         from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
@@ -289,6 +298,7 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
         ],
         "aiter_mxfp4_fp8": [Mxfp4MoeBackend.AITER_MXFP4_FP8],
         "aiter_mxfp4_mxfp4": [Mxfp4MoeBackend.AITER_MXFP4_MXFP4],
+        "tokenspeed": [Mxfp4MoeBackend.TOKENSPEED],
         "xpu": [Mxfp4MoeBackend.XPU],
         "cpu": [Mxfp4MoeBackend.CPU],
         "emulation": [Mxfp4MoeBackend.EMULATION],
@@ -355,6 +365,8 @@ def _backend_activation_key(backend: Mxfp4MoeBackend) -> QuantKey | None:
     ):
         return kMxfp8Dynamic
     if backend == Mxfp4MoeBackend.AITER_MXFP4_FP8:
+        return kFp8StaticTensorSym
+    if backend == Mxfp4MoeBackend.TOKENSPEED:
         return kFp8StaticTensorSym
     if backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
         return kMxfp4Dynamic
@@ -634,7 +646,9 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
     backend: Mxfp4MoeBackend, hidden_size: int, intermediate_size: int
 ) -> tuple[int, int]:
     """Round up hidden_size and intermediate_size based on backend requirements."""
-    if backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
+    if backend == Mxfp4MoeBackend.TOKENSPEED:
+        return hidden_size, intermediate_size
+    elif backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
         # DeepGEMM requires M/N/K alignment
         intermediate_size = round_up(intermediate_size, 128)
         hidden_size = round_up(hidden_size, 128)
@@ -1120,6 +1134,62 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             w2_precision_config,
             w13_bias,
             w2_bias,
+        )
+
+    elif mxfp4_backend == Mxfp4MoeBackend.TOKENSPEED:
+        for scale_name in ("w13_input_scale", "w2_input_scale"):
+            scale = getattr(layer, scale_name, None)
+            if scale is None or torch.isnan(scale).any():
+                raise ValueError(
+                    "TokenSpeed MXFP4 MoE requires static FP8 activation "
+                    f"scales, but {scale_name} was not loaded."
+                )
+
+        if w13_bias is not None:
+            layer.w13_weight_bias = w13_bias
+        else:
+            layer.w13_weight_bias = torch.nn.Parameter(
+                torch.zeros(
+                    num_experts,
+                    2 * intermediate_size,
+                    dtype=torch.bfloat16,
+                    device=w13_weight.device,
+                ),
+                requires_grad=False,
+            )
+        if w2_bias is not None:
+            layer.w2_weight_bias = w2_bias
+        else:
+            layer.w2_weight_bias = torch.nn.Parameter(
+                torch.zeros(
+                    num_experts,
+                    hidden_size,
+                    dtype=torch.bfloat16,
+                    device=w2_weight.device,
+                ),
+                requires_grad=False,
+            )
+
+        try:
+            from tokenspeed_kernel_amd.ops.moe.mxfp4_gfx950_preprocess import (
+                preprocess_gluon_mxfp4_gfx950_moe_weights,
+            )
+        except ImportError as e:
+            raise ImportError(
+                "TokenSpeed MXFP4 MoE requires a local/new enough "
+                "tokenspeed-kernel-amd package with "
+                "ops.moe.mxfp4_gfx950_preprocess."
+            ) from e
+
+        preprocess_gluon_mxfp4_gfx950_moe_weights({}, layer, preshuffle=True)
+
+        return (
+            layer.w13_weight_triton_tensor,
+            layer.w2_weight_triton_tensor,
+            layer.w13_precision_config,
+            layer.w2_precision_config,
+            None,
+            None,
         )
 
     elif mxfp4_backend in TRITON_BACKENDS:
@@ -1612,6 +1682,18 @@ def make_mxfp4_moe_quant_config(
             a2_scale=a2_scale,
             w1_bias=w1_bias,
             w2_bias=w2_bias,
+            block_shape=None,
+            gemm1_clamp_limit=swiglu_limit,
+        )
+    elif mxfp4_backend == Mxfp4MoeBackend.TOKENSPEED:
+        assert layer is not None
+        return mxfp4_w4a8_moe_quant_config(
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            a1_scale=layer.w13_act_scale,
+            a2_scale=layer.w2_act_scale,
+            w1_bias=layer.w13_weight_bias,
+            w2_bias=layer.w2_weight_bias,
             block_shape=None,
             gemm1_clamp_limit=swiglu_limit,
         )
