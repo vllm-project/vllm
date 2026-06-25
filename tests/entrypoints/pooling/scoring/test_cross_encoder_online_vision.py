@@ -34,16 +34,25 @@ BACKEND_TOL: dict[str, float] = {
     # See: https://github.com/vllm-project/vllm/issues/35569
     "ROCM_ATTN": 0.09,  # gfx950:~8.45%, gfx942:~3.70%
     "ROCM_AITER_FA": 0.045,  # gfx950:~2.00%, gfx942:~0.80%
-    "TRITON_ATTN": 0.045,  # gfx950:~3.00%, gfx942:~2.20%
+    # gfx942 text-vs-text drifts ~7.9% in *probability* space; this is the
+    # ~0.008 absolute drift below amplified by the sigmoid near a small prob,
+    # not a Triton bug (ROCM_ATTN math attention lands on the same ~0.1083).
+    "TRITON_ATTN": 0.045,  # gfx950:~3.00%, gfx942:~3.9% (logit space)
     "FLEX_ATTENTION": 0.045,  # gfx950:~3.25%, gfx942:~1.10%
 }
 
-# ROCm 7.2/gfx950 shows small absolute drift on the low text-vs-text
-# probability even though larger scores remain well inside the relative
-# tolerance. Keep the relative tolerances tight and add only a small floor.
+# ROCm shows small absolute drift on the low text-vs-text probability even
+# though larger scores remain well inside the relative tolerance. The non-flash
+# attention paths (ROCM_ATTN, TRITON_ATTN) land around ~0.1083 vs the CUDA
+# golden ~0.1004 on gfx942 -- an ~0.008 absolute drift that the sigmoid blows
+# up to ~7.9% relative. Keep the relative tolerances tight and add only a small
+# absolute floor for the backends that need it. The TRITON_ATTN floor matches
+# the absolute drift ROCM_ATTN already permits on this pair via its relative
+# tol (0.09 * ~0.1004 ~= 0.009); both land on the same ~0.1083 value.
 BACKEND_ABS_TOL: dict[str, float] = {
     "default": 0.0,
     "ROCM_AITER_FA": 0.005,
+    "TRITON_ATTN": 0.009,
     "FLEX_ATTENTION": 0.006,
 }
 
