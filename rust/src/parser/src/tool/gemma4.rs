@@ -70,7 +70,7 @@ impl Gemma4ToolParser {
     fn apply_event(&mut self, event: Gemma4Event, output: &mut ToolParserOutput) -> Result<()> {
         match event {
             Gemma4Event::Text { len: consumed_len } => {
-                output.normal_text.push_str(&self.buffer[..consumed_len]);
+                output.push_text(&self.buffer[..consumed_len]);
             }
             Gemma4Event::ToolCallStart => self.mode = Gemma4Mode::Header,
             Gemma4Event::ToolCallHeader { name } => {
@@ -89,7 +89,7 @@ impl Gemma4ToolParser {
                 let arguments = serde_json::to_string(&args)
                     .map_err(|error| parsing_failed!("failed to serialize arguments: {}", error))?;
 
-                output.calls.push(ToolCallDelta {
+                output.push_call(ToolCallDelta {
                     tool_index: self.emitted_tool_count,
                     name: Some(name),
                     arguments,
@@ -153,7 +153,7 @@ impl ToolParser for Gemma4ToolParser {
         let mut output = ToolParserOutput::default();
 
         match &self.mode {
-            Gemma4Mode::Text => output.normal_text.push_str(&self.buffer),
+            Gemma4Mode::Text => output.push_text(&self.buffer),
             Gemma4Mode::Header | Gemma4Mode::ToolCall { .. } => {
                 return Err(parsing_failed!("incomplete Gemma4 tool call"));
             }
@@ -501,11 +501,11 @@ mod tests {
             output.append(parser.parse_chunk(chunk).unwrap());
         }
         output.append(parser.finish().unwrap());
-        output.coalesce_calls()
+        output.coalesce()
     }
 
-    fn first_call(output: &ToolParserOutput) -> &ToolCallDelta {
-        output.calls.first().expect("expected one tool call")
+    fn first_call(output: &ToolParserOutput) -> ToolCallDelta {
+        (*output.calls().first().expect("expected one tool call")).clone()
     }
 
     #[test]
@@ -547,8 +547,8 @@ mod tests {
             .parse_complete("<|tool_call>call:get_weather{location:<|\"|>London<|\"|>}<tool_call|>")
             .unwrap();
 
-        assert!(output.normal_text.is_empty());
-        assert_eq!(output.calls.len(), 1);
+        assert!(output.normal_text().is_empty());
+        assert_eq!(output.calls().len(), 1);
         assert_eq!(first_call(&output).name.as_deref(), Some("get_weather"));
         assert_eq!(
             serde_json::from_str::<Value>(&first_call(&output).arguments).unwrap(),
@@ -577,7 +577,7 @@ mod tests {
             "<tool_call|>",
         ]);
 
-        assert!(output.normal_text.is_empty());
+        assert!(output.normal_text().is_empty());
         assert_eq!(first_call(&output).name.as_deref(), Some("get_weather"));
         assert_eq!(
             serde_json::from_str::<Value>(&first_call(&output).arguments).unwrap(),
@@ -597,7 +597,7 @@ mod tests {
             "div>",
         ]);
 
-        assert_eq!(output.normal_text, "Let me check the weather. <div>");
+        assert_eq!(output.normal_text(), "Let me check the weather. <div>");
         assert_eq!(first_call(&output).name.as_deref(), Some("get_weather"));
         assert_eq!(
             serde_json::from_str::<Value>(&first_call(&output).arguments).unwrap(),
@@ -616,11 +616,11 @@ mod tests {
             "location:<|\"|>Paris<|\"|>}",
         ] {
             output.append(parser.parse_chunk(chunk).unwrap());
-            assert!(output.calls.is_empty());
+            assert!(output.calls().is_empty());
         }
 
         output.append(parser.parse_chunk("<tool_call|>").unwrap());
-        let output = output.coalesce_calls();
+        let output = output.coalesce();
 
         assert_eq!(first_call(&output).name.as_deref(), Some("get_weather"));
         assert_eq!(
@@ -777,8 +777,8 @@ mod tests {
         let mut output = parser.parse_chunk("<").unwrap();
         output.append(parser.finish().unwrap());
 
-        assert_eq!(output.normal_text, "<");
-        assert!(output.calls.is_empty());
+        assert_eq!(output.normal_text(), "<");
+        assert!(output.calls().is_empty());
     }
 
     #[test]
