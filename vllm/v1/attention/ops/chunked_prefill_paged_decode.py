@@ -9,12 +9,21 @@
 
 import torch
 
+from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .prefix_prefill import context_attention_fwd
 
 float8_info = torch.finfo(current_platform.fp8_dtype())
+
+
+def has_native_kv_cache_layout(
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+) -> bool:
+    """Return whether K/V cache views match native ROCm paged attention."""
+    return key_cache.dim() == 5 and value_cache.dim() == 4
 
 
 @triton.jit
@@ -270,6 +279,12 @@ def chunked_prefill_paged_decode(
     if sliding_window is None or sliding_window <= 0:
         sliding_window = 0
 
+    has_native_layout = has_native_kv_cache_layout(key_cache, value_cache)
+    if has_native_layout and max_query_len > 1:
+        raise NotImplementedError(
+            "Native ROCm paged attention layout is only supported for decode."
+        )
+
     if max_query_len > 1:
         context_attention_fwd(
             q=query,
@@ -295,7 +310,7 @@ def chunked_prefill_paged_decode(
             causal=causal,
         )
 
-    block_size = value_cache.shape[2]
+    block_size = value_cache.shape[3] if has_native_layout else value_cache.shape[2]
     num_seqs = len(seq_lens)
     num_query_heads = query.shape[1]
     # key may be None in cross-attention decode (already cached from encoder)
@@ -324,7 +339,68 @@ def chunked_prefill_paged_decode(
 
     num_queries_per_kv_padded = max(triton.next_power_of_2(num_queries_per_kv), 16)
 
+    from vllm.platforms.rocm import use_rocm_custom_paged_attention
+
+    use_custom = use_rocm_custom_paged_attention(
+        query.dtype,
+        head_size,
+        block_size,
+        num_queries_per_kv,
+        max_seq_len,
+        sliding_window,
+        kv_cache_dtype,
+        alibi_slopes,
+        sinks,
+    )
+
     is_pow2 = block_size > 0 and (block_size & (block_size - 1) == 0)
+
+    if use_custom and is_pow2 and max_query_len == 1 and has_native_layout:
+        _PARTITION_SIZE_ROCM = 256
+        max_num_partitions = (
+            max_seq_len + _PARTITION_SIZE_ROCM - 1
+        ) // _PARTITION_SIZE_ROCM
+        assert _PARTITION_SIZE_ROCM % block_size == 0
+        total_num_seq = block_table.shape[0]
+        tmp_output = torch.empty(
+            size=(total_num_seq, num_query_heads, max_num_partitions, head_size),
+            dtype=query.dtype,
+            device=output.device,
+        )
+        exp_sums = torch.empty(
+            size=(total_num_seq, num_query_heads, max_num_partitions),
+            dtype=torch.float32,
+            device=output.device,
+        )
+        max_logits = torch.empty_like(exp_sums)
+
+        ops.paged_attention_rocm(
+            output,
+            exp_sums,
+            max_logits,
+            tmp_output,
+            query,
+            key_cache,
+            value_cache,
+            num_kv_heads,
+            scale=sm_scale,
+            block_tables=block_table,
+            seq_lens=seq_lens,
+            query_start_loc=query_start_loc,
+            block_size=block_size,
+            max_seq_len=max_seq_len,
+            alibi_slopes=alibi_slopes,
+            kv_cache_dtype=kv_cache_dtype,
+            k_scale=k_scale,
+            v_scale=v_scale,
+            fp8_out_scale=output_scale,
+        )
+        return
+
+    if has_native_layout:
+        raise NotImplementedError(
+            "Native ROCm paged attention layout requires the custom ROCm kernel."
+        )
 
     real_block_size = value_cache.shape[2]
     # The standard model directly uses the original block_size.
