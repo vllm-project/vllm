@@ -149,16 +149,11 @@ class QuarkConfig(QuantizationConfig):
         # Check if the layer is skipped for quantization.
         exclude_layers = cast(list[str], self.quant_config.get("exclude"))
         is_ignored = should_ignore_layer(
-            prefix, ignore=exclude_layers, fused_mapping=self.packed_modules_mapping
+            prefix,
+            ignore=exclude_layers,
+            fused_mapping=self.packed_modules_mapping,
+            check_children=isinstance(layer, RoutedExperts),
         )
-        if isinstance(layer, RoutedExperts) and exclude_layers:
-            # Quark stores MoE excludes at child expert projection names,
-            # e.g. model.layers.78.mlp.experts.0.down_proj. RoutedExperts is
-            # the aggregate module, so honor child excludes at the parent prefix.
-            is_ignored = is_ignored or any(
-                excluded == prefix or excluded.startswith(prefix + ".")
-                for excluded in exclude_layers
-            )
 
         if is_ignored:
             if isinstance(layer, RoutedExperts):
