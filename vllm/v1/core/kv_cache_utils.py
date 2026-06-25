@@ -15,6 +15,7 @@ from typing import Any, NewType, TypeAlias, cast, overload
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.hashing import sha256_cbor, xxhash_cbor
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
@@ -1287,15 +1288,25 @@ def _get_kv_cache_config_packed(
     byte_offset = 0
     for ps, slots in buckets.items():
         for slot in slots:
-            kv_cache_tensors.append(
-                KVCacheTensor(
-                    size=total_size,
-                    shared_by=slot,
-                    offset=byte_offset,
-                    block_stride=total_num_bytes_per_block,
+            if current_platform.is_xpu():
+                # XPU: independent allocation per slot to avoid a single
+                # oversized contiguous tensor that triggers driver abort.
+                kv_cache_tensors.append(
+                    KVCacheTensor(
+                        size=ps * num_blocks,
+                        shared_by=slot,
+                    )
                 )
-            )
-            byte_offset += ps
+            else:
+                kv_cache_tensors.append(
+                    KVCacheTensor(
+                        size=total_size,
+                        shared_by=slot,
+                        offset=byte_offset,
+                        block_stride=total_num_bytes_per_block,
+                    )
+                )
+                byte_offset += ps
 
     return num_blocks, kv_cache_tensors
 
