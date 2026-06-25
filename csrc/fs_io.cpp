@@ -19,7 +19,7 @@ static void _batch_lookup(const std::vector<const char*>& paths,
 /// @brief Check file existence for a batch of paths.
 /// @param paths list[str] – absolute paths to check.
 /// @return list[bool] – True if the corresponding path exists, False otherwise.
-/// @note Releases the GIL for the entire batch via access(2).
+/// @note Releases the GIL for the entire batch. File existence via access(2).
 static PyObject* batch_lookup(PyObject* /*self*/, PyObject* args) {
   PyObject* path_list;
   if (!PyArg_ParseTuple(args, "O!", &PyList_Type, &path_list)) {
