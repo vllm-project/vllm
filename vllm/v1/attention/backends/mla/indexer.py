@@ -170,10 +170,10 @@ class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
 @dataclass
 class DeepseekV32IndexerPrefillChunkMetadata:
     block_table: torch.Tensor
+    # Under DCP (dcp_world_size > 1) these hold this rank's local row bounds;
+    # otherwise they hold the global bounds.
     cu_seqlen_ks: torch.Tensor
     cu_seqlen_ke: torch.Tensor
-    local_cu_seqlen_ks: torch.Tensor | None
-    local_cu_seqlen_ke: torch.Tensor | None
     cu_seq_lens: torch.Tensor
     token_to_seq: torch.Tensor
     total_seq_lens: int
@@ -775,8 +775,6 @@ def build_prefill_chunk_metadata(
     torch.cumsum(compressed_seq_lens[start_idx:end_idx], dim=0, out=cu_seq_lens[1:])
 
     local_cu_seq_lens: torch.Tensor | None = None
-    local_cu_seq_len_ks: torch.Tensor | None = None
-    local_cu_seq_len_ke: torch.Tensor | None = None
     local_total_seq_lens = 0
     max_local_total_seq_lens = 0
     if dcp_world_size > 1:
@@ -813,17 +811,10 @@ def build_prefill_chunk_metadata(
 
     cu_seq_len_ks = torch.empty(output_query_len, dtype=torch.int32, device=device)
     cu_seq_len_ke = torch.empty(output_query_len, dtype=torch.int32, device=device)
-    local_cu_seq_len_ks = (
-        torch.empty(output_query_len, dtype=torch.int32, device=device)
-        if dcp_world_size > 1
-        else None
-    )
-    local_cu_seq_len_ke = (
-        torch.empty(output_query_len, dtype=torch.int32, device=device)
-        if dcp_world_size > 1
-        else None
-    )
 
+    # Under DCP the kernel writes this rank's local row bounds into
+    # cu_seq_len_ks/ke, using local_cu_seq_lens for the row starts; otherwise
+    # it writes the global bounds off cu_seq_lens.
     _build_prefill_chunk_metadata_kernel[(num_reqs,)](
         query_start_loc,
         uncompressed_seq_lens[start_idx:end_idx],
@@ -832,8 +823,6 @@ def build_prefill_chunk_metadata(
         token_to_seq,
         cu_seq_len_ks,
         cu_seq_len_ke,
-        local_cu_seq_len_ks if local_cu_seq_len_ks is not None else cu_seq_len_ks,
-        local_cu_seq_len_ke if local_cu_seq_len_ke is not None else cu_seq_len_ke,
         qs_start,
         qs_stop,
         dcp_rank,
@@ -854,8 +843,6 @@ def build_prefill_chunk_metadata(
     return DeepseekV32IndexerPrefillChunkMetadata(
         cu_seqlen_ks=cu_seq_len_ks,
         cu_seqlen_ke=cu_seq_len_ke,
-        local_cu_seqlen_ks=local_cu_seq_len_ks,
-        local_cu_seqlen_ke=local_cu_seq_len_ke,
         cu_seq_lens=cu_seq_lens,
         token_to_seq=token_to_seq,
         total_seq_lens=total_seq_lens,
@@ -879,13 +866,13 @@ def _build_prefill_chunk_metadata_kernel(
     query_start_loc_ptr,
     uncompressed_seq_lens_ptr,
     cu_compressed_seq_lens_ptr,
-    local_cu_compressed_seq_lens_ptr,
+    # Row-start base for cu_seq_len_ks/ke: local cumulative lens under DCP,
+    # aliases cu_compressed_seq_lens_ptr otherwise.
+    row_start_cu_compressed_seq_lens_ptr,
     # Outputs
     token_to_seq_ptr,
     cu_compressed_seq_len_ks_ptr,
     cu_compressed_seq_len_ke_ptr,
-    local_cu_compressed_seq_len_ks_ptr,
-    local_cu_compressed_seq_len_ke_ptr,
     query_slice_start,
     query_slice_stop,
     DCP_RANK,
@@ -904,6 +891,10 @@ def _build_prefill_chunk_metadata_kernel(
     seq_end = tl.load(cu_compressed_seq_lens_ptr + batch_idx + 1)
     compressed_seq_len = seq_end - seq_start
 
+    # Row start for the (possibly localized) cu_seq_len_ks/ke. Equals seq_start
+    # when DCP is disabled (the pointer aliases cu_compressed_seq_lens_ptr).
+    row_start = tl.load(row_start_cu_compressed_seq_lens_ptr + batch_idx)
+
     uncompressed_seq_len = tl.load(uncompressed_seq_lens_ptr + batch_idx)
     start_pos = uncompressed_seq_len - query_len
 
@@ -917,33 +908,20 @@ def _build_prefill_chunk_metadata_kernel(
         )
         out_pos = abs_pos - query_slice_start
 
-        # Compute cu_seq_len_ks
-        tl.store(cu_compressed_seq_len_ks_ptr + out_pos, seq_start, mask=mask)
+        # cu_seq_len_ks: row start in the gathered K buffer.
+        tl.store(cu_compressed_seq_len_ks_ptr + out_pos, row_start, mask=mask)
 
-        # Compute global cu_seq_len_ke. DCP prefill stores local row bounds
-        # below when DCP_WORLD > 1.
+        # cu_seq_len_ke: row start + per-token context length. Under DCP the
+        # global per-token length is sharded across ranks.
         global_ctx = start_pos + 1 + offset
-        seq_len_per_token = global_ctx // COMPRESS_RATIO
+        len_per_token = global_ctx // COMPRESS_RATIO
+        if DCP_WORLD > 1:
+            len_per_token = (len_per_token + (DCP_WORLD - 1 - DCP_RANK)) // DCP_WORLD
         tl.store(
             cu_compressed_seq_len_ke_ptr + out_pos,
-            seq_start + seq_len_per_token,
+            row_start + len_per_token,
             mask=mask,
         )
-        if DCP_WORLD > 1:
-            local_seq_start = tl.load(local_cu_compressed_seq_lens_ptr + batch_idx)
-            local_len_per_token = (
-                seq_len_per_token + (DCP_WORLD - 1 - DCP_RANK)
-            ) // DCP_WORLD
-            tl.store(
-                local_cu_compressed_seq_len_ks_ptr + out_pos,
-                local_seq_start,
-                mask=mask,
-            )
-            tl.store(
-                local_cu_compressed_seq_len_ke_ptr + out_pos,
-                local_seq_start + local_len_per_token,
-                mask=mask,
-            )
 
     # Compute token_to_seq
     for i in range(0, compressed_seq_len, BLOCK_SIZE):

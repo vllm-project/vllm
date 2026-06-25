@@ -156,7 +156,7 @@ def _merge_dcp_topk_global(
 
     if _can_use_cutedsl_dcp_merge(logits, topk_indices, topk_tokens):
         try:
-            from vllm.model_executor.layers.sparse_attn_indexer_cutedsl import (
+            from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
                 pack_dcp_topk_candidates_cutedsl,
                 stable_topk_from_gathered_candidates_cutedsl,
             )
@@ -213,7 +213,7 @@ def _merge_dcp_topk_global(
     gathered = get_dcp_group().all_gather(packed, dim=1)
     if _can_use_cutedsl_candidate_topk(gathered, topk_tokens):
         try:
-            from vllm.model_executor.layers.sparse_attn_indexer_cutedsl import (
+            from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
                 stable_topk_from_gathered_candidates_cutedsl,
             )
 
@@ -396,15 +396,15 @@ def sparse_attn_indexer(
 
         for chunk in prefill_metadata.chunks:
             use_dcp_prefill_candidates = prefill_dcp_world > 1
+            # Under DCP, cu_seqlen_ks/ke already hold this rank's local row
+            # bounds (build_prefill_chunk_metadata localizes them in place).
+            cu_seqlen_ks = chunk.cu_seqlen_ks
+            cu_seqlen_ke = chunk.cu_seqlen_ke
             if use_dcp_prefill_candidates:
                 assert chunk.local_cu_seq_lens is not None
-                assert chunk.local_cu_seqlen_ks is not None
-                assert chunk.local_cu_seqlen_ke is not None
                 max_local = chunk.max_local_total_seq_lens
                 k_quant = k_quant_full[:max_local]
                 k_scale = k_scale_full[:max_local]
-                cu_seqlen_ks = chunk.local_cu_seqlen_ks
-                cu_seqlen_ke = chunk.local_cu_seqlen_ke
                 if not chunk.skip_kv_gather and chunk.local_total_seq_lens > 0:
                     ops.cp_gather_indexer_k_quant_cache(
                         kv_cache,
@@ -416,8 +416,6 @@ def sparse_attn_indexer(
             else:
                 k_quant = k_quant_full[: chunk.total_seq_lens]
                 k_scale = k_scale_full[: chunk.total_seq_lens]
-                cu_seqlen_ks = chunk.cu_seqlen_ks
-                cu_seqlen_ke = chunk.cu_seqlen_ke
                 if not chunk.skip_kv_gather:
                     ops.cp_gather_indexer_k_quant_cache(
                         kv_cache,

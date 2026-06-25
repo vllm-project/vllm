@@ -23,6 +23,9 @@ def _convert_req_index_to_global_index_kernel(
     BLOCK_N: tl.constexpr,  # tile width along columns
     HAS_PREFILL: tl.constexpr,
     COUNT_VALID: tl.constexpr,  # whether to count valid indices
+    # DCP de-interleave: with DCP_SIZE == 1 these are an exact no-op
+    DCP_SIZE: tl.constexpr,
+    DCP_RANK: tl.constexpr,
     # strides (in elements)
     bt_stride0,
     bt_stride1,
@@ -52,15 +55,23 @@ def _convert_req_index_to_global_index_kernel(
     if HAS_PREFILL:
         prefill_req_id = tl.load(prefill_request_id_ptr + token_id)
         is_prefill = prefill_req_id >= 0
+
+    # DCP de-interleave the global token id into this rank's local slot.
+    # DCP_SIZE == 1 -> owning_rank == 0 == DCP_RANK (never remote) and
+    # local_idx == tok, so this reduces to the non-DCP path exactly.
+    owning_rank = tok % DCP_SIZE
+    is_remote = owning_rank != DCP_RANK
+    local_idx = tok // DCP_SIZE
+
     # Compute block id and in-block offset
-    block_id = tok // BLOCK_SIZE
-    inblock_off = tok % BLOCK_SIZE
+    block_id = local_idx // BLOCK_SIZE
+    inblock_off = local_idx % BLOCK_SIZE
 
     # Guard block_table access
     valid_block = (block_id < max_num_blocks_per_req) & (block_id >= 0)
     bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
-    is_invalid_tok |= ~valid_block
-    base = tl.load(bt_ptr, mask=valid_block & ~is_prefill, other=0)
+    is_invalid_tok |= ~valid_block | is_remote
+    base = tl.load(bt_ptr, mask=valid_block & ~is_prefill & ~is_remote, other=0)
     out_val = base * BLOCK_SIZE + inblock_off
 
     # Override with prefill output if prefill is enabled
@@ -176,6 +187,9 @@ def triton_convert_req_index_to_global_index(
         BLOCK_N,
         HAS_PREFILL_WORKSPACE,
         return_valid_counts,
+        # DCP disabled (no-op de-interleave)
+        1,
+        0,
         # strides
         bt_stride0,
         bt_stride1,
@@ -189,56 +203,6 @@ def triton_convert_req_index_to_global_index(
         assert valid_counts is not None
         return out, valid_counts
     return out
-
-
-@triton.jit
-def _convert_req_index_to_global_index_dcp_kernel(
-    req_id_ptr,
-    block_table_ptr,
-    token_indices_ptr,
-    out_ptr,
-    valid_count_ptr,
-    max_num_blocks_per_req: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-    DCP_SIZE: tl.constexpr,
-    DCP_RANK: tl.constexpr,
-    COUNT_VALID: tl.constexpr,
-    bt_stride0,
-    bt_stride1,
-    ti_stride0,
-    ti_stride1,
-    out_stride0,
-    out_stride1,
-):
-    token_id = tl.program_id(0)
-    tile_id = tl.program_id(1)
-    indice_id = tile_id * BLOCK_N + tl.arange(0, BLOCK_N)
-
-    req = tl.load(req_id_ptr + token_id)
-    tok = tl.load(token_indices_ptr + token_id * ti_stride0 + indice_id * ti_stride1)
-
-    is_invalid_tok = tok < 0
-    owning_rank = tok % DCP_SIZE
-    is_remote = owning_rank != DCP_RANK
-
-    local_idx = tok // DCP_SIZE
-    block_id = local_idx // BLOCK_SIZE
-    inblock_off = local_idx % BLOCK_SIZE
-
-    valid_block = (block_id < max_num_blocks_per_req) & (block_id >= 0)
-    is_invalid_tok |= ~valid_block | is_remote
-
-    bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
-    base = tl.load(bt_ptr, mask=valid_block & ~is_remote & ~is_invalid_tok, other=0)
-    out_val = base * BLOCK_SIZE + inblock_off
-    out_val = tl.where(is_invalid_tok, -1, out_val)
-
-    tl.store(out_ptr + token_id * out_stride0 + indice_id * out_stride1, out_val)
-
-    if COUNT_VALID:
-        tile_valid_count = tl.sum((~is_invalid_tok).to(tl.int32))
-        tl.atomic_add(valid_count_ptr + token_id, tile_valid_count)
 
 
 def _compact_valid_to_front(
@@ -306,18 +270,22 @@ def triton_filter_and_convert_dcp_index(
     ti_stride0, ti_stride1 = token_indices_c.stride()
     out_stride0, out_stride1 = out.stride()
 
-    _convert_req_index_to_global_index_dcp_kernel[(num_tokens, tiles_per_row)](
+    _convert_req_index_to_global_index_kernel[(num_tokens, tiles_per_row)](
         req_id_c,
         block_table_c,
         token_indices_c,
         out,
         valid_counts,
+        # No prefill workspace on the DCP decode path.
+        None,
+        None,
         max_num_blocks_per_req,
         BLOCK_SIZE,
         BLOCK_N,
+        False,  # HAS_PREFILL
+        return_valid_counts,
         dcp_size,
         dcp_rank,
-        return_valid_counts,
         bt_stride0,
         bt_stride1,
         ti_stride0,

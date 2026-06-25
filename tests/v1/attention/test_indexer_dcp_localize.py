@@ -682,7 +682,7 @@ def test_dcp_prefill_topk_merge_handles_empty_local_shard():
 def test_cutedsl_dcp_candidate_pack_and_select_matches_reference(
     use_row_starts: bool,
 ):
-    from vllm.model_executor.layers.sparse_attn_indexer_cutedsl import (
+    from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
         pack_dcp_topk_candidates_cutedsl,
         stable_topk_from_gathered_candidates_cutedsl,
     )
@@ -750,10 +750,9 @@ def test_cutedsl_dcp_candidate_pack_and_select_matches_reference(
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
-def test_sparse_prefill_dcp_metadata_uses_global_causal_bounds():
+def test_sparse_prefill_dcp_metadata_localizes_causal_bounds():
     device = torch.device("cuda")
     seq_len = 8
-    dcp_world_size = 4
 
     query_start_loc = torch.tensor([0, seq_len], dtype=torch.int32, device=device)
     query_start_loc_cpu = torch.tensor([0, seq_len], dtype=torch.int32)
@@ -761,37 +760,28 @@ def test_sparse_prefill_dcp_metadata_uses_global_causal_bounds():
     seq_lens_cpu = torch.tensor([seq_len], dtype=torch.int32)
     block_table = torch.zeros((1, 1), dtype=torch.int32, device=device)
 
-    chunk = build_prefill_chunk_metadata(
-        start_idx=0,
-        end_idx=1,
-        query_start_loc=query_start_loc,
-        query_start_loc_cpu=query_start_loc_cpu,
-        uncompressed_seq_lens=seq_lens,
-        compressed_seq_lens=seq_lens,
-        compressed_seq_lens_cpu=seq_lens_cpu,
-        block_table=block_table,
-        compress_ratio=1,
-        dcp_rank=0,
-        dcp_world_size=dcp_world_size,
-        cp_kv_cache_interleave_size=1,
-    )
-    assert chunk is not None
-    torch.accelerator.synchronize()
+    def build(dcp_world_size, dcp_rank):
+        chunk = build_prefill_chunk_metadata(
+            start_idx=0,
+            end_idx=1,
+            query_start_loc=query_start_loc,
+            query_start_loc_cpu=query_start_loc_cpu,
+            uncompressed_seq_lens=seq_lens,
+            compressed_seq_lens=seq_lens,
+            compressed_seq_lens_cpu=seq_lens_cpu,
+            block_table=block_table,
+            compress_ratio=1,
+            dcp_rank=dcp_rank,
+            dcp_world_size=dcp_world_size,
+            cp_kv_cache_interleave_size=1,
+        )
+        assert chunk is not None
+        torch.accelerator.synchronize()
+        return chunk
 
-    torch.testing.assert_close(
-        chunk.local_cu_seq_lens.cpu(),
-        torch.tensor([0, 2], dtype=torch.int32),
-    )
-    assert chunk.local_cu_seqlen_ks is not None
-    assert chunk.local_cu_seqlen_ke is not None
-    torch.testing.assert_close(
-        chunk.local_cu_seqlen_ks.cpu(),
-        torch.zeros(seq_len, dtype=torch.int32),
-    )
-    torch.testing.assert_close(
-        chunk.local_cu_seqlen_ke.cpu(),
-        torch.tensor([1, 1, 1, 1, 2, 2, 2, 2], dtype=torch.int32),
-    )
+    # Non-DCP: cu_seqlen_ks/ke carry the global causal bounds.
+    chunk = build(dcp_world_size=1, dcp_rank=0)
+    assert chunk.local_cu_seq_lens is None
     torch.testing.assert_close(
         chunk.cu_seqlen_ks.cpu(),
         torch.zeros(seq_len, dtype=torch.int32),
@@ -800,14 +790,20 @@ def test_sparse_prefill_dcp_metadata_uses_global_causal_bounds():
         chunk.cu_seqlen_ke.cpu(),
         torch.arange(1, seq_len + 1, dtype=torch.int32),
     )
-    assert chunk.local_cu_seqlen_ks is not None
-    assert chunk.local_cu_seqlen_ke is not None
+
+    # DCP: cu_seqlen_ks/ke are localized in place to this rank's shard.
+    chunk = build(dcp_world_size=4, dcp_rank=0)
+    assert chunk.local_cu_seq_lens is not None
     torch.testing.assert_close(
-        chunk.local_cu_seqlen_ks.cpu(),
+        chunk.local_cu_seq_lens.cpu(),
+        torch.tensor([0, 2], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        chunk.cu_seqlen_ks.cpu(),
         torch.zeros(seq_len, dtype=torch.int32),
     )
     torch.testing.assert_close(
-        chunk.local_cu_seqlen_ke.cpu(),
+        chunk.cu_seqlen_ke.cpu(),
         torch.tensor([1, 1, 1, 1, 2, 2, 2, 2], dtype=torch.int32),
     )
 
