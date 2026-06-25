@@ -482,7 +482,6 @@ def test_resolve_content_format_fallbacks(model, expected_format):
     ("template_path", "expected_format"),
     [
         ("template_alpaca.jinja", "string"),
-        ("template_baichuan.jinja", "string"),
         ("template_chatglm.jinja", "string"),
         ("template_chatglm2.jinja", "string"),
         ("template_chatml.jinja", "string"),
