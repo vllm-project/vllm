@@ -405,22 +405,14 @@ def sparse_attn_indexer(
                 k_scale = k_scale_full[:max_local]
                 cu_seqlen_ks = chunk.local_cu_seqlen_ks
                 cu_seqlen_ke = chunk.local_cu_seqlen_ke
-                if not chunk.skip_kv_gather:
-                    logger.info_once(
-                        "DSA sparse indexer DCP prefill local-topK path triggered "
-                        "(chunks=%d, total_seq_lens=%d, local_total_seq_lens=%d)",
-                        len(prefill_metadata.chunks),
-                        chunk.total_seq_lens,
-                        chunk.local_total_seq_lens,
+                if not chunk.skip_kv_gather and chunk.local_total_seq_lens > 0:
+                    ops.cp_gather_indexer_k_quant_cache(
+                        kv_cache,
+                        k_quant,
+                        k_scale,
+                        chunk.block_table,
+                        chunk.local_cu_seq_lens,
                     )
-                    if chunk.local_total_seq_lens > 0:
-                        ops.cp_gather_indexer_k_quant_cache(
-                            kv_cache,
-                            k_quant,
-                            k_scale,
-                            chunk.block_table,
-                            chunk.local_cu_seq_lens,
-                        )
             else:
                 k_quant = k_quant_full[: chunk.total_seq_lens]
                 k_scale = k_scale_full[: chunk.total_seq_lens]
