@@ -99,8 +99,8 @@ async def test_non_streaming_cancel_advances_all_chunk_generators():
     engine_client = SimpleNamespace(
         errored=False,
         generate=Mock(
-            side_effect=lambda *_args, **_kwargs: (
-                _records_start_then_never_finishes(started_request_ids, _args[2])
+            side_effect=lambda *_args, **_kwargs: _records_start_then_never_finishes(
+                started_request_ids, _args[2]
             )
         ),
         abort=AsyncMock(),

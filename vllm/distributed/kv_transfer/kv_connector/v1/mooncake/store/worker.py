@@ -389,6 +389,7 @@ class KVTransferThread(threading.Thread):
     def run(self):
         self.ready_event.set()
         while True:
+            request_data = None
             try:
                 request_data = self.request_queue.get()
                 if request_data is None:
@@ -396,8 +397,9 @@ class KVTransferThread(threading.Thread):
                     self.request_queue.task_done()
                     continue
                 self._handle_request(request_data)
-            except Exception as e:
-                logger.error("Error in %s: %s", self.name, e)
+            except Exception:
+                req_id = getattr(request_data, "req_id", "<unknown>")
+                logger.exception("Error in %s (req=%s)", self.name, req_id)
 
     def _handle_request(self, req_meta: Any):
         pass
@@ -473,6 +475,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self._store_pressure_active = False
         self._skip_store_requests: set[str] = set()
 
+        # Per-request high-water mark of tokens actually persisted; the next
+        # batch resumes here, so pressure-skipped or failed ranges are retried.
+        self._saved_offset: dict[str, int] = {}
+
     def add_stored_request(self, req_id: str):
         with self.done_task_lock:
             self.stored_requests[req_id] += 1
@@ -487,6 +493,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if req_id in self.stored_requests:
                 del self.stored_requests[req_id]
             self._skip_store_requests.discard(req_id)
+            self._saved_offset.pop(req_id, None)
+
+    def _record_saved(self, req_id: str, token_len: int) -> None:
+        # Guard on liveness so a concurrent finish/preempt pop isn't recreated.
+        with self.done_task_lock:
+            if req_id in self.stored_requests:
+                self._saved_offset[req_id] = token_len
 
     def _should_skip_request(self, req_id: str) -> bool:
         with self.done_task_lock:
@@ -526,6 +539,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         try:
             if token_len == 0:
                 return
+
             if self._should_skip_request(req_id):
                 logger.debug(
                     "Skipping Mooncake store for request %s while CPU/disk "
@@ -534,40 +548,42 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 )
                 return
 
+            # Resume from where this rank left off; only the new suffix is saved.
+            save_start = self._saved_offset.get(req_id, 0)
+
             # Within each lcm region only per-spec relevant chunks are loaded
             # (e.g., SWA or linear attn), so mask out irrelevant chunks
             store_masks = self.coord.store_mask(
-                token_len, num_prompt_tokens=req_meta.num_prompt_tokens
+                token_len,
+                save_start,
+                num_prompt_tokens=req_meta.num_prompt_tokens,
             )
+
             starts: list[int] = []
             ends: list[int] = []
             keys: list[str] = []
-            block_hashes: list[BlockHash] = []
+            kv_event_block_hashes: list[BlockHash] = []
             group_indices: list[int] = []
             for g_idx, db in enumerate(self.token_databases):
-                mask = store_masks[g_idx]
-                for chunk_idx, (start, end, key) in enumerate(
-                    db.process_tokens(token_len, req_meta.block_hashes)
+                # Rotate the stride phase per group to balance load across ranks.
+                put_step_rank = (self.tp_rank + g_idx) % self.put_step
+                for start, end, block_hash in db.process_tokens(
+                    token_len,
+                    req_meta.block_hashes,
+                    mask_num=save_start,
+                    chunk_mask=store_masks[g_idx],
+                    put_step=self.put_step,
+                    put_step_rank=put_step_rank,
                 ):
-                    if mask is not None and (
-                        chunk_idx >= len(mask) or not mask[chunk_idx]
-                    ):
-                        continue
                     starts.append(start)
                     ends.append(end)
-                    keys.append(key.to_string())
-                    block_hashes.append(BlockHash(bytes.fromhex(key.chunk_hash)))
+                    keys.append(db.key_for(block_hash))
+                    if self.enable_kv_event:
+                        kv_event_block_hashes.append(block_hash)
                     group_indices.append(g_idx)
 
-            # Apply put_step striding for TP
-            sl = slice(self.tp_rank % self.put_step, None, self.put_step)
-            starts = starts[sl]
-            ends = ends[sl]
-            keys = keys[sl]
-            block_hashes = block_hashes[sl]
-            group_indices = group_indices[sl]
-
             if not keys:
+                self._record_saved(req_id, token_len)
                 return
 
             # Check which blocks already exist (dedup)
@@ -593,13 +609,18 @@ class KVCacheStoreSendingThread(KVTransferThread):
             ]
 
             if not missing_indices:
+                self._record_saved(req_id, token_len)
                 return
 
-            starts = [starts[i] for i in missing_indices]
-            ends = [ends[i] for i in missing_indices]
-            keys = [keys[i] for i in missing_indices]
-            block_hashes = [block_hashes[i] for i in missing_indices]
-            group_indices = [group_indices[i] for i in missing_indices]
+            if len(missing_indices) != len(keys):
+                starts = [starts[i] for i in missing_indices]
+                ends = [ends[i] for i in missing_indices]
+                keys = [keys[i] for i in missing_indices]
+                if self.enable_kv_event:
+                    kv_event_block_hashes = [
+                        kv_event_block_hashes[i] for i in missing_indices
+                    ]
+                group_indices = [group_indices[i] for i in missing_indices]
 
             logger.debug(
                 "Storing KV cache for %d blocks (groups=%s) for request %s",
@@ -612,8 +633,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
             sizes: list[list[int]] = []
             stored_events: list[BlockStored] = []
             # parent_block_hash chains live within a group, not across.
-            prev_key_per_group: dict[int, Any] = {}
-            new_block_hashes = [maybe_convert_block_hash(bh) for bh in block_hashes]
+            if self.enable_kv_event:
+                prev_key_per_group: dict[int, Any] = {}
+                new_block_hashes = [
+                    maybe_convert_block_hash(bh) for bh in kv_event_block_hashes
+                ]
 
             for idx, (s, e, g_idx) in enumerate(
                 zip(starts, ends, group_indices, strict=True)
@@ -687,11 +711,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
                             "batch succeeds",
                             req_id,
                         )
-                elif self._clear_store_pressure():
-                    logger.info(
-                        "Mooncake CPU/disk offloading pressure cleared after a "
-                        "successful store batch"
-                    )
+                else:
+                    self._record_saved(req_id, token_len)
+                    if self._clear_store_pressure():
+                        logger.info(
+                            "Mooncake CPU/disk offloading pressure cleared "
+                            "after a successful store batch"
+                        )
             except Exception as e:
                 self._record_operation(
                     "save_put",
@@ -775,7 +801,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         block_id_list: list[int] = []
         for g_idx, db in enumerate(self.token_databases):
             mask = load_mask_per_group[g_idx]
-            for start, end, key in db.process_tokens(
+            for start, end, block_hash in db.process_tokens(
                 token_len, req_meta.block_hashes, mask_num
             ):
                 chunk_idx = start // db.block_size
@@ -784,7 +810,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 addr, size, block_id = db.prepare_value(
                     start, end, req_meta.block_ids[g_idx]
                 )
-                key_list.append(key.to_string())
+                key_list.append(db.key_for(block_hash))
                 addr_list.append(addr)
                 size_list.append(size)
                 block_id_list.append(block_id)
@@ -1119,6 +1145,20 @@ class MooncakeStoreWorker:
             )
             for g_idx, g in enumerate(self._kv_cache_groups)
         ]
+        self._init_lookup_key_prefixes()
+
+    def _init_lookup_key_prefixes(self) -> None:
+        """Precompute per-group key prefixes expanded across TP/PP ranks."""
+        tp_count = min(self.tp_size, self.num_kv_head)
+        self._lookup_key_prefixes = tuple(
+            tuple(
+                PoolKey.build_prefix(db.metadata, tp_rank=tp, pp_rank=pp)
+                for tp in range(tp_count)
+                for pp in range(self.pp_size)
+            )
+            for db in self.token_dbs
+        )
+        self._lookup_expected_per_key = tp_count * self.pp_size
 
     def register_cross_layers_kv_caches(self, kv_cache: torch.Tensor) -> None:
         """Register a cross-layers KV cache tensor.
@@ -1381,22 +1421,17 @@ class MooncakeStoreWorker:
             return 0
 
         # Build per-(group, hash) candidate keys expanded across TP/PP.
-        # candidate_meta[i] is the (group_id, hash_bytes) for candidate_keys[i].
+        # candidate_meta stores the (group, hash_bytes) for key slice.
         candidate_keys: list[str] = []
         candidate_meta: list[tuple[int, bytes]] = []
         lookup_masks = self.coord.lookup_mask(token_len)
-        tp_count = min(self.tp_size, self.num_kv_head)
         for g_idx, db in enumerate(self.token_dbs):
             spec_block_size = db.block_size
             lookup_mask = lookup_masks[g_idx]
+            key_prefixes = self._lookup_key_prefixes[g_idx]
             group_hashes = self.coord.block_hashes_for_spec(
                 block_hashes, self._kv_cache_groups[g_idx].kv_cache_spec
             )
-            metadata_templates = [
-                dataclasses.replace(db.metadata, tp_rank=tp, pp_rank=pp)
-                for tp in range(tp_count)
-                for pp in range(self.pp_size)
-            ]
             for chunk_id, h in enumerate(group_hashes):
                 start_idx = chunk_id * spec_block_size
                 if start_idx >= token_len:
@@ -1405,11 +1440,12 @@ class MooncakeStoreWorker:
                     chunk_id >= len(lookup_mask) or not lookup_mask[chunk_id]
                 ):
                     continue
-                h_hex = h.hex()
-                h_bytes = bytes(h)
-                for md in metadata_templates:
-                    candidate_keys.append(PoolKey(md, h_hex).to_string())
-                    candidate_meta.append((g_idx, h_bytes))
+                hash_hex = h.hex()
+                for key_prefix in key_prefixes:
+                    candidate_keys.append(
+                        PoolKey.build_key_string(key_prefix, hash_hex)
+                    )
+                candidate_meta.append((g_idx, bytes(h)))
 
         if not candidate_keys:
             return 0
@@ -1434,12 +1470,15 @@ class MooncakeStoreWorker:
             return 0
 
         # A (group, hash) is "present" only when every TP*PP rank has it.
-        expected_per_key = max(1, tp_count * self.pp_size)
-        present_count: dict[tuple[int, bytes], int] = {}
-        for gh, exists in zip(candidate_meta, res, strict=True):
-            if exists == 1:
-                present_count[gh] = present_count.get(gh, 0) + 1
-        exists_set = {gh for gh, c in present_count.items() if c >= expected_per_key}
+        ranks_per_candidate = self._lookup_expected_per_key
+        exists_set = {
+            (g_idx, hash_bytes)
+            for i, (g_idx, hash_bytes) in enumerate(candidate_meta)
+            if all(
+                res[i * ranks_per_candidate + j] == 1
+                for j in range(ranks_per_candidate)
+            )
+        }
 
         _masks, hit_length = self.coord.find_longest_cache_hit(
             block_hashes, token_len, ExternalCachedBlockPool(exists_set)

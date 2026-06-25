@@ -799,10 +799,9 @@ class Scheduler(SchedulerInterface):
                     # KVTransfer: loading remote KV, do not allocate for new work.
                     assert num_external_computed_tokens > 0
                     num_new_tokens = 0
-                elif defer_prefills and request.num_computed_tokens == 0:
-                    # DP prefill balancing: async KV loads (the branch above) are
-                    # allowed to start even on throttled steps, but committing new
-                    # prefill compute is deferred to a cadence-aligned step.
+                elif defer_prefills and num_computed_tokens < request.num_tokens - 1:
+                    # DP prefill balancing: defer this step's local prefill
+                    # compute to a cadence-aligned step.
                     break
                 else:
                     # Number of tokens to be scheduled.
