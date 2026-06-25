@@ -30,45 +30,13 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode,
 )
+from vllm.v1.attention.ops.paged_attn import PagedAttention
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
-
-
-def _split_native_rocm_kv_cache(
-    kv_cache: torch.Tensor,
-    num_kv_heads: int,
-    head_size: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Expose ROCm native K/V views from the packed 2H cache storage."""
-    block_size = kv_cache.shape[2]
-    if kv_cache.stride(3) != 1 or kv_cache.stride(2) != head_size:
-        raise NotImplementedError(
-            "ROCm native KV layout requires contiguous per-head KV storage."
-        )
-
-    x = 16 // kv_cache.element_size()
-    if head_size % x != 0:
-        raise ValueError(f"Head size {head_size} must be divisible by {x}.")
-
-    block_stride = kv_cache.stride(0)
-    head_stride = kv_cache.stride(1)
-    storage_offset = kv_cache.storage_offset()
-
-    key_cache = kv_cache.as_strided(
-        size=(kv_cache.shape[0], num_kv_heads, head_size // x, block_size, x),
-        stride=(block_stride, head_stride, block_size * x, x, 1),
-        storage_offset=storage_offset,
-    )
-    value_cache = kv_cache.as_strided(
-        size=(kv_cache.shape[0], num_kv_heads, head_size, block_size),
-        stride=(block_stride, head_stride, block_size, 1),
-        storage_offset=storage_offset + num_kv_heads * head_stride,
-    )
-    return key_cache, value_cache
 
 
 @dataclass
@@ -280,8 +248,6 @@ class RocmAttentionBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        # Store K/V as separate head groups so ROCm can cheaply expose
-        # independent K and V cache views.
         return (num_blocks, 2 * num_kv_heads, block_size, head_size)
 
     @staticmethod
@@ -447,7 +413,7 @@ class RocmAttentionImpl(AttentionImpl):
                 layer,
             )
 
-        key_cache, value_cache = _split_native_rocm_kv_cache(
+        key_cache, value_cache = PagedAttention.split_kv_cache(
             kv_cache, self.num_kv_heads, self.head_size
         )
 
@@ -509,7 +475,7 @@ class RocmAttentionImpl(AttentionImpl):
     ):
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             return
-        key_cache, value_cache = _split_native_rocm_kv_cache(
+        key_cache, value_cache = PagedAttention.split_kv_cache(
             kv_cache, self.num_kv_heads, self.head_size
         )
         triton_reshape_and_cache_flash(
@@ -524,7 +490,7 @@ class RocmAttentionImpl(AttentionImpl):
         )
 
     def fused_rope_kvcache_supported(self):
-        return False
+        return rocm_aiter_ops.is_enabled()
 
     def do_rope_and_kv_cache_update(
         self,
@@ -540,11 +506,12 @@ class RocmAttentionImpl(AttentionImpl):
     ):
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             return
-        # Packed logical (B, 2*H, N, C) -> (B, N, 2*H, C); split K/V on the
-        # head-group dim (flash layout) for the fused rope+cache kernel.
-        kv_cache_transposed = kv_cache.transpose(1, 2)
-        key_cache, value_cache = kv_cache_transposed.split(self.num_kv_heads, dim=-2)
-        flash_layout = True
+        key_cache, value_cache = PagedAttention.split_kv_cache(
+            kv_cache,
+            layer.num_kv_heads,  # type: ignore[attr-defined]
+            layer.head_size,  # type: ignore[attr-defined]
+        )
+        flash_layout = False
 
         is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)
         if is_fp8_kv_cache:

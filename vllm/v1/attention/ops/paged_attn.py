@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+
+import torch
+
+from vllm.platforms import current_platform
+
+if current_platform.is_cuda_alike():
+    from vllm import _custom_ops as ops
+elif current_platform.is_xpu():
+    from vllm._xpu_ops import xpu_ops as ops  # type: ignore[no-redef]
+
+
+class PagedAttention:
+    @staticmethod
+    def split_kv_cache(
+        kv_cache: torch.Tensor,
+        num_kv_heads: int,
+        head_size: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        x = 16 // kv_cache.element_size()
+
+        if kv_cache.dim() == 4:
+            block_size = kv_cache.shape[2]
+            block_stride = kv_cache.stride(0)
+            head_stride = kv_cache.stride(1)
+            storage_offset = kv_cache.storage_offset()
+
+            key_cache = kv_cache.as_strided(
+                size=(
+                    kv_cache.shape[0],
+                    num_kv_heads,
+                    head_size // x,
+                    block_size,
+                    x,
+                ),
+                stride=(block_stride, head_stride, block_size * x, x, 1),
+                storage_offset=storage_offset,
+            )
+            value_cache = kv_cache.as_strided(
+                size=(kv_cache.shape[0], num_kv_heads, head_size, block_size),
+                stride=(block_stride, head_stride, block_size, 1),
+                storage_offset=storage_offset + num_kv_heads * head_stride,
+            )
+            return key_cache, value_cache
+
+        num_blocks = kv_cache.shape[1]
+        key_cache = kv_cache[0]
+        key_cache = key_cache.view(num_blocks, num_kv_heads, head_size // x, -1, x)
+        value_cache = kv_cache[1]
+        value_cache = value_cache.view(num_blocks, num_kv_heads, head_size, -1)
+        return key_cache, value_cache
+
+    @staticmethod
+    def write_to_paged_cache(
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        kv_cache_dtype: str,
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
+    ) -> None:
+        ops.reshape_and_cache(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping.flatten(),
+            kv_cache_dtype,
+            k_scale,
+            v_scale,
+        )
