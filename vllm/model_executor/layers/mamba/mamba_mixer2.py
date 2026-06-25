@@ -62,7 +62,7 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 logger = init_logger(__name__)
 
-def _filter_mtp_replay_cache_indices(
+def _filter_replay_cache_indices(
     state_indices: torch.Tensor,
     cache_size: int,
 ) -> torch.Tensor:
@@ -75,7 +75,7 @@ def _filter_mtp_replay_cache_indices(
     return state_indices[valid_mask].contiguous()
 
 
-def _new_mtp_replay_tied_dt_buffer(
+def _new_replay_tied_dt_buffer(
     src: torch.Tensor,
     num_decodes: int,
     num_steps: int,
@@ -558,22 +558,22 @@ class MambaMixer2(MambaBase, PluggableLayer):
             and cache_config.mamba_cache_mode == "none"
             and self.mamba_config.backend == MambaBackendEnum.TRITON
             and current_platform.is_cuda()
-            and envs.VLLM_MAMBA_MTP_REPLAY
+            and cache_config.enable_mamba_mtp_replay
         )
         if self._use_mtp_replay:
             logger.info_once(
                 "Using replay-based Mamba2 MTP SSM state update for %s.",
                 self.prefix,
             )
-        self._mtp_replay_cb_scaled: torch.Tensor | None
-        self._mtp_replay_decay_vec: torch.Tensor | None
-        self.register_buffer("_mtp_replay_cb_scaled", None, persistent=False)
-        self.register_buffer("_mtp_replay_decay_vec", None, persistent=False)
+        self._replay_cb_scaled: torch.Tensor | None
+        self._replay_decay_vec: torch.Tensor | None
+        self.register_buffer("_replay_cb_scaled", None, persistent=False)
+        self.register_buffer("_replay_decay_vec", None, persistent=False)
 
         # Check if running on Blackwell (SM100+) for kernel tuning
         self.is_blackwell = current_platform.is_device_capability_family(100)
 
-    def _ensure_mtp_replay_workspace(
+    def _ensure_replay_workspace(
         self,
         batch: int,
         num_heads: int,
@@ -584,18 +584,18 @@ class MambaMixer2(MambaBase, PluggableLayer):
         cb_shape = (num_heads, block_size_t, block_size_t)
         decay_shape = (num_heads, block_size_t)
         if (
-            self._mtp_replay_cb_scaled is not None
-            and self._mtp_replay_decay_vec is not None
-            and self._mtp_replay_cb_scaled.shape[0] >= batch
-            and self._mtp_replay_cb_scaled.shape[1:] == cb_shape
-            and self._mtp_replay_decay_vec.shape[0] >= batch
-            and self._mtp_replay_decay_vec.shape[1:] == decay_shape
-            and self._mtp_replay_cb_scaled.device == device
-            and self._mtp_replay_decay_vec.device == device
+            self._replay_cb_scaled is not None
+            and self._replay_decay_vec is not None
+            and self._replay_cb_scaled.shape[0] >= batch
+            and self._replay_cb_scaled.shape[1:] == cb_shape
+            and self._replay_decay_vec.shape[0] >= batch
+            and self._replay_decay_vec.shape[1:] == decay_shape
+            and self._replay_cb_scaled.device == device
+            and self._replay_decay_vec.device == device
         ):
             return
 
-        self._mtp_replay_cb_scaled = torch.empty(
+        self._replay_cb_scaled = torch.empty(
             batch,
             num_heads,
             block_size_t,
@@ -603,7 +603,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             dtype=torch.float32,
             device=device,
         )
-        self._mtp_replay_decay_vec = torch.empty(
+        self._replay_decay_vec = torch.empty(
             batch,
             num_heads,
             block_size_t,
@@ -619,7 +619,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             return
         replay_valid = self.kv_cache[7]
         cache_size = replay_valid.shape[0]
-        valid_indices = _filter_mtp_replay_cache_indices(state_indices, cache_size)
+        valid_indices = _filter_replay_cache_indices(state_indices, cache_size)
         if valid_indices.numel() == 0:
             return
         valid_indices = valid_indices.to(device=replay_valid.device, dtype=torch.long)
@@ -1106,10 +1106,11 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 and num_decode_tokens == num_decodes * (1 + self.num_spec)
             )
             use_mtp_replay_external_pdl = (
-                full_mtp_decode_rows and envs.VLLM_MAMBA_MTP_REPLAY_EXTERNAL_PDL
+                full_mtp_decode_rows
+                and self.cache_config.enable_mamba_mtp_replay_pdl
             )
             use_mtp_replay_internal_pdl = (
-                use_mtp_replay and envs.VLLM_MAMBA_MTP_REPLAY_INTERNAL_PDL
+                use_mtp_replay and self.cache_config.enable_mamba_mtp_replay_pdl
             )
             replay_num_accepted_tokens = None
             replay_state_indices = None
@@ -1131,7 +1132,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     self.kv_cache[6],
                     self.kv_cache[7],
                 )
-                self._ensure_mtp_replay_workspace(
+                self._ensure_replay_workspace(
                     num_decodes,
                     num_heads,
                     num_steps,
@@ -1200,8 +1201,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 assert replay_cache_tensors is not None
                 num_steps = 1 + self.num_spec
                 num_heads = self.num_heads // self.tp_size
-                assert self._mtp_replay_cb_scaled is not None
-                assert self._mtp_replay_decay_vec is not None
+                assert self._replay_cb_scaled is not None
+                assert self._replay_decay_vec is not None
                 (
                     replay_old_x,
                     replay_old_B,
@@ -1247,7 +1248,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                         num_heads,
                         self.head_dim,
                     )
-                    replay_dt_storage, replay_dt = _new_mtp_replay_tied_dt_buffer(
+                    replay_dt_storage, replay_dt = _new_replay_tied_dt_buffer(
                         dt_d,
                         num_decodes,
                         num_steps,
@@ -1308,8 +1309,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     # with a normal cache-dtype cast, even when non-spec decode
                     # uses stochastic rounding. Match that behavior here.
                     enable_stochastic_rounding=False,
-                    cb_scaled=self._mtp_replay_cb_scaled,
-                    decay_vec=self._mtp_replay_decay_vec,
+                    cb_scaled=self._replay_cb_scaled,
+                    decay_vec=self._replay_decay_vec,
                     launch_with_pdl=use_mtp_replay_external_pdl,
                     use_internal_pdl=use_mtp_replay_internal_pdl,
                 )
@@ -1346,7 +1347,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         assert self.model_config is not None
         assert self.cache_config is not None
         if self._use_mtp_replay:
-            return MambaStateDtypeCalculator.mamba2_mtp_replay_state_dtype(
+            return MambaStateDtypeCalculator.mamba2_spec_replay_state_dtype(
                 self.model_config.dtype,
                 self.cache_config.mamba_cache_dtype,
                 self.cache_config.mamba_ssm_cache_dtype,
@@ -1359,7 +1360,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
     def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
         if self._use_mtp_replay:
-            return MambaStateShapeCalculator.mamba2_mtp_replay_state_shape(
+            return MambaStateShapeCalculator.mamba2_spec_replay_state_shape(
                 intermediate_size=self.intermediate_size,
                 tp_world_size=get_tensor_model_parallel_world_size(),
                 n_groups=self.n_groups,

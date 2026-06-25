@@ -38,7 +38,7 @@ from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
 from .load import LoadConfig
 from .lora import LoRAConfig
-from .mamba import MambaConfig
+from .mamba import MambaBackendEnum, MambaConfig
 from .model import ModelConfig
 from .observability import ObservabilityConfig
 from .offload import OffloadConfig
@@ -2151,6 +2151,30 @@ class VllmConfig:
         if mamba_block_size_is_set and not self.cache_config.enable_prefix_caching:
             raise ValueError(
                 "--mamba-block-size can only be set with --enable-prefix-caching"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_mamba_mtp_replay(self) -> "VllmConfig":
+        if not self.cache_config.enable_mamba_mtp_replay:
+            if self.cache_config.enable_mamba_mtp_replay_pdl:
+                raise ValueError(
+                    "--enable-mamba-mtp-replay-pdl requires "
+                    "--enable-mamba-mtp-replay"
+                )
+            return self
+        if self.num_speculative_tokens <= 0:
+            raise ValueError(
+                "--enable-mamba-mtp-replay requires speculative decoding "
+                "(num_speculative_tokens > 0)"
+            )
+        if self.cache_config.mamba_cache_mode != "none":
+            raise ValueError(
+                "--enable-mamba-mtp-replay requires --mamba-cache-mode none"
+            )
+        if self.mamba_config.backend != MambaBackendEnum.TRITON:
+            raise ValueError(
+                "--enable-mamba-mtp-replay requires --mamba-backend triton"
             )
         return self
 

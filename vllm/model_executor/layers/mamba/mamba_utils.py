@@ -81,7 +81,7 @@ class MambaStateDtypeCalculator:
         )
 
     @classmethod
-    def mamba2_mtp_replay_state_dtype(
+    def mamba2_spec_replay_state_dtype(
         cls,
         model_dtype: ModelDType | torch.dtype,
         mamba_cache_dtype: MambaDType,
@@ -208,7 +208,7 @@ class MambaStateShapeCalculator:
         return conv_state_shape, temporal_state_shape
 
     @classmethod
-    def mamba2_mtp_replay_state_shape(
+    def mamba2_spec_replay_state_shape(
         cls,
         tp_world_size: int,
         intermediate_size: int,

@@ -5,7 +5,6 @@ from collections.abc import Iterable
 
 import torch
 
-from vllm import envs
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
@@ -52,7 +51,7 @@ class MambaBase(AttentionLayerBase):
             else 0
         )
         if (
-            envs.VLLM_MAMBA_MTP_REPLAY
+            vllm_config.cache_config.enable_mamba_mtp_replay
             and vllm_config.speculative_config
             and vllm_config.cache_config.mamba_cache_mode == "none"
         ):

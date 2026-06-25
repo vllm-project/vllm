@@ -139,6 +139,12 @@ class CacheConfig:
     - "align": only cache the mamba state of the last token of each scheduler step and
            when the token is at position i * block_size.
     """
+    enable_mamba_mtp_replay: bool = False
+    """Use replay-based Mamba2 SSM state updates for MTP speculative decode.
+    Requires speculative decoding, Mamba cache mode "none", and the Triton
+    Mamba backend."""
+    enable_mamba_mtp_replay_pdl: bool = False
+    """Use Programmatic Dependent Launch for the Mamba MTP replay kernel chain."""
 
     # Will be set after profiling.
     num_gpu_blocks: int | None = field(default=None, init=False)

@@ -1042,7 +1042,7 @@ class GPUModelRunner(
             self.cache_config.mamba_cache_mode != "none"
             or self.speculative_config is None
             or not self.model_config.is_hybrid
-            or not envs.VLLM_MAMBA_MTP_REPLAY
+            or not self.cache_config.enable_mamba_mtp_replay
         ):
             return
 
@@ -1239,7 +1239,7 @@ class GPUModelRunner(
             self.cache_config.mamba_cache_mode == "none"
             and self.speculative_config is not None
             and self.model_config.is_hybrid
-            and envs.VLLM_MAMBA_MTP_REPLAY
+            and self.cache_config.enable_mamba_mtp_replay
         ):
             mamba_group_ids, _ = mamba_utils.get_mamba_groups(self.kv_cache_config)
             if mamba_group_ids:

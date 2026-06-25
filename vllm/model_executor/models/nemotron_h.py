@@ -25,7 +25,6 @@ from itertools import islice
 import torch
 from torch import nn
 
-from vllm import envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.config.parallel import ParallelConfig
@@ -817,11 +816,11 @@ class NemotronHForCausalLM(
         vllm_config: "VllmConfig",
     ) -> tuple[torch.dtype, ...]:
         if (
-            envs.VLLM_MAMBA_MTP_REPLAY
+            vllm_config.cache_config.enable_mamba_mtp_replay
             and vllm_config.speculative_config
             and vllm_config.cache_config.mamba_cache_mode == "none"
         ):
-            return MambaStateDtypeCalculator.mamba2_mtp_replay_state_dtype(
+            return MambaStateDtypeCalculator.mamba2_spec_replay_state_dtype(
                 vllm_config.model_config.dtype,
                 vllm_config.cache_config.mamba_cache_dtype,
                 vllm_config.cache_config.mamba_ssm_cache_dtype,
@@ -852,11 +851,11 @@ class NemotronHForCausalLM(
         intermediate_size = hf_config.mamba_num_heads * hf_config.mamba_head_dim
 
         if (
-            envs.VLLM_MAMBA_MTP_REPLAY
+            vllm_config.cache_config.enable_mamba_mtp_replay
             and vllm_config.speculative_config
             and vllm_config.cache_config.mamba_cache_mode == "none"
         ):
-            return MambaStateShapeCalculator.mamba2_mtp_replay_state_shape(
+            return MambaStateShapeCalculator.mamba2_spec_replay_state_shape(
                 intermediate_size=intermediate_size,
                 tp_world_size=parallel_config.tensor_parallel_size,
                 n_groups=hf_config.n_groups,

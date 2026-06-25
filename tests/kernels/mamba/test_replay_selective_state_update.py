@@ -6,10 +6,8 @@ import torch
 
 from tests.kernels.mamba.utils import selective_state_update_ref
 from vllm.model_executor.layers.mamba.mamba_mixer2 import (
-    _filter_mtp_replay_cache_indices,
-    _filter_mtp_replay_preserve_indices,
-    _move_mtp_replay_valid_rows,
-    _new_mtp_replay_tied_dt_buffer,
+    _filter_replay_cache_indices,
+    _new_replay_tied_dt_buffer,
 )
 from vllm.model_executor.layers.mamba.ops.replay_selective_state_update import (
     replay_selective_state_update,
@@ -363,63 +361,6 @@ def test_replay_selective_state_update_ignores_invalid_state_indices():
     torch.testing.assert_close(out[2], torch.full_like(out[2], 123.0))
 
 
-def test_mtp_replay_preserve_indices_filter_invalid_rows():
-    device = DEVICE
-    cache_size = 8
-    state_indices = torch.tensor(
-        [
-            [1, 2, 3, 4],
-            [5, 5, 6, 7],
-            [NULL_BLOCK_ID, 1, 2, 3],
-            [8, 1, 2, 3],
-            [2, NULL_BLOCK_ID, 4, 5],
-            [3, 6, cache_size + 1, 7],
-            [4, 0, 1, 2],
-        ],
-        dtype=torch.int32,
-        device=device,
-    )
-    num_accepted_tokens = torch.tensor(
-        [2, 1, 3, 2, 1, 2, 0],
-        dtype=torch.int32,
-        device=device,
-    )
-
-    src_indices, dst_indices = _filter_mtp_replay_preserve_indices(
-        state_indices,
-        num_accepted_tokens,
-        num_steps=state_indices.size(1),
-        cache_size=cache_size,
-    )
-
-    torch.testing.assert_close(
-        src_indices,
-        torch.tensor([1, 3], dtype=torch.long, device=device),
-    )
-    torch.testing.assert_close(
-        dst_indices,
-        torch.tensor([2, 6], dtype=torch.long, device=device),
-    )
-
-
-def test_mtp_replay_valid_rows_are_moved_not_copied():
-    device = DEVICE
-    replay_valid = torch.tensor(
-        [0, 1, 1, 0, 0, 1],
-        dtype=torch.int32,
-        device=device,
-    )
-    src_indices = torch.tensor([1, 2, 5], dtype=torch.long, device=device)
-    dst_indices = torch.tensor([3, 4, 2], dtype=torch.long, device=device)
-
-    _move_mtp_replay_valid_rows(replay_valid, src_indices, dst_indices)
-
-    torch.testing.assert_close(
-        replay_valid,
-        torch.tensor([0, 0, 1, 1, 1, 0], dtype=torch.int32, device=device),
-    )
-
-
 def test_mtp_replay_cache_indices_filter_invalid_rows():
     device = DEVICE
     state_indices = torch.tensor(
@@ -428,7 +369,7 @@ def test_mtp_replay_cache_indices_filter_invalid_rows():
         device=device,
     )
 
-    filtered = _filter_mtp_replay_cache_indices(state_indices, cache_size=8)
+    filtered = _filter_replay_cache_indices(state_indices, cache_size=8)
 
     torch.testing.assert_close(
         filtered,
@@ -449,7 +390,7 @@ def test_mtp_replay_padded_dt_keeps_tied_head_dim_stride():
     )
     dt = dt_scalar[:, :, None].expand(-1, -1, head_dim)
 
-    dt_storage, replay_dt = _new_mtp_replay_tied_dt_buffer(
+    dt_storage, replay_dt = _new_replay_tied_dt_buffer(
         dt,
         num_decodes=2,
         num_steps=4,
