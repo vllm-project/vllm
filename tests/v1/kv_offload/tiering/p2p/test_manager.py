@@ -351,11 +351,12 @@ class TestOnRequestFinished:
         assert bound.finishes == ["req-1"]
         assert "req-1" not in mgr._kv_to_session
 
-    def test_prefiller_unbound_id_drops_batches_as_failed(self):
+    def test_prefiller_unbound_id_leaves_batches_parked(self):
         """Prefiller-side finish for an id with parked unbound batches
-        and no session binding drops the batches and surfaces them as
-        failed jobs (so the engine doesn't wait for the unbound-store
-        timeout)."""
+        and no session binding is a no-op on `_unbound_stores`. The
+        parked batches survive until a peer fetches them or the
+        `_reap_unbound_stores` timeout fires — `on_request_finished`
+        must not evict them."""
         from vllm.v1.kv_offload.tiering.p2p.manager import _UnboundStoreBatch
 
         mgr = _make_manager()
@@ -371,10 +372,11 @@ class TestOnRequestFinished:
             )
         )
         mgr.on_request_finished(ctx)
-        assert "req-1" not in mgr._unbound_stores
+        assert "req-1" in mgr._unbound_stores
+        assert [b.job_id for b in mgr._unbound_stores["req-1"]] == [10, 11]
         outcomes = {(r.job_id, r.success) for r in mgr._finished_jobs}
-        assert (10, False) in outcomes
-        assert (11, False) in outcomes
+        assert (10, False) not in outcomes
+        assert (11, False) not in outcomes
 
 
 # ---------------------------------------------------------------------------
@@ -1371,8 +1373,7 @@ class TestConnectionDeathMidTransfer:
 
         # Reap surfaces the load (which lived inside the session) as
         # failed. The store 900 is not session-scoped — it survives the
-        # session reap and waits for on_request_finished or the unbound
-        # timeout.
+        # session reap and waits for the unbound-store timeout.
         results: list[JobResult] = []
         for _ in range(3):
             results.extend(list(mgr_a.get_finished_jobs()))
@@ -1386,9 +1387,12 @@ class TestConnectionDeathMidTransfer:
         # Store batch is still parked.
         assert "req-store" in mgr_a._unbound_stores
 
-        # The engine signals the producer's request is done. That drops
-        # the parked batch and surfaces 900 as a failure.
+        # The engine signals the producer's request is done. That is a
+        # no-op for the parked batch — `on_request_finished` does not
+        # evict unbound stores; only `_reap_unbound_stores` does, after
+        # the unbound-store timeout. Job 900 stays unfinished here.
         mgr_a.on_request_finished(_req_context(a_prefiller_params))
         finishes = {(r.job_id, r.success) for r in mgr_a._finished_jobs}
-        assert (900, False) in finishes
-        assert "req-store" not in mgr_a._unbound_stores
+        assert (900, False) not in finishes
+        assert (900, True) not in finishes
+        assert "req-store" in mgr_a._unbound_stores

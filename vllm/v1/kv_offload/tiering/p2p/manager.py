@@ -197,14 +197,16 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
     @override
     def on_request_finished(self, req_context: ReqContext) -> None:
-        """Cancels pending loads and prunes state.
+        """Cancels pending loads and prunes session-scoped state.
 
         Decoder side (do_remote_prefill): looks up the session by peer_id
         because the producer's address is what addresses the client-role
         load to cancel. Prefiller side (do_remote_decode): looks up via
         kv_request_id because peer_id is no longer carried on store-time
-        kv_transfer_params; if no session has bound the id yet, drop any
-        unbound batches and surface their jobs as failed.
+        kv_transfer_params; if a session has bound the id, finish it. If
+        no session has bound the id yet, this is a no-op: parked batches
+        in `_unbound_stores` are left in place and cleaned up only by
+        `_reap_unbound_stores` after `_UNBOUND_STORE_TIMEOUT_S`.
         """
         kv_params = req_context.kv_transfer_params
         if not kv_params:
