@@ -33,11 +33,14 @@ def activation_to_flashinfer_type(activation: MoEActivation) -> "ActivationType"
         MoEActivation.SILU_NO_MUL: ActivationType.Silu,
         MoEActivation.GELU_NO_MUL: ActivationType.Gelu,
         MoEActivation.SILU: ActivationType.Swiglu,
-        # SwiGLU-OAI uses Swiglu; the OAI alpha/beta/clamp come from gemm1_* args.
-        MoEActivation.SWIGLUOAI_UNINTERLEAVE: ActivationType.Swiglu,
         MoEActivation.GELU: ActivationType.Geglu,
         MoEActivation.GELU_TANH: ActivationType.Geglu,
         MoEActivation.RELU2_NO_MUL: ActivationType.Relu2,
+        # Both OAI variants map to Swiglu: FlashInfer has no SwigluOAI enum;
+        # the clamped/biased behavior is driven by the per-expert gemm1_alpha/
+        # gemm1_beta/gemm1_clamp_limit tensors (see trtllm_nvfp4_moe.py).
+        # The interleaved-vs-contiguous row layout difference between the two
+        # is resolved in process_weights_after_loading, not here.
         MoEActivation.SWIGLUOAI: ActivationType.Swiglu,
         MoEActivation.SWIGLUOAI_UNINTERLEAVE: ActivationType.Swiglu,
     }
