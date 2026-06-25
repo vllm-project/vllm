@@ -46,17 +46,43 @@ this module (same request-level processor as DeepSeek-OCR) with::
         max_tokens=8192,
         extra_args={"ngram_size": 35, "window_size": 128},
     )
+
+Image processing
+----------------
+Unlimited-OCR supports up to 32 local crops (vs 6 for DeepSeek-OCR), matching
+the SGLang reference implementation (``dynamic_preprocess max_num=32``).
+
+Multi-image requests automatically fall back to non-crop mode, mirroring
+SGLang's ``_MULTI_IMAGE_ALLOWED`` restriction that excludes "gundam" (crop)
+mode for multi-image input.  DeepSeek-OCR does *not* have this restriction.
 """
+
+import math
+from collections.abc import Mapping, Sequence
 
 from vllm.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import MultiModalKwargsItems
+from vllm.multimodal.parse import (
+    ImageEmbeddingItems,
+    ImageProcessorItems,
+    ImageSize,
+    MultiModalDataItems,
+)
+from vllm.multimodal.processing import PromptReplacement, PromptUpdate
+from vllm.transformers_utils.processors.deepseek_ocr import (
+    BASE_SIZE,
+    CROP_MODE,
+    IMAGE_SIZE,
+    count_tiles,
+)
 
 from .deepseek_ocr import (
     DeepseekOCRDummyInputsBuilder,
     DeepseekOCRForCausalLM,
     DeepseekOCRMultiModalProcessor,
+    DeepseekOCRProcessingInfo,
     NGramPerReqLogitsProcessor,
-    UnlimitedOCRProcessingInfo,
 )
 
 __all__ = [
@@ -64,9 +90,133 @@ __all__ = [
     "UnlimitedOCRForCausalLM",
 ]
 
+# Unlimited-OCR supports up to 32 local crops (vs 6 for DeepSeek-OCR).
+_UNLIMITED_OCR_MAX_CROPS = 32
+
+
+class UnlimitedOCRProcessingInfo(DeepseekOCRProcessingInfo):
+    """ProcessingInfo for Unlimited-OCR: same as DeepSeek-OCR but with
+    max_crops=32 instead of 6.  The higher crop count allows tiling very large
+    document pages into up to 32 640×640 patches, matching the SGLang reference
+    implementation (dynamic_preprocess max_num=32).
+    """
+
+    def get_hf_config(self):
+        from vllm.transformers_utils.configs.unlimited_ocr import UnlimitedOCRConfig
+
+        return self.ctx.get_hf_config(UnlimitedOCRConfig)
+
+    def get_hf_processor(self, **kwargs: object):
+        from vllm.transformers_utils.processors.unlimited_ocr import (
+            UnlimitedOCRProcessor,
+        )
+
+        v1_processor_config = dict(
+            image_size=IMAGE_SIZE,
+            base_size=BASE_SIZE,
+            crop_mode=CROP_MODE,
+            strategy="v1",
+            max_crops=_UNLIMITED_OCR_MAX_CROPS,
+        )
+        return self.ctx.get_hf_processor(
+            UnlimitedOCRProcessor,
+            **{**v1_processor_config, **kwargs},
+        )
+
+    def get_num_image_tokens(
+        self, *, image_width: int, image_height: int, cropping: bool = True
+    ) -> int:
+        patch_size = 16
+        downsample_ratio = 4
+
+        # Use the caller-supplied `cropping` flag (multi-image callers pass
+        # cropping=False to match the fallback in tokenize_with_images).
+        if cropping:
+            if image_width <= IMAGE_SIZE and image_height <= IMAGE_SIZE:
+                crop_ratio = [1, 1]
+            else:
+                crop_ratio = count_tiles(
+                    image_width,
+                    image_height,
+                    max_num=_UNLIMITED_OCR_MAX_CROPS,
+                    image_size=IMAGE_SIZE,
+                )
+            num_width_tiles, num_height_tiles = crop_ratio
+        else:
+            num_width_tiles = num_height_tiles = 1
+
+        h = w = math.ceil((BASE_SIZE // patch_size) / downsample_ratio)
+        h2 = w2 = math.ceil((IMAGE_SIZE // patch_size) / downsample_ratio)
+
+        global_views_tokens = h * (w + 1)
+        if num_width_tiles > 1 or num_height_tiles > 1:
+            local_views_tokens = (num_height_tiles * h2) * (num_width_tiles * w2 + 1)
+        else:
+            local_views_tokens = 0
+
+        return global_views_tokens + local_views_tokens + 1
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        # With max_crops=32, the widest possible grid is 4×8 (aspect ratio 1:2).
+        # A 2560×5120 image (4×640 × 8×640) selects exactly 4×8=32 tiles and
+        # produces the maximum token count.
+        return ImageSize(width=640 * 4, height=640 * 8)
+
+
+class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
+    """Multimodal processor for Unlimited-OCR.
+
+    Overrides ``_get_prompt_updates`` to disable crop mode for multi-image
+    requests, keeping the token count consistent with the guard added to
+    ``UnlimitedOCRProcessor.tokenize_with_images``.
+
+    DeepSeek-OCR does *not* apply this restriction.
+    """
+
+    def _get_prompt_updates(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargsItems,
+    ) -> Sequence[PromptUpdate]:
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+
+        image_token_id = hf_processor.image_token_id
+        assert isinstance(image_token_id, int)
+
+        def get_replacement_unlimited_ocr(item_idx: int):
+            images = mm_items.get_items(
+                "image", (ImageEmbeddingItems, ImageProcessorItems)
+            )
+
+            if isinstance(images, ImageEmbeddingItems):
+                num_image_tokens = images.get_feature_size(item_idx)
+            else:
+                size = images.get_image_size(item_idx)
+
+                # Disable crop mode for multi-image input to match SGLang.
+                # UnlimitedOCRProcessor.tokenize_with_images applies the same
+                # fallback, so both paths must agree on the effective crop flag.
+                effective_cropping = CROP_MODE and len(images) == 1
+
+                num_image_tokens = self.info.get_num_image_tokens(
+                    image_width=size.width,
+                    image_height=size.height,
+                    cropping=effective_cropping,
+                )
+            return [image_token_id] * num_image_tokens
+
+        return [
+            PromptReplacement(
+                modality="image",
+                target=[image_token_id],
+                replacement=get_replacement_unlimited_ocr,
+            )
+        ]
+
 
 @MULTIMODAL_REGISTRY.register_processor(
-    DeepseekOCRMultiModalProcessor,
+    UnlimitedOCRMultiModalProcessor,
     info=UnlimitedOCRProcessingInfo,
     dummy_inputs=DeepseekOCRDummyInputsBuilder,
 )
