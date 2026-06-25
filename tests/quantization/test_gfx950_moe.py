@@ -42,7 +42,7 @@ def _make_w4a4_moe_config(moe_backend: str = "auto") -> FusedMoEConfig:
         num_experts=8,
         experts_per_token=2,
         hidden_dim=256,
-        intermediate_size_per_partition=256,
+        intermediate_size=256,
         num_local_experts=8,
         num_logical_experts=8,
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
@@ -54,9 +54,22 @@ def _make_w4a4_moe_config(moe_backend: str = "auto") -> FusedMoEConfig:
     )
 
 
+@pytest.fixture
+def mxfp4_oracle_config():
+    """Stub the config the oracle reads (``model_config.quantization_config``)
+    so backend dispatch resolves without a real model / user override."""
+    from unittest.mock import patch
+
+    with patch(
+        "vllm.model_executor.layers.fused_moe.oracle.mxfp4.get_current_vllm_config"
+    ) as mock_get_config:
+        mock_get_config.return_value.model_config.quantization_config = None
+        yield
+
+
 @pytest.mark.skipif(not ROCM_GFX950, reason="Requires GFX950 (mi355x)")
 @pytest.mark.skipif(not ROCM_AITER_AVAILABLE, reason="Requires AITER enabled")
-def test_w4a4_dispatches_to_aiter():
+def test_w4a4_dispatches_to_aiter(mxfp4_oracle_config):
     """With AITER enabled + GFX950, W4A4 selects AITER_MXFP4_MXFP4."""
     config = _make_w4a4_moe_config()
     backend, experts_cls = select_mxfp4_moe_backend(
@@ -71,16 +84,18 @@ def test_w4a4_dispatches_to_aiter():
     ROCM_AITER_AVAILABLE,
     reason="Test requires AITER disabled (unset VLLM_ROCM_USE_AITER)",
 )
-def test_w4a4_raises_without_aiter_and_no_moe_backend():
-    """Without AITER and no --moe-backend, raises NotImplementedError
-    with hint to use --moe-backend emulation."""
+def test_w4a4_falls_back_to_triton_unfused_without_aiter(mxfp4_oracle_config):
+    """Without AITER and no --moe-backend, ROCm falls back to TRITON_UNFUSED."""
     config = _make_w4a4_moe_config()
-    with pytest.raises(NotImplementedError, match="--moe-backend emulation"):
-        select_mxfp4_moe_backend(config, activation_key=kMxfp4Dynamic)
+    backend, experts_cls = select_mxfp4_moe_backend(
+        config, activation_key=kMxfp4Dynamic
+    )
+    assert backend == Mxfp4MoeBackend.TRITON_UNFUSED
+    assert experts_cls is not None
 
 
 @pytest.mark.skipif(not ROCM_GFX950, reason="Requires GFX950 (mi355x)")
-def test_w4a4_dispatches_to_emulation_with_moe_backend():
+def test_w4a4_dispatches_to_emulation_with_moe_backend(mxfp4_oracle_config):
     """With --moe-backend emulation, W4A4 selects EMULATION."""
     config = _make_w4a4_moe_config(moe_backend="emulation")
     backend, experts_cls = select_mxfp4_moe_backend(

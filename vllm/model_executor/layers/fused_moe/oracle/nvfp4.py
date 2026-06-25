@@ -174,6 +174,8 @@ def select_nvfp4_moe_backend(
 
     NVFP4_BACKENDS_WITH_CLAMP = {
         NvFp4MoeBackend.FLASHINFER_TRTLLM,
+        NvFp4MoeBackend.FLASHINFER_CUTLASS,
+        NvFp4MoeBackend.MARLIN,
     }
 
     if config.swiglu_limit is not None:
@@ -423,6 +425,7 @@ def make_nvfp4_moe_quant_config(
             g2_alphas=w2_scale_2,
             w1_scale=w13_scale,
             w2_scale=w2_scale,
+            gemm1_clamp_limit=swiglu_limit,
         )
     elif backend == NvFp4MoeBackend.EMULATION:
         return nvfp4_moe_quant_config(

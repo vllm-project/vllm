@@ -185,6 +185,7 @@ if TYPE_CHECKING:
         "relax",
     ] = "relax"
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
+    VLLM_MOE_SKIP_PADDING: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
@@ -199,6 +200,7 @@ if TYPE_CHECKING:
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
     VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
     VLLM_MOONCAKE_STORE_TIER_LOG: bool = False
+    VLLM_MOONCAKE_LOAD_RECV_THREADS: int = 1
     VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO: float = 0.9
     MOONCAKE_PREFERRED_SEGMENT: str | None = None
     MOONCAKE_REQUESTER_LOCAL_HOSTNAME: str | None = None
@@ -209,11 +211,10 @@ if TYPE_CHECKING:
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
     VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS: int = 5
     VLLM_KV_CACHE_LAYOUT: Literal["NHD", "HND"] | None = None
-    VLLM_USE_PACKED_HMA_KV_CACHE: bool = False
     VLLM_SSM_CONV_STATE_LAYOUT: Literal["SD", "DS"] | None = None
     VLLM_COMPUTE_NANS_IN_LOGITS: bool = False
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: Literal[
-        "FP", "INT8", "INT6", "INT4", "NONE"
+        "FP", "INT8", "INT6", "INT4", "INT3", "NONE"
     ] = "NONE"
     VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: int | None = None
@@ -1223,12 +1224,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", "False").lower() in ("true", "1")
     ),
     # Custom quick allreduce kernel for MI3* cards
-    # Choice of quantization level: FP, INT8, INT6, INT4 or NONE
+    # Choice of quantization level: FP, INT8, INT6, INT4, INT3 or NONE
     # Recommended for large models to get allreduce
     "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION": env_with_choices(
         "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION",
         "NONE",
-        ["FP", "INT8", "INT6", "INT4", "NONE"],
+        ["FP", "INT8", "INT6", "INT4", "INT3", "NONE"],
     ),
     # Custom quick allreduce kernel for MI3* cards
     # Due to the lack of the bfloat16 asm instruction, bfloat16
@@ -1469,6 +1470,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_FUSED_MOE_GROUPED_TOPK": lambda: bool(
         int(os.getenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "1"))
     ),
+    # Skip cudagraph/DP padding tokens in the MoE path by forcing their expert
+    # ids to -1 so the dispatch and experts drop them. Requires a MoE kernel that
+    # treats topk_id == -1 as a skip sentinel; off by default because not all
+    # kernels support it yet.
+    "VLLM_MOE_SKIP_PADDING": lambda: bool(int(os.getenv("VLLM_MOE_SKIP_PADDING", "0"))),
     # Allow use of FlashInfer FP8 block-scale GEMM for linear layers.
     # This uses TensorRT-LLM kernels and requires SM90+ (Hopper).
     "VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER": lambda: bool(
@@ -1526,6 +1532,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MOONCAKE_STORE_TIER_LOG": lambda: (
         os.getenv("VLLM_MOONCAKE_STORE_TIER_LOG", "False").lower() in ("true", "1")
     ),
+    # Number of parallel KV-load receive threads per worker rank. Lets the
+    # per-request control overhead (Python prep + master key lookup) of one
+    # request overlap with the RDMA transfer of another, keeping the transfer
+    # engine's queue pairs busy. Helps when that overhead is significant or
+    # per-request batches are too small to saturate the link on their own.
+    "VLLM_MOONCAKE_LOAD_RECV_THREADS": lambda: int(
+        os.getenv("VLLM_MOONCAKE_LOAD_RECV_THREADS", "1")
+    ),
     # Fraction of the owner's DirectIO staging buffer to fill per GET batch.
     "VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO": lambda: float(
         os.getenv("VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO", "0.9")
@@ -1580,10 +1594,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS", "1")
     ),
     # Enforce function parameter schemas in structural-tag based tool calling.
-    "VLLM_ENFORCE_STRICT_TOOL_CALLING": lambda: os.getenv(
-        "VLLM_ENFORCE_STRICT_TOOL_CALLING", "True"
-    ).lower()
-    in ("true", "1"),
+    "VLLM_ENFORCE_STRICT_TOOL_CALLING": lambda: (
+        os.getenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", "True").lower() in ("true", "1")
+    ),
     # Control the max chunk bytes (in MB) for the rpc message queue.
     # Object larger than this threshold will be broadcast to worker
     # processes via zmq.
@@ -1608,11 +1621,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # implement and support a subset of all possible layouts.
     "VLLM_KV_CACHE_LAYOUT": env_with_choices(
         "VLLM_KV_CACHE_LAYOUT", None, ["NHD", "HND"]
-    ),
-    # Opt into packed per-block KV cache allocation for multi-group
-    # attention-only HMA models (e.g. gpt-oss, Gemma 3/4).
-    "VLLM_USE_PACKED_HMA_KV_CACHE": lambda: bool(
-        int(os.getenv("VLLM_USE_PACKED_HMA_KV_CACHE", "0"))
     ),
     # SSM conv state layout used for Mamba models.
     # - SD: (state_len, dim) — dim contiguous (default)
