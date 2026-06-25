@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 //
-// MXFP4 W4A16 GEMM for RDNA3 (gfx1100/1101/1102), WMMA path. Forked from the
+// MXFP4 W4A16 GEMM for RDNA3 (gfx1100), WMMA path. Forked from the
 // GPTQ WMMA kernel (q_gemm_rdna3_wmma.cu): identical f16/bf16 tiling, only the
 // B-tile dequant differs (E2M1 + E8M0 group-32, no zeros). Weights are repacked
 // Python-side into the [K/8, N] uint32 layout the GPTQ kernel reads.

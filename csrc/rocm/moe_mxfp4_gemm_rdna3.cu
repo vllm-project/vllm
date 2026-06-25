@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 //
-// MXFP4 fused MoE GEMM for RDNA3 (gfx1100/1101/1102). Fork of
+// MXFP4 fused MoE GEMM for RDNA3 (gfx1100). Fork of
 // moe_q_gemm_rdna3.cu: expert routing (sorted_token_ids / expert_ids) + the
 // MXFP4 scalar dequant+dot, in one kernel. No zero-point; E8M0 block scale is
 // [E, K/32, N] uint8. Per-expert weights are [E, K/8, N] uint32 (E2M1).
