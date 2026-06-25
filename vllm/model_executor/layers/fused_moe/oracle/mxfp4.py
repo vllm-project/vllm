@@ -1370,12 +1370,13 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         if w2_bias is not None:
             w2_bias = w2_bias.data.to(torch.float32)
 
+        import os
+
         from aiter.ops.shuffle import shuffle_scale as _shuf_s
         from aiter.ops.shuffle import shuffle_weight as _shuf_w
 
-        import os
+        # TODO: Remove this once AITER is fixed
         # Necessary for AITER side from crashing
-        # fixed with https://github.com/ROCm/aiter/pull/3741
         os.environ["AITER_BF16_FP8_MOE_BOUND"] = "0"
 
         w13_weight = torch.nn.Parameter(
