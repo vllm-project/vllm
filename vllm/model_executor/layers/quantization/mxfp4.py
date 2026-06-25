@@ -86,27 +86,13 @@ class Mxfp4Config(QuantizationConfig):
             )
             return UnquantizedLinearMethod()
         elif isinstance(layer, RoutedExperts):
-            import torch
+            from vllm.model_executor.layers.quantization.gpt_oss_mxfp4_rdna3 import (
+                maybe_rdna3_gpt_oss_method,
+            )
 
-            from vllm.platforms import current_platform
-
-            if (
-                current_platform.is_rocm()
-                and hasattr(torch.ops, "_rocm_C")
-                and hasattr(torch.ops._rocm_C, "moe_mxfp4_gemm_rdna3")
-            ):
-                from vllm.platforms.rocm import on_gfx1100
-
-                if on_gfx1100():
-                    from vllm.model_executor.layers.quantization.gpt_oss_mxfp4_rdna3 import (  # noqa: E501
-                        GptOssMxfp4RDNA3MoEMethod,
-                    )
-
-                    logger.info_once(
-                        "Using GptOssMxfp4RDNA3MoEMethod (native RDNA3 HIP kernel)"
-                    )
-                    return GptOssMxfp4RDNA3MoEMethod(layer.moe_config)
-            return GptOssMxfp4MoEMethod(layer.moe_config)
+            return maybe_rdna3_gpt_oss_method(layer) or GptOssMxfp4MoEMethod(
+                layer.moe_config
+            )
         elif isinstance(layer, Attention):
             logger.debug_once(
                 "MXFP4 attention layer is not implemented. "

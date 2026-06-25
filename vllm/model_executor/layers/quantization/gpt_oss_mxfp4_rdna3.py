@@ -31,6 +31,29 @@ logger = init_logger(__name__)
 _ALPHA, _BETA, _LIMIT = 1.702, 1.0, 7.0
 
 
+def maybe_rdna3_gpt_oss_method(layer):
+    """Return the native RDNA3 GPT-OSS MXFP4 MoE method on gfx1100, else None.
+
+    Keeps the gfx1100 selection out of the generic ``Mxfp4Config`` so the only
+    footprint there is a one-line delegation (mirrors ``rocm_moe_rdna`` for the
+    compressed-tensors path).
+    """
+    from vllm.platforms import current_platform
+
+    if not (
+        current_platform.is_rocm()
+        and hasattr(torch.ops, "_rocm_C")
+        and hasattr(torch.ops._rocm_C, "moe_mxfp4_gemm_rdna3")
+    ):
+        return None
+    from vllm.platforms.rocm import on_gfx1100
+
+    if not on_gfx1100():
+        return None
+    logger.info_once("Using GptOssMxfp4RDNA3MoEMethod (native RDNA3 HIP kernel)")
+    return GptOssMxfp4RDNA3MoEMethod(layer.moe_config)
+
+
 class GptOssMxfp4RDNA3MoEMethod(GptOssMxfp4MoEMethod):
     """GPT-OSS MXFP4 MoE via the native RDNA3 HIP kernel (moe_mxfp4_gemm_rdna3).
 
