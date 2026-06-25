@@ -412,11 +412,25 @@ class LazyRDTTensor(torch.Tensor):
 class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     """Initialization info for the sharded RDT backend."""
 
-    trainer_actor_name: str
-    """Name of the trainer Ray actor (set via ``.options(name=...)``)."""
+    trainer_actor_name: str | None = None
+    """Name of a single trainer Ray actor (set via ``.options(name=...)``).
+
+    Back-compat single-producer form. Prefer ``trainer_actor_names`` when the
+    trainer exposes more than one NIXL producer (see below). Exactly one of
+    ``trainer_actor_name`` / ``trainer_actor_names`` must be non-empty."""
+
+    trainer_actor_names: list[str] = field(default_factory=list)
+    """Names of all trainer Ray actors that expose the producer method, ordered
+    by trainer rank. When the trainer all-gathers each layer to *every* rank
+    (not just rank 0), all of them can serve NIXL pulls, so inference workers
+    spread their pulls across this list to parallelize the trainer-side clone +
+    NIC egress instead of funneling everything through rank 0. Each inference
+    worker statically binds **one** producer from this list, chosen by its own
+    global worker index modulo ``len(trainer_actor_names)`` (see
+    ``_select_producer_index``). If empty, ``trainer_actor_name`` is used."""
 
     trainer_actor_namespace: str | None = None
-    """Optional Ray namespace the trainer actor lives in."""
+    """Optional Ray namespace the trainer actor(s) live in."""
 
     produce_method_name: str = "rdt_produce_weights_batched"
     """Name of the trainer-side method that takes a batched specs list and
@@ -527,15 +541,34 @@ class ShardedRDTWeightTransferEngine(
                 "(distributed_executor_backend='ray')."
             ) from e
 
+        producer_names = list(init_info.trainer_actor_names)
+        if not producer_names and init_info.trainer_actor_name is not None:
+            producer_names = [init_info.trainer_actor_name]
+        if not producer_names:
+            raise RuntimeError(
+                "Sharded RDT engine requires a trainer producer: set "
+                "init_info.trainer_actor_names (preferred) or "
+                "trainer_actor_name."
+            )
+
+        # Static 1:1 load balancing: each inference worker binds exactly ONE
+        # producer, chosen by its global worker index modulo the producer count.
+        # Workers pull disjoint slice sets (their EP-local experts / TP shard),
+        # so spreading them across the trainer ranks parallelizes both the
+        # trainer-side clone and the NIXL egress. One stable (consumer, producer)
+        # pair per worker keeps the NIXL agent cache + warmup simple.
+        producer_idx = self._select_producer_index(len(producer_names))
+        chosen_name = producer_names[producer_idx]
+
         try:
             self._trainer_actor = ray.get_actor(
-                init_info.trainer_actor_name,
+                chosen_name,
                 namespace=init_info.trainer_actor_namespace,
             )
         except ValueError as e:
             raise RuntimeError(
                 f"Sharded RDT engine could not find trainer actor "
-                f"{init_info.trainer_actor_name!r} (namespace="
+                f"{chosen_name!r} (namespace="
                 f"{init_info.trainer_actor_namespace!r})."
             ) from e
 
@@ -550,8 +583,11 @@ class ShardedRDTWeightTransferEngine(
             self._trainer_actor, init_info.produce_method_name
         )
         logger.info(
-            "Sharded RDT engine bound to trainer actor %r (batched method %r)",
-            init_info.trainer_actor_name,
+            "Sharded RDT engine bound to trainer actor %r (%d/%d producers, "
+            "batched method %r)",
+            chosen_name,
+            producer_idx,
+            len(producer_names),
             init_info.produce_method_name,
         )
 
@@ -577,6 +613,28 @@ class ShardedRDTWeightTransferEngine(
         # record how each slice is fetched and where it lands, then restore the
         # model. Every later update_weights is a replay.
         self._bake(init_info)
+
+    def _select_producer_index(self, num_producers: int) -> int:
+        """Pick which trainer producer this worker pulls from (static 1:1).
+
+        Returns ``global_worker_index % num_producers`` where the global index
+        uniquely identifies this inference worker across the cluster:
+        ``data_parallel_rank * tensor_parallel_size + tp_rank``. With DP=4/TP=1
+        and 4 producers this is the identity map (worker i -> trainer rank i),
+        evenly spreading the disjoint per-worker pull volume across the trainer
+        ranks.
+
+        Isolated so a future policy (per-layer rotation, per-pull split) can
+        replace this single decision without touching the pull path.
+        """
+        if num_producers <= 1:
+            return 0
+        pc = self.parallel_config
+        tp_size = getattr(pc, "tensor_parallel_size", 1) or 1
+        tp_rank = getattr(pc, "rank", 0) or 0
+        dp_rank = getattr(pc, "data_parallel_rank", 0) or 0
+        global_worker_index = dp_rank * tp_size + tp_rank
+        return global_worker_index % num_producers
 
     def receive_weights(
         self,
