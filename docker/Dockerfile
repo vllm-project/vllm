@@ -105,7 +105,6 @@ FROM ${BUILD_BASE_IMAGE} AS base
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
 ARG BUILD_OS
-ARG NCCL_VERSION
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -158,8 +157,6 @@ RUN if [ "${BUILD_OS}" = "manylinux" ]; then \
             # (pytorch/pytorch#167929) are not compatible with GCC < 11.3.
             gcc-11 \
             g++-11 \
-            libnccl-dev=${NCCL_VERSION} \
-            libnccl2=${NCCL_VERSION} \
         && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 110 --slave /usr/bin/g++ g++ /usr/bin/g++-11 \
         # Install python dev headers if available (needed for cmake FindPython on Ubuntu 24.04
         # which ships cmake 3.28 and requires Development.SABIModule; silently skipped on
@@ -460,6 +457,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 # This stage is independent and doesn't affect csrc cache
 FROM base AS extensions-build
 ARG CUDA_VERSION
+ARG NCCL_VERSION
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 ENV UV_HTTP_TIMEOUT=500
@@ -467,6 +465,12 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE=copy
 
 WORKDIR /workspace
+
+# Install NCCL >= 2.30.4 headers/libs for DeepEPv2 compilation
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends --allow-change-held-packages \
+        libnccl-dev=${NCCL_VERSION} libnccl2=${NCCL_VERSION} && \
+    rm -rf /var/lib/apt/lists/*
 
 # Build DeepEP wheels
 COPY tools/ep_kernels/install_python_libraries.sh /tmp/install_python_libraries.sh
