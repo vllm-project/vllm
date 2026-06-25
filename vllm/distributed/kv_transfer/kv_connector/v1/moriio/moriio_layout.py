@@ -56,6 +56,42 @@ def is_mla_cache_layer(
     return isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
 
 
+def _spec_dim_matches(value: int, expected: int | None) -> bool:
+    return expected is None or value == expected
+
+
+def _kernel_layout_matches(
+    spec: KVCacheSpec, kernel_block_size: int, num_kv_heads: int, head_dim: int
+) -> bool:
+    if kernel_block_size <= 0 or spec.block_size % kernel_block_size != 0:
+        return False
+    return _spec_dim_matches(
+        num_kv_heads, getattr(spec, "num_kv_heads", None)
+    ) and _spec_dim_matches(head_dim, getattr(spec, "head_size", None))
+
+
+def _select_kernel_block_layout(
+    layer_name: str, shape: torch.Size, spec: KVCacheSpec
+) -> tuple[int, int, int]:
+    axis2_matches = _kernel_layout_matches(spec, shape[2], shape[3], shape[4])
+    axis3_matches = _kernel_layout_matches(spec, shape[3], shape[2], shape[4])
+
+    if axis2_matches and axis3_matches and shape[2] != shape[3]:
+        raise ValueError(
+            f"Ambiguous MoRIIO kernel-block K/V cache shape for layer "
+            f"{layer_name}: {tuple(shape)}"
+        )
+    if axis2_matches:
+        return shape[2], shape[3], shape[4]
+    if axis3_matches:
+        return shape[3], shape[2], shape[4]
+
+    raise ValueError(
+        f"Unsupported MoRIIO K/V cache shape for layer {layer_name}: "
+        f"{tuple(shape)} does not contain block size {spec.block_size}"
+    )
+
+
 def get_layer_transfer_geometry(
     layer_name: str,
     kv_cache: torch.Tensor,
@@ -65,6 +101,7 @@ def get_layer_transfer_geometry(
     shape = kv_cache.shape
     stride = kv_cache.stride()
     element_size = kv_cache.element_size()
+    spec = layer_to_spec[layer_name]
     is_mla_cache = is_mla_cache_layer(layer_to_spec, layer_name)
 
     if is_mla_cache and len(shape) == 3:
@@ -85,25 +122,92 @@ def get_layer_transfer_geometry(
         )
 
     if not is_mla_cache and len(shape) == 5 and shape[0] == 2:
-        _, num_blocks, block_size, num_kv_heads, head_dim = shape
+        _, num_blocks = shape[:2]
+        kernel_blocks_per_block = 1
+        if shape[2] == spec.block_size:
+            block_size, num_kv_heads, head_dim = shape[2:]
+        elif shape[3] == spec.block_size:
+            num_kv_heads, block_size, head_dim = shape[2:]
+        else:
+            kernel_num_blocks = num_blocks
+            kernel_block_size, num_kv_heads, head_dim = _select_kernel_block_layout(
+                layer_name, shape, spec
+            )
+            kernel_blocks_per_block = spec.block_size // kernel_block_size
+            if kernel_num_blocks % kernel_blocks_per_block != 0:
+                raise ValueError(
+                    f"Unsupported MoRIIO K/V cache shape for layer {layer_name}: "
+                    f"{tuple(shape)} has {kernel_num_blocks} kernel blocks, "
+                    f"not divisible by {kernel_blocks_per_block}"
+                )
+            num_blocks = kernel_num_blocks // kernel_blocks_per_block
+            block_size = spec.block_size
         slot_size_bytes = num_kv_heads * head_dim * element_size
         block_len = block_size * slot_size_bytes
-        remote_kv_stride = stride[1] * (remote_num_blocks or num_blocks)
         return LayerTransferGeometry(
             num_blocks=num_blocks,
             block_size=block_size,
             block_len=block_len,
             slot_size_bytes=slot_size_bytes,
-            block_stride=stride[1],
+            block_stride=stride[1] * kernel_blocks_per_block,
             local_kv_stride=stride[0],
-            remote_kv_stride=remote_kv_stride,
+            remote_kv_stride=(
+                stride[1] * kernel_blocks_per_block * (remote_num_blocks or num_blocks)
+            ),
             transfers_per_block=2,
             regions_per_block=1,
             split_kv_regions=True,
         )
 
     if not is_mla_cache and len(shape) == 5 and shape[1] == 2:
-        num_blocks, _, block_size, num_kv_heads, head_dim = shape
+        num_blocks = shape[0]
+        if shape[2] == spec.block_size:
+            block_size, num_kv_heads, head_dim = shape[2:]
+            slot_size_bytes = num_kv_heads * head_dim * element_size
+            block_len = block_size * slot_size_bytes
+            return LayerTransferGeometry(
+                num_blocks=num_blocks,
+                block_size=block_size,
+                block_len=block_len,
+                slot_size_bytes=slot_size_bytes,
+                block_stride=stride[0],
+                local_kv_stride=stride[1],
+                remote_kv_stride=stride[1],
+                transfers_per_block=2,
+                regions_per_block=2,
+                split_kv_regions=False,
+            )
+        elif shape[3] == spec.block_size:
+            num_kv_heads, block_size, head_dim = shape[2:]
+        else:
+            kernel_num_blocks = num_blocks
+            kernel_block_size, _, _ = _select_kernel_block_layout(
+                layer_name, shape, spec
+            )
+            kernel_blocks_per_block = spec.block_size // kernel_block_size
+            if kernel_num_blocks % kernel_blocks_per_block != 0:
+                raise ValueError(
+                    f"Unsupported MoRIIO K/V cache shape for layer {layer_name}: "
+                    f"{tuple(shape)} has {kernel_num_blocks} kernel blocks, "
+                    f"not divisible by {kernel_blocks_per_block}"
+                )
+            num_blocks = kernel_num_blocks // kernel_blocks_per_block
+            block_size = spec.block_size
+            block_stride = stride[0] * kernel_blocks_per_block
+            block_len = block_stride * element_size
+            slot_size_bytes = block_len // block_size
+            return LayerTransferGeometry(
+                num_blocks=num_blocks,
+                block_size=block_size,
+                block_len=block_len,
+                slot_size_bytes=slot_size_bytes,
+                block_stride=block_stride,
+                local_kv_stride=None,
+                remote_kv_stride=None,
+                transfers_per_block=1,
+                regions_per_block=1,
+                split_kv_regions=False,
+            )
         slot_size_bytes = num_kv_heads * head_dim * element_size
         block_len = block_size * slot_size_bytes
         return LayerTransferGeometry(
