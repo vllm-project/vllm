@@ -125,6 +125,7 @@ def _get_backend_priorities(
                 AttentionBackendEnum.FLASH_ATTN_MLA,
                 AttentionBackendEnum.FLASHMLA,
                 AttentionBackendEnum.FLASHINFER_MLA,
+                AttentionBackendEnum.HELION_MLA,
                 AttentionBackendEnum.TRITON_MLA,
                 AttentionBackendEnum.FLASHMLA_SPARSE,
             ]

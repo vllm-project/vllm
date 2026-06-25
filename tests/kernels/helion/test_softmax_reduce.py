@@ -54,6 +54,7 @@ def skip_if_platform_unsupported():
 def reset_config_manager_singleton():
     ConfigManager.reset_instance()
     ConfigManager()
+    _softmax_reduce_pick_cache.clear()
     yield
     ConfigManager.reset_instance()
 

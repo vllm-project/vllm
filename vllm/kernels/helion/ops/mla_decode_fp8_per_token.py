@@ -25,16 +25,17 @@ logger = init_logger(__name__)
 
 
 def generate_mla_decode_kv_split_inputs() -> dict[CaseKey, tuple[Any, ...]]:
-    batch_sizes = [1, 4, 16, 128, 256]
-    seq_lens = [512, 2048, 8192, 32768]
-    head_counts = [16, 32]
+    batch_sizes = [128]
+    seq_lens = [2048]
+    head_counts = [16, 128]
 
     HEADS_PER_BLOCK = 4
     NUM_KV_SPLITS = 4
     PAGE_SIZE = 16
     latent_dim = 512
     rope_dim = 64
-    logit_cap = None
+    logit_cap = 0.0
+    sm_scale = 1.0 / (latent_dim**0.5)
 
     inputs: dict[CaseKey, tuple[Any, ...]] = {}
 
@@ -84,13 +85,7 @@ def generate_mla_decode_kv_split_inputs() -> dict[CaseKey, tuple[Any, ...]]:
         )
 
         kv_dequant = torch.tensor(
-            [1.0],
-            device="cuda",
-            dtype=torch.float32,
-        )
-
-        sm_scale = torch.tensor(
-            [1.0 / (latent_dim**0.5)],
+            1.0,
             device="cuda",
             dtype=torch.float32,
         )
@@ -138,11 +133,14 @@ def pick_mla_decode_kv_split_config(
         return None
     # print("PICKER")
     q_absorbed = args[0]
-    b_seq_len = args[5]
+    # b_seq_len = args[5]
 
     batch = int(q_absorbed.shape[0])
     heads = int(q_absorbed.shape[1])
-    seq_len = int(b_seq_len.max().item())
+    # seq_len = int(b_seq_len.max().item())
+    Req_to_Tokens = args[6]
+    PAGE_SIZE = args[9]
+    seq_len = int(Req_to_Tokens.shape[1] * PAGE_SIZE)
 
     cache_key = (batch, seq_len, heads)
     cached = _pick_cache.get(cache_key)
@@ -189,7 +187,7 @@ def fake_impl(
     PAGE_SIZE: int,  # page size: 16
     latent_dim: int,  # 512
     rope_dim: int,  # 64
-    logit_cap: float | None = None,
+    logit_cap: float = 0.0,
 ) -> None:
     return
 
@@ -206,15 +204,13 @@ def baseline(
     NUM_KV_SPLITS: int,
     PAGE_SIZE: int,
     latent_dim: int,
-    rope_dim: hl.constexpr,
-    logit_cap: hl.constexpr = None,
+    rope_dim: int,
+    logit_cap: float = 0.0,
 ) -> torch.Tensor:
     """Baseline wrapper that allocates the output buffer and forwards all
 
     arguments to the internal Triton configuration function.
     """
-    sm_scale = float(sm_scale.item())
-    logit_cap = float(logit_cap) if logit_cap is not None else 0.0
 
     from vllm.v1.attention.ops.triton_decode_attention import _decode_grouped_att_m_fwd
 
@@ -247,9 +243,9 @@ def baseline(
 def mla_decode_kv_split(
     q_absorbed: torch.Tensor,  # query (batch, heads, d_model)
     latent_kv: torch.Tensor,  # latent kv vector (num_pages, page_size, latent+rope)
-    attn_out: torch.Tensor,  # output (batch, heads, d_model)
+    attn_out: torch.Tensor,  # output (batch, heads, num_kv_splits, d_model)
     kv_dequant: torch.Tensor,  # scale to dequant fp8 latent kv cache
-    sm_scale: torch.Tensor,  # normalising scale for attention product
+    sm_scale: float,  # normalising scale for attention product
     B_seq_len: torch.Tensor,  # seq_len of each request (batch,)
     Req_to_Tokens: torch.Tensor,  # page table mapping
     HEADS_PER_BLOCK: int,  # heads per thread block
@@ -257,7 +253,7 @@ def mla_decode_kv_split(
     PAGE_SIZE: int,  # page size: 16
     latent_dim: int,  # 512
     rope_dim: int,  # 64
-    logit_cap: float | None = None,
+    logit_cap: float = 0.0,
 ) -> None:
     assert q_absorbed.ndim == 3
     assert latent_kv.ndim == 4 and latent_kv.dtype == torch.float8_e4m3fn
@@ -270,7 +266,7 @@ def mla_decode_kv_split(
     HEADS_PER_BLOCK = hl.specialize(HEADS_PER_BLOCK)
 
     num_pages = latent_kv.shape[0]
-    latent_kv = latent_kv.reshape(num_pages * PAGE_SIZE, heads, -1)
+    latent_kv = latent_kv.reshape(num_pages * PAGE_SIZE, 1, -1)
 
     grid = (batch, heads_group, NUM_KV_SPLITS)
 
@@ -305,6 +301,7 @@ def mla_decode_kv_split(
 
         split_kv_start = kv_len_per_split * split.begin
         split_kv_end = torch.min(split_kv_start + kv_len_per_split, cur_batch_seq_len)
+        dequant = hl.load(kv_dequant, [])
 
         if split_kv_end > split_kv_start:
             for kv_block in hl.tile(split_kv_start, split_kv_end, block_size=None):
@@ -319,7 +316,7 @@ def mla_decode_kv_split(
 
                 page_offs = offs_n % PAGE_SIZE
                 kv_loc = kv_page_number * PAGE_SIZE + page_offs
-                dequant = hl.load(kv_dequant, [0])
+
                 if rope_dim > 0:
                     k_latent = hl.load(
                         latent_kv,
@@ -344,10 +341,9 @@ def mla_decode_kv_split(
                     k_latent = (k_latent.to(torch.float32) * dequant).to(q_latent.dtype)
                     qk = hl.dot(q_latent, torch.transpose(k_latent, 0, 1))
 
-                scale = hl.load(sm_scale, [0])
-                qk *= scale
+                qk *= sm_scale
 
-                if logit_cap is not None and logit_cap > 1:
+                if logit_cap > 1:
                     qk = logit_cap * torch.tanh(qk / logit_cap)
                 token_mask = offs_n < split_kv_end
                 qk = torch.where(
@@ -381,9 +377,9 @@ def mla_decode_kv_split(
 
 
 def generate_softmax_reduce_inputs() -> dict[CaseKey, tuple[Any, ...]]:
-    batch_sizes = [1, 4, 16]
-    seq_lens = [512]
-    head_counts = [16]
+    batch_sizes = [128]
+    seq_lens = [2048]
+    head_counts = [16, 128]
 
     NUM_KV_SPLITS = 4
     latent_dim = 512
@@ -575,7 +571,58 @@ def mla_decode_softmax_reduce(
                 e_max = n_e_max
 
         result = acc / e_sum
+        result = result.to(attn_out.dtype)
         lse_val = e_max + torch.log(e_sum)
+        lse_val = lse_val.to(lse_out.dtype)
 
         hl.store(attn_out, [seq.begin, head.begin, hl.arange(latent_dim)], result)
         hl.store(lse_out, [seq.begin, head.begin], lse_val)
+
+
+def mla_decode(
+    q,
+    kv_cache,
+    out,
+    lse_out,
+    partial_attn,
+    req_to_token,
+    b_seq_len,
+    num_kv_splits,
+    sm_scale,
+    page_size=1,
+    logit_cap=0.0,
+    kv_scale=None,
+):
+    assert num_kv_splits == partial_attn.shape[2]
+
+    if kv_scale is None:
+        kv_scale = torch.tensor(1.0, dtype=torch.float32, device=q.device)
+    # align with deepseek, using defaults as of now # TODO
+    latent_dim = 512
+    rope_dim = 64
+    HEADS_PER_BLOCK = 16
+
+    mla_decode_kv_split(
+        q,
+        kv_cache,
+        partial_attn,
+        kv_scale,
+        sm_scale,
+        b_seq_len,
+        req_to_token,
+        HEADS_PER_BLOCK,
+        num_kv_splits,
+        page_size,
+        latent_dim,
+        rope_dim,
+        logit_cap,
+    )
+
+    mla_decode_softmax_reduce(
+        partial_attn,
+        out,
+        lse_out,
+        b_seq_len,
+        num_kv_splits,
+        latent_dim,
+    )

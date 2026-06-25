@@ -46,12 +46,13 @@ def _make_inputs(
     page_size: int = PAGE_SIZE,
     num_kv_splits: int = NUM_KV_SPLITS,
     heads_per_block: int = HEADS_PER_BLOCK,
-    logit_cap=None,
+    logit_cap=0.0,
 ):
     """Build a single input tuple matching the generator's layout."""
     from helion._utils import cdiv
 
     num_pages = cdiv(seq_len, page_size)
+    sm_scale = 1.0 / (latent_dim**0.5)
 
     q_absorbed = torch.randn(
         batch, heads, latent_dim + rope_dim, device="cuda", dtype=torch.bfloat16
@@ -76,10 +77,7 @@ def _make_inputs(
         device="cuda",
         dtype=torch.float32,
     )
-    kv_dequant = torch.tensor([1.0], device="cuda", dtype=torch.float32)
-    sm_scale = torch.tensor(
-        [1.0 / (latent_dim**0.5)], device="cuda", dtype=torch.float32
-    )
+    kv_dequant = torch.tensor(1.0, device="cuda", dtype=torch.float32)
 
     return (
         q_absorbed,
@@ -169,6 +167,7 @@ def _call_baseline(inputs, attn_out):
 def reset_config_manager_singleton():
     ConfigManager.reset_instance()
     ConfigManager()
+    _pick_cache.clear()
     yield
     ConfigManager.reset_instance()
 
