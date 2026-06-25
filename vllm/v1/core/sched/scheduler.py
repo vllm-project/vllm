@@ -64,9 +64,6 @@ from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
 
-DEFERRED_WAIT_REASON_GRAMMAR = "grammar"
-DEFERRED_WAIT_REASON_REMOTE_KV = "remote_kv"
-
 
 class Scheduler(SchedulerInterface):
     def __init__(
@@ -184,7 +181,7 @@ class Scheduler(SchedulerInterface):
         self.waiting = create_request_queue(self.policy)
         # requests skipped in waiting flow due async deps or constraints.
         self.skipped_waiting = create_request_queue(self.policy)
-        self.deferred_wait_times: dict[str, list[float]] = defaultdict(list)
+        self.deferred_wait_times: dict[RequestStatus, list[float]] = defaultdict(list)
         self.running: list[Request] = []
 
         # The request IDs that are finished in between the previous and the
@@ -736,8 +733,8 @@ class Scheduler(SchedulerInterface):
                             # the KVConnector couldn't determine
                             # the number of matched tokens.
                             request_queue.pop_request()
-                            request.deferred_wait_reason = (
-                                DEFERRED_WAIT_REASON_REMOTE_KV
+                            request.deferred_wait_status = (
+                                RequestStatus.WAITING_FOR_REMOTE_KVS
                             )
                             step_skipped_waiting.prepend_request(request)
                             continue
@@ -1820,39 +1817,40 @@ class Scheduler(SchedulerInterface):
         )
 
     @staticmethod
-    def _deferred_wait_reason(status: RequestStatus) -> str | None:
-        if status == RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR:
-            return DEFERRED_WAIT_REASON_GRAMMAR
-        if status == RequestStatus.WAITING_FOR_REMOTE_KVS:
-            return DEFERRED_WAIT_REASON_REMOTE_KV
+    def _deferred_wait_status(status: RequestStatus) -> RequestStatus | None:
+        if status in (
+            RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR,
+            RequestStatus.WAITING_FOR_REMOTE_KVS,
+        ):
+            return status
         return None
 
     def _record_deferred_wait_start(
         self,
         request: Request,
         timestamp: float | None = None,
-        reason: str | None = None,
+        status: RequestStatus | None = None,
     ) -> None:
-        reason = (
-            reason
-            if reason is not None
-            else request.deferred_wait_reason
-            or self._deferred_wait_reason(request.status)
+        status = (
+            status
+            if status is not None
+            else request.deferred_wait_status
+            or self._deferred_wait_status(request.status)
         )
-        if reason is not None:
-            request.start_deferred_wait(timestamp, reason)
+        if status is not None:
+            request.start_deferred_wait(timestamp, status)
 
     def _record_deferred_wait_end(
         self, request: Request, timestamp: float | None = None
     ) -> None:
-        reason = request.deferred_wait_reason or self._deferred_wait_reason(
+        status = request.deferred_wait_status or self._deferred_wait_status(
             request.status
         )
-        if reason is None:
+        if status is None:
             return
         wait_time = request.take_deferred_wait_time(timestamp)
         if wait_time is not None:
-            self.deferred_wait_times[reason].append(wait_time)
+            self.deferred_wait_times[status].append(wait_time)
 
     def _prepend_skipped_waiting_requests(
         self, requests: RequestQueue, timestamp: float | None = None

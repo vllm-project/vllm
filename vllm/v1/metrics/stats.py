@@ -13,6 +13,7 @@ from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
 if TYPE_CHECKING:
     from vllm.v1.engine import EngineCoreEvent, EngineCoreOutput, FinishReason
+    from vllm.v1.request import RequestStatus
 
 
 @dataclass
@@ -175,7 +176,9 @@ class SchedulerStats:
 
     num_waiting_reqs: int = 0  # length of the "waiting" request queue
     num_skipped_waiting_reqs: int = 0  # length of the "skipped waiting" queue
-    deferred_wait_times: dict[str, list[float]] = field(default_factory=dict)
+    deferred_wait_times: dict["RequestStatus", list[float]] = field(
+        default_factory=dict
+    )
 
     # These are used for internal DP load-balancing.
     step_counter: int = 0
