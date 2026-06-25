@@ -226,20 +226,24 @@ class TieringOffloadingManager(OffloadingManager):
                     self.primary_tier.complete_read(
                         job_metadata.keys, job_metadata.req_context
                     )
-                    # Announce secondary-tier presence: append a raw
-                    # OffloadingEvent (keys + medium, removed=False). The
-                    # connector's events tracker renders it downstream as a
-                    # hash-only placeholder BlockStored (no self-describing
-                    # token payload, since no store-time metadata is snapshotted
-                    # for cascade keys). Emit only on success; a failed cascade
-                    # stored nothing. Secondary eviction is not reported here
-                    # (it may be tier-external, e.g. shared storage), so there
-                    # is no matching removed=True event.
-                    if completed_job.success and self.events is not None:
+                    # Announce secondary-tier presence as a raw OffloadingEvent
+                    # (keys + medium, removed=False); the connector's tracker
+                    # renders it downstream as a hash-only placeholder
+                    # BlockStored. Opt-in: emit only when the tier reports a
+                    # wire medium (tier.medium() is not None), the cascade
+                    # succeeded, and events are enabled. Secondary eviction is
+                    # not reported here (it may be tier-external), so there is
+                    # no matching removed=True event.
+                    secondary_medium = tier.medium()
+                    if (
+                        completed_job.success
+                        and secondary_medium is not None
+                        and self.events is not None
+                    ):
                         self.events.append(
                             OffloadingEvent(
                                 keys=list(job_metadata.keys),
-                                medium=tier.medium,
+                                medium=secondary_medium,
                                 removed=False,
                             )
                         )
@@ -555,6 +559,13 @@ class TieringOffloadingManager(OffloadingManager):
 
         # Note: The async transfers are now in flight. Their completion is
         # tracked via get_finished_jobs() / _maybe_process_finished_jobs().
+
+    @override
+    def medium(self) -> str | None:
+        # The tiering manager's parent store is GPU->primary(CPU); the
+        # scheduler emits that Stored event keyed on this. Secondary-tier
+        # Stored events are emitted separately (see _process_finished_jobs).
+        return self.primary_tier.medium()
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:

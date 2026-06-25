@@ -81,8 +81,6 @@ class FileSystemTierManager(SecondaryTierManager):
         content.
     """
 
-    EVENT_MEDIUM = MEDIUM_FS
-
     def __init__(
         self,
         offloading_spec: "OffloadingSpec",
@@ -91,6 +89,7 @@ class FileSystemTierManager(SecondaryTierManager):
         root_dir: str,
         n_read_threads: int = 16,
         n_write_threads: int = 16,
+        enable_kv_events: bool = False,
     ):
         """
         Args:
@@ -101,8 +100,11 @@ class FileSystemTierManager(SecondaryTierManager):
             root_dir: Root directory for block files.
             n_read_threads: Number of read-priority I/O threads.
             n_write_threads: Number of write-priority I/O threads.
+            enable_kv_events: Whether this tier emits secondary BlockStored
+                presence KV events (default False = opt-in off).
         """
         super().__init__(offloading_spec, primary_kv_view, tier_type)
+        self._enable_kv_events = enable_kv_events
 
         # Extract block size from primary view
         assert primary_kv_view.strides is not None, (
@@ -134,6 +136,10 @@ class FileSystemTierManager(SecondaryTierManager):
         )
 
         self._lookup_manager = FsAsyncLookupManager(tier=self, tier_type=self.tier_type)
+
+    @override
+    def medium(self) -> str | None:
+        return MEDIUM_FS if self._enable_kv_events else None
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:

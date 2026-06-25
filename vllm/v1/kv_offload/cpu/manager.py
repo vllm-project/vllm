@@ -6,6 +6,7 @@ from typing import Literal
 
 from typing_extensions import override
 
+from vllm.distributed.kv_events import MEDIUM_CPU
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
@@ -50,7 +51,6 @@ class CPUOffloadingManager(OffloadingManager):
         store_threshold: int = 1,
         max_tracker_size: int = 64_000,
     ):
-        self.medium: str = CPULoadStoreSpec.medium()
         self._num_blocks: int = num_blocks
         self._num_allocated_blocks: int = 0
         self._free_list: list[int] = []
@@ -213,7 +213,7 @@ class CPUOffloadingManager(OffloadingManager):
             self.events.append(
                 OffloadingEvent(
                     keys=to_evict,
-                    medium=self.medium,
+                    medium=self.medium(),
                     removed=True,
                 )
             )
@@ -259,11 +259,14 @@ class CPUOffloadingManager(OffloadingManager):
                     self._policy.remove(key)
                     self._free_block(block)
 
-        if stored_keys and self.events is not None:
+        # medium() gates Stored emission: emit only when this manager reports a
+        # wire medium (always MEDIUM_CPU for the CPU tier).
+        medium = self.medium()
+        if stored_keys and self.events is not None and medium is not None:
             self.events.append(
                 OffloadingEvent(
                     keys=stored_keys,
-                    medium=self.medium,
+                    medium=medium,
                     removed=False,
                 )
             )
@@ -286,6 +289,13 @@ class CPUOffloadingManager(OffloadingManager):
         if self.events is not None:
             yield from self.events
             self.events.clear()
+
+    @override
+    def medium(self) -> str | None:
+        # Primary CPU tier always reports a wire medium; the scheduler emits
+        # the Stored event keyed on this. Independent of CPULoadStoreSpec.medium()
+        # (the worker transfer-dispatch key) and of enable_kv_cache_events.
+        return MEDIUM_CPU
 
     def get_stats(self) -> OffloadingConnectorStats | None:
         stats = OffloadingConnectorStats()

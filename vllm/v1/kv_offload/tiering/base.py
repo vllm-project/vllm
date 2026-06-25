@@ -7,7 +7,7 @@ Abstract interfaces and data types for the secondary tiering layer.
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -61,11 +61,6 @@ class SecondaryTierManager(ABC):
     async jobs; get_finished_jobs() polls for completion.
     """
 
-    # Stable wire medium for this tier's KV cache events. Built-in tiers set
-    # this to a constant from kv_events.py (e.g. MEDIUM_FS); None falls back
-    # to the registered tier_type (used by custom tiers).
-    EVENT_MEDIUM: ClassVar[str | None] = None
-
     def __init__(
         self,
         offloading_spec: "OffloadingSpec",
@@ -83,11 +78,13 @@ class SecondaryTierManager(ABC):
         self._primary_kv_view: memoryview = primary_kv_view
         self.tier_type = tier_type
 
-    @property
-    def medium(self) -> str:
-        """Wire medium for this tier's offloading events: EVENT_MEDIUM if set,
-        else the registered tier_type. Mirrors CPUOffloadingManager.medium."""
-        return self.EVENT_MEDIUM or self.tier_type
+    def medium(self) -> str | None:
+        """Wire medium for this tier's Stored KV events, or None if this tier
+        should not auto-emit Stored events (the default). Built-in tiers
+        override to return their stable wire medium (e.g. MEDIUM_FS), gated on
+        their own per-tier opt-in (enable_kv_events). Mirrors
+        OffloadingManager.medium()."""
+        return None
 
     @abstractmethod
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:

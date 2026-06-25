@@ -113,6 +113,31 @@ def verify_events(
     assert tuple(stores) == to_key_sets(expected_stores)
 
 
+def test_cpu_eviction_removed_precedes_stored():
+    # Wire-order contract: when a store triggers eviction, the eviction Removed
+    # event must precede the new Stored event within one take_events() drain.
+    # The medium() refactor keeps Stored emission in the manager (gated on
+    # medium()), so this order is unchanged.
+    manager = make_cpu_manager(num_blocks=2, enable_events=True)
+
+    # Fill the 2-block cache and drain the resulting Stored events.
+    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    list(manager.take_events())
+
+    # Store a 3rd block: evicts one of {1, 2}, then stores 3, in one cycle.
+    manager.prepare_store(to_keys([3]), _EMPTY_REQ_CTX)
+    manager.complete_store(to_keys([3]), _EMPTY_REQ_CTX)
+
+    events = list(manager.take_events())
+    removed_idx = [i for i, e in enumerate(events) if e.removed]
+    stored_idx = [i for i, e in enumerate(events) if not e.removed]
+    assert removed_idx and stored_idx, events
+    # Every eviction Removed precedes every new Stored within the drain.
+    assert max(removed_idx) < min(stored_idx)
+    assert all(e.medium == manager.medium() for e in events)
+
+
 @pytest.mark.parametrize("eviction_policy", ["lru", "arc"])
 def test_already_stored_block_not_evicted_during_prepare_store(eviction_policy):
     """

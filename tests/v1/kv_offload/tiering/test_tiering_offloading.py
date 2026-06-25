@@ -705,13 +705,15 @@ class TestTieringOffloadingWithoutSecondaryTiers:
 
 
 class _ObjStubTier(ExampleSecondaryTierManager):
-    """Lightweight stand-in for a built-in tier that declares a wire medium."""
+    """Opted-in built-in-tier stand-in: overrides medium() with a wire name."""
 
-    EVENT_MEDIUM = MEDIUM_OBJ
+    def medium(self) -> str | None:
+        return MEDIUM_OBJ
 
 
 class _FsStubTier(ExampleSecondaryTierManager):
-    EVENT_MEDIUM = MEDIUM_FS
+    def medium(self) -> str | None:
+        return MEDIUM_FS
 
 
 class TestTieringOffloadingSecondaryEvents:
@@ -766,12 +768,12 @@ class TestTieringOffloadingSecondaryEvents:
         assert set(event.keys) == set(blocks)
 
     def test_failed_cascade_emits_no_event(self):
-        """A failed cascade store stored nothing, so no presence event fires
+        """A failed cascade emits no event even when the tier is opted in
         (ref_cnt is still released via complete_read)."""
 
-        class _FailingStoreTier(ExampleSecondaryTierManager):
+        class _FailingObjTier(_ObjStubTier):
             def submit_store(self, job_metadata):
-                # Report the cascade store as failed, storing nothing.
+                # Opted in (medium() != None) but reports the store as failed.
                 self.completed_jobs.append(
                     JobResult(job_id=job_metadata.job_id, success=False)
                 )
@@ -780,10 +782,10 @@ class TestTieringOffloadingSecondaryEvents:
         primary_tier = CPUPrimaryTierOffloadingManager(
             num_blocks=5, mmap_region=mock_region
         )
-        secondary_tier = _FailingStoreTier(
+        secondary_tier = _FailingObjTier(
             offloading_spec=_MOCK_OFFLOADING_SPEC,
             primary_kv_view=mock_region.create_kv_memoryview(),
-            tier_type="object_store",
+            tier_type="obj",
         )
         manager = TieringOffloadingManager(
             primary_tier=primary_tier,
@@ -801,10 +803,10 @@ class TestTieringOffloadingSecondaryEvents:
         for block in blocks:
             assert primary_tier._policy.get(block).ref_cnt == 0
 
-    def test_take_events_yields_primary_before_secondary(self):
+    def test_primary_stored_precedes_secondary(self):
         """Primary CPU BlockStored precedes the secondary presence event for
-        the same offload keys."""
-        _, _, manager = self._single_example(primary_events=True)
+        the same offload keys (take_events yields primary events first)."""
+        _, _, manager = self._single_example(primary_events=True, tier_cls=_ObjStubTier)
         blocks = to_keys(range(3))
 
         manager.prepare_store(blocks, _CTX)
@@ -813,9 +815,8 @@ class TestTieringOffloadingSecondaryEvents:
 
         events = list(manager.take_events())
 
-        assert [e.medium for e in events] == ["CPU", "example"]
-        assert events[0].removed is False
-        assert events[-1].removed is False
+        assert [e.medium for e in events] == ["CPU", "OBJ"]
+        assert all(e.removed is False for e in events)
         assert set(events[0].keys) == set(blocks)
         assert set(events[-1].keys) == set(blocks)
 
@@ -857,38 +858,18 @@ class TestTieringOffloadingSecondaryEvents:
             assert event.removed is False
             assert set(event.keys) == set(blocks)
 
-    def test_custom_tier_medium_falls_back_to_tier_type(self):
-        """Custom tier types without a stable wire alias are emitted as-is."""
-        _, _, manager = self._single_example(tier_type="custom_store")
+    def test_default_tier_emits_no_secondary_event(self):
+        """A tier that does not opt in (medium() == None, the default) emits no
+        secondary event even on a successful cascade."""
+        # plain Example tier: medium() returns None (no opt-in).
+        _, _, manager = self._single_example()
         blocks = to_keys(range(3))
 
         manager.prepare_store(blocks, _CTX)
         manager.complete_store(blocks, _CTX, success=True)
         manager._process_finished_jobs()
 
-        events = list(manager.take_events())
-
-        assert len(events) == 1
-        assert events[0].medium == "custom_store"
-
-    def test_fs_tier_class_declares_wire_medium(self):
-        """The real FileSystemTierManager declares MEDIUM_FS as its wire medium
-        (checked at class level to avoid heavy instantiation)."""
-        from vllm.v1.kv_offload.tiering.fs.manager import FileSystemTierManager
-
-        assert FileSystemTierManager.EVENT_MEDIUM == MEDIUM_FS
-
-    def test_obj_tier_class_declares_wire_medium(self):
-        """The real ObjectStoreSecondaryTierManager declares MEDIUM_OBJ
-        (skipped when the object-store tier's NIXL dependency is missing)."""
-        try:
-            from vllm.v1.kv_offload.tiering.obj.manager import (
-                ObjectStoreSecondaryTierManager,
-            )
-        except ImportError:
-            pytest.skip("object-store tier requires NIXL")
-
-        assert ObjectStoreSecondaryTierManager.EVENT_MEDIUM == MEDIUM_OBJ
+        assert list(manager.take_events()) == []
 
 
 if __name__ == "__main__":

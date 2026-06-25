@@ -90,8 +90,6 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     primary tier. Object keys are formed as ``{prefix}/{hash_shard}/{hash}.bin``.
     """
 
-    EVENT_MEDIUM = MEDIUM_OBJ
-
     def __init__(
         self,
         offloading_spec: "OffloadingSpec",
@@ -100,8 +98,10 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         store_config: dict,
         prefix: str = "",
         io_threads: int = 4,
+        enable_kv_events: bool = False,
     ):
         super().__init__(offloading_spec, primary_kv_view, tier_type)
+        self._enable_kv_events = enable_kv_events
         agent_config = nixl_agent_config(backends=[])
         self._agent = nixl_agent("ObjAgent", agent_config)
         obj_config = ObjStoreConfig(**store_config)
@@ -223,6 +223,9 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             return
 
         self._transfers[job_id] = TransferEntry(xfer_handle, files_desc, obj_handle)
+
+    def medium(self) -> str | None:
+        return MEDIUM_OBJ if self._enable_kv_events else None
 
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
         return self._lookup_manager.lookup(key, req_context)
