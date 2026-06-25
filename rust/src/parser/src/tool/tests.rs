@@ -1,4 +1,4 @@
-use super::{Result, Tool, ToolCallDelta, ToolParser, ToolParserOutput};
+use super::{Result, Tool, ToolCallDelta, ToolParser, ToolParserEvent, ToolParserOutput};
 use crate::tool::ToolParserTestExt as _;
 
 struct DefaultParser;
@@ -29,6 +29,66 @@ fn tool_parser_does_not_preserve_special_tokens_by_default() {
     let parser = DefaultParser;
 
     assert!(!parser.preserve_special_tokens());
+}
+
+#[test]
+fn tool_parser_output_coalesces_adjacent_text_events() {
+    let mut output = ToolParserOutput::default();
+    output.push_text("hello");
+    output.push_text(" ");
+    output.push_text("world");
+    output.push_call(ToolCallDelta {
+        tool_index: 0,
+        name: Some("lookup".to_string()),
+        arguments: "{}".to_string(),
+    });
+    output.push_text("!");
+
+    assert_eq!(
+        output.events,
+        vec![
+            ToolParserEvent::Text("hello world".to_string()),
+            ToolParserEvent::ToolCall(ToolCallDelta {
+                tool_index: 0,
+                name: Some("lookup".to_string()),
+                arguments: "{}".to_string(),
+            }),
+            ToolParserEvent::Text("!".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn tool_parser_output_append_coalesces_adjacent_text_events() {
+    let mut output = ToolParserOutput::default();
+    output.push_text("hello");
+
+    let mut other = ToolParserOutput::default();
+    other.push_text(" ");
+    other.push_text("world");
+    output.append(other);
+
+    let mut after_call = ToolParserOutput::default();
+    after_call.push_call(ToolCallDelta {
+        tool_index: 0,
+        name: Some("lookup".to_string()),
+        arguments: "{}".to_string(),
+    });
+    after_call.push_text("!");
+    output.append(after_call);
+
+    assert_eq!(
+        output.events,
+        vec![
+            ToolParserEvent::Text("hello world".to_string()),
+            ToolParserEvent::ToolCall(ToolCallDelta {
+                tool_index: 0,
+                name: Some("lookup".to_string()),
+                arguments: "{}".to_string(),
+            }),
+            ToolParserEvent::Text("!".to_string()),
+        ]
+    );
 }
 
 #[test]

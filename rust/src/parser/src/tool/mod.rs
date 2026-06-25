@@ -75,12 +75,15 @@ pub struct ToolParserOutput {
 
 impl ToolParserOutput {
     /// Append one visible text event if `text` is non-empty.
-    pub fn push_text(&mut self, text: impl Into<String>) {
-        let text = text.into();
-        if text.is_empty() {
+    pub fn push_text(&mut self, text: impl AsRef<str> + Into<String>) {
+        if text.as_ref().is_empty() {
             return;
         }
-        self.events.push(ToolParserEvent::Text(text));
+        if let Some(ToolParserEvent::Text(last_text)) = self.events.last_mut() {
+            last_text.push_str(text.as_ref());
+            return;
+        }
+        self.events.push(ToolParserEvent::Text(text.into()));
     }
 
     /// Append one tool-call update event.
@@ -117,8 +120,13 @@ impl ToolParserOutput {
     ///
     /// Note that this keeps events exactly as they arrive. Call `coalesce()`
     /// after if final text and tool-call fragments should be flattened.
-    pub fn append(&mut self, mut other: Self) {
-        self.events.append(&mut other.events);
+    pub fn append(&mut self, other: Self) {
+        for event in other.events {
+            match event {
+                ToolParserEvent::Text(text) => self.push_text(text),
+                ToolParserEvent::ToolCall(call) => self.push_call(call),
+            }
+        }
     }
 
     /// Flatten text and merge deltas for the same tool call.

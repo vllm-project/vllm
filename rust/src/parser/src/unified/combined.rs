@@ -32,7 +32,7 @@ impl CombinedParser {
 
     fn parse_tool(&mut self, content: &str, output: &mut UnifiedParserOutput) -> Result<()> {
         let Some(tool) = self.tool.as_mut() else {
-            output.push_text(content.to_string());
+            output.push_text(content);
             return Ok(());
         };
 
