@@ -12,11 +12,11 @@ from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.openai.engine.protocol import StreamOptions
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.disagg.protocol import (
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateRequest,
     GenerateResponse,
 )
-from vllm.entrypoints.serve.disagg.serving import ServingTokens
+from vllm.entrypoints.scale_out.token_in_token_out.serving import ServingTokens
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers import renderer_from_config

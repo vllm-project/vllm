@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from vllm.entrypoints.serve.disagg.serving import ServingTokens
+from vllm.entrypoints.scale_out.disagg import ServingTokens
 from vllm.logprobs import Logprob
 
 
