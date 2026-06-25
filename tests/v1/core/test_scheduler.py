@@ -144,6 +144,43 @@ def test_async_scheduling_pp_allows_rescheduling_with_output_placeholders():
     assert req.request_id in output.num_scheduled_tokens
 
 
+def test_cached_request_data_resumed_all_token_ids_mrv1_only():
+    """all_token_ids carries a resumed request's token ids to the connector
+    for the V1 model runner, but is skipped entirely for the V2 model runner.
+    """
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+
+    scheduler = create_scheduler()
+    (req,) = create_requests(num_requests=1, num_tokens=8)
+    req.append_output_token_ids([101, 102, 103])
+
+    # A resumed request was not scheduled in the previous step.
+    assert req.request_id not in scheduler.prev_step_scheduled_req_ids
+
+    empty_blocks = KVCacheBlocks(blocks=((),))
+
+    def make_cached():
+        return scheduler._make_cached_request_data(
+            running_reqs=[],
+            resumed_reqs=[req],
+            num_scheduled_tokens={req.request_id: 1},
+            spec_decode_tokens={},
+            req_to_new_blocks={req.request_id: empty_blocks},
+        )
+
+    # V1 model runner: the full token id list is propagated.
+    assert not scheduler.use_v2_model_runner
+    cached = make_cached()
+    assert req.request_id in cached.resumed_req_ids
+    assert cached.all_token_ids[req.request_id] == list(req.all_token_ids)
+
+    # V2 model runner: all_token_ids is skipped entirely.
+    scheduler.use_v2_model_runner = True
+    cached = make_cached()
+    assert req.request_id in cached.resumed_req_ids
+    assert cached.all_token_ids == {}
+
+
 def test_schedule_partial_requests():
     """Test scheduling behavior with partial requests.
 
@@ -255,34 +292,32 @@ def test_schedule_prefills_gating(has_running: bool):
     assert any(r.req_id == "new0" for r in output.scheduled_new_reqs)
 
 
-def test_throttle_prefills_excludes_remote_kv_resume():
-    """A request resuming after a completed async KV load (num_computed_tokens
-    > 0, e.g. the decode side of P/D disaggregation) must NOT be throttled by
-    the DP prefill cadence: only fresh prefills are deferred. Otherwise the
-    resumed request's first (single-token) step would be needlessly delayed.
+def _setup_remote_kv_resume(num_prompt_tokens: int, matched_tokens: int):
+    """Drive a remote-KV request `r2` to the resume point (async load complete)
+    while another request `r1` is already decoding, so the step is throttle-
+    eligible. Returns the scheduler. The connector matches `matched_tokens` of
+    `r2`'s prompt; the rest (if any) is local prefill.
     """
     from tests.v1.kv_connector.unit.utils import create_model_runner_output
 
     BLOCK_SIZE = 16
-    NUM_MATCHED = BLOCK_SIZE * 2
     scheduler = create_scheduler(
         enable_prefix_caching=True,
-        use_kv_connector=mock_kv(matched_tokens=NUM_MATCHED, is_async=True),
+        use_kv_connector=mock_kv(matched_tokens=matched_tokens, is_async=True),
         block_size=BLOCK_SIZE,
     )
-
-    # Two remote-KV requests with distinct prompts (so r2 gets no local prefix
-    # cache hit from r1, only the connector's external async load).
+    # Distinct prompts so r2 gets no local prefix cache hit from r1, only the
+    # connector's external async load.
     r1, r2 = create_requests(
         num_requests=2,
-        num_tokens=NUM_MATCHED * 2,
+        num_tokens=num_prompt_tokens,
         max_tokens=20,
         block_size=BLOCK_SIZE,
         req_ids=["r1", "r2"],
     )
 
-    # r1: drive through its async KV load and into the running (decode) state,
-    # so that self.running is non-empty for the assertion below.
+    # r1: drive through its async KV load into the running (decode) state, so
+    # self.running is non-empty (which makes the next step throttle-eligible).
     scheduler.add_request(r1)
     _step_until_kv_transfer_finished(scheduler, ["r1"])
     output = scheduler.schedule()  # promote + schedule r1
@@ -300,12 +335,37 @@ def test_throttle_prefills_excludes_remote_kv_resume():
         output, create_model_runner_output([r1], finished_recving={"r2"})
     )
     assert "r2" in scheduler.finished_recving_kv_req_ids
+    return scheduler
 
-    # Throttle prefills. r2's load is complete, so it must be promoted and
-    # scheduled (a resume, not a fresh prefill) even though the running decode
-    # (r1) would otherwise make this a throttled step.
+
+def test_throttle_prefills_excludes_fully_transferred_remote_kv():
+    """A remote-KV resume whose whole prompt was transferred (no local prefill
+    left, e.g. the decode side of P/D disaggregation) must NOT be throttled by
+    the DP prefill cadence -- its single-token step has no prefill compute to
+    defer, so delaying it would be pointless.
+    """
+    block_size = 16
+    num_prompt = block_size * 2
+    # Fully matched: the whole prompt is loaded remotely.
+    scheduler = _setup_remote_kv_resume(num_prompt, matched_tokens=num_prompt)
+
     output = scheduler.schedule(throttle_prefills=True)
     assert "r2" in output.num_scheduled_tokens
+    assert "r1" in output.num_scheduled_tokens
+
+
+def test_throttle_prefills_defers_remote_kv_resume_with_local_prefill():
+    """A remote-KV resume with local prefill still to compute (the connector
+    only matched part of the prompt) IS throttled by the DP prefill cadence,
+    like any other request doing local prefill compute this step.
+    """
+    block_size = 16
+    num_prompt = block_size * 4
+    # Half matched: the remaining half is local prefill compute.
+    scheduler = _setup_remote_kv_resume(num_prompt, matched_tokens=num_prompt // 2)
+
+    output = scheduler.schedule(throttle_prefills=True)
+    assert "r2" not in output.num_scheduled_tokens  # deferred (has local prefill)
     assert "r1" in output.num_scheduled_tokens
 
 
@@ -4667,6 +4727,38 @@ def test_free_encoder_inputs_respects_unconfirmed_placeholders():
     # every unconfirmed token is rejected, progress cannot rewind into the
     # range, so the entry is freed.
     request.num_computed_tokens = mm_end + 4
+    scheduler._free_encoder_inputs(request)
+    assert manager.get_cached_input_ids(request) == set()
+
+
+def test_free_encoder_inputs_defers_for_eagle_lookahead():
+    """With EAGLE speculative decoding, the encoder input is retained one extra
+    position so the drafter's +1 look-ahead mm-embedding gather (which reads one
+    position past the target's computed range) still finds it cached. This is
+    the primary mechanism that prevents the drafter "Encoder cache miss"; the
+    worker-side token-embedding fallback is only a backstop."""
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    # create_scheduler only builds ngram spec configs; force the eagle path that
+    # _free_encoder_inputs keys off (self.use_eagle).
+    scheduler.use_eagle = True
+    mm_positions = [[PlaceholderRange(offset=50, length=100)]]
+    request = create_requests(
+        num_requests=1,
+        num_tokens=250,
+        mm_positions=mm_positions,
+    )[0]
+    manager = scheduler.encoder_cache_manager
+    manager.allocate(request, 0)
+    mm_end = 150  # offset + length
+
+    # Confirmed progress reaches the range end: without spec decode this frees
+    # (see test below), but the drafter's +1 look-ahead still needs it.
+    request.num_computed_tokens = mm_end
+    scheduler._free_encoder_inputs(request)
+    assert manager.get_cached_input_ids(request) == {0}
+
+    # One position past the range end: the +1 look-ahead has now passed it.
+    request.num_computed_tokens = mm_end + 1
     scheduler._free_encoder_inputs(request)
     assert manager.get_cached_input_ids(request) == set()
 
