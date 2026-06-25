@@ -1196,7 +1196,7 @@ def test_trtllm_gen_mxfp8_block_scale_moe(
     check_accuracy(ref, out, atol=0.1, rtol=0.85, percent=0.8)
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="session")
 def dist_init_single_rank():
     import os
     from unittest.mock import patch
@@ -1206,18 +1206,27 @@ def dist_init_single_rank():
         init_distributed_environment,
         initialize_model_parallel,
     )
+
+    config_ctx = set_current_vllm_config(VllmConfig())
+    config_ctx.__enter__()
+
+    mock_ctx = patch(
+        "vllm.model_executor.layers.fused_moe.oracle.mxfp4.get_current_vllm_config"
+    )
+    mock_cfg = mock_ctx.__enter__()
+    mock_cfg.return_value.model_config.quantization_config = None
+
     if not dist.is_initialized():
         os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
         os.environ.setdefault("MASTER_PORT", "29501")
         dist.init_process_group(backend="nccl", world_size=1, rank=0)
         init_distributed_environment(world_size=1, rank=0, local_rank=0)
-
-    with patch(
-        "vllm.model_executor.layers.fused_moe.oracle.mxfp4.get_current_vllm_config"
-    ) as mock_cfg, set_current_vllm_config(VllmConfig()):
-        mock_cfg.return_value.model_config.quantization_config = None
         initialize_model_parallel(tensor_model_parallel_size=1)
-        yield
+
+    yield
+
+    mock_ctx.__exit__(None, None, None)
+    config_ctx.__exit__(None, None, None)
 
 # -----------------------------------------------------------------------------
 # ROCm Oracle-based kernel execution tests
