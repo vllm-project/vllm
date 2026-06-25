@@ -5,14 +5,9 @@
 This backend calls ``aiter.flash_attn_varlen_func`` directly, which natively
 supports different q/k and v head dims (qk headdim 192, v headdim 128) without
 padding V, and dispatches to the fast ``aiter::fmha_fwd_`` kernel on
-gfx950. It also returns ``softmax_lse`` shaped ``(nheads, total_q)`` -- exactly
-what ``merge_attn_states`` expects -- so no LSE transpose is required.
+gfx942/gfx950 (fp16/bf16). It also returns ``softmax_lse`` shaped ``(nheads, total_q)`` --
+exactly what ``merge_attn_states`` expects -- so no LSE transpose is required.
 
-This is the fp16/bf16 (non-FP8) prefill path: the kernel runs in the model's
-compute dtype, and ``supported_dtypes`` (inherited as ``[float16, bfloat16]``)
-restricts selection accordingly. It is distinct from the FP8 ``fmha_fwd_``
-varlen variant, which does not support returning ``softmax_lse`` for the MLA
-head dims and so cannot serve the chunked-context merge path.
 """
 
 from typing import TYPE_CHECKING
@@ -27,23 +22,8 @@ if TYPE_CHECKING:
     from vllm.platforms.interface import DeviceCapability
 
 
-def is_aiter_flash_attn_varlen_func_available() -> bool:
-    try:
-        from aiter import flash_attn_varlen_func  # noqa: F401
-
-        return True
-    except ImportError:
-        return False
-
-
-if is_aiter_flash_attn_varlen_func_available():
-    from aiter import flash_attn_varlen_func
-else:
-    flash_attn_varlen_func = None  # type: ignore[assignment]
-
-
 class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
-    """AITER FlashAttention backend for MLA prefill (ROCm/gfx950)."""
+    """AITER FlashAttention backend for MLA prefill """
 
     @staticmethod
     def get_name() -> str:
@@ -51,24 +31,18 @@ class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
 
     @classmethod
     def supports_compute_capability(cls, device_capability: "DeviceCapability") -> bool:
-        # The fast fmha_fwd_* varlen path is validated on gfx950. Non-gfx950
-        # ROCm falls back to FLASH_ATTN via the selector priorities.
         if not current_platform.is_rocm():
             return False
-        from vllm.platforms.rocm import on_gfx950
+        from vllm.platforms.rocm import on_gfx942, on_gfx950
 
-        return on_gfx950()
+        return on_gfx950() or on_gfx942()
 
     @classmethod
     def is_available(cls) -> bool:
         import vllm.envs as envs
         from vllm._aiter_ops import is_aiter_found_and_supported
 
-        return (
-            envs.VLLM_ROCM_USE_AITER
-            and is_aiter_flash_attn_varlen_func_available()
-            and is_aiter_found_and_supported()
-        )
+        return envs.VLLM_ROCM_USE_AITER and is_aiter_found_and_supported()
 
     def __init__(
         self,
@@ -90,12 +64,8 @@ class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
             vllm_config=vllm_config,
         )
 
-        assert flash_attn_varlen_func is not None, (
-            "AiterFlashAttnPrefillBackend requires aiter.flash_attn_varlen_func. "
-            "Ensure AiterFlashAttnPrefillBackend.is_available() is checked first."
-        )
-        # aiter natively supports diff q/k vs v head dims (no V padding) and
-        # returns softmax_lse as (nheads, total_q) already (no transpose).
+        from aiter import flash_attn_varlen_func
+
         self.flash_attn_varlen_func = flash_attn_varlen_func
 
     def run_prefill_new_tokens(
@@ -149,7 +119,7 @@ class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
             max_seqlen_q=self._prefill_metadata.max_query_len,
             max_seqlen_k=chunked.max_seq_lens[chunk_idx],
             softmax_scale=self.scale,
-            causal=False,  # Context is unmasked
+            causal=False,
             return_lse=True,
         )
         return out, lse

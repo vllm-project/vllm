@@ -59,10 +59,6 @@ def _get_mla_prefill_backend_priorities(
     from vllm.platforms import current_platform
 
     if current_platform.is_rocm():
-        # Prefer the fast aiter fmha_fwd_hd192_hd128 path on ROCm; FLASH_ATTN
-        # (upstream CK-tile) is the automatic fallback. validate_configuration
-        # filters ROCM_AITER_FA out on non-gfx950 or aiter-missing hosts, so
-        # those transparently fall back to FLASH_ATTN.
         return [
             MLAPrefillBackendEnum.ROCM_AITER_FA,
             MLAPrefillBackendEnum.FLASH_ATTN,

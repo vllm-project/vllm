@@ -274,12 +274,7 @@ class TestBackendValidation:
 
 
 class TestROCmAiterFAPrefillSelection:
-    """Tests for the ROCm AITER FlashAttention MLA prefill backend.
-
-    These run on any platform: ROCm/gfx950 specifics are mocked so the
-    selection logic and gating can be exercised without AMD hardware or a
-    real ``aiter`` install.
-    """
+    """Tests for the ROCm AITER FlashAttention MLA prefill backend."""
 
     def test_rocm_priorities_prefer_aiter_fa(self):
         """On ROCm, ROCM_AITER_FA is tried first, FLASH_ATTN as fallback."""
@@ -304,30 +299,39 @@ class TestROCmAiterFAPrefillSelection:
         # FP8 is served by the separate AITER ASM backend, not this one.
         assert not AiterFlashAttnPrefillBackend.supports_dtype(torch.float8_e4m3fn)
 
-    def test_supports_compute_capability_only_on_rocm_gfx950(self):
+    def test_supports_compute_capability_on_rocm(self):
         from vllm.v1.attention.backends.mla.prefill import aiter_flash_attn as mod
 
-        capability = DeviceCapability(major=9, minor=5)
+        # Gating is decided by on_gfx950()/on_gfx942(), not by capability
+        capability = MagicMock()
 
-        # Non-ROCm host: never supported (falls back via selector).
         with patch.object(mod.current_platform, "is_rocm", return_value=False):
             assert not mod.AiterFlashAttnPrefillBackend.supports_compute_capability(
                 capability
             )
 
-        # ROCm but not gfx950: not supported.
         with (
             patch.object(mod.current_platform, "is_rocm", return_value=True),
             patch("vllm.platforms.rocm.on_gfx950", return_value=False),
+            patch("vllm.platforms.rocm.on_gfx942", return_value=False),
         ):
             assert not mod.AiterFlashAttnPrefillBackend.supports_compute_capability(
                 capability
             )
 
-        # ROCm gfx950: supported.
         with (
             patch.object(mod.current_platform, "is_rocm", return_value=True),
             patch("vllm.platforms.rocm.on_gfx950", return_value=True),
+            patch("vllm.platforms.rocm.on_gfx942", return_value=False),
+        ):
+            assert mod.AiterFlashAttnPrefillBackend.supports_compute_capability(
+                capability
+            )
+
+        with (
+            patch.object(mod.current_platform, "is_rocm", return_value=True),
+            patch("vllm.platforms.rocm.on_gfx950", return_value=False),
+            patch("vllm.platforms.rocm.on_gfx942", return_value=True),
         ):
             assert mod.AiterFlashAttnPrefillBackend.supports_compute_capability(
                 capability
@@ -337,29 +341,20 @@ class TestROCmAiterFAPrefillSelection:
         import vllm.envs as envs
         from vllm.v1.attention.backends.mla.prefill import aiter_flash_attn as mod
 
-        # VLLM_ROCM_USE_AITER disabled: not available.
         with patch.object(envs, "VLLM_ROCM_USE_AITER", False):
             assert not mod.AiterFlashAttnPrefillBackend.is_available()
 
-        # Enabled but aiter.flash_attn_varlen_func missing: not available.
         with (
             patch.object(envs, "VLLM_ROCM_USE_AITER", True),
-            patch.object(
-                mod,
-                "is_aiter_flash_attn_varlen_func_available",
+            patch(
+                "vllm._aiter_ops.is_aiter_found_and_supported",
                 return_value=False,
             ),
         ):
             assert not mod.AiterFlashAttnPrefillBackend.is_available()
 
-        # All prerequisites satisfied: available.
         with (
             patch.object(envs, "VLLM_ROCM_USE_AITER", True),
-            patch.object(
-                mod,
-                "is_aiter_flash_attn_varlen_func_available",
-                return_value=True,
-            ),
             patch(
                 "vllm._aiter_ops.is_aiter_found_and_supported",
                 return_value=True,
@@ -367,12 +362,13 @@ class TestROCmAiterFAPrefillSelection:
         ):
             assert mod.AiterFlashAttnPrefillBackend.is_available()
 
-    def test_auto_select_prefers_aiter_fa_on_gfx950(self):
+    def test_auto_select_prefers_aiter_fa_on_rocm(self):
         from vllm.v1.attention.backends.mla.prefill.aiter_flash_attn import (
             AiterFlashAttnPrefillBackend,
         )
 
-        capability = DeviceCapability(major=9, minor=5)
+        # gfx gating is simulated via the mocked validate_configuration, not the capability.
+        capability = MagicMock()
         selector_config = MLAPrefillSelectorConfig(
             dtype=torch.bfloat16,
             is_r1_compatible=True,
@@ -401,7 +397,8 @@ class TestROCmAiterFAPrefillSelection:
             pytest.skip("FLASH_ATTN backend not available")
             return
 
-        capability = DeviceCapability(major=9, minor=0)
+        # the fallback is forced by the mocked validate_configuration, not the capability.
+        capability = MagicMock()
         selector_config = MLAPrefillSelectorConfig(
             dtype=torch.bfloat16,
             is_r1_compatible=True,
@@ -412,7 +409,7 @@ class TestROCmAiterFAPrefillSelection:
             patch.object(
                 AiterFlashAttnPrefillBackend,
                 "validate_configuration",
-                return_value=["compute capability 9.0 not supported"],
+                return_value=["compute capability not supported"],
             ),
             patch.object(flash_attn_cls, "validate_configuration", return_value=[]),
         ):
