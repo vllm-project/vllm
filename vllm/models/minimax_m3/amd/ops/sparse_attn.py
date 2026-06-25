@@ -15,21 +15,11 @@ from vllm.models.minimax_m3.common.ops.sparse_attn import (
     SPARSE_BLOCK_SIZE,
     minimax_m3_sparse_attn_decode,
 )
-from vllm.platforms.rocm import on_gfx942, on_gfx950
+from vllm.platforms.rocm import on_mi3xx, on_gfx950
 from vllm.triton_utils import tl, triton
 
 __all__ = ["minimax_m3_sparse_attn", "minimax_m3_sparse_attn_decode"]
 
-
-# MI300-series (CDNA3 gfx942 / CDNA4 gfx950) tuning for the block-sparse prefill
-# kernel (_gqa_sparse_fwd_kernel). On CDNA the per-block QK/PV GEMMs are small;
-# splitting each 128-token KV block into SUB_K sub-tiles right-sizes the MFMA
-# tiles and lifts occupancy (5x+ kernel speedup over the dense path in an MI350
-# sweep). The sub-tiling is numerically equivalent (flash softmax reassociation)
-# and arch-independent, so it runs on both gfx942 and gfx950. SUB_K and the MFMA
-# launch params are arch-specific -- see the SUB_K constant and prefill_kwargs.
-# CDNA2 (gfx90a) and other AMD archs fall through to the dense path.
-_IS_MI3XX = tl.constexpr(on_gfx942() or on_gfx950())
 
 # Sub-tile width for the prefill kernel's per-block QK/PV GEMMs. gfx950 -> 64,
 # gfx942 -> 32 (re-tune with tune_sparse_attn.py). Must divide SPARSE_BLOCK_SIZE.
@@ -50,7 +40,7 @@ def _sparse_attn_prefill_kwargs() -> dict:
     global _SPARSE_ATTN_PREFILL_KWARG
     if _SPARSE_ATTN_PREFILL_KWARG is None:
         kwarg: dict = {}
-        if on_gfx942() or on_gfx950():
+        if on_mi3xx():
             kwarg = {
                 "num_warps": 1,
                 "matrix_instr_nonkdim": 16,
@@ -161,107 +151,60 @@ def _gqa_sparse_fwd_kernel(
         lse_i = tl.full((BLOCK_SIZE_QH,), float("-inf"), dtype=tl.float32)
         acc_o = tl.zeros((BLOCK_SIZE_QH, BLOCK_SIZE_D), dtype=tl.float32)
         q = tl.reshape(q, BLOCK_SIZE_QH, BLOCK_SIZE_D)
-        if _IS_MI3XX:
-            # CDNA: process each 128-token KV block in SUB_K-token sub-tiles so
-            # each QK/PV MFMA is right-sized. Numerically equivalent to the dense
-            # path below (flash-softmax reassociation).
-            NUM_SUB: tl.constexpr = BLOCK_SIZE_K // SUB_K
-            for _ in tl.range(real_topk):
-                blk = tl.load(t_ptr_j).to(tl.int32)
-                t_ptr_j = t_ptr_j + stride_tk
-                c = blk * BLOCK_SIZE_K
-                page = tl.load(bt_row + blk).to(tl.int64)
-                kv_base = kv_cache_ptr + page * stride_kv_blk + pid_kh * stride_kv_h
-                for sub_i in range(NUM_SUB):
-                    off_sub = tl.arange(0, SUB_K) + sub_i * SUB_K
-                    pos_sub = c + off_sub
-                    pos_mask_sub = pos_sub < seq_len
-                    k_sub = tl.load(
-                        kv_base
-                        + 0 * stride_kv_kv
-                        + off_sub[None, :] * stride_kv_pos
-                        + off_d[:, None] * stride_kv_d,
-                        mask=d_mask[:, None] & pos_mask_sub[None, :],
-                        other=0.0,
-                    )
-                    if USE_FP8:
-                        k_sub = k_sub.to(q.dtype)
-                    off_q_sub = (
-                        tl.arange(0, BLOCK_SIZE_Q)[:, None]
-                        + pid_q_j * BLOCK_SIZE_Q
-                        + prefix_len
-                        - off_sub[None, :]
-                    )
-                    qk_sub = tl.zeros(
-                        (BLOCK_SIZE_Q, BLOCK_SIZE_H, SUB_K), dtype=tl.float32
-                    )
-                    # causal: q_abs_pos - k_off >= block_start (c)
-                    qk_sub += tl.where(off_q_sub[:, None, :] >= c, 0, float("-inf"))
-                    qk_sub = tl.reshape(qk_sub, BLOCK_SIZE_QH, SUB_K)
-                    qk_sub += tl.dot(q, k_sub) * sm_scale_log2e
-                    qk_sub += tl.where(pos_mask_sub[None, :], 0, float("-inf"))
-                    m_ij = tl.maximum(m_i, tl.max(qk_sub, axis=1))
-                    p_sub = tl.exp2(qk_sub - m_ij[:, None])
-                    l_ij = tl.sum(p_sub, axis=1)
-                    acc_o = acc_o * tl.exp2(m_i - m_ij)[:, None]
-                    v_sub = tl.load(
-                        kv_base
-                        + 1 * stride_kv_kv
-                        + off_sub[:, None] * stride_kv_pos
-                        + off_d[None, :] * stride_kv_d,
-                        mask=pos_mask_sub[:, None] & d_mask[None, :],
-                        other=0.0,
-                    )
-                    if USE_FP8:
-                        v_sub = v_sub.to(q.dtype)
-                    acc_o += tl.dot(p_sub.to(v_sub.dtype), v_sub)
-                    m_i = m_ij
-                    lse_i = m_ij + tl.log2(tl.exp2(lse_i - m_ij) + l_ij)
-        else:
-            for _ in range(real_topk):
-                blk = tl.load(t_ptr_j).to(tl.int32)
-                t_ptr_j = t_ptr_j + stride_tk
-                c = blk * BLOCK_SIZE_K
-                page = tl.load(bt_row + blk).to(tl.int64)
-                pos = c + off_n
-                pos_mask = pos < seq_len
-                k = tl.load(
-                    kv_cache_ptr
-                    + page * stride_kv_blk
+
+        # CDNA: process each 128-token KV block in SUB_K-token sub-tiles so
+        # each QK/PV MFMA is right-sized. Numerically equivalent to the dense
+        # path below (flash-softmax reassociation).
+        NUM_SUB: tl.constexpr = BLOCK_SIZE_K // SUB_K
+        for _ in tl.range(real_topk):
+            blk = tl.load(t_ptr_j).to(tl.int32)
+            t_ptr_j = t_ptr_j + stride_tk
+            c = blk * BLOCK_SIZE_K
+            page = tl.load(bt_row + blk).to(tl.int64)
+            kv_base = kv_cache_ptr + page * stride_kv_blk + pid_kh * stride_kv_h
+            for sub_i in range(NUM_SUB):
+                off_sub = tl.arange(0, SUB_K) + sub_i * SUB_K
+                pos_sub = c + off_sub
+                pos_mask_sub = pos_sub < seq_len
+                k_sub = tl.load(
+                    kv_base
                     + 0 * stride_kv_kv
-                    + off_n[None, :] * stride_kv_pos
-                    + pid_kh * stride_kv_h
+                    + off_sub[None, :] * stride_kv_pos
                     + off_d[:, None] * stride_kv_d,
-                    mask=d_mask[:, None] & pos_mask[None, :],
+                    mask=d_mask[:, None] & pos_mask_sub[None, :],
                     other=0.0,
                 )
                 if USE_FP8:
-                    k = k.to(q.dtype)
-                qk = tl.zeros(
-                    (BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_K), dtype=tl.float32
+                    k_sub = k_sub.to(q.dtype)
+                off_q_sub = (
+                    tl.arange(0, BLOCK_SIZE_Q)[:, None]
+                    + pid_q_j * BLOCK_SIZE_Q
+                    + prefix_len
+                    - off_sub[None, :]
+                )
+                qk_sub = tl.zeros(
+                    (BLOCK_SIZE_Q, BLOCK_SIZE_H, SUB_K), dtype=tl.float32
                 )
                 # causal: q_abs_pos - k_off >= block_start (c)
-                qk += tl.where(off_q[:, None, :] >= c, 0, float("-inf"))
-                qk = tl.reshape(qk, BLOCK_SIZE_QH, BLOCK_SIZE_K)
-                qk += tl.dot(q, k) * sm_scale_log2e
-                qk += tl.where(pos_mask[None, :], 0, float("-inf"))
-                m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
-                p = tl.exp2(qk - m_ij[:, None])
-                l_ij = tl.sum(p, axis=1)
+                qk_sub += tl.where(off_q_sub[:, None, :] >= c, 0, float("-inf"))
+                qk_sub = tl.reshape(qk_sub, BLOCK_SIZE_QH, SUB_K)
+                qk_sub += tl.dot(q, k_sub) * sm_scale_log2e
+                qk_sub += tl.where(pos_mask_sub[None, :], 0, float("-inf"))
+                m_ij = tl.maximum(m_i, tl.max(qk_sub, axis=1))
+                p_sub = tl.exp2(qk_sub - m_ij[:, None])
+                l_ij = tl.sum(p_sub, axis=1)
                 acc_o = acc_o * tl.exp2(m_i - m_ij)[:, None]
-                v = tl.load(
-                    kv_cache_ptr
-                    + page * stride_kv_blk
+                v_sub = tl.load(
+                    kv_base
                     + 1 * stride_kv_kv
-                    + off_n[:, None] * stride_kv_pos
-                    + pid_kh * stride_kv_h
+                    + off_sub[:, None] * stride_kv_pos
                     + off_d[None, :] * stride_kv_d,
-                    mask=pos_mask[:, None] & d_mask[None, :],
+                    mask=pos_mask_sub[:, None] & d_mask[None, :],
                     other=0.0,
                 )
                 if USE_FP8:
-                    v = v.to(q.dtype)
-                acc_o += tl.dot(p.to(v.dtype), v)
+                    v_sub = v_sub.to(q.dtype)
+                acc_o += tl.dot(p_sub.to(v_sub.dtype), v_sub)
                 m_i = m_ij
                 lse_i = m_ij + tl.log2(tl.exp2(lse_i - m_ij) + l_ij)
         acc_o = acc_o * tl.exp2(m_i - lse_i)[:, None]
