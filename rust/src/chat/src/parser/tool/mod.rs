@@ -5,7 +5,7 @@ use std::sync::LazyLock;
 pub use vllm_tool_parser::{
     DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser, DeepSeekV32ToolParser,
     Gemma4ToolParser, Glm45MoeToolParser, Glm47MoeToolParser, Granite4ToolParser, HermesToolParser,
-    HyV3ToolParser, Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser,
+    HyV3ToolParser, Internlm2ToolParser, JambaToolParser, KimiK2ToolParser, Llama3JsonToolParser,
     MinimaxM2ToolParser, MinimaxM3ToolParser, MistralToolParser, Phi4MiniJsonToolParser,
     Qwen3CoderToolParser, Qwen3XmlToolParser, ToolCallDelta, ToolParser, ToolParserError,
     ToolParserOutput,
@@ -29,6 +29,7 @@ pub mod names {
     // Matches the Python CLI name `--tool-call-parser internlm`, which Python
     // also routes to `Internlm2ToolParser` despite the version-agnostic name.
     pub const INTERNLM: &str = "internlm";
+    pub const JAMBA: &str = "jamba";
     pub const KIMI_K2: &str = "kimi_k2";
     pub const LLAMA3_JSON: &str = "llama3_json";
     pub const LLAMA4_JSON: &str = "llama4_json";
@@ -71,6 +72,7 @@ impl ToolParserFactory {
             .register_parser::<HermesToolParser>(names::HERMES)
             .register_parser::<HyV3ToolParser>(names::HY_V3)
             .register_parser::<Internlm2ToolParser>(names::INTERNLM)
+            .register_parser::<JambaToolParser>(names::JAMBA)
             .register_parser::<KimiK2ToolParser>(names::KIMI_K2)
             .register_parser::<Llama3JsonToolParser>(names::LLAMA3_JSON)
             .register_parser::<Llama3JsonToolParser>(names::LLAMA4_JSON)
@@ -97,6 +99,7 @@ impl ToolParserFactory {
             // vllm/model_executor/models/registry.py:146), or `Intern-S1` /
             // `Intern-S1-Pro` (separate intern-s1 parser, see PR #40115).
             .register_pattern("internlm2", names::INTERNLM)
+            .register_pattern("jamba", names::JAMBA)
             .register_pattern("llama-4", names::LLAMA4_JSON)
             .register_pattern("llama-3.2", names::LLAMA3_JSON)
             .register_pattern("llama-3.1", names::LLAMA3_JSON)
