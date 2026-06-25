@@ -432,7 +432,14 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
                 raise UnexpectedAstError("Mismatched curly braces")
         elif char in {"'", '"'}:
             if bracket_stack and bracket_stack[-1] == char:
-                if index > 0 and text[index - 1] == "\\":
+                # A quote is escaped only when preceded by an odd number of
+                # consecutive backslashes (e.g. `\"` is escaped, `\\"` is not).
+                num_backslashes = 0
+                j = index - 1
+                while j >= 0 and text[j] == "\\":
+                    num_backslashes += 1
+                    j -= 1
+                if num_backslashes % 2 == 1:
                     pass
                 else:
                     bracket_stack.pop()
