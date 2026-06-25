@@ -3898,10 +3898,6 @@ class GPUModelRunner(
                 "a multiple of tensor parallel size"
             )
 
-        # Enter for any ubatched run (incl. DP=1) OR any DP>1 run. The DP>1
-        # case must always coordinate token padding across ranks (as on main),
-        # even when micro-batching is off; coordinate_batch_across_dp
-        # short-circuits the ubatch-specific logic when DP=1.
         should_ubatch, num_tokens_across_dp = False, None
         if (
             self.vllm_config.parallel_config.num_ubatches > 1
