@@ -1,11 +1,12 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use criterion::{BatchSize, Criterion, Throughput, black_box, criterion_group, criterion_main};
-use vllm_parser::tool::Tool;
 use vllm_parser::tool::test_utils::{split_by_chars, test_tools};
-use vllm_parser::unified::{Gemma4UnifiedParser, UnifiedParser, UnifiedParserEvent};
-use vllm_tokenizer::Tokenizer;
+use vllm_parser::tool::{Tool, ToolParser};
+use vllm_parser::unified::Gemma4UnifiedParser;
+
+mod utils;
+use utils::{UnifiedToolParserAdapter, feed_parser};
 
 const CHUNK_CHARS: usize = 7;
 const LONG_NORMAL_TEXT_REPEATS: usize = 2048;
@@ -67,65 +68,9 @@ fn long_tool_argument_fixture() -> String {
     )
 }
 
-struct BenchTokenizer;
-
-impl Tokenizer for BenchTokenizer {
-    fn encode(&self, text: &str, _add_special_tokens: bool) -> vllm_tokenizer::Result<Vec<u32>> {
-        Ok(text.chars().map(u32::from).collect())
-    }
-
-    fn decode(
-        &self,
-        token_ids: &[u32],
-        _skip_special_tokens: bool,
-    ) -> vllm_tokenizer::Result<String> {
-        Ok(token_ids
-            .iter()
-            .map(|token_id| char::from_u32(*token_id).unwrap_or('\u{FFFD}'))
-            .collect())
-    }
-
-    fn token_to_id(&self, token: &str) -> Option<u32> {
-        match token {
-            "<|channel>" => Some(100),
-            "<channel|>" => Some(101),
-            "<|tool_call>" => Some(102),
-            "<tool_call|>" => Some(103),
-            "<|turn>" => Some(104),
-            "<|tool_response>" => Some(105),
-            _ => None,
-        }
-    }
-}
-
-fn parser(tools: &[Tool]) -> Box<dyn UnifiedParser> {
-    Box::new(Gemma4UnifiedParser::new(tools, Arc::new(BenchTokenizer)).unwrap())
-}
-
-fn feed_parser(parser: &mut dyn UnifiedParser, chunks: &[&str]) -> (String, usize) {
-    let mut normal_text = String::new();
-    let mut calls_len = 0;
-    for chunk in chunks {
-        let mut output = vllm_parser::unified::UnifiedParserOutput::default();
-        parser.parse_into(chunk, &mut output).unwrap();
-        collect_output(output, &mut normal_text, &mut calls_len);
-    }
-    collect_output(parser.finish().unwrap(), &mut normal_text, &mut calls_len);
-    (normal_text, calls_len)
-}
-
-fn collect_output(
-    output: vllm_parser::unified::UnifiedParserOutput,
-    normal_text: &mut String,
-    calls_len: &mut usize,
-) {
-    for event in output.events {
-        match event {
-            UnifiedParserEvent::Text(text) => normal_text.push_str(&text),
-            UnifiedParserEvent::Reasoning(_) => {}
-            UnifiedParserEvent::ToolCall(_) => *calls_len += 1,
-        }
-    }
+fn parser(tools: &[Tool]) -> Box<dyn ToolParser> {
+    UnifiedToolParserAdapter::<Gemma4UnifiedParser>::create(tools)
+        .expect("Gemma4 unified parser should initialize")
 }
 
 fn run_stream_group(
