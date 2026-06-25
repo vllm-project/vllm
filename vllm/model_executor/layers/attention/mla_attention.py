@@ -666,8 +666,18 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         quant_key: Any,
     ) -> bool:
         pcp_manager = get_forward_context().additional_kwargs.get("pcp_manager")
-        if pcp_manager is None or getattr(pcp_manager, "dcp_world_size", 1) <= 1:
+        if pcp_manager is None:
             return False
+        dcp_world_size = getattr(pcp_manager, "dcp_world_size", 1)
+        if dcp_world_size <= 1:
+            return False
+        if dcp_world_size != getattr(pcp_manager, "pcp_world_size", 1):
+            raise NotImplementedError(
+                "MRV2 MLA PCP+DCP currently supports only the replicated-Q "
+                "layout where decode_context_parallel_size equals "
+                "prefill_context_parallel_size. Full TP x PCP DCP needs the "
+                "gathered-Q/reduce-scatter path."
+            )
         if quant_key is not None:
             raise NotImplementedError(
                 "MRV2 MLA PCP+DCP does not support fused output quantization yet."

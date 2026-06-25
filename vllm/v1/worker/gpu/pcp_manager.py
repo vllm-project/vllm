@@ -123,9 +123,10 @@ class PCPManager:
         if dcp_size > 1:
             if dcp_size != pcp_size:
                 raise NotImplementedError(
-                    "MRV2 MLA PCP+DCP currently supports DCP that spans the PCP "
-                    "axis only, so decode_context_parallel_size must equal "
-                    "prefill_context_parallel_size."
+                    "MRV2 MLA PCP+DCP currently implements only the replicated-Q "
+                    "layout where decode_context_parallel_size equals "
+                    "prefill_context_parallel_size. Full TP x PCP DCP needs the "
+                    "gathered-Q/reduce-scatter path."
                 )
             if parallel_config.dcp_comm_backend != "ag_rs":
                 raise NotImplementedError(
@@ -643,17 +644,7 @@ def get_pcp_forward_context_kwargs(
     return {"pcp_manager": manager}
 
 
-def restore_pcp_for_sampling(
-    manager: PCPManager | None,
-    hidden_states: torch.Tensor,
-    input_batch: InputBatch,
-) -> tuple[torch.Tensor, InputBatch]:
-    if manager is None:
-        return hidden_states, input_batch
-    return manager.restore_for_sampling(hidden_states)
-
-
-def build_pcp_runner_config(
+def maybe_build_pcp_runner_config(
     vllm_config: VllmConfig,
     device: torch.device,
     max_num_reqs: int,
@@ -664,17 +655,12 @@ def build_pcp_runner_config(
     supports_mm_inputs: bool,
     lora_config: Any,
     speculative_config: Any,
-) -> tuple[PCPManager | None, int, int, int]:
+) -> tuple[PCPManager | None, int]:
     parallel_config = vllm_config.parallel_config
-    model_config = vllm_config.model_config
     pcp_size = parallel_config.prefill_context_parallel_size
     pcp_rank = get_pcp_group().rank_in_group if pcp_size > 1 else 0
-    total_cp_size = pcp_size * dcp_size
-    total_cp_rank = pcp_rank * dcp_size + dcp_rank
-    kv_cp_size = dcp_size if model_config.use_mla else total_cp_size
-    kv_cp_rank = dcp_rank if model_config.use_mla else total_cp_rank
     if pcp_size <= 1:
-        return None, max_num_reqs, kv_cp_size, kv_cp_rank
+        return None, max_num_reqs
 
     PCPManager.validate_config(
         vllm_config,
@@ -695,4 +681,4 @@ def build_pcp_runner_config(
         cp_interleave=parallel_config.cp_kv_cache_interleave_size,
     )
     max_num_input_reqs = max_num_reqs * 2 + pcp_size - 1
-    return manager, max_num_input_reqs, kv_cp_size, kv_cp_rank
+    return manager, max_num_input_reqs

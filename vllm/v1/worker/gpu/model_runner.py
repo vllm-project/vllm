@@ -97,9 +97,8 @@ from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
 from vllm.v1.worker.gpu.pcp_manager import (
-    build_pcp_runner_config,
     get_pcp_forward_context_kwargs,
-    restore_pcp_for_sampling,
+    maybe_build_pcp_runner_config,
 )
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import PPHandler
@@ -210,12 +209,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
 
-        (
-            self.pcp_manager,
-            max_num_input_reqs,
-            self.kv_cp_size,
-            self.kv_cp_rank,
-        ) = build_pcp_runner_config(
+        self.pcp_manager, max_num_input_reqs = maybe_build_pcp_runner_config(
             self.vllm_config,
             self.device,
             self.max_num_reqs,
@@ -446,11 +440,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             spec = kv_cache_group.kv_cache_spec
             block_sizes.append(spec.block_size)
-            # When using CP, each request's KV cache is sharded among ranks.
-            # As a result, one block on the current rank covers `block_size * cp_size`
-            # tokens in the full, global (unsharded) sequence.
+            # When using DCP, each request's KV cache is sharded among ranks.
+            # As a result, one block on the current rank covers
+            # `block_size * dcp_size` tokens in the full sequence.
             max_num_blocks = cdiv(
-                block_table_max_model_len, spec.block_size * self.kv_cp_size
+                block_table_max_model_len, spec.block_size * self.dcp_size
             )
             # Align to a multiple of (128 / block_size) as required by some attention
             # backends such as TRTLLM (#39324)
@@ -474,8 +468,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_blocks_per_group=max_num_blocks_per_group,
             device=self.device,
             kernel_block_sizes=self.kernel_block_sizes,
-            cp_size=self.kv_cp_size,
-            cp_rank=self.kv_cp_rank,
+            cp_size=self.dcp_size,
+            cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
         )
         if self.pcp_manager is not None:
@@ -1410,11 +1404,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Last rank: sample tokens
         assert hidden_states is not None
-        hidden_states, input_batch = restore_pcp_for_sampling(
-            self.pcp_manager,
-            hidden_states,
-            input_batch,
-        )
+        if self.pcp_manager is not None:
+            hidden_states, input_batch = self.pcp_manager.restore_for_sampling(
+                hidden_states
+            )
 
         sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output
