@@ -4,6 +4,8 @@ from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 
+from vllm.logger import init_logger
+
 if TYPE_CHECKING:
     from argparse import Namespace
 
@@ -14,6 +16,8 @@ if TYPE_CHECKING:
     from vllm.tasks import SupportedTask
 else:
     RequestLogger = object
+
+logger = init_logger(__name__)
 
 
 def register_generate_api_routers(app: FastAPI):
@@ -75,6 +79,20 @@ async def init_generate_state(
         getattr(args, "fingerprint_value", None),
     )
 
+    # Per-request timing metrics are derived from the engine's RequestStateStats,
+    # which are only tracked when statistics logging is enabled. Warn (rather
+    # than fail) so the server still starts, but the operator knows the metrics
+    # will always be null until stat logging is re-enabled.
+    if args.enable_per_request_metrics and not getattr(
+        engine_client, "log_stats", True
+    ):
+        logger.warning(
+            "--enable-per-request-metrics is set but engine statistics logging "
+            "is disabled (e.g. --disable-log-stats). Per-request timing metrics "
+            "depend on engine statistics and will be null until stat logging is "
+            "enabled."
+        )
+
     if args.tool_server == "demo":
         tool_server: ToolServer | None = DemoToolServer()
         assert isinstance(tool_server, DemoToolServer)
@@ -130,6 +148,7 @@ async def init_generate_state(
         enable_force_include_usage=args.enable_force_include_usage,
         enable_log_outputs=args.enable_log_outputs,
         enable_log_deltas=args.enable_log_deltas,
+        enable_per_request_metrics=args.enable_per_request_metrics,
     )
     state.openai_serving_chat = (
         OpenAIServingChat(**_chat_kwargs) if "generate" in supported_tasks else None
@@ -150,6 +169,7 @@ async def init_generate_state(
             return_tokens_as_token_ids=args.return_tokens_as_token_ids,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,
+            enable_per_request_metrics=args.enable_per_request_metrics,
         )
         if "generate" in supported_tasks
         else None
