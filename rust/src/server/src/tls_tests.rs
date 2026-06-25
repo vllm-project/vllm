@@ -2,6 +2,8 @@
 //! through the production `serve_listener` path, with a trivial router since TLS
 //! terminates below the app.
 
+use std::time::Duration;
+
 use axum::Router;
 use axum::routing::get;
 use openssl::asn1::Asn1Time;
@@ -21,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::{HttpListenerMode, TlsConfig};
 use crate::listener::Listener;
-use crate::{serve_listener, tls};
+use crate::{ConnectionTimeouts, serve_listener, tls};
 
 // ============================================================================
 // Test infrastructure
@@ -246,11 +248,25 @@ fn build_tls(certs: &TestCerts, cert: &str, key: Option<&str>) -> TlsConfig {
     }
 }
 
+/// Generous per-connection timeouts that never fire during the fast tests.
+const TEST_TIMEOUTS: ConnectionTimeouts = ConnectionTimeouts {
+    handshake: Duration::from_secs(60),
+    header_read: Duration::from_secs(5),
+    keep_alive_enabled: true,
+};
+
+async fn spawn_server(tls_config: Option<TlsConfig>) -> (String, CancellationToken) {
+    spawn_server_with_timeouts(tls_config, TEST_TIMEOUTS).await
+}
+
 /// Bind an ephemeral listener and serve a trivial router via the production
 /// `serve_listener`, optionally with TLS. The listener is bound (and thus
 /// accepting into the backlog) before returning, so a client may connect
 /// immediately without a sleep.
-async fn spawn_server(tls_config: Option<TlsConfig>) -> (String, CancellationToken) {
+async fn spawn_server_with_timeouts(
+    tls_config: Option<TlsConfig>,
+    timeouts: ConnectionTimeouts,
+) -> (String, CancellationToken) {
     let listener = Listener::bind(&HttpListenerMode::BindTcp {
         host: "127.0.0.1".to_string(),
         port: 0,
@@ -271,6 +287,7 @@ async fn spawn_server(tls_config: Option<TlsConfig>) -> (String, CancellationTok
             server_config,
             app,
             server_shutdown.cancelled_owned(),
+            timeouts,
         )
         .await;
     });
@@ -493,5 +510,133 @@ async fn plain_http_serves_when_tls_is_disabled() {
     let (addr, shutdown) = spawn_server(None).await;
     let response = plain_get(&addr).await.expect("http request");
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn tls_handshake_timeout_drops_silent_client() {
+    // Silent client (no ClientHello) must be dropped at the handshake deadline.
+    let certs = TestCerts::generate();
+    let timeouts = ConnectionTimeouts {
+        handshake: Duration::from_millis(150),
+        header_read: Duration::from_secs(5),
+        keep_alive_enabled: true,
+    };
+    let (addr, shutdown) = spawn_server_with_timeouts(Some(server_tls(&certs, 0)), timeouts).await;
+
+    let mut tcp = TcpStream::connect(&addr).await.expect("connect");
+    let mut buf = [0u8; 1];
+    let read = tokio::time::timeout(Duration::from_secs(5), tcp.read(&mut buf)).await;
+    assert!(
+        matches!(read, Ok(Ok(0)) | Ok(Err(_))),
+        "server must drop a stalled TLS handshake (expected close, got {read:?})"
+    );
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn keep_alive_timeout_closes_idle_connection() {
+    // Idle keep-alive connection must be closed at the deadline.
+    let timeouts = ConnectionTimeouts {
+        handshake: Duration::from_secs(60),
+        header_read: Duration::from_millis(150),
+        keep_alive_enabled: true,
+    };
+    let (addr, shutdown) = spawn_server_with_timeouts(None, timeouts).await;
+
+    let mut tcp = TcpStream::connect(&addr).await.expect("connect");
+    // No `Connection: close`, so it stays alive until the idle deadline.
+    tcp.write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        .await
+        .expect("write request");
+
+    let drained = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut buf = [0u8; 1024];
+        loop {
+            match tcp.read(&mut buf).await {
+                Ok(0) => return Ok(()),
+                Ok(_) => continue,
+                Err(err) => return Err(err),
+            }
+        }
+    })
+    .await;
+    assert!(
+        matches!(drained, Ok(Ok(()))),
+        "server must close an idle keep-alive connection (got {drained:?})"
+    );
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn idle_timeout_closes_silent_client() {
+    // Silent client closed by the header-read timeout (http1-only arms it from byte 0).
+    let timeouts = ConnectionTimeouts {
+        handshake: Duration::from_secs(60),
+        header_read: Duration::from_millis(150),
+        keep_alive_enabled: true,
+    };
+    let (addr, shutdown) = spawn_server_with_timeouts(None, timeouts).await;
+
+    let mut tcp = TcpStream::connect(&addr).await.expect("connect");
+    let mut buf = [0u8; 1];
+    let read = tokio::time::timeout(Duration::from_secs(5), tcp.read(&mut buf)).await;
+    assert!(
+        matches!(read, Ok(Ok(0)) | Ok(Err(_))),
+        "server must close a silent client (expected close, got {read:?})"
+    );
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn keep_alive_zero_disables_keep_alive() {
+    // 0 disables keep-alive (serve, then close), like uvicorn's timeout_keep_alive=0.
+    let timeouts = ConnectionTimeouts {
+        handshake: Duration::from_secs(60),
+        header_read: Duration::from_secs(5),
+        keep_alive_enabled: false,
+    };
+    let (addr, shutdown) = spawn_server_with_timeouts(None, timeouts).await;
+
+    let mut tcp = TcpStream::connect(&addr).await.expect("connect");
+    tcp.write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        .await
+        .expect("write request");
+
+    let mut response = String::new();
+    let read =
+        tokio::time::timeout(Duration::from_secs(5), tcp.read_to_string(&mut response)).await;
+    assert!(
+        read.is_ok(),
+        "server must close after one response, not hang"
+    );
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    // Assert `Connection: close`, not just 200: a 0 header-read timeout would also
+    // serve an immediate request, so 200 alone wouldn't prove keep-alive is off.
+    assert!(
+        response.to_ascii_lowercase().contains("connection: close"),
+        "keep-alive must be disabled (expected Connection: close): {response}"
+    );
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn disabled_keep_alive_still_closes_silent_client() {
+    // Even with keep-alive off, the head read stays bounded, so a silent client
+    // is dropped rather than held open.
+    let timeouts = ConnectionTimeouts {
+        handshake: Duration::from_secs(60),
+        header_read: Duration::from_millis(150),
+        keep_alive_enabled: false,
+    };
+    let (addr, shutdown) = spawn_server_with_timeouts(None, timeouts).await;
+
+    let mut tcp = TcpStream::connect(&addr).await.expect("connect");
+    let mut buf = [0u8; 1];
+    let read = tokio::time::timeout(Duration::from_secs(5), tcp.read(&mut buf)).await;
+    assert!(
+        matches!(read, Ok(Ok(0)) | Ok(Err(_))),
+        "disabled keep-alive must still close a silent client (got {read:?})"
+    );
     shutdown.cancel();
 }

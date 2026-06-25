@@ -17,19 +17,29 @@ mod utils;
 
 use std::future::Future;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use axum::Router;
+use axum::body::Body;
+use axum::http::Request;
 use axum::serve::ListenerExt as _;
 pub use config::{
-    ApiServerOptions, Config, CoordinatorMode, CorsConfig, HttpListenerMode, TlsConfig,
+    ApiServerOptions, Config, CoordinatorMode, CorsConfig, DEFAULT_KEEP_ALIVE_TIMEOUT,
+    HttpListenerMode, TlsConfig,
 };
+use hyper::body::Incoming;
+use hyper::server::conn::http1;
+use hyper_util::rt::{TokioIo, TokioTimer};
+use hyper_util::server::graceful::GracefulShutdown;
+use hyper_util::service::TowerToHyperService;
 use tokio::net::TcpListener;
 use tokio::time::{Instant, sleep_until};
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::either::Either;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server as TonicServer;
+use tower::ServiceExt as _;
 use tracing::{info, trace, warn};
 use vllm_chat::{ChatLlm, LoadModelBackendsOptions, load_model_backends};
 pub use vllm_chat::{ChatTemplateContentFormatOption, ParserSelection, RendererSelection};
@@ -219,13 +229,26 @@ where
         }
     });
 
+    // 0 disables keep-alive but still bounds the head read (default), so a
+    // silent client cannot hold the connection open.
+    let keep_alive_timeout = config.keep_alive_timeout;
+    let timeouts = ConnectionTimeouts {
+        handshake: tls::TLS_HANDSHAKE_TIMEOUT,
+        header_read: if keep_alive_timeout.is_zero() {
+            DEFAULT_KEEP_ALIVE_TIMEOUT
+        } else {
+            keep_alive_timeout
+        },
+        keep_alive_enabled: !keep_alive_timeout.is_zero(),
+    };
+
     let http_fut = {
         let shutdown = server_shutdown.child_token();
         let server_shutdown = server_shutdown.clone();
         let force_shutdown = force_shutdown.clone();
         async move {
             let result = tokio::select! {
-                result = serve_listener(listener, tls_config, app, shutdown.cancelled_owned()) => {
+                result = serve_listener(listener, tls_config, app, shutdown.cancelled_owned(), timeouts) => {
                     result
                 }
                 _ = force_shutdown.cancelled() => {
@@ -280,17 +303,27 @@ where
     state.shutdown(shutdown_deadline).await
 }
 
-/// Apply `TCP_NODELAY`, optional TLS termination, and graceful shutdown to a
-/// bound listener, then serve `app`. Shared by [`serve_with_router_extension`]
-/// and the TLS integration tests so both exercise the same listener wrapping.
+/// Per-connection timeouts applied while serving HTTP/HTTPS.
+#[derive(Clone, Copy)]
+pub(crate) struct ConnectionTimeouts {
+    /// Max time for a client to complete the TLS handshake (TLS path only).
+    pub(crate) handshake: Duration,
+    /// HTTP/1 header-read timeout (bounds idle keep-alive and the head read).
+    pub(crate) header_read: Duration,
+    /// Whether HTTP/1 keep-alive is enabled; `false` closes after each response.
+    pub(crate) keep_alive_enabled: bool,
+}
+
+/// Apply `TCP_NODELAY`, optional TLS termination, and per-connection timeouts,
+/// then serve `app`. Shared by [`serve_with_router_extension`] and the TLS tests.
 async fn serve_listener(
     listener: Listener,
     tls: Option<Arc<openssl::ssl::SslContext>>,
     app: Router,
     shutdown: impl Future<Output = ()> + Send + 'static,
+    timeouts: ConnectionTimeouts,
 ) -> Result<()> {
-    // Set TCP_NODELAY on accepted connections to reduce latency.
-    // By `tap_io` we will do this on every accepted connection.
+    // Enable TCP_NODELAY on each accepted connection to reduce latency.
     let listener = listener.tap_io(|io| {
         if let Either::Left(tcp_stream) = io
             && let Err(err) = tcp_stream.set_nodelay(true)
@@ -300,15 +333,71 @@ async fn serve_listener(
     });
 
     match tls {
-        Some(config) => axum::serve(tls::TlsListener::new(listener, config), app)
-            .with_graceful_shutdown(shutdown)
+        Some(context) => {
+            let listener = tls::TlsListener::new(listener, context, timeouts.handshake);
+            serve_connections(
+                listener,
+                app,
+                shutdown,
+                timeouts.header_read,
+                timeouts.keep_alive_enabled,
+            )
             .await
-            .context("HTTPS server failed"),
-        None => axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown)
-            .await
-            .context("HTTP server failed"),
+            .context("HTTPS server failed")
+        }
+        None => serve_connections(
+            listener,
+            app,
+            shutdown,
+            timeouts.header_read,
+            timeouts.keep_alive_enabled,
+        )
+        .await
+        .context("HTTP server failed"),
     }
+}
+
+/// Serve `app` per connection (HTTP/1) with a keep-alive idle timeout and
+/// graceful drain. Hand-rolled on hyper because [`axum::serve()`] takes no config.
+async fn serve_connections<L>(
+    mut listener: L,
+    app: Router,
+    shutdown: impl Future<Output = ()> + Send,
+    header_read: Duration,
+    keep_alive_enabled: bool,
+) -> Result<()>
+where
+    L: axum::serve::Listener,
+{
+    let graceful = GracefulShutdown::new();
+    let mut shutdown = std::pin::pin!(shutdown);
+    loop {
+        let (io, _addr) = tokio::select! {
+            conn = listener.accept() => conn,
+            () = &mut shutdown => break,
+        };
+
+        let service = TowerToHyperService::new(
+            app.clone().map_request(|req: Request<Incoming>| req.map(Body::new)),
+        );
+        let mut builder = http1::Builder::new();
+        builder.timer(TokioTimer::new()).header_read_timeout(header_read);
+        if !keep_alive_enabled {
+            builder.keep_alive(false);
+        }
+        let connection = builder.serve_connection(TokioIo::new(io), service);
+        let connection = graceful.watch(connection);
+
+        tokio::spawn(async move {
+            if let Err(err) = connection.await {
+                trace!(error = %err, "failed to serve connection");
+            }
+        });
+    }
+
+    drop(listener);
+    graceful.shutdown().await;
+    Ok(())
 }
 
 #[cfg(test)]

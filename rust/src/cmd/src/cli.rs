@@ -25,7 +25,7 @@ use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
 use vllm_server::{
     ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
-    HttpListenerMode, ParserSelection, RendererSelection, TlsConfig,
+    DEFAULT_KEEP_ALIVE_TIMEOUT, HttpListenerMode, ParserSelection, RendererSelection, TlsConfig,
 };
 
 use crate::cli::unsupported::UnsupportedArgs;
@@ -154,6 +154,11 @@ pub struct SharedRuntimeArgs {
     #[arg(long, default_value_t = 0)]
     #[serde(default)]
     pub shutdown_timeout: u64,
+    /// Maximum idle time (seconds) on a keep-alive HTTP connection before the
+    /// server closes it (default 5).
+    #[arg(long = "http-timeout-keep-alive", env = "VLLM_HTTP_TIMEOUT_KEEP_ALIVE")]
+    #[serde(default)]
+    pub http_timeout_keep_alive: Option<u64>,
 
     /// The file path to the chat template, or the template in single-line form
     /// for the specified model.
@@ -305,6 +310,13 @@ impl SharedRuntimeArgs {
         Duration::from_secs(self.shutdown_timeout)
     }
 
+    /// Maximum idle time on a keep-alive HTTP connection before the server
+    /// closes it.
+    pub fn keep_alive_timeout(&self) -> Duration {
+        self.http_timeout_keep_alive
+            .map_or(DEFAULT_KEEP_ALIVE_TIMEOUT, Duration::from_secs)
+    }
+
     /// Apply fallback logic for API key configuration from env variables.
     fn apply_env_api_key_fallback(&mut self) {
         if self.api_key.is_empty()
@@ -312,6 +324,19 @@ impl SharedRuntimeArgs {
         {
             self.api_key.push(api_key);
         }
+    }
+
+    /// Apply fallback logic for `http_timeout_keep_alive` from env variables.
+    fn apply_env_keep_alive_fallback(&mut self) -> Result<(), String> {
+        if self.http_timeout_keep_alive.is_none()
+            && let Ok(value) = std::env::var("VLLM_HTTP_TIMEOUT_KEEP_ALIVE")
+        {
+            let secs = value
+                .parse::<u64>()
+                .map_err(|e| format!("invalid VLLM_HTTP_TIMEOUT_KEEP_ALIVE {value:?}: {e}"))?;
+            self.http_timeout_keep_alive = Some(secs);
+        }
+        Ok(())
     }
 
     /// Build the OpenAI-server config for the Python-bootstrap worker contract.
@@ -329,6 +354,7 @@ impl SharedRuntimeArgs {
     ) -> Config {
         let ready_timeout = self.ready_timeout();
         let shutdown_timeout = self.shutdown_timeout();
+        let keep_alive_timeout = self.keep_alive_timeout();
         let api_server_options = self.api_server_options();
         let cors = self.cors_config();
         let tls = self.tls_config();
@@ -363,6 +389,7 @@ impl SharedRuntimeArgs {
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
             shutdown_timeout,
+            keep_alive_timeout,
         }
     }
 
@@ -379,6 +406,7 @@ impl SharedRuntimeArgs {
     ) -> Config {
         let ready_timeout = self.ready_timeout();
         let shutdown_timeout = self.shutdown_timeout();
+        let keep_alive_timeout = self.keep_alive_timeout();
         let api_server_options = self.api_server_options();
         let cors = self.cors_config();
         let tls = self.tls_config();
@@ -411,6 +439,7 @@ impl SharedRuntimeArgs {
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
             shutdown_timeout,
+            keep_alive_timeout,
         }
     }
 
@@ -471,6 +500,7 @@ fn parse_runtime_args_json(value: &str) -> Result<SharedRuntimeArgs, String> {
     // --args-json is parsed with serde, so clap's env support does not run for
     // the Python-supervised frontend path.
     args.apply_env_api_key_fallback();
+    args.apply_env_keep_alive_fallback()?;
     args.unsupported.check()?;
     Ok(args)
 }

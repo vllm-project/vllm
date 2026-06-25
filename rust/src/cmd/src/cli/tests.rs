@@ -41,6 +41,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         max_logprobs: None,
                         grpc_port: None,
                         shutdown_timeout: 0,
+                        http_timeout_keep_alive: None,
                         chat_template: None,
                         default_chat_template_kwargs: None,
                         chat_template_content_format: Auto,
@@ -701,6 +702,7 @@ fn frontend_args_accept_json() {
                         max_logprobs: None,
                         grpc_port: None,
                         shutdown_timeout: 0,
+                        http_timeout_keep_alive: None,
                         chat_template: None,
                         default_chat_template_kwargs: None,
                         chat_template_content_format: Auto,
@@ -1221,6 +1223,7 @@ fn serve_args_accept_handshake_aliases() {
                         max_logprobs: None,
                         grpc_port: None,
                         shutdown_timeout: 0,
+                        http_timeout_keep_alive: None,
                         chat_template: None,
                         default_chat_template_kwargs: None,
                         chat_template_content_format: Auto,
@@ -1388,6 +1391,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             disable_log_stats: false,
             grpc_port: None,
             shutdown_timeout: 0ns,
+            keep_alive_timeout: 5s,
         }
     "#]]
     .assert_debug_eq(&Config {
@@ -1470,6 +1474,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             disable_log_stats: false,
             grpc_port: None,
             shutdown_timeout: 0ns,
+            keep_alive_timeout: 5s,
         }
     "#]]
     .assert_debug_eq(&config);
@@ -1570,6 +1575,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             disable_log_stats: false,
             grpc_port: None,
             shutdown_timeout: 0ns,
+            keep_alive_timeout: 5s,
         }
     "#]]
     .assert_debug_eq(&config);

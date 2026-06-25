@@ -2,19 +2,21 @@
 //!
 //! Builds an OpenSSL [`SslContext`] from the uvicorn-style `ssl_*` arguments and
 //! wraps the unified [`Listener`](crate::listener::Listener) so each accepted
-//! connection completes its TLS handshake lazily, inside axum's per-connection
-//! task. Driving the handshake there (rather than inside `accept()`) keeps the
-//! serial accept loop non-blocking, so one slow or stalled handshake cannot
-//! stall new connections.
+//! connection completes its TLS handshake lazily, inside the per-connection
+//! serving task. Driving the handshake there (rather than inside `accept()`)
+//! keeps the serial accept loop non-blocking, so one slow or stalled handshake
+//! cannot stall new connections.
 //!
 //! Crypto runs through whichever OpenSSL the binary links (system by default,
 //! vendored when built with that feature).
 
+use std::future::Future;
 use std::io;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
+use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use openssl::ssl::{
@@ -22,9 +24,13 @@ use openssl::ssl::{
     SslVerifyMode,
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::time::{Sleep, sleep};
 use tokio_openssl::SslStream;
 
 use crate::config::TlsConfig;
+
+/// Time a client has to complete the TLS handshake before the connection is dropped.
+pub(crate) const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Build an OpenSSL [`SslContext`] from validated [`TlsConfig`]: the full
 /// certificate chain, the private key (`key_file`, or the certificate file when
@@ -107,7 +113,11 @@ fn configure_client_auth(builder: &mut SslContextBuilder, tls: &TlsConfig) -> Re
 
 /// A TLS connection whose handshake is driven lazily on the first I/O poll.
 pub(crate) enum MaybeTlsStream<IO> {
-    Handshaking(Pin<Box<SslStream<IO>>>),
+    /// Handshake in flight, bounded by `deadline`.
+    Handshaking {
+        stream: Pin<Box<SslStream<IO>>>,
+        deadline: Pin<Box<Sleep>>,
+    },
     Streaming(Pin<Box<SslStream<IO>>>),
     /// Setup failed in the infallible `accept()`; surfaced on first poll.
     SetupFailed(Option<io::Error>),
@@ -131,12 +141,20 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> MaybeTlsStream<IO> {
                     err.take().unwrap_or_else(|| io::Error::other("TLS connection setup failed"));
                 return Poll::Ready(Err(err));
             }
-            MaybeTlsStream::Handshaking(stream) => stream.as_mut().poll_accept(cx),
+            MaybeTlsStream::Handshaking { stream, deadline } => {
+                if deadline.as_mut().poll(cx).is_ready() {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "TLS handshake timed out",
+                    )));
+                }
+                stream.as_mut().poll_accept(cx)
+            }
         };
         match handshake {
             Poll::Ready(Ok(())) => {
                 let stream = match std::mem::replace(this, MaybeTlsStream::SetupFailed(None)) {
-                    MaybeTlsStream::Handshaking(stream) => stream,
+                    MaybeTlsStream::Handshaking { stream, .. } => stream,
                     _ => unreachable!("handshake just completed"),
                 };
                 *this = MaybeTlsStream::Streaming(stream);
@@ -201,11 +219,16 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for MaybeTlsStream<IO> {
 pub(crate) struct TlsListener<L> {
     inner: L,
     context: Arc<SslContext>,
+    handshake_timeout: Duration,
 }
 
 impl<L> TlsListener<L> {
-    pub(crate) fn new(inner: L, context: Arc<SslContext>) -> Self {
-        Self { inner, context }
+    pub(crate) fn new(inner: L, context: Arc<SslContext>, handshake_timeout: Duration) -> Self {
+        Self {
+            inner,
+            context,
+            handshake_timeout,
+        }
     }
 }
 
@@ -220,7 +243,10 @@ where
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
         let (io, addr) = self.inner.accept().await;
         let io = match Ssl::new(&self.context).and_then(|ssl| SslStream::new(ssl, io)) {
-            Ok(stream) => MaybeTlsStream::Handshaking(Box::pin(stream)),
+            Ok(stream) => MaybeTlsStream::Handshaking {
+                stream: Box::pin(stream),
+                deadline: Box::pin(sleep(self.handshake_timeout)),
+            },
             Err(err) => MaybeTlsStream::SetupFailed(Some(io::Error::other(err))),
         };
         (io, addr)
