@@ -5,7 +5,7 @@
 import torch
 
 
-def tokenspeed_mha_prefill(
+def rocm_tokenspeed_mha_prefill(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
@@ -31,7 +31,7 @@ def tokenspeed_mha_prefill(
     )
 
 
-def tokenspeed_mha_decode(
+def rocm_tokenspeed_mha_decode(
     query: torch.Tensor,
     key_cache: torch.Tensor,
     value_cache: torch.Tensor,

@@ -427,7 +427,7 @@ def _get_backend_priorities(
             ]
 
     backends = []
-    backends.append(AttentionBackendEnum.TOKENSPEED_MHA)
+    backends.append(AttentionBackendEnum.ROCM_TOKENSPEED_MHA)
     # ROCM_ATTN uses (2, num_blocks, ...) KV cache layout which is
     # incompatible with KV connectors that require blocks-first layout.
     if not use_kv_connector:

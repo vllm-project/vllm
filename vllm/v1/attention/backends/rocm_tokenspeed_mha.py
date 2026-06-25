@@ -27,9 +27,9 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.utils import (
     split_decodes_prefills_and_extends,
 )
-from vllm.v1.attention.ops.tokenspeed_mha import (
-    tokenspeed_mha_decode,
-    tokenspeed_mha_prefill,
+from vllm.v1.attention.ops.rocm_tokenspeed_mha import (
+    rocm_tokenspeed_mha_decode,
+    rocm_tokenspeed_mha_prefill,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -41,7 +41,7 @@ _MAX_SLIDING_DECODE_TOKENS_PER_CALL = 8192
 
 
 @dataclass
-class TokenspeedMHAMetadata(AttentionMetadata):
+class RocmTokenspeedMHAMetadata(AttentionMetadata):
     num_actual_tokens: int
     max_query_len: int
     query_start_loc: torch.Tensor
@@ -68,7 +68,9 @@ class TokenspeedMHAMetadata(AttentionMetadata):
     causal: bool | torch.Tensor = True
 
 
-class TokenspeedMHAMetadataBuilder(AttentionMetadataBuilder[TokenspeedMHAMetadata]):
+class RocmTokenspeedMHAMetadataBuilder(
+    AttentionMetadataBuilder[RocmTokenspeedMHAMetadata]
+):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(
@@ -82,7 +84,7 @@ class TokenspeedMHAMetadataBuilder(AttentionMetadataBuilder[TokenspeedMHAMetadat
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
-    ) -> TokenspeedMHAMetadata:
+    ) -> RocmTokenspeedMHAMetadata:
         attn_metadata = self.build(0, common_attn_metadata)
         attn_metadata.seq_lens.fill_(1)
         common_attn_metadata.query_start_loc.zero_()
@@ -94,9 +96,9 @@ class TokenspeedMHAMetadataBuilder(AttentionMetadataBuilder[TokenspeedMHAMetadat
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
-    ) -> TokenspeedMHAMetadata:
+    ) -> RocmTokenspeedMHAMetadata:
         if common_prefix_len > 0:
-            raise NotImplementedError("TOKENSPEED_MHA does not support cascade.")
+            raise NotImplementedError("ROCM_TOKENSPEED_MHA does not support cascade.")
 
         (
             num_decodes,
@@ -183,7 +185,7 @@ class TokenspeedMHAMetadataBuilder(AttentionMetadataBuilder[TokenspeedMHAMetadat
             )
             extend_max_seq_len = extend_seq_lens.max().item()
 
-        return TokenspeedMHAMetadata(
+        return RocmTokenspeedMHAMetadata(
             num_actual_tokens=common_attn_metadata.num_actual_tokens,
             max_query_len=common_attn_metadata.max_query_len,
             query_start_loc=common_attn_metadata.query_start_loc,
@@ -211,7 +213,7 @@ class TokenspeedMHAMetadataBuilder(AttentionMetadataBuilder[TokenspeedMHAMetadat
         )
 
 
-class TokenspeedMHABackend(AttentionBackend):
+class RocmTokenspeedMHABackend(AttentionBackend):
     forward_includes_kv_cache_update: bool = False
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
@@ -223,15 +225,15 @@ class TokenspeedMHABackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "TOKENSPEED_MHA"
+        return "ROCM_TOKENSPEED_MHA"
 
     @staticmethod
-    def get_impl_cls() -> type["TokenspeedMHAImpl"]:
-        return TokenspeedMHAImpl
+    def get_impl_cls() -> type["RocmTokenspeedMHAImpl"]:
+        return RocmTokenspeedMHAImpl
 
     @staticmethod
-    def get_builder_cls() -> type["TokenspeedMHAMetadataBuilder"]:
-        return TokenspeedMHAMetadataBuilder
+    def get_builder_cls() -> type["RocmTokenspeedMHAMetadataBuilder"]:
+        return RocmTokenspeedMHAMetadataBuilder
 
     @staticmethod
     def get_kv_cache_shape(
@@ -242,7 +244,7 @@ class TokenspeedMHABackend(AttentionBackend):
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         if block_size != 64:
-            raise ValueError("TOKENSPEED_MHA requires block_size=64.")
+            raise ValueError("ROCM_TOKENSPEED_MHA requires block_size=64.")
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
@@ -297,13 +299,13 @@ class TokenspeedMHABackend(AttentionBackend):
         device_capability: DeviceCapability,
     ) -> str | None:
         if block_size is not None and block_size != 64:
-            return "TokenSpeed MHA gfx950 kernels require block_size 64"
+            return "ROCm TokenSpeed MHA gfx950 kernels require block_size 64"
         if use_mm_prefix:
-            return "TokenSpeed MHA does not support multimodal prefix attention"
+            return "ROCm TokenSpeed MHA does not support multimodal prefix attention"
         return None
 
 
-class TokenspeedMHAImpl(AttentionImpl[TokenspeedMHAMetadata]):
+class RocmTokenspeedMHAImpl(AttentionImpl[RocmTokenspeedMHAMetadata]):
     def __init__(
         self,
         num_heads: int,
@@ -334,13 +336,13 @@ class TokenspeedMHAImpl(AttentionImpl[TokenspeedMHAMetadata]):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.sinks = sinks
         if alibi_slopes is not None:
-            raise NotImplementedError("TOKENSPEED_MHA does not support ALiBi.")
+            raise NotImplementedError("ROCM_TOKENSPEED_MHA does not support ALiBi.")
         if self.logits_soft_cap != 0:
             raise NotImplementedError(
-                "TOKENSPEED_MHA does not support logits soft cap."
+                "ROCM_TOKENSPEED_MHA does not support logits soft cap."
             )
         if head_size != 64:
-            raise ValueError("TOKENSPEED_MHA only supports head_size=64.")
+            raise ValueError("ROCM_TOKENSPEED_MHA only supports head_size=64.")
         if sinks is not None:
             assert sinks.shape[0] == num_heads, (
                 "Sinks must have the same number of heads as the number of "
@@ -366,7 +368,7 @@ class TokenspeedMHAImpl(AttentionImpl[TokenspeedMHAMetadata]):
     ) -> torch.Tensor:
         total_tokens = query.shape[0]
         if total_tokens <= _MAX_PREFILL_TOKENS_PER_CALL:
-            return tokenspeed_mha_prefill(
+            return rocm_tokenspeed_mha_prefill(
                 query=query,
                 key=key,
                 value=value,
@@ -394,7 +396,7 @@ class TokenspeedMHAImpl(AttentionImpl[TokenspeedMHAMetadata]):
             cu_cpu = query_start_loc_cpu[seq_start : seq_end + 1] - token_start
             cu = query_start_loc[seq_start : seq_end + 1] - token_start
             query_lens = cu_cpu[1:] - cu_cpu[:-1]
-            result = tokenspeed_mha_prefill(
+            result = rocm_tokenspeed_mha_prefill(
                 query=query[token_start:token_end],
                 key=key[token_start:token_end],
                 value=value[token_start:token_end],
@@ -426,7 +428,7 @@ class TokenspeedMHAImpl(AttentionImpl[TokenspeedMHAMetadata]):
             else _MAX_FULL_DECODE_TOKENS_PER_CALL
         )
         if total_tokens <= max_tokens_per_call:
-            return tokenspeed_mha_decode(
+            return rocm_tokenspeed_mha_decode(
                 query=query,
                 key_cache=key_cache,
                 value_cache=value_cache,
@@ -441,7 +443,7 @@ class TokenspeedMHAImpl(AttentionImpl[TokenspeedMHAMetadata]):
         output = torch.empty_like(query)
         for start in range(0, total_tokens, max_tokens_per_call):
             end = min(start + max_tokens_per_call, total_tokens)
-            result = tokenspeed_mha_decode(
+            result = rocm_tokenspeed_mha_decode(
                 query=query[start:end],
                 key_cache=key_cache,
                 value_cache=value_cache,
@@ -456,13 +458,13 @@ class TokenspeedMHAImpl(AttentionImpl[TokenspeedMHAMetadata]):
         return output
 
     @staticmethod
-    def _is_pure_prefill(attn_metadata: TokenspeedMHAMetadata) -> bool:
+    def _is_pure_prefill(attn_metadata: RocmTokenspeedMHAMetadata) -> bool:
         return attn_metadata.num_prefills > 0 and (
             attn_metadata.num_decodes == 0 and attn_metadata.num_extends == 0
         )
 
     @staticmethod
-    def _is_pure_decode(attn_metadata: TokenspeedMHAMetadata) -> bool:
+    def _is_pure_decode(attn_metadata: RocmTokenspeedMHAMetadata) -> bool:
         return attn_metadata.num_decodes > 0 and (
             attn_metadata.num_prefills == 0 and attn_metadata.num_extends == 0
         )
@@ -474,23 +476,29 @@ class TokenspeedMHAImpl(AttentionImpl[TokenspeedMHAMetadata]):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: TokenspeedMHAMetadata,
+        attn_metadata: RocmTokenspeedMHAMetadata,
         output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
-                "TOKENSPEED_MHA does not support fused output quantization."
+                "ROCM_TOKENSPEED_MHA does not support fused output quantization."  # noqa: E501
             )
         if attn_metadata is None:
             return output.fill_(0)
         if not attn_metadata.causal:
-            raise NotImplementedError("TOKENSPEED_MHA only supports causal attention.")
+            raise NotImplementedError(
+                "ROCM_TOKENSPEED_MHA only supports causal attention."  # noqa: E501
+            )
         if self.attn_type != AttentionType.DECODER:
-            raise NotImplementedError("TOKENSPEED_MHA only supports decoder attention.")
+            raise NotImplementedError(
+                "ROCM_TOKENSPEED_MHA only supports decoder attention."  # noqa: E501
+            )
         if is_quantized_kv_cache(self.kv_cache_dtype):
-            raise NotImplementedError("TOKENSPEED_MHA does not support FP8 KV cache.")
+            raise NotImplementedError(
+                "ROCM_TOKENSPEED_MHA does not support FP8 KV cache."  # noqa: E501
+            )
 
         num_actual_tokens = attn_metadata.num_actual_tokens
         query = query[:num_actual_tokens]
@@ -597,7 +605,9 @@ class TokenspeedMHAImpl(AttentionImpl[TokenspeedMHAMetadata]):
             output[prefill_start:].copy_(prefill_result)
             return output
 
-        raise NotImplementedError("Unhandled TOKENSPEED_MHA attention batch shape.")
+        raise NotImplementedError(
+            "Unhandled ROCM_TOKENSPEED_MHA attention batch shape."
+        )
 
     def do_kv_cache_update(
         self,
