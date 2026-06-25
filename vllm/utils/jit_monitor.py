@@ -26,7 +26,7 @@ import importlib
 import os
 from collections.abc import Mapping
 from contextlib import suppress
-from typing import Literal
+from typing import Any, Literal, cast
 
 from vllm.logger import init_logger
 from vllm.triton_utils.importing import HAS_TRITON
@@ -291,8 +291,9 @@ def _tilelang_cache_miss_key(
 
     try:
         if getattr(jit_impl, "mode", None) == "auto":
-            mode = jit_impl._infer_jit_mode(*args, **call_kwargs)
-            jit_impl.mode = mode
+            impl = cast(Any, jit_impl)
+            mode = impl._infer_jit_mode(*args, **call_kwargs)
+            impl.mode = mode
             if func is not None:
                 func.set_mode(mode)
         key, _ = parse_args(*args, **call_kwargs)
