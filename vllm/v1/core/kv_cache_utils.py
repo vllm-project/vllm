@@ -1539,6 +1539,7 @@ def _get_kv_cache_config_with_request_constant_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
+    check_available_memory: bool = True,
 ) -> KVCacheConfig:
     token_groups_with_ids, request_groups_with_ids = _get_groups_by_memory_model(
         kv_cache_groups
@@ -1547,7 +1548,10 @@ def _get_kv_cache_config_with_request_constant_groups(
     request_reserved_bytes = _request_constant_reserved_bytes(
         vllm_config, request_groups
     )
-    if request_reserved_bytes > available_memory:
+    if request_reserved_bytes > available_memory and (
+        check_available_memory
+        or vllm_config.cache_config.num_gpu_blocks_override is None
+    ):
         raise ValueError(
             "Not enough KV cache memory for request-bounded KV cache groups: "
             f"need {format_gib(request_reserved_bytes)} GiB but only "
@@ -1629,10 +1633,11 @@ def get_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
+    check_available_memory: bool = True,
 ) -> KVCacheConfig:
     if _uses_request_constant_pools(vllm_config, kv_cache_groups):
         return _get_kv_cache_config_with_request_constant_groups(
-            vllm_config, kv_cache_groups, available_memory
+            vllm_config, kv_cache_groups, available_memory, check_available_memory
         )
     return _get_token_proportional_kv_cache_config_from_groups(
         vllm_config, kv_cache_groups, available_memory
