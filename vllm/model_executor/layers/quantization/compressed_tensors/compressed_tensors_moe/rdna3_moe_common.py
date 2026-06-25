@@ -20,6 +20,24 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
 )
 
 
+def select_block_size_m(num_tokens: int, top_k: int, num_experts: int) -> int:
+    """Pick the fused-MoE GEMM tile for the current batch.
+
+    The WMMA-16 tile wins once a step has >=16 rows: real (clustered) routing
+    fills it well even on high-expert models, and this is also where prefill
+    lives (validated e2e: WMMA is fastest at concurrency 32 even on Qwen's 256
+    experts). For sub-16 batches the 16-tile is mostly padding, so we fall back
+    to a scalar tile sized to the expected occupancy avg tokens/expert =
+    num_tokens*top_k/E (bsm=1 beats bsm=4 at low concurrency, +9% e2e at C=8).
+    """
+    if num_experts <= 0 or top_k <= 0:
+        return 1
+    if num_tokens >= 16:
+        return 16
+    tpe = num_tokens * top_k / num_experts
+    return 4 if tpe >= 1.5 else 1
+
+
 def repack_experts(packed: torch.Tensor, scale: torch.Tensor, deinterleave: bool):
     """[E, N, K/2] uint8 + [E, N, K/32] uint8 -> [E, K/8, N] int32 + [E, K/32, N].
 
@@ -76,9 +94,7 @@ class RDNA3FusedMoEMixin:
 
         if global_num_experts <= 0:
             global_num_experts = layer.w13_weight_packed.shape[0]
-        # Scalar tiles (1/4) for low batch; the 16-wide WMMA tile wins once
-        # there are enough tokens to fill it (high decode concurrency / prefill).
-        block_size_m = 1 if num_tokens <= 4 else (4 if num_tokens < 16 else 16)
+        block_size_m = select_block_size_m(num_tokens, top_k, global_num_experts)
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
             topk_ids, block_size_m, global_num_experts, expert_map

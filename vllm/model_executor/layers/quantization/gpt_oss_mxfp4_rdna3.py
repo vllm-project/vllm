@@ -22,6 +22,7 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.rdna3_moe_common import (  # noqa: E501
     repack_experts,
+    select_block_size_m,
 )
 from vllm.model_executor.layers.quantization.mxfp4 import GptOssMxfp4MoEMethod
 
@@ -102,7 +103,7 @@ class GptOssMxfp4RDNA3MoEMethod(GptOssMxfp4MoEMethod):
         gne = layer.global_num_experts
         if gne <= 0:
             gne = layer.w13_weight_packed.shape[0]
-        block_size_m = 1 if M <= 4 else (4 if M < 16 else 16)
+        block_size_m = select_block_size_m(M, top_k, gne)
         sti, eid, ntp = moe_align_block_size(
             topk_ids, block_size_m, gne, layer.expert_map
         )
