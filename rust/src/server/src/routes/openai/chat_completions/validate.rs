@@ -94,11 +94,6 @@ pub(super) fn validate_request_compat(
         "mm_processor_kwargs",
         "mm_processor_kwargs is not supported.",
     )?;
-    reject_non_default(
-        request.repetition_detection.as_ref(),
-        "repetition_detection",
-        "repetition_detection is not supported.",
-    )?;
 
     Ok(())
 }
