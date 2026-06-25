@@ -11,6 +11,7 @@ from torch import fx
 from torch._ops import OpOverload, OpOverloadPacket
 from torch.fx._utils import lazy_format_graph_code
 
+from vllm.compilation.graph_dump import collect_graph_metadata, graph_dump_context
 from vllm.compilation.passes.fx_utils import find_op_nodes
 from vllm.compilation.passes.inductor_pass import (
     InductorPass,
@@ -74,8 +75,13 @@ class TestBackend:
         if debug_dump_path := vllm_config.compile_debug_dump_path():
             logger.debug("Dumping depyf output to %s", debug_dump_path)
             self.debug_ctx = depyf.prepare_debug(debug_dump_path.as_posix())
+            self.graph_dump_path = debug_dump_path / "graphs"
         else:
             self.debug_ctx = nullcontext()
+            self.graph_dump_path = None
+        self.graph_dump_metadata = collect_graph_metadata(
+            vllm_config, function_name="TestBackend.post_pass"
+        )
 
     def __call__(self, graph: fx.GraphModule, example_inputs):
         self.graph_pre_compile = deepcopy(graph)
@@ -91,12 +97,16 @@ class TestBackend:
         self.graph_pre_pass = deepcopy(graph)
         lazy_format_graph_code("graph_pre_pass", graph.owning_module)
 
-        VllmInductorPass.dump_prefix = 0
-        for pass_ in self.custom_passes:
-            pass_(graph)
-            VllmInductorPass.dump_prefix += 1
-
-        VllmInductorPass.dump_prefix = None
+        for dump_index, pass_ in enumerate(self.custom_passes):
+            pass_name = pass_.__class__.__name__
+            metadata = dict(self.graph_dump_metadata, pass_name=pass_name)
+            with graph_dump_context(
+                graph.owning_module,
+                self.graph_dump_path,
+                metadata,
+                f"post_grad.{dump_index}.{pass_name}",
+            ):
+                pass_(graph)
 
         self.graph_post_pass = deepcopy(graph)
         lazy_format_graph_code("graph_post_pass", graph.owning_module)

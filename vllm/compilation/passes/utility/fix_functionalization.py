@@ -7,6 +7,7 @@ from collections.abc import Iterable
 import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 
+from vllm.compilation.graph_dump import dump_graph
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -233,7 +234,7 @@ class FixFunctionalizationPass(VllmInductorPass):
 
             count += 1
 
-        self.dump_graph(graph, "before_cleanup")
+        dump_graph("before_cleanup")
 
         # Remove the nodes all at once
         count_removed = len(self.nodes_to_remove)

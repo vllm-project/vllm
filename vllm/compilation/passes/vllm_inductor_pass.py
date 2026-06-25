@@ -13,9 +13,9 @@ import regex as re
 import torch
 import torch._inductor.pattern_matcher as pm
 from torch import fx
-from torch._dynamo.utils import lazy_format_graph_code
 from torch._inductor.pattern_matcher import PatternMatcherPass, PatternPrettyPrinter
 
+from vllm.compilation.graph_dump import dump_graph
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
@@ -36,9 +36,6 @@ class VllmInductorPass(InductorPass):
     An inductor pass with access to vLLM PassConfig.
     It provides timing, logging, and dumping utilities.
     """
-
-    dump_prefix: ClassVar[int | None] = None
-    """Keep track of pass index for debug dump ordering."""
 
     def __init__(self, config: VllmConfig):
         # Get only the necessary CompilationConfig for the inductor pass, since
@@ -61,19 +58,12 @@ class VllmInductorPass(InductorPass):
         @functools.wraps(call_fn)
         def wrapped(self: VllmInductorPass, graph: torch.fx.Graph) -> None:
             self.begin()
-            self.dump_graph(graph, "before")
+            dump_graph("before")
             call_fn(self, graph)
-            self.dump_graph(graph, "after")
+            dump_graph("after")
             self.end_and_log()
 
         return wrapped
-
-    def dump_graph(self, graph: torch.fx.Graph, stage: str) -> None:
-        i = VllmInductorPass.dump_prefix
-        i_str = "" if i is None else f".{i}"
-        lazy_format_graph_code(
-            f"post_grad{i_str}.{self.pass_name}.{stage}", graph.owning_module
-        )
 
     def begin(self) -> None:
         self._start_time = time.perf_counter_ns()
@@ -338,4 +328,4 @@ class PrinterInductorPass(VllmInductorPass):
         self.name = name
 
     def __call__(self, graph: torch.fx.Graph) -> None:
-        self.dump_graph(graph, self.name)
+        dump_graph(self.name)
