@@ -15,7 +15,7 @@ from vllm.models.minimax_m3.common.ops.sparse_attn import (
     SPARSE_BLOCK_SIZE,
     minimax_m3_sparse_attn_decode,
 )
-from vllm.platforms.rocm import on_mi3xx, on_gfx950
+from vllm.platforms.rocm import on_gfx950, on_mi3xx
 from vllm.triton_utils import tl, triton
 
 __all__ = ["minimax_m3_sparse_attn", "minimax_m3_sparse_attn_decode"]
@@ -123,7 +123,6 @@ def _gqa_sparse_fwd_kernel(
         return
     real_q_loop = min(num_q_loop, q_block_len - pid_q * num_q_loop)
     bt_row = block_table_ptr + pid_b * stride_bt_b
-    off_n = tl.arange(0, BLOCK_SIZE_K)
     off_d = tl.arange(0, BLOCK_SIZE_D)
     d_mask = off_d < head_dim
     for j in range(real_q_loop):
@@ -141,12 +140,6 @@ def _gqa_sparse_fwd_kernel(
             order=(2, 1, 0),
         )
         q = tl.load(q_ptrs, boundary_check=(0, 1, 2), padding_option="zero")
-        off_q = (
-            tl.arange(0, BLOCK_SIZE_Q)[:, None]
-            + pid_q_j * BLOCK_SIZE_Q
-            + prefix_len
-            - tl.arange(0, BLOCK_SIZE_K)[None, :]
-        )
         m_i = tl.full((BLOCK_SIZE_QH,), float("-inf"), dtype=tl.float32)
         lse_i = tl.full((BLOCK_SIZE_QH,), float("-inf"), dtype=tl.float32)
         acc_o = tl.zeros((BLOCK_SIZE_QH, BLOCK_SIZE_D), dtype=tl.float32)
@@ -182,9 +175,7 @@ def _gqa_sparse_fwd_kernel(
                     + prefix_len
                     - off_sub[None, :]
                 )
-                qk_sub = tl.zeros(
-                    (BLOCK_SIZE_Q, BLOCK_SIZE_H, SUB_K), dtype=tl.float32
-                )
+                qk_sub = tl.zeros((BLOCK_SIZE_Q, BLOCK_SIZE_H, SUB_K), dtype=tl.float32)
                 # causal: q_abs_pos - k_off >= block_start (c)
                 qk_sub += tl.where(off_q_sub[:, None, :] >= c, 0, float("-inf"))
                 qk_sub = tl.reshape(qk_sub, BLOCK_SIZE_QH, SUB_K)
