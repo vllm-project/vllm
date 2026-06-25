@@ -256,7 +256,7 @@ mod tests {
             _chunk: &str,
             output: &mut crate::tool::ToolParserOutput,
         ) -> crate::tool::Result<()> {
-            output.normal_text.push_str("committed");
+            output.push_text("committed");
             Err(crate::tool::ToolParserError::ParsingFailed {
                 message: "synthetic failure".to_string(),
             })
