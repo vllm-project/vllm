@@ -18,6 +18,7 @@ class AsyncScheduler(Scheduler):
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         super()._update_after_schedule(scheduler_output)
         spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
+        tokens_per_step = self.scheduler_config.tokens_per_step
         for req_id in scheduler_output.num_scheduled_tokens:
             request = self.requests[req_id]
             if request.is_prefill_chunk:
@@ -26,10 +27,18 @@ class AsyncScheduler(Scheduler):
             scheduler_output.pending_structured_output_tokens |= (
                 request.use_structured_output and request.num_output_placeholders > 0
             )
-            # The request will generate a new token plus num_spec_tokens
-            # in this scheduling step.
+            # The request will generate tokens_per_step tokens plus
+            # num_spec_tokens in this scheduling step.
             cur_num_spec_tokens = len(spec_decode_tokens.get(req_id, ()))
-            request.num_output_placeholders += 1 + cur_num_spec_tokens
+            request.num_output_placeholders += tokens_per_step + cur_num_spec_tokens
+            # Pre-advance num_computed_tokens for the extra forward tokens.
+            # The base class already advanced by num_scheduled_tokens (=1 for
+            # decode). We add (tokens_per_step - 1) here so that the next
+            # schedule() sees num_new_tokens=1 instead of tokens_per_step.
+            # This matches the fact that extra forwards run internally on GPU
+            # and only 1 decode token position is scheduled per step.
+            if tokens_per_step > 1:
+                request.num_computed_tokens += tokens_per_step - 1
             # Add placeholders for the new draft/spec tokens.
             # We will update the actual spec token ids in the worker process.
             request.spec_token_ids = self._spec_token_placeholders

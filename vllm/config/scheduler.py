@@ -154,6 +154,18 @@ class SchedulerConfig:
     while a larger value (e.g., 10) reduces host overhead and may increase throughput
     by batching multiple tokens before sending."""
 
+    tokens_per_step: int = 1
+    """Number of tokens generated per step via GPU-internal autoregressive
+    forwards. 1 = normal (no extra forwards). Values > 1 enable extra
+    forwards within a single execute_model call to reduce GPU-CPU
+    round-trips. E.g., 10 = 1 sample + 9 extra forwards."""
+
+    extra_forward_use_argmax: bool = False
+    """Controls whether extra forward passes use argmax (greedy) or full
+    sampling. True = argmax (default, fast). False = use the same sampling
+    strategy as the main forward (respects temperature, top_p, top_k,
+    penalties, etc.). Only effective when tokens_per_step > 1."""
+
     @staticmethod
     def default_factory(**kwargs):
         """
@@ -258,8 +270,8 @@ class SchedulerConfig:
 
     def verify_max_model_len(self, max_model_len: int) -> Self:
         if (
-            self.max_num_batched_tokens < max_model_len
-            and not self.enable_chunked_prefill
+                self.max_num_batched_tokens < max_model_len
+                and not self.enable_chunked_prefill
         ):
             raise ValueError(
                 f"max_num_batched_tokens ({self.max_num_batched_tokens}) is "

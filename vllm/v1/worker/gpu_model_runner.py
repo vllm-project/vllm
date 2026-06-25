@@ -243,9 +243,11 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         async_output_copy_stream: torch.cuda.Stream,
         vocab_size: int,
         routed_experts: RoutedExpertsTensors | None = None,
+        has_spec_decode: bool = False,
     ):
         self._model_runner_output = model_runner_output
         self._invalid_req_indices = invalid_req_indices
+        self._has_spec_decode = has_spec_decode
 
         # Event on the copy stream so we can synchronize the non-blocking copy.
         self.async_copy_ready_event = torch.Event()
@@ -294,13 +296,21 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
             logprobs_lists = None
             if self._logprobs_tensors_cpu is not None:
                 logprobs_lists = self._logprobs_tensors_cpu.tolists()
-        else:
+        elif self._has_spec_decode:
             valid_sampled_token_ids, logprobs_lists = RejectionSampler.parse_output(
                 self.sampled_token_ids_cpu,
                 self.vocab_size,
                 self._invalid_req_indices,
                 logprobs_tensors=self._logprobs_tensors_cpu,
             )
+        else:
+            # Extra forwards: all tokens are valid, no rejection needed.
+            valid_sampled_token_ids = self.sampled_token_ids_cpu.tolist()
+            for i in self._invalid_req_indices:
+                valid_sampled_token_ids[i].clear()
+            logprobs_lists = None
+            if self._logprobs_tensors_cpu is not None:
+                logprobs_lists = self._logprobs_tensors_cpu.tolists()
 
         output = self._model_runner_output
         output.sampled_token_ids = valid_sampled_token_ids
@@ -410,6 +420,8 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
     slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None
+    attn_metadata: "Any | None"
+    logits_indices: torch.Tensor | None
 
 
 class GPUModelRunner(
@@ -463,6 +475,12 @@ class GPUModelRunner(
         self.dcp_rank = 0 if self.dcp_world_size <= 1 else get_dcp_group().rank_in_group
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
+
+        # Number of tokens generated per step via GPU-internal autoregressive
+        # forwards. 1 = normal (no extra forwards), 3 = 1 sample + 2 extra.
+        self.tokens_per_step = self.scheduler_config.tokens_per_step
+        self.extra_forward_use_argmax = (
+            self.scheduler_config.extra_forward_use_argmax)
 
         # Broadcast PP output for external_launcher (torchrun)
         # to make sure we are synced across pp ranks
@@ -842,7 +860,7 @@ class GPUModelRunner(
         self._draft_token_req_ids: list[str] | None = None
         self.transfer_event = torch.Event()
         self.sampled_token_ids_pinned_cpu = torch.empty(
-            (self.max_num_reqs, 1),
+            (self.max_num_reqs, max(1, self.tokens_per_step)),
             dtype=torch.int64,
             device="cpu",
             pin_memory=self.pin_memory,
@@ -3509,6 +3527,216 @@ class GPUModelRunner(
         )
         return sampler_output
 
+    def _run_extra_forwards(
+            self,
+            sampler_output: "SamplerOutput",
+            attn_metadata: "dict[str, Any]",
+            logits_indices: torch.Tensor,
+    ) -> None:
+        """Run extra autoregressive forward passes after the initial sample.
+
+        After sampling token_1, feed it back through the model on GPU to
+        generate additional tokens via argmax or full sampling (controlled
+        by extra_forward_use_argmax), avoiding GPU-CPU round-trips.
+        All tokens are sent to CPU together afterward.
+        """
+        num_extra = self.tokens_per_step - 1
+
+        with record_function_or_nullcontext("ExtraForwards"):
+            batch_size = self.input_batch.num_reqs
+            block_size = self.cache_config.block_size
+
+            if self.uses_mrope:
+                extra_positions = self.mrope_positions.gpu[
+                    :, logits_indices].clone()
+                extra_pos_1d = extra_positions[0]
+            else:
+                extra_positions = self.positions[
+                    logits_indices].clone()
+                extra_pos_1d = extra_positions
+
+            all_token_ids = [sampler_output.sampled_token_ids]
+
+            seen_ids: set[int] = set()
+            unique_metas = []
+            for meta in attn_metadata.values():
+                if id(meta) not in seen_ids:
+                    seen_ids.add(id(meta))
+                    unique_metas.append(meta)
+
+            extra_padded_size = batch_size
+            extra_cg_mode = CUDAGraphMode.NONE
+            extra_batch_desc = None
+            if (self.compilation_config.cudagraph_mode
+                    != CUDAGraphMode.NONE
+                    and self.cudagraph_batch_sizes
+                    and batch_size
+                    <= self.cudagraph_batch_sizes[-1]):
+                extra_cg_mode, extra_batch_desc = (
+                    self.cudagraph_dispatcher.dispatch(
+                        num_tokens=batch_size,
+                        uniform_decode=True,
+                    ))
+                extra_padded_size = extra_batch_desc.num_tokens
+
+            self.query_start_loc.gpu[:batch_size + 1] = torch.arange(
+                batch_size + 1, device=self.device, dtype=torch.int32)
+            # Fill remaining query_start_loc entries to batch_size so that
+            # padding requests in attn_metadata.query_start_loc VIEW
+            # (which may be wider than extra_padded_size) see 0-length queries.
+            first_meta_qsl = unique_metas[0].query_start_loc
+            qsl_view_len = first_meta_qsl.shape[0]
+            if qsl_view_len > batch_size + 1:
+                self.query_start_loc.gpu[
+                    batch_size + 1:qsl_view_len].fill_(batch_size)
+            for meta in unique_metas:
+                meta.num_actual_tokens = batch_size
+                meta.max_query_len = 1
+
+            # Disable FA3 AOT scheduler_metadata during extra forwards.
+            saved_scheduler_metas = []
+            for meta in unique_metas:
+                saved_scheduler_metas.append(meta.scheduler_metadata)
+                meta.scheduler_metadata = None
+            # Also disable cascade (prefix scheduler) if present
+            saved_prefix_scheduler_metas = []
+            for meta in unique_metas:
+                saved_prefix_scheduler_metas.append(
+                    getattr(meta, 'prefix_scheduler_metadata', None))
+                if hasattr(meta, 'prefix_scheduler_metadata'):
+                    meta.prefix_scheduler_metadata = None
+            # Disable cascade attention during extra forwards.
+            saved_use_cascade = []
+            saved_max_num_splits = []
+            for meta in unique_metas:
+                saved_use_cascade.append(meta.use_cascade)
+                meta.use_cascade = False
+                saved_max_num_splits.append(meta.max_num_splits)
+                meta.max_num_splits = 0
+
+            extra_slot_bufs = []
+            for gid in range(len(self.kv_cache_config.kv_cache_groups)):
+                buf = self.input_batch.block_table[gid].slot_mapping.gpu
+                buf.fill_(-1)
+                extra_slot_bufs.append(buf)
+
+            # Build per-layer slot mapping dict for set_forward_context
+            extra_slot_mappings: dict[str, torch.Tensor] = {}
+            for gid, kv_cache_group in enumerate(
+                    self.kv_cache_config.kv_cache_groups):
+                for layer_name in kv_cache_group.layer_names:
+                    extra_slot_mappings[layer_name] = (
+                        extra_slot_bufs[gid][:extra_padded_size])
+
+            for _extra_i in range(num_extra):
+                extra_positions = extra_positions + 1
+                extra_pos_1d = extra_pos_1d + 1
+                exceeds = extra_pos_1d >= self.max_model_len
+                if self.uses_mrope:
+                    clamped_pos = torch.where(
+                        exceeds.unsqueeze(0),
+                        torch.zeros_like(extra_positions),
+                        extra_positions)
+                else:
+                    clamped_pos = torch.where(
+                        exceeds,
+                        torch.zeros_like(extra_pos_1d),
+                        extra_pos_1d)
+
+                self.seq_lens[:batch_size].add_(1)
+                self.seq_lens[:batch_size].masked_fill_(exceeds, 1)
+                if extra_padded_size > batch_size:
+                    self.seq_lens[
+                        batch_size:extra_padded_size].fill_(0)
+
+                abs_positions = self.seq_lens[:batch_size] - 1
+                abs_positions = abs_positions.masked_fill(exceeds, 0)
+                block_numbers = abs_positions // block_size
+                for slot_buf, meta in zip(extra_slot_bufs, unique_metas):
+                    blk_ids = meta.block_table.gather(
+                        dim=1,
+                        index=block_numbers.view(-1, 1)).view(-1)
+                    slot_buf[:batch_size] = (
+                        blk_ids * block_size + abs_positions % block_size)
+                    slot_buf[:batch_size].masked_fill_(exceeds, -1)
+                    if extra_padded_size > batch_size:
+                        slot_buf[batch_size:extra_padded_size].fill_(-1)
+                for meta in unique_metas:
+                    meta.max_seq_len = min(
+                        meta.max_seq_len + 1, self.max_model_len)
+
+                prev_tokens = all_token_ids[-1].squeeze(-1).int()
+                self.input_ids.gpu[:batch_size] = prev_tokens
+                if self.uses_mrope:
+                    self.mrope_positions.gpu[:, :batch_size] = clamped_pos
+                else:
+                    self.positions[:batch_size] = clamped_pos
+
+                if self.uses_mrope:
+                    fwd_positions = self.mrope_positions.gpu[
+                        :, :extra_padded_size]
+                else:
+                    fwd_positions = self.positions[:extra_padded_size]
+
+                if self.supports_mm_inputs:
+                    extra_embeds = self.model.embed_input_ids(
+                        self.input_ids.gpu[:batch_size])
+                    self.inputs_embeds.gpu[:batch_size].copy_(extra_embeds)
+                    fwd_input_ids = None
+                    fwd_inputs_embeds = self.inputs_embeds.gpu[
+                        :extra_padded_size]
+                else:
+                    fwd_input_ids = self.input_ids.gpu[:extra_padded_size]
+                    fwd_inputs_embeds = None
+
+                with set_forward_context(
+                        attn_metadata, self.vllm_config,
+                        num_tokens=extra_padded_size,
+                        cudagraph_runtime_mode=extra_cg_mode,
+                        batch_descriptor=extra_batch_desc,
+                        slot_mapping=extra_slot_mappings):
+                    extra_hidden = self.model(
+                        input_ids=fwd_input_ids,
+                        positions=fwd_positions,
+                        inputs_embeds=fwd_inputs_embeds,
+                    )
+
+                if self.use_aux_hidden_state_outputs:
+                    extra_hidden = extra_hidden[0]
+                extra_hidden = extra_hidden[:batch_size]
+                extra_logits = self.model.compute_logits(extra_hidden)
+
+                if self.extra_forward_use_argmax:
+                    next_tokens = extra_logits.argmax(
+                        dim=-1).int().unsqueeze(-1)
+                else:
+                    sampling_metadata = self.input_batch.sampling_metadata
+                    extra_sampler_output = self.sampler(
+                        logits=extra_logits,
+                        sampling_metadata=sampling_metadata,
+                    )
+                    next_tokens = extra_sampler_output.sampled_token_ids
+                all_token_ids.append(next_tokens)
+
+
+
+            sampler_output.sampled_token_ids = torch.cat(
+                all_token_ids, dim=1)
+
+            # Restore scheduler_metadata and cascade state after extra forwards
+            for meta, saved in zip(unique_metas, saved_scheduler_metas):
+                meta.scheduler_metadata = saved
+            for meta, saved in zip(unique_metas,
+                                   saved_prefix_scheduler_metas):
+                if hasattr(meta, 'prefix_scheduler_metadata'):
+                    meta.prefix_scheduler_metadata = saved
+            for meta, saved in zip(unique_metas, saved_use_cascade):
+                meta.use_cascade = saved
+            for meta, saved in zip(unique_metas, saved_max_num_splits):
+                meta.max_num_splits = saved
+
+
+
     def _bookkeeping_sync(
         self,
         scheduler_output: "SchedulerOutput",
@@ -3575,8 +3803,17 @@ class GPUModelRunner(
 
                 if logprobs_tensors is not None:
                     logprobs_lists = logprobs_tensors.tolists()
+            elif self.tokens_per_step > 1 and not scheduler_output.scheduled_spec_decode_tokens:
+                # Extra autoregressive forwards: all tokens are valid
+                # (no rejection needed). Use efficient D2H copy.
+                valid_sampled_token_ids = self._to_list(sampled_token_ids)
+                for i in discard_sampled_tokens_req_indices:
+                    valid_sampled_token_ids[int(i)].clear()
+
+                if logprobs_tensors is not None:
+                    logprobs_lists = logprobs_tensors.tolists()
             else:
-                # Includes spec decode tokens.
+                # Includes spec decode tokens with rejection.
                 valid_sampled_token_ids, logprobs_lists = RejectionSampler.parse_output(
                     sampled_token_ids,
                     self.input_batch.vocab_size,
@@ -3593,8 +3830,9 @@ class GPUModelRunner(
             # when preparing inputs.
             # With spec decoding, this is done in propose_draft_token_ids().
             if self.input_batch.prev_sampled_token_ids is None:
-                assert sampled_token_ids.shape[-1] == 1
-                self.input_batch.prev_sampled_token_ids = sampled_token_ids
+                # With extra forwards, sampled_token_ids shape is [B, tokens_per_step].
+                # Only store the last token column for next step's input_ids.
+                self.input_batch.prev_sampled_token_ids = sampled_token_ids[:, -1:]
             self.input_batch.prev_req_id_to_index = {
                 req_id: i
                 for i, req_id in enumerate(self.input_batch.req_ids)
@@ -3607,9 +3845,10 @@ class GPUModelRunner(
         # the sampled tokens back, because there's no direct communication
         # between the first-stage worker and the last-stage worker.
         req_ids = self.input_batch.req_ids
+        num_tokens_this_step = sampled_token_ids.shape[-1] if self.use_async_scheduling else 0
         for req_idx in range(num_sampled_tokens):
             if self.use_async_scheduling:
-                sampled_ids = [-1] if req_idx not in invalid_req_indices_set else None
+                sampled_ids = [-1] * num_tokens_this_step if req_idx not in invalid_req_indices_set else None
             else:
                 sampled_ids = valid_sampled_token_ids[req_idx]
 
@@ -4235,7 +4474,6 @@ class GPUModelRunner(
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
-
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
                 # True when EAGLE 3 is used.
@@ -4306,6 +4544,8 @@ class GPUModelRunner(
             ec_connector_output,
             cudagraph_stats,
             slot_mappings,
+            attn_metadata,
+            logits_indices,
         )
         self.kv_connector_output = kv_connector_output
 
@@ -4350,6 +4590,8 @@ class GPUModelRunner(
             ec_connector_output,
             cudagraph_stats,
             slot_mappings,
+            attn_metadata,
+            logits_indices,
         ) = self.execute_model_state
         # Clear ephemeral state.
         self.execute_model_state = None
@@ -4363,6 +4605,17 @@ class GPUModelRunner(
         with record_function_or_nullcontext("gpu_model_runner: sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
+        # --- Extra autoregressive forward passes ---
+        _extra_fwd_cond = (self.tokens_per_step > 1
+                and not self.is_pooling_model
+                and spec_decode_metadata is None
+                and scheduler_output.total_num_scheduled_tokens > 0
+                and logits is not None
+                and not isinstance(attn_metadata, list))
+        if _extra_fwd_cond:
+            self._run_extra_forwards(
+                sampler_output, attn_metadata, logits_indices)
+
         self._update_states_after_model_execute(
             sampler_output.sampled_token_ids, scheduler_output
         )
@@ -4372,8 +4625,10 @@ class GPUModelRunner(
             # PP outputs have been broadcasted to all ranks at logits computation.
             # Therefore, here is no need to send sampled token ids again in this case.
             if not self.broadcast_pp_output and pp.world_size > 1 and pp.is_last_rank:
+                # Only broadcast the last token column — PP non-last ranks
+                # use this as next-step input_ids (shape [B, 1]).
                 self._pp_broadcast_prev_sampled_token_ids(
-                    sampler_output.sampled_token_ids
+                    sampler_output.sampled_token_ids[:, -1:]
                 )
 
         self._draft_token_ids = None
@@ -4574,6 +4829,7 @@ class GPUModelRunner(
                 async_output_copy_stream=self._get_or_create_async_output_copy_stream(),
                 vocab_size=self.input_batch.vocab_size,
                 routed_experts=routed_experts_snapshot,
+                has_spec_decode=bool(scheduler_output.scheduled_spec_decode_tokens),
             )
         with record_function_or_nullcontext(
             "gpu_model_runner: set_async_sampled_token_ids"
@@ -7329,7 +7585,8 @@ class GPUModelRunner(
         # this is in the critical path of every single model
         # forward loop, this has caused perf issue for a disagg
         # setup.
-        pinned = self.sampled_token_ids_pinned_cpu[: sampled_token_ids.shape[0]]
+        n_rows, n_cols = sampled_token_ids.shape
+        pinned = self.sampled_token_ids_pinned_cpu[:n_rows, :n_cols]
         pinned.copy_(sampled_token_ids, non_blocking=True)
         self.transfer_event.record()
         self.transfer_event.synchronize()
