@@ -58,7 +58,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+from vllm.model_executor.layers.quantization.utils.flashinfer_moe import (
     swap_w13_to_w31,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
