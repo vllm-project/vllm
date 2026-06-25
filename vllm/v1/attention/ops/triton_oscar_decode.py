@@ -250,9 +250,6 @@ def _oscar_full_dequant_kv(
     tl.store(V_out_ptr + vo_base + d_offs, v_recon.to(tl.float16), mask=d_mask)
 
 
-_layout_cache: dict = {}
-
-
 def oscar_decode_attention(
     q_rot: torch.Tensor,  # [B, Hq, D] — query already rotated by R_k
     kv_cache: torch.Tensor,  # [num_blocks, block_size, Hk, slot_size] uint8

@@ -177,7 +177,6 @@ class OscarAttentionImpl(AttentionImpl["OscarMetadata"]):
         self.head_size = head_size
         self.scale = scale
         self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
-        self.num_kv_groups = num_heads // self.num_kv_heads
         self.kv_cache_dtype = kv_cache_dtype
 
         self.cfg = OscarConfig.from_cache_dtype(kv_cache_dtype, head_size)

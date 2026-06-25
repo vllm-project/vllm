@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # (rotation matrix paths, clip ratios, mixed-precision window sizes) are read
 # from environment variables, mirroring the SGLang reference UX so that a
 # checkpoint's RotationZoo artifacts can be pointed at without re-exporting a
-# model. See ``OscarConfig.from_env``.
+# model. See ``OscarConfig.from_cache_dtype``.
 OSCAR_PRESETS: dict[str, dict] = {
     # OSCAR's headline 2-bit KV configuration (BPE ~2.28 in the paper).
     "oscar_int2": {"key_quant_bits": 2, "value_quant_bits": 2},
