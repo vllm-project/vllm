@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from vllm.v1.kv_offload.base import ReqContext
+from vllm.v1.kv_offload.base import LookupResult, ReqContext
 from vllm.v1.kv_offload.tiering.base import JobMetadata, JobResult
 from vllm.v1.kv_offload.tiering.p2p import manager as manager_module
 from vllm.v1.kv_offload.tiering.p2p.manager import (
@@ -115,40 +115,40 @@ class TestRemoteIdFromParams:
 
 
 class TestLookup:
-    def test_lookup_returns_false_without_kv_params(self):
+    def test_lookup_returns_miss_without_kv_params(self):
         mgr = _make_manager()
         ctx = _req_context(kv_params=None)
-        assert mgr.lookup(b"key", ctx) is False
+        assert mgr.lookup(b"key", ctx) is LookupResult.MISS
 
-    def test_lookup_returns_false_without_required_fields(self):
+    def test_lookup_returns_miss_without_required_fields(self):
         mgr = _make_manager()
         ctx = _req_context(kv_params={"remote_host": "x"})
-        assert mgr.lookup(b"key", ctx) is False
+        assert mgr.lookup(b"key", ctx) is LookupResult.MISS
 
-    def test_lookup_returns_true_for_valid_request(self):
+    def test_lookup_returns_hit_for_valid_request(self):
         mgr = _make_manager()
         ctx = _req_context(kv_params=_kv_params())
-        assert mgr.lookup(b"key", ctx) is True
+        assert mgr.lookup(b"key", ctx) is LookupResult.HIT
 
-    def test_lookup_returns_false_for_failed_request(self):
+    def test_lookup_returns_miss_for_failed_request(self):
         mgr = _make_manager()
         mgr._failed_req_ids.add("req-1")
         ctx = _req_context(kv_params=_kv_params(kv_request_id="req-1"))
-        assert mgr.lookup(b"key", ctx) is False
+        assert mgr.lookup(b"key", ctx) is LookupResult.MISS
 
-    def test_lookup_returns_true_for_different_request_id(self):
+    def test_lookup_returns_hit_for_different_request_id(self):
         mgr = _make_manager()
         mgr._failed_req_ids.add("req-1")
         ctx = _req_context(kv_params=_kv_params(kv_request_id="req-2"))
-        assert mgr.lookup(b"key", ctx) is True
+        assert mgr.lookup(b"key", ctx) is LookupResult.HIT
 
-    def test_lookup_returns_false_without_do_remote_prefill(self):
+    def test_lookup_returns_miss_without_do_remote_prefill(self):
         """do_remote_prefill=False means the request was not routed for
         remote prefill — local prefill should run instead, so lookup()
-        returns False even though host/port/kv_request_id are present."""
+        returns MISS even though host/port/kv_request_id are present."""
         mgr = _make_manager()
         ctx = _req_context(kv_params=_kv_params(do_remote_prefill=False))
-        assert mgr.lookup(b"key", ctx) is False
+        assert mgr.lookup(b"key", ctx) is LookupResult.MISS
 
 
 # ---------------------------------------------------------------------------
@@ -1175,7 +1175,7 @@ class TestPollOnce:
 
     def test_failed_load_records_kv_request_id(self):
         """A LoadResult(success=False) from session.poll() must add its
-        kv_request_id to _failed_req_ids so future lookups return False."""
+        kv_request_id to _failed_req_ids so future lookups return MISS."""
         mgr = _make_manager()
         peer = "10.0.0.1:8000"
         sess = _FakeSession(
