@@ -12,7 +12,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.tracing import instrument
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -103,6 +103,10 @@ class CPUModelRunner(GPUModelRunner):
             cpu_tl.sample_recovered_tokens_kernel
         )
 
+        import vllm.v1.worker.mamba_utils
+
+        vllm.v1.worker.mamba_utils.batch_memcpy_kernel = cpu_tl.batch_memcpy_kernel
+
     @instrument(span_name="Loading (CPU)")
     def load_model(self, load_dummy_weights: bool = False) -> None:
         if load_dummy_weights:
@@ -153,9 +157,25 @@ class CPUModelRunner(GPUModelRunner):
         pass
 
     def _zero_block_ids(self, block_ids: list[int]) -> None:
-        # CPU attention assigns -INF to logits at invalid positions,
-        # so stale KV cache data never affects computation.
-        pass
+        # Zero full-attention blocks to prevent stale data corruption on partial writes.
+        # Encoder-only (runner-only) layers are not FullAttentionSpec, so the
+        # spec filter below already excludes them; no runner-only skip needed.
+        seen_ptrs: set[int] = set()
+        for group in self.kv_cache_config.kv_cache_groups:
+            if not isinstance(group.kv_cache_spec, FullAttentionSpec):
+                continue
+            for layer_name in group.layer_names:
+                ctx = self.compilation_config.static_forward_context.get(layer_name)
+                if ctx is None:
+                    continue
+                kv = ctx.kv_cache
+                if not isinstance(kv, torch.Tensor):
+                    continue
+                if kv.data_ptr() in seen_ptrs:
+                    continue
+                seen_ptrs.add(kv.data_ptr())
+                for block_id in block_ids:
+                    kv[block_id].zero_()
 
     # =========================================================================
     # CPU-safe overrides for speculative decoding methods
