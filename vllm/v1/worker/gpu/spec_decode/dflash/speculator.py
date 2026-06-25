@@ -278,6 +278,9 @@ class DFlashSpeculator(DraftModelSpeculator):
                 self.hidden_states[:num_target_tokens],
                 self.context_positions[:num_target_tokens],
             )
+            # DFlash processes all speculative tokens in one forward pass,
+            # so the real token count is num_query_tokens.
+            self._prepare_eplb_forward(num_query_tokens)
             self._generate_draft(
                 num_reqs,
                 num_query_tokens,
@@ -353,6 +356,10 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.block_tables.slot_mappings[:, :num_tokens_padded],
             self.kv_cache_config,
         )
+
+        # DFlash processes all speculative tokens in one forward pass,
+        # so the real token count is num_query_tokens.
+        self._prepare_eplb_forward(num_query_tokens)
 
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
             assert self.query_cudagraph_manager is not None

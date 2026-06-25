@@ -203,6 +203,26 @@ class SupportsHash(Protocol):
     def compute_hash(self) -> str: ...
 
 
+_config_hash_cache: dict[int, str] = {}
+
+
+def compute_hash_cached(config: SupportsHash) -> str:
+    """Cache config.compute_hash() by object identity.
+
+    Config objects (ModelConfig, etc.) are long-lived singletons that never
+    mutate after construction, but compute_hash() is expensive (JSON
+    serialization + SHA-256).  This utility avoids recomputing the hash on
+    every forward pass while keeping a single consistent key type for all
+    lookup paths.
+    """
+    key = id(config)
+    result = _config_hash_cache.get(key)
+    if result is None:
+        result = config.compute_hash()
+        _config_hash_cache[key] = result
+    return result
+
+
 class SupportsMetricsInfo(Protocol):
     def metrics_info(self) -> dict[str, str]: ...
 

@@ -165,6 +165,14 @@ class DraftModelSpeculator(BaseSpeculator):
         """Inject EPLB state after construction."""
         self.eplb_state = eplb_state
 
+    def _prepare_eplb_forward(self, num_unpadded_tokens: int) -> None:
+        """Call EPLB prepare_forward if EPLB is active for the draft model."""
+        if self.eplb_state is not None:
+            self.eplb_state.prepare_forward(
+                self.speculative_config.draft_model_config,
+                num_unpadded_tokens,
+            )
+
     def set_attn(
         self,
         model_state: ModelState,

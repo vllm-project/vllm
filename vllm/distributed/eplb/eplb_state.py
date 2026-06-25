@@ -34,6 +34,7 @@ import torch
 from torch.distributed import ProcessGroup, all_reduce
 
 from vllm.config import ModelConfig, ParallelConfig
+from vllm.config.utils import compute_hash_cached
 from vllm.distributed.parallel_state import (
     get_ep_group,
     get_eplb_group,
@@ -506,7 +507,7 @@ class EplbState:
                 ``UBatchSlice`` objects describing each micro-batch's
                 token range.  When ``None``, only ``tensors[0]`` is filled.
         """
-        model_state = self.model_states.get(model_config.compute_hash())
+        model_state = self.model_states.get(compute_hash_cached(model_config))
         if model_state is None or model_state.num_unpadded_tokens_tensors is None:
             return
         tensors = model_state.num_unpadded_tokens_tensors
