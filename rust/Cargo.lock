@@ -2813,7 +2813,7 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 [[package]]
 name = "openai-harmony"
 version = "0.0.8"
-source = "git+https://github.com/Inferact/openai-harmony?rev=9c0fb6024a39b484b3c56df88d8a0ee738c28a35#9c0fb6024a39b484b3c56df88d8a0ee738c28a35"
+source = "git+https://github.com/Inferact/openai-harmony?rev=cfbadbc66f3158692bfeefa961e363aa7a6b9708#cfbadbc66f3158692bfeefa961e363aa7a6b9708"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
