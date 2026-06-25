@@ -82,6 +82,18 @@ else
   uv pip install cmake torch ninja
 fi
 
+# DeepEPv2 compiles against NCCL GIN device headers that are only in the
+# pip package, not the apt libnccl-dev package. torch pins an older NCCL,
+# so re-install the required version after torch.
+if [ -n "${NCCL_VERSION:-}" ] && [ "${CUDA_VERSION_MAJOR}" -ge 13 ]; then
+  echo "Installing nvidia-nccl-cu${CUDA_VERSION_MAJOR}==${NCCL_VERSION} for DeepEPv2 GIN headers"
+  if [ -z "$VIRTUAL_ENV" ]; then
+    uv pip install --system "nvidia-nccl-cu${CUDA_VERSION_MAJOR}==${NCCL_VERSION}" --no-deps
+  else
+    uv pip install "nvidia-nccl-cu${CUDA_VERSION_MAJOR}==${NCCL_VERSION}" --no-deps
+  fi
+fi
+
 # fetch nvshmem
 ARCH=$(uname -m)
 case "${ARCH,,}" in
