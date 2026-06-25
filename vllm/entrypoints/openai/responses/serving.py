@@ -753,12 +753,6 @@ class OpenAIServingResponses(OpenAIServing):
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
     ):
-        if request.tool_choice not in ("auto", "none"):
-            raise NotImplementedError(
-                "Only 'auto' or 'none' tool_choice is supported "
-                "in response API with Harmony"
-            )
-
         if self.parser is not None:
             # HarmonyParser doesn't need chat_template_kwargs
             # TODO: Unify adjust_request() call with non-harmony branch
