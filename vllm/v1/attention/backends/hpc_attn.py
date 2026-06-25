@@ -191,6 +191,9 @@ class HpcAttentionBackend(AttentionBackend):
         "fp8_e4m3",
     ]
 
+    # Avoid attention abstracted method call cache insert
+    forward_includes_kv_cache_update: bool = True
+
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [64]
