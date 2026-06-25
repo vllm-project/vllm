@@ -2,7 +2,7 @@
 
 use winnow::Parser;
 use winnow::error::{ContextError, ErrMode, ModalResult, Needed, StrContext, StrContextValue};
-use winnow::stream::{Offset, Partial, Stream};
+use winnow::stream::{FindSlice, Offset, Partial, Stream};
 
 use crate::tool::{Result, ToolParserError};
 
@@ -44,6 +44,7 @@ pub fn partial_prefix_len(buffer: &str, token: &str) -> usize {
 }
 
 /// Parse a safe text run before the next marker.
+/// This is the single-marker variant of [`safe_text_len_mul`].
 ///
 /// Returns the text length in bytes, and advances the input.
 pub fn safe_text_len(input: &mut Partial<&str>, marker: &str) -> ModalResult<usize> {
@@ -68,6 +69,7 @@ pub fn safe_text_len(input: &mut Partial<&str>, marker: &str) -> ModalResult<usi
 }
 
 /// Parse a safe text run before the earliest next marker.
+/// This is the multi-marker variant of [`safe_text_len`].
 ///
 /// Returns the text length in bytes, and advances the input.
 pub fn safe_text_len_mul(input: &mut Partial<&str>, markers: &[&str]) -> ModalResult<usize> {
@@ -76,7 +78,7 @@ pub fn safe_text_len_mul(input: &mut Partial<&str>, markers: &[&str]) -> ModalRe
         return incomplete();
     }
 
-    if let Some(start_idx) = markers.iter().filter_map(|marker| text.find(marker)).min() {
+    if let Some(start_idx) = find_slice_mul(text, markers) {
         input.next_slice(start_idx);
         return Ok(start_idx);
     }
@@ -89,6 +91,19 @@ pub fn safe_text_len_mul(input: &mut Partial<&str>, markers: &[&str]) -> ModalRe
 
     input.next_slice(emit_len);
     Ok(emit_len)
+}
+
+#[inline(always)]
+fn find_slice_mul(text: &str, markers: &[&str]) -> Option<usize> {
+    let range = match markers {
+        // Use the fast specialized `winnow::stream::FindSlice` impl for 1-3 markers.
+        [first] => text.find_slice(*first),
+        [first, second] => text.find_slice((*first, *second)),
+        [first, second, third] => text.find_slice((*first, *second, *third)),
+        // Fall back to a linear scan for 4+ markers.
+        _ => return markers.iter().filter_map(|marker| text.find(marker)).min(),
+    };
+    range.map(|range| range.start)
 }
 
 /// Streaming scan state for a buffered marker search [`take_until_marker`],
@@ -454,6 +469,18 @@ mod tests {
         assert_eq!(len, "hello".len());
         assert_eq!(input.offset_from(&checkpoint), "hello".len());
         assert_eq!(*input, "<|tool");
+    }
+
+    #[test]
+    fn safe_text_len_mul_skips_false_same_prefix_candidate() {
+        let mut input = Partial::new("hello<not_marker><|tool_call>");
+        let checkpoint = input.checkpoint();
+
+        let len = safe_text_len_mul(&mut input, &["<|tool_call>", "<|channel>thought\n"]).unwrap();
+
+        assert_eq!(len, "hello<not_marker>".len());
+        assert_eq!(input.offset_from(&checkpoint), "hello<not_marker>".len());
+        assert_eq!(*input, "<|tool_call>");
     }
 
     #[test]
