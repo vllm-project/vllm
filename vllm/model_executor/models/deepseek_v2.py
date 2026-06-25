@@ -1408,10 +1408,12 @@ class DeepseekV2Model(nn.Module):
             )
 
         if hidden_states.shape[0] != positions.shape[0]:
-            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
-            hidden_states = hidden_states[: positions.shape[0]]
-            residual = tensor_model_parallel_all_gather(residual, 0)
-            residual = residual[: positions.shape[0]]
+            combined_states = torch.cat([hidden_states, residual], dim=-1)
+            combined_states = tensor_model_parallel_all_gather(combined_states, 0)
+            combined_states = combined_states[: positions.shape[0]]
+            hidden_states, residual = combined_states.split(
+                [self.hidden_size, self.hidden_size], dim=-1
+            )
 
         hidden_states, _ = self.norm(hidden_states, residual)
         if len(aux_hidden_states) > 0:
