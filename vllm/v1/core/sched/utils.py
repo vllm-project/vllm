@@ -3,7 +3,10 @@
 import contextlib
 from collections.abc import Sequence
 
-from vllm.sampling_params import RepetitionDetectionParams
+from vllm.sampling_params import (
+    _MAX_ABSOLUTE_PATTERN_SIZE,
+    RepetitionDetectionParams,
+)
 from vllm.v1.request import Request, RequestStatus
 
 
@@ -44,6 +47,13 @@ def check_sequence_repetition(
         min_pattern_size = 1
 
     if max_pattern_size <= 0 or min_count < 2 or min_pattern_size > max_pattern_size:
+        return False
+
+    if max_pattern_size > _MAX_ABSOLUTE_PATTERN_SIZE:
+        return False
+
+    scan_work = (max_pattern_size - min_pattern_size + 1) * min_count
+    if scan_work > _MAX_ABSOLUTE_PATTERN_SIZE * 10:
         return False
 
     for pattern_len in range(

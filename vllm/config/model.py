@@ -218,6 +218,12 @@ class ModelConfig:
     specified in `SamplingParams`. The default value comes the default for the
     OpenAI Chat Completions API. -1 means no cap, i.e. all (output_length *
     vocab_size) logprobs are allowed to be returned and it may cause OOM."""
+    max_repetition_detection_pattern_size: int = 2048
+    """Maximum ``max_pattern_size`` a request may set in
+    ``repetition_detection``.  Limits scheduler CPU work per generated token.
+    0 disables the feature (rejects any non-zero max_pattern_size).
+    -1 removes the cap (up to the absolute hard limit in
+    RepetitionDetectionParams)."""
     logprobs_mode: LogprobsMode = "raw_logprobs"
     """Indicates the content returned in the logprobs and prompt_logprobs.
     Supported mode:
