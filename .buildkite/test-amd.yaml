@@ -1588,10 +1588,10 @@ steps:
   - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
 
 - label: Basic Models Tests (Other) # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
-  torch_nightly: true
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -2393,7 +2393,7 @@ steps:
 #------------------------------------------------------  mi300 · weight_loading  -------------------------------------------------------#
 
 - label: Weight Loading Multiple GPU # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_2
   num_gpus: 2
@@ -2405,7 +2405,7 @@ steps:
   - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-amd.txt
 
 - label: Weight Loading Multiple GPU - Large Models # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_2
   num_gpus: 2
@@ -3318,7 +3318,7 @@ steps:
 #------------------------------------------------------  mi355 · weight_loading  -------------------------------------------------------#
 
 - label: Weight Loading Multiple GPU # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_2
   num_gpus: 2
@@ -3330,7 +3330,7 @@ steps:
   - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-amd.txt
 
 - label: Weight Loading Multiple GPU - Large Models # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_2
   working_dir: "/vllm-workspace/tests"
