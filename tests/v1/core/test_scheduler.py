@@ -1302,6 +1302,101 @@ def test_no_spec_tokens_scheduled_for_prefill_chunks():
     assert len(output.scheduled_spec_decode_tokens[req.request_id]) == num_spec_tokens
 
 
+def _model_output(scheduler, output, sampled):
+    """Feed `sampled` (per-request list) back to the scheduler."""
+    req_ids = list(output.num_scheduled_tokens.keys())
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=req_ids,
+            req_id_to_index={r: i for i, r in enumerate(req_ids)},
+            sampled_token_ids=sampled,
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+
+def test_spec_decode_padding_first_decode_step():
+    """A request taking its first decode step (whole prompt already computed via
+    a prefix-cache hit) is padded with placeholder (-1) spec tokens so it enters
+    the worker with the same 1 + num_spec_tokens shape as the other speculative
+    decodes, keeping the batch uniform.
+    """
+    num_spec = 3
+    scheduler = create_scheduler(
+        num_speculative_tokens=num_spec,
+        enable_prefix_caching=True,
+        block_size=16,
+    )
+    # Two identical 33-token prompts: 2 full blocks (32 tokens) get cached, so a
+    # second identical request hits num_computed == num_prompt_tokens - 1.
+    r1, r2 = create_requests(
+        num_requests=2, num_tokens=33, same_prompt=True, max_tokens=16
+    )
+
+    # Drive r1 through prefill so its prompt blocks are cached, then give it real
+    # drafts so it is a running speculative decode (1 + num_spec shape).
+    scheduler.add_request(r1)
+    out = scheduler.schedule()
+    assert out.num_scheduled_tokens[r1.request_id] == 33
+    _model_output(scheduler, out, [[100]])
+    scheduler.update_draft_token_ids(DraftTokenIds([r1.request_id], [[1, 2, 3]]))
+
+    # r2 arrives; its whole prompt is a prefix-cache hit -> first decode step.
+    scheduler.add_request(r2)
+    out = scheduler.schedule()
+
+    # r1 verifies its real drafts.
+    assert out.scheduled_spec_decode_tokens[r1.request_id] == [1, 2, 3]
+    # r2 is padded to the 1 + num_spec shape with placeholder (-1) drafts.
+    assert out.num_scheduled_tokens[r2.request_id] == 1 + num_spec
+    assert out.scheduled_spec_decode_tokens[r2.request_id] == [-1] * num_spec
+
+
+def test_spec_decode_padding_skipped_with_prefill_in_batch():
+    """Padding is skipped when the batch contains a prefill chunk: the batch is
+    already mixed/non-uniform, so padding a new decode request buys nothing.
+    """
+    num_spec = 3
+    scheduler = create_scheduler(
+        num_speculative_tokens=num_spec,
+        enable_prefix_caching=True,
+        block_size=16,
+        max_num_batched_tokens=64,
+    )
+    # r_warm + r_candidate share a prompt so r_candidate gets a full prefix hit.
+    r_warm, r_candidate = create_requests(
+        num_requests=2, num_tokens=33, same_prompt=True, max_tokens=1
+    )
+    # r_long has a different, long prompt that prefills over multiple chunks.
+    (r_long,) = create_requests(num_requests=1, num_tokens=100, max_tokens=16)
+
+    # Warm the prefix cache with r_warm's prompt (it finishes; blocks stay cached).
+    scheduler.add_request(r_warm)
+    out = scheduler.schedule()
+    assert out.num_scheduled_tokens[r_warm.request_id] == 33
+    _model_output(scheduler, out, [[100]])
+    assert r_warm.request_id in scheduler.finished_req_ids
+
+    # Start r_long; after one chunk it remains a prefill chunk in the running queue.
+    scheduler.add_request(r_long)
+    out = scheduler.schedule()
+    _model_output(scheduler, out, [[]])  # still prefilling, no sampled token
+    assert r_long.is_prefill_chunk
+
+    # r_candidate arrives (prefix-cache hit -> first decode step) alongside the
+    # in-flight prefill chunk.
+    scheduler.add_request(r_candidate)
+    out = scheduler.schedule()
+
+    # The batch has a prefill chunk, so r_candidate is NOT padded.
+    assert r_long.request_id in out.num_scheduled_tokens
+    assert out.num_scheduled_tokens[r_candidate.request_id] == 1
+    assert r_candidate.request_id not in out.scheduled_spec_decode_tokens
+
+
 def test_scheduler_stats_waiting_queues():
     """Test that scheduler stats correctly report waiting and skipped_waiting queues."""
     # Create scheduler with limited capacity so we can have waiting requests
