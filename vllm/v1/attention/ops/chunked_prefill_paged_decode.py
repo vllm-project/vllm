@@ -25,14 +25,17 @@ def has_native_kv_cache_layout(
     key_cache: torch.Tensor,
     value_cache: torch.Tensor,
 ) -> bool:
-    """Return whether KV cache blocks can use the native ROCm pairing.
+    """Return whether KV cache blocks can use native ROCm paged attention.
 
-    The native reshape_and_cache writer assumes packed blocks. If cache update
-    needs reshape_and_cache_flash for a stride-padded hybrid layout, decode
-    should use the matching Triton path too.
+    The native ROCm paged attention op expects the legacy K layout
+    [block, head, head_size/x, block_size, x] paired with the V layout
+    [block, head, head_size, block_size]. The packed 4D content-dim layout
+    should use the stride-aware Triton path instead.
     """
     return (
-        key_cache.stride(0) == key_cache.shape[1:].numel()
+        key_cache.dim() == 5
+        and value_cache.dim() == 4
+        and key_cache.stride(0) == key_cache.shape[1:].numel()
         and value_cache.stride(0) == value_cache.shape[1:].numel()
     )
 
