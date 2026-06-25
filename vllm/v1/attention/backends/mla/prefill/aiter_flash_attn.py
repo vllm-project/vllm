@@ -31,16 +31,15 @@ class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
     def supports_compute_capability(cls, device_capability: "DeviceCapability") -> bool:
         if not current_platform.is_rocm():
             return False
-        from vllm.platforms.rocm import on_gfx942, on_gfx950
+        from vllm.platforms.rocm import on_mi3xx
 
-        return on_gfx950() or on_gfx942()
+        return on_mi3xx()
 
     @classmethod
     def is_available(cls) -> bool:
-        import vllm.envs as envs
-        from vllm._aiter_ops import is_aiter_found_and_supported
+        from vllm._aiter_ops import rocm_aiter_ops
 
-        return envs.VLLM_ROCM_USE_AITER and is_aiter_found_and_supported()
+        return rocm_aiter_ops.is_enabled()
 
     def __init__(
         self,

@@ -302,7 +302,7 @@ class TestROCmAiterFAPrefillSelection:
     def test_supports_compute_capability_on_rocm(self):
         from vllm.v1.attention.backends.mla.prefill import aiter_flash_attn as mod
 
-        # Gating is decided by on_gfx950()/on_gfx942(), not by capability
+        # Gating is decided by on_mi3xx(), not by capability
         capability = MagicMock()
 
         with patch.object(mod.current_platform, "is_rocm", return_value=False):
@@ -312,8 +312,7 @@ class TestROCmAiterFAPrefillSelection:
 
         with (
             patch.object(mod.current_platform, "is_rocm", return_value=True),
-            patch("vllm.platforms.rocm.on_gfx950", return_value=False),
-            patch("vllm.platforms.rocm.on_gfx942", return_value=False),
+            patch("vllm.platforms.rocm.on_mi3xx", return_value=False),
         ):
             assert not mod.AiterFlashAttnPrefillBackend.supports_compute_capability(
                 capability
@@ -321,45 +320,20 @@ class TestROCmAiterFAPrefillSelection:
 
         with (
             patch.object(mod.current_platform, "is_rocm", return_value=True),
-            patch("vllm.platforms.rocm.on_gfx950", return_value=True),
-            patch("vllm.platforms.rocm.on_gfx942", return_value=False),
+            patch("vllm.platforms.rocm.on_mi3xx", return_value=True),
         ):
             assert mod.AiterFlashAttnPrefillBackend.supports_compute_capability(
                 capability
             )
 
-        with (
-            patch.object(mod.current_platform, "is_rocm", return_value=True),
-            patch("vllm.platforms.rocm.on_gfx950", return_value=False),
-            patch("vllm.platforms.rocm.on_gfx942", return_value=True),
-        ):
-            assert mod.AiterFlashAttnPrefillBackend.supports_compute_capability(
-                capability
-            )
-
-    def test_is_available_requires_env_and_aiter(self):
-        import vllm.envs as envs
+    def test_is_available_delegates_to_rocm_aiter_ops(self):
+        from vllm._aiter_ops import rocm_aiter_ops
         from vllm.v1.attention.backends.mla.prefill import aiter_flash_attn as mod
 
-        with patch.object(envs, "VLLM_ROCM_USE_AITER", False):
+        with patch.object(rocm_aiter_ops, "is_enabled", return_value=False):
             assert not mod.AiterFlashAttnPrefillBackend.is_available()
 
-        with (
-            patch.object(envs, "VLLM_ROCM_USE_AITER", True),
-            patch(
-                "vllm._aiter_ops.is_aiter_found_and_supported",
-                return_value=False,
-            ),
-        ):
-            assert not mod.AiterFlashAttnPrefillBackend.is_available()
-
-        with (
-            patch.object(envs, "VLLM_ROCM_USE_AITER", True),
-            patch(
-                "vllm._aiter_ops.is_aiter_found_and_supported",
-                return_value=True,
-            ),
-        ):
+        with patch.object(rocm_aiter_ops, "is_enabled", return_value=True):
             assert mod.AiterFlashAttnPrefillBackend.is_available()
 
     def test_auto_select_prefers_aiter_fa_on_rocm(self):
