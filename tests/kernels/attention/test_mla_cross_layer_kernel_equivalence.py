@@ -421,6 +421,116 @@ def test_flashattn_mla_dense_decode_unified_slot_view():
     assert (out_ref - out_view).abs().max().item() == 0.0
 
 
+def test_flashattn_mla_dense_fp8_decode_unified_slot_view():
+    """FLASH_ATTN_MLA must read a standard fp8 unified-slot block-major
+    cache with bf16 queries and dispatch the FA3 MLA q_v kernel."""
+    try:
+        from vllm.vllm_flash_attn import flash_attn_varlen_func
+    except ImportError:
+        pytest.skip("vllm_flash_attn is not available")
+    from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
+    from vllm.v1.attention.backends.mla.flashattn_mla import (
+        FlashAttnMLADecodeMetadata,
+        FlashAttnMLAImpl,
+    )
+
+    if not flash_attn_supports_mla():
+        pytest.skip("FA3 MLA requires a Hopper device")
+
+    torch.manual_seed(0)
+    dev = "cuda"
+    dt = torch.bfloat16
+    fp8_dt = torch.float8_e4m3fn
+    kv_lora_rank = 512
+    rope_dim = 64
+    entry = kv_lora_rank + rope_dim  # 576
+    h_q = 16
+    page = 64
+    num_blocks = 64
+    bs = 4
+    n_layers = 3
+    layer = 1
+
+    q_pe = torch.randn(bs, h_q, rope_dim, device=dev, dtype=dt) * 0.1
+    q_nope = torch.randn(bs, h_q, kv_lora_rank, device=dev, dtype=dt) * 0.1
+    kv_data = torch.randn(num_blocks, page, entry, device=dev, dtype=dt) * 0.1
+
+    k_scale = torch.tensor(0.5, device=dev, dtype=torch.float32)
+    fp8_kv_data = (kv_data / k_scale).to(fp8_dt)
+
+    # (A) contiguous per-layer reference.
+    cache_contiguous = fp8_kv_data.clone().contiguous()
+
+    # (B) unified slot: view one layer -> inflated stride(0), non-zero offset.
+    unified = (torch.randn(num_blocks, n_layers, page, entry, device=dev) * 0.1).to(
+        fp8_dt
+    )
+    unified[:, layer].copy_(fp8_kv_data)
+    cache_view = unified[:, layer]
+    assert not cache_view.is_contiguous()
+    assert cache_view.stride(0) == n_layers * page * entry
+
+    max_blk = num_blocks // bs
+    block_table = torch.arange(num_blocks, device=dev, dtype=torch.int32).view(
+        bs, max_blk
+    )
+    seq_lens = torch.full((bs,), max_blk * page, device=dev, dtype=torch.int32)
+    cu_seqlens_q = torch.arange(bs + 1, device=dev, dtype=torch.int32)
+
+    decode = FlashAttnMLADecodeMetadata(
+        block_table=block_table,
+        seq_lens=seq_lens,
+        query_start_loc=cu_seqlens_q,
+        max_query_len=1,
+        max_seq_len=int(seq_lens.max().item()),
+        scheduler_metadata=None,
+        max_num_splits=0,
+        dcp_tot_seq_lens=None,
+    )
+    attn_metadata = type("_AttnMetadata", (), {"decode": decode})()
+    layer_obj = type("_Layer", (), {"_k_scale": k_scale})()
+
+    impl = object.__new__(FlashAttnMLAImpl)
+    impl.kv_cache_dtype = "fp8"
+    impl.kv_lora_rank = kv_lora_rank
+    impl.qk_rope_head_dim = rope_dim
+    impl.num_kv_heads = 1
+    impl.scale = entry**-0.5
+    impl.need_to_return_lse_for_decode = False
+    impl.dcp_world_size = 1
+    impl.dcp_rank = 0
+
+    def run_ref(cache):
+        cache = cache.to(dt) * k_scale.to(dt)
+        kv_c_cache = cache[..., :kv_lora_rank]
+        k_pe_cache = cache[..., kv_lora_rank:]
+        out = flash_attn_varlen_func(
+            q=q_pe,
+            k=k_pe_cache.unsqueeze(-2),  # Add head dim of 1
+            v=kv_c_cache.unsqueeze(-2),  # Add head dim of 1
+            q_v=q_nope,
+            max_seqlen_q=1,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_k=int(seq_lens.max().item()),
+            seqused_k=seq_lens,
+            block_table=block_table,
+            softmax_scale=entry**-0.5,
+            causal=True,
+            fa_version=3,
+        )
+        return out.clone().float()
+
+    def run_impl(cache):
+        out, _ = impl.forward_mqa((q_nope, q_pe), cache, attn_metadata, layer_obj)
+        return out.clone().float()
+
+    out_ref = run_ref(cache_contiguous)
+    out_view = run_impl(cache_view)
+    assert torch.isfinite(out_ref).all()
+    assert out_ref.abs().max().item() > 0.0
+    assert (out_ref - out_view).abs().max().item() == 0.0
+
+
 def test_flashmla_dense_fp8_decode_unified_slot_view():
     """FlashMLA dense fp8 decode (FLASHMLA backend with quantized KV cache)
     must read a unified-slot block-major view bit-identically to a contiguous
