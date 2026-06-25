@@ -1017,10 +1017,7 @@ class Worker(WorkerBase):
             # reload path may instantiate CustomOps / kernels (e.g.
             # FlashInfer CUTLASS MoE) whose __init__ reads
             # get_current_vllm_config().
-            with (
-                set_current_vllm_config(self.vllm_config),
-                torch.device(self.device),
-            ):
+            with torch.device(self.device):
                 initialize_layerwise_reload(model)
 
         self._is_checkpoint_format = is_checkpoint_format
@@ -1055,10 +1052,7 @@ class Worker(WorkerBase):
             # run per-layer postprocessing (process_weights_after_loading) that
             # instantiates kernels reading get_current_vllm_config() — e.g.
             # FlashInfer CUTLASS MoE for unquantized MoE models.
-            with (
-                set_current_vllm_config(self.vllm_config),
-                torch.device(self.device),
-            ):
+            with torch.device(self.device):
                 if self._is_checkpoint_format:
                     if typed_update_info.update_kind != "dense":
                         raise ValueError(
@@ -1122,10 +1116,7 @@ class Worker(WorkerBase):
             )
 
             model = self.model_runner.model
-            with (
-                set_current_vllm_config(self.vllm_config),
-                torch.device(self.device),
-            ):
+            with torch.device(self.device):
                 finalize_layerwise_reload(model, self.model_config)
 
         self._weight_update_active = False
