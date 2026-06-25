@@ -11,6 +11,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 )
 from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
+    LookupResult,
     OffloadingEvent,
     OffloadingManager,
     OffloadKey,
@@ -18,7 +19,10 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
 )
-from vllm.v1.kv_offload.cpu.common import METRIC_STORES_SKIPPED, CPULoadStoreSpec
+from vllm.v1.kv_offload.cpu.common import (
+    CPULoadStoreSpec,
+    CPUOffloadingMetrics,
+)
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
 from vllm.v1.kv_offload.cpu.policies.base import BlockStatus, CachePolicy
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
@@ -109,7 +113,7 @@ class CPUOffloadingManager(OffloadingManager):
         return RequestOffloadingContext()
 
     @override
-    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         if self.counts is not None:
             if key in self.counts:
                 self.counts.move_to_end(key)
@@ -120,10 +124,10 @@ class CPUOffloadingManager(OffloadingManager):
                 self.counts[key] = 1
         block = self._policy.get(key)
         if block is None:
-            return False
+            return LookupResult.MISS
         if not block.is_ready:
-            return None  # write in-flight; caller should retry
-        return True
+            return LookupResult.HIT_PENDING
+        return LookupResult.HIT
 
     @override
     def prepare_load(
@@ -137,6 +141,7 @@ class CPUOffloadingManager(OffloadingManager):
             assert block is not None, f"Block {key!r} not found in cache"
             assert block.is_ready, f"Block {key!r} is not ready for reading"
             if block.ref_cnt == 0:
+                self._policy.mark_non_evictable(key)
                 self._num_evictable_cache_blocks -= 1  # ref_cnt 0 -> 1
                 assert self._num_evictable_cache_blocks >= 0
             block.ref_cnt += 1
@@ -158,6 +163,7 @@ class CPUOffloadingManager(OffloadingManager):
             block.ref_cnt -= 1
             if block.ref_cnt == 0:
                 self._num_evictable_cache_blocks += 1  # ref_cnt 1 -> 0
+                self._policy.mark_evictable(key)
 
     @override
     def prepare_store(
@@ -245,6 +251,7 @@ class CPUOffloadingManager(OffloadingManager):
                 if block is not None and not block.is_ready:
                     block.ref_cnt = 0
                     self._num_evictable_cache_blocks += 1
+                    self._policy.mark_evictable(key)
                     stored_keys.append(key)
         else:
             for key in keys:
@@ -282,13 +289,21 @@ class CPUOffloadingManager(OffloadingManager):
             self.events.clear()
 
     def get_stats(self) -> OffloadingConnectorStats | None:
-        if self.store_threshold < 2:
-            return None
-
         stats = OffloadingConnectorStats()
-        stats.increase_counter(
-            METRIC_STORES_SKIPPED,
-            self.stores_skipped_in_current_batch,
+
+        # Compute cache usage.
+        num_used = (
+            self._num_allocated_blocks
+            - len(self._free_list)
+            - self._num_evictable_cache_blocks
         )
-        self.stores_skipped_in_current_batch = 0
+        usage = num_used / self._num_blocks if self._num_blocks > 0 else 0.0
+        stats.set_gauge(CPUOffloadingMetrics.CPU_CACHE_USAGE_PERC, usage)
+
+        if self.store_threshold >= 2:
+            stats.increase_counter(
+                CPUOffloadingMetrics.STORES_SKIPPED,
+                self.stores_skipped_in_current_batch,
+            )
+            self.stores_skipped_in_current_batch = 0
         return stats

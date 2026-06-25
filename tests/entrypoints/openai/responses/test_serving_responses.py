@@ -230,7 +230,7 @@ class TestInitializeToolSessions:
         instance = OpenAIServingResponses(
             engine_client=engine_client,
             models=models,
-            openai_serving_render=MagicMock(),
+            online_renderer=MagicMock(),
             request_logger=None,
             chat_template=None,
             chat_template_content_format="auto",
@@ -316,7 +316,7 @@ class TestValidateGeneratorInput:
         instance = OpenAIServingResponses(
             engine_client=engine_client,
             models=models,
-            openai_serving_render=MagicMock(),
+            online_renderer=MagicMock(),
             request_logger=None,
             chat_template=None,
             chat_template_content_format="auto",
@@ -379,15 +379,22 @@ async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
     serving = OpenAIServingResponses(
         engine_client=engine_client,
         models=models,
-        openai_serving_render=MagicMock(),
+        online_renderer=MagicMock(),
         request_logger=None,
         chat_template=None,
         chat_template_content_format="auto",
         reasoning_parser="qwen3",
     )
 
+    request = ResponsesRequest(input="hi", tools=[], stream=False)
+    response_parser = serving._make_response_parser(
+        request,
+        tokenizer,
+        serving._effective_chat_template_kwargs(request),
+    )
+
     # Build a SimpleContext with thinking tokens in the output.
-    context = SimpleContext()
+    context = SimpleContext(response_parser=response_parser)
     token_ids = [1, 10, 2, 20]  # <think> 10 </think> 20 -> reasoning token count = 1
     completion = CompletionOutput(
         index=0,
@@ -412,7 +419,6 @@ async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
     async def dummy_result_generator():
         yield None
 
-    request = ResponsesRequest(input="hi", tools=[], stream=False)
     sampling_params = SamplingParams(max_tokens=16)
     metadata = RequestResponseMetadata(request_id="req")
 
@@ -636,9 +642,9 @@ class TestHarmonyPreambleStreaming:
         assert "response.output_text.done" not in type_names
 
 
-def _make_simple_context_with_output(text, token_ids):
+def _make_simple_context_with_output(text, token_ids, response_parser=None):
     """Create a SimpleContext with a RequestOutput containing the given text."""
-    ctx = SimpleContext()
+    ctx = SimpleContext(response_parser=response_parser)
     completion = CompletionOutput(
         index=0,
         text=text,
@@ -678,7 +684,7 @@ def _make_serving_instance_with_reasoning():
     serving = OpenAIServingResponses(
         engine_client=engine_client,
         models=models,
-        openai_serving_render=MagicMock(),
+        online_renderer=MagicMock(),
         request_logger=None,
         chat_template=None,
         chat_template_content_format="auto",
@@ -719,6 +725,7 @@ def _mock_parser_with_reasoning(serving, delta_sequence: list[DeltaMessage]):
     mock_parser_instance.parse_delta = mock_parse_delta
     mock_parser_instance.is_reasoning_end = MagicMock(return_value=False)
     serving.parser = MagicMock(return_value=mock_parser_instance)
+    return mock_parser_instance
 
 
 class TestStreamingReasoningToContentTransition:
@@ -745,12 +752,12 @@ class TestStreamingReasoningToContentTransition:
             DeltaMessage(reasoning=" end", content="hello"),  # mixed delta
             DeltaMessage(content=" world"),
         ]
-        _mock_parser_with_reasoning(serving, delta_sequence)
+        response_parser = _mock_parser_with_reasoning(serving, delta_sequence)
         # Create contexts for each streaming chunk
         contexts = [
-            _make_simple_context_with_output("chunk1", [10]),
-            _make_simple_context_with_output("chunk2", [20]),
-            _make_simple_context_with_output("chunk3", [30]),
+            _make_simple_context_with_output("chunk1", [10], response_parser),
+            _make_simple_context_with_output("chunk2", [20], response_parser),
+            _make_simple_context_with_output("chunk3", [30], response_parser),
         ]
 
         async def result_generator():
@@ -767,7 +774,7 @@ class TestStreamingReasoningToContentTransition:
             request=request,
             sampling_params=sampling_params,
             result_generator=result_generator(),
-            context=SimpleContext(),
+            context=SimpleContext(response_parser=response_parser),
             model_name="test-model",
             tokenizer=MagicMock(),
             request_metadata=metadata,
@@ -813,11 +820,11 @@ class TestStreamingReasoningToContentTransition:
             DeltaMessage(reasoning="thinking"),
             DeltaMessage(content="answer"),
         ]
-        _mock_parser_with_reasoning(serving, delta_sequence)
+        response_parser = _mock_parser_with_reasoning(serving, delta_sequence)
 
         contexts = [
-            _make_simple_context_with_output("chunk1", [10]),
-            _make_simple_context_with_output("chunk2", [20]),
+            _make_simple_context_with_output("chunk1", [10], response_parser),
+            _make_simple_context_with_output("chunk2", [20], response_parser),
         ]
 
         async def result_generator():
@@ -834,7 +841,7 @@ class TestStreamingReasoningToContentTransition:
             request=request,
             sampling_params=sampling_params,
             result_generator=result_generator(),
-            context=SimpleContext(),
+            context=SimpleContext(response_parser=response_parser),
             model_name="test-model",
             tokenizer=MagicMock(),
             request_metadata=metadata,
@@ -875,11 +882,11 @@ class TestStreamingReasoningToContentTransition:
             DeltaMessage(reasoning="step 1"),
             DeltaMessage(reasoning=" step 2"),
         ]
-        _mock_parser_with_reasoning(serving, delta_sequence)
+        response_parser = _mock_parser_with_reasoning(serving, delta_sequence)
 
         contexts = [
-            _make_simple_context_with_output("chunk1", [10]),
-            _make_simple_context_with_output("chunk2", [20]),
+            _make_simple_context_with_output("chunk1", [10], response_parser),
+            _make_simple_context_with_output("chunk2", [20], response_parser),
         ]
 
         async def result_generator():
@@ -896,7 +903,7 @@ class TestStreamingReasoningToContentTransition:
             request=request,
             sampling_params=sampling_params,
             result_generator=result_generator(),
-            context=SimpleContext(),
+            context=SimpleContext(response_parser=response_parser),
             model_name="test-model",
             tokenizer=MagicMock(),
             request_metadata=metadata,
@@ -936,10 +943,10 @@ class TestAutoToolStreaming:
     @staticmethod
     async def _collect_events(delta_sequence: list[DeltaMessage]):
         serving = _make_serving_instance_with_reasoning()
-        _mock_parser_with_reasoning(serving, delta_sequence)
+        response_parser = _mock_parser_with_reasoning(serving, delta_sequence)
 
         contexts = [
-            _make_simple_context_with_output("chunk", [i])
+            _make_simple_context_with_output("chunk", [i], response_parser)
             for i in range(len(delta_sequence))
         ]
 
@@ -974,7 +981,7 @@ class TestAutoToolStreaming:
             request=request,
             sampling_params=sampling_params,
             result_generator=result_generator(),
-            context=SimpleContext(),
+            context=SimpleContext(response_parser=response_parser),
             model_name="test-model",
             tokenizer=MagicMock(),
             request_metadata=metadata,
