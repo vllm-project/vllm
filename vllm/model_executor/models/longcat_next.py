@@ -701,6 +701,126 @@ class LongcatNextTransformerHead(nn.Module):
 # =============================================================================
 
 
+class LongcatNextVisualEncoder(nn.Module):
+    """Visual encoder for LongCat-Next.
+
+    Wraps vLLM's Qwen2_5_VisionTransformer but removes the merger,
+    since LongCat-Next uses OmniVisualBridge instead.
+    Returns hidden_states in window-indexed order.
+    """
+
+    def __init__(
+        self,
+        vision_config: Any,
+        norm_eps: float = 1e-6,
+        quant_config: Any = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VisionTransformer
+
+        # Create the full vLLM vision transformer (includes merger)
+        self._vision_transformer = Qwen2_5_VisionTransformer(
+            vision_config=vision_config,
+            norm_eps=norm_eps,
+            quant_config=quant_config,
+            prefix=prefix,
+        )
+
+        # Remove the merger since LongCat-Next doesn't use it
+        if hasattr(self._vision_transformer, "merger"):
+            del self._vision_transformer.merger
+
+        # Expose attributes for convenience
+        self.patch_embed = self._vision_transformer.patch_embed
+        self.blocks = self._vision_transformer.blocks
+        self.hidden_size = self._vision_transformer.hidden_size
+        self.num_heads = self._vision_transformer.num_heads
+        self.spatial_merge_size = self._vision_transformer.spatial_merge_size
+        self.spatial_merge_unit = self._vision_transformer.spatial_merge_unit
+        self.fullatt_block_indexes = self._vision_transformer.fullatt_block_indexes
+        self.window_size = self._vision_transformer.window_size
+        self.patch_size = self._vision_transformer.patch_size
+        self.dtype = self._vision_transformer.dtype
+        self.device = self._vision_transformer.device
+
+    def prepare_encoder_metadata(
+        self, grid_thw: list[list[int]]
+    ) -> dict[str, torch.Tensor]:
+        return self._vision_transformer.prepare_encoder_metadata(grid_thw)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        grid_thw: list[list[int]] | None = None,
+        *,
+        encoder_metadata: dict[str, torch.Tensor] | None = None,
+        require_window_index: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        hidden_states = x.to(device=self.device, dtype=self.dtype)
+        hidden_states = self.patch_embed(hidden_states)
+
+        seq_len = hidden_states.shape[0]
+        if encoder_metadata is None:
+            if grid_thw is None:
+                raise ValueError("Either grid_thw or encoder_metadata must be provided")
+            encoder_metadata = self.prepare_encoder_metadata(grid_thw)
+
+        rotary_pos_emb_cos = encoder_metadata["rotary_pos_emb_cos"]
+        rotary_pos_emb_sin = encoder_metadata["rotary_pos_emb_sin"]
+        window_index = encoder_metadata["window_index"]
+        cu_seqlens = encoder_metadata["cu_seqlens"]
+        cu_window_seqlens = encoder_metadata["cu_window_seqlens"]
+        max_seqlen_full = encoder_metadata["max_seqlen_full"]
+        max_seqlen_window = encoder_metadata["max_seqlen_window"]
+        sequence_lengths_full = encoder_metadata.get("sequence_lengths_full")
+        sequence_lengths_window = encoder_metadata.get("sequence_lengths_window")
+
+        hidden_states = hidden_states.reshape(
+            seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
+        )
+        hidden_states = hidden_states[window_index, :, :]
+        hidden_states = hidden_states.reshape(seq_len, -1)
+        hidden_states = hidden_states.unsqueeze(1)
+
+        for layer_num, blk in enumerate(self.blocks):
+            if layer_num in self.fullatt_block_indexes:
+                cu_seqlens_now = cu_seqlens
+                max_seqlen_now = max_seqlen_full
+                sequence_lengths_now = sequence_lengths_full
+            else:
+                cu_seqlens_now = cu_window_seqlens
+                max_seqlen_now = max_seqlen_window
+                sequence_lengths_now = sequence_lengths_window
+
+            hidden_states = blk(
+                hidden_states,
+                cu_seqlens=cu_seqlens_now,
+                rotary_pos_emb_cos=rotary_pos_emb_cos,
+                rotary_pos_emb_sin=rotary_pos_emb_sin,
+                max_seqlen=max_seqlen_now,
+                sequence_lengths=sequence_lengths_now,
+            )
+
+        # Skip merger — squeeze the middle dim instead
+        hidden_states = hidden_states.squeeze(1)
+
+        if require_window_index:
+            return hidden_states, window_index
+        return hidden_states
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        """Load weights, bridging the `_vision_transformer` wrapper."""
+        stripped_weights = [
+            (name[len("_vision_transformer.") :], loaded_weight)
+            if name.startswith("_vision_transformer.")
+            else (name, loaded_weight)
+            for name, loaded_weight in weights
+        ]
+        loaded = self._vision_transformer.load_weights(stripped_weights)
+        return {f"_vision_transformer.{n}" for n in loaded}
+
+
 class MLP(nn.Module):
     """Simple MLP with separate gate/up/down projections."""
 
@@ -1002,14 +1122,11 @@ class LongcatNextVisualTokenizer(nn.Module):
         self.config = config
 
         # Visual encoder (Qwen2.5-VL style ViT without merger)
-        from vllm.model_executor.models.qwen2_5_vl import Qwen2_5_VisionTransformer
-
-        self.visual_model = Qwen2_5_VisionTransformer(
+        self.visual_model = LongcatNextVisualEncoder(
             vision_config=config.visual_config,
             norm_eps=getattr(config, "rms_norm_eps", 1e-6),
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "visual_model"),
-            skip_merger=True,
         )
 
         # Bridge + quantizer
@@ -1036,7 +1153,7 @@ class LongcatNextVisualTokenizer(nn.Module):
         encoder_metadata = self.visual_model.prepare_encoder_metadata(grid_thw.tolist())
         window_index = encoder_metadata["window_index"]
 
-        # Run visual encoder (skip_merger=True returns window-indexed output)
+        # Run visual encoder (LongcatNextVisualEncoder returns window-indexed output)
         visual_embed = self.visual_model(
             pixel_values,
             grid_thw=None,
