@@ -157,20 +157,6 @@ class CpuPlatform(Platform):
             logger.warning_once("Dual-Batch Overlap is not supported on CPU, disabled.")
             parallel_config.enable_dbo = False
 
-        if torch.cpu._is_amx_tile_supported() and (
-            model_config is not None
-            and model_config.get_num_layers_by_block_type(
-                parallel_config, "linear_attention"
-            )
-            > 0
-        ):
-            cache_config.enable_prefix_caching = False
-            scheduler_config.enable_chunked_prefill = False
-            logger.warning_once(
-                "Disabled unsupported prefix caching and chunked prefill "
-                "for linear attention on AMX CPU platforms."
-            )
-
         # Note: workaround for v1 gpu_model_runner
         from vllm.config import CompilationMode
 
