@@ -32,7 +32,7 @@ impl CombinedParser {
 
     fn parse_tool(&mut self, content: &str, output: &mut UnifiedParserOutput) -> Result<()> {
         let Some(tool) = self.tool.as_mut() else {
-            output.push_text(content.to_string());
+            output.push_text(content);
             return Ok(());
         };
 
@@ -228,7 +228,7 @@ mod tests {
             chunk: &str,
             output: &mut crate::tool::ToolParserOutput,
         ) -> crate::tool::Result<()> {
-            output.normal_text.push_str(chunk);
+            output.push_text(chunk);
             Ok(())
         }
 
@@ -256,7 +256,7 @@ mod tests {
             _chunk: &str,
             output: &mut crate::tool::ToolParserOutput,
         ) -> crate::tool::Result<()> {
-            output.normal_text.push_str("committed");
+            output.push_text("committed");
             Err(crate::tool::ToolParserError::ParsingFailed {
                 message: "synthetic failure".to_string(),
             })

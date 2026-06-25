@@ -23,7 +23,7 @@ pub(super) fn openai_tools(tools: &[Tool]) -> Vec<OpenAiTool> {
 
 pub(super) fn feed_parser(parser: &mut dyn ToolParser, chunks: &[&str]) -> (String, usize) {
     let result = collect_stream(parser, chunks);
-    (result.normal_text, result.calls.len())
+    (result.normal_text(), result.calls().len())
 }
 
 pub(super) fn feed_external_parser(

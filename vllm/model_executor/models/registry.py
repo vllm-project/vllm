@@ -72,8 +72,6 @@ _TEXT_GENERATION_MODELS = {
     # [Decoder-only]
     "AfmoeForCausalLM": ("afmoe", "AfmoeForCausalLM"),
     "ApertusForCausalLM": ("apertus", "ApertusForCausalLM"),
-    "AquilaModel": ("llama", "LlamaForCausalLM"),
-    "AquilaForCausalLM": ("llama", "LlamaForCausalLM"),  # AquilaChat2
     "ArceeForCausalLM": ("arcee", "ArceeForCausalLM"),
     "ArcticForCausalLM": ("arctic", "ArcticForCausalLM"),
     "AXK1ForCausalLM": ("AXK1", "AXK1ForCausalLM"),
@@ -731,6 +729,8 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "MiniMaxVL01ForConditionalGeneration": "0.23.0",
     "BaiChuanForCausalLM": "0.23.0",
     "BaichuanForCausalLM": "0.23.0",
+    "AquilaModel": "0.24.0",
+    "AquilaForCausalLM": "0.24.0",
 }
 
 _OOT_SUPPORTED_MODELS = {

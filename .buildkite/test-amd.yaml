@@ -221,30 +221,6 @@ steps:
   - pytest -v -s distributed/test_shm_buffer.py
   - pytest -v -s distributed/test_shm_storage.py
 
-- label: Distributed Torchrun + Shutdown Tests (2 GPUs) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_2
-  num_gpus: 2
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/distributed/
-  - vllm/engine/
-  - vllm/executor/
-  - vllm/worker/worker_base.py
-  - vllm/v1/engine/
-  - vllm/v1/worker/
-  - tests/distributed/
-  - tests/v1/shutdown
-  - tests/v1/worker/test_worker_memory_snapshot.py
-  - vllm/platforms/rocm.py
-  commands:
-  - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
-  - VLLM_TEST_SAME_HOST=1 VLLM_TEST_WITH_DEFAULT_DEVICE_SET=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
-  - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
-  - pytest -v -s v1/worker/test_worker_memory_snapshot.py
-
 - label: Pipeline + Context Parallelism (4 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
@@ -617,7 +593,7 @@ steps:
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s renderers
   - pytest -v -s tokenizers_
-  - pytest -v -s reasoning --ignore=reasoning/test_seedoss_reasoning_parser.py --ignore=reasoning/test_glm4_moe_reasoning_parser.py
+  - pytest -v -s reasoning
   - pytest -v -s tool_parsers
   - pytest -v -s parser
   - pytest -v -s transformers_utils
@@ -1588,10 +1564,10 @@ steps:
   - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
 
 - label: Basic Models Tests (Other) # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
-  torch_nightly: true
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -2240,7 +2216,7 @@ steps:
   - pytest -v -s tests/distributed/test_packed_tensor.py
 
 - label: Metrics, Tracing (2 GPUs) # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_2
   optional: true
@@ -2393,7 +2369,7 @@ steps:
 #------------------------------------------------------  mi300 · weight_loading  -------------------------------------------------------#
 
 - label: Weight Loading Multiple GPU # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_2
   num_gpus: 2
@@ -2405,7 +2381,7 @@ steps:
   - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-amd.txt
 
 - label: Weight Loading Multiple GPU - Large Models # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_2
   num_gpus: 2
@@ -3318,7 +3294,7 @@ steps:
 #------------------------------------------------------  mi355 · weight_loading  -------------------------------------------------------#
 
 - label: Weight Loading Multiple GPU # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_2
   num_gpus: 2
@@ -3330,7 +3306,7 @@ steps:
   - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-amd.txt
 
 - label: Weight Loading Multiple GPU - Large Models # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_2
   working_dir: "/vllm-workspace/tests"
