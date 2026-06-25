@@ -51,6 +51,8 @@ _DSV4_COMBINE_TOPK_SWA_WARMUP_CASES = (
     # compress_ratio, topk, topk_width, N
     (1, 0, 512, 512),
     (4, 512, 512, 512 * 4),
+    # DSv4-Pro C4A traffic uses top-k 1024 with N=1024.
+    (4, 1024, 1024, 1024),
     (128, 8192, 8192, 8192 * 128),
     # Real C128A traffic also specializes N=1 in one call path.
     (128, 8192, 8192, 1),
