@@ -61,6 +61,17 @@ fn effective_served_model_names(model: &str, served_model_name: &[String]) -> Ve
     }
 }
 
+/// Choose the gRPC listener host. It follows the HTTP TCP host when there is
+/// one; otherwise (unix socket or inherited fd) it defaults to IPv4 loopback
+/// rather than all interfaces, so the side-car is never accidentally
+/// network-exposed.
+fn grpc_bind_host(listener_mode: &HttpListenerMode) -> &str {
+    match listener_mode {
+        HttpListenerMode::BindTcp { host, .. } => host.as_str(),
+        HttpListenerMode::BindUnix { .. } | HttpListenerMode::InheritedFd { .. } => "127.0.0.1",
+    }
+}
+
 /// Build the shared application state for one configured model and one engine
 /// client.
 async fn build_state(config: &Config) -> Result<Arc<AppState>> {
@@ -170,15 +181,9 @@ where
 
     // Optionally bind the gRPC Generate server on a separate port. Bind
     // synchronously here so bind errors (port in use, permission denied, ...)
-    // surface before we start serving, rather than being deferred until
-    // shutdown. The gRPC listener follows the same host as the HTTP listener so
-    // that enabling --grpc-port does not accidentally expose the service on all
-    // interfaces when HTTP is intentionally local-only.
+    // surface before serving rather than being deferred until shutdown.
     let grpc_setup = if let Some(grpc_port) = config.grpc_port {
-        let grpc_host = match &config.listener_mode {
-            HttpListenerMode::BindTcp { host, .. } => host.as_str(),
-            HttpListenerMode::BindUnix { .. } | HttpListenerMode::InheritedFd { .. } => "0.0.0.0",
-        };
+        let grpc_host = grpc_bind_host(&config.listener_mode);
         let grpc_listener = TcpListener::bind((grpc_host, grpc_port))
             .await
             .with_context(|| format!("failed to bind gRPC listener on {grpc_host}:{grpc_port}"))?;
@@ -420,5 +425,24 @@ mod tests {
             effective_served_model_names("backend-model", &served_names),
             served_names
         );
+    }
+
+    #[test]
+    fn grpc_bind_host_follows_http_tcp_host() {
+        let mode = HttpListenerMode::BindTcp {
+            host: "0.0.0.0".to_string(),
+            port: 8000,
+        };
+        assert_eq!(grpc_bind_host(&mode), "0.0.0.0");
+    }
+
+    #[test]
+    fn grpc_bind_host_defaults_to_loopback_without_tcp_host() {
+        let unix = HttpListenerMode::BindUnix {
+            path: "/tmp/vllm.sock".to_string(),
+        };
+        let inherited = HttpListenerMode::InheritedFd { fd: 3 };
+        assert_eq!(grpc_bind_host(&unix), "127.0.0.1");
+        assert_eq!(grpc_bind_host(&inherited), "127.0.0.1");
     }
 }
