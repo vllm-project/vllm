@@ -22,7 +22,6 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     TransferTopology,
-    effective_block_size,
     get_current_attn_backend,
     get_current_attn_backends,
 )
@@ -529,7 +528,7 @@ class MooncakeConnectorScheduler:
         sw_sizes_tokens: list[tuple[int, int]] = [
             (
                 g.kv_cache_spec.sliding_window,
-                effective_block_size(g.kv_cache_spec.block_size, cp_world_size),
+                g.kv_cache_spec.block_size * cp_world_size,
             )
             if isinstance(g.kv_cache_spec, SlidingWindowSpec)
             else (0, self.block_size)

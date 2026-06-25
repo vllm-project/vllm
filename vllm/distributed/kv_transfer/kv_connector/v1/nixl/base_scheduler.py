@@ -13,7 +13,6 @@ from vllm import envs
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     EngineId,
-    effective_block_size,
     yield_req_data,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -131,7 +130,7 @@ class NixlBaseConnectorScheduler:
         sw_sizes_tokens: list[tuple[int, int]] = [
             (
                 g.kv_cache_spec.sliding_window,
-                effective_block_size(g.kv_cache_spec.block_size, cp_world_size),
+                g.kv_cache_spec.block_size * cp_world_size,
             )
             if isinstance(g.kv_cache_spec, SlidingWindowSpec)
             else (0, self.block_size)
