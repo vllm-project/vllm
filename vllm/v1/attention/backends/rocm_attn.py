@@ -247,8 +247,9 @@ class RocmAttentionBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        # K and V are packed into the content dim: logical (B, H, N, 2*C).
-        return (num_blocks, num_kv_heads, block_size, 2 * head_size)
+        # Store K/V as separate head groups so ROCm can cheaply expose
+        # independent K and V cache views.
+        return (num_blocks, 2 * num_kv_heads, block_size, head_size)
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
@@ -375,7 +376,7 @@ class RocmAttentionImpl(AttentionImpl):
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
-                [2, num_blocks, block_size, num_kv_heads, head_size]
+                [num_blocks, 2 * num_kv_heads, block_size, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -413,7 +414,7 @@ class RocmAttentionImpl(AttentionImpl):
                 layer,
             )
 
-        key_cache, value_cache = kv_cache.split(self.head_size, dim=-1)
+        key_cache, value_cache = kv_cache.split(self.num_kv_heads, dim=1)
 
         if is_quantized_kv_cache(self.kv_cache_dtype):
             key_cache = key_cache.view(self.fp8_dtype)
@@ -473,8 +474,10 @@ class RocmAttentionImpl(AttentionImpl):
     ):
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             return
-        # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
-        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+        # (B, 2*H, N, hs) -> ((B, N, H, hs), (B, N, H, hs))
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(
+            self.num_kv_heads, dim=-2
+        )
         triton_reshape_and_cache_flash(
             key,
             value,
@@ -503,10 +506,12 @@ class RocmAttentionImpl(AttentionImpl):
     ):
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             return
-        # Packed logical (B, H, N, 2*C) -> (B, N, H, 2*C); split K/V on the
-        # content dim (flash layout) for the fused rope+cache kernel.
+        # Packed logical (B, 2*H, N, C) -> (B, N, 2*H, C); split K/V on the
+        # head-group dim (flash layout) for the fused rope+cache kernel.
         kv_cache_transposed = kv_cache.transpose(1, 2)
-        key_cache, value_cache = kv_cache_transposed.split(self.head_size, dim=-1)
+        key_cache, value_cache = kv_cache_transposed.split(
+            self.num_kv_heads, dim=-2
+        )
         flash_layout = True
 
         is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)
