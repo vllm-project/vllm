@@ -286,11 +286,6 @@ class HpcRopeNorm(CustomOp, HpcModule):
 
         qkv = qkv[:num_actual_tokens]
 
-        attn_metadata.hpc_kv_written = True
-        attn_metadata.hpc_prefill_q_scale = None
-        attn_metadata.hpc_decode_q_scale = None
-        attn_metadata.hpc_split_k_flag = None
-
         num_prefill_tokens = num_actual_tokens - num_decode_tokens
 
         # KV cache for the FP8 path is stored as uint8; view it as fp8 so the

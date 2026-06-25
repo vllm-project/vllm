@@ -172,6 +172,10 @@ class HpcAttnMetadataBuilder(AttentionMetadataBuilder[HpcAttnMetadata]):
             seq_lens=seq_lens,
             block_table_tensor=block_table_tensor,
             qo_indptr=qo_indptr,
+            hpc_kv_written=True,
+            hpc_prefill_q_scale=None,
+            hpc_decode_q_scale=None,
+            hpc_split_k_flag=None,
         )
 
 
@@ -461,11 +465,5 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
                     new_kv_included=True,
                     splitk=self.splitk,
                 )
-
-        if hpc_kv_written:
-            attn_metadata.hpc_kv_written = False
-            attn_metadata.hpc_prefill_q_scale = None
-            attn_metadata.hpc_decode_q_scale = None
-            attn_metadata.hpc_split_k_flag = None
 
         return output_padded
