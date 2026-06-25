@@ -46,6 +46,7 @@ from vllm.v1.kv_offload.tiering.p2p.session.server import (
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.tiering.base import JobId
     from vllm.v1.kv_offload.tiering.p2p.data import DataTransport
+    from vllm.v1.kv_offload.tiering.p2p.tiering_callbacks import TieringCallbacks
 
 logger = init_logger(__name__)
 
@@ -95,6 +96,7 @@ class P2PSession:
         local_id: str,
         transport: DataTransport,
         local_block_len: int,
+        tiering_callbacks: TieringCallbacks | None = None,
         conn: ControlConnection | None = None,
     ) -> None:
         self.peer_id = peer_id
@@ -117,7 +119,12 @@ class P2PSession:
         self._new_fetch_ids: list[str] = []
 
         self._client = ClientRole(peer_id=peer_id, send=self._send)
-        self._server = ServerRole(peer_id=peer_id, transport=transport, send=self._send)
+        self._server = ServerRole(
+            peer_id=peer_id,
+            transport=transport,
+            send=self._send,
+            tiering_callbacks=tiering_callbacks,
+        )
 
         if conn is not None:
             self.attach_connection(conn)

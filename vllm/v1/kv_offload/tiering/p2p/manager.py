@@ -31,6 +31,10 @@ from vllm.v1.kv_offload.tiering.base import (
 from vllm.v1.kv_offload.tiering.p2p.control import ControlTransport, ZmqTransport
 from vllm.v1.kv_offload.tiering.p2p.data import DataTransport, NixlTransport
 from vllm.v1.kv_offload.tiering.p2p.session import P2PSession
+from vllm.v1.kv_offload.tiering.p2p.tiering_callbacks import (
+    TieringCallbacks,
+    _AllMissCallbacks,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
@@ -135,6 +139,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         port: int = 7777,
         backends: list[str] | None = None,
         num_threads: int = 4,
+        tiering_callbacks: TieringCallbacks | None = None,
         **kwargs,
     ) -> None:
         """Initialize the P2P secondary tier manager.
@@ -162,9 +167,17 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             num_threads: NIXL agent worker threads for the UCX-only
                 branch. Ignored when ``backends`` contains a non-UCX
                 entry.
+            tiering_callbacks: TieringManager-facing callbacks invoked
+                by the producer's server role to answer inbound
+                ``LookupMsg`` traffic. Defaults to
+                :class:`_AllMissCallbacks`, which preserves today's
+                all-miss behaviour until the real adapter is wired.
             **kwargs: Reserved for future tier-specific options.
         """
         super().__init__(offloading_spec, primary_kv_view, tier_type)
+        self._tiering_callbacks: TieringCallbacks = (
+            tiering_callbacks if tiering_callbacks is not None else _AllMissCallbacks()
+        )
         port = int(port)
         self._local_id = f"{host}:{port}"
 
@@ -506,6 +519,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             local_id=self._local_id,
             transport=self._data,
             local_block_len=self._data.block_len,
+            tiering_callbacks=self._tiering_callbacks,
             conn=conn,
         )
         self._sessions[peer_id] = session
@@ -527,6 +541,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                     local_id=self._local_id,
                     transport=self._data,
                     local_block_len=self._data.block_len,
+                    tiering_callbacks=self._tiering_callbacks,
                     conn=conn,
                 )
                 logger.info(

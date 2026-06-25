@@ -13,9 +13,13 @@ completes its own load.
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 
+import numpy as np
 import pytest
 
+from vllm.v1.kv_offload.base import LookupResult, OffloadKey, ReqContext
+from vllm.v1.kv_offload.tiering.base import JobMetadata
 from vllm.v1.kv_offload.tiering.p2p.session import (
     LoadResult,
     P2PSession,
@@ -190,11 +194,67 @@ def _peer_connect_msg(
     return msg
 
 
+class FakeCallbacks:
+    """Configurable :class:`TieringCallbacks` for server-role tests.
+
+    ``stored`` is the dict of ready blocks (hash → primary block_id).
+    ``pending`` and ``retry`` script the first lookup() result for those
+    hashes; subsequent lookups behave normally (a hash that promised
+    HIT_PENDING / RETRY can later be promoted to HIT by adding it to
+    ``stored`` and removing it from ``pending``/``retry``). ``calls``
+    captures every callback invocation in order for assertions.
+    """
+
+    def __init__(
+        self,
+        stored: dict[OffloadKey, int] | None = None,
+        pending: set[OffloadKey] | None = None,
+        retry: set[OffloadKey] | None = None,
+    ) -> None:
+        self.stored: dict[OffloadKey, int] = dict(stored or {})
+        self.pending: set[OffloadKey] = set(pending or ())
+        self.retry: set[OffloadKey] = set(retry or ())
+        self._next_job_id: int = 1000
+        self.calls: list[tuple] = []
+
+    def lookup(self, key: OffloadKey, ctx: ReqContext) -> LookupResult:
+        self.calls.append(("lookup", key, ctx.req_id))
+        if key in self.pending:
+            return LookupResult.HIT_PENDING
+        if key in self.retry:
+            return LookupResult.RETRY
+        if key in self.stored:
+            return LookupResult.HIT
+        return LookupResult.MISS
+
+    def create_store_job(
+        self,
+        keys: Sequence[OffloadKey],
+        ctx: ReqContext,
+    ) -> JobMetadata:
+        keys_list = list(keys)
+        self.calls.append(("create_store_job", tuple(keys_list), ctx.req_id))
+        block_ids = np.array([self.stored[k] for k in keys_list], dtype=np.int32)
+        job_id = self._next_job_id
+        self._next_job_id += 1
+        return JobMetadata(
+            job_id=job_id,
+            keys=keys_list,
+            block_ids=block_ids,
+            is_promotion=False,
+            req_context=ctx,
+        )
+
+    def finish_request(self, ctx: ReqContext) -> None:
+        self.calls.append(("finish_request", ctx.req_id))
+
+
 def _make_session(
     conn: FakeConnection | None = None,
     transport: FakeDataTransport | None = None,
     peer_id: str = "peer:8000",
     local_id: str = "local:9000",
+    tiering_callbacks: FakeCallbacks | None = None,
 ) -> tuple[P2PSession, FakeConnection, FakeDataTransport]:
     if conn is None:
         conn = FakeConnection(peer_id=peer_id)
@@ -205,6 +265,7 @@ def _make_session(
         local_id=local_id,
         transport=transport,  # type: ignore[arg-type]
         local_block_len=transport.block_len,
+        tiering_callbacks=tiering_callbacks,  # type: ignore[arg-type]
         conn=conn,  # type: ignore[arg-type]
     )
     return session, conn, transport
@@ -553,9 +614,9 @@ class TestLookupFlow:
         assert ("req-1", b"hB") not in session._client._lookups
         assert ("req-2", b"hC") in session._client._lookups
 
-    def test_server_stub_replies_with_all_misses(self):
-        """Producer-side stub: incoming LookupMsg yields LookupRespMsg
-        echoing the same hashes with hits=[False, ...]."""
+    def test_server_default_callbacks_replies_all_misses(self):
+        """Default ``_AllMissCallbacks`` ⇒ incoming LookupMsg yields one
+        LookupRespMsg with the same hashes and ``hits=[False, ...]``."""
         session, conn, _ = _make_session()
         _activate(session, conn)
 
@@ -577,6 +638,265 @@ class TestLookupFlow:
         assert resp[LookupRespMsg.KV_REQUEST_ID] == "req-1"
         assert resp[LookupRespMsg.BLOCK_HASHES] == [b"hX", b"hY", b"hZ"]
         assert resp[LookupRespMsg.HITS] == [False, False, False]
+
+
+# ---------------------------------------------------------------------------
+# Server-side handling of inbound LookupMsg (TieringCallbacks-driven)
+# ---------------------------------------------------------------------------
+
+
+def _send_lookup(conn: FakeConnection, kv_request_id: str, hashes: list[bytes]):
+    conn.enqueue(
+        {
+            TYPE_KEY: LookupMsg.TYPE,
+            LookupMsg.KV_REQUEST_ID: kv_request_id,
+            LookupMsg.BLOCK_HASHES: list(hashes),
+        }
+    )
+
+
+def _lookup_resps(conn: FakeConnection, since: int = 0) -> list[dict]:
+    return [m for m in conn._sent[since:] if m[TYPE_KEY] == LookupRespMsg.TYPE]
+
+
+class TestServerLookupHandling:
+    def test_immediate_hits_create_one_store_job(self):
+        """All-HIT batch: one create_store_job call with all keys, one
+        LookupRespMsg with hits=[True]*N, finish_request fires immediately,
+        and `available` is populated for the eventual fetch."""
+        cb = FakeCallbacks(stored={b"hA": 1, b"hB": 2, b"hC": 3})
+        session, conn, _ = _make_session(tiering_callbacks=cb)
+        _activate(session, conn)
+
+        sent_before = len(conn._sent)
+        _send_lookup(conn, "req-1", [b"hA", b"hB", b"hC"])
+        session.poll()
+
+        resps = _lookup_resps(conn, sent_before)
+        assert len(resps) == 1
+        assert resps[0][LookupRespMsg.BLOCK_HASHES] == [b"hA", b"hB", b"hC"]
+        assert resps[0][LookupRespMsg.HITS] == [True, True, True]
+
+        kinds = [c[0] for c in cb.calls]
+        assert kinds.count("create_store_job") == 1
+        cs = next(c for c in cb.calls if c[0] == "create_store_job")
+        assert cs[1] == (b"hA", b"hB", b"hC")
+        assert cb.calls[-1][0] == "finish_request"
+
+        # Hits are pinned in _outbound for the upcoming FetchMsg match.
+        assert set(session._server._outbound["req-1"].available) == {
+            b"hA",
+            b"hB",
+            b"hC",
+        }
+
+    def test_all_misses_no_store_job_finish_fires(self):
+        """All-MISS batch: no create_store_job call; one LookupRespMsg
+        with hits=[False]*N; finish_request fires immediately."""
+        cb = FakeCallbacks()
+        session, conn, _ = _make_session(tiering_callbacks=cb)
+        _activate(session, conn)
+
+        sent_before = len(conn._sent)
+        _send_lookup(conn, "req-1", [b"hA", b"hB"])
+        session.poll()
+
+        resps = _lookup_resps(conn, sent_before)
+        assert len(resps) == 1
+        assert resps[0][LookupRespMsg.HITS] == [False, False]
+        assert all(c[0] != "create_store_job" for c in cb.calls)
+        assert cb.calls[-1][0] == "finish_request"
+
+    def test_mixed_hit_miss_pending_partial_response(self):
+        """HIT and MISS resolve immediately; HIT_PENDING / RETRY defer.
+        First LookupRespMsg carries only the immediate resolutions."""
+        cb = FakeCallbacks(
+            stored={b"hA": 1},
+            pending={b"hB"},
+            retry={b"hD"},
+        )
+        session, conn, _ = _make_session(tiering_callbacks=cb)
+        _activate(session, conn)
+
+        sent_before = len(conn._sent)
+        _send_lookup(conn, "req-1", [b"hA", b"hB", b"hC", b"hD"])
+        session.poll()
+
+        resps = _lookup_resps(conn, sent_before)
+        assert len(resps) == 1
+        # immediate resolutions only — order: hits then misses
+        assert resps[0][LookupRespMsg.BLOCK_HASHES] == [b"hA", b"hC"]
+        assert resps[0][LookupRespMsg.HITS] == [True, False]
+        # batch is parked, finish_request not yet called
+        assert all(c[0] != "finish_request" for c in cb.calls)
+        assert len(session._server._lookup_batches) == 1
+
+    def test_pending_resolves_in_followup_creates_second_store_job(self):
+        """A HIT_PENDING hash that becomes HIT on a later poll fires a
+        follow-up LookupRespMsg with the resolution and a separate
+        create_store_job call for the newly-HIT key."""
+        cb = FakeCallbacks(stored={b"hA": 1}, pending={b"hB"})
+        session, conn, _ = _make_session(tiering_callbacks=cb)
+        _activate(session, conn)
+
+        sent_before = len(conn._sent)
+        _send_lookup(conn, "req-1", [b"hA", b"hB"])
+        session.poll()
+
+        # Promote hB.
+        cb.pending.discard(b"hB")
+        cb.stored[b"hB"] = 2
+
+        # Drive resolver via collect_results (called inside session.poll).
+        session.poll()
+
+        resps = _lookup_resps(conn, sent_before)
+        assert len(resps) == 2
+        first_hashes = resps[0][LookupRespMsg.BLOCK_HASHES]
+        assert first_hashes == [b"hA"]
+        assert resps[0][LookupRespMsg.HITS] == [True]
+        assert resps[1][LookupRespMsg.BLOCK_HASHES] == [b"hB"]
+        assert resps[1][LookupRespMsg.HITS] == [True]
+
+        cs_calls = [c for c in cb.calls if c[0] == "create_store_job"]
+        assert len(cs_calls) == 2
+        assert cs_calls[0][1] == (b"hA",)
+        assert cs_calls[1][1] == (b"hB",)
+        # finish_request fires once after the last resolve
+        assert sum(1 for c in cb.calls if c[0] == "finish_request") == 1
+        assert b"hA" in session._server._outbound["req-1"].available
+        assert b"hB" in session._server._outbound["req-1"].available
+
+    def test_pending_timeout_replies_miss_no_store_job(self):
+        """A HIT_PENDING hash that stays pending past
+        ``_LOOKUP_PENDING_TIMEOUT_S`` is force-MISS and never pinned."""
+        from vllm.v1.kv_offload.tiering.p2p.session.server import (
+            _LOOKUP_PENDING_TIMEOUT_S,
+        )
+
+        cb = FakeCallbacks(pending={b"hA"})
+        session, conn, _ = _make_session(tiering_callbacks=cb)
+        _activate(session, conn)
+
+        sent_before = len(conn._sent)
+        _send_lookup(conn, "req-1", [b"hA"])
+        session.poll()
+        # Initial poll: nothing immediate, batch parked, no LookupRespMsg.
+        assert _lookup_resps(conn, sent_before) == []
+
+        # Forge timestamp to trigger the timeout branch.
+        batch = next(iter(session._server._lookup_batches.values()))
+        batch.pending[b"hA"] = time.monotonic() - _LOOKUP_PENDING_TIMEOUT_S - 0.1
+
+        session.poll()
+
+        resps = _lookup_resps(conn, sent_before)
+        assert len(resps) == 1
+        assert resps[0][LookupRespMsg.BLOCK_HASHES] == [b"hA"]
+        assert resps[0][LookupRespMsg.HITS] == [False]
+        assert all(c[0] != "create_store_job" for c in cb.calls)
+        assert sum(1 for c in cb.calls if c[0] == "finish_request") == 1
+
+    def test_finish_request_called_per_lookup_msg_not_per_kv_request_id(self):
+        """Two LookupMsgs for the same kv_request_id get distinct ctxs
+        and two finish_request calls (one per batch)."""
+        cb = FakeCallbacks(stored={b"hA": 1, b"hB": 2})
+        session, conn, _ = _make_session(tiering_callbacks=cb)
+        _activate(session, conn)
+
+        _send_lookup(conn, "req-1", [b"hA"])
+        session.poll()
+        _send_lookup(conn, "req-1", [b"hB"])
+        session.poll()
+
+        finish_calls = [c for c in cb.calls if c[0] == "finish_request"]
+        assert len(finish_calls) == 2
+        # Distinct synthetic req_ids
+        assert finish_calls[0][1] != finish_calls[1][1]
+        # Both namespaced under the same kv_request_id
+        assert ":req-1:" in finish_calls[0][1]
+        assert ":req-1:" in finish_calls[1][1]
+
+    def test_close_fires_finish_request_for_open_batches(self):
+        """Tearing the session down with a parked batch still calls
+        finish_request so the TieringManager can release its state."""
+        cb = FakeCallbacks(pending={b"hA"})
+        session, conn, _ = _make_session(tiering_callbacks=cb)
+        _activate(session, conn)
+
+        _send_lookup(conn, "req-1", [b"hA"])
+        session.poll()
+        assert len(session._server._lookup_batches) == 1
+        assert all(c[0] != "finish_request" for c in cb.calls)
+
+        session.close()
+
+        finish_calls = [c for c in cb.calls if c[0] == "finish_request"]
+        assert len(finish_calls) == 1
+
+    def test_wire_finish_drops_pending_batches_for_kv_request_id(self):
+        """``ServerRole.finish(kv_request_id)`` drops every parked batch
+        whose kv_request_id matches and fires finish_request for each."""
+        cb = FakeCallbacks(pending={b"hA", b"hB"})
+        session, conn, _ = _make_session(tiering_callbacks=cb)
+        _activate(session, conn)
+
+        _send_lookup(conn, "req-1", [b"hA"])
+        session.poll()
+        _send_lookup(conn, "req-2", [b"hB"])
+        session.poll()
+        assert len(session._server._lookup_batches) == 2
+
+        session._server.finish("req-1")
+
+        # req-1 batch dropped, finish_request fired exactly once
+        remaining_kv_request_ids = {
+            b.kv_request_id for b in session._server._lookup_batches.values()
+        }
+        assert remaining_kv_request_ids == {"req-2"}
+        finish_calls = [c for c in cb.calls if c[0] == "finish_request"]
+        assert len(finish_calls) == 1
+        assert ":req-1:" in finish_calls[0][1]
+
+    def test_lookup_then_fetch_round_trip_emits_store_result(self):
+        """End-to-end: lookup pins primary slots → fetch matches them →
+        NIXL transfer completes → StoreResult surfaces with the
+        create_store_job's job_id (the engine releases the pin)."""
+        cb = FakeCallbacks(stored={b"hA": 7, b"hB": 8})
+        session, conn, transport = _make_session(tiering_callbacks=cb)
+        _activate(session, conn)
+
+        _send_lookup(conn, "req-1", [b"hA", b"hB"])
+        session.poll()
+        cs = next(c for c in cb.calls if c[0] == "create_store_job")
+        # FakeCallbacks issues monotonic job_ids starting at 1000.
+        expected_job_id = 1000
+
+        # Consumer issues FetchMsg on the resolved hits.
+        conn.enqueue(
+            {
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.KV_REQUEST_ID: "req-1",
+                FetchMsg.BLOCK_HASHES: [b"hA", b"hB"],
+                FetchMsg.BLOCK_INDEXES: [20, 21],
+            }
+        )
+        session.poll()
+
+        # NIXL write_blocks called with our pinned local block_ids.
+        assert len(transport._transfers) == 1
+        _, (_peer, local, remote) = next(iter(transport._transfers.items()))
+        assert local == [7, 8]
+        assert remote == [20, 21]
+
+        # Drive the transport completion.
+        transport._poll_done.append(0)
+        result = session.poll()
+
+        store_results = [s for s in result.stores if s.success]
+        assert any(s.job_id == expected_job_id for s in store_results)
+        # Sanity: kv mention in synthetic ctx.
+        assert cs[2].startswith("p2p:")
 
 
 # ---------------------------------------------------------------------------

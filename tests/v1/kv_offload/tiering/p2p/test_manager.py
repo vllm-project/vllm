@@ -78,6 +78,8 @@ def _job_metadata(
 
 def _make_manager() -> P2PSecondaryTierManager:
     """Create a manager with stubbed __init__."""
+    from vllm.v1.kv_offload.tiering.p2p.tiering_callbacks import _AllMissCallbacks
+
     mgr = P2PSecondaryTierManager.__new__(P2PSecondaryTierManager)
     mgr._local_id = "127.0.0.1:7777"
     mgr._finished_jobs = []
@@ -85,6 +87,7 @@ def _make_manager() -> P2PSecondaryTierManager:
     mgr._sessions = {}
     mgr._kv_to_session = {}
     mgr._unbound_stores = {}
+    mgr._tiering_callbacks = _AllMissCallbacks()
     return mgr
 
 
@@ -155,6 +158,75 @@ class TestLookup:
         mgr = _make_manager()
         ctx = _req_context(kv_params=_decode_kv_params())
         assert mgr.lookup(b"key", ctx) is LookupResult.MISS
+
+
+# ---------------------------------------------------------------------------
+# Tests for TieringCallbacks plumbing
+# ---------------------------------------------------------------------------
+
+
+class TestTieringCallbacksPlumbing:
+    def test_default_uses_all_miss_callbacks(self):
+        """When no callbacks are passed, the manager defaults to
+        ``_AllMissCallbacks`` and that instance is forwarded to every
+        session's server role."""
+        from vllm.v1.kv_offload.tiering.p2p.tiering_callbacks import (
+            _AllMissCallbacks,
+        )
+
+        mgr = _make_manager()
+        # _make_manager already sets _AllMissCallbacks; sanity check.
+        assert isinstance(mgr._tiering_callbacks, _AllMissCallbacks)
+
+    def test_custom_callbacks_forwarded_to_accepted_sessions(self):
+        """Inbound connections create sessions that share the manager's
+        ``tiering_callbacks`` instance."""
+
+        class _Stub:
+            def lookup(self, key, ctx):
+                from vllm.v1.kv_offload.base import LookupResult
+
+                return LookupResult.MISS
+
+            def create_store_job(self, keys, ctx):
+                raise AssertionError("unreachable for MISS-only stub")
+
+            def finish_request(self, ctx):
+                pass
+
+        class _FakeData:
+            block_len = 4096
+            base_addr = 0x1000
+            num_blocks = 16
+            config_fingerprint = ""
+
+            def get_agent_metadata(self):
+                return b"meta"
+
+            def add_remote_peer(self, *args, **kwargs):
+                pass
+
+        class _Conn:
+            def __init__(self, pid: str) -> None:
+                self.peer_id = pid
+                self.alive = True
+
+            def send(self, msg: dict) -> None:
+                pass
+
+            def close(self) -> None:
+                self.alive = False
+
+        mgr = _make_manager()
+        stub = _Stub()
+        mgr._tiering_callbacks = stub  # type: ignore[assignment]
+        mgr._data = _FakeData()  # type: ignore[assignment]
+        peer_id = "10.0.0.5:9000"
+
+        mgr._accept_new_peers([_Conn(peer_id)])  # type: ignore[arg-type]
+
+        session = mgr._sessions[peer_id]
+        assert session._server._cb is stub
 
 
 # ---------------------------------------------------------------------------
