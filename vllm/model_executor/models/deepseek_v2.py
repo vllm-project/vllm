@@ -388,7 +388,7 @@ class DeepseekV2MoE(nn.Module):
             )
             final_hidden_states = final_hidden_states[:num_tokens]
 
-        return final_hidden_states.view(final_hidden_states.shape[0], hidden_dim)
+        return final_hidden_states.view(num_tokens, hidden_dim)
 
 
 def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
@@ -1384,10 +1384,12 @@ class DeepseekV2Model(nn.Module):
                 hidden_states.shape[0] != positions.shape[0]
                 and not layer.use_sequence_parallel_moe
             ):
-                hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
-                hidden_states = hidden_states[: positions.shape[0]]
-                residual = tensor_model_parallel_all_gather(residual, 0)
-                residual = residual[: positions.shape[0]]
+                combined_states = torch.cat([hidden_states, residual], dim=-1)
+                combined_states = tensor_model_parallel_all_gather(combined_states, 0)
+                combined_states = combined_states[: positions.shape[0]]
+                hidden_states, residual = combined_states.split(
+                    [self.hidden_size, self.hidden_size], dim=-1
+                )
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_state = hidden_states + residual
                 if aux_hidden_state.shape[0] != positions.shape[0]:
