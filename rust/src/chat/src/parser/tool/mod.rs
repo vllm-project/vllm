@@ -2,13 +2,12 @@
 
 use std::sync::LazyLock;
 
-pub use vllm_tool_parser::{
+pub use vllm_parser::tool::{
     DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser, DeepSeekV32ToolParser,
     Gemma4ToolParser, Glm45MoeToolParser, Glm47MoeToolParser, Granite4ToolParser, HermesToolParser,
     HyV3ToolParser, Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser,
     MinimaxM2ToolParser, MinimaxM3ToolParser, MistralToolParser, Phi4MiniJsonToolParser,
-    Qwen3CoderToolParser, Qwen3XmlToolParser, ToolCallDelta, ToolParser, ToolParserError,
-    ToolParserOutput,
+    Qwen3CoderToolParser, Qwen3XmlToolParser, ToolParser, ToolParserError,
 };
 
 use crate::parser::ParserFactory;
@@ -41,7 +40,7 @@ pub mod names {
 }
 
 /// Constructor signature for one registered tool parser implementation.
-type ToolParserCreator = fn(&[ChatTool]) -> vllm_tool_parser::Result<Box<dyn ToolParser>>;
+type ToolParserCreator = fn(&[ChatTool]) -> vllm_parser::tool::Result<Box<dyn ToolParser>>;
 
 /// Registry and model matcher for tool parsers.
 pub type ToolParserFactory = ParserFactory<ToolParserCreator>;
