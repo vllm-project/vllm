@@ -23,7 +23,7 @@ license = "Apache-2.0"
 [workspace.dependencies]
 anyhow = "1.0.100"
 arc-swap = "1.9.0"
-async-openai = "0.33.1"
+async-openai = { version = "0.33.1", default-features = false, features = ["native-tls"] }
 async-trait = "0.1.89"
 asynk-strim-attr = "0.1.0"
 axum = "0.8.8"
@@ -37,7 +37,7 @@ easy-ext = "1.0.3"
 educe = "0.6.0"
 enum-as-inner = "0.7.0"
 expect-test = "1.5.1"
-fastokens = { git = "https://github.com/BugenZhao/fastokens", rev = "d6188032f15a72fbddb5d9fdabfc498bbda99965", default-features = false }
+fastokens = { version = "0.2.1", default-features = false }
 futures = "0.3.31"
 half = { version = "2.7.1", features = ["bytemuck"] }
 hex = "0.4.3"
@@ -52,7 +52,7 @@ minijinja = { version = "2.0", features = ["unstable_machinery", "json", "builti
 minijinja-contrib = { version = "2.0", features = ["pycompat"] }
 native-tls-vendored = { package = "native-tls", version = "0.2.18", features = ["vendored"] }
 ndarray = { version = "0.16.1", features = ["serde"] }
-openai-harmony = "0.0.8"
+openai-harmony = { git = "https://github.com/Inferact/openai-harmony", rev = "9c0fb6024a39b484b3c56df88d8a0ee738c28a35", default-features = false, features = ["native-tls"] }
 openai-protocol = "1.6.0"
 parking_lot = "0.12.5"
 paste = "1.0.15"
