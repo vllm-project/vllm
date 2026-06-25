@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import sys
 from contextlib import contextmanager
 from typing import Any
 
@@ -78,7 +79,7 @@ class CPUModelRunner(GPUModelRunner):
         # Speculative decoding fallbacks
         import vllm.v1.sample.rejection_sampler
         import vllm.v1.spec_decode.llm_base_proposer
-        import vllm.v1.spec_decode.utils
+        import vllm.v1.spec_decode.utils as spec_decode_utils
 
         vllm.v1.spec_decode.llm_base_proposer.eagle_prepare_inputs_padded_kernel = (
             cpu_tl.eagle_prepare_inputs_padded_kernel
@@ -89,7 +90,18 @@ class CPUModelRunner(GPUModelRunner):
         vllm.v1.spec_decode.llm_base_proposer.copy_and_expand_eagle_inputs_kernel = (
             cpu_tl.copy_and_expand_eagle_inputs_kernel
         )
-        vllm.v1.spec_decode.utils.eagle_step_slot_mapping_metadata_kernel = (
+        spec_decode_utils.copy_and_expand_dflash_inputs_kernel = (
+            cpu_tl.copy_and_expand_dflash_inputs_kernel
+        )
+        dflash_module = sys.modules.get("vllm.v1.spec_decode.dflash")
+        if dflash_module is not None:
+            dflash_kernel_name = "copy_and_expand_dflash_inputs_kernel"
+            setattr(
+                dflash_module,
+                dflash_kernel_name,
+                cpu_tl.copy_and_expand_dflash_inputs_kernel,
+            )
+        spec_decode_utils.eagle_step_slot_mapping_metadata_kernel = (
             cpu_tl.eagle_step_slot_mapping_metadata_kernel
         )
         vllm.v1.sample.rejection_sampler.rejection_greedy_sample_kernel = (
