@@ -112,15 +112,31 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
         a1_scale = normalize_scales_shape(quant_config.a1_scale)
 
-        for expert_id in range(first_expert, last_expert):
-            topks = torch.any(topk_ids == expert_id, dim=1).flatten()
-            rows = torch.count_nonzero(topks.flatten())
-            if rows == 0:
-                continue
-            idx = expert_id - first_expert
-            tokens_per_expert[idx] = rows
-            rhs = a1[: topks.numel()][topks]
-            if quant_config.quant_dtype is not None:
+        if quant_config.quant_dtype is None:
+            # Vectorized dispatch for the unquantized path. Equivalent to the
+            # per-expert masked gather below, but it computes the [E, T] hit
+            # mask and per-expert slot offsets in one shot, doing a single
+            # device sync (nonzero) instead of one per local expert. The
+            # per-expert Python loop is launch-bound and dominates latency for
+            # decode (many small/empty experts), so this is a large speedup.
+            local_ids = torch.arange(first_expert, last_expert, device=a1.device).view(
+                -1, 1, 1
+            )
+            hits = (topk_ids.unsqueeze(0) == local_ids).any(dim=2)  # [E_local, T]
+            tokens_per_expert[:num_local_experts] = hits.sum(dim=1).to(torch.int32)
+            # slot of each token within its expert batch, preserving token order
+            slots = hits.to(torch.int32).cumsum(dim=1) - 1  # [E_local, T]
+            e_idx, t_idx = hits.nonzero(as_tuple=True)
+            b_a1[e_idx, slots[e_idx, t_idx]] = a1[t_idx].to(b_type)
+        else:
+            for expert_id in range(first_expert, last_expert):
+                topks = torch.any(topk_ids == expert_id, dim=1).flatten()
+                rows = torch.count_nonzero(topks.flatten())
+                if rows == 0:
+                    continue
+                idx = expert_id - first_expert
+                tokens_per_expert[idx] = rows
+                rhs = a1[: topks.numel()][topks]
                 if a1_scale is not None:
                     if quant_config.is_per_act_token:
                         rhs_a1_scale = a1_scale[: topks.numel()][topks]
@@ -140,8 +156,6 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                     b_a1_scale[idx, :rows] = b_s[:rows]
                 else:
                     b_a1_scale[idx, : b_s.shape[0]] = b_s
-            else:
-                b_a1[idx, :rows, :] = rhs
 
         assert b_a1_scale is None or b_a1_scale.ndim == 3
 
