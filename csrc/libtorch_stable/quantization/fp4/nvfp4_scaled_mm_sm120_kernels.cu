@@ -31,7 +31,7 @@
 
 #include "cutlass/util/packed_stride.hpp"
 
-#include "core/math.hpp"
+#include "libtorch_stable/core/math.hpp"
 #include "core/batch_invariant.hpp"
 
 using namespace cute;
