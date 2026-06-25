@@ -1198,26 +1198,26 @@ def test_trtllm_gen_mxfp8_block_scale_moe(
 
 @pytest.fixture(scope="module")
 def dist_init_single_rank():
-    """Initialize a single-rank distributed env for ROCm MoE kernel tests.
-
-    Required because make_mxfp4_moe_kernel() internally calls
-    get_tensor_model_parallel_world_size() even when tp_size=1.
-    """
     import os
-
+    from unittest.mock import patch
     import torch.distributed as dist
+    from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.distributed.parallel_state import (
         init_distributed_environment,
         initialize_model_parallel,
     )
-
     if not dist.is_initialized():
         os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
         os.environ.setdefault("MASTER_PORT", "29501")
         dist.init_process_group(backend="nccl", world_size=1, rank=0)
         init_distributed_environment(world_size=1, rank=0, local_rank=0)
+
+    with patch(
+        "vllm.model_executor.layers.fused_moe.oracle.mxfp4.get_current_vllm_config"
+    ) as mock_cfg, set_current_vllm_config(VllmConfig()):
+        mock_cfg.return_value.model_config.quantization_config = None
         initialize_model_parallel(tensor_model_parallel_size=1)
-    yield
+        yield
 
 # -----------------------------------------------------------------------------
 # ROCm Oracle-based kernel execution tests
