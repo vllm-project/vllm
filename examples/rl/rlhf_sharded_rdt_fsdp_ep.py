@@ -82,7 +82,7 @@ WARMUP = os.environ.get("RDT_WARMUP", "0") == "1"
 # RDT_SYNC_ITERS -> how many back-to-back weight syncs to run. The sharded RDT
 # backend bakes a replay plan on the first sync for a given name set and
 # replays it on subsequent syncs, so use >=2 to observe the replay speedup.
-SYNC_ITERS = int(os.environ.get("RDT_SYNC_ITERS", "1"))
+SYNC_ITERS = int(os.environ.get("RDT_SYNC_ITERS", "3"))
 
 FSDP_WORLD_SIZE = 4
 INFERENCE_TP_SIZE = 1
