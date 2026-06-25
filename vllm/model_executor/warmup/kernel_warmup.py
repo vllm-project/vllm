@@ -48,13 +48,10 @@ def kernel_warmup(worker: "Worker"):
 
     # Pooling models do not use the generation slot-mapping path.
     if not worker.model_runner.is_pooling_model:
-        try:
-            warm_v1_block_table_kernels(
-                getattr(worker.model_runner, "device", torch.device("cuda")),
-                worker.scheduler_config.max_num_batched_tokens,
-            )
-        except Exception:
-            logger.warning("Skipping v1 block-table Triton warmup.", exc_info=True)
+        warm_v1_block_table_kernels(
+            getattr(worker.model_runner, "device", torch.device("cuda")),
+            worker.scheduler_config.max_num_batched_tokens,
+        )
 
     # DSv4 mHC TileLang kernels (hc_pre/hc_post/hc_head_op) run every decoder
     # layer per token; warm them across token sizes first so the first real
