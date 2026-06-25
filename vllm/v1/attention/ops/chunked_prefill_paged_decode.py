@@ -9,35 +9,12 @@
 
 import torch
 
-from vllm import _custom_ops as ops
-from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .prefix_prefill import context_attention_fwd
 
-logger = init_logger(__name__)
-
 float8_info = torch.finfo(current_platform.fp8_dtype())
-
-
-def has_native_kv_cache_layout(
-    key_cache: torch.Tensor,
-    value_cache: torch.Tensor,
-) -> bool:
-    """Return whether KV cache blocks can use native ROCm paged attention.
-
-    The native ROCm paged attention op expects the legacy K layout
-    [block, head, head_size/x, block_size, x] paired with the V layout
-    [block, head, head_size, block_size]. The packed 4D content-dim layout
-    should use the stride-aware Triton path instead.
-    """
-    return (
-        key_cache.dim() == 5
-        and value_cache.dim() == 4
-        and key_cache.stride(0) == key_cache.shape[1:].numel()
-        and value_cache.stride(0) == value_cache.shape[1:].numel()
-    )
 
 
 @triton.jit
@@ -347,138 +324,74 @@ def chunked_prefill_paged_decode(
 
     num_queries_per_kv_padded = max(triton.next_power_of_2(num_queries_per_kv), 16)
 
-    from vllm.platforms.rocm import use_rocm_custom_paged_attention
-
-    use_custom = use_rocm_custom_paged_attention(
-        query.dtype,
-        head_size,
-        block_size,
-        num_queries_per_kv,
-        max_seq_len,
-        sliding_window,
-        kv_cache_dtype,
-        alibi_slopes,
-        sinks,
-    )
-    has_native_layout = has_native_kv_cache_layout(key_cache, value_cache)
-    # Force Triton for non-standard blocks like Qwen3's 544 and for
-    # stride-padded hybrid layouts. The latter use reshape_and_cache_flash
-    # during cache update, so keep decode on the matching stride-aware path.
     is_pow2 = block_size > 0 and (block_size & (block_size - 1) == 0)
-    if not is_pow2 or not has_native_layout:
-        use_custom = False
 
-    if use_custom:
-        _PARTITION_SIZE_ROCM = 256
-        max_num_partitions = (
-            max_seq_len + _PARTITION_SIZE_ROCM - 1
-        ) // _PARTITION_SIZE_ROCM
-        assert _PARTITION_SIZE_ROCM % block_size == 0
-        total_num_seq = block_table.shape[0]
-        tmp_output = torch.empty(
-            size=(total_num_seq, num_query_heads, max_num_partitions, head_size),
-            dtype=query.dtype,
-            device=output.device,
-        )
-        exp_sums = torch.empty(
-            size=(total_num_seq, num_query_heads, max_num_partitions),
-            dtype=torch.float32,
-            device=output.device,
-        )
-        max_logits = torch.empty_like(exp_sums)
+    real_block_size = value_cache.shape[2]
+    # The standard model directly uses the original block_size.
+    # Non-standard 544 uses 32 to accommodate integer division logic.
+    # Cap at 128 to avoid exceeding GPU shared memory limits
+    # (e.g. hybrid Mamba models inflate block_size to 2048).
+    # The kernel handles TRITON_BLOCK_SIZE != PHYSICAL_BLOCK_SIZE
+    # via the l_block_idx/internal_offsets addressing logic.
+    MAX_TRITON_BLOCK_SIZE = 128
+    TRITON_BLOCK_SIZE = min(block_size, MAX_TRITON_BLOCK_SIZE) if is_pow2 else 32
+    if is_block_table_ptr:
+        # Using the physical base address of tensors
+        kv_element_size = key_cache.element_size()
+        block_byte_stride = key_cache.stride(0) * kv_element_size
+        # Get the starting physical address of the KV Cache
+        base_addr = key_cache.data_ptr()
 
-        ops.paged_attention_rocm(
-            output,
-            exp_sums,
-            max_logits,
-            tmp_output,
-            query,
-            key_cache,
-            value_cache,
-            num_kv_heads,
-            scale=sm_scale,
-            block_tables=block_table,
-            seq_lens=seq_lens,
-            query_start_loc=query_start_loc,
-            block_size=block_size,
-            max_seq_len=max_seq_len,
-            alibi_slopes=alibi_slopes,
-            kv_cache_dtype=kv_cache_dtype,
-            k_scale=k_scale,
-            v_scale=v_scale,
-            fp8_out_scale=output_scale,
+        # Normalization: Directly calculate the block offset
+        # of the pointer relative to the base address
+        processed_block_table = ((block_table - base_addr) // block_byte_stride).to(
+            torch.int32
         )
     else:
-        logger.warning_once(
-            "Cannot use ROCm custom paged attention kernel,"
-            " falling back to Triton implementation."
-        )
-        real_block_size = value_cache.shape[2]
-        # The standard model directly uses the original block_size.
-        # Non-standard 544 uses 32 to accommodate integer division logic.
-        # Cap at 128 to avoid exceeding GPU shared memory limits
-        # (e.g. hybrid Mamba models inflate block_size to 2048).
-        # The kernel handles TRITON_BLOCK_SIZE != PHYSICAL_BLOCK_SIZE
-        # via the l_block_idx/internal_offsets addressing logic.
-        MAX_TRITON_BLOCK_SIZE = 128
-        TRITON_BLOCK_SIZE = min(block_size, MAX_TRITON_BLOCK_SIZE) if is_pow2 else 32
-        if is_block_table_ptr:
-            # Using the physical base address of tensors
-            kv_element_size = key_cache.element_size()
-            block_byte_stride = key_cache.stride(0) * kv_element_size
-            # Get the starting physical address of the KV Cache
-            base_addr = key_cache.data_ptr()
+        processed_block_table = block_table.to(torch.int32)
 
-            # Normalization: Directly calculate the block offset
-            # of the pointer relative to the base address
-            processed_block_table = ((block_table - base_addr) // block_byte_stride).to(
-                torch.int32
-            )
-        else:
-            processed_block_table = block_table.to(torch.int32)
-
-        kernel_paged_attention_2d[
-            (
-                num_seqs,
-                num_kv_heads,
-            )
-        ](
-            output_ptr=output,
-            query_ptr=query,
-            key_cache_ptr=key_cache,
-            value_cache_ptr=value_cache,
-            sink_ptr=sinks,
-            block_tables_ptr=processed_block_table,
-            seq_lens_ptr=seq_lens,
-            alibi_slopes_ptr=alibi_slopes,
-            scale=sm_scale,
-            k_scale=k_scale,
-            v_scale=v_scale,
-            out_scale_inv=1.0 / output_scale if output_scale is not None else 1.0,
-            num_query_heads=num_query_heads,
-            num_queries_per_kv=num_queries_per_kv,
-            num_queries_per_kv_padded=num_queries_per_kv_padded,
-            block_table_stride=processed_block_table.stride(0),
-            query_stride_0=query.stride(0),
-            query_stride_1=query.stride(1),
-            output_stride_0=output.stride(0),
-            output_stride_1=output.stride(1),
-            BLOCK_SIZE=TRITON_BLOCK_SIZE,
-            PHYSICAL_BLOCK_SIZE=real_block_size,
-            HEAD_SIZE=head_size,
-            HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
-            USE_ALIBI_SLOPES=use_alibi_slopes,
-            SLIDING_WINDOW=sliding_window,
-            stride_k_cache_0=key_cache.stride(0),
-            stride_k_cache_1=key_cache.stride(1),
-            stride_k_cache_2=key_cache.stride(2),
-            stride_k_cache_3=key_cache.stride(3),
-            stride_v_cache_0=value_cache.stride(0),
-            stride_v_cache_1=value_cache.stride(1),
-            stride_v_cache_2=value_cache.stride(2),
-            stride_v_cache_3=value_cache.stride(3),
-            filter_by_query_len=True,
-            query_start_len_ptr=query_start_loc,
-            USE_SINKS=sinks is not None,
-            USE_FP8=output_scale is not None,
+    kernel_paged_attention_2d[
+        (
+            num_seqs,
+            num_kv_heads,
         )
+    ](
+        output_ptr=output,
+        query_ptr=query,
+        key_cache_ptr=key_cache,
+        value_cache_ptr=value_cache,
+        sink_ptr=sinks,
+        block_tables_ptr=processed_block_table,
+        seq_lens_ptr=seq_lens,
+        alibi_slopes_ptr=alibi_slopes,
+        scale=sm_scale,
+        k_scale=k_scale,
+        v_scale=v_scale,
+        out_scale_inv=1.0 / output_scale if output_scale is not None else 1.0,
+        num_query_heads=num_query_heads,
+        num_queries_per_kv=num_queries_per_kv,
+        num_queries_per_kv_padded=num_queries_per_kv_padded,
+        block_table_stride=processed_block_table.stride(0),
+        query_stride_0=query.stride(0),
+        query_stride_1=query.stride(1),
+        output_stride_0=output.stride(0),
+        output_stride_1=output.stride(1),
+        BLOCK_SIZE=TRITON_BLOCK_SIZE,
+        PHYSICAL_BLOCK_SIZE=real_block_size,
+        HEAD_SIZE=head_size,
+        HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
+        USE_ALIBI_SLOPES=use_alibi_slopes,
+        SLIDING_WINDOW=sliding_window,
+        stride_k_cache_0=key_cache.stride(0),
+        stride_k_cache_1=key_cache.stride(1),
+        stride_k_cache_2=key_cache.stride(2),
+        stride_k_cache_3=key_cache.stride(3),
+        stride_v_cache_0=value_cache.stride(0),
+        stride_v_cache_1=value_cache.stride(1),
+        stride_v_cache_2=value_cache.stride(2),
+        stride_v_cache_3=value_cache.stride(3),
+        filter_by_query_len=True,
+        query_start_len_ptr=query_start_loc,
+        USE_SINKS=sinks is not None,
+        USE_FP8=output_scale is not None,
+    )
