@@ -126,6 +126,10 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python
 ENV UV_CACHE_DIR=/opt/uv/cache
 ENV UV_INSTALL_DIR=/opt/uv/bin
+# Torch test-channel / nightly wheels can be re-published under the same version
+# (RC respins, CDN inconsistency), so the index-advertised hash may not match the
+# served file. Skip uv's hash verification so torch installs don't break on it.
+ENV UV_NO_VERIFY_HASHES=1
 ENV PATH="/opt/venv/bin:/opt/uv/bin:$PATH"
 ENV VIRTUAL_ENV="/opt/venv"
 
@@ -280,11 +284,18 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # Track PyTorch lib versions used during build and match in downstream instances.
 # We do this for both nightly and release so we can strip dependencies/*.txt as needed.
 # Otherwise library dependencies can upgrade/downgrade torch incorrectly.
+COPY docker/verify_torch_wheel.py verify_torch_wheel.py
 RUN --mount=type=cache,target=/opt/uv/cache \
     uv pip freeze | grep -i "^torch=\|^torchvision=\|^torchaudio=" > torch_lib_versions.txt \
     && TORCH_LIB_VERSIONS=$(cat torch_lib_versions.txt | xargs) \
     && echo "Installed torch libs: ${TORCH_LIB_VERSIONS}" \
-    && /opt/venv/bin/python3 -c "import importlib.metadata, hashlib; d = importlib.metadata.distribution('torch'); meta_hash = hashlib.sha256(d.read_text('METADATA').encode()).hexdigest(); print(f'=== Torch wheel verification ==='); print(f'torch=={d.version}'); print(f'metadata_sha256={meta_hash}'); print(f'================================')"
+    && CU_TAG=cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+    && if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
+        TORCH_INDEX_URL="${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/${CU_TAG}"; \
+    else \
+        TORCH_INDEX_URL="${PYTORCH_CUDA_INDEX_BASE_URL}/${CU_TAG}"; \
+    fi \
+    && /opt/venv/bin/python3 verify_torch_wheel.py "${TORCH_INDEX_URL}"
 
 # CUDA arch list used by torch
 # Explicitly set the list to avoid issues with torch 2.2
@@ -742,6 +753,8 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE=copy
 ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python
 ENV UV_CACHE_DIR=/opt/uv/cache
+# See base stage: skip uv hash verification so re-published torch wheels install.
+ENV UV_NO_VERIFY_HASHES=1
 RUN mkdir -p "${UV_PYTHON_INSTALL_DIR}" "${UV_CACHE_DIR}" \
     && chgrp -R 0 /opt/uv \
     && chmod -R g+rwX,a+rX /opt/uv
