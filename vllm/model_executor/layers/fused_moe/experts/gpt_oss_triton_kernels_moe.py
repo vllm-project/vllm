@@ -574,6 +574,44 @@ def triton_kernel_moe_forward(
 ) -> torch.Tensor:
     sm_first = not renormalize
 
+    # ROCm aiter-native MXFP4 fast path (mirrors ROCm/ATOM triton_kernel_moe_forward):
+    # native aiter routing on the raw logits + the two-GEMM aiter compute. Falls back
+    # to the vendored triton_kernels routing + matmul_ogs path below when unavailable
+    # or out of the ported scope (SiLU is FP8-only).
+    if (
+        expert_map is None
+        and quant_config is not None
+        and rocm_aiter_ops.is_enabled()
+        and _aiter_act_quant_mode(quant_config) is not None
+    ):
+        _act_mode = _aiter_act_quant_mode(quant_config)
+        _aiter_ops = _import_aiter_moe_ops()
+        if _aiter_ops is not None and (
+            activation == MoEActivation.SWIGLUOAI or _act_mode == _AITER_ACT_FP8
+        ):
+            routing_data, gather_idx, scatter_idx = _aiter_ops["routing"](
+                gating_output, topk, sm_first=sm_first
+            )
+            swiglu_alpha, swiglu_limit = _aiter_swiglu_params(quant_config)
+            # Native aiter routing applies router weights in-kernel, so no post-scale.
+            return _aiter_moe_two_gemm(
+                _aiter_ops,
+                hidden_states,
+                w1,
+                w2,
+                routing_data,
+                gather_idx,
+                scatter_idx,
+                topk,
+                quant_config,
+                _act_mode,
+                activation,
+                swiglu_alpha,
+                swiglu_limit,
+                apply_router_weight_on_input,
+                None,
+            )
+
     # When no expert map is provided (no EP), call the fused `routing()`
     # kernel directly. It combines softmax, topk, bitmatrix packing, and
     # routing-metadata construction in a single launch, instead of the
@@ -826,7 +864,7 @@ def _maybe_downcast_bf16_hidden_to_fp8_mxfp4_unfused(
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """BF16 activations -> FP8 before unfused ``matmul_ogs`` for MXFP4 w4a16 (ROCm).
 
-    Uses ``aiter.ops.triton.quant_moe.downcast_to_static_fp8`` with a scalar scale:
+    Uses ``aiter.ops.triton.moe.quant_moe.downcast_to_static_fp8`` with a scalar scale:
     for GEMM1: ``w1_precision.flex_ctx.lhs_data.scale`` or ``a1_scale`` when
     single-element; for GEMM2: ``w2_precision.flex_ctx.lhs_data.scale`` or
     ``a2_scale``; otherwise ``max(|x|) / 448`` for e4m3 range (matches AITER static
@@ -841,7 +879,7 @@ def _maybe_downcast_bf16_hidden_to_fp8_mxfp4_unfused(
     if not quant_config.use_mxfp4_w4a16:
         return hidden_states, None
     try:
-        from aiter.ops.triton.quant_moe import downcast_to_static_fp8
+        from aiter.ops.triton.moe.quant_moe import downcast_to_static_fp8
     except ImportError:
         return hidden_states, None
     if not rocm_aiter_ops.is_enabled():
@@ -927,6 +965,392 @@ def _precision_config_with_mxfp4_unfused_fp8_lhs_scale(
         lhs_data=InFlexData(scale=lhs_scale),
     )
     return replace(precision_config, flex_ctx=new_flex)
+
+
+# ---------------------------------------------------------------------------
+# aiter `.moe.*` MXFP4 MoE path (ported from ROCm/ATOM
+# atom/model_ops/fused_moe_triton.py).
+#
+# Scope (agreed): the reference's *complete* paths only --
+#   * SwiGLU (interleaved, gpt-oss): FP8 -> a8w4, FP4/BF16 -> a16w4, with the
+#     activation fused into the GEMM (apply_swiglu=True, swiglu_add_residual).
+#   * SiLU (half/half, e.g. DeepSeek-V4): FP8 -> a8w4 via dynamic MXFP8 quant +
+#     fused_clamp_act_mul.
+# The reference's SiLU FP4 (a4w4) / BF16 (a16w4) paths feed an *unactivated*
+# buffer to GEMM2 and are therefore intentionally NOT ported -- they raise.
+# ---------------------------------------------------------------------------
+
+# aiter MXFP4 activation-quant modes (mirror ATOM MoEActivationQuant).
+_AITER_ACT_FP8 = "fp8"  # a8w4: FP8 activations    (use_mxfp4_w4a8)
+_AITER_ACT_FP4 = "fp4"  # a4w4: MXFP4 activations  (use_mxfp4_w4a4)
+_AITER_ACT_BF16 = "bf16"  # a16w4: BF16 activations (use_mxfp4_w4a16)
+
+
+def _aiter_raw(t):
+    """Unwrap a triton_kernels ``Tensor`` to its backing ``torch.Tensor``.
+
+    aiter's ``.moe.*`` kernels take plain ``torch.Tensor`` weights/scales, while
+    vLLM stores MXFP4 weights as triton_kernels ``Tensor`` wrappers
+    (``.storage.data``). Plain tensors pass through unchanged.
+    """
+    return t.storage.data if hasattr(t, "storage") else t
+
+
+def _aiter_act_quant_mode(quant_config: FusedMoEQuantConfig) -> str | None:
+    """Activation-quant mode for aiter MXFP4 MoE, or ``None`` if not MXFP4."""
+    if quant_config.use_mxfp4_w4a8:
+        return _AITER_ACT_FP8
+    if quant_config.use_mxfp4_w4a4:
+        return _AITER_ACT_FP4
+    if quant_config.use_mxfp4_w4a16:
+        return _AITER_ACT_BF16
+    return None
+
+
+def _aiter_swiglu_params(quant_config: FusedMoEQuantConfig) -> tuple[float, float]:
+    """(alpha, clamp limit) for the SwiGLU/SiLU activation; DeepSeek-V4 defaults."""
+    alpha = quant_config.gemm1_alpha if quant_config.gemm1_alpha is not None else 1.0
+    limit = (
+        quant_config.gemm1_clamp_limit
+        if quant_config.gemm1_clamp_limit is not None
+        else 7.0
+    )
+    return alpha, limit
+
+
+def _import_aiter_moe_ops() -> dict | None:
+    """Import the aiter ``.moe.*`` triton MoE kernels (ROCm/ATOM API), or ``None``.
+
+    Mirrors ROCm/ATOM ``atom/model_ops/fused_moe_triton.py``. Returns a dict of
+    callables on success; ``None`` if aiter (or this kernel family) is absent, so
+    the caller can fall back to the vendored ``matmul_ogs`` path.
+    """
+    try:
+        from aiter.ops.triton.fusions.fused_clamp_act_mul import fused_clamp_act_mul
+        from aiter.ops.triton.moe.moe_op_gemm_a8w4 import moe_gemm_a8w4
+        from aiter.ops.triton.moe.moe_op_gemm_a16w4 import moe_gemm_a16w4
+        from aiter.ops.triton.moe.moe_routing.routing import routing as aiter_routing
+        from aiter.ops.triton.moe.quant_moe import downcast_to_static_fp8
+        from aiter.ops.triton.quant.quant import dynamic_mxfp8_quant
+        from aiter.ops.triton.utils._triton.arch_info import get_arch
+    except ImportError:
+        return None
+    return {
+        "moe_gemm_a8w4": moe_gemm_a8w4,
+        "moe_gemm_a16w4": moe_gemm_a16w4,
+        "routing": aiter_routing,
+        "downcast_to_static_fp8": downcast_to_static_fp8,
+        "dynamic_mxfp8_quant": dynamic_mxfp8_quant,
+        "fused_clamp_act_mul": fused_clamp_act_mul,
+        "get_arch": get_arch,
+    }
+
+
+def _aiter_routing_from_topk(
+    aiter_ops: dict,
+    topk_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    num_experts: int,
+    device: torch.device,
+) -> tuple:
+    """Build aiter ``RoutingData`` from a precomputed topk selection.
+
+    vLLM selects experts before the expert kernel runs, but aiter's MXFP4 GEMMs
+    need aiter routing structs (distinct from the vendored triton_kernels ones).
+    aiter ``routing`` always softmaxes its logits, so we scatter ``log(weight)``
+    into a dense ``-inf`` logit matrix: softmax-over-selected reproduces both the
+    exact expert selection and ``weight / sum(weight)``. The per-token weight sum
+    (e.g. ``routed_scaling_factor``) divided out here is restored by the caller.
+
+    Returns ``(routing_data, gather_idx, scatter_idx, topk_weights_f32)``.
+    """
+    routing = aiter_ops["routing"]
+    M = topk_weights.shape[0]
+    topk = topk_ids.size(1)
+    tw = topk_weights.to(torch.float32)
+    logits = torch.full((M, num_experts), -1e30, device=device, dtype=torch.float32)
+    logits.scatter_(
+        1,
+        topk_ids.long().clamp(min=0, max=num_experts - 1),
+        torch.log(tw.clamp(min=1e-20)),
+    )
+    routing_data, gather_idx, scatter_idx = routing(logits, topk, sm_first=False)
+    return routing_data, gather_idx, scatter_idx, tw
+
+
+def _aiter_moe_two_gemm(
+    aiter_ops: dict,
+    hidden_states: torch.Tensor,
+    w1,
+    w2,
+    routing_data,
+    gather_idx,
+    scatter_idx,
+    topk: int,
+    quant_config: FusedMoEQuantConfig,
+    act_mode: str,
+    activation: MoEActivation,
+    swiglu_alpha: float,
+    swiglu_limit: float,
+    apply_router_weight_on_input: bool,
+    moe_config: FusedMoEConfig | None,
+) -> torch.Tensor:
+    """Two-GEMM aiter MXFP4 MoE compute (ported from ROCm/ATOM fused_moe_triton).
+
+    vLLM/gfx1250 adaptations vs the reference: weights/scales are unwrapped from
+    triton_kernels ``Tensor`` (``.storage.data``); scales are passed unswizzled
+    with logical ``unpadded_N/K`` (the gfx1250 convention used by the validated
+    aiter path); and GEMM1's in-kernel gather -- numerically broken on gfx1250 --
+    is replaced by an explicit torch gather there.
+
+    Returns the (M, K) bf16 result *before* any router-weight post-scale; the
+    caller applies that when routing was reconstructed from a topk selection.
+    """
+    moe_gemm_a8w4 = aiter_ops["moe_gemm_a8w4"]
+    moe_gemm_a16w4 = aiter_ops["moe_gemm_a16w4"]
+    dynamic_mxfp8_quant = aiter_ops["dynamic_mxfp8_quant"]
+    fused_clamp_act_mul = aiter_ops["fused_clamp_act_mul"]
+    downcast_to_static_fp8 = aiter_ops["downcast_to_static_fp8"]
+    get_arch = aiter_ops["get_arch"]
+
+    assert quant_config.w1_precision is not None
+    assert quant_config.w2_precision is not None
+    w1_data = _aiter_raw(w1)
+    w2_data = _aiter_raw(w2)
+    w1_wscale = _aiter_raw(quant_config.w1_precision.weight_scale)
+    w2_wscale = _aiter_raw(quant_config.w2_precision.weight_scale)
+    w1_bias = quant_config.w1_bias
+    w2_bias = quant_config.w2_bias
+
+    if moe_config is not None:
+        unpadded_n_w1, unpadded_k_w1, unpadded_n_w2, unpadded_k_w2 = (
+            _mxfp4_w4a8_unpadded_dims(moe_config)
+        )
+    else:
+        unpadded_n_w1 = unpadded_k_w1 = unpadded_n_w2 = unpadded_k_w2 = None
+
+    arch = get_arch()
+    quant_dtype = torch.float8_e4m3fnuz if arch == "gfx942" else torch.float8_e4m3fn
+
+    # gfx1250's in-kernel gather miscomputes (validated on the FFM sim), so gather
+    # rows into expert-sorted order in torch and pass gather_indx=None instead. Per
+    # aiter's moe_gemm_torch, sorted row i reads source token gather_idx[i] // topk.
+    if arch == "gfx1250":
+        gather_src = gather_idx.to(torch.long) // topk
+        gemm1_input = hidden_states[gather_src]
+        gemm1_gather_indx = None
+    else:
+        gemm1_input = hidden_states
+        gemm1_gather_indx = gather_idx
+
+    gammas = routing_data.gate_scal if routing_data else None
+    g1_gammas = gammas if apply_router_weight_on_input else None
+    g2_gammas = None if apply_router_weight_on_input else gammas
+
+    if activation == MoEActivation.SWIGLUOAI:
+        # Interleaved [gate, up] (gpt-oss): activation fused into the GEMM.
+        if act_mode == _AITER_ACT_FP8:
+            a13_scale = _mxfp4_w4a8_resolve_lhs_scale(
+                quant_config, gemm_num=1, activations=gemm1_input
+            )
+            a2_scale = _mxfp4_w4a8_resolve_lhs_scale(
+                quant_config, gemm_num=2, activations=gemm1_input
+            )
+            hidden_fp8 = downcast_to_static_fp8(gemm1_input, a13_scale)
+            interm = moe_gemm_a8w4(
+                hidden_fp8,
+                w1_data,
+                None,
+                w1_wscale,
+                a13_scale,
+                a2_scale,
+                w1_bias,
+                routing_data,
+                gather_indx=gemm1_gather_indx,
+                gammas=g1_gammas,
+                swizzle_mx_scale=None,
+                out_dtype=quant_dtype,
+                apply_swiglu=True,
+                alpha=swiglu_alpha,
+                limit=swiglu_limit,
+                swiglu_add_residual=True,
+                unpadded_N=unpadded_n_w1,
+                unpadded_K=unpadded_k_w1,
+            )
+            out = moe_gemm_a8w4(
+                interm,
+                w2_data,
+                None,
+                w2_wscale,
+                a2_scale,
+                None,
+                w2_bias,
+                routing_data,
+                scatter_indx=scatter_idx,
+                gammas=g2_gammas,
+                swizzle_mx_scale=None,
+                unpadded_N=unpadded_n_w2,
+                unpadded_K=unpadded_k_w2,
+            )
+        else:
+            # FP4 and BF16 activations both route through the a16w4 kernel.
+            interm = moe_gemm_a16w4(
+                gemm1_input,
+                w1_data,
+                None,
+                w1_wscale,
+                None,
+                None,
+                w1_bias,
+                routing_data,
+                gather_indx=gemm1_gather_indx,
+                gammas=g1_gammas,
+                swizzle_mx_scale=None,
+                apply_swiglu=True,
+                alpha=swiglu_alpha,
+                limit=swiglu_limit,
+                swiglu_add_residual=True,
+                unpadded_N=unpadded_n_w1,
+                unpadded_K=unpadded_k_w1,
+            )
+            out = moe_gemm_a16w4(
+                interm,
+                w2_data,
+                None,
+                w2_wscale,
+                None,
+                None,
+                w2_bias,
+                routing_data,
+                scatter_indx=scatter_idx,
+                gammas=g2_gammas,
+                swizzle_mx_scale=None,
+                unpadded_N=unpadded_n_w2,
+                unpadded_K=unpadded_k_w2,
+            )
+        return out
+
+    # SiLU (concatenated [gate | up], half/half): manual activation between GEMMs.
+    # FP8 (a8w4) and BF16 (w4a16 served as a8w4) both run through moe_gemm_a8w4 by
+    # dynamically quantizing activations to FP8 (dynamic_mxfp8_quant below). Only
+    # FP4 (a4w4) SiLU is unsupported (ATOM reference a4w4 SiLU path is incomplete).
+    if act_mode == _AITER_ACT_FP4:
+        raise NotImplementedError(
+            "aiter SiLU MoE is unsupported for FP4 (a4w4) activations because the "
+            "ATOM reference a4w4 SiLU path is incomplete; use FP8 or BF16 (w4a16)."
+        )
+
+    hidden_q, a13_scale = dynamic_mxfp8_quant(gemm1_input, quant_dtype=quant_dtype)
+    raw_gate_up = moe_gemm_a8w4(
+        hidden_q,
+        w1_data,
+        a13_scale,
+        w1_wscale,
+        None,
+        None,
+        w1_bias,
+        routing_data,
+        gather_indx=gemm1_gather_indx,
+        gammas=g1_gammas,
+        swizzle_mx_scale=None,
+        out_dtype=torch.bfloat16,
+        apply_swiglu=False,
+        unpadded_N=unpadded_n_w1,
+        unpadded_K=unpadded_k_w1,
+    )
+    if unpadded_n_w1 is not None:
+        raw_gate_up = raw_gate_up[:, :unpadded_n_w1]
+    # SiLU + clamp + (gate * up), fused with dynamic MXFP8 quant of the result.
+    interm_fp8, a2_scale = fused_clamp_act_mul(
+        raw_gate_up,
+        swiglu_limit=swiglu_limit,
+        activation="silu",
+        dtype_quant=quant_dtype,
+        scale_dtype_fmt="ue8m0",
+        quant_block_size=32,
+    )
+    out = moe_gemm_a8w4(
+        interm_fp8,
+        w2_data,
+        a2_scale,
+        w2_wscale,
+        None,
+        None,
+        w2_bias,
+        routing_data,
+        scatter_indx=scatter_idx,
+        gammas=g2_gammas,
+        swizzle_mx_scale=None,
+        unpadded_N=unpadded_n_w2,
+        unpadded_K=unpadded_k_w2,
+    )
+    return out
+
+
+def _aiter_mxfp4_fused_experts(
+    output: torch.Tensor,
+    hidden_states: torch.Tensor,
+    w1,
+    w2,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    quant_config: FusedMoEQuantConfig,
+    activation: MoEActivation,
+    apply_router_weight_on_input: bool,
+    moe_config: FusedMoEConfig | None,
+) -> torch.Tensor | None:
+    """aiter-native MXFP4 MoE for the modular expert path (ROCm fast path).
+
+    Builds aiter routing from ``topk_ids``/``topk_weights``, runs the two-GEMM
+    aiter compute, restores the per-token router-weight sum that routing
+    reconstruction normalized away, and writes ``output``.
+
+    Returns ``output`` on success, or ``None`` (caller falls back to ``matmul_ogs``)
+    when aiter is unavailable, the weights are not MXFP4, or the requested
+    activation/quant combination is out of the ported scope.
+    """
+    if not rocm_aiter_ops.is_enabled():
+        return None
+    act_mode = _aiter_act_quant_mode(quant_config)
+    if act_mode is None:
+        return None
+    if quant_config.w1_precision is None or quant_config.w2_precision is None:
+        return None
+    # SiLU served via a8w4 for FP8 and BF16 (dynamic FP8 quant); only FP4 (a4w4)
+    # SiLU is out of scope (reference a4w4 SiLU path incomplete). This keeps w4a16
+    # SiLU on the aiter-native fast path instead of the vendored-routing fallback.
+    if activation != MoEActivation.SWIGLUOAI and act_mode == _AITER_ACT_FP4:
+        return None
+    aiter_ops = _import_aiter_moe_ops()
+    if aiter_ops is None:
+        return None
+
+    num_experts = w1.shape[0]
+    routing_data, gather_idx, scatter_idx, tw = _aiter_routing_from_topk(
+        aiter_ops, topk_ids, topk_weights, num_experts, hidden_states.device
+    )
+    swiglu_alpha, swiglu_limit = _aiter_swiglu_params(quant_config)
+    out = _aiter_moe_two_gemm(
+        aiter_ops,
+        hidden_states,
+        w1,
+        w2,
+        routing_data,
+        gather_idx,
+        scatter_idx,
+        topk_ids.size(1),
+        quant_config,
+        act_mode,
+        activation,
+        swiglu_alpha,
+        swiglu_limit,
+        apply_router_weight_on_input,
+        moe_config,
+    )
+    # Restore the per-token weight sum that routing reconstruction normalized out.
+    out = out.to(output.dtype) * tw.sum(dim=1, keepdim=True)
+    output.copy_(out.reshape(output.shape))
+    return output
 
 
 @triton.jit
@@ -1139,9 +1563,49 @@ class OAITritonExperts(BaseOAITritonExperts):
             self.quant_config: FusedMoEQuantConfig = FUSED_MOE_UNQUANTIZED_CONFIG
 
         if expert_map is not None:
-            # Preserve -1 (invalid / non-local slots, e.g. from EP dispatch):
-            # make_routing_data treats -1 as the skip sentinel.
-            topk_ids = remap_topk_to_local(topk_ids, expert_map)
+                topk_ids = expert_map[topk_ids]
+
+        # ROCm aiter-native MXFP4 fast path (bypasses the gfx1250-incompatible
+        # matmul_ogs unswizzle). Returns None -> fall through to matmul_ogs.
+        if (
+            not apply_router_weight_on_input
+            and rocm_aiter_ops.is_enabled()
+            and _aiter_mxfp4_fused_experts(
+                output,
+                hidden_states,
+                w1,
+                w2,
+                topk_weights,
+                topk_ids,
+                self.quant_config,
+                activation,
+                apply_router_weight_on_input,
+                getattr(self, "moe_config", None),
+            )
+            is not None
+        ):
+            return
+
+        # ROCm aiter-native MXFP4 fast path (bypasses the gfx1250-incompatible
+        # matmul_ogs unswizzle). Returns None -> fall through to matmul_ogs.
+        if (
+            not apply_router_weight_on_input
+            and rocm_aiter_ops.is_enabled()
+            and _aiter_mxfp4_fused_experts(
+                output,
+                hidden_states,
+                w1,
+                w2,
+                topk_weights,
+                topk_ids,
+                self.quant_config,
+                activation,
+                apply_router_weight_on_input,
+                getattr(self, "moe_config", None),
+            )
+            is not None
+        ):
+            return
 
         local_num_experts = w1.shape[0]
         if global_num_experts == -1:
@@ -1267,193 +1731,34 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         quant_config: FusedMoEQuantConfig,
+        activation: MoEActivation,
         apply_router_weight_on_input: bool,
     ) -> torch.Tensor | None:
-        """ROCm/gfx1250 MXFP4 MoE via aiter's W4A8 ``moe_gemm_a8w4``.
+        """ROCm aiter-native MXFP4 MoE fast path; ``None`` -> caller uses matmul_ogs.
 
         The vendored ``triton_kernels`` ``matmul_ogs`` MXFP4 path calls
         ``unswizzle_mx_scale_cdna4``, which has no gfx1250 scale-layout variant and
-        fails to compile on gfx1250. aiter's gluon ``moe_gemm_a8w4`` (FP8 act x MXFP4
-        weight) does run on gfx1250, so we route the MoE through it.
+        fails to compile on gfx1250. aiter's ``.moe.*`` gluon kernels run on gfx1250,
+        so we route the MoE through them.
 
-        Routing is built aiter-native directly from ``topk_ids``/``topk_weights`` so we
-        never touch the diverged vendored ``triton_kernels`` routing structs (whose
-        ``RoutingData``/``GatherIndx``/``ExptData`` field names and layout differ from
-        aiter's). This mirrors ``triton_kernel_fused_mxfp4_w4a8_experts``
-        (aiter_mxfp4_w4a8_moe.py) but resolves the FP8 LHS scales dynamically because
-        DeepSeek-V4 is ``activation_scheme: dynamic`` (no calibrated static scale).
-
-        aiter's ``routing`` always softmaxes the gate weights, so we feed
-        ``log(topk_weights)``: softmax-over-selected then recovers
-        ``topk_weights / sum(topk_weights)``. DeepSeek-V4 weights are
-        norm_topk_prob-normalized then scaled by ``routed_scaling_factor`` (so they sum
-        to that factor, not 1); we restore the exact weighting with a per-token output
-        rescale by the weight sum (== 1 for plain renormalize routing, a no-op there).
-
-        Returns ``output`` on success, or ``None`` if aiter is unavailable (caller then
-        falls back to ``matmul_ogs``).
+        Delegates to :func:`_aiter_mxfp4_fused_experts` (ported from ROCm/ATOM
+        ``fused_moe_triton.py``): a8w4 SiLU via dynamic MXFP8 + ``fused_clamp_act_mul``,
+        and the fused-SwiGLU modes. Routing is built aiter-native from
+        ``topk_ids``/``topk_weights`` and the router-weight sum is restored afterward;
+        see that function for the routing/scaling details.
         """
-        try:
-            from aiter.ops.triton.moe.moe_routing.routing import (
-                routing as aiter_routing,
-            )
-            from aiter.ops.triton.moe_op_gemm_a8w4 import moe_gemm_a8w4
-            from aiter.ops.triton.quant_moe import downcast_to_static_fp8
-        except ImportError:
-            return None
-
-        assert quant_config.w1_precision is not None
-        assert quant_config.w2_precision is not None
-
-        M = hidden_states.shape[0]
-        num_experts = w1.shape[0]
-        topk = topk_ids.size(1)
-
-        # Reconstruct dense gating logits from the sparse topk selection. log(weight)
-        # padded with a large-negative sentinel makes aiter's softmax reproduce both
-        # this exact expert selection and weight = topk_weights / per-token-sum.
-        tw = topk_weights.to(torch.float32)
-        logits = torch.full(
-            (M, num_experts), -1e30, device=hidden_states.device, dtype=torch.float32
+        return _aiter_mxfp4_fused_experts(
+            output,
+            hidden_states,
+            w1,
+            w2,
+            topk_weights,
+            topk_ids,
+            quant_config,
+            activation,
+            apply_router_weight_on_input,
+            self.moe_config,
         )
-        logits.scatter_(
-            1,
-            topk_ids.long().clamp(min=0, max=num_experts - 1),
-            torch.log(tw.clamp(min=1e-20)),
-        )
-        logger.info(
-            "[aiter-w4a8] ENTER M=%d K=%d num_experts=%d topk=%d "
-            "w1=%s w2=%s w1_wscale=%s w2_wscale=%s",
-            M,
-            hidden_states.shape[1],
-            num_experts,
-            topk,
-            tuple(w1.storage.data.shape),
-            tuple(w2.storage.data.shape),
-            tuple(quant_config.w1_precision.weight_scale.storage.data.shape),
-            tuple(quant_config.w2_precision.weight_scale.storage.data.shape),
-        )
-        routing_data, gather_idx, scatter_idx = aiter_routing(
-            logits, topk, sm_first=False
-        )
-        gammas = routing_data.gate_scal
-        logger.info(
-            "[aiter-w4a8] routing OK block_m=%s gate_scal=%s gather=%s scatter=%s",
-            getattr(routing_data, "block_m", None),
-            tuple(gammas.shape),
-            tuple(gather_idx.shape),
-            tuple(scatter_idx.shape),
-        )
-
-        unpadded_n_w1, unpadded_k_w1, unpadded_n_w2, unpadded_k_w2 = (
-            _mxfp4_w4a8_unpadded_dims(self.moe_config)
-        )
-        swiglu_alpha = (
-            quant_config.gemm1_alpha
-            if quant_config.gemm1_alpha is not None
-            else 1.0  # SILU (DeepSeek-V4); was 1.702 gpt-oss default
-        )
-        swiglu_limit = (
-            quant_config.gemm1_clamp_limit
-            if quant_config.gemm1_clamp_limit is not None
-            else 7.0
-        )
-
-        # FP8 LHS scales (static if calibrated, else dynamic amax/448). GEMM1 emits FP8
-        # directly (apply_swiglu=True, out_dtype fp8) quantized with GEMM2's LHS scale,
-        # so resolve GEMM2's scale up front (hidden states as the amax proxy) and reuse
-        # it as GEMM2's input scale so quantize/dequantize are consistent.
-        gemm1_lhs_scale = _mxfp4_w4a8_resolve_lhs_scale(
-            quant_config, gemm_num=1, activations=hidden_states
-        )
-        gemm2_lhs_scale = _mxfp4_w4a8_resolve_lhs_scale(
-            quant_config, gemm_num=2, activations=hidden_states
-        )
-        # aiter's in-kernel gather is numerically broken on gfx1250 (validated on the
-        # FFM sim: do_gather=True -> maxrel ~2.4), so gather rows into expert-sorted
-        # order in torch and pass gather_indx=None. Per aiter's moe_gemm_torch, sorted
-        # row i reads source token gather_idx[i] // n_expts_act, so this reproduces the
-        # in-kernel gather exactly (validated: manual gather -> maxrel ~5e-3).
-        gather_src = gather_idx.to(torch.long) // topk
-        hidden_sorted = hidden_states[gather_src]
-        hidden_fp8 = downcast_to_static_fp8(hidden_sorted, gemm1_lhs_scale)
-        logger.info(
-            "[aiter-w4a8] scales g1_lhs=%s g2_lhs=%s hidden_fp8=%s; calling gemm1 "
-            "(unpadded N/K w1=%s/%s w2=%s/%s, alpha=%.4f limit=%.2f)",
-            float(gemm1_lhs_scale),
-            float(gemm2_lhs_scale),
-            tuple(hidden_fp8.shape),
-            unpadded_n_w1,
-            unpadded_k_w1,
-            unpadded_n_w2,
-            unpadded_k_w2,
-            swiglu_alpha,
-            swiglu_limit,
-        )
-
-        # GEMM1 WITHOUT fused swiglu. aiter's fused _swiglu splits gate/up by
-        # INTERLEAVING, but DeepSeek-V4 (SILU) stores w13 half/half, so emit the raw
-        # gate_up (bf16) and apply the half/half SILU+clamp ourselves -- identical to
-        # the unfused activation() path (swiglu_limit_func) -- then requantize to fp8.
-        raw_gate_up = moe_gemm_a8w4(
-            hidden_fp8,
-            w1.storage.data,
-            None,
-            quant_config.w1_precision.weight_scale.storage.data,
-            gemm1_lhs_scale,
-            None,
-            quant_config.w1_bias,
-            routing_data,
-            gather_indx=None,
-            gammas=gammas if apply_router_weight_on_input else None,
-            swizzle_mx_scale=None,
-            out_dtype=torch.bfloat16,
-            apply_swiglu=False,
-            unpadded_N=unpadded_n_w1,
-            unpadded_K=unpadded_k_w1,
-        )
-        gate_up = raw_gate_up[:, :unpadded_n_w1]
-        _act = torch.empty(
-            (gate_up.shape[0], unpadded_n_w1 // 2),
-            dtype=torch.bfloat16,
-            device=gate_up.device,
-        )
-        swiglu_limit_func(_act, gate_up, swiglu_limit)
-        intermediate_cache1 = downcast_to_static_fp8(_act, gemm2_lhs_scale)
-        logger.info(
-            "[aiter-w4a8] gemm1(raw)+halfsplit-silu OK ic1=%s %s; calling gemm2",
-            tuple(intermediate_cache1.shape),
-            intermediate_cache1.dtype,
-        )
-        intermediate_cache3 = moe_gemm_a8w4(
-            intermediate_cache1,
-            w2.storage.data,
-            None,
-            quant_config.w2_precision.weight_scale.storage.data,
-            gemm2_lhs_scale,
-            None,
-            quant_config.w2_bias,
-            routing_data,
-            scatter_indx=scatter_idx,
-            gammas=None if apply_router_weight_on_input else gammas,
-            swizzle_mx_scale=None,
-            unpadded_N=unpadded_n_w2,
-            unpadded_K=unpadded_k_w2,
-        )
-
-        # Restore the per-token weight sum (e.g. routed_scaling_factor) that the
-        # log+softmax normalization divided out. Output weighting (gammas on GEMM2) is
-        # linear in the gate, so a single post-scale is exact.
-        logger.info(
-            "[aiter-w4a8] gemm2 OK ic3=%s %s; rescaling + writing output=%s",
-            tuple(intermediate_cache3.shape),
-            intermediate_cache3.dtype,
-            tuple(output.shape),
-        )
-        out = intermediate_cache3.to(output.dtype) * tw.sum(dim=1, keepdim=True)
-        output.copy_(out.reshape(output.shape))
-        logger.info("[aiter-w4a8] DONE")
-        return output
 
     def apply(
         self,
@@ -1520,7 +1825,11 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
         # unswizzle. Output-side router weighting only (the post-scale below assumes
         # it); LoRA still uses the matmul_ogs path further down.
         if (
-            (quant_config.use_mxfp4_w4a8 or quant_config.use_mxfp4_w4a16)
+            (
+                quant_config.use_mxfp4_w4a8
+                or quant_config.use_mxfp4_w4a16
+                or quant_config.use_mxfp4_w4a4
+            )
             and not apply_router_weight_on_input
             and self._lora_context is None
             and rocm_aiter_ops.is_enabled()
@@ -1534,6 +1843,7 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
                     topk_weights,
                     topk_ids,
                     quant_config,
+                    activation,
                     apply_router_weight_on_input,
                 )
                 is not None
@@ -1569,10 +1879,10 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
         _mxfp4_weights = quant_config.use_mxfp4_w4a8 or quant_config.use_mxfp4_w4a16
         if _mxfp4_weights and rocm_aiter_ops.is_enabled():
             try:
-                from aiter.ops.triton.moe_op_gemm_a8w4 import (
+                from aiter.ops.triton.moe.moe_op_gemm_a8w4 import (
                     moe_gemm_a8w4 as _moe_gemm_a8w4_fn,
                 )
-                from aiter.ops.triton.quant_moe import (
+                from aiter.ops.triton.moe.quant_moe import (
                     downcast_to_static_fp8 as _downcast_static_fp8_fn,
                 )
             except ImportError:

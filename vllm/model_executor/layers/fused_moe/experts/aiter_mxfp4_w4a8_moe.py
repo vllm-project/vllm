@@ -141,6 +141,7 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
     )
     from vllm.platforms.rocm import on_gfx1250
 
+    from vllm.platforms.rocm import on_gfx1250
     _swizzle_mx_scale = "CDNA4_SCALE" if should_use_cdna4_mx_scale_swizzle() else None
     # TODO (JPVILLAM): merge conflict resolve later if _swizzle_mx_scale is enough
     mx_scale_swizzle = None if on_gfx1250() else "CDNA4_SCALE"
