@@ -1576,6 +1576,19 @@ class ModelConfig:
         return self._model_info.supports_multimodal_raw_input_only
 
     @property
+    def num_attn_module(self) -> int:
+        """Number of attention modules in the model.
+
+        Some models like LongCat-Flash and LongCat-Next have 2 attention
+        modules (e.g., separate attention for different modalities).
+        Most models have 1 attention module.
+        """
+        model_type = self.hf_config.model_type
+        if model_type in ("longcat_flash", "longcat_next"):
+            return 2
+        return 1
+
+    @property
     def requires_raw_input_tokens(self) -> bool:
         return self._model_info.requires_raw_input_tokens
 
