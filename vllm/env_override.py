@@ -82,7 +82,69 @@ def _maybe_set_cuda_compatibility_path():
     os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(new_paths)
 
 
+def _ensure_getuser_safe() -> None:
+    """Patch getpass.getuser() to never raise in arbitrary-UID containers.
+
+    Containers such as OpenShift run with UIDs that have no /etc/passwd entry.
+    torch._inductor.codecache calls default_cache_dir() *directly* at module
+    level (for _HEADER_DIR), bypassing the TORCHINDUCTOR_CACHE_DIR env-var
+    check in cache_dir().  This means getpass.getuser() is called
+    unconditionally and raises KeyError on affected systems.
+
+    Setting TORCHINDUCTOR_CACHE_DIR alone is not sufficient.  The only robust
+    fix is to make getpass.getuser() itself safe.  This function is idempotent:
+    if getuser() already works, or has already been patched, it does nothing.
+
+    This guard can be removed once vLLM drops support for torch < 2.13, which
+    ships the upstream fix (pytorch/pytorch#184208).
+    """
+    from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+    if is_torch_equal_or_newer("2.13.0.dev"):
+        return  # pytorch#184208 is present; native behavior is safe
+
+    import getpass
+
+    try:
+        getpass.getuser()
+        return  # already works, nothing to do
+    except (KeyError, ModuleNotFoundError, OSError):
+        pass
+
+    # UID has no /etc/passwd entry. Replace getuser with a version that
+    # returns "uid<N>" instead of raising.  The fallback string is computed
+    # once and closed over so repeated calls never hit the syscall again.
+    _fallback = f"uid{os.getuid()}"
+
+    def _safe_getuser() -> str:
+        return _fallback
+
+    getpass.getuser = _safe_getuser  # type: ignore[assignment]
+
+    # Also pre-set TORCHINDUCTOR_CACHE_DIR so the cache_dir() code path
+    # (which does check the env var) also resolves without calling
+    # default_cache_dir().
+    if "TORCHINDUCTOR_CACHE_DIR" not in os.environ:
+        os.environ["TORCHINDUCTOR_CACHE_DIR"] = os.path.join(
+            os.environ.get("XDG_CACHE_HOME", "/tmp"),
+            f"torchinductor_{_fallback}",
+        )
+
+
 _maybe_set_cuda_compatibility_path()
+
+# Guard against containers (e.g. OpenShift) that run with an arbitrary UID
+# that has no /etc/passwd entry.
+#
+# torch._inductor.codecache calls default_cache_dir() *directly* at module
+# level to compute _HEADER_DIR, bypassing the TORCHINDUCTOR_CACHE_DIR check
+# in cache_dir().  Setting the env var alone is therefore not sufficient --
+# getpass.getuser() is called unconditionally.
+#
+# The only robust fix is to ensure getpass.getuser() itself never raises, by
+# patching it once here before any torch sub-module is imported.  This covers
+# every downstream caller without needing a per-call-site guard.
+_ensure_getuser_safe()
 
 import torch
 
@@ -831,6 +893,33 @@ def _patch_inductor_fallback_allow_list() -> None:
 
     Idempotent: a sentinel attribute on the proxy prevents re-wrapping.
     """
+    # Importing torch._inductor.lowering triggers a deep import chain that
+    # eventually calls getpass.getuser() via cache_dir_utils.default_cache_dir.
+    # torch._inductor.codecache also calls default_cache_dir() *directly* at
+    # module level (for _HEADER_DIR), so TORCHINDUCTOR_CACHE_DIR alone is not
+    # sufficient.  The top-level guard earlier in this module patches
+    # getpass.getuser itself; repeat it here as a safety net for older
+    # installed versions of this file that may lack the top-level guard.
+    import getpass as _getpass
+
+    try:
+        _getpass.getuser()
+    except (KeyError, ImportError):
+        _fallback_user = f"uid{os.getuid()}"
+
+        def _safe_getuser(_orig=_getpass.getuser):  # type: ignore[misc]
+            try:
+                return _orig()
+            except (KeyError, ImportError):
+                return _fallback_user
+
+        _getpass.getuser = _safe_getuser  # type: ignore[assignment]
+        if "TORCHINDUCTOR_CACHE_DIR" not in os.environ:
+            os.environ["TORCHINDUCTOR_CACHE_DIR"] = os.path.join(
+                os.environ.get("XDG_CACHE_HOME", "/tmp"),
+                f"torchinductor_{_fallback_user}",
+            )
+
     try:
         from torch._inductor import lowering as _lowering
     except ImportError:
