@@ -11,6 +11,7 @@ from utils import (
     TEST_MODEL,
     _extract_step_logprobs,
     _random_prompt,
+    is_device_capability_below_90,
     skip_unsupported,
 )
 
@@ -928,3 +929,546 @@ def LLM_with_max_seqs(
         # Enable for MOE models
         # enable_expert_parallel=True,
     )
+
+
+def _make_ragged_batch(
+    needle_prompt: str,
+    max_batch_size: int,
+    needle_pos: int,
+    filler_sizes: list[tuple[int, int]] | None = None,
+    unique_fillers: bool = False,
+) -> list[str]:
+    if filler_sizes is None:
+        filler_sizes = [(16, 64), (256, 512), (1024, 2048), (2048, 4096)]
+    prompts: list[str] = []
+    for i in range(max_batch_size):
+        if i == needle_pos:
+            prompts.append(needle_prompt)
+        else:
+            lo, hi = random.choice(filler_sizes)
+            filler = _random_prompt(lo, hi)
+            if unique_fillers:
+                filler = f"Unique filler request {i}: {filler}"
+            prompts.append(filler)
+    return prompts
+
+
+def _assert_logprobs_match(
+    baseline_logprobs,
+    cached_logprobs,
+    baseline_tokens,
+    cached_tokens,
+    label: str,
+) -> None:
+    assert cached_tokens == baseline_tokens, (
+        f"{label}: token IDs differ after prefix-cache hit.\n"
+        f"baseline={baseline_tokens}\ncached={cached_tokens}"
+    )
+    assert len(cached_logprobs) == len(baseline_logprobs), (
+        f"{label}: step count differs.\n"
+        f"baseline={len(baseline_logprobs)}, cached={len(cached_logprobs)}"
+    )
+    for step, (a, b) in enumerate(zip(baseline_logprobs, cached_logprobs)):
+        if not torch.equal(a, b):
+            max_diff = torch.abs(a - b).max().item()
+            pytest.fail(
+                f"{label}: batch invariance violated at decode step {step}: "
+                f"max_diff={max_diff:.6e}\n"
+                f"baseline_tokens={baseline_tokens}\n"
+                f"cached_tokens={cached_tokens}\n"
+                f"baseline_logprob={a.tolist()}\n"
+                f"cached_logprob={b.tolist()}\n"
+            )
+
+
+@skip_unsupported
+@pytest.mark.timeout(1000)
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_partial_prefix_cache_hit_preserves_batch_invariance(monkeypatch, backend):
+    """
+    Verifies that a partial prefix-cache hit (only the shared prefix is cached,
+    the suffix still needs a fresh prefill) produces bit-identical logprobs
+    compared to a full-prefill baseline run alone.
+
+    Cache state going into Case B:
+      - tokens 0..prefix_len-1 : cached (from the warmup run)
+      - tokens prefix_len..end  : NOT cached → fresh suffix prefill
+
+    This exercises the path where prefix caching changes the effective prefill
+    length and block-table layout, while the user-visible prompt is identical.
+    """
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+
+    seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
+    random.seed(seed)
+
+    tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
+    gpu_mem_util = float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.9"))
+    max_batch_size = int(os.getenv("VLLM_PREFIX_CACHE_BATCH_SIZE", "32"))
+    max_model_len = int(os.getenv("VLLM_MAX_MODEL_LEN", "8192"))
+    fixed_chunk_size = int(os.getenv("VLLM_PREFIX_CACHE_FIXED_CHUNK_SIZE", "0"))
+    fixed_chunk_size = int(os.getenv("VLLM_PREFIX_CACHE_FIXED_CHUNK_SIZE", "0"))
+    prefix_len = int(os.getenv("VLLM_PREFIX_CACHE_PREFIX_LEN", "2048"))
+    suffix_len = int(os.getenv("VLLM_PREFIX_CACHE_SUFFIX_LEN", "512"))
+
+    common_prefix = _random_prompt(prefix_len, prefix_len + 64)
+    suffix = _random_prompt(suffix_len, suffix_len + 64)
+    needle_prompt = common_prefix + "\n\nQuestion:\n" + suffix
+
+    sp = SamplingParams(temperature=0.0, top_p=1.0, max_tokens=16,
+                        seed=1234, logprobs=5)
+    warm_sp = SamplingParams(temperature=0.0, top_p=1.0, max_tokens=1,
+                             seed=1234)
+
+    llm_kwargs = {}
+    if fixed_chunk_size > 0:
+        llm_kwargs["long_prefill_token_threshold"] = fixed_chunk_size
+
+    llm = None
+    try:
+        llm = LLM(
+            model=TEST_MODEL,
+            tensor_parallel_size=tp_size,
+            max_num_seqs=max_batch_size,
+            max_model_len=max_model_len,
+            dtype="auto",
+            gpu_memory_utilization=gpu_mem_util,
+            enable_prefix_caching=True,
+            enforce_eager=is_device_capability_below_90(),
+            attention_config={"backend": backend},
+            **llm_kwargs,
+        )
+
+        # Case A: full prefill with empty cache → baseline logprobs.
+        baseline_out = llm.generate([needle_prompt], sp, use_tqdm=False)
+        baseline_logprobs, baseline_tokens = _extract_step_logprobs(baseline_out[0])
+        if baseline_logprobs is None:
+            pytest.skip("Logprobs not available.")
+
+        # Clear the cache so Case A's full needle is not still resident.
+        # Without this, the warmup below would be a no-op (Case A already
+        # cached the full needle), and Case B would get a *full* cache hit
+        # (decode path) instead of the intended *partial* hit (suffix prefill).
+        llm.reset_prefix_cache()
+        
+        tokenizer = llm.get_tokenizer()
+        common_ids = tokenizer.encode(common_prefix)
+        needle_ids = tokenizer.encode(needle_prompt)
+        
+        assert needle_ids[:len(common_ids)] == common_ids, (
+            "common_prefix is not an exact token prefix of needle_prompt\n"
+            f"common_len={len(common_ids)}\n"
+            f"needle_prefix_tail={needle_ids[:len(common_ids)][-20:]}\n"
+            f"common_tail={common_ids[-20:]}\n"
+        )
+        
+        print(
+            "TOKEN_PREFIX_CHECK",
+            {
+                "common_len": len(common_ids),
+                "needle_len": len(needle_ids),
+                "prefix_match": (
+                    needle_ids[:len(common_ids)] == common_ids
+                ),
+            },
+        )
+
+        # Warm only the shared prefix so Case B gets a partial hit.
+        llm.generate([common_prefix], warm_sp, use_tqdm=False)
+
+        # Case B: same full prompt in a ragged batch → partial prefix cache hit.
+        needle_pos = random.randint(0, max_batch_size - 1)
+        # Small fillers keep total KV footprint well below the cache capacity so
+        # the needle's cached prefix blocks are never evicted before it runs.
+        prompts = _make_ragged_batch(
+            needle_prompt, max_batch_size, needle_pos,
+            filler_sizes=[(16, 64), (64, 256), (128, 512)],
+            unique_fillers=True,
+        )
+
+        cached_outs = llm.generate(prompts, sp, use_tqdm=False)
+        cached_needle = cached_outs[needle_pos]
+        assert cached_needle.prompt == needle_prompt
+
+        cached_logprobs, cached_tokens = _extract_step_logprobs(cached_needle)
+        if cached_logprobs is None:
+            pytest.skip("Logprobs not available.")
+
+        _assert_logprobs_match(
+            baseline_logprobs, cached_logprobs,
+            baseline_tokens, cached_tokens,
+            label="partial-prefix-cache-hit",
+        )
+
+    finally:
+        if llm is not None:
+            with contextlib.suppress(Exception):
+                llm.shutdown()
+
+
+@skip_unsupported
+@pytest.mark.timeout(1000)
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_full_cache_hit_preserves_batch_invariance(monkeypatch, backend):
+    """
+    Verifies that a full cache hit (the entire prompt is already cached from a
+    prior run) produces bit-identical logprobs when the same prompt is re-run
+    inside a larger ragged batch.
+
+    Cache state going into Case B:
+      - ALL prompt tokens cached (Case A populated them)
+      → FA2 decode path for the last prompt token (no prefill needed)
+
+    This specifically exercises the FA2 packed-GQA heuristic that fires when
+    max_seqlen_q == 1 for a GQA model, which is suppressed in batch-invariant
+    mode by clamping max_seqlen_q to max_model_len.
+    """
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+
+    seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
+    random.seed(seed)
+
+    tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
+    gpu_mem_util = float(os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.9"))
+    max_batch_size = int(os.getenv("VLLM_PREFIX_CACHE_BATCH_SIZE", "32"))
+    max_model_len = int(os.getenv("VLLM_MAX_MODEL_LEN", "8192"))
+    prefix_len = int(os.getenv("VLLM_PREFIX_CACHE_PREFIX_LEN", "2048"))
+    suffix_len = int(os.getenv("VLLM_PREFIX_CACHE_SUFFIX_LEN", "512"))
+
+    common_prefix = _random_prompt(prefix_len, prefix_len + 64)
+    suffix = _random_prompt(suffix_len, suffix_len + 64)
+    needle_prompt = common_prefix + "\n\nQuestion:\n" + suffix
+
+    sp = SamplingParams(temperature=0.0, top_p=1.0, max_tokens=16,
+                        seed=1234, logprobs=5)
+
+    llm = None
+    try:
+        llm = LLM(
+            model=TEST_MODEL,
+            tensor_parallel_size=tp_size,
+            max_num_seqs=max_batch_size,
+            max_model_len=max_model_len,
+            dtype="auto",
+            gpu_memory_utilization=gpu_mem_util,
+            enable_prefix_caching=True,
+            enforce_eager=is_device_capability_below_90(),
+            attention_config={"backend": backend},
+        )
+
+        # Case A: full prefill with empty cache → baseline logprobs.
+        # This also populates the KV cache for ALL needle tokens.
+        baseline_out = llm.generate([needle_prompt], sp, use_tqdm=False)
+        baseline_logprobs, baseline_tokens = _extract_step_logprobs(baseline_out[0])
+        if baseline_logprobs is None:
+            pytest.skip("Logprobs not available.")
+
+        # Case B: same full prompt in a ragged batch.
+        # All needle tokens are already cached → full cache hit → decode path.
+        needle_pos = random.randint(0, max_batch_size - 1)
+        # Small fillers to avoid KV-cache pressure evicting the needle's blocks.
+        prompts = _make_ragged_batch(
+            needle_prompt, max_batch_size, needle_pos,
+            filler_sizes=[(16, 64), (64, 256), (128, 512)],
+            unique_fillers=True,
+        )
+
+        cached_outs = llm.generate(prompts, sp, use_tqdm=False)
+        cached_needle = cached_outs[needle_pos]
+        assert cached_needle.prompt == needle_prompt
+
+        cached_logprobs, cached_tokens = _extract_step_logprobs(cached_needle)
+        if cached_logprobs is None:
+            pytest.skip("Logprobs not available.")
+
+        _assert_logprobs_match(
+            baseline_logprobs, cached_logprobs,
+            baseline_tokens, cached_tokens,
+            label="full-cache-hit",
+        )
+
+    finally:
+        if llm is not None:
+            with contextlib.suppress(Exception):
+                llm.shutdown()
+
+
+@skip_unsupported
+@pytest.mark.timeout(1000)
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_prefix_cache_hit_length_invariance_fixed_batch(monkeypatch, backend):
+    """
+    Verifies that different prefix-cache hit depths produce bit-identical
+    logprobs when the needle prompt runs in a fixed-size ragged batch.
+
+    Reference: BS=1, cold cache (needle alone).
+    Two hit cases run the same fixed batch of max_batch_size sequences:
+      short-hit : tokens 0..short_split-1 pre-warmed
+      long-hit  : tokens 0..long_split-1 pre-warmed
+
+    Both hit cases are compared against the BS=1 cold-cache reference.
+    Using a BS=32 cold run as the reference would compare prefix KV computed
+    in a BS=32 batch (no-cache) against prefix KV from a BS=1 warmup
+    (hit cases) — these differ numerically even with VLLM_BATCH_INVARIANT.
+
+    Warmup inputs are submitted as prompt_token_ids (not strings) so they
+    are guaranteed to be an exact token-prefix of the needle prompt,
+    avoiding BPE boundary differences.
+    """
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+
+    seed = int(os.getenv("VLLM_TEST_SEED", "54"))
+    random.seed(seed)
+
+    max_batch_size = int(os.getenv("VLLM_PREFIX_CACHE_BATCH_SIZE", "32"))
+    max_model_len = int(os.getenv("VLLM_MAX_MODEL_LEN", "8192"))
+    fixed_chunk_size = int(os.getenv("VLLM_PREFIX_CACHE_FIXED_CHUNK_SIZE", "0"))
+
+    short_prefix = _random_prompt(1024, 1088)
+    mid = _random_prompt(1024, 1088)
+    suffix = _random_prompt(512, 576)
+    long_prefix = short_prefix + mid
+    needle_prompt = long_prefix + "\n\nQuestion:\n" + suffix
+
+    sp = SamplingParams(temperature=0.0, top_p=1.0, max_tokens=1,
+                        seed=1234, logprobs=5)
+    warm_sp = SamplingParams(temperature=0.0, top_p=1.0, max_tokens=1,
+                             seed=1234)
+
+    llm_kwargs = {}
+    if fixed_chunk_size > 0:
+        llm_kwargs["long_prefill_token_threshold"] = fixed_chunk_size
+
+    llm = None
+    try:
+        llm = LLM(
+            model=TEST_MODEL,
+            tensor_parallel_size=int(os.getenv("VLLM_TEST_TP_SIZE", "1")),
+            max_num_seqs=max_batch_size,
+            max_model_len=max_model_len,
+            dtype="auto",
+            gpu_memory_utilization=float(
+                os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.9")
+            ),
+            enable_prefix_caching=True,
+            enforce_eager=is_device_capability_below_90(),
+            attention_config={"backend": backend},
+            **llm_kwargs,
+        )
+
+        tokenizer = llm.get_tokenizer()
+        needle_ids = tokenizer.encode(needle_prompt)
+        # Use sub-string token lengths as approximate split points.
+        # Warmup uses prompt_token_ids so BPE boundary differences between
+        # tokenize(sub_string) and needle_ids[:N] are irrelevant.
+        short_split = len(tokenizer.encode(short_prefix))
+        long_split = len(tokenizer.encode(long_prefix))
+
+        assert 0 < short_split < long_split < len(needle_ids), (
+            "Split points must be strictly increasing and within needle length"
+        )
+
+        print("PREFIX_SPLITS", {
+            "needle_tokens": len(needle_ids),
+            "short_split": short_split,
+            "long_split": long_split,
+            "fixed_chunk_size": fixed_chunk_size,
+        })
+
+        needle_pos = random.randint(0, max_batch_size - 1)
+        prompts = _make_ragged_batch(
+            needle_prompt, max_batch_size, needle_pos,
+            filler_sizes=[(16, 64), (64, 256), (128, 512)],
+        )
+
+        def run_case(warmup_ids, label):
+            llm.reset_prefix_cache()
+            if warmup_ids is not None:
+                llm.generate(
+                    [{"prompt_token_ids": warmup_ids}],
+                    warm_sp, use_tqdm=False,
+                )
+            outs = llm.generate(prompts, sp, use_tqdm=False)
+            lp, tok = _extract_step_logprobs(outs[needle_pos])
+            if lp is None:
+                pytest.skip("Logprobs not available.")
+            print("FIXED_BATCH_CASE", {
+                "label": label,
+                "warm_tokens": len(warmup_ids) if warmup_ids is not None else 0,
+                "needle_tokens": len(needle_ids),
+                "tokens": tok,
+            })
+            return lp, tok
+
+        # Diagnostic: compare BS=1 cold vs BS=32 cold to isolate batch-size
+        # invariance from prefix-cache invariance.
+        llm.reset_prefix_cache()
+        _diag_bs1 = llm.generate([needle_prompt], sp, use_tqdm=False)
+        _diag_lp1, _diag_tok1 = _extract_step_logprobs(_diag_bs1[0])
+        print("FIXED_BATCH_DIAG bs1_cold", {
+            "tokens": _diag_tok1, "lp": _diag_lp1.tolist() if _diag_lp1 is not None else None
+        })
+
+        ref_lp, ref_tok = run_case(None, "no-cache")
+
+        if _diag_lp1 is not None and ref_lp is not None:
+            import torch as _torch
+            _bs1_vs_bs32 = _torch.abs(_diag_lp1 - ref_lp).max().item()
+            print(f"FIXED_BATCH_DIAG bs1_vs_bs32_nocache: max_diff={_bs1_vs_bs32:.6e}")
+
+        short_lp, short_tok = run_case(needle_ids[:short_split], "short-hit")
+        long_lp, long_tok = run_case(needle_ids[:long_split], "long-hit")
+
+        if _diag_lp1 is not None:
+            print("FIXED_BATCH_DIFF_MATRIX", {
+                "bs1_vs_bsN_nocache": torch.abs(_diag_lp1 - ref_lp).max().item(),
+                "bs1_vs_short_hit": torch.abs(_diag_lp1 - short_lp).max().item(),
+                "bs1_vs_long_hit": torch.abs(_diag_lp1 - long_lp).max().item(),
+                "bsN_nocache_vs_short_hit": torch.abs(
+                    ref_lp - short_lp
+                ).max().item(),
+                "bsN_nocache_vs_long_hit": torch.abs(
+                    ref_lp - long_lp
+                ).max().item(),
+                "short_hit_vs_long_hit": torch.abs(
+                    short_lp - long_lp
+                ).max().item(),
+            })
+
+        _assert_logprobs_match(
+            ref_lp, short_lp, ref_tok, short_tok, "short-hit-vs-no-cache"
+        )
+        _assert_logprobs_match(
+            ref_lp, long_lp, ref_tok, long_tok, "long-hit-vs-no-cache"
+        )
+
+    finally:
+        if llm is not None:
+            with contextlib.suppress(Exception):
+                llm.shutdown()
+
+
+@skip_unsupported
+@pytest.mark.timeout(1000)
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_prefix_cache_hit_length_invariance_variable_batch(monkeypatch, backend):
+    """
+    Verifies that a partial prefix-cache hit in a large ragged batch produces
+    bit-identical logprobs to a full prefill of the same prompt run alone
+    (BS=1, cold cache).
+
+    This simultaneously exercises two invariant properties:
+      1. Batch-size invariance: BS=1 (no cache) vs BS=N (cached)
+      2. Prefix-cache-hit-length invariance: short-hit vs long-hit
+
+    Warmup inputs are submitted as prompt_token_ids (not strings) so they
+    are guaranteed to be an exact token-prefix of the needle prompt,
+    avoiding BPE boundary differences.
+    """
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+
+    seed = int(os.getenv("VLLM_TEST_SEED", "54"))
+    random.seed(seed)
+
+    max_batch_size = int(os.getenv("VLLM_PREFIX_CACHE_BATCH_SIZE", "32"))
+    max_model_len = int(os.getenv("VLLM_MAX_MODEL_LEN", "8192"))
+
+    short_prefix = _random_prompt(1024, 1088)
+    mid = _random_prompt(1024, 1088)
+    suffix = _random_prompt(512, 576)
+    long_prefix = short_prefix + mid
+    needle_prompt = long_prefix + "\n\nQuestion:\n" + suffix
+
+    sp = SamplingParams(temperature=0.0, top_p=1.0, max_tokens=1,
+                        seed=1234, logprobs=5)
+    warm_sp = SamplingParams(temperature=0.0, top_p=1.0, max_tokens=1,
+                             seed=1234)
+
+    llm = None
+    try:
+        llm = LLM(
+            model=TEST_MODEL,
+            tensor_parallel_size=int(os.getenv("VLLM_TEST_TP_SIZE", "1")),
+            max_num_seqs=max_batch_size,
+            max_model_len=max_model_len,
+            dtype="auto",
+            gpu_memory_utilization=float(
+                os.getenv("VLLM_GPU_MEMORY_UTILIZATION", "0.9")
+            ),
+            enable_prefix_caching=True,
+            enforce_eager=is_device_capability_below_90(),
+            attention_config={"backend": backend},
+        )
+
+        tokenizer = llm.get_tokenizer()
+        needle_ids = tokenizer.encode(needle_prompt)
+        short_split = len(tokenizer.encode(short_prefix))
+        long_split = len(tokenizer.encode(long_prefix))
+
+        assert 0 < short_split < long_split < len(needle_ids), (
+            "Split points must be strictly increasing and within needle length"
+        )
+
+        print("PREFIX_SPLITS", {
+            "needle_tokens": len(needle_ids),
+            "short_split": short_split,
+            "long_split": long_split,
+        })
+
+        needle_pos = random.randint(0, max_batch_size - 1)
+        batch_prompts = _make_ragged_batch(
+            needle_prompt, max_batch_size, needle_pos,
+            filler_sizes=[(16, 64), (64, 256), (128, 512)],
+        )
+
+        # BS=1, cold cache: establish baseline.
+        llm.reset_prefix_cache()
+        ref_outs = llm.generate([needle_prompt], sp, use_tqdm=False)
+        ref_lp, ref_tok = _extract_step_logprobs(ref_outs[0])
+        if ref_lp is None:
+            pytest.skip("Logprobs not available.")
+
+        def run_bsN_case(warmup_ids, label):
+            llm.reset_prefix_cache()
+            llm.generate(
+                [{"prompt_token_ids": warmup_ids}],
+                warm_sp, use_tqdm=False,
+            )
+            outs = llm.generate(batch_prompts, sp, use_tqdm=False)
+            lp, tok = _extract_step_logprobs(outs[needle_pos])
+            if lp is None:
+                pytest.skip("Logprobs not available.")
+            print("VARIABLE_BATCH_CASE", {
+                "label": label,
+                "batch_size": len(batch_prompts),
+                "needle_pos": needle_pos,
+                "warm_tokens": len(warmup_ids),
+                "needle_tokens": len(needle_ids),
+                "tokens": tok,
+            })
+            return lp, tok
+
+        short_lp, short_tok = run_bsN_case(
+            needle_ids[:short_split], "short-hit-batchN"
+        )
+        long_lp, long_tok = run_bsN_case(
+            needle_ids[:long_split], "long-hit-batchN"
+        )
+
+        _assert_logprobs_match(
+            ref_lp, short_lp, ref_tok, short_tok,
+            "short-hit-batchN-vs-bs1-no-cache",
+        )
+        _assert_logprobs_match(
+            ref_lp, long_lp, ref_tok, long_tok,
+            "long-hit-batchN-vs-bs1-no-cache",
+        )
+
+    finally:
+        if llm is not None:
+            with contextlib.suppress(Exception):
+                llm.shutdown()

@@ -697,6 +697,19 @@ class FlashAttentionImpl(AttentionImpl):
         self._dcp_dtype: torch.dtype | None = None
         if vllm_config is not None and self.dcp_world_size > 1:
             self._dcp_dtype = vllm_config.model_config.dtype
+        self.max_model_len: int | None = (
+            vllm_config.model_config.max_model_len
+            if vllm_config is not None
+            else None
+        )
+        if self.batch_invariant_enabled and self.max_model_len is None:
+            logger.warning_once(
+                "VLLM_BATCH_INVARIANT is enabled, but max_model_len is "
+                "unknown because no active vLLM config is available. "
+                "FlashAttention batch invariance is best-effort only: "
+                "max_seqlen_k and non-decode max_seqlen_q may still depend on "
+                "batch composition."
+            )
 
     def forward(
         self,
@@ -793,7 +806,33 @@ class FlashAttentionImpl(AttentionImpl):
             cu_seqlens_q = attn_metadata.query_start_loc
             seqused_k = attn_metadata.seq_lens
             max_seqlen_q = attn_metadata.max_query_len
+            # Prevent FA2's packed-GQA heuristic (seqlenq_ngroups_swapped),
+            # which fires when max_seqlen_q == 1 for GQA models and selects a
+            # different kernel path than when max_seqlen_q > 1. A mixed batch
+            # (needle decoding + fillers prefilling) has max_seqlen_q > 1 and
+            # skips packed-GQA, while a pure-decode batch has max_seqlen_q == 1
+            # and triggers it — different paths → different FP results.
+            # Passing 2 disables it without extra work: BLOCK_M >= 2 means
+            # ceil(2/BLOCK_M) == ceil(1/BLOCK_M) == 1 CTA; cu_seqlens_q still
+            # bounds actual computation per request.
+            if self.batch_invariant_enabled:
+                if self.max_model_len is not None:
+                    # Fix max_seqlen_q to a constant so FA kernel dispatch and
+                    # reduction order are independent of cache-hit length or
+                    # batch composition (including the packed-GQA heuristic
+                    # that fires when max_seqlen_q == 1 for GQA models).
+                    max_seqlen_q = self.max_model_len
+                elif max_seqlen_q == 1:
+                    # Fallback when max_model_len is unknown (vllm_config=None):
+                    # set to 2 to prevent the packed-GQA path.
+                    max_seqlen_q = 2
             max_seqlen_k = attn_metadata.max_seq_len
+            if self.batch_invariant_enabled and self.max_model_len is not None:
+                # Fix max_seqlen_k to a constant so any FA kernel-dispatch
+                # heuristic that reads this upper bound is batch-independent.
+                # Correctness is unaffected: FA2 bounds each request's inner
+                # KV loop by seqused_k[i], not max_seqlen_k.
+                max_seqlen_k = self.max_model_len
             block_table = attn_metadata.block_table
             scheduler_metadata = attn_metadata.scheduler_metadata
 

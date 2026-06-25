@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
 
+import vllm.envs as envs
 from vllm.distributed.kv_events import BlockStored, KVCacheEvent
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
@@ -134,6 +135,7 @@ class KVCacheManager:
         self.enable_caching = enable_caching
         self.use_eagle = use_eagle
         self.log_stats = log_stats
+        self.scheduler_block_size = scheduler_block_size
         self.metrics_collector = metrics_collector
         # FIXME: make prefix cache stats conditional on log_stats. We still need
         # this comment because when the log stats is enabled there are still
@@ -230,6 +232,28 @@ class KVCacheManager:
                 request.block_hashes, max_cache_hit_length
             )
         )
+
+        if envs.VLLM_BATCH_INVARIANT and num_new_computed_tokens > 0:
+            # Prefix-cache hits are block-aligned already. In batch-invariant
+            # mode, further coarsen them to a fixed multiple of the scheduler
+            # block size so users cannot configure a non-aligned boundary.
+            chunk_size = self.scheduler_block_size * 8
+            canonical_tokens = num_new_computed_tokens // chunk_size * chunk_size
+            if canonical_tokens != num_new_computed_tokens:
+                blocks_to_keep = canonical_tokens // self.scheduler_block_size
+                if all(
+                    len(group) == len(computed_blocks[0])
+                    for group in computed_blocks
+                ):
+                    computed_blocks = tuple(
+                        group[:blocks_to_keep] for group in computed_blocks
+                    )
+                    num_new_computed_tokens = canonical_tokens
+                else:
+                    logger.warning_once(
+                        "Skipping canonical prefix-cache hit truncation because "
+                        "KV cache groups have different block counts."
+                    )
 
         if self.log_stats:
             assert self.prefix_cache_stats is not None
