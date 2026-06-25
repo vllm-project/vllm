@@ -457,7 +457,6 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 # This stage is independent and doesn't affect csrc cache
 FROM base AS extensions-build
 ARG CUDA_VERSION
-ARG NCCL_VERSION
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 ENV UV_HTTP_TIMEOUT=500
@@ -466,11 +465,10 @@ ENV UV_LINK_MODE=copy
 
 WORKDIR /workspace
 
-# Install NCCL >= 2.30.4 headers/libs for DeepEPv2 compilation
-RUN apt-get update -y && \
-    apt-get install -y --no-install-recommends --allow-change-held-packages \
-        libnccl-dev=${NCCL_VERSION} libnccl2=${NCCL_VERSION} && \
-    rm -rf /var/lib/apt/lists/*
+# DeepEPv2 compiles against NCCL GIN device headers (ncclGinRequest_t etc.)
+# which are only in the pip package, not the apt libnccl-dev package.
+RUN --mount=type=cache,target=/opt/uv/cache \
+    uv pip install --python /opt/venv/bin/python3 "nvidia-nccl-cu13>=2.30.4" --no-deps
 
 # Build DeepEP wheels
 COPY tools/ep_kernels/install_python_libraries.sh /tmp/install_python_libraries.sh
