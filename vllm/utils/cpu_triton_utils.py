@@ -5,6 +5,7 @@
 Contains replacement functions to fallback Triton usages in CPU backend
 """
 
+import ctypes
 from collections.abc import Callable
 
 import torch
@@ -300,6 +301,7 @@ def _sample_recovered_tokens_kernel_impl(
     vocab_size,
     BLOCK_SIZE=None,
     NO_DRAFT_PROBS=False,
+    USE_FP64_GUMBEL=False,
 ):
     # C++ reads integer tensors as int64_t*; ensure correct dtype.
     orig_dtype = output_token_ids.dtype
@@ -310,7 +312,8 @@ def _sample_recovered_tokens_kernel_impl(
         _ensure_int64(draft_token_ids),
         draft_probs,
         target_probs,
-        inv_q,
+        # C++ kernel reads inv_q as float32.
+        inv_q.to(torch.float32),
         vocab_size,
         NO_DRAFT_PROBS,
     )
@@ -334,3 +337,12 @@ rejection_greedy_sample_kernel = _FuncWrapper(_rejection_greedy_sample_kernel_im
 rejection_random_sample_kernel = _FuncWrapper(_rejection_random_sample_kernel_impl)
 expand_kernel = _FuncWrapper(_expand_kernel_impl)
 sample_recovered_tokens_kernel = _FuncWrapper(_sample_recovered_tokens_kernel_impl)
+
+
+def _batch_memcpy_impl(src_ptrs, dst_ptrs, sizes, BLOCK_SIZE=None):
+    # BLOCK_SIZE is unused; kept for signature parity with the Triton kernel.
+    for src, dst, size in zip(src_ptrs.tolist(), dst_ptrs.tolist(), sizes.tolist()):
+        ctypes.memmove(dst, src, size)
+
+
+batch_memcpy_kernel = _FuncWrapper(_batch_memcpy_impl)

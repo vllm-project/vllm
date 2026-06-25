@@ -3,26 +3,31 @@
 import os
 import sys
 from contextlib import contextmanager
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
+from typing import Any, cast
 from unittest import mock
 
 import pytest
 
-from vllm.triton_utils import jit_monitor
+from vllm.utils import jit_monitor
 
 
 @pytest.fixture(autouse=True)
 def _reset_monitor():
     """Reset global monitor state between tests."""
     jit_monitor._active = False
+    jit_monitor._mode = "warn"
     jit_monitor._verbose = False
+    jit_monitor._cutedsl_hook_installed = False
     yield
     jit_monitor._active = False
+    jit_monitor._mode = "warn"
     jit_monitor._verbose = False
+    jit_monitor._cutedsl_hook_installed = False
 
 
 # ------------------------------------------------------------------
-# Helpers — lightweight stand-ins for triton.knobs
+# Helpers — lightweight stand-ins for the modules ``activate()`` patches
 # ------------------------------------------------------------------
 
 
@@ -33,12 +38,36 @@ def _make_fake_knobs(*, autotuning_print=False, jit_hook=None):
     return SimpleNamespace(autotuning=autotuning, runtime=runtime)
 
 
+def _fake_cute_import_modules(compile_fn):
+    """Fake Python's parent package + submodule for ``import cutlass.cute``."""
+    fake_cute = cast(Any, ModuleType("cutlass.cute"))
+    fake_cute.compile = compile_fn
+    fake_parent_package = cast(Any, ModuleType("cutlass"))
+    fake_parent_package.__path__ = []
+    fake_parent_package.cute = fake_cute
+    return {
+        "cutlass": fake_parent_package,
+        "cutlass.cute": fake_cute,
+    }
+
+
+def _fake_cute_compile(*args, **kwargs):
+    return "compiled"
+
+
 @contextmanager
-def _patch_triton_knobs(fake_knobs):
-    """Context manager that makes ``from triton import knobs`` return *fake_knobs*."""
-    fake_triton = SimpleNamespace(knobs=fake_knobs)
+def _patch_jit_modules(fake_knobs, *, cute_compile=_fake_cute_compile):
+    """Patch the Triton and CuTeDSL imports touched by ``jit_monitor.activate``."""
+    fake_triton = cast(Any, ModuleType("triton"))
+    fake_triton.knobs = fake_knobs
     with (
-        mock.patch.dict(sys.modules, {"triton": fake_triton}),
+        mock.patch.dict(
+            sys.modules,
+            {
+                "triton": fake_triton,
+                **_fake_cute_import_modules(cute_compile),
+            },
+        ),
         mock.patch.object(jit_monitor, "HAS_TRITON", True),
     ):
         yield
@@ -52,13 +81,13 @@ def _patch_triton_knobs(fake_knobs):
 class TestActivateBasic:
     def test_sets_active(self):
         assert not jit_monitor.is_active()
-        with _patch_triton_knobs(_make_fake_knobs()):
+        with _patch_jit_modules(_make_fake_knobs()):
             jit_monitor.activate()
         assert jit_monitor.is_active()
 
     def test_idempotent(self):
         fake = _make_fake_knobs()
-        with _patch_triton_knobs(fake):
+        with _patch_jit_modules(fake):
             jit_monitor.activate()
             first_hook = fake.runtime.jit_post_compile_hook
             jit_monitor.activate()
@@ -67,17 +96,21 @@ class TestActivateBasic:
     def test_logs_info_on_activation(self):
         with (
             mock.patch.object(jit_monitor.logger, "info") as m,
-            _patch_triton_knobs(_make_fake_knobs()),
+            _patch_jit_modules(_make_fake_knobs()),
         ):
             jit_monitor.activate()
         m.assert_called_once()
         assert "Kernel JIT monitor activated" in m.call_args[0][0]
 
+    def test_rejects_unknown_mode(self):
+        with pytest.raises(ValueError, match="Unsupported JIT monitor mode"):
+            jit_monitor.activate(mode="panic")  # type: ignore[arg-type]
+
 
 class TestAutotuningPrint:
     def test_enables_autotuning_print(self):
         fake = _make_fake_knobs(autotuning_print=False)
-        with _patch_triton_knobs(fake):
+        with _patch_jit_modules(fake):
             jit_monitor.activate()
         assert fake.autotuning.print is True
 
@@ -85,7 +118,7 @@ class TestAutotuningPrint:
         fake = _make_fake_knobs(autotuning_print=False)
         with (
             mock.patch.dict(os.environ, {"TRITON_PRINT_AUTOTUNING": "0"}),
-            _patch_triton_knobs(fake),
+            _patch_jit_modules(fake),
         ):
             jit_monitor.activate()
         assert fake.autotuning.print is False
@@ -94,23 +127,23 @@ class TestAutotuningPrint:
         fake = _make_fake_knobs(autotuning_print=True)
         with (
             mock.patch.dict(os.environ, {"TRITON_PRINT_AUTOTUNING": "1"}),
-            _patch_triton_knobs(fake),
+            _patch_jit_modules(fake),
         ):
             jit_monitor.activate()
         assert fake.autotuning.print is True
 
 
-class TestJitHook:
+class TestTritonJitHook:
     def test_hook_registered(self):
         fake = _make_fake_knobs()
         assert fake.runtime.jit_post_compile_hook is None
-        with _patch_triton_knobs(fake):
+        with _patch_jit_modules(fake):
             jit_monitor.activate()
         assert fake.runtime.jit_post_compile_hook is not None
 
     def test_hook_logs_warning(self):
         fake = _make_fake_knobs()
-        with _patch_triton_knobs(fake):
+        with _patch_jit_modules(fake):
             jit_monitor.activate()
 
         hook = fake.runtime.jit_post_compile_hook
@@ -138,7 +171,7 @@ class TestJitHook:
     def test_hook_chains_existing_hook(self):
         existing = mock.MagicMock(return_value="existing_result")
         fake = _make_fake_knobs(jit_hook=existing)
-        with _patch_triton_knobs(fake):
+        with _patch_jit_modules(fake):
             jit_monitor.activate()
 
         hook = fake.runtime.jit_post_compile_hook
@@ -158,7 +191,7 @@ class TestJitHook:
 
     def test_hook_works_without_existing_hook(self):
         fake = _make_fake_knobs(jit_hook=None)
-        with _patch_triton_knobs(fake):
+        with _patch_jit_modules(fake):
             jit_monitor.activate()
 
         hook = fake.runtime.jit_post_compile_hook
@@ -173,12 +206,74 @@ class TestJitHook:
         )
         assert result is None
 
+    def test_error_mode_raises(self):
+        fake = _make_fake_knobs()
+        with _patch_jit_modules(fake):
+            jit_monitor.activate(mode="error")
+
+        hook = fake.runtime.jit_post_compile_hook
+        mock_fn = SimpleNamespace(name="error_kernel")
+        with pytest.raises(RuntimeError, match="Triton kernel JIT compilation"):
+            hook(
+                key="k",
+                repr="r",
+                fn=mock_fn,
+                compile=lambda: None,
+                is_manual_warmup=False,
+                already_compiled=False,
+            )
+
 
 class TestNoTritonFallback:
     def test_activate_without_triton(self):
         with mock.patch.object(jit_monitor, "HAS_TRITON", False):
             jit_monitor.activate()
         assert jit_monitor.is_active()
+
+
+class TestCuTeDSLHook:
+    def test_compile_logs_warning(self):
+        def compile_fn(*args, **kwargs):
+            return "compiled"
+
+        with _patch_jit_modules(_make_fake_knobs(), cute_compile=compile_fn):
+            import cutlass.cute as cute
+
+            jit_monitor.activate()
+            with mock.patch.object(jit_monitor.logger, "warning_once") as warning_once:
+                result = cute.compile(lambda: None, "arg", option=True)
+
+        assert result == "compiled"
+        warning_once.assert_called_once()
+        msg = warning_once.call_args[0][0] % warning_once.call_args[0][1:]
+        assert "CuTeDSL JIT compilation during inference" in msg
+
+    def test_compile_logs_verbose_warning(self):
+        def compile_fn(*args, **kwargs):
+            return "compiled"
+
+        with _patch_jit_modules(_make_fake_knobs(), cute_compile=compile_fn):
+            import cutlass.cute as cute
+
+            jit_monitor.activate(verbose=True)
+            with mock.patch.object(jit_monitor.logger, "warning") as warning:
+                result = cute.compile(lambda: None, "arg", option=True)
+
+        assert result == "compiled"
+        warning.assert_called_once()
+        msg = warning.call_args[0][0] % warning.call_args[0][1:]
+        assert "CuTeDSL JIT compilation during inference" in msg
+
+    def test_error_mode_raises(self):
+        def compile_fn(*args, **kwargs):
+            return "compiled"
+
+        with _patch_jit_modules(_make_fake_knobs(), cute_compile=compile_fn):
+            import cutlass.cute as cute
+
+            jit_monitor.activate(mode="error")
+            with pytest.raises(RuntimeError, match="CuTeDSL JIT compilation"):
+                cute.compile(lambda: None, "arg", option=True)
 
 
 # ------------------------------------------------------------------
