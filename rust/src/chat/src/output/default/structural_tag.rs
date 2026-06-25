@@ -77,7 +77,7 @@ fn structural_tag_tool_choice(request: &ChatRequest) -> Option<StructuralTagTool
 mod tests {
     use serde_json::{Value, json};
     use vllm_engine_core_client::protocol::{StructuredOutputBackend, StructuredOutputsParams};
-    use vllm_tool_parser::{Qwen3CoderToolParser, Tool};
+    use vllm_parser::tool::{Qwen3CoderToolParser, Tool};
 
     use super::*;
 
