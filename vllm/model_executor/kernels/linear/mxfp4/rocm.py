@@ -34,10 +34,10 @@ class Rdna3MxFp4LinearKernel(MxFp4LinearKernel):
     ) -> tuple[bool, str | None]:
         if not current_platform.is_rocm():
             return False, "not running on ROCm"
-        from vllm.platforms.rocm import on_gfx11
+        from vllm.platforms.rocm import on_gfx1100
 
-        if not on_gfx11():
-            return False, "RDNA3 (gfx11xx) WMMA required"
+        if not on_gfx1100():
+            return False, "RDNA3 gfx1100 WMMA required"
         if not hasattr(torch.ops._rocm_C, "mxfp4_gemm_rdna3"):
             return False, "_rocm_C.mxfp4_gemm_rdna3 op not built"
         return True, None
