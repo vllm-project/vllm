@@ -79,7 +79,7 @@ impl GlmXmlToolParser {
     fn apply_event(&mut self, event: GlmEvent, output: &mut ToolParserOutput) -> Result<()> {
         match event {
             GlmEvent::Text { len: consumed_len } => {
-                output.normal_text.push_str(&self.buffer[..consumed_len]);
+                output.push_text(&self.buffer[..consumed_len]);
             }
             GlmEvent::ToolCallStart => {
                 self.mode = GlmMode::ToolCall {
@@ -92,7 +92,7 @@ impl GlmXmlToolParser {
                 let arguments = serde_json::to_string(&arguments)
                     .map_err(|error| parsing_failed!("failed to serialize arguments: {}", error))?;
 
-                output.calls.push(ToolCallDelta {
+                output.push_call(ToolCallDelta {
                     tool_index: self.emitted_tool_count,
                     name: Some(name),
                     arguments,
@@ -127,7 +127,7 @@ impl GlmXmlToolParser {
         let mut output = ToolParserOutput::default();
         if !self.buffer.is_empty() {
             match self.mode {
-                GlmMode::Text => output.normal_text.push_str(&self.buffer),
+                GlmMode::Text => output.push_text(&self.buffer),
                 GlmMode::ToolCall { .. } => {
                     return Err(parsing_failed!("incomplete GLM MoE tool call"));
                 }
@@ -283,8 +283,8 @@ mod tests {
         let mut parser = Glm45MoeToolParser::new(&test_tools());
         let output = parser.parse_complete("Hello, world!").unwrap();
 
-        assert_eq!(output.normal_text, "Hello, world!");
-        assert!(output.calls.is_empty());
+        assert_eq!(output.normal_text(), "Hello, world!");
+        assert!(output.calls().is_empty());
     }
 
     #[test]
@@ -300,11 +300,11 @@ mod tests {
 
         let output = parser.parse_complete(&output).unwrap();
 
-        assert_eq!(output.normal_text, "Let me search for that.\n");
-        assert_eq!(output.calls.len(), 1);
-        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(output.normal_text(), "Let me search for that.\n");
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
         assert_eq!(
-            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
             json!({"city": "Beijing", "date": "2024-12-25"})
         );
     }
@@ -321,12 +321,12 @@ mod tests {
         let chunks = split_by_chars(&output, 11);
         let output = collect_stream(&mut parser, &chunks);
 
-        assert_eq!(output.normal_text, "");
-        assert_eq!(output.calls.len(), 2);
-        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
-        assert_eq!(output.calls[1].name.as_deref(), Some("add"));
+        assert_eq!(output.normal_text(), "");
+        assert_eq!(output.calls().len(), 2);
+        assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(output.calls()[1].name.as_deref(), Some("add"));
         assert_eq!(
-            serde_json::from_str::<Value>(&output.calls[1].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls()[1].arguments).unwrap(),
             json!({"x": 1, "y": 2})
         );
     }
@@ -345,7 +345,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
             json!({
                 "city": "Paris &lt;/arg_value&gt;&lt;/tool_call&gt;",
                 "date": "2026-05-08",
@@ -359,8 +359,8 @@ mod tests {
 
         let output = collect_stream(&mut parser, &["hello ", "world"]);
 
-        assert_eq!(output.normal_text, "hello world");
-        assert!(output.calls.is_empty());
+        assert_eq!(output.normal_text(), "hello world");
+        assert!(output.calls().is_empty());
     }
 
     #[test]
@@ -375,8 +375,8 @@ mod tests {
             ],
         );
 
-        assert_eq!(output.normal_text, "Prefix ");
-        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.normal_text(), "Prefix ");
+        assert_eq!(output.calls().len(), 1);
     }
 
     #[test]
@@ -391,9 +391,9 @@ mod tests {
             ],
         );
 
-        assert_eq!(output.normal_text, "hello ");
-        assert_eq!(output.calls.len(), 1);
-        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(output.normal_text(), "hello ");
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
     }
 
     #[test]
@@ -402,8 +402,8 @@ mod tests {
 
         let output = parser.parse_chunk("<tool_call>get_weather\n<arg_key>city</arg_key>").unwrap();
 
-        assert_eq!(output.normal_text, "");
-        assert!(output.calls.is_empty());
+        assert_eq!(output.normal_text(), "");
+        assert!(output.calls().is_empty());
     }
 
     #[test]
@@ -437,7 +437,7 @@ mod tests {
             )],
         );
 
-        assert_eq!(output.normal_text, "");
-        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.normal_text(), "");
+        assert_eq!(output.calls().len(), 1);
     }
 }
