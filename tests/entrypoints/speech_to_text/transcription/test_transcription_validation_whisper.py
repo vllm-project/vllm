@@ -10,6 +10,7 @@ import numpy as np
 import openai
 import pytest
 import pytest_asyncio
+import regex as re
 import soundfile as sf
 
 from tests.utils import RemoteOpenAIServer
@@ -307,6 +308,43 @@ async def test_audio_with_timestamp(mary_had_lamb, whisper_client):
     assert len(transcription.segments) > 0
     assert transcription.segments[0].avg_logprob is not None
     assert transcription.segments[0].compression_ratio is not None
+
+
+@pytest.mark.asyncio
+async def test_audio_response_format_srt(mary_had_lamb, whisper_client):
+    """srt format returns subtitle text built from segment timestamps."""
+    # The OpenAI client returns srt as a raw string, not a parsed object.
+    transcription = await whisper_client.audio.transcriptions.create(
+        model=MODEL_NAME,
+        file=mary_had_lamb,
+        language="en",
+        response_format="srt",
+        temperature=0.0,
+    )
+    assert isinstance(transcription, str)
+    # First cue is numbered "1" and is followed by a timestamp line.
+    assert transcription.startswith("1\n")
+    assert "-->" in transcription
+    # Cue timing uses the SRT "HH:MM:SS,mmm --> HH:MM:SS,mmm" format.
+    assert re.search(
+        r"\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}", transcription
+    )
+    assert "Mary had a little lamb" in transcription
+
+
+@pytest.mark.asyncio
+async def test_srt_streaming_raises(mary_had_lamb, whisper_client):
+    """srt format does not support streaming and should raise a 400."""
+    with pytest.raises(openai.BadRequestError):
+        await whisper_client.audio.transcriptions.create(
+            model=MODEL_NAME,
+            file=mary_had_lamb,
+            language="en",
+            response_format="srt",
+            temperature=0.0,
+            stream=True,
+            timeout=30,
+        )
 
 
 @pytest.mark.asyncio
