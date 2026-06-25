@@ -256,6 +256,10 @@ class SamplingParams(
     """Token IDs that stop the generation when they are generated. The returned
     output will contain the stop tokens unless the stop tokens are special
     tokens."""
+    trace_decode_token_ids: list[int] | None = None
+    """If provided, forces the engine to emit this predetermined sequence of
+    token IDs during decoding instead of sampling randomly. Real logprobs are
+    still computed. Conflict checking is performed at the engine level."""
     ignore_eos: bool = False
     """Whether to ignore the EOS token and continue generating
     tokens after the EOS token is generated."""
@@ -383,6 +387,7 @@ class SamplingParams(
         extra_args: dict[str, Any] | None = None,
         skip_clone: bool = False,
         repetition_detection: RepetitionDetectionParams | None = None,
+        trace_decode_token_ids: list[int] | None = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Fast path uses a dict comprehension; on failure we iterate once
@@ -443,6 +448,7 @@ class SamplingParams(
             extra_args=extra_args,
             skip_clone=skip_clone,
             repetition_detection=repetition_detection,
+            trace_decode_token_ids=trace_decode_token_ids,
         )
 
     def __post_init__(self) -> None:
@@ -605,6 +611,15 @@ class SamplingParams(
             raise ValueError(
                 f"stop_token_ids must contain only integers, got {self.stop_token_ids}."
             )
+        if self.trace_decode_token_ids is not None:
+            if not self.trace_decode_token_ids:
+                raise ValueError("trace_decode_token_ids must be a non-empty list.")
+            if not all(
+                isinstance(t, int) and t >= 0 for t in self.trace_decode_token_ids
+            ):
+                raise ValueError(
+                    "trace_decode_token_ids must contain non-negative integers."
+                )
         assert isinstance(self.stop, list)
         if any(not stop_str for stop_str in self.stop):
             raise ValueError("stop cannot contain an empty string.")
