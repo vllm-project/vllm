@@ -20,7 +20,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
-    RSWAMLASpec,
+    RSWASpec,
     SinkFullAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
@@ -609,7 +609,7 @@ class RSWAManager(FullAttentionManager):
     growing linearly with decode length.
     """
 
-    def __init__(self, kv_cache_spec: RSWAMLASpec, **kwargs) -> None:
+    def __init__(self, kv_cache_spec: RSWASpec, **kwargs) -> None:
         super().__init__(kv_cache_spec, **kwargs)
         self.rswa_window: int = kv_cache_spec.rswa_window
 
@@ -1406,7 +1406,7 @@ def get_manager_for_kv_cache_spec(
     # startup pool sizer uses (single source of truth: the spec method).
     if isinstance(
         kv_cache_spec,
-        (SlidingWindowSpec, ChunkedLocalAttentionSpec, RSWAMLASpec),
+        (SlidingWindowSpec, ChunkedLocalAttentionSpec, RSWASpec),
     ):
         kwargs["max_admission_blocks_per_request"] = (
             kv_cache_spec.max_admission_blocks_per_request(
@@ -1461,7 +1461,7 @@ def register_all_kvcache_specs(vllm_config):
         MLAAttentionSpec, FullAttentionManager, uniform_type_base_spec=FullAttentionSpec
     )
     KVCacheSpecRegistry.register(
-        RSWAMLASpec, RSWAManager, uniform_type_base_spec=FullAttentionSpec
+        RSWASpec, RSWAManager, uniform_type_base_spec=FullAttentionSpec
     )
     # NOTE(Mengqing): HiddenStateCacheSpec won't take part in
     # grouping, thus the uniform_type_base_spec is just a

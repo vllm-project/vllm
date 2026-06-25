@@ -150,6 +150,11 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
         text_config.architectures = ["DeepseekV2ForCausalLM"]
         if getattr(model_config.hf_config, "rswa_window", None) is None:
             model_config.hf_config.rswa_window = 128
+        # Propagate rswa_window to text_config so that DeepseekAttention (which
+        # receives text_config as its vllm_config.model_config.hf_config via
+        # init_vllm_registered_model) can read it and create RSWAAttention.
+        rswa_window = model_config.hf_config.rswa_window
+        text_config.rswa_window = rswa_window
 
 
 class Gemma4Config(VerifyAndUpdateConfig):

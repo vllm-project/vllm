@@ -438,13 +438,14 @@ class HiddenStateCacheSpec(MLAAttentionSpec):
 
 
 @dataclass(frozen=True, kw_only=True)
-class RSWAMLASpec(MLAAttentionSpec):
-    """KV cache spec for Reference Sliding Window Attention (R-SWA) with MLA.
+class RSWASpec(FullAttentionSpec):
+    """KV cache spec for Reference Sliding Window Attention (R-SWA).
 
     Prefill (image + text prompt) tokens are always globally visible.
     Only the last ``rswa_window`` generated tokens are kept in the KV cache;
     gap blocks (between the prefill tail and the current decode window) are
-    evicted during each decode step to bound memory at O(prefix + rswa_window).
+    evicted during each decode step to bound memory at
+    O(prefix_blocks + window_blocks).
     """
 
     rswa_window: int
@@ -455,11 +456,36 @@ class RSWAMLASpec(MLAAttentionSpec):
         """Per-request KV block cap.
 
         Steady-state decode holds prefix blocks + window blocks + 2 boundary
-        blocks.  We conservatively cap at max_model_len + rswa_window to allow
-        any prefix length; RSWAManager.remove_gap_blocks keeps the actual
-        in-flight count at prefix_blocks + window_blocks.
+        blocks.  We conservatively cap to allow any prefix length; the actual
+        in-flight count is kept bounded by RSWAManager.remove_gap_blocks.
         """
         return cdiv(max_model_len + self.rswa_window, self.block_size) + 2
+
+    @classmethod
+    def merge(cls, specs: list["RSWASpec"]) -> "RSWASpec":
+        assert all(isinstance(spec, RSWASpec) for spec in specs), (
+            "All attention layers in the same KV cache group must be RSWASpec."
+        )
+        rswa_windows = {spec.rswa_window for spec in specs}
+        assert len(rswa_windows) == 1, (
+            f"All R-SWA layers must share the same rswa_window, got {rswa_windows}"
+        )
+        # Delegate common field merging to the parent, then reattach rswa_window.
+        base = FullAttentionSpec.merge(specs)  # type: ignore[arg-type]
+        return cls(
+            block_size=base.block_size,
+            num_kv_heads=base.num_kv_heads,
+            head_size=base.head_size,
+            head_size_v=base.head_size_v,
+            dtype=base.dtype,
+            kv_quant_mode=base.kv_quant_mode,
+            page_size_padded=base.page_size_padded,
+            indexes_kv_by_block_stride=base.indexes_kv_by_block_stride,
+            sliding_window=base.sliding_window,
+            attention_chunk_size=base.attention_chunk_size,
+            non_causal=base.non_causal,
+            rswa_window=rswa_windows.pop(),
+        )
 
 
 @dataclass(frozen=True, kw_only=True)

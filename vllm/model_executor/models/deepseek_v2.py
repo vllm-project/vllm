@@ -94,7 +94,7 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerBackend,
 )
-from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec, RSWAMLASpec
+from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec, RSWASpec
 
 from .interfaces import (
     MixtureOfExperts,
@@ -113,6 +113,40 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+
+class RSWAAttention(Attention):
+    """Attention subclass that reports RSWASpec as its KV cache spec.
+
+    Drop-in replacement for the standard ``Attention`` layer inside
+    ``DeepseekAttention`` when the model is configured with Reference Sliding
+    Window Attention (R-SWA, ``rswa_window > 0``).  The actual masking logic
+    lives in the attention backend (FlexAttention or FA4 mask_mod); this class
+    only overrides ``get_kv_cache_spec`` so the KV cache manager instantiates
+    ``RSWAManager`` (instead of ``FullAttentionManager``) and can therefore
+    evict "gap" blocks to keep per-request KV memory bounded.
+    """
+
+    def __init__(self, *args, rswa_window: int, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._rswa_window = rswa_window
+
+    def get_kv_cache_spec(self, vllm_config: "VllmConfig") -> "KVCacheSpec | None":
+        base = super().get_kv_cache_spec(vllm_config)
+        if base is None:
+            return None
+        from vllm.v1.kv_cache_interface import get_kv_quant_mode
+
+        quant_mode = get_kv_quant_mode(self.kv_cache_dtype)
+        return RSWASpec(
+            block_size=base.block_size,
+            num_kv_heads=base.num_kv_heads,
+            head_size=base.head_size,
+            head_size_v=getattr(base, "head_size_v", base.head_size),
+            dtype=base.dtype,
+            kv_quant_mode=quant_mode,
+            rswa_window=self._rswa_window,
+        )
 
 
 class DeepseekAttention(nn.Module):
@@ -173,15 +207,28 @@ class DeepseekAttention(nn.Module):
             max_position=max_position_embeddings,
             rope_parameters=config.rope_parameters,
         )
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.attn",
-        )
+        rswa_window = getattr(vllm_config.model_config.hf_config, "rswa_window", None)
+        if rswa_window is not None:
+            self.attn = RSWAAttention(
+                self.num_heads,
+                self.head_dim,
+                self.scaling,
+                num_kv_heads=self.num_kv_heads,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.attn",
+                rswa_window=rswa_window,
+            )
+        else:
+            self.attn = Attention(
+                self.num_heads,
+                self.head_dim,
+                self.scaling,
+                num_kv_heads=self.num_kv_heads,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.attn",
+            )
 
     def forward(
         self,
@@ -587,17 +634,12 @@ class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
         compilation_config.static_forward_context[prefix] = self
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        rswa_window = getattr(vllm_config.model_config.hf_config, "rswa_window", None)
-        spec_cls = RSWAMLASpec if rswa_window is not None else MLAAttentionSpec
-        kwargs = dict(
+        return MLAAttentionSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
-        )
-        if rswa_window is not None:
-            kwargs["rswa_window"] = rswa_window
-        return spec_cls(**kwargs)  # Only has one vector instead of K + V
+        )  # Only has one vector instead of K + V
 
     def forward(self): ...
 
