@@ -15,23 +15,6 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.utils import (
-    AutoWeightsLoader,
-    PPMissingLayer,
-    WeightsMapper,
-    extract_layer_index,
-    is_pp_missing_parameter,
-    make_layers,
-    maybe_prefix,
-)
-from vllm.models.deepseek_v4.hw_agnostic.attention.attention import (
-    DeepseekV4Indexer,
-    DeepseekV4MLAModules,
-    DeepseekV4MultiHeadLatentAttentionWrapper,
-)
-from vllm.models.deepseek_v4.hw_agnostic.layers.rotary_embedding import get_rope
 from vllm.model_executor.hw_agnostic.interfaces import SupportsPP
 from vllm.model_executor.hw_agnostic.layers.activation import (
     SiluAndMul,
@@ -57,6 +40,23 @@ from vllm.model_executor.hw_agnostic.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
+    PPMissingLayer,
+    WeightsMapper,
+    extract_layer_index,
+    is_pp_missing_parameter,
+    make_layers,
+    maybe_prefix,
+)
+from vllm.models.deepseek_v4.hw_agnostic.attention.attention import (
+    DeepseekV4Indexer,
+    DeepseekV4MLAModules,
+    DeepseekV4MultiHeadLatentAttentionWrapper,
+)
+from vllm.models.deepseek_v4.hw_agnostic.layers.rotary_embedding import get_rope
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 

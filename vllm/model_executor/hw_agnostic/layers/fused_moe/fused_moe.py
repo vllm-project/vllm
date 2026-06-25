@@ -762,9 +762,6 @@ def dispatch_fused_moe_kernel(
     assert topk_weights is None or topk_weights.stride(1) == 1
     assert sorted_token_ids is None or sorted_token_ids.stride(0) == 1
 
-    M = A.size(0)
-    num_tokens = M * top_k
-
     if (use_int8_w8a16 or use_int4_w4a16) and (
         block_shape is not None and block_shape[1] > 0
     ):
@@ -894,7 +891,6 @@ def get_moe_configs(
     return None
 
 
-
 def get_moe_wna16_block_config(
     config: dict[str, int],
     num_valid_tokens: int,
@@ -908,7 +904,6 @@ def get_moe_wna16_block_config(
         # if bs=1, use a smaller BLOCK_SIZE_N
         return {"BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 64}
     return {"BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32}
-
 
 
 def get_default_config(
@@ -1085,5 +1080,3 @@ def _prepare_expert_assignment(
         expert_map,
         ignore_invalid_experts=ignore_invalid_experts,
     )
-
-

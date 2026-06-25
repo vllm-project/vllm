@@ -109,8 +109,10 @@ def per_token_group_quant_fp8(
     fp8_min, fp8_max = _get_fp8_min_max()
 
     assert out_q is None or out_q.shape == x.shape
-    x_q = out_q if out_q is not None else torch.empty(
-        x.shape, device=x.device, dtype=dtype
+    x_q = (
+        out_q
+        if out_q is not None
+        else torch.empty(x.shape, device=x.device, dtype=dtype)
     )
 
     shape = x.shape[:-1] + (x.shape[-1] // group_size,)
@@ -501,9 +503,7 @@ def _requantize_with_max_scale(
             if logical_width == 0:
                 continue
             end = start + logical_width
-            weight_dq = _per_tensor_dequantize(
-                weight[start:end, :], weight_scale[idx]
-            )
+            weight_dq = _per_tensor_dequantize(weight[start:end, :], weight_scale[idx])
             weight[start:end, :], _ = ops.scaled_fp8_quant(weight_dq, max_w_scale)
             start = end
 

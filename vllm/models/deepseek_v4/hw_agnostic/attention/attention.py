@@ -16,6 +16,15 @@ from vllm.config import (
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.hw_agnostic.custom_op import PluggableLayer
+from vllm.model_executor.hw_agnostic.layers.attention_layer_base import (
+    AttentionLayerBase,
+)
+from vllm.model_executor.hw_agnostic.layers.layernorm import (
+    LayerNorm,
+    RMSNorm,
+)
+from vllm.model_executor.hw_agnostic.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.models.deepseek_v4.hw_agnostic.attention.compressor import DeepseekCompressor
 from vllm.models.deepseek_v4.hw_agnostic.attention.indexer import (
@@ -41,15 +50,6 @@ from vllm.models.deepseek_v4.hw_agnostic.attention.sparse_mla import (
     DeepseekV4HWAgnosticMetadata,
 )
 from vllm.models.deepseek_v4.hw_agnostic.attention.sparse_swa import DeepseekV4SWACache
-from vllm.model_executor.hw_agnostic.custom_op import PluggableLayer
-from vllm.model_executor.hw_agnostic.layers.attention_layer_base import (
-    AttentionLayerBase,
-)
-from vllm.model_executor.hw_agnostic.layers.layernorm import (
-    LayerNorm,
-    RMSNorm,
-)
-from vllm.model_executor.hw_agnostic.layers.linear import ReplicatedLinear
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec

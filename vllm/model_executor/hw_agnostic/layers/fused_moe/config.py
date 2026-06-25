@@ -445,8 +445,7 @@ class FusedMoEQuantConfig:
         """
         assert not isinstance(weight_dtype, str) or weight_dtype == "int4"
         assert not isinstance(quant_dtype, str), (
-            f"Unsupported quant_dtype={quant_dtype!r} on the hw-agnostic "
-            "FusedMoE path."
+            f"Unsupported quant_dtype={quant_dtype!r} on the hw-agnostic FusedMoE path."
         )
 
         if weight_dtype is None:

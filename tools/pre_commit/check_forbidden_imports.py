@@ -236,8 +236,7 @@ def test_regex():
         # All ``fused_moe.*`` upstream submodules are now vendored — the
         # upstream paths are forbidden.
         (
-            "from vllm.model_executor.layers.fused_moe.activation "
-            "import MoEActivation",
+            "from vllm.model_executor.layers.fused_moe.activation import MoEActivation",
             True,
         ),
         (
@@ -256,8 +255,7 @@ def test_regex():
             True,
         ),
         (
-            "from vllm.model_executor.layers.fused_moe.oracle.fp8 "
-            "import Fp8MoeBackend",
+            "from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend",
             True,
         ),
         (

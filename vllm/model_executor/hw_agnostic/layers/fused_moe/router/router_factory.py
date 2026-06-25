@@ -7,6 +7,7 @@ GroupedTopK, custom) are out of scope. Selection here picks between
 ``FusedTopKBiasRouter`` (DSv4-style sqrtsoftplus / hash MoE / sigmoid+bias)
 and ``FusedTopKRouter`` (plain softmax/sigmoid top-k).
 """
+
 from collections.abc import Callable
 
 import torch

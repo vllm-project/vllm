@@ -8,16 +8,16 @@ from torch import nn
 
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import get_forward_context
-from vllm.models.deepseek_v4.hw_agnostic.attention.kernels import (
-    compress_norm_rope_store_triton,
-    save_partial_states,
-)
 from vllm.model_executor.hw_agnostic.layers.attention_layer_base import (
     AttentionLayerBase,
 )
 from vllm.model_executor.hw_agnostic.layers.layernorm import RMSNorm
 from vllm.model_executor.hw_agnostic.layers.linear import (
     MergedColumnParallelLinear,
+)
+from vllm.models.deepseek_v4.hw_agnostic.attention.kernels import (
+    compress_norm_rope_store_triton,
+    save_partial_states,
 )
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import (

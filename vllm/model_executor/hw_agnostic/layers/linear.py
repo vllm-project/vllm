@@ -15,6 +15,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.hw_agnostic.custom_op import PluggableLayer
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
@@ -32,7 +33,6 @@ from vllm.model_executor.parameter import (
     RowvLLMParameter,
 )
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.model_executor.hw_agnostic.custom_op import PluggableLayer
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)

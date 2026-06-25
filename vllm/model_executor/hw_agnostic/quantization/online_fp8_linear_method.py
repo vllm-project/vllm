@@ -110,8 +110,7 @@ class Fp8PerTensorOnlineLinearMethod(LinearMethodBase):
             if weight_scale.numel() == 1:
                 weight_bf16 = weight_fp8 * weight_scale
             elif (
-                weight_scale.dim() == 1
-                and weight_scale.shape[0] == weight_fp8.shape[0]
+                weight_scale.dim() == 1 and weight_scale.shape[0] == weight_fp8.shape[0]
             ):
                 weight_bf16 = weight_fp8 * weight_scale.unsqueeze(1)
             else:

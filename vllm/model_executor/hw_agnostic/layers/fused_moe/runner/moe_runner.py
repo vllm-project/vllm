@@ -49,7 +49,6 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
 )
 
-
 logger = init_logger(__name__)
 
 # Settings the hw-agnostic MoE pipeline accepts. Anything outside these

@@ -6,6 +6,7 @@ Vendored from upstream ``layers.quantization.utils.{fp8_utils,w8a8_utils}``
 to avoid pulling the upstream module's transitive Cutlass / DeepGEMM
 imports when the only code we need is pure tensor math.
 """
+
 import torch
 
 from vllm import _custom_ops as ops
