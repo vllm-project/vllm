@@ -25,6 +25,7 @@ EXPECTED_VALUES = {
     "ibm-granite/granite-4.0-h-tiny": 0.77,
     "Qwen/Qwen3.5-0.8B": 0.33,
     "google/gemma-4-E2B-it": 0.485,
+    "deepseek-ai/DeepSeek-V4-Flash": 0.95,
 }
 
 SIMPLE_PROMPT = (
