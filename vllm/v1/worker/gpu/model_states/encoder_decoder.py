@@ -85,7 +85,10 @@ class EncoderDecoderModelState(ModelState):
         self.encoder_outputs: list[torch.Tensor] = []
 
     def get_mm_embeddings(
-        self, scheduled_encoder_inputs: dict[str, list[int]], input_batch: InputBatch
+        self,
+        scheduled_encoder_inputs: dict[str, list[int]],
+        input_batch: InputBatch,
+        req_states: RequestState,
     ) -> None:
         # Ensure encoder inputs are ordered consistently with input_batch.req_ids.
         encoder_inputs: dict[str, list[int]] = {}
