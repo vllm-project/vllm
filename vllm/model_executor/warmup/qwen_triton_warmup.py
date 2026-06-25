@@ -23,7 +23,7 @@ from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.utils import _zero_kv_blocks_kernel
 
 if TYPE_CHECKING:
-    from vllm.v1.worker.gpu_worker import Worker
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -73,30 +73,6 @@ class _QwenGDNWarmupConfig:
         return 2 * self.h * self.k + self.hv * self.v
 
 
-def _hf_model_type(worker: "Worker") -> str | None:
-    model_config = getattr(worker.vllm_config, "model_config", None)
-    hf_text_config = getattr(model_config, "hf_text_config", None)
-    hf_config = getattr(model_config, "hf_config", None)
-    for config in (hf_text_config, hf_config):
-        model_type = getattr(config, "model_type", None)
-        if model_type is not None:
-            return str(model_type)
-    return None
-
-
-def _get_model(worker: "Worker") -> object | None:
-    get_model = getattr(worker, "get_model", None)
-    if callable(get_model):
-        try:
-            return get_model()
-        except Exception:
-            logger.exception("Failed to get model for Qwen Triton warmup.")
-            return None
-
-    runner = getattr(worker, "model_runner", None)
-    return getattr(runner, "model", None)
-
-
 def _is_non_empty_tensor(value: object) -> bool:
     return isinstance(value, torch.Tensor) and value.numel() > 0
 
@@ -118,26 +94,13 @@ def _is_qwen_gdn_layer(module: object) -> bool:
     )
 
 
-def _iter_qwen_gdn_layers(worker: "Worker"):
-    runner = getattr(worker, "model_runner", None)
-    compilation_config = getattr(runner, "compilation_config", None)
-    static_forward_context = getattr(compilation_config, "static_forward_context", None)
-    seen: set[int] = set()
+def _iter_qwen_gdn_layers(static_forward_context: object):
+    if not isinstance(static_forward_context, dict):
+        return
 
-    if isinstance(static_forward_context, dict):
-        for module in static_forward_context.values():
-            if _is_qwen_gdn_layer(module):
-                seen.add(id(module))
-                yield module
-
-    model = _get_model(worker)
-    modules = getattr(model, "modules", None)
-    if callable(modules):
-        for module in modules():
-            if id(module) in seen:
-                continue
-            if _is_qwen_gdn_layer(module):
-                yield module
+    for module in static_forward_context.values():
+        if _is_qwen_gdn_layer(module):
+            yield module
 
 
 def _split_qwen_gdn_cache(kv_cache: object) -> tuple[torch.Tensor, torch.Tensor] | None:
@@ -154,9 +117,11 @@ def _split_qwen_gdn_cache(kv_cache: object) -> tuple[torch.Tensor, torch.Tensor]
     return None
 
 
-def _qwen_gdn_warmup_config(worker: "Worker") -> _QwenGDNWarmupConfig | None:
+def _qwen_gdn_warmup_config(
+    static_forward_context: object,
+) -> _QwenGDNWarmupConfig | None:
     found_layer = False
-    for layer in _iter_qwen_gdn_layers(worker):
+    for layer in _iter_qwen_gdn_layers(static_forward_context):
         found_layer = True
         cache_tensors = _split_qwen_gdn_cache(getattr(layer, "kv_cache", None))
         if cache_tensors is None:
@@ -376,13 +341,22 @@ def _synchronize_device(device: torch.device) -> None:
 
 
 @torch.inference_mode()
-def qwen_triton_warmup(worker: "Worker") -> None:
+def qwen_triton_warmup(
+    runner: "GPUModelRunner",
+    model_config: object,
+) -> None:
     """Warm Qwen Triton kernels reported by the JIT monitor."""
-    runner = worker.model_runner
     if runner.is_pooling_model:
         return
 
-    model_type = _hf_model_type(worker)
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    hf_config = getattr(model_config, "hf_config", None)
+    model_type = None
+    for config in (hf_text_config, hf_config):
+        model_type = getattr(config, "model_type", None)
+        if model_type is not None:
+            model_type = str(model_type)
+            break
     if model_type not in _QWEN_MODEL_TYPES:
         return
 
@@ -400,7 +374,9 @@ def qwen_triton_warmup(worker: "Worker") -> None:
     _warm_compute_slot_mapping_kernel(device)
     _synchronize_device(device)
 
-    gdn_config = _qwen_gdn_warmup_config(worker)
+    compilation_config = getattr(runner, "compilation_config", None)
+    static_forward_context = getattr(compilation_config, "static_forward_context", None)
+    gdn_config = _qwen_gdn_warmup_config(static_forward_context)
     if gdn_config is None:
         return
 
