@@ -166,12 +166,13 @@ elseif (S390_FOUND)
         "-mtune=native")
 elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
     message(STATUS "RISC-V detected")
-    if(DEFINED VLLM_RVV_VLEN AND NOT VLLM_RVV_VLEN GREATER 0)
+    if(DEFINED VLLM_RVV_VLEN AND VLLM_RVV_VLEN LESS 0)
         message(FATAL_ERROR
-            "VLLM_RVV_VLEN must be a positive integer; got '${VLLM_RVV_VLEN}'")
+            "VLLM_RVV_VLEN must be zero or a positive integer; got '${VLLM_RVV_VLEN}'")
     endif()
     # VLLM_RVV_VLEN selects the target VLEN. Auto-detected from /proc/cpuinfo
-    # by default; override with -DVLLM_RVV_VLEN=128 or -DVLLM_RVV_VLEN=256.
+    # by default; set -DVLLM_RVV_VLEN=0 to force scalar RISC-V build.
+    # Override with -DVLLM_RVV_VLEN=128 or -DVLLM_RVV_VLEN=256 for RVV.
     if(NOT DEFINED VLLM_RVV_VLEN)
         # Auto-detect: find the largest zvl<N>b in /proc/cpuinfo isa line.
         if(EXISTS /proc/cpuinfo)
