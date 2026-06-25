@@ -304,14 +304,14 @@ class OffloadingManager(ABC):
         return ()
 
     def medium(self) -> str | None:
-        """Wire medium for Stored KV events emitted on behalf of this manager.
+        """Wire medium for this manager's Stored KV events, or None if this
+        manager does not auto-emit Stored events.
 
-        Returns the medium string the OffloadingConnectorScheduler uses when
-        emitting a Stored event for blocks this manager completed, or None if
-        this manager should not auto-emit Stored events. This is the event
-        wire-name only; whether events are collected at all is controlled by
-        the connector's enable_kv_cache_events. It is independent of
-        LoadStoreSpec.medium() (the worker transfer-dispatch key).
+        This is the event wire-name only: the manager's event path uses it as
+        the medium of the Stored events it emits. Whether events are collected
+        at all is controlled by the connector's enable_kv_cache_events. It is
+        independent of LoadStoreSpec.medium() (the worker transfer-dispatch
+        key).
         """
         return None
 

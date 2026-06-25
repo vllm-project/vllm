@@ -292,9 +292,9 @@ class CPUOffloadingManager(OffloadingManager):
 
     @override
     def medium(self) -> str | None:
-        # Primary CPU tier always reports a wire medium; the scheduler emits
-        # the Stored event keyed on this. Independent of CPULoadStoreSpec.medium()
-        # (the worker transfer-dispatch key) and of enable_kv_cache_events.
+        # Primary CPU tier always reports a wire medium; it is used as the
+        # medium of the Stored/Removed events this manager emits. Independent
+        # of CPULoadStoreSpec.medium() (the worker transfer-dispatch key).
         return MEDIUM_CPU
 
     def get_stats(self) -> OffloadingConnectorStats | None:

@@ -871,6 +871,35 @@ class TestTieringOffloadingSecondaryEvents:
 
         assert list(manager.take_events()) == []
 
+    def test_fs_tier_medium_opt_in(self):
+        """The real FileSystemTierManager reports MEDIUM_FS only when
+        enable_kv_events is set, else None. medium() depends only on that flag,
+        so it is exercised via __new__ without the tier's heavy __init__
+        (disk + threads)."""
+        from vllm.v1.kv_offload.tiering.fs.manager import FileSystemTierManager
+
+        tier = FileSystemTierManager.__new__(FileSystemTierManager)
+        tier._enable_kv_events = False
+        assert tier.medium() is None
+        tier._enable_kv_events = True
+        assert tier.medium() == MEDIUM_FS
+
+    def test_obj_tier_medium_opt_in(self):
+        """The real ObjectStoreSecondaryTierManager reports MEDIUM_OBJ only when
+        enable_kv_events is set, else None (skipped if NIXL is unavailable)."""
+        try:
+            from vllm.v1.kv_offload.tiering.obj.manager import (
+                ObjectStoreSecondaryTierManager,
+            )
+        except ImportError:
+            pytest.skip("object-store tier requires NIXL")
+
+        tier = ObjectStoreSecondaryTierManager.__new__(ObjectStoreSecondaryTierManager)
+        tier._enable_kv_events = False
+        assert tier.medium() is None
+        tier._enable_kv_events = True
+        assert tier.medium() == MEDIUM_OBJ
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

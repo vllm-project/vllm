@@ -562,9 +562,9 @@ class TieringOffloadingManager(OffloadingManager):
 
     @override
     def medium(self) -> str | None:
-        # The tiering manager's parent store is GPU->primary(CPU); the
-        # scheduler emits that Stored event keyed on this. Secondary-tier
-        # Stored events are emitted separately (see _process_finished_jobs).
+        # The parent store is GPU->primary(CPU); the primary tier emits that
+        # Stored event using this medium. Secondary-tier Stored events use
+        # their own SecondaryTierManager.medium() (see _process_finished_jobs).
         return self.primary_tier.medium()
 
     @override
