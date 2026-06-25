@@ -7,7 +7,7 @@ Core abstractions for KV cache offloading in vLLM v1.
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
-from enum import Enum
+from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, NamedTuple, NewType
 
 import numpy as np
