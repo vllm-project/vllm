@@ -21,10 +21,10 @@ It works in two phases, keyed per ``update_weights`` name set:
     recorded slice directly into freshly materialized params, run
     ``process_weights_after_loading``, and copy into kernel storage.
 
-Groups whose loaders don't reduce to a pure view + ``copy_`` (or whose
-requested names aren't fully covered by recorded copies — e.g. weights that
-load via the attention/partial-layer finalize path) fail the coverage gate
-and fall back to a plain batched load every sync.
+Within a single ``update_weights`` call we replay the baked groups its names
+cover (one batched pull) and route only the residual names — those with no
+recorded plan (attention/partial-layer finalize path, or experts owned by
+another EP rank that no-op in their loader) — to the plain per-slice load.
 
 Only valid with ``is_checkpoint_format=True`` (layerwise reload). See
 ``sharded_weight_loader_rdt.md`` and ``baked_rdt_replay.md`` for the design,
@@ -587,10 +587,10 @@ class ShardedRDTWeightTransferEngine(
 
         ``update_info.names`` is the subset of the init names the driver
         gathered for this call. We replay every baked ``_BakedGroup`` those
-        names reach (deduped). If any name has no baked plan — attention scales,
-        padded/partial layers — we fall back to a plain batched load of the
-        whole call (correct, just not accelerated). ``load_weights`` is used
-        only by that slow path.
+        names reach (deduped) in one batched pull, and route only the
+        **residual** names with no baked plan — attention scales, padded/partial
+        layers, and experts owned by another EP rank (which no-op in their
+        loader) — to the plain per-slice load. ``load_weights`` is used only by that residual path.
 
         Assumes each baked module's source names are gathered within a single
         call (true for the per-layer / pre / post partition); if not, ``_pull``
@@ -603,18 +603,18 @@ class ShardedRDTWeightTransferEngine(
         names = update_info.names
         groups: list[_BakedGroup] = []
         seen: set[int] = set()
-        all_covered = True
+        residual: list[str] = []
         for n in names:
             g = self._name_to_group.get(n)
             if g is None:
-                all_covered = False
+                residual.append(n)
             elif id(g) not in seen:
                 seen.add(id(g))
                 groups.append(g)
-        if all_covered:
+        if groups:
             self._replay(groups)
-        else:
-            self._load_unbaked(names, load_weights)
+        if residual:
+            self._load_unbaked(residual, load_weights)
 
     def _build_lazy_weights(
         self,
