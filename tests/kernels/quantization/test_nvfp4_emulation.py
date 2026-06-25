@@ -35,6 +35,13 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx950
+else:
+
+    def on_gfx950() -> bool:
+        return False
+
 
 class Nvfp4QuantizationEmulationTritonExpertsReference(TritonExperts):
     """
@@ -749,15 +756,16 @@ def test_nvfp4_moe_correctness(
         **apply_kwargs,
     )
 
-    # Not strict equality on e.g. H100 (< 0.1% elements). The fused
-    # on-the-fly dequant path can lower to a slightly different
-    # Triton/MMA tiling than the pre-dequantized reference;
-    # experiments with reference-like tiling/masking
+    # Not strict equality on H100, MI325, MI300 (< 0.1% elements).
+    # The fused on-the-fly dequant path can lower to a slightly
+    # different Triton/MMA tiling than the pre-dequantized
+    # reference; experiments with reference-like tiling/masking
     # reduced some diffs were not kept because they regress
     # the fused kernel speed.
+    # Strict equality validated on MI355.
     torch.testing.assert_close(
         output_fused,
         output_ref,
-        atol=0.0 if current_platform.is_rocm() else 0.02,
+        atol=0.0 if on_gfx950() else 0.02,
         rtol=0,
     )
