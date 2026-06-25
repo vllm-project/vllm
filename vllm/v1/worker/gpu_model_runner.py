@@ -7285,9 +7285,7 @@ class GPUModelRunner(
             kv_caches[layer_name] = kv_caches[target_layer_name]
 
         model_type = self.model_config.hf_config.model_type
-        num_attn_module = (
-            2 if model_type in ("longcat_flash", "longcat_next") else 1
-        )
+        num_attn_module = 2 if model_type in ("longcat_flash", "longcat_next") else 1
         bind_kv_cache(
             kv_caches,
             self.compilation_config.static_forward_context,

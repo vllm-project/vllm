@@ -478,10 +478,8 @@ class NgramEmbedding(nn.Module):
         # Use isin_list (which uses async_tensor_h2d) instead of
         # torch.tensor(..., device=device) to avoid CPU→GPU transfers that
         # are unsafe inside CUDA graph capture regions.
-        oe_ignored_mask = isin_list(input_ids,
-                                    self.config.oe_ignored_token_ids)
-        context_ignored_mask = isin_list(context,
-                                         self.config.oe_ignored_token_ids)
+        oe_ignored_mask = isin_list(input_ids, self.config.oe_ignored_token_ids)
+        context_ignored_mask = isin_list(context, self.config.oe_ignored_token_ids)
         context = context.clone()
         context[context_ignored_mask] = 0
 
@@ -1035,9 +1033,7 @@ class LongcatNextVisualTokenizer(nn.Module):
             Visual token indices of shape [num_tokens, depth]
         """
         # Prepare encoder metadata to get window_index
-        encoder_metadata = self.visual_model.prepare_encoder_metadata(
-            grid_thw.tolist()
-        )
+        encoder_metadata = self.visual_model.prepare_encoder_metadata(grid_thw.tolist())
         window_index = encoder_metadata["window_index"]
 
         # Run visual encoder (skip_merger=True returns window-indexed output)
@@ -1147,7 +1143,7 @@ class LongcatNextWhisperEncoder(WhisperEncoder):
             embeds = nn.functional.gelu(self.conv2(embeds))
             embeds = embeds.transpose(-1, -2)  # [seq_len, d_model]
             # Match original: float32 addition for numerical precision
-            pos_embed = self.embed_positions.weight[:embeds.size(0)]
+            pos_embed = self.embed_positions.weight[: embeds.size(0)]
             embeds = (embeds.float() + pos_embed).to(embeds.dtype)
             hidden_states_list.append(embeds)
         # [bs, max_seq_len, d_model]
@@ -1194,7 +1190,7 @@ class LongcatNextWhisperEncoder(WhisperEncoder):
             for i in range(bs):
                 start = int(cu_seqlens_cpu[i])
                 end = int(cu_seqlens_cpu[i + 1])
-                result[i, :end - start] = packed_hidden[start:end]
+                result[i, : end - start] = packed_hidden[start:end]
             # Padded positions remain zero (implicit mask)
         else:
             result = packed_hidden.view(bs, max_len, dim)
@@ -1246,18 +1242,14 @@ class LongcatNextWhisperEncoder(WhisperEncoder):
                 if name.endswith(".bias") and name not in params_dict:
                     continue
                 param = params_dict[name]
-                weight_loader = getattr(
-                    param, "weight_loader", default_weight_loader
-                )
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
                 if name.endswith(".bias") and name not in params_dict:
                     continue
                 param = params_dict[name]
-                weight_loader = getattr(
-                    param, "weight_loader", default_weight_loader
-                )
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
@@ -2319,9 +2311,7 @@ class LongcatNextForCausalLM(
 
             # Audio Tower
             with self._mark_tower_model(vllm_config, "audio"):
-                self.audio_tower = self._build_audio_tower(
-                    config, vllm_config, prefix
-                )
+                self.audio_tower = self._build_audio_tower(config, vllm_config, prefix)
         else:
             self.visual = None
             self.audio_tower = None

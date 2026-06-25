@@ -143,7 +143,8 @@ def _moe_forward_fake(
     # a pure shape function of its inputs and preserve subgraph dedup.
     if hidden_dim_unpadded > 0:
         fused_out = hidden_states.new_empty(
-            (*hidden_states.shape[:-1], hidden_dim_unpadded))
+            (*hidden_states.shape[:-1], hidden_dim_unpadded)
+        )
     else:
         fused_out = torch.empty_like(hidden_states)
     # Return zero tensor for zero_expert_output (not used in monolithic path)

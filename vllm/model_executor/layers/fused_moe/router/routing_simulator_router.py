@@ -118,7 +118,7 @@ class DistributionBasedRouting(RoutingStrategy):
         # Generate weights based on the distribution
         topk_weights = self._generate_weights(num_tokens, top_k, hidden_states.device)
 
-        return topk_weights, topk_ids, None
+        return topk_weights, topk_ids
 
     def _sample_expert_ids(
         self,

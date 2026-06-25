@@ -317,9 +317,11 @@ def fused_topk_bias(
     topk_weights = topk_weights.to(torch.float32)
     if routed_scaling_factor != 1.0:
         topk_weights *= routed_scaling_factor
-    return topk_weights, topk_indices.to(
-        torch.int32 if indices_type is None else indices_type
-    ), None
+    return (
+        topk_weights,
+        topk_indices.to(torch.int32 if indices_type is None else indices_type),
+        None,
+    )
 
 
 class FusedTopKBiasRouter(BaseRouter):
