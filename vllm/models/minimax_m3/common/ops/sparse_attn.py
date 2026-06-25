@@ -31,30 +31,6 @@ _FP8_DTYPES = (
     torch.float8_e5m2fnuz,
 )
 
-_SPARSE_ATTN_NUM_STAGES_KWARG: dict | None = None
-
-
-def _sparse_attn_num_stages_kwarg() -> dict:
-    """Triton ``num_stages`` override for the sparse-attn GEMM kernels.
-
-    Forced only where required: CDNA3 (gfx942) caps LDS at
-    64 KB, and the default 2-stage pipeline double-buffers the 128x128 K/V tiles
-    to ~66 KB ("out of resource: shared memory"), so pin gfx942 to a single
-    stage (~32 KB, which fits). Everywhere else (NVIDIA, CDNA4 gfx950) return an
-    empty kwarg and let Triton keep its own default -- don't second-guess it.
-    Cached: the arch is fixed per process.
-    """
-    global _SPARSE_ATTN_NUM_STAGES_KWARG
-    if _SPARSE_ATTN_NUM_STAGES_KWARG is None:
-        kwarg: dict = {}
-        if current_platform.is_rocm():
-            from vllm.platforms.rocm import on_gfx942
-
-            if on_gfx942():
-                kwarg = {"num_stages": 1}
-        _SPARSE_ATTN_NUM_STAGES_KWARG = kwarg
-    return _SPARSE_ATTN_NUM_STAGES_KWARG
-
 
 # ---------------------------------------------------------------------------
 # GQA block-sparse attention (paged). Main heads attend only to the selected
@@ -498,7 +474,6 @@ def minimax_m3_sparse_attn(
         BLOCK_SIZE_Q=1,
         BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
         USE_FP8=use_fp8,
-        **_sparse_attn_num_stages_kwarg(),
     )
 
 
@@ -574,7 +549,6 @@ def minimax_m3_sparse_attn_decode(
         NUM_TOPK_CHUNKS=num_topk_chunks,
         USE_FP8=use_fp8,
         USE_PDL=use_pdl,
-        **_sparse_attn_num_stages_kwarg(),
         **pdl_launch,
     )
     merge_grid = (total_q, num_heads)
