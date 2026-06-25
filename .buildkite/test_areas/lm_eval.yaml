@@ -227,6 +227,8 @@ steps:
   device: dgx-spark
   optional: true
   num_devices: 1
+  depends_on:
+  - arm64-image-build
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
