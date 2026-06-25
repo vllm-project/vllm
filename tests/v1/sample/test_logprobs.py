@@ -1128,6 +1128,9 @@ def test_spec_decode_logprobs(
         enable_chunked_prefill=True,
         max_num_batched_tokens=32,
         enable_prefix_caching=False,
+        # Run eagerly (as the docstring states) so compilation-induced
+        # nondeterminism does not get misattributed to spec decode.
+        enforce_eager=True,
         **GPU_DETERMINISM_KWARGS,
     )
 
