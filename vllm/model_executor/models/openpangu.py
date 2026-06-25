@@ -935,7 +935,7 @@ class OpenPanguDecoderLayer(nn.Module):
         residual: torch.Tensor | None,
     ) -> torch.Tensor:
         if residual is None:
-            residual = hidden_states.clone()
+            residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
