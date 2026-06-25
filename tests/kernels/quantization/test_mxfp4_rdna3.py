@@ -11,9 +11,7 @@ import torch
 
 from vllm.platforms import current_platform
 
-E2M1_MAG = torch.tensor(
-    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=torch.float32
-)
+E2M1_MAG = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=torch.float32)
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(), reason="RDNA3 MXFP4 WMMA kernel is ROCm-only"
@@ -52,9 +50,7 @@ def test_mxfp4_wmma_matches_dequant_reference(dtype, M, N, K):
     # Random E2M1 codes (full 0..255 byte = two 4-bit codes) and mild E8M0
     # scales centered on 127 (== 2^0) to stay well inside fp16/bf16 range.
     w_packed = torch.randint(0, 256, (N, K // 2), dtype=torch.uint8, device=dev)
-    scale_e8m0 = torch.randint(
-        124, 131, (N, K // 32), dtype=torch.uint8, device=dev
-    )
+    scale_e8m0 = torch.randint(124, 131, (N, K // 32), dtype=torch.uint8, device=dev)
     x = torch.randn(M, K, dtype=dtype, device=dev) * 0.1
 
     w_deq = _dequant_ref(w_packed, scale_e8m0)  # [N, K] fp32

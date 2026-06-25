@@ -174,7 +174,7 @@ __global__ void moe_gemm_mxfp4_wmma_kernel_rdna3(
   const int expert_id = expert_ids[token_block];
   if (expert_id == -1 || n_tile >= size_n) return;
 
-  const int lane = threadIdx.x;   // 0..31
+  const int lane = threadIdx.x;  // 0..31
   const int lane_lo = lane & 15;
   const int lane_hi = lane >> 4;
 
@@ -226,7 +226,8 @@ __global__ void moe_gemm_mxfp4_wmma_kernel_rdna3(
       for (int i = 0; i < 16; i++) a_frag[i] = (E)0;
     }
   #pragma unroll
-    for (int i = 0; i < 16; i++) b_frag[i] = wmoe_bitcast<T, E>(b_lds[i][lane_lo]);
+    for (int i = 0; i < 16; i++)
+      b_frag[i] = wmoe_bitcast<T, E>(b_lds[i][lane_lo]);
     c_acc = wmma_mma(a_frag, b_frag, c_acc);
     __syncthreads();
   }
@@ -252,8 +253,8 @@ __global__ void moe_gemm_mxfp4_wmma_kernel_rdna3(
         (output_topk > 0) ? (int64_t)(tok_id / output_topk) : (int64_t)tok_id;
     T* dst = c + out_row * size_n + out_n;
     if constexpr (std::is_same<T, half>::value) {
-      atomic_add_pk2(dst, __halves2half2(__float2half_rn(v0),
-                                         __float2half_rn(v1)));
+      atomic_add_pk2(dst,
+                     __halves2half2(__float2half_rn(v0), __float2half_rn(v1)));
     } else {
       bf162_t p;
       p.x = __float2bfloat16(v0);
@@ -411,16 +412,14 @@ __global__ void moe_gemm_mxfp4_kernel_rdna3(
 #else  // non-RDNA3: empty stub for symbol parity
 template <typename T, int BLOCK_SIZE_M>
 __global__ void moe_gemm_mxfp4_kernel_rdna3(
-    const T*, T*, const uint32_t*, const uint8_t*, const float*,
-    const int32_t*, const int32_t*, const int32_t*, const int, const int,
-    const int, const int, const int, const int, const int, const bool,
-    const int) {}
+    const T*, T*, const uint32_t*, const uint8_t*, const float*, const int32_t*,
+    const int32_t*, const int32_t*, const int, const int, const int, const int,
+    const int, const int, const int, const bool, const int) {}
 template <typename T>
 __global__ void moe_gemm_mxfp4_wmma_kernel_rdna3(
-    const T*, T*, const uint32_t*, const uint8_t*, const float*,
-    const int32_t*, const int32_t*, const int32_t*, const int, const int,
-    const int, const int, const int, const int, const int, const bool,
-    const int) {}
+    const T*, T*, const uint32_t*, const uint8_t*, const float*, const int32_t*,
+    const int32_t*, const int32_t*, const int, const int, const int, const int,
+    const int, const int, const int, const bool, const int) {}
 #endif
 
 // WMMA launcher: 16x16 tiles, single wave, no K-split (enough blocks at the
@@ -442,17 +441,13 @@ void launch_moe_gemm_mxfp4_wmma(
 }
 
 template <typename T, int BLOCK_SIZE_M>
-void launch_moe_gemm_mxfp4(const T* a, T* c, const uint32_t* b_q_weight,
-                           const uint8_t* b_scales_e8m0,
-                           const float* topk_weights,
-                           const int32_t* sorted_token_ids,
-                           const int32_t* expert_ids,
-                           const int32_t* num_tokens_post_padded,
-                           int num_token_blocks, int size_m, int size_n,
-                           int size_k, int groups, int top_k,
-                           int expert_weight_stride, int expert_scales_stride,
-                           bool mul_topk_weight, int output_topk,
-                           cudaStream_t stream) {
+void launch_moe_gemm_mxfp4(
+    const T* a, T* c, const uint32_t* b_q_weight, const uint8_t* b_scales_e8m0,
+    const float* topk_weights, const int32_t* sorted_token_ids,
+    const int32_t* expert_ids, const int32_t* num_tokens_post_padded,
+    int num_token_blocks, int size_m, int size_n, int size_k, int groups,
+    int top_k, int expert_weight_stride, int expert_scales_stride,
+    bool mul_topk_weight, int output_topk, cudaStream_t stream) {
   dim3 block(MOE_MXFP4_THREADS);
   dim3 grid(num_token_blocks,
             (size_n + MOE_MXFP4_BLOCK_KN * 4 - 1) / (MOE_MXFP4_BLOCK_KN * 4),
@@ -500,7 +495,8 @@ void dispatch_moe_gemm_mxfp4(
           mul_topk_weight, output_topk, stream);
       break;
     default:
-      TORCH_CHECK(false, "moe_mxfp4_gemm_rdna3: block_size_m must be 1/2/4/8/16");
+      TORCH_CHECK(false,
+                  "moe_mxfp4_gemm_rdna3: block_size_m must be 1/2/4/8/16");
   }
 }
 

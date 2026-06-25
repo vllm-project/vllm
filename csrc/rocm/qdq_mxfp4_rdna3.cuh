@@ -15,12 +15,12 @@
 // Device-only HIP dependencies are gated so the pure-integer decode below can
 // be #included and unit-tested by a plain host compiler.
 #if defined(__HIPCC__)
-#include <hip/hip_bf16.h>
-#include <hip/hip_fp16.h>
-#define MXFP4_HD __host__ __device__ __forceinline__
-#define MXFP4_D __device__ __forceinline__
+  #include <hip/hip_bf16.h>
+  #include <hip/hip_fp16.h>
+  #define MXFP4_HD __host__ __device__ __forceinline__
+  #define MXFP4_D __device__ __forceinline__
 #else
-#define MXFP4_HD inline
+  #define MXFP4_HD inline
 #endif
 
 namespace vllm {
@@ -56,8 +56,7 @@ MXFP4_HD uint16_t mxfp4_e2m1_to_fp16_bits(uint32_t nib) {
 
 // Apply the E8M0 scale as an exponent add (zero stays zero).
 MXFP4_HD uint16_t mxfp4_apply_e8m0_bits(uint16_t bits, int32_t bias_u16) {
-  return (bits & 0x7FFFu) == 0u ? bits
-                                : (uint16_t)((int32_t)bits + bias_u16);
+  return (bits & 0x7FFFu) == 0u ? bits : (uint16_t)((int32_t)bits + bias_u16);
 }
 
 // E8M0 byte -> additive exponent bias. mant_bits = 7 (bf16) or 10 (fp16).
@@ -88,7 +87,7 @@ MXFP4_D half mxfp4_nib_to_fp16(uint32_t nib, int32_t bias_u16) {
 // = even K). All 8 share one E8M0 block since K is tiled in multiples of 32.
 MXFP4_D void dequant_mxfp4_8_bf16(uint32_t qa, int32_t bias_u16,
                                   bf16_t (&dq)[8]) {
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < 8; i++) {
     dq[i] = mxfp4_nib_to_bf16((qa >> (4 * i)) & 0xFu, bias_u16);
   }
@@ -96,7 +95,7 @@ MXFP4_D void dequant_mxfp4_8_bf16(uint32_t qa, int32_t bias_u16,
 
 MXFP4_D void dequant_mxfp4_8_fp16(uint32_t qa, int32_t bias_u16,
                                   half (&dq)[8]) {
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < 8; i++) {
     dq[i] = mxfp4_nib_to_fp16((qa >> (4 * i)) & 0xFu, bias_u16);
   }
@@ -108,7 +107,7 @@ MXFP4_D void dequant_mxfp4_8_fp16(uint32_t qa, int32_t bias_u16,
 template <typename T>
 MXFP4_D void dequant_mxfp4_8_lut(uint32_t qa, int32_t bias_u16,
                                  const uint16_t* lut, T (&dq)[8]) {
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < 8; i++) {
     uint16_t b = mxfp4_apply_e8m0_bits(lut[(qa >> (4 * i)) & 0xFu], bias_u16);
     __builtin_memcpy(&dq[i], &b, sizeof(T));
@@ -118,7 +117,7 @@ MXFP4_D void dequant_mxfp4_8_lut(uint32_t qa, int32_t bias_u16,
 // fp32 output (bf16 bits widened by a free <<16) for a scalar dot path.
 MXFP4_D void dequant_mxfp4_8_f32(uint32_t qa, int32_t bias_u16,
                                  float (&dq)[8]) {
-#pragma unroll
+  #pragma unroll
   for (int i = 0; i < 8; i++) {
     uint16_t b = mxfp4_apply_e8m0_bits(
         mxfp4_e2m1_to_bf16_bits((qa >> (4 * i)) & 0xFu), bias_u16);

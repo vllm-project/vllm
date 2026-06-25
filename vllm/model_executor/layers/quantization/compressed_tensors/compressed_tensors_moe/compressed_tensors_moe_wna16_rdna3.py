@@ -116,16 +116,37 @@ class CompressedTensorsWNA16RDNA3MoEMethod(
         )
         layer.rdna3_empty_tw = torch.empty(0, device=device)
 
-
     def _gemm_w13(self, layer, a, c, tw, sti, eid, ntp, top_k, block_size_m, mul_tw):
         ops.moe_gptq_gemm_rdna3(
-            a, c, layer.w13_weight_packed, layer.w13_weight_scale,
-            layer.w13_qzeros, tw, sti, eid, ntp, top_k, block_size_m, mul_tw,
+            a,
+            c,
+            layer.w13_weight_packed,
+            layer.w13_weight_scale,
+            layer.w13_qzeros,
+            tw,
+            sti,
+            eid,
+            ntp,
+            top_k,
+            block_size_m,
+            mul_tw,
         )
 
-    def _gemm_w2(self, layer, a, c, tw, sti, eid, ntp, block_size_m, mul_tw, output_topk):
+    def _gemm_w2(
+        self, layer, a, c, tw, sti, eid, ntp, block_size_m, mul_tw, output_topk
+    ):
         ops.moe_gptq_gemm_rdna3(
-            a, c, layer.w2_weight_packed, layer.w2_weight_scale,
-            layer.w2_qzeros, tw, sti, eid, ntp, 1, block_size_m, mul_tw,
+            a,
+            c,
+            layer.w2_weight_packed,
+            layer.w2_weight_scale,
+            layer.w2_qzeros,
+            tw,
+            sti,
+            eid,
+            ntp,
+            1,
+            block_size_m,
+            mul_tw,
             output_topk,
         )

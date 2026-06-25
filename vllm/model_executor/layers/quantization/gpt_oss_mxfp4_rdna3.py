@@ -136,8 +136,18 @@ class GptOssMxfp4RDNA3MoEMethod(GptOssMxfp4MoEMethod):
         # gate_up GEMM (no reduction) + per-expert bias
         w1 = torch.zeros(total, N_gate_up, dtype=dtype, device=device)
         ops.moe_mxfp4_gemm_rdna3(
-            x, w1, layer.w13_weight_packed, layer.w13_weight_scale, empty_tw,
-            sti, eid, ntp, top_k, block_size_m, False, 0,
+            x,
+            w1,
+            layer.w13_weight_packed,
+            layer.w13_weight_scale,
+            empty_tw,
+            sti,
+            eid,
+            ntp,
+            top_k,
+            block_size_m,
+            False,
+            0,
         )
         w1 = w1 + layer.w13_bias[flat_experts].to(dtype)
         act = self._swiglu_oai(w1)
@@ -145,8 +155,18 @@ class GptOssMxfp4RDNA3MoEMethod(GptOssMxfp4MoEMethod):
         # down GEMM (no reduction) + per-expert bias, then weighted moe_sum
         w2o = torch.zeros(total, hidden, dtype=dtype, device=device)
         ops.moe_mxfp4_gemm_rdna3(
-            act, w2o, layer.w2_weight_packed, layer.w2_weight_scale, empty_tw,
-            sti, eid, ntp, 1, block_size_m, False, 0,
+            act,
+            w2o,
+            layer.w2_weight_packed,
+            layer.w2_weight_scale,
+            empty_tw,
+            sti,
+            eid,
+            ntp,
+            1,
+            block_size_m,
+            False,
+            0,
         )
         w2o = w2o + layer.w2_bias[flat_experts].to(dtype)
         w2o = w2o * topk_weights.reshape(-1, 1).to(dtype)

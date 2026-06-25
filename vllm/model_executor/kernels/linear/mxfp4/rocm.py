@@ -11,9 +11,7 @@ from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
 _MXFP4_GROUP_SIZE = 32
 
 # Fake/meta impl so the op is traceable under torch.compile + CUDA graphs.
-if hasattr(torch.ops, "_rocm_C") and hasattr(
-    torch.ops._rocm_C, "mxfp4_gemm_rdna3"
-):
+if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "mxfp4_gemm_rdna3"):
     try:
 
         @torch.library.register_fake("_rocm_C::mxfp4_gemm_rdna3")
@@ -58,8 +56,7 @@ class Rdna3MxFp4LinearKernel(MxFp4LinearKernel):
 
         if N % 16 != 0 or K % _MXFP4_GROUP_SIZE != 0:
             raise ValueError(
-                f"RDNA3 MXFP4 WMMA kernel needs N%16==0 and K%32==0, got "
-                f"N={N}, K={K}"
+                f"RDNA3 MXFP4 WMMA kernel needs N%16==0 and K%32==0, got N={N}, K={K}"
             )
 
         # [N, K/2] uint8 reinterpreted little-endian as int32 is already the
@@ -81,9 +78,7 @@ class Rdna3MxFp4LinearKernel(MxFp4LinearKernel):
         if not x_2d.is_contiguous():
             x_2d = x_2d.contiguous()
 
-        out = torch.ops._rocm_C.mxfp4_gemm_rdna3(
-            x_2d, layer.weight, layer.weight_scale
-        )
+        out = torch.ops._rocm_C.mxfp4_gemm_rdna3(x_2d, layer.weight, layer.weight_scale)
         if bias is not None:
             out = out + bias
         return out.view(out_shape)

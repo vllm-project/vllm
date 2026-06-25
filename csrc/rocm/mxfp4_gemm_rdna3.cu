@@ -126,7 +126,7 @@ __global__ void gemm_mxfp4_wmma_kernel_16x16_1w(
 
   v8fp32 c_acc = {0, 0, 0, 0, 0, 0, 0, 0};
 
-  const int groupsize = size_k / groups;            // == 32 for MXFP4
+  const int groupsize = size_k / groups;  // == 32 for MXFP4
   constexpr uint32_t mant_bits = std::is_same<T, half>::value ? 10u : 7u;
 
   const int k_per_split = size_k / gridDim.z;
@@ -243,7 +243,8 @@ void launch_gemm_mxfp4_wmma_16x16_1w(const T* a, const uint32_t* b_q,
   int k_split = compute_mxfp4_k_split(size_k);
   // Each K-segment must be a whole number of 16-wide tiles, else the k_tile
   // loop would drop the tail of K. Fall back to no split otherwise.
-  while (k_split > 1 && (size_k % k_split != 0 || (size_k / k_split) % 16 != 0)) {
+  while (k_split > 1 &&
+         (size_k % k_split != 0 || (size_k / k_split) % 16 != 0)) {
     k_split /= 2;
   }
   dim3 block(32);
@@ -508,7 +509,8 @@ __global__ void gemm_mxfp4_wmma_kernel_64x64_4w(
   store_acc(c_acc3, n_tile + 48);
 }
 
-// ---- 128x64_k32: 8 waves, 128M x 64N, K=32/iter, cached group bias (M >= 128) ----
+// ---- 128x64_k32: 8 waves, 128M x 64N, K=32/iter, cached group bias (M >= 128)
+// ----
 template <typename T>
 __global__ void gemm_mxfp4_wmma_kernel_128x64_k32(
     const T* __restrict__ a, const uint32_t* __restrict__ b_q,
@@ -725,8 +727,9 @@ void launch_gemm_mxfp4_wmma(const T* a, const uint32_t* b_q,
 }
 
 // Scalar GEMV for decode (small M): WMMA wastes 15/16 of its compute at M=1,
-// so this reads each weight column once and does M scalar dots (bandwidth-bound,
-// the 4-bit read wins). 256 threads, 4 N cols each; gridDim.z splits K (atomic).
+// so this reads each weight column once and does M scalar dots
+// (bandwidth-bound, the 4-bit read wins). 256 threads, 4 N cols each; gridDim.z
+// splits K (atomic).
 #define MXFP4_BLOCK_KN 256
 #define MXFP4_THREADS 256
 
@@ -819,8 +822,8 @@ __global__ void gemm_mxfp4_scalar_rdna3(
   auto refresh = [&](int g) {
   #pragma unroll
     for (int col = 0; col < 4; ++col)
-      gscale[col] = __uint_as_float((uint32_t)b_scales_e8m0[g * size_n + n + col]
-                                    << 23);
+      gscale[col] =
+          __uint_as_float((uint32_t)b_scales_e8m0[g * size_n + n + col] << 23);
   };
   refresh(group);
 
@@ -945,7 +948,8 @@ torch::Tensor mxfp4_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
                                torch::Tensor b_scales_e8m0) {
   TORCH_CHECK(a.is_cuda(), "a must be a CUDA/HIP tensor");
   TORCH_CHECK(b_q_weight.is_cuda(), "b_q_weight must be a CUDA/HIP tensor");
-  TORCH_CHECK(b_scales_e8m0.is_cuda(), "b_scales_e8m0 must be a CUDA/HIP tensor");
+  TORCH_CHECK(b_scales_e8m0.is_cuda(),
+              "b_scales_e8m0 must be a CUDA/HIP tensor");
   TORCH_CHECK(a.dim() == 2, "a must be 2D [M, K]");
   TORCH_CHECK(b_q_weight.dim() == 2, "b_q_weight must be 2D [K/8, N]");
   TORCH_CHECK(
@@ -967,7 +971,8 @@ torch::Tensor mxfp4_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
 
   TORCH_CHECK(b_q_weight.size(0) * 8 == size_k,
               "b_q_weight first dim must be K/8");
-  TORCH_CHECK(b_scales_e8m0.size(1) == size_n, "b_scales_e8m0 last dim must be N");
+  TORCH_CHECK(b_scales_e8m0.size(1) == size_n,
+              "b_scales_e8m0 last dim must be N");
   TORCH_CHECK(groups * 32 == size_k, "E8M0 group count must be K/32");
   TORCH_CHECK(size_n % 16 == 0, "WMMA path requires N % 16 == 0");
   TORCH_CHECK(size_k % 32 == 0, "MXFP4 path requires K % 32 == 0");

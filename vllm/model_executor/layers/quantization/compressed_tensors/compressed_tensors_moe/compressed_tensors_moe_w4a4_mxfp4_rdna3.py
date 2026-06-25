@@ -42,12 +42,34 @@ class CompressedTensorsW4A4Mxfp4RDNA3MoEMethod(
 
     def _gemm_w13(self, layer, a, c, tw, sti, eid, ntp, top_k, block_size_m, mul_tw):
         ops.moe_mxfp4_gemm_rdna3(
-            a, c, layer.w13_weight_packed, layer.w13_weight_scale, tw, sti, eid,
-            ntp, top_k, block_size_m, mul_tw, 0,
+            a,
+            c,
+            layer.w13_weight_packed,
+            layer.w13_weight_scale,
+            tw,
+            sti,
+            eid,
+            ntp,
+            top_k,
+            block_size_m,
+            mul_tw,
+            0,
         )
 
-    def _gemm_w2(self, layer, a, c, tw, sti, eid, ntp, block_size_m, mul_tw, output_topk):
+    def _gemm_w2(
+        self, layer, a, c, tw, sti, eid, ntp, block_size_m, mul_tw, output_topk
+    ):
         ops.moe_mxfp4_gemm_rdna3(
-            a, c, layer.w2_weight_packed, layer.w2_weight_scale, tw, sti, eid,
-            ntp, 1, block_size_m, mul_tw, output_topk,
+            a,
+            c,
+            layer.w2_weight_packed,
+            layer.w2_weight_scale,
+            tw,
+            sti,
+            eid,
+            ntp,
+            1,
+            block_size_m,
+            mul_tw,
+            output_topk,
         )

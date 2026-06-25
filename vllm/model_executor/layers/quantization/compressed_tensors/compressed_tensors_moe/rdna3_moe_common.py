@@ -69,7 +69,9 @@ class RDNA3FusedMoEMixin:
     def _gemm_w13(self, layer, a, c, tw, sti, eid, ntp, top_k, block_size_m, mul_tw):
         raise NotImplementedError
 
-    def _gemm_w2(self, layer, a, c, tw, sti, eid, ntp, block_size_m, mul_tw, output_topk):
+    def _gemm_w2(
+        self, layer, a, c, tw, sti, eid, ntp, block_size_m, mul_tw, output_topk
+    ):
         raise NotImplementedError
 
     def _rdna3_run(
