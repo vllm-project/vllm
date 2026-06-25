@@ -333,7 +333,7 @@ class OpenCVVideoBackendMixin:
 
             if not ok:
                 if is_target_frame:
-                    logger.warning(
+                    logger.debug(
                         "Failed to grab frame %d during video loading.",
                         idx,
                     )
@@ -364,7 +364,7 @@ class OpenCVVideoBackendMixin:
                             idx - recovered_idx,
                         )
                 elif is_target_frame:
-                    logger.warning(
+                    logger.debug(
                         "Failed to retrieve frame %d during video loading.",
                         idx,
                     )
@@ -372,7 +372,7 @@ class OpenCVVideoBackendMixin:
 
         # Log any remaining failed frames
         for failed_idx in failed_frames_idx:
-            logger.warning(
+            logger.debug(
                 "Frame %d could not be recovered (end of video).",
                 failed_idx,
             )
@@ -402,9 +402,9 @@ class OpenCVVideoBackendMixin:
         for idx in range(max_frame_idx + 1):
             ok = cap.grab()
             if not ok:
-                # Frame is broken/unreadable, log warning
+                # Frame is broken/unreadable, skip it
                 if idx in frame_indices:
-                    logger.warning(
+                    logger.debug(
                         "Failed to grab frame %d during video loading. "
                         "This frame will be skipped.",
                         idx,
@@ -418,7 +418,7 @@ class OpenCVVideoBackendMixin:
                     i += 1
                 else:
                     # retrieve() failed even though grab() succeeded
-                    logger.warning(
+                    logger.debug(
                         "Failed to retrieve frame %d during video loading. "
                         "This frame will be skipped.",
                         idx,
