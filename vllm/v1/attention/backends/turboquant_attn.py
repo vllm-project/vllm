@@ -350,6 +350,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             layer._tq_Pi = H
             # fp16 copy for rotation in continuation prefill path
             layer._tq_Pi_half = H.to(torch.float16)
+            # fp16 copy of PiT for fused query rotation in decode kernel
+            layer._tq_PiT_half = H.to(torch.float16)
 
             # Centroids for Lloyd-Max quantization.
             # Use query dtype (bf16) to enable bf16 Tensor Core in decode path.
@@ -712,7 +714,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                         value_quant_bits=(self.tq_config.effective_value_quant_bits),
                         key_fp8=self.tq_config.key_fp8,
                         norm_correction=self.tq_config.norm_correction,
-                        PiT=PiT,
+                        PiT_half=layer._tq_PiT_half,
                     )
                 else:
                     # Large continuation: dequant cached K/V and use
@@ -923,7 +925,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             value_quant_bits=self.tq_config.effective_value_quant_bits,
             key_fp8=self.tq_config.key_fp8,
             norm_correction=self.tq_config.norm_correction,
-            PiT=PiT,
+            PiT_half=layer._tq_PiT_half,
             mid_o_buf=mid_o_buf,
             output_buf=output_buf,
             lse_buf=lse_buf,
