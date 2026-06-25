@@ -360,6 +360,7 @@ class EagleMiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         hidden_states, hidden_states2 = self.model(input_ids, positions, hidden_states)
         hidden_states = hidden_states / self.scale_width
