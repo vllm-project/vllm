@@ -461,7 +461,6 @@ class RocmPlatform(Platform):
         "auto_awq",
         "awq_marlin",  # will be overwritten with awq
         "gptq",
-        "gptq_marlin",
         "auto_gptq",
         "fp8",
         "deepseek_v4_fp8",
