@@ -176,10 +176,7 @@ class Glm4MoE(nn.Module):
             rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
         )
 
-        if (
-            config.n_shared_experts is None
-            or self.is_fusion_moe_shared_experts_enabled
-        ):
+        if config.n_shared_experts is None or self.is_fusion_moe_shared_experts_enabled:
             self.shared_experts = None
         else:
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
@@ -523,8 +520,7 @@ class Glm4MoeModel(nn.Module):
                 continue
 
             is_fusion_moe_shared_experts_layer = (
-                rocm_aiter_moe_shared_expert_enabled
-                and ("mlp.shared_experts" in name)
+                rocm_aiter_moe_shared_expert_enabled and ("mlp.shared_experts" in name)
             )
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
@@ -569,15 +565,10 @@ class Glm4MoeModel(nn.Module):
                 split_dim = 0
                 chunk_size = 0
                 if is_fusion_moe_shared_experts_layer:
-                    num_chunks = (
-                        getattr(self.config, "n_shared_experts", 1) or 1
-                    )
+                    num_chunks = getattr(self.config, "n_shared_experts", 1) or 1
                     split_dim = (
                         1
-                        if (
-                            "down_proj.weight" in name
-                            and loaded_weight.ndim > 1
-                        )
+                        if ("down_proj.weight" in name and loaded_weight.ndim > 1)
                         else 0
                     )
                     total = loaded_weight.shape[split_dim]
@@ -594,9 +585,7 @@ class Glm4MoeModel(nn.Module):
                     weight_to_load = loaded_weight
 
                     if is_fusion_moe_shared_experts_layer:
-                        chunk_slice = slice(
-                            j * chunk_size, (j + 1) * chunk_size
-                        )
+                        chunk_slice = slice(j * chunk_size, (j + 1) * chunk_size)
                         if loaded_weight.ndim == 1:
                             weight_to_load = loaded_weight[chunk_slice]
                         elif split_dim == 0:
