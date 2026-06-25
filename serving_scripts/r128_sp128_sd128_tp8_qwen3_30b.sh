@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --nodelist=htc-g[060]
+#SBATCH --nodelist=htc-g060
 #SBATCH --job-name=r128_sp128_sd128_tp8_qwen3_30b
 #SBATCH --nodes=1
 #SBATCH --partition=short
