@@ -40,6 +40,11 @@ def benchmark_relu_squared(
     def native(x: torch.Tensor) -> torch.Tensor:
         return torch.square(F.relu(x))
 
+    # Verify the custom kernel matches the native implementation before timing.
+    ref = native(x)
+    torch.ops._C.relu_squared(out, x)
+    torch.testing.assert_close(out, ref)
+
     if provider == "custom":
         # Custom CUDA kernel — single fused kernel.
         fn = lambda: torch.ops._C.relu_squared(out, x)
