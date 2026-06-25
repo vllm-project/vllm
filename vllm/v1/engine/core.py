@@ -10,7 +10,6 @@ from collections import defaultdict, deque
 from collections.abc import Callable, Generator
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
 from enum import IntEnum
 from functools import partial
 from inspect import isclass, signature
@@ -84,18 +83,10 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
-from vllm.v1.utils import IterationDetails, compute_iteration_details
+from vllm.v1.utils import compute_iteration_details
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
-
-
-@dataclass
-class PendingIterationDetails:
-    iteration_index: int
-    details: IterationDetails
-    start_time: float
-    is_dummy: bool = False
 
 
 HANDSHAKE_TIMEOUT_MINS = 5
@@ -440,56 +431,53 @@ class EngineCore:
             )
             raise err
 
-    def _start_iteration_details(
+    @contextmanager
+    def capture_iteration_details(
         self, scheduler_output: SchedulerOutput | None
-    ) -> PendingIterationDetails | None:
+    ) -> Generator[SchedulerIterationDetails | None, None, None]:
         enable_details = (
             self.vllm_config.observability_config.enable_logging_iteration_details
         )
         if not self.log_stats or not enable_details:
-            return None
+            yield None
+            return
         # 0-token step: let the dummy_batch wrapper log it (avoids double-log).
         if (
             scheduler_output is not None
             and scheduler_output.total_num_scheduled_tokens == 0
         ):
-            return None
+            yield None
+            return
 
         iteration_index = getattr(self, "_iteration_index", 0)
         # scheduler_output=None marks a DP dummy iteration.
         if scheduler_output is None:
-            details = IterationDetails(0, 0, 0, 0)
-            is_dummy = True
+            iteration_details = SchedulerIterationDetails(
+                iteration_index=iteration_index,
+                num_ctx_requests=0,
+                num_ctx_tokens=0,
+                num_generation_requests=0,
+                num_generation_tokens=0,
+                elapsed_ms=0.0,
+                is_dummy=True,
+            )
         else:
             details = compute_iteration_details(scheduler_output)
-            is_dummy = False
+            iteration_details = SchedulerIterationDetails(
+                iteration_index=iteration_index,
+                num_ctx_requests=details.num_ctx_requests,
+                num_ctx_tokens=details.num_ctx_tokens,
+                num_generation_requests=details.num_generation_requests,
+                num_generation_tokens=details.num_generation_tokens,
+                elapsed_ms=0.0,
+                num_encoder_inputs=details.num_encoder_inputs,
+                num_encoder_output_tokens=details.num_encoder_output_tokens,
+            )
 
-        return PendingIterationDetails(
-            iteration_index=iteration_index,
-            details=details,
-            start_time=time.monotonic(),
-            is_dummy=is_dummy,
-        )
-
-    def _finish_iteration_details(
-        self, pending: PendingIterationDetails | None
-    ) -> SchedulerIterationDetails | None:
-        if pending is None:
-            return None
-
-        self._iteration_index = pending.iteration_index + 1
-        details = pending.details
-        return SchedulerIterationDetails(
-            iteration_index=pending.iteration_index,
-            num_ctx_requests=details.num_ctx_requests,
-            num_ctx_tokens=details.num_ctx_tokens,
-            num_generation_requests=details.num_generation_requests,
-            num_generation_tokens=details.num_generation_tokens,
-            elapsed_ms=(time.monotonic() - pending.start_time) * 1000,
-            num_encoder_inputs=details.num_encoder_inputs,
-            num_encoder_output_tokens=details.num_encoder_output_tokens,
-            is_dummy=pending.is_dummy,
-        )
+        start_time = time.monotonic()
+        yield iteration_details
+        iteration_details.elapsed_ms = (time.monotonic() - start_time) * 1000
+        self._iteration_index = iteration_index + 1
 
     def _make_iteration_details_stats(
         self, iteration_details: SchedulerIterationDetails
@@ -532,13 +520,13 @@ class EngineCore:
         scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
-        pending_iteration = self._start_iteration_details(scheduler_output)
-        with self.log_error_detail(scheduler_output):
+        with (
+            self.capture_iteration_details(scheduler_output) as iteration_details,
+            self.log_error_detail(scheduler_output),
+        ):
             model_output = future.result()
             if model_output is None:
                 model_output = self.model_executor.sample_tokens(grammar_output)
-
-        iteration_details = self._finish_iteration_details(pending_iteration)
 
         # Before processing the model output, process any aborts that happened
         # during the model execution.
@@ -631,16 +619,16 @@ class EngineCore:
 
         # Block until the next result is available.
         future, scheduler_output, exec_model_fut = batch_queue.pop()
-        pending_iteration = self._start_iteration_details(scheduler_output)
-        with self.log_error_detail(scheduler_output):
+        with (
+            self.capture_iteration_details(scheduler_output) as iteration_details,
+            self.log_error_detail(scheduler_output),
+        ):
             model_output = future.result()
             if model_output is None:
                 # None from sample_tokens() implies that the original execute_model()
                 # call failed - raise that exception.
                 exec_model_fut.result()
                 raise RuntimeError("unexpected error")
-
-        iteration_details = self._finish_iteration_details(pending_iteration)
 
         # Before processing the model output, process any aborts that happened
         # during the model execution.
@@ -1996,11 +1984,8 @@ class DPEngineCoreProc(EngineCoreProc):
                 # Execute a dummy pass when no ready requests ran, unless the
                 # engine is sleeping.
                 elif not self.model_executor.is_sleeping:
-                    pending_iteration = self._start_iteration_details(None)
-                    self.execute_dummy_batch()
-                    iteration_details = self._finish_iteration_details(
-                        pending_iteration
-                    )
+                    with self.capture_iteration_details(None) as iteration_details:
+                        self.execute_dummy_batch()
                     if iteration_details is not None and not self.has_coordinator:
                         stats = self._make_iteration_details_stats(iteration_details)
                         self.output_queue.put_nowait(

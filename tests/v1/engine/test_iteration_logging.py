@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import time
 from types import SimpleNamespace
 
 from vllm.v1.engine import EngineCoreOutputs
@@ -26,9 +27,9 @@ def make_iteration_details() -> SchedulerIterationDetails:
     )
 
 
-def test_start_iteration_details_disabled_without_log_stats():
-    engine = SimpleNamespace(
-        log_stats=False,
+def make_fake_engine(log_stats: bool = True) -> SimpleNamespace:
+    return SimpleNamespace(
+        log_stats=log_stats,
         vllm_config=SimpleNamespace(
             observability_config=SimpleNamespace(
                 enable_logging_iteration_details=True,
@@ -36,7 +37,28 @@ def test_start_iteration_details_disabled_without_log_stats():
         ),
     )
 
-    assert EngineCore._start_iteration_details(engine, None) is None
+
+def test_capture_iteration_details_disabled_without_log_stats():
+    engine = make_fake_engine(log_stats=False)
+
+    with EngineCore.capture_iteration_details(engine, None) as iteration_details:
+        assert iteration_details is None
+
+    assert not hasattr(engine, "_iteration_index")
+
+
+def test_capture_iteration_details_fills_elapsed_time():
+    engine = make_fake_engine()
+
+    with EngineCore.capture_iteration_details(engine, None) as iteration_details:
+        assert iteration_details is not None
+        assert iteration_details.elapsed_ms == 0.0
+        assert iteration_details.is_dummy
+        time.sleep(0.001)
+
+    assert iteration_details is not None
+    assert iteration_details.elapsed_ms > 0.0
+    assert engine._iteration_index == 1
 
 
 def test_attach_iteration_details_uses_existing_output():
