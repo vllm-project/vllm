@@ -11,6 +11,8 @@
 #include <cub/cub.cuh>
 #include <cstdint>
 
+#include "topk_histogram_4096.cuh"
+
 namespace vllm {
 namespace persistent {
 
@@ -935,8 +937,16 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2)
 }  // namespace persistent
 
 // ============================================================================
-// FlashInfer FilteredTopK (BS>32 dispatch) — float32 only.
-// Extracted from flashinfer_topk.cuh. Lives in namespace vllm (not persistent).
+// ============================================================================
+// Optimized FilteredTopK — single CTA per row for bs > 32.
+// Kept with persistent_topk so the portable fallback owns the non-cluster path.
+// ============================================================================
+namespace filtered_topk {
+
+namespace hist4096 = topk_histogram_4096;
+
+// ============================================================================
+// FilteredTopK — single CTA per row for bs > 32
 // Adapted from https://github.com/flashinfer-ai/flashinfer/pull/2215
 // ============================================================================
 
@@ -961,13 +971,6 @@ struct vec_t {
 #pragma unroll
     for (size_t i = 0; i < N; ++i) {
       data[i] = ptr[i];
-    }
-  }
-
-  FLASHINFER_INLINE void cast_store(T* ptr) const {
-#pragma unroll
-    for (size_t i = 0; i < N; ++i) {
-      ptr[i] = data[i];
     }
   }
 };
@@ -1013,7 +1016,8 @@ constexpr size_t FILTERED_TOPK_SMEM_DYNAMIC =
  * \tparam IdType Index type (int32_t)
  * \tparam VEC_SIZE Vector size for input loads (1, 2, 4, or 8)
  */
-template <typename DType, typename IdType, int VEC_SIZE, uint32_t MAX_K = 2048>
+template <typename DType, typename IdType, int VEC_SIZE, uint32_t MAX_K = 2048,
+          bool UsePredicatedShortLoads = false>
 __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
     FilteredTopKUnifiedKernel(const DType* __restrict__ input,
                               IdType* __restrict__ output,
@@ -1038,6 +1042,19 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
   if (length <= static_cast<int>(top_k)) {
     for (int i = tx; i < static_cast<int>(top_k); i += BLOCK_SIZE) {
       dst[i] = (i < length) ? static_cast<IdType>(i) : static_cast<IdType>(-1);
+    }
+    return;
+  }
+
+  // Short path
+  if (length <= 32768) {
+    extern __shared__ uint8_t _smem_reg[];
+    if constexpr (UsePredicatedShortLoads) {
+      hist4096::histogram_4096_topk_predicated<MAX_K, 12, 8>(score, dst, length,
+                                                             _smem_reg);
+    } else {
+      hist4096::histogram_4096_topk<MAX_K, 12, 8>(score, dst, length,
+                                                  _smem_reg);
     }
     return;
   }
@@ -1285,14 +1302,15 @@ cudaError_t FilteredTopKRaggedTransform(const DType* input,
 
   const int vec_size = ComputeFilteredTopKVecSize<DType>(max_len);
 
-#define DISPATCH_VEC_SIZE(VS)                                               \
-  if (vec_size == VS) {                                                     \
-    auto kernel = FilteredTopKUnifiedKernel<DType, IdType, VS, MAX_K>;      \
-    FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(                              \
-        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));   \
-    FLASHINFER_CUDA_CALL(cudaLaunchKernel((void*)kernel, grid, block, args, \
-                                          smem_size, stream));              \
-    return cudaSuccess;                                                     \
+#define DISPATCH_VEC_SIZE(VS)                                                 \
+  if (vec_size == VS) {                                                       \
+    auto kernel =                                                             \
+        FilteredTopKUnifiedKernel<DType, IdType, VS, MAX_K, (VS != MAX_VEC)>; \
+    FLASHINFER_CUDA_CALL(cudaFuncSetAttribute(                                \
+        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size));     \
+    FLASHINFER_CUDA_CALL(cudaLaunchKernel((void*)kernel, grid, block, args,   \
+                                          smem_size, stream));                \
+    return cudaSuccess;                                                       \
   }
 
   DISPATCH_VEC_SIZE(1)
@@ -1304,6 +1322,19 @@ cudaError_t FilteredTopKRaggedTransform(const DType* input,
 #undef DISPATCH_VEC_SIZE
 
   return cudaSuccess;
+}
+
+}  // namespace filtered_topk
+
+template <typename DType, typename IdType, uint32_t MAX_K = 2048>
+cudaError_t FilteredTopKRaggedTransform(const DType* input,
+                                        IdType* output_indices,
+                                        const IdType* lengths,
+                                        uint32_t num_rows, uint32_t top_k_val,
+                                        uint32_t max_len,
+                                        cudaStream_t stream = 0) {
+  return filtered_topk::FilteredTopKRaggedTransform<DType, IdType, MAX_K>(
+      input, output_indices, lengths, num_rows, top_k_val, max_len, stream);
 }
 
 }  // namespace vllm
