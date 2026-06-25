@@ -186,6 +186,7 @@ if TYPE_CHECKING:
         "relax",
     ] = "relax"
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
+    VLLM_MOE_SKIP_PADDING: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
@@ -486,7 +487,7 @@ def get_vllm_port() -> int | None:
             raise ValueError(
                 f"VLLM_PORT '{port}' appears to be a URI. "
                 "This may be caused by a Kubernetes service discovery issue,"
-                "check the warning in: https://docs.vllm.ai/en/stable/serving/env_vars.html"
+                "check the warning in: https://docs.vllm.ai/en/latest/configuration/env_vars.html"
             ) from None
         raise ValueError(f"VLLM_PORT '{port}' must be a valid integer") from err
 
@@ -1470,6 +1471,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_FUSED_MOE_GROUPED_TOPK": lambda: bool(
         int(os.getenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "1"))
     ),
+    # Skip cudagraph/DP padding tokens in the MoE path by forcing their expert
+    # ids to -1 so the dispatch and experts drop them. Requires a MoE kernel that
+    # treats topk_id == -1 as a skip sentinel; off by default because not all
+    # kernels support it yet.
+    "VLLM_MOE_SKIP_PADDING": lambda: bool(int(os.getenv("VLLM_MOE_SKIP_PADDING", "0"))),
     # Allow use of FlashInfer FP8 block-scale GEMM for linear layers.
     # This uses TensorRT-LLM kernels and requires SM90+ (Hopper).
     "VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER": lambda: bool(
@@ -1581,10 +1587,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS", "1")
     ),
     # Enforce function parameter schemas in structural-tag based tool calling.
-    "VLLM_ENFORCE_STRICT_TOOL_CALLING": lambda: os.getenv(
-        "VLLM_ENFORCE_STRICT_TOOL_CALLING", "True"
-    ).lower()
-    in ("true", "1"),
+    "VLLM_ENFORCE_STRICT_TOOL_CALLING": lambda: (
+        os.getenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", "True").lower() in ("true", "1")
+    ),
     # Control the max chunk bytes (in MB) for the rpc message queue.
     # Object larger than this threshold will be broadcast to worker
     # processes via zmq.

@@ -7,6 +7,7 @@ from typing import Any, Literal
 import torch
 
 from vllm.config import VllmConfig
+from vllm.config.lora import LoRAConfig
 from vllm.exceptions import LoRAAdapterNotFoundError
 from vllm.logger import init_logger
 from vllm.lora.lora_model import LoRAModel
@@ -45,7 +46,10 @@ class WorkerLoRAManager:
             vllm_config.scheduler_config.max_num_batched_tokens
         )
         self.vocab_size = vllm_config.model_config.get_vocab_size()
-        self.lora_config = vllm_config.lora_config
+        lora_config = vllm_config.lora_config
+        if lora_config is None:
+            raise ValueError("LoRA config must be set for WorkerLoRAManager.")
+        self.lora_config: LoRAConfig = lora_config
 
         # Use get_text_config() in case of multimodal models
         text_config = vllm_config.model_config.hf_config.get_text_config()
@@ -81,8 +85,10 @@ class WorkerLoRAManager:
     def create_lora_manager(
         self,
         model: torch.nn.Module,
-        vllm_config: VllmConfig | None = None,
+        vllm_config: VllmConfig,
     ) -> Any:
+        if vllm_config is None:
+            raise ValueError("vllm_config must be provided to create a LoRA manager.")
         lora_manager = create_lora_manager(
             model,
             max_num_seqs=self.max_num_seqs,
@@ -240,8 +246,10 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
     def create_lora_manager(
         self,
         model: torch.nn.Module,
-        vllm_config: VllmConfig | None = None,
+        vllm_config: VllmConfig,
     ) -> Any:
+        if vllm_config is None:
+            raise ValueError("vllm_config must be provided to create a LoRA manager.")
         lora_manager = create_lora_manager(
             model,
             lora_manager_cls=self._manager_cls,

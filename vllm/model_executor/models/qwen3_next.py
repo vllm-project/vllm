@@ -62,6 +62,7 @@ from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
+from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import (
     EagleModelMixin,
@@ -85,6 +86,26 @@ from .utils import (
 logger = init_logger(__name__)
 
 KVCache = tuple[torch.Tensor, torch.Tensor]
+
+
+def _is_shared_expert_fse_compatible(quant_config) -> bool:
+    """Check if shared expert can be fused with routed experts.
+
+    FSE requires that shared and routed expert weights use the same
+    quantization format. Returns False when the shared expert is
+    excluded from quantization (e.g. float32 shared in an MXFP4 model)
+    or has a different quant spec than routed experts.
+    """
+    if quant_config is None:
+        return True
+    # Quark stores its full config dict in quant_config.quant_config
+    raw_config = getattr(quant_config, "quant_config", None)
+    if not isinstance(raw_config, dict):
+        return True
+    exclude = raw_config.get("exclude", [])
+    if not exclude:
+        return True
+    return not any("shared_expert." in str(e) for e in exclude)
 
 
 class Qwen3NextSparseMoeBlock(nn.Module):
@@ -141,10 +162,15 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             prefix=f"{prefix}.shared_expert_gate",
         )
 
-        if (
-            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
-            or config.shared_expert_intermediate_size <= 0
-        ):
+        _fse_requested = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+        _fse_enabled = _fse_requested and _is_shared_expert_fse_compatible(quant_config)
+        if _fse_requested and not _fse_enabled:
+            logger.warning(
+                "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but "
+                "shared expert has a different quantization spec than routed "
+                "experts. Falling back to non-fused shared expert path."
+            )
+        if _fse_enabled or config.shared_expert_intermediate_size <= 0:
             self.shared_expert = None
         else:
             self.shared_expert = Qwen3NextMLP(
@@ -267,6 +293,15 @@ class Qwen3NextAttention(nn.Module):
             dual_chunk_attention_config=self.dual_chunk_attention_config,
         )
 
+        # Late-interaction retrieval models (e.g. ColQwen3.5) run BIDIRECTIONAL
+        # attention on the full_attention layers; they set config.is_causal=False
+        # via a VerifyAndUpdateConfig handler. Generation models leave is_causal
+        # unset (-> causal/DECODER), so this is a no-op for them. Mirrors qwen3.py.
+        attn_type = (
+            AttentionType.DECODER
+            if getattr(config, "is_causal", True)
+            else AttentionType.ENCODER_ONLY
+        )
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -275,6 +310,7 @@ class Qwen3NextAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
+            attn_type=attn_type,
             **{
                 "layer_idx": extract_layer_index(prefix),
                 "dual_chunk_attention_config": self.dual_chunk_attention_config,
