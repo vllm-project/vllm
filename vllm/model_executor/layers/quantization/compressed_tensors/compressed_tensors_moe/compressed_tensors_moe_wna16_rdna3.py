@@ -116,6 +116,12 @@ class CompressedTensorsWNA16RDNA3MoEMethod(
         )
         layer.rdna3_empty_tw = torch.empty(0, device=device)
 
+    def _select_block_size_m(self, num_tokens, top_k, num_experts):
+        # moe_gptq_gemm_rdna3 only has tiles {1,2,4,8} (no WMMA-16 path); keep
+        # the proven W4A16 cap so prefill / batched decode don't hit the
+        # kernel's TORCH_CHECK default arm.
+        return 1 if num_tokens <= 4 else 4
+
     def _gemm_w13(self, layer, a, c, tw, sti, eid, ntp, top_k, block_size_m, mul_tw):
         ops.moe_gptq_gemm_rdna3(
             a,

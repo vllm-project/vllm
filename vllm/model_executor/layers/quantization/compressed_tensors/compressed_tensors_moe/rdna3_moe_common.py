@@ -66,6 +66,14 @@ class RDNA3FusedMoEMixin:
     """Mixin: shared apply() + two-GEMM orchestration. Subclasses implement
     ``_gemm_w13`` and ``_gemm_w2`` (the op-specific HIP launch)."""
 
+    def _select_block_size_m(
+        self, num_tokens: int, top_k: int, num_experts: int
+    ) -> int:
+        """Tile size for the GEMM op. The default targets the MXFP4 kernel
+        (tiles 1/2/4/8/16); subclasses whose kernel supports a smaller set
+        (e.g. the W4A16 ``moe_gptq_gemm_rdna3``: 1/2/4/8) must override."""
+        return select_block_size_m(num_tokens, top_k, num_experts)
+
     def _gemm_w13(self, layer, a, c, tw, sti, eid, ntp, top_k, block_size_m, mul_tw):
         raise NotImplementedError
 
@@ -96,7 +104,9 @@ class RDNA3FusedMoEMixin:
 
         if global_num_experts <= 0:
             global_num_experts = layer.w13_weight_packed.shape[0]
-        block_size_m = select_block_size_m(num_tokens, top_k, global_num_experts)
+        block_size_m = self._select_block_size_m(
+            num_tokens, top_k, global_num_experts
+        )
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
             topk_ids, block_size_m, global_num_experts, expert_map
