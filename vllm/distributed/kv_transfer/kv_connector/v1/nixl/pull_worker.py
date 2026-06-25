@@ -16,6 +16,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
     ReadSpec,
+    _is_attention_spec,
 )
 from vllm.logger import init_logger
 
@@ -134,11 +135,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             for rank in plan.all_source_ranks
         ]
 
-        # D may have to perform multiple reads from different remote ranks.
-        # MLA opt: when P TP > D TP, only a single read is executed for
-        # the first remote rank (cache is duplicated)..
-        if self.use_mla and tp_ratio < 0:
-            assert len(read_specs) == 1
+        needs_multi_rank_read = tp_ratio < 0 and len(read_specs) > 1
 
         for i, spec in enumerate(read_specs):
             remote_block_size = remote_info.remote_block_size
@@ -151,8 +148,7 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 req_id,
             )
             # Get side handles.
-            if tp_ratio < 0 and not self.use_mla:
-                assert remote_block_size == self.block_size
+            if needs_multi_rank_read:
                 # Remote tp_size > local tp_size: we must perform multiple
                 # reads. Get the memory chunk onto which we will write to.
                 local_xfer_side_handle = self.src_xfer_handles_by_tp_ratio[tp_ratio][i]
@@ -177,13 +173,15 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 remote_xfer_side_handle=remote_xfer_side_handle,
             )
 
-        if self.use_mla and tp_ratio < 0 and read_specs:
-            # ..but we still need to notify the other remote ranks that we
-            # have the blocks we need so they can update the request state.
+        if tp_ratio < 0 and read_specs:
+            # Notify all registered source ranks that we did NOT read from,
+            # so they can mark the request as done without waiting for a
+            # transfer that will never come.
             notif_id = f"{meta.remote.request_id}:{self.world_size}".encode()
+            read_ranks = {spec.remote_rank for spec in read_specs}
             remote_agents = self._remote_agents[meta.remote.engine_id]
             for rank_to_notify, agent in remote_agents.items():
-                if rank_to_notify != read_specs[0].remote_rank:
+                if rank_to_notify not in read_ranks:
                     self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
 
     def _read_blocks(
@@ -209,30 +207,27 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             remote_info.remote_block_size
         )
         if block_size_ratio > 1:
-            # TODO (NickLucche) assume HMA is off. Change to handle multiple KV groups.
-            assert not self._is_hma_required
-            local_block_ids0 = local_block_ids[0] if local_block_ids else []
-            remote_block_ids0 = remote_block_ids[0]
-            local_block_ids_mapped = self.get_mapped_blocks(
-                np.asarray(local_block_ids0), block_size_ratio
-            ).tolist()
-            if len(local_block_ids_mapped) > len(remote_block_ids0):
-                # NOTE:
-                # get_mapped_blocks will always expand block_ids for n times.
-                # ex:
-                # prefill block_ids with block_size as 4:
-                # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-                # Local decode block_ids with block_size as 16: [1, 2, 3]
-                # expanded decode block_ids with get_mapped_blocks from [1, 2, 3] to
-                # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
-                # Then we clip local to align with prefill
-                # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] to
-                # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-                local_block_ids_mapped = local_block_ids_mapped[
-                    : len(remote_block_ids0)
-                ]
-            local_block_ids = [local_block_ids_mapped] if local_block_ids_mapped else []
-            remote_block_ids = [remote_block_ids0]
+            # Expand only FA/attention group block_ids by block_size_ratio.
+            # SSM/Mamba block_ids stay unchanged (recurrent state is 1:1).
+            local_block_ids = list(local_block_ids)
+            for g in range(len(local_block_ids)):
+                if _is_attention_spec(self._group_spec_types[g]):
+                    orig_len = len(local_block_ids[g])
+                    mapped = self.get_mapped_blocks(
+                        np.asarray(local_block_ids[g]), block_size_ratio
+                    ).tolist()
+                    if len(mapped) > len(remote_block_ids[g]):
+                        mapped = mapped[: len(remote_block_ids[g])]
+                    local_block_ids[g] = mapped
+                    logger.debug(
+                        "[HeteroTP] block_size_ratio=%d: FA group %d "
+                        "expanded %d→%d local blocks (remote=%d)",
+                        block_size_ratio,
+                        g,
+                        orig_len,
+                        len(mapped),
+                        len(remote_block_ids[g]),
+                    )
         # NOTE(rob): having the staging blocks be on the READER side is
         # not going to work well (since we will have to call rearrange tensors).
         # after we detect the txn is complete (which means we cannot make the
