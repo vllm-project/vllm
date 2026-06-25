@@ -387,43 +387,20 @@ def sparse_attn_indexer(
             values_spec,
             scales_spec,
         )
-        chunks_under_dcp = (
-            prefill_metadata.chunks
-            and prefill_metadata.chunks[0].local_cu_seq_lens is not None
-        )
-        dcp_group = get_dcp_group() if chunks_under_dcp else None
-        dcp_world_size = dcp_group.world_size if dcp_group else 1
-
         for chunk in prefill_metadata.chunks:
-            use_dcp_prefill_candidates = dcp_world_size > 1
-            # Under DCP, cu_seqlen_ks/ke already hold this rank's local row
-            # bounds (build_prefill_chunk_metadata localizes them in place).
             cu_seqlen_ks = chunk.cu_seqlen_ks
             cu_seqlen_ke = chunk.cu_seqlen_ke
-            if use_dcp_prefill_candidates:
-                assert chunk.local_cu_seq_lens is not None
-                max_local = chunk.max_local_total_seq_lens
-                k_quant = k_quant_full[:max_local]
-                k_scale = k_scale_full[:max_local]
-                if not chunk.skip_kv_gather and chunk.local_total_seq_lens > 0:
-                    ops.cp_gather_indexer_k_quant_cache(
-                        kv_cache,
-                        k_quant,
-                        k_scale,
-                        chunk.block_table,
-                        chunk.local_cu_seq_lens,
-                    )
-            else:
-                k_quant = k_quant_full[: chunk.total_seq_lens]
-                k_scale = k_scale_full[: chunk.total_seq_lens]
-                if not chunk.skip_kv_gather:
-                    ops.cp_gather_indexer_k_quant_cache(
-                        kv_cache,
-                        k_quant,
-                        k_scale,
-                        chunk.block_table,
-                        chunk.cu_seq_lens,
-                    )
+            assert chunk.local_cu_seq_lens is not None
+            k_quant = k_quant_full[: chunk.max_local_total_seq_lens]
+            k_scale = k_scale_full[: chunk.max_local_total_seq_lens]
+            if not chunk.skip_kv_gather and chunk.local_total_seq_lens > 0:
+                ops.cp_gather_indexer_k_quant_cache(
+                    kv_cache,
+                    k_quant,
+                    k_scale,
+                    chunk.block_table,
+                    chunk.local_cu_seq_lens,
+                )
 
             q_slice = q_quant[chunk.token_start : chunk.token_end]
             q_scale_slice = (
@@ -435,7 +412,7 @@ def sparse_attn_indexer(
                 chunk.token_start : chunk.token_end, :topk_tokens
             ]
 
-            if use_dcp_prefill_candidates and chunk.local_total_seq_lens == 0:
+            if chunk.local_total_seq_lens == 0:
                 logits = q_slice.new_empty((q_slice.shape[0], 0), dtype=torch.float32)
                 topk_indices.fill_(-1)
             else:
@@ -481,16 +458,15 @@ def sparse_attn_indexer(
                     topk_tokens,
                 )
 
-            if use_dcp_prefill_candidates:
-                _merge_dcp_topk_global(
-                    logits,
-                    topk_indices,
-                    topk_tokens,
-                    chunk.dcp_rank,
-                    chunk.dcp_world_size,
-                    chunk.cp_kv_cache_interleave_size,
-                    row_starts=cu_seqlen_ks,
-                )
+            _merge_dcp_topk_global(
+                logits,
+                topk_indices,
+                topk_tokens,
+                chunk.dcp_rank,
+                chunk.dcp_world_size,
+                chunk.cp_kv_cache_interleave_size,
+                row_starts=chunk.cu_seqlen_ks,
+            )
 
     if has_decode:
         decode_metadata = attn_metadata_narrowed.decode

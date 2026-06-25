@@ -779,9 +779,10 @@ def test_sparse_prefill_dcp_metadata_localizes_causal_bounds():
         torch.accelerator.synchronize()
         return chunk
 
-    # Non-DCP: cu_seqlen_ks/ke carry the global causal bounds.
+    # Non-DCP: local_cu_seq_lens aliases the global cu_seq_lens, and
+    # cu_seqlen_ks/ke carry the global causal bounds.
     chunk = build(dcp_world_size=1, dcp_rank=0)
-    assert chunk.local_cu_seq_lens is None
+    assert chunk.local_cu_seq_lens is chunk.cu_seq_lens
     torch.testing.assert_close(
         chunk.cu_seqlen_ks.cpu(),
         torch.zeros(seq_len, dtype=torch.int32),

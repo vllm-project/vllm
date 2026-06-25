@@ -770,9 +770,9 @@ def build_prefill_chunk_metadata(
     cu_seq_lens[:1] = 0
     torch.cumsum(compressed_seq_lens[start_idx:end_idx], dim=0, out=cu_seq_lens[1:])
 
-    local_cu_seq_lens: torch.Tensor | None = None
-    local_total_seq_lens = 0
-    max_local_total_seq_lens = 0
+    local_cu_seq_lens = cu_seq_lens
+    local_total_seq_lens = total_seq_lens
+    max_local_total_seq_lens = total_seq_lens
     if dcp_world_size > 1:
         assert cp_kv_cache_interleave_size == 1, (
             "DCP sparse indexer prefill currently supports only "
@@ -809,13 +809,12 @@ def build_prefill_chunk_metadata(
     cu_seq_len_ke = torch.empty(output_query_len, dtype=torch.int32, device=device)
 
     # Under DCP the kernel writes this rank's local row bounds into
-    # cu_seq_len_ks/ke, using local_cu_seq_lens for the row starts; otherwise
-    # it writes the global bounds off cu_seq_lens.
+    # cu_seq_len_ks/ke; otherwise local_cu_seq_lens aliases cu_seq_lens.
     _build_prefill_chunk_metadata_kernel[(num_reqs,)](
         query_start_loc,
         uncompressed_seq_lens[start_idx:end_idx],
         cu_seq_lens,
-        local_cu_seq_lens if local_cu_seq_lens is not None else cu_seq_lens,
+        local_cu_seq_lens,
         token_to_seq,
         cu_seq_len_ks,
         cu_seq_len_ke,
