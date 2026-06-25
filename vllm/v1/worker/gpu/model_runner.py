@@ -99,7 +99,6 @@ from vllm.v1.worker.gpu.model_states import init_model_state
 from vllm.v1.worker.gpu.pcp_manager import (
     build_pcp_runner_config,
     get_pcp_forward_context_kwargs,
-    partition_pcp_input_batch,
     restore_pcp_for_sampling,
 )
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
@@ -211,7 +210,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
 
-        pcp_runner_config = build_pcp_runner_config(
+        (
+            self.pcp_manager,
+            max_num_input_reqs,
+            self.kv_cp_size,
+            self.kv_cp_rank,
+        ) = build_pcp_runner_config(
             self.vllm_config,
             self.device,
             self.max_num_reqs,
@@ -223,9 +227,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.lora_config,
             self.speculative_config,
         )
-        self.pcp_manager = pcp_runner_config.manager
-        self.kv_cp_size = pcp_runner_config.kv_cp_size
-        self.kv_cp_rank = pcp_runner_config.kv_cp_rank
 
         # Pooling models.
         self.is_pooling_model = self.model_config.runner_type == "pooling"
@@ -241,10 +242,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             device=self.device,
         )
         self.input_buffers = InputBuffers(
-            max_num_reqs=pcp_runner_config.max_num_input_reqs,
+            max_num_reqs=max_num_input_reqs,
             max_num_tokens=self.max_num_tokens,
             device=self.device,
         )
+        if self.pcp_manager is not None:
+            self.pcp_manager.bind_input_context(self.req_states, self.input_buffers)
 
         if self.use_pp:
             self.pp_handler = PPHandler(
@@ -475,6 +478,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cp_rank=self.kv_cp_rank,
             cp_interleave=self.cp_interleave,
         )
+        if self.pcp_manager is not None:
+            self.pcp_manager.bind_slot_mapping_context(
+                self.block_tables.compute_slot_mappings,
+                self.kv_cache_config,
+            )
         initialize_mamba_ssu_backend(
             self.vllm_config.mamba_config, self.kv_cache_config
         )
@@ -1050,7 +1058,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         # Slot mappings: [num_kv_cache_groups, num_tokens_padded].
         # Kernel pads beyond num_tokens with PAD_SLOT_ID.
-        slot_mappings = self.block_tables.compute_slot_mappings(
+        compute_slot_mappings = (
+            self.block_tables.compute_slot_mappings
+            if self.pcp_manager is None
+            else self.pcp_manager.compute_slot_mappings
+        )
+        slot_mappings = compute_slot_mappings(
             input_batch.idx_mapping,
             input_batch.query_start_loc,
             input_batch.positions,
@@ -1192,14 +1205,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Common case.
             # Prepare all the inputs and copy to the input buffers.
             input_batch = self.prepare_inputs(scheduler_output, batch_desc)
-            input_batch = partition_pcp_input_batch(
-                self.pcp_manager,
-                input_batch,
-                self.req_states,
-                self.input_buffers,
-                self.prepare_attn,
-                self.kv_cache_config,
-            )
+            if self.pcp_manager is not None:
+                input_batch = self.pcp_manager.partition_batch(input_batch)
             block_tables, slot_mappings = self.prepare_attn(input_batch)
 
             if self.lora_config:

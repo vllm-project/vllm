@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -22,16 +22,9 @@ from vllm.v1.worker.gpu.input_batch import (
 )
 from vllm.v1.worker.gpu.states import RequestState
 
-PhysicalSlotMappingsBuilder = Callable[[InputBatch], dict[str, torch.Tensor]]
-PrepareAttn = Callable[[InputBatch], tuple[tuple[torch.Tensor, ...], torch.Tensor]]
-
-
-@dataclass(frozen=True)
-class PCPRunnerConfig:
-    manager: "PCPManager | None"
-    max_num_input_reqs: int
-    kv_cp_size: int
-    kv_cp_rank: int
+SlotMappingsComputer = Callable[
+    [torch.Tensor, torch.Tensor, torch.Tensor, int], torch.Tensor
+]
 
 
 class PCPManager:
@@ -60,11 +53,31 @@ class PCPManager:
 
         self._physical_batch: InputBatch | None = None
         self._physical_slot_mappings_by_layer: dict[str, torch.Tensor] | None = None
+        self._req_states: RequestState | None = None
+        self._input_buffers: InputBuffers | None = None
+        self._compute_slot_mappings: SlotMappingsComputer | None = None
+        self._kv_cache_config: KVCacheConfig | None = None
         self._hidden_restore_idx: torch.Tensor | None = None
         self._per_rank_num_tokens: list[int] | None = None
         self._restored_slot_mapping_cache: dict[
             tuple[int, torch.dtype, int], torch.Tensor
         ] = {}
+
+    def bind_input_context(
+        self,
+        req_states: RequestState,
+        input_buffers: InputBuffers,
+    ) -> None:
+        self._req_states = req_states
+        self._input_buffers = input_buffers
+
+    def bind_slot_mapping_context(
+        self,
+        compute_slot_mappings: SlotMappingsComputer,
+        kv_cache_config: KVCacheConfig,
+    ) -> None:
+        self._compute_slot_mappings = compute_slot_mappings
+        self._kv_cache_config = kv_cache_config
 
     @staticmethod
     def validate_config(
@@ -367,7 +380,6 @@ class PCPManager:
         input_batch: InputBatch,
         req_states: RequestState,
         input_buffers: InputBuffers,
-        build_physical_slot_mappings: PhysicalSlotMappingsBuilder | None = None,
     ) -> InputBatch:
         if input_batch.num_draft_tokens > 0:
             raise NotImplementedError("MRV2 PCP does not support spec decode yet.")
@@ -377,15 +389,6 @@ class PCPManager:
             )
 
         self._physical_slot_mappings_by_layer = None
-        if self.dcp_world_size > 1:
-            if build_physical_slot_mappings is None:
-                raise RuntimeError(
-                    "PCP+DCP requires physical slot mappings before virtual "
-                    "batch partitioning."
-                )
-            self._physical_slot_mappings_by_layer = build_physical_slot_mappings(
-                input_batch
-            )
 
         physical_batch = self._copy_physical_batch(input_batch)
         self._physical_batch = physical_batch
@@ -574,6 +577,45 @@ class PCPManager:
             cu_num_logits_np=cu_num_logits_np,
         )
 
+    def partition_batch(self, input_batch: InputBatch) -> InputBatch:
+        assert self._req_states is not None
+        assert self._input_buffers is not None
+        return self.partition_input_batch(
+            input_batch,
+            self._req_states,
+            self._input_buffers,
+        )
+
+    def compute_slot_mappings(
+        self,
+        idx_mapping: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        positions: torch.Tensor,
+        num_tokens_padded: int,
+    ) -> torch.Tensor:
+        assert self._compute_slot_mappings is not None
+        if self.dcp_world_size > 1 and self._physical_slot_mappings_by_layer is None:
+            assert self._physical_batch is not None
+            assert self._kv_cache_config is not None
+            physical_batch = self._physical_batch
+            physical_slot_mappings = self._compute_slot_mappings(
+                physical_batch.idx_mapping,
+                physical_batch.query_start_loc,
+                physical_batch.positions,
+                physical_batch.num_tokens_after_padding,
+            )
+            self._physical_slot_mappings_by_layer = build_slot_mappings_by_layer(
+                physical_slot_mappings.clone(),
+                self._kv_cache_config,
+            )
+
+        return self._compute_slot_mappings(
+            idx_mapping,
+            query_start_loc,
+            positions,
+            num_tokens_padded,
+        )
+
     def restore_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if self._hidden_restore_idx is None or self._per_rank_num_tokens is None:
             return hidden_states
@@ -590,36 +632,6 @@ class PCPManager:
         self._physical_slot_mappings_by_layer = None
         self._restored_slot_mapping_cache.clear()
         return self.restore_hidden_states(hidden_states), physical_batch
-
-
-def partition_pcp_input_batch(
-    manager: PCPManager | None,
-    input_batch: InputBatch,
-    req_states: RequestState,
-    input_buffers: InputBuffers,
-    prepare_attn: PrepareAttn,
-    kv_cache_config: KVCacheConfig,
-) -> InputBatch:
-    if manager is None:
-        return input_batch
-    physical_slot_mappings_builder: PhysicalSlotMappingsBuilder | None = None
-    if manager.dcp_world_size > 1:
-
-        def physical_slot_mappings_builder(
-            physical_batch: InputBatch,
-        ) -> dict[str, torch.Tensor]:
-            _, slot_mappings = prepare_attn(physical_batch)
-            return build_slot_mappings_by_layer(
-                slot_mappings.clone(),
-                kv_cache_config,
-            )
-
-    return manager.partition_input_batch(
-        input_batch,
-        req_states,
-        input_buffers,
-        physical_slot_mappings_builder,
-    )
 
 
 def get_pcp_forward_context_kwargs(
@@ -652,7 +664,7 @@ def build_pcp_runner_config(
     supports_mm_inputs: bool,
     lora_config: Any,
     speculative_config: Any,
-) -> PCPRunnerConfig:
+) -> tuple[PCPManager | None, int, int, int]:
     parallel_config = vllm_config.parallel_config
     model_config = vllm_config.model_config
     pcp_size = parallel_config.prefill_context_parallel_size
@@ -662,7 +674,7 @@ def build_pcp_runner_config(
     kv_cp_size = dcp_size if model_config.use_mla else total_cp_size
     kv_cp_rank = dcp_rank if model_config.use_mla else total_cp_rank
     if pcp_size <= 1:
-        return PCPRunnerConfig(None, max_num_reqs, kv_cp_size, kv_cp_rank)
+        return None, max_num_reqs, kv_cp_size, kv_cp_rank
 
     PCPManager.validate_config(
         vllm_config,
@@ -683,4 +695,4 @@ def build_pcp_runner_config(
         cp_interleave=parallel_config.cp_kv_cache_interleave_size,
     )
     max_num_input_reqs = max_num_reqs * 2 + pcp_size - 1
-    return PCPRunnerConfig(manager, max_num_input_reqs, kv_cp_size, kv_cp_rank)
+    return manager, max_num_input_reqs, kv_cp_size, kv_cp_rank
