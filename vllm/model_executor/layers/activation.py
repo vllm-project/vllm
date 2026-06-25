@@ -556,7 +556,7 @@ class ReLUSquaredActivation(CustomOp):
 
     def __init__(self):
         super().__init__()
-        if current_platform.is_cuda_alike() or current_platform.is_cpu():
+        if current_platform.is_cuda_alike():
             self.op = torch.ops._C.relu_squared
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
