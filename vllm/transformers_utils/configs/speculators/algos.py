@@ -36,6 +36,8 @@ def update_eagle3(config_dict: dict, pre_trained_config: dict) -> None:
         "norm_before_residual", True
     )
     pre_trained_config["norm_before_fc"] = config_dict.get("norm_before_fc", False)
+    pre_trained_config["fc_norm"] = config_dict.get("fc_norm", False)
+    pre_trained_config["norm_output"] = config_dict.get("norm_output", False)
     eagle3_arch_map = {
         "qwen3": "Eagle3Qwen3ForCausalLM",
         "llama": "Eagle3LlamaForCausalLM",
