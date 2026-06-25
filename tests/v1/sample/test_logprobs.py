@@ -1128,6 +1128,9 @@ def test_spec_decode_logprobs(
         enable_chunked_prefill=True,
         max_num_batched_tokens=32,
         enable_prefix_caching=False,
+        # Use eager mode as documented in the docstring — avoids non-determinism
+        # from compiled CUDA/ROCm kernels that would mask spec-decode divergence.
+        enforce_eager=True,
         **GPU_DETERMINISM_KWARGS,
     )
 
