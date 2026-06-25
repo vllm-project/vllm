@@ -882,7 +882,8 @@ class SamplingParams(
     def _validate_stop(self, tokenizer: TokenizerLike | None) -> None:
         if tokenizer is None and self.stop:
             raise ValueError(
-                "Stop strings require a tokenizer so they can't be used with 'skip_tokenizer_init'"  # noqa: E501
+                "Stop strings require a tokenizer so they can't be used "
+                "with 'skip_tokenizer_init'"
             )
 
     def _validate_structured_outputs(

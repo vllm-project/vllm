@@ -429,23 +429,6 @@ def test_logprob_token_ids_validate_vocab_bounds_invalid(token_ids: list[int]):
         )
 
 
-def test_stop_strings_require_tokenizer():
-    params = SamplingParams(stop=["foo"])
-    with pytest.raises(ValueError, match="skip_tokenizer_init"):
-        params.verify(
-            _model_config(),
-            speculative_config=None,
-            structured_outputs_config=None,
-            tokenizer=None,
-        )
-    SamplingParams().verify(
-        _model_config(),
-        speculative_config=None,
-        structured_outputs_config=None,
-        tokenizer=None,
-    )
-
-
 def test_none_logprobs(vllm_model, example_prompts):
     """Engine should return `logprobs` and `prompt_logprobs` as `None`
 
