@@ -38,8 +38,6 @@ RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 # MXFP4 layout: 2 values packed per byte, ue8m0 (1-byte) scale per block of 32.
 MXFP4_BLOCK_SIZE = 32
 
-_STABLE_TOPK_SCALE = 1.0e9
-
 
 def _can_use_cutedsl_candidate_topk(gathered: torch.Tensor, k: int) -> bool:
     return (
@@ -73,17 +71,29 @@ def _stable_topk_from_candidates_fp64(
     candidate_token_ids: torch.Tensor,
     k: int,
 ) -> torch.Tensor:
-    """fp64-composite stable top-K fallback. Selects the same set as the
-    CuteDSL DCP selector."""
+    """Stable top-K fallback matching the CuteDSL DCP selector order."""
     num_rows, num_candidates = candidate_scores.shape
     device = candidate_scores.device
     select_k = min(k, num_candidates)
     valid = candidate_token_ids >= 0
-    composite = candidate_scores.to(
-        torch.float64
-    ) * _STABLE_TOPK_SCALE - candidate_token_ids.to(torch.float64)
-    composite = composite.masked_fill(~valid, float("-inf"))
-    _, topk_pos = composite.topk(select_k, dim=-1)
+    bits = (
+        candidate_scores.to(torch.float32).view(torch.int32).to(torch.int64)
+        & 0xFFFFFFFF
+    )
+    sign = (bits >> 31) & 1
+    score_key = (
+        torch.where(
+            sign.bool(),
+            bits ^ 0xFFFFFFFF,
+            bits ^ 0x80000000,
+        )
+        & 0xFFFFFFFF
+    )
+    id_key = (~candidate_token_ids.to(torch.int64)) & 0xFFFFFFFF
+    key = (score_key << 32) | id_key
+    key = torch.where(valid, key, torch.zeros_like(key))
+    topk_key = key ^ torch.iinfo(torch.int64).min
+    _, topk_pos = topk_key.topk(select_k, dim=-1)
 
     selected = candidate_token_ids.gather(1, topk_pos).to(torch.int32)
     selected_valid = valid.gather(1, topk_pos)
