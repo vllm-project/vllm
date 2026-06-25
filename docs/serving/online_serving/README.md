@@ -121,7 +121,7 @@ For further details on profiling vLLM, please refer to [this page](../../contrib
 
 ## Scale out APIs
 
-### Tokens IN <> Tokens OUT
+### Tokens IN <> Tokens OUT APIs
 
 - `/inference/v1/generate` - Generate completions
 - `/abort_requests` - Abort in-flight requests (only when `--tokens-only` is also set)
