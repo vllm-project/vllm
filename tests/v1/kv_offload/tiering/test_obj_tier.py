@@ -17,7 +17,12 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import torch
 
-from vllm.v1.kv_offload.base import OffloadKey, ReqContext, make_offload_key
+from vllm.v1.kv_offload.base import (
+    LookupResult,
+    OffloadKey,
+    ReqContext,
+    make_offload_key,
+)
 from vllm.v1.kv_offload.tiering.base import JobMetadata, JobResult
 from vllm.v1.kv_offload.tiering.obj.manager import ObjectStoreSecondaryTierManager
 
@@ -236,19 +241,19 @@ class TestMockObjTierBasic:
         self.tier, self.agent = _make_tier(num_blocks=4)
 
     def test_lookup_empty_tier(self):
-        assert lookup_and_wait(self.tier, [key(1)]) == [False]
+        assert lookup_and_wait(self.tier, [key(1)]) == [LookupResult.MISS]
 
     def test_store_and_lookup(self):
         self.tier.submit_store(make_job(1, [key(1)], [0]))
         results = drain(self.tier)
         assert len(results) == 1
         assert results[0].success
-        assert lookup_and_wait(self.tier, [key(1)]) == [True]
+        assert lookup_and_wait(self.tier, [key(1)]) == [LookupResult.HIT]
 
     def test_lookup_unrelated_key_returns_false(self):
         self.tier.submit_store(make_job(1, [key(1)], [0]))
         drain(self.tier)
-        assert lookup_and_wait(self.tier, [key(999)]) == [False]
+        assert lookup_and_wait(self.tier, [key(999)]) == [LookupResult.MISS]
 
     def test_store_then_load_roundtrip(self):
         self.tier.submit_store(make_job(1, [key(1), key(2)], [0, 1]))
@@ -327,13 +332,17 @@ class TestMockObjTierMultiBlock:
         results = drain(tier)
         assert len(results) == 1
         assert results[0].success
-        assert lookup_and_wait(tier, keys) == [True] * 8
+        assert lookup_and_wait(tier, keys) == [LookupResult.HIT] * 8
 
     def test_partial_block_lookup(self):
         tier, _ = _make_tier(num_blocks=4)
         tier.submit_store(make_job(1, [key(0), key(1)], [0, 1]))
         drain(tier)
-        assert lookup_and_wait(tier, [key(0), key(1), key(2)]) == [True, True, False]
+        assert lookup_and_wait(tier, [key(0), key(1), key(2)]) == [
+            LookupResult.HIT,
+            LookupResult.HIT,
+            LookupResult.MISS,
+        ]
 
 
 class TestMockObjTierFailures:
@@ -342,7 +351,7 @@ class TestMockObjTierFailures:
         agent.query_memory = lambda *a, **k: (_ for _ in ()).throw(
             RuntimeError("backend error")
         )
-        assert lookup_and_wait(tier, [key(1)]) == [False]
+        assert lookup_and_wait(tier, [key(1)]) == [LookupResult.MISS]
 
     def test_submit_store_register_memory_failure_reported_in_get_finished(self):
         tier, agent = _make_tier(num_blocks=4)
