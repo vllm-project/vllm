@@ -26,6 +26,7 @@ def _convert_req_index_to_global_index_kernel(
     # DCP de-interleave: with DCP_SIZE == 1 these are an exact no-op
     DCP_SIZE: tl.constexpr,
     DCP_RANK: tl.constexpr,
+    DCP_INTERLEAVE: tl.constexpr,
     # strides (in elements)
     bt_stride0,
     bt_stride1,
@@ -57,11 +58,15 @@ def _convert_req_index_to_global_index_kernel(
         is_prefill = prefill_req_id >= 0
 
     # DCP de-interleave the global token id into this rank's local slot.
-    # DCP_SIZE == 1 -> owning_rank == 0 == DCP_RANK (never remote) and
-    # local_idx == tok, so this reduces to the non-DCP path exactly.
-    owning_rank = tok % DCP_SIZE
+    # Tokens are interleaved in groups of DCP_INTERLEAVE across ranks. With
+    # DCP_SIZE == 1 (and any interleave) owning_rank == 0 == DCP_RANK (never
+    # remote) and local_idx == tok, so this reduces to the non-DCP path; with
+    # DCP_INTERLEAVE == 1 it reduces to plain round-robin (tok % / // DCP_SIZE).
+    owning_rank = (tok // DCP_INTERLEAVE) % DCP_SIZE
     is_remote = owning_rank != DCP_RANK
-    local_idx = tok // DCP_SIZE
+    local_idx = (
+        tok // (DCP_SIZE * DCP_INTERLEAVE)
+    ) * DCP_INTERLEAVE + tok % DCP_INTERLEAVE
 
     # Compute block id and in-block offset
     block_id = local_idx // BLOCK_SIZE
@@ -190,6 +195,7 @@ def triton_convert_req_index_to_global_index(
         # DCP disabled (no-op de-interleave)
         1,
         0,
+        1,
         # strides
         bt_stride0,
         bt_stride1,
@@ -230,9 +236,12 @@ def triton_filter_and_convert_dcp_index(
     """Filter global per-request indices to this DCP rank's local slots."""
     assert dcp_size >= 1
     assert 0 <= dcp_rank < dcp_size
-    assert cp_kv_cache_interleave_size == 1, (
-        "DCP sparse index conversion currently supports only "
-        "cp_kv_cache_interleave_size=1."
+    # Interleave groups must align to KV blocks (globally enforced by
+    # VllmConfig: block_size % cp_kv_cache_interleave_size == 0); assert the
+    # local invariant so local_idx // BLOCK_SIZE never straddles a group.
+    assert BLOCK_SIZE % cp_kv_cache_interleave_size == 0, (
+        f"BLOCK_SIZE ({BLOCK_SIZE}) must be divisible by "
+        f"cp_kv_cache_interleave_size ({cp_kv_cache_interleave_size})."
     )
     assert req_id.dtype == torch.int32
     assert block_table.dtype == torch.int32
@@ -286,6 +295,7 @@ def triton_filter_and_convert_dcp_index(
         return_valid_counts,
         dcp_size,
         dcp_rank,
+        cp_kv_cache_interleave_size,
         bt_stride0,
         bt_stride1,
         ti_stride0,

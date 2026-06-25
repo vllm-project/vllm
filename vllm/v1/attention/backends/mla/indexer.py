@@ -261,6 +261,15 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.dcp_world_size = parallel_config.decode_context_parallel_size
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
+        # The DCP sparse-indexer code is parameterized by interleave size, but
+        # interleave > 1 is not yet validated end-to-end (gsm8k parity fails),
+        # so fail closed here rather than silently produce wrong output.
+        if self.dcp_world_size > 1 and self.cp_kv_cache_interleave_size > 1:
+            raise NotImplementedError(
+                "DCP sparse indexer currently supports only "
+                f"cp_kv_cache_interleave_size=1 (got "
+                f"{self.cp_kv_cache_interleave_size})."
+            )
         # NOTE(Chen):an estimated max size of flattened_kv. Need to double check.
         self.max_prefill_buffer_size = get_max_prefill_buffer_size(self.vllm_config)
         self.num_speculative_tokens = (
@@ -774,21 +783,20 @@ def build_prefill_chunk_metadata(
     local_total_seq_lens = total_seq_lens
     max_local_total_seq_lens = total_seq_lens
     if dcp_world_size > 1:
-        assert cp_kv_cache_interleave_size == 1, (
-            "DCP sparse indexer prefill currently supports only "
-            "cp_kv_cache_interleave_size=1."
+        # Per-rank local KV length under interleave-aware DCP sharding, shape
+        # [num_reqs, dcp_world_size]. Reuse the canonical CP helper so the
+        # sharding matches the rest of the DCP pipeline (decode/prefill).
+        local_seq_lens = get_dcp_local_seq_lens(
+            compressed_seq_lens[start_idx:end_idx],
+            dcp_world_size,
+            None,
+            cp_kv_cache_interleave_size,
         )
-        ranks = torch.arange(dcp_world_size, device=device, dtype=torch.int32)
-        seqs = compressed_seq_lens[start_idx:end_idx].to(torch.int32)
-        local_counts = (
-            seqs.unsqueeze(0) + (dcp_world_size - 1 - ranks.unsqueeze(1))
-        ) // dcp_world_size
-        local_counts = torch.clamp(local_counts, min=0)
-        this_rank_counts = local_counts[dcp_rank]
+        this_rank_counts = local_seq_lens[:, dcp_rank].to(torch.int32)
         local_cu_seq_lens = torch.zeros(num_reqs + 1, dtype=torch.int32, device=device)
         torch.cumsum(this_rank_counts, dim=0, out=local_cu_seq_lens[1:])
         local_total_seq_lens = int(local_cu_seq_lens[-1].item())
-        max_local_total_seq_lens = int(local_counts.sum(dim=1).max().item())
+        max_local_total_seq_lens = int(local_seq_lens.sum(dim=0).max().item())
 
     query_start_loc = (
         query_start_loc[start_idx : end_idx + 1] - query_start_loc[start_idx]
@@ -911,7 +919,14 @@ def _build_prefill_chunk_metadata_kernel(
         global_ctx = start_pos + 1 + offset
         len_per_token = global_ctx // COMPRESS_RATIO
         if DCP_WORLD > 1:
-            len_per_token = (len_per_token + (DCP_WORLD - 1 - DCP_RANK)) // DCP_WORLD
+            # Per-rank local context length under interleave-aware DCP, matching
+            # get_dcp_local_seq_lens. K == 1 reduces to (len + world-1-rank)//world.
+            base = (len_per_token // DCP_INTERLEAVE // DCP_WORLD) * DCP_INTERLEAVE
+            remainder = len_per_token - base * DCP_WORLD
+            remainder = tl.minimum(
+                tl.maximum(remainder - DCP_RANK * DCP_INTERLEAVE, 0), DCP_INTERLEAVE
+            )
+            len_per_token = base + remainder
         tl.store(
             cu_compressed_seq_len_ke_ptr + out_pos,
             row_start + len_per_token,

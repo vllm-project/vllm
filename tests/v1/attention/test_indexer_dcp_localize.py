@@ -760,7 +760,7 @@ def test_sparse_prefill_dcp_metadata_localizes_causal_bounds():
     seq_lens_cpu = torch.tensor([seq_len], dtype=torch.int32)
     block_table = torch.zeros((1, 1), dtype=torch.int32, device=device)
 
-    def build(dcp_world_size, dcp_rank):
+    def build(dcp_world_size, dcp_rank, interleave=1):
         chunk = build_prefill_chunk_metadata(
             start_idx=0,
             end_idx=1,
@@ -773,7 +773,7 @@ def test_sparse_prefill_dcp_metadata_localizes_causal_bounds():
             compress_ratio=1,
             dcp_rank=dcp_rank,
             dcp_world_size=dcp_world_size,
-            cp_kv_cache_interleave_size=1,
+            cp_kv_cache_interleave_size=interleave,
         )
         assert chunk is not None
         torch.accelerator.synchronize()
@@ -806,6 +806,21 @@ def test_sparse_prefill_dcp_metadata_localizes_causal_bounds():
     torch.testing.assert_close(
         chunk.cu_seqlen_ke.cpu(),
         torch.tensor([1, 1, 1, 1, 2, 2, 2, 2], dtype=torch.int32),
+    )
+
+    # DCP with interleave=2: per-token causal bounds localize differently from
+    # interleave=1 (groups of 2 consecutive tokens are owned together). For
+    # world=4, rank=0, K=2, per-token global len L=1..8 -> local len
+    # [1,2,2,2,2,2,2,2] (matches get_dcp_local_seq_lens).
+    chunk = build(dcp_world_size=4, dcp_rank=0, interleave=2)
+    assert chunk.local_cu_seq_lens is not None
+    torch.testing.assert_close(
+        chunk.cu_seqlen_ks.cpu(),
+        torch.zeros(seq_len, dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        chunk.cu_seqlen_ke.cpu(),
+        torch.tensor([1, 2, 2, 2, 2, 2, 2, 2], dtype=torch.int32),
     )
 
 
@@ -841,7 +856,8 @@ def test_dcp_filter_compacts_valid_slots_for_sparse_kernel():
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
-def test_dcp_global_topk_physical_attention_matches_non_dcp():
+@pytest.mark.parametrize("interleave", [1, 2, 4])
+def test_dcp_global_topk_physical_attention_matches_non_dcp(interleave: int):
     torch.manual_seed(2)
     device = torch.device("cuda")
     dcp_size = 2
@@ -877,9 +893,11 @@ def test_dcp_global_topk_physical_attention_matches_non_dcp():
         k_cache = torch.zeros(num_slots, head_dim, device=device)
         v_cache = torch.zeros(num_slots, head_dim, device=device)
         for global_idx in range(seq_len):
-            if global_idx % dcp_size != rank:
+            if (global_idx // interleave) % dcp_size != rank:
                 continue
-            local_idx = global_idx // dcp_size
+            local_idx = (
+                global_idx // (dcp_size * interleave)
+            ) * interleave + global_idx % interleave
             block = local_idx // block_size
             offset = local_idx % block_size
             slot = int(block_ids[0, block].item()) * block_size + offset
@@ -892,6 +910,7 @@ def test_dcp_global_topk_physical_attention_matches_non_dcp():
             global_topk,
             dcp_size=dcp_size,
             dcp_rank=rank,
+            cp_kv_cache_interleave_size=interleave,
             BLOCK_SIZE=block_size,
             NUM_TOPK_TOKENS=num_topk,
             return_valid_counts=True,
