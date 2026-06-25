@@ -15,8 +15,12 @@ from vllm.triton_utils import triton
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, set_random_seed
 
+# Capped so the largest tensor stays under 2**31 elements: the shared activation
+# kernel computes the per-token pointer offset (blockIdx.x * d) in 32-bit, which
+# overflows for tensors with >2**32 elements. Realistic token counts are well
+# below this; the kernel-vs-native gap is already clear at these sizes.
 batch_size_range = [1, 16, 128]
-seq_len_range = [1, 16, 64, 1024, 4096]
+seq_len_range = [1, 16, 64, 1024]
 intermediate_size = [3072, 9728, 12288]
 configs = list(itertools.product(batch_size_range, seq_len_range, intermediate_size))
 
