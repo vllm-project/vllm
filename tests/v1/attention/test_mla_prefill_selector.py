@@ -167,6 +167,7 @@ class TestAutoSelectMLAPrefillBackend:
             return
 
         with (
+            patch("vllm.platforms.current_platform") as mock_platform,
             patch.object(
                 MLAPrefillBackendEnum.FLASH_ATTN,
                 "get_class",
@@ -174,6 +175,8 @@ class TestAutoSelectMLAPrefillBackend:
             ),
             patch.object(trtllm_cls, "validate_configuration", return_value=[]),
         ):
+            # Force the non-ROCm priority on the Blackwell.
+            mock_platform.is_rocm.return_value = False
             backend = _auto_select_mla_prefill_backend(
                 capability,
                 selector_config,
