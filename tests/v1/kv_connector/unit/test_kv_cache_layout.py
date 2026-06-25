@@ -30,7 +30,7 @@ def test_mla_common_backend_rejects_cross_layer_kv_cache():
     [
         "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend",
     ]
-    if current_platform.is_rocm()
+    if current_platform.is_rocm() or current_platform.is_xpu()
     else [
         "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend",
         "vllm.v1.attention.backends.mla.cutlass_mla.CutlassMLABackend",

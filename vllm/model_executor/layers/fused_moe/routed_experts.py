@@ -530,8 +530,10 @@ class RoutedExperts(PluggableLayer):
     ):
         param_data = param.data
 
-        # Input scales can be loaded directly and should be equal.
-        param_data[expert_id] = self._to_scalar(loaded_weight)
+        # Used for both scalar input_scale and the size-2 `weight_shape`
+        # param (compressed-tensors). Assign directly so both shapes load;
+        # _to_scalar's reshape(()) would reject the size-2 weight_shape.
+        param_data[expert_id] = loaded_weight
 
     def _load_g_idx(
         self,
