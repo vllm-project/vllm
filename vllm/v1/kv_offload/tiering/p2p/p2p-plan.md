@@ -24,7 +24,10 @@ sequenceDiagram
     Cons_P2P->>Prod_P2P: 𝗖𝗧𝗥𝗟: LookupMsg kv_request_id block_hashes
     Note right of Cons_P2P: One msg per peer per request per step
 
-    Note right of Prod_P2P: Match hashes against local CPU cache
+    Prod_P2P->>Prod_TM: lookup(key, ctx) per block_hash
+    Note right of Prod_TM: HIT / MISS resolve now,<br/>HIT_PENDING / RETRY parked for re-poll
+    Prod_P2P->>Prod_TM: create_store_job(hit_keys, ctx)
+    Note right of Prod_TM: Pins primary slots for hits,<br/>returns JobMetadata(job_id, keys, block_ids)
 
     Prod_P2P--)Cons_P2P: 𝗖𝗧𝗥𝗟: LookupRespMsg kv_request_id hit_block_hashes
 
@@ -64,7 +67,7 @@ subsequent `lookup()` call in a later step.
   responses across multiple LookupRespMsgs for the same
   `kv_request_id`.
 
-### Consumer state machine
+### Client role
 
 State is kept per `(kv_request_id, block_hash)` in `ClientRole._lookups`:
 
@@ -78,8 +81,9 @@ State is kept per `(kv_request_id, block_hash)` in `ClientRole._lookups`:
                            idempotent: register_lookup() while PENDING/IN_FLIGHT returns None
 ```
 
-- The first `manager.lookup(key, ctx)` for a `do_p2p_fetch=true`
-  consumer registers a PENDING entry and returns `None`.
+- The first `manager.lookup(key, ctx)` for a symmetric-P2P consumer
+  (`p2p` sub-dict in `kv_transfer_params`) registers a PENDING entry
+  and returns `LookupResult.RETRY`.
 - `manager.on_schedule_end()` drives `session.flush_pending_lookups()`
   on every session. The flush groups all unsent entries by
   `kv_request_id` and emits one `LookupMsg` per group; sends are gated
@@ -87,21 +91,14 @@ State is kept per `(kv_request_id, block_hash)` in `ClientRole._lookups`:
 - An incoming `LookupRespMsg` walks the `(block_hash, hit)` pairs and
   sets each entry's `result`.
 - A subsequent `manager.lookup()` for the same key pops the entry and
-  returns the bool — `True` becomes a normal secondary-tier hit (the
-  manager starts promotion); `False` falls back to local prefill.
+  returns `LookupResult.HIT` / `LookupResult.MISS` accordingly — HIT
+  becomes a normal secondary-tier hit (the manager starts promotion);
+  MISS falls back to local prefill.
 - A timeout (`_LOAD_TIMEOUT_S` since flush) sets `result = False` so
   the next `register_lookup` resolves via the happy path above instead
   of looping forever.
 
-### Producer side
-
-The producer receives `LookupMsg(kv_request_id, block_hashes)`, decides
-hit-or-miss for each hash, and replies with one or more
-`LookupRespMsg(kv_request_id, block_hashes, hits)` whose pairs cover
-the requested hashes. There is no per-request producer flag — the
-producer answers any incoming LookupMsg from a connected peer.
-
-### Entry lifecycle
+#### Entry lifecycle
 
 There are three ways an entry leaves `_lookups`:
 
@@ -118,3 +115,119 @@ There are three ways an entry leaves `_lookups`:
   `_inbound`. Unresolved entries just disappear; the manager sees no
   session for the peer on the next call and the request falls back to
   local prefill.
+
+### Server role
+
+The producer answers any incoming `LookupMsg` from a connected peer —
+there is no per-request producer flag. The reply is computed against
+the local TieringManager via three callbacks
+(`TieringCallbacks` Protocol, in `tiering/p2p/tiering_callbacks.py`):
+
+| Callback | Purpose |
+| --- | --- |
+| `lookup(key, ctx) -> LookupResult` | Hit/miss decision per hash. |
+| `create_store_job(keys, ctx) -> JobMetadata` | Pin the primary-tier slots for the HIT keys; returns parallel `keys` / `block_ids` and a fresh `job_id`. The pin survives until the engine processes the matching `JobResult`. |
+| `finish_request(ctx) -> None` | Release per-request bookkeeping the TieringManager accumulated under the synthetic peer-driven `ctx`. |
+
+The default is `_AllMissCallbacks` (every `lookup` returns `MISS`,
+`create_store_job` is unreachable, `finish_request` is a no-op),
+which preserves the pre-integration all-miss behaviour until the real
+adapter on `TieringOffloadingManager` is wired.
+
+#### Per-LookupMsg batch
+
+`ServerRole._lookup_batches: dict[batch_id, _LookupBatch]` tracks the
+state for each inbound `LookupMsg` independently. Each batch carries
+its own synthetic `ReqContext`:
+
+```text
+ctx = ReqContext(req_id=f"p2p:{peer_id}:{kv_request_id}:b{batch_id}")
+```
+
+A fresh ctx per LookupMsg gives the TieringManager a clean,
+bounded-lifetime request to attach state to — created on the first
+`lookup` call, closed by `finish_request` once the batch's last hash
+has been answered on the wire.
+
+#### `on_lookup(kv_request_id, block_hashes)`
+
+For each hash, call `cb.lookup(h, ctx)` and bucket:
+
+| `LookupResult` | Action |
+| --- | --- |
+| `HIT` | Add to the immediate-HIT batch. |
+| `MISS` | Add to the immediate-MISS batch. |
+| `HIT_PENDING` / `RETRY` | Park in `batch.pending[h] = now`. |
+
+Then, in one shot:
+
+1. If any HITs: call `cb.create_store_job(hits, ctx)` once, then feed
+   the returned JobMetadata into the existing
+   `ServerRole.add_stored_blocks(...)` path. This populates
+   `_outbound[kv_request_id].available[hash] = (job_id, block_id)`,
+   which the existing fetch-time match in `add_fetch_demand` already
+   consumes — no fetch-side changes needed.
+2. Send one `LookupRespMsg(kv_request_id, immediate_hashes, hits)`
+   (HITs first, then MISS es in their own order).
+3. If `batch.pending` is empty (everything resolved on first sight),
+   call `cb.finish_request(ctx)` immediately and drop the batch.
+   Otherwise stash it in `_lookup_batches`.
+
+Single-thread guarantee: `lookup → HIT → create_store_job` happens in
+one synchronous sequence, so no eviction can race in between.
+`create_store_job` is therefore N-in / N-out (parallel `keys` /
+`block_ids` of the same length as the input) — there is no
+partial-result branch.
+
+#### `_resolve_pending_lookups` (driven from `collect_results`)
+
+Called every poll tick. For every parked batch:
+
+- Re-call `cb.lookup` per remaining pending hash.
+    - `HIT` → move to the newly-HIT list, drop from `pending`.
+    - `MISS` → move to the newly-MISS list, drop from `pending`.
+    - Still `HIT_PENDING` / `RETRY` past `_LOOKUP_PENDING_TIMEOUT_S`
+    (5 s) → force-MISS, drop from `pending`. The consumer falls back
+    to local prefill rather than waiting on a stuck producer.
+    - Otherwise leave the entry to try again next tick.
+- For the newly-HIT list: one `cb.create_store_job(...)` call per
+  batch, plumbed through `add_stored_blocks` as in `on_lookup`.
+- Send one follow-up `LookupRespMsg(kv_request_id, ...)` per batch
+  with the freshly-resolved hashes (the wire protocol's
+  self-describing pairs make split responses safe).
+- Sweep any batch whose `pending` is now empty: call
+  `cb.finish_request(ctx)` and drop.
+
+#### Cleanup
+
+- `finish(kv_request_id)` (PD path) — drops every parked batch
+  matching `kv_request_id` and fires `finish_request(ctx)` for each.
+  In symmetric P2P this rarely fires: the producer has no local
+  request lifecycle for the consumer's id, so the `on_request_finished`
+  path that calls into `session.finish_request` is not exercised on
+  this side.
+- `close()` — best-effort `finish_request` (under `contextlib.suppress`)
+  for every remaining batch, then clears `_lookup_batches`. Wedged
+  callbacks can't block teardown.
+
+#### Pin lifetime
+
+The pin created by `cb.create_store_job` covers the full lookup → fetch
+→ transfer → completion journey, which spans multiple engine steps:
+
+```text
+cb.create_store_job   ─►  JobMetadata registered, ref_cnt += 1 on each block
+add_stored_blocks     ─►  _outbound[req].available populated; _store_jobs[job_id] tracked
+on_fetch              ─►  add_fetch_demand matches available, NIXL write_blocks issued
+collect_results       ─►  StoreResult emitted on transfer completion
+manager._finished_jobs ─► JobResult bubbled to engine's get_finished_jobs()
+TieringManager        ─►  _process_finished_jobs pops _transfer_jobs[job_id] and
+                          calls complete_read(keys, ctx) — ref_cnt -= 1
+```
+
+The release path is the same one PD already uses — there is no
+separate `complete_store_job` callback. Failure modes (peer drops the
+fetch, transfer fails, `_STORE_TIMEOUT_S` fires, session closes,
+`finish` arrives) all flow through the existing terminal-finalize
+code, which emits `StoreResult(success=False)` for the pinned job and
+the engine still releases ref_cnt.
