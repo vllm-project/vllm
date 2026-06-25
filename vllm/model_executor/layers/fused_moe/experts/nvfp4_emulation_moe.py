@@ -72,6 +72,11 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
     def expects_unquantized_inputs(self) -> bool:
         return True
 
+    @property
+    def a1_scale(self) -> torch.Tensor:
+        # Used in experts/triton_moe.py and passed to moe_kernel_quantize_input.
+        return self.a1_gscale
+
     @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
