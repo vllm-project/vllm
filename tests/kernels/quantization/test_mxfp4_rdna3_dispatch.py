@@ -4,7 +4,7 @@
 
 ``RDNA3FusedMoEMixin`` is shared by the MXFP4 MoE method and the existing W4A16
 (``moe_gptq_gemm_rdna3``) method. The MXFP4 kernel has a WMMA-16 tile; the W4A16
-kernel only instantiates tiles {1,2,4,8} and TORCH_CHECKs anything else. So the
+kernel only instantiates tiles {1,2,4,8} and rejects anything else. So the
 W4A16 method must override tile selection to stay inside its set — otherwise any
 >=16-token prefill / batched decode hard-crashes. These are pure-Python checks
 (no GPU), so the regression is caught on any CI host.

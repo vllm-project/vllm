@@ -104,9 +104,7 @@ class RDNA3FusedMoEMixin:
 
         if global_num_experts <= 0:
             global_num_experts = layer.w13_weight_packed.shape[0]
-        block_size_m = self._select_block_size_m(
-            num_tokens, top_k, global_num_experts
-        )
+        block_size_m = self._select_block_size_m(num_tokens, top_k, global_num_experts)
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
             topk_ids, block_size_m, global_num_experts, expert_map
