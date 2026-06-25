@@ -845,7 +845,7 @@ class FlashAttentionImpl(AttentionImpl):
                 )
                 return output
             else:
-                sliding_window_size = (
+                sliding_window_size: list[int] | None = (
                     list(self.sliding_window)
                     if self.sliding_window is not None
                     else None
