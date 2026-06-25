@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from vllm.v1.kv_offload.base import (
+    LookupResult,
     OffloadingMetricMetadata,
     OffloadKey,
     ReqContext,
@@ -87,7 +88,7 @@ class SecondaryTierManager(ABC):
         return None
 
     @abstractmethod
-    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         """
         Check whether a block exists in this secondary tier.
 
@@ -96,9 +97,9 @@ class SecondaryTierManager(ABC):
             req_context: per-request context (e.g. kv_transfer_params).
 
         Returns:
-            True if the block is present and ready,
-            False if not found,
-            or None if the block is being transferred (retry later).
+            HIT if the block is present and ready,
+            MISS if not found,
+            or RETRY if the block is being transferred (retry later).
         """
         pass
 
