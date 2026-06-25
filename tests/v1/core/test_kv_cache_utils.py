@@ -11,6 +11,7 @@ import torch
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
 from vllm.config.kv_events import KVEventsConfig
+from vllm.config.kv_transfer import KVTransferConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -1865,7 +1866,9 @@ def test_get_kv_cache_configs_attention_free():
     ]
 
 
-def test_request_constant_mamba_does_not_reduce_attention_pool():
+def _new_request_constant_mamba_test_inputs(
+    kv_transfer_config: KVTransferConfig | None = None,
+):
     model_config = ModelConfig(max_model_len=64)
     scheduler_config = SchedulerConfig(
         max_num_batched_tokens=64,
@@ -1876,6 +1879,7 @@ def test_request_constant_mamba_does_not_reduce_attention_pool():
     vllm_config = VllmConfig(
         model_config=model_config,
         scheduler_config=scheduler_config,
+        kv_transfer_config=kv_transfer_config,
     )
 
     attention_spec = new_kv_cache_spec(
@@ -1899,9 +1903,27 @@ def test_request_constant_mamba_does_not_reduce_attention_pool():
         + mamba_spec.page_size_bytes * request_blocks
     )
 
-    kv_cache_config = get_kv_cache_configs(
+    return (
         vllm_config,
         [{"attn": attention_spec, "mamba": mamba_spec}],
+        attention_blocks,
+        request_blocks,
+        available_memory,
+    )
+
+
+def test_request_constant_mamba_does_not_reduce_attention_pool():
+    (
+        vllm_config,
+        kv_cache_specs,
+        attention_blocks,
+        request_blocks,
+        available_memory,
+    ) = _new_request_constant_mamba_test_inputs()
+
+    kv_cache_config = get_kv_cache_configs(
+        vllm_config,
+        kv_cache_specs,
         [available_memory],
     )[0]
 
@@ -1916,17 +1938,110 @@ def test_request_constant_mamba_does_not_reduce_attention_pool():
     assert kv_cache_config.group_to_pool_id == [0, 1]
     assert kv_cache_config.kv_cache_tensors == [
         KVCacheTensor(
-            size=attention_spec.page_size_bytes * attention_blocks,
+            size=kv_cache_specs[0]["attn"].page_size_bytes * attention_blocks,
             shared_by=["attn"],
         ),
         KVCacheTensor(
-            size=mamba_spec.page_size_bytes * request_blocks,
+            size=kv_cache_specs[0]["mamba"].page_size_bytes * request_blocks,
             shared_by=["mamba"],
         ),
     ]
 
     _, max_concurrency = get_kv_cache_capacity(vllm_config, kv_cache_config)
-    assert max_concurrency == scheduler_config.max_num_seqs
+    assert max_concurrency == vllm_config.scheduler_config.max_num_seqs
+
+
+def test_request_constant_mamba_uses_legacy_pool_with_simple_cpu_offload():
+    (
+        vllm_config,
+        kv_cache_specs,
+        attention_blocks,
+        request_blocks,
+        available_memory,
+    ) = _new_request_constant_mamba_test_inputs(
+        KVTransferConfig(
+            kv_connector="SimpleCPUOffloadConnector",
+            kv_role="kv_both",
+        )
+    )
+
+    kv_cache_config = get_kv_cache_configs(
+        vllm_config,
+        kv_cache_specs,
+        [available_memory],
+    )[0]
+
+    assert [pool.memory_model for pool in kv_cache_config.pool_configs] == [
+        MemoryModel.TOKEN_PROPORTIONAL,
+    ]
+    assert kv_cache_config.num_blocks == attention_blocks + request_blocks
+    assert kv_cache_config.pool_configs[0].num_blocks == kv_cache_config.num_blocks
+    assert kv_cache_config.group_to_pool_id == [0, 0]
+
+
+def test_request_constant_mamba_override_uses_legacy_pool_with_simple_cpu_offload():
+    (
+        vllm_config,
+        kv_cache_specs,
+        _,
+        _,
+        available_memory,
+    ) = _new_request_constant_mamba_test_inputs(
+        KVTransferConfig(
+            kv_connector="SimpleCPUOffloadConnector",
+            kv_role="kv_both",
+        )
+    )
+    vllm_config.cache_config.num_gpu_blocks_override = 8
+
+    kv_cache_config = get_kv_cache_configs(
+        vllm_config,
+        kv_cache_specs,
+        [available_memory],
+    )[0]
+
+    assert [pool.memory_model for pool in kv_cache_config.pool_configs] == [
+        MemoryModel.TOKEN_PROPORTIONAL,
+    ]
+    assert kv_cache_config.num_blocks == 8
+    assert kv_cache_config.pool_configs[0].num_blocks == kv_cache_config.num_blocks
+    assert kv_cache_config.group_to_pool_id == [0, 0]
+
+
+def test_request_constant_mamba_uses_legacy_pool_with_nested_simple_cpu_offload():
+    (
+        vllm_config,
+        kv_cache_specs,
+        attention_blocks,
+        request_blocks,
+        available_memory,
+    ) = _new_request_constant_mamba_test_inputs(
+        KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "connectors": [
+                    {
+                        "kv_connector": "SimpleCPUOffloadConnector",
+                        "kv_role": "kv_both",
+                    },
+                ]
+            },
+        )
+    )
+
+    kv_cache_config = get_kv_cache_configs(
+        vllm_config,
+        kv_cache_specs,
+        [available_memory],
+    )[0]
+
+    assert [pool.memory_model for pool in kv_cache_config.pool_configs] == [
+        MemoryModel.TOKEN_PROPORTIONAL,
+    ]
+    assert kv_cache_config.num_blocks == attention_blocks + request_blocks
+    assert kv_cache_config.pool_configs[0].num_blocks == kv_cache_config.num_blocks
+    assert kv_cache_config.group_to_pool_id == [0, 0]
 
 
 def test_generate_uniform_type_kv_cache_specs():

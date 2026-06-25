@@ -21,7 +21,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     MambaSpec,
-    MemoryModel,
     SlidingWindowSpec,
 )
 from vllm.v1.outputs import KVConnectorOutput
@@ -188,14 +187,6 @@ class SimpleCPUOffloadScheduler:
         from vllm.v1.kv_cache_interface import KVCacheTensor
 
         assert len(gpu_config.kv_cache_tensors) > 0
-        if any(
-            pool_config.memory_model == MemoryModel.REQUEST_CONSTANT
-            for pool_config in gpu_config.pool_configs
-        ):
-            raise NotImplementedError(
-                "Simple CPU KV offload does not support request-bounded "
-                "KV cache groups yet."
-            )
 
         is_packed = any(t.block_stride for t in gpu_config.kv_cache_tensors)
         assert not is_packed or all(t.block_stride for t in gpu_config.kv_cache_tensors)

@@ -938,6 +938,56 @@ def _has_request_constant_groups(kv_cache_groups: list[KVCacheGroupSpec]) -> boo
     )
 
 
+def _has_request_constant_pool_configs(
+    pool_configs: list[KVCachePoolConfig],
+) -> bool:
+    return any(
+        pool_config.memory_model == MemoryModel.REQUEST_CONSTANT
+        for pool_config in pool_configs
+    )
+
+
+def _kv_transfer_config_uses_simple_cpu_offload(
+    kv_connector: str | None,
+    extra_config: dict[str, Any] | None,
+) -> bool:
+    if kv_connector == "SimpleCPUOffloadConnector":
+        return True
+    if kv_connector != "MultiConnector" or not extra_config:
+        return False
+
+    connectors = extra_config.get("connectors")
+    if not isinstance(connectors, list):
+        return False
+    for connector_config in connectors:
+        if not isinstance(connector_config, dict):
+            continue
+        if _kv_transfer_config_uses_simple_cpu_offload(
+            connector_config.get("kv_connector"),
+            connector_config.get("kv_connector_extra_config"),
+        ):
+            return True
+    return False
+
+
+def _uses_simple_cpu_offload(vllm_config: VllmConfig) -> bool:
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if kv_transfer_config is None:
+        return False
+    return _kv_transfer_config_uses_simple_cpu_offload(
+        kv_transfer_config.kv_connector,
+        kv_transfer_config.kv_connector_extra_config,
+    )
+
+
+def _uses_request_constant_pools(
+    vllm_config: VllmConfig, kv_cache_groups: list[KVCacheGroupSpec]
+) -> bool:
+    return _has_request_constant_groups(
+        kv_cache_groups
+    ) and not _uses_simple_cpu_offload(vllm_config)
+
+
 def _request_constant_num_blocks(
     vllm_config: VllmConfig, kv_cache_group: KVCacheGroupSpec
 ) -> int:
@@ -977,7 +1027,7 @@ def get_max_concurrency_for_kv_cache_config(
     """
     Get the maximum concurrency for the given KV cache configuration.
     """
-    if _has_request_constant_groups(kv_cache_config.kv_cache_groups):
+    if _has_request_constant_pool_configs(kv_cache_config.pool_configs):
         max_concurrencies: list[float] = []
         for pool_config in kv_cache_config.pool_configs:
             groups = [
@@ -1580,7 +1630,7 @@ def get_kv_cache_config_from_groups(
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
 ) -> KVCacheConfig:
-    if _has_request_constant_groups(kv_cache_groups):
+    if _uses_request_constant_pools(vllm_config, kv_cache_groups):
         return _get_kv_cache_config_with_request_constant_groups(
             vllm_config, kv_cache_groups, available_memory
         )
@@ -1990,6 +2040,7 @@ def get_kv_cache_capacity(
 def _max_memory_usage_bytes_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
+    use_request_constant_pools: bool = True,
 ) -> int:
     """
     Calculate maximum memory usage in bytes from KV cache groups.
@@ -2001,7 +2052,7 @@ def _max_memory_usage_bytes_from_groups(
     if not kv_cache_groups:
         return 0
 
-    if _has_request_constant_groups(kv_cache_groups):
+    if use_request_constant_pools and _has_request_constant_groups(kv_cache_groups):
         token_groups_with_ids, request_groups_with_ids = _get_groups_by_memory_model(
             kv_cache_groups
         )
@@ -2012,7 +2063,7 @@ def _max_memory_usage_bytes_from_groups(
         if not token_groups:
             return request_reserved_bytes
         return request_reserved_bytes + _max_memory_usage_bytes_from_groups(
-            vllm_config, token_groups
+            vllm_config, token_groups, use_request_constant_pools
         )
 
     if len(kv_cache_groups) == 1 and isinstance(
@@ -2068,6 +2119,7 @@ def _estimate_max_model_len_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
+    use_request_constant_pools: bool = True,
 ) -> int:
     """
     Binary search for the maximum model length that fits in available memory.
@@ -2078,7 +2130,9 @@ def _estimate_max_model_len_from_groups(
     def fits(model_len: int) -> bool:
         vllm_config.model_config.max_model_len = model_len
         return (
-            _max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups)
+            _max_memory_usage_bytes_from_groups(
+                vllm_config, kv_cache_groups, use_request_constant_pools
+            )
             <= available_memory
         )
 
@@ -2103,6 +2157,7 @@ def _auto_fit_max_model_len(
     vllm_config: VllmConfig,
     projected_groups_per_worker: list[list[KVCacheGroupSpec]],
     available_memory: list[int],
+    use_request_constant_pools: bool = True,
 ) -> None:
     """
     When max_model_len is set to -1, this function estimates the largest
@@ -2133,7 +2188,9 @@ def _auto_fit_max_model_len(
     for groups, avail_mem in zip(projected_groups_per_worker, available_memory):
         if not groups:
             continue
-        worker_max = _estimate_max_model_len_from_groups(vllm_config, groups, avail_mem)
+        worker_max = _estimate_max_model_len_from_groups(
+            vllm_config, groups, avail_mem, use_request_constant_pools
+        )
         if worker_max < auto_fit_max:
             auto_fit_max = worker_max
             limiting_worker_mem = avail_mem
@@ -2325,18 +2382,21 @@ def get_kv_cache_configs(
             if not groups:
                 adjusted_memory.append(avail_mem)
                 continue
-            (
-                token_groups_with_ids,
-                request_groups_with_ids,
-            ) = _get_groups_by_memory_model(groups)
-            request_reserved_bytes = _request_constant_reserved_bytes(
-                vllm_config, [group for _, group in request_groups_with_ids]
-            )
-            token_groups = [group for _, group in token_groups_with_ids]
-            if not token_groups:
-                adjusted_memory.append(avail_mem)
-                continue
-            bytes_per_block = _pool_bytes_per_block(vllm_config, token_groups)
+            request_reserved_bytes = 0
+            block_groups = groups
+            if _uses_request_constant_pools(vllm_config, groups):
+                (
+                    token_groups_with_ids,
+                    request_groups_with_ids,
+                ) = _get_groups_by_memory_model(groups)
+                request_reserved_bytes = _request_constant_reserved_bytes(
+                    vllm_config, [group for _, group in request_groups_with_ids]
+                )
+                block_groups = [group for _, group in token_groups_with_ids]
+                if not block_groups:
+                    adjusted_memory.append(avail_mem)
+                    continue
+            bytes_per_block = _pool_bytes_per_block(vllm_config, block_groups)
             logger.info(
                 "Overriding num_gpu_blocks=%d with num_gpu_blocks_override=%d",
                 max(avail_mem - request_reserved_bytes, 0) // bytes_per_block,
@@ -2347,18 +2407,32 @@ def get_kv_cache_configs(
 
     if vllm_config.model_config.original_max_model_len == -1:
         _auto_fit_max_model_len(
-            vllm_config, projected_groups_per_worker, available_memory
+            vllm_config,
+            projected_groups_per_worker,
+            available_memory,
+            not _uses_simple_cpu_offload(vllm_config),
         )
 
     # Check if the available memory is enough per worker.
     for groups, avail_mem in zip(projected_groups_per_worker, available_memory):
         if not groups:
             continue
+        use_request_constant_pools = _uses_request_constant_pools(vllm_config, groups)
         _check_enough_kv_cache_memory(
             avail_mem,
-            partial(_max_memory_usage_bytes_from_groups, vllm_config, groups),
+            partial(
+                _max_memory_usage_bytes_from_groups,
+                vllm_config,
+                groups,
+                use_request_constant_pools,
+            ),
             vllm_config.model_config.max_model_len,
-            partial(_estimate_max_model_len_from_groups, vllm_config, groups),
+            partial(
+                _estimate_max_model_len_from_groups,
+                vllm_config,
+                groups,
+                use_request_constant_pools=use_request_constant_pools,
+            ),
         )
 
     kv_cache_configs: list[KVCacheConfig] = []
