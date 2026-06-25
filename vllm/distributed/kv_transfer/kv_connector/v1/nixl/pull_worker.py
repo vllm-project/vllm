@@ -104,6 +104,27 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # Update last activity from this remote. Mind that cleanup is done on main
         # thread (this one), so we don't race on this structure.
         self._engine_last_active[engine_id] = time.perf_counter()
+
+        # Turn-2 readback: decline expired/near-expiry reads.
+        blocks_expiry_time = meta.remote.blocks_expiry_time
+        clock_offset = self._engine_clock_offset.get(engine_id)
+        if (
+            blocks_expiry_time is not None
+            and clock_offset is not None
+            and len(meta.local_physical_block_ids) > 0
+            and time.perf_counter() + self._kv_blocks_expiry_safety_margin
+            >= blocks_expiry_time - clock_offset
+        ):
+            logger.warning(
+                "Declining expired remote read for %s from engine %s; "
+                "recomputing locally.",
+                req_id,
+                engine_id,
+            )
+            self.xfer_stats.record_kv_expired_req()
+            self._handle_failed_transfer(req_id, None)
+            return
+
         plan = self.tp_mappings[engine_id]
         remote_info = self.transfer_topo.get_engine_info(engine_id)
         tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)

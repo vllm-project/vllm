@@ -2829,7 +2829,10 @@ def test_compatibility_hash_validation(
 
     # Mock ZMQ socket to return our handshake payload
     mock_socket = MagicMock()
-    mock_socket.recv.return_value = msgspec.msgpack.encode(handshake_payload)
+    mock_socket.recv_multipart.return_value = [
+        msgspec.msgpack.encode(handshake_payload),
+        msgspec.msgpack.encode(time.perf_counter()),
+    ]
 
     # Mock add_remote_agent to avoid actual NIXL operations
     # Patch zmq_ctx to return our mock socket
@@ -2932,7 +2935,7 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
         raise AssertionError(f"{error_scenario} not a valid scenario")
 
     mock_socket = MagicMock()
-    mock_socket.recv.return_value = msg_bytes
+    mock_socket.recv_multipart.return_value = [msg_bytes]
     with (
         patch.object(decode_worker, "add_remote_agent", return_value="fake_agent"),
         patch.object(nixl.base_worker, "zmq_ctx") as mock_zmq_ctx,

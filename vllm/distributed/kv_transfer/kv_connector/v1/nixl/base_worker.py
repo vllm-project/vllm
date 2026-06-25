@@ -268,6 +268,13 @@ class NixlBaseConnectorWorker:
         # NOTE (NickLucche): For now we use a hardcoded value for a simpler interface.
         self._lease_extension = kv_lease_duration * 2 // 3
 
+        # Safety margin (s) for the turn-2 deadline check (offset/read slack).
+        self._kv_blocks_expiry_safety_margin: float = (
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "kv_blocks_expiry_safety_margin", 5
+            )
+        )
+
         self._is_hma_required = (
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
             and any(
@@ -342,6 +349,8 @@ class NixlBaseConnectorWorker:
         self._remote_agents: dict[EngineId, dict[tuple[int, int], str]] = defaultdict(
             dict
         )
+        # Map of engine_id -> clock offset.
+        self._engine_clock_offset: dict[EngineId, float] = {}
 
         # Metadata.
         self.engine_id: EngineId = engine_id
@@ -585,6 +594,8 @@ class NixlBaseConnectorWorker:
         p_remote_ranks = self.transfer_topo.handshake_target_ranks(remote_tp_size)
         remote_rank_to_agent_name: dict[tuple[int, int], str] = {}
         path = make_zmq_path("tcp", host, port)
+        best_rtt = float("inf")
+        best_offset: float | None = None
 
         with zmq_ctx(zmq.REQ, path) as sock:
             for remote_pp_rank, remote_rank in itertools.product(
@@ -605,7 +616,18 @@ class NixlBaseConnectorWorker:
                 # Set receive timeout to 5 seconds to avoid hanging on dead server
                 sock.setsockopt(zmq.RCVTIMEO, 5000)  # milliseconds
                 sock.send(msg)
-                handshake_bytes = sock.recv()
+                reply_parts = sock.recv_multipart()
+                recv_time = time.perf_counter()
+                handshake_bytes = reply_parts[0]
+
+                # Clock offset from the peer timestamp frame.
+                # keep the lowest-RTT sample.
+                if len(reply_parts) > 1:
+                    remote_perf = msgspec.msgpack.decode(reply_parts[1])
+                    rtt = recv_time - start_time
+                    if rtt < best_rtt:
+                        best_rtt = rtt
+                        best_offset = remote_perf - (start_time + recv_time) / 2
 
                 # Decode handshake payload to get compatibility hash
                 handshake_decoder = msgspec.msgpack.Decoder(NixlHandshakePayload)
@@ -683,6 +705,9 @@ class NixlBaseConnectorWorker:
                 )
                 remote_ranks = (remote_pp_rank, remote_rank)
                 remote_rank_to_agent_name[remote_ranks] = remote_agent_name
+
+        if best_offset is not None:
+            self._engine_clock_offset[expected_engine_id] = best_offset
         return remote_rank_to_agent_name
 
     def _add_notif_only_remote_agent(
@@ -2479,6 +2504,8 @@ class NixlBaseConnectorWorker:
         if self.transfer_topo is not None:
             self.transfer_topo.unregister_remote_engine(engine_id)
 
+        # Drop the cached clock offset; it is re-measured on the next handshake.
+        self._engine_clock_offset.pop(engine_id, None)
         # Push P-side engines are tracked in _remote_agents but not in
         # _engine_last_active (they don't participate in stale eviction), so
         # tolerate a missing entry.
