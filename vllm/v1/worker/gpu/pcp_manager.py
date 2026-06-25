@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
 import numpy as np
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_pcp_group
+from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import (
@@ -18,6 +21,9 @@ from vllm.v1.worker.gpu.input_batch import (
     prepare_prefill_inputs_with_start_pos,
 )
 from vllm.v1.worker.gpu.states import RequestState
+
+PhysicalSlotMappingsBuilder = Callable[[InputBatch], dict[str, torch.Tensor]]
+PrepareAttn = Callable[[InputBatch], tuple[tuple[torch.Tensor, ...], torch.Tensor]]
 
 
 @dataclass(frozen=True)
@@ -51,12 +57,10 @@ class PCPManager:
         self.dcp_world_size = dcp_world_size
         self.dcp_rank = dcp_rank
         self.cp_interleave = cp_interleave
-        self.dcp_passthrough = False
 
         self._physical_batch: InputBatch | None = None
         self._physical_slot_mappings_by_layer: dict[str, torch.Tensor] | None = None
         self._hidden_restore_idx: torch.Tensor | None = None
-        self._local_virtual_to_physical_idx: torch.Tensor | None = None
         self._per_rank_num_tokens: list[int] | None = None
         self._restored_slot_mapping_cache: dict[
             tuple[int, torch.dtype, int], torch.Tensor
@@ -94,6 +98,15 @@ class PCPManager:
             raise NotImplementedError(
                 "MRV2 PCP does not support speculative decoding yet."
             )
+        is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
+        if (
+            is_sparse_mla
+            and vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            raise NotImplementedError(
+                "MRV2 sparse MLA PCP does not support CUDA graphs yet. "
+                "Set -cc.cudagraph_mode=NONE."
+            )
         if dcp_size > 1:
             if dcp_size != pcp_size:
                 raise NotImplementedError(
@@ -119,6 +132,16 @@ class PCPManager:
     def _local_num_tokens(self) -> int:
         assert self._per_rank_num_tokens is not None
         return self._per_rank_num_tokens[self.pcp_rank]
+
+    @staticmethod
+    def _set_padding_mask(
+        is_padding: torch.Tensor,
+        num_tokens: int,
+        num_tokens_after_padding: int,
+    ) -> torch.Tensor:
+        is_padding[:num_tokens].fill_(False)
+        is_padding[num_tokens:num_tokens_after_padding].fill_(True)
+        return is_padding[:num_tokens_after_padding]
 
     @staticmethod
     def _copy_physical_batch(input_batch: InputBatch) -> InputBatch:
@@ -217,7 +240,6 @@ class PCPManager:
             )
 
         restore_pairs: list[tuple[int, int]] = []
-        local_virtual_to_physical: list[int] = []
         for rank, segments in enumerate(all_rank_segments):
             rank_offset = 0
             for req_idx, start_pos, num_tokens in segments:
@@ -228,8 +250,6 @@ class PCPManager:
                     rank_offset += 1
                     physical_offset = start_pos - base_pos + local_idx
                     output_idx = int(query_start_loc_np[req_idx]) + physical_offset
-                    if rank == self.pcp_rank:
-                        local_virtual_to_physical.append(output_idx)
                     if is_decode and rank != 0:
                         continue
                     restore_pairs.append((output_idx, gathered_idx))
@@ -240,13 +260,6 @@ class PCPManager:
         )
         self._hidden_restore_idx = async_copy_to_gpu(
             restore_idx,
-            device=self.device,
-        )
-        local_virtual_to_physical_idx = np.asarray(
-            local_virtual_to_physical, dtype=np.int64
-        )
-        self._local_virtual_to_physical_idx = async_copy_to_gpu(
-            local_virtual_to_physical_idx,
             device=self.device,
         )
 
@@ -277,31 +290,6 @@ class PCPManager:
         return tuple(
             gathered[self._hidden_restore_idx] for gathered in gathered_tensors
         )
-
-    def gather_and_restore_tokens(self, tensor: torch.Tensor) -> torch.Tensor:
-        return self._allgather_and_restore_tokens(tensor)
-
-    def select_local_from_physical(
-        self,
-        tensor: torch.Tensor,
-        local_token_offset: int = 0,
-        local_num_tokens: int | None = None,
-    ) -> torch.Tensor:
-        if self._local_virtual_to_physical_idx is None:
-            return tensor
-        idx = self._local_virtual_to_physical_idx
-        if local_token_offset or local_num_tokens is not None:
-            end = None
-            if local_num_tokens is not None:
-                end = local_token_offset + local_num_tokens
-            idx = idx[local_token_offset:end]
-        return tensor.index_select(0, idx)
-
-    def set_physical_slot_mappings(
-        self,
-        slot_mappings_by_layer: dict[str, torch.Tensor],
-    ) -> None:
-        self._physical_slot_mappings_by_layer = slot_mappings_by_layer
 
     def _get_physical_slot_mapping(self, layer_name: str | None) -> torch.Tensor | None:
         if layer_name is None or self._physical_slot_mappings_by_layer is None:
@@ -337,15 +325,12 @@ class PCPManager:
         slot_mapping = slot_mapping[:num_tokens]
         restored_slots = self._get_physical_slot_mapping(layer_name)
         k_pe_flat = k_pe.reshape(num_tokens, -1)
+        restored_kv_c, restored_k_pe_flat = self._allgather_and_restore_token_tensors(
+            (kv_c_normed, k_pe_flat)
+        )
         if restored_slots is None:
-            restored_kv_c, restored_k_pe_flat = (
-                self._allgather_and_restore_token_tensors((kv_c_normed, k_pe_flat))
-            )
             restored_slots = self._get_or_gather_restored_slot_mapping(slot_mapping)
         else:
-            restored_kv_c, restored_k_pe_flat = (
-                self._allgather_and_restore_token_tensors((kv_c_normed, k_pe_flat))
-            )
             restored_slots = restored_slots[: restored_kv_c.shape[0]]
 
         restored_k_pe = restored_k_pe_flat.view(
@@ -353,20 +338,6 @@ class PCPManager:
             *k_pe.shape[1:],
         )
         return restored_kv_c, restored_k_pe, restored_slots
-
-    def gather_and_restore_mla_cache_inputs(
-        self,
-        kv_c_normed: torch.Tensor,
-        k_pe: torch.Tensor,
-        slot_mapping: torch.Tensor,
-        layer_name: str | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        return self.gather_and_restore_mla_latent_cache_inputs(
-            kv_c_normed,
-            k_pe,
-            slot_mapping,
-            layer_name,
-        )
 
     def gather_and_restore_indexer_cache_inputs(
         self,
@@ -396,12 +367,24 @@ class PCPManager:
         input_batch: InputBatch,
         req_states: RequestState,
         input_buffers: InputBuffers,
+        build_physical_slot_mappings: PhysicalSlotMappingsBuilder | None = None,
     ) -> InputBatch:
         if input_batch.num_draft_tokens > 0:
             raise NotImplementedError("MRV2 PCP does not support spec decode yet.")
         if input_batch.num_reqs_after_padding != input_batch.num_reqs:
             raise NotImplementedError(
                 "MRV2 PCP does not support request-padded CUDA graphs yet."
+            )
+
+        self._physical_slot_mappings_by_layer = None
+        if self.dcp_world_size > 1:
+            if build_physical_slot_mappings is None:
+                raise RuntimeError(
+                    "PCP+DCP requires physical slot mappings before virtual "
+                    "batch partitioning."
+                )
+            self._physical_slot_mappings_by_layer = build_physical_slot_mappings(
+                input_batch
             )
 
         physical_batch = self._copy_physical_batch(input_batch)
@@ -499,6 +482,11 @@ class PCPManager:
             input_buffers.positions[
                 virtual_num_tokens:virtual_num_tokens_padded
             ].zero_()
+        is_padding = self._set_padding_mask(
+            input_buffers.is_padding,
+            virtual_num_tokens,
+            virtual_num_tokens_padded,
+        )
 
         total_num_logits = num_virtual_reqs if virtual_num_tokens > 0 else 0
         if total_num_logits > 0:
@@ -580,6 +568,7 @@ class PCPManager:
             else None,
             input_ids=input_buffers.input_ids[:virtual_num_tokens_padded],
             positions=input_buffers.positions[:virtual_num_tokens_padded],
+            is_padding=is_padding,
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
@@ -595,14 +584,61 @@ class PCPManager:
     def restore_for_sampling(
         self,
         hidden_states: torch.Tensor,
-        input_batch: InputBatch,
     ) -> tuple[torch.Tensor, InputBatch]:
-        del input_batch
         assert self._physical_batch is not None
         physical_batch = self._physical_batch
         self._physical_slot_mappings_by_layer = None
         self._restored_slot_mapping_cache.clear()
         return self.restore_hidden_states(hidden_states), physical_batch
+
+
+def partition_pcp_input_batch(
+    manager: PCPManager | None,
+    input_batch: InputBatch,
+    req_states: RequestState,
+    input_buffers: InputBuffers,
+    prepare_attn: PrepareAttn,
+    kv_cache_config: KVCacheConfig,
+) -> InputBatch:
+    if manager is None:
+        return input_batch
+    physical_slot_mappings_builder: PhysicalSlotMappingsBuilder | None = None
+    if manager.dcp_world_size > 1:
+
+        def physical_slot_mappings_builder(
+            physical_batch: InputBatch,
+        ) -> dict[str, torch.Tensor]:
+            _, slot_mappings = prepare_attn(physical_batch)
+            return build_slot_mappings_by_layer(
+                slot_mappings.clone(),
+                kv_cache_config,
+            )
+
+    return manager.partition_input_batch(
+        input_batch,
+        req_states,
+        input_buffers,
+        physical_slot_mappings_builder,
+    )
+
+
+def get_pcp_forward_context_kwargs(
+    manager: PCPManager | None,
+    dummy_run: bool,
+) -> dict[str, Any] | None:
+    if manager is None or dummy_run:
+        return None
+    return {"pcp_manager": manager}
+
+
+def restore_pcp_for_sampling(
+    manager: PCPManager | None,
+    hidden_states: torch.Tensor,
+    input_batch: InputBatch,
+) -> tuple[torch.Tensor, InputBatch]:
+    if manager is None:
+        return hidden_states, input_batch
+    return manager.restore_for_sampling(hidden_states)
 
 
 def build_pcp_runner_config(

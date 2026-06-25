@@ -346,11 +346,15 @@ def _maybe_gather_pcp_mla_latent_cache_inputs(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     pcp_manager = get_forward_context().additional_kwargs.get("pcp_manager")
     if (
-        getattr(attn_layer.impl, "pcp_world_size", 1) <= 1
+        pcp_manager is None
+        or getattr(pcp_manager, "pcp_world_size", 1) <= 1
         or attn_metadata is None
-        or pcp_manager is None
     ):
         return kv_c_normed, k_pe, layer_slot_mapping
+    if not getattr(attn_layer.impl, "supports_pcp", False):
+        raise NotImplementedError(
+            f"{attn_layer.impl.__class__.__name__} does not support PCP."
+        )
 
     assert layer_slot_mapping is not None
     return pcp_manager.gather_and_restore_mla_latent_cache_inputs(
@@ -359,15 +363,6 @@ def _maybe_gather_pcp_mla_latent_cache_inputs(
         layer_slot_mapping,
         layer_name,
     )
-
-
-@dataclass
-class _PCPDCPForwardInputs:
-    q: torch.Tensor
-    k_c_normed: torch.Tensor
-    k_pe: torch.Tensor
-    attn_metadata: "MLACommonMetadata"
-    same_head_dcp: bool
 
 
 class MLAAttention(nn.Module, AttentionLayerBase):
@@ -666,46 +661,29 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
             return output
 
-    def _maybe_prepare_pcp_dcp_forward_inputs(
+    def _use_pcp_axis_dcp(
         self,
-        q: torch.Tensor,
-        k_c_normed: torch.Tensor,
-        k_pe: torch.Tensor,
-        attn_metadata: "MLACommonMetadata",
         quant_key: Any,
-    ) -> _PCPDCPForwardInputs:
+    ) -> bool:
         pcp_manager = get_forward_context().additional_kwargs.get("pcp_manager")
         if pcp_manager is None or getattr(pcp_manager, "dcp_world_size", 1) <= 1:
-            return _PCPDCPForwardInputs(
-                q=q,
-                k_c_normed=k_c_normed,
-                k_pe=k_pe,
-                attn_metadata=attn_metadata,
-                same_head_dcp=False,
-            )
+            return False
         if quant_key is not None:
             raise NotImplementedError(
                 "MRV2 MLA PCP+DCP does not support fused output quantization yet."
             )
-
-        return _PCPDCPForwardInputs(
-            q=q,
-            k_c_normed=k_c_normed,
-            k_pe=k_pe,
-            attn_metadata=attn_metadata,
-            same_head_dcp=True,
-        )
+        return True
 
     def _prepare_mqa_query_for_dcp(
         self,
         mqa_q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         fp8_attention: bool,
-        same_head_dcp: bool,
+        pcp_axis_dcp: bool,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if self.impl.dcp_world_size <= 1:
             return mqa_q
 
-        if same_head_dcp:
+        if pcp_axis_dcp:
             assert not self.dcp_a2a, (
                 "PCP-axis MLA DCP does not support A2A combine yet."
             )
@@ -718,13 +696,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self,
         attn_out: torch.Tensor,
         lse: torch.Tensor | None,
-        same_head_dcp: bool,
+        pcp_axis_dcp: bool,
     ) -> torch.Tensor:
         if self.impl.dcp_world_size <= 1:
             return attn_out
 
         assert lse is not None
-        if same_head_dcp:
+        if pcp_axis_dcp:
             return cp_lse_ag_out_ar(
                 attn_out,
                 lse,
@@ -805,20 +783,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
 
-        pcp_dcp_inputs = self._maybe_prepare_pcp_dcp_forward_inputs(
-            q,
-            k_c_normed,
-            k_pe,
-            attn_metadata,
-            quant_key,
-        )
-        q = pcp_dcp_inputs.q
-        k_c_normed = pcp_dcp_inputs.k_c_normed
-        k_pe = pcp_dcp_inputs.k_pe
-        attn_metadata = pcp_dcp_inputs.attn_metadata
-
         num_actual_toks = attn_metadata.num_actual_tokens
-        same_head_dcp = pcp_dcp_inputs.same_head_dcp
+        pcp_axis_dcp = self._use_pcp_axis_dcp(quant_key)
 
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output
@@ -871,7 +837,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self._k_scale,
                 output=mha_output[num_mqa_tokens:num_actual_toks],
                 output_scale=mha_output_scale,
-                same_head_dcp=same_head_dcp,
+                pcp_axis_dcp=pcp_axis_dcp,
             )
 
         if num_mqa_tokens > 0:
@@ -940,7 +906,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             mqa_q = self._prepare_mqa_query_for_dcp(
                 mqa_q,
                 fp8_attention,
-                same_head_dcp,
+                pcp_axis_dcp,
             )
 
             # call decode attn
@@ -950,7 +916,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             attn_out = self._combine_mqa_dcp_output(
                 attn_out,
                 lse,
-                same_head_dcp,
+                pcp_axis_dcp,
             )
 
             # v_up projection
@@ -2666,14 +2632,13 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         k_scale: torch.Tensor,
         output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
-        same_head_dcp: bool = False,
+        pcp_axis_dcp: bool = False,
     ) -> None:
         assert attn_metadata.prefill is not None
         assert self.dcp_world_size != -1
 
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata.prefill_backend is not None
-        prefill_metadata.prefill_backend.prepare_metadata(prefill_metadata)
         use_fp8_prefill = prefill_metadata.q_data_type == current_platform.fp8_dtype()
 
         # Convert q to FP8 if FP8 prefill attention is enabled
@@ -2712,7 +2677,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             assert prefill_metadata.chunked_context is not None
             suffix_output, suffix_lse = output_prefill
             if self.dcp_world_size > 1:
-                if same_head_dcp:
+                if pcp_axis_dcp:
                     context_output, context_lse = (
                         self._dcp_compute_local_prefill_context(
                             q,

@@ -96,7 +96,12 @@ from vllm.v1.worker.gpu.lora_utils import (
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
-from vllm.v1.worker.gpu.pcp_manager import build_pcp_runner_config
+from vllm.v1.worker.gpu.pcp_manager import (
+    build_pcp_runner_config,
+    get_pcp_forward_context_kwargs,
+    partition_pcp_input_batch,
+    restore_pcp_for_sampling,
+)
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import PPHandler
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
@@ -1053,18 +1058,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         return block_tables, slot_mappings
 
-    def _snapshot_pcp_physical_slot_mappings(self, input_batch: InputBatch) -> None:
-        assert self.pcp_manager is not None
-        _, slot_mappings = self.prepare_attn(input_batch)
-        # compute_slot_mappings writes into a reusable buffer; keep the physical
-        # view before PCP partitioning prepares the executable virtual batch.
-        self.pcp_manager.set_physical_slot_mappings(
-            build_slot_mappings_by_layer(
-                slot_mappings.clone(),
-                self.kv_cache_config,
-            ),
-        )
-
     def prepare_dummy_attn(
         self, input_batch: InputBatch
     ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
@@ -1199,14 +1192,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Common case.
             # Prepare all the inputs and copy to the input buffers.
             input_batch = self.prepare_inputs(scheduler_output, batch_desc)
-            if self.pcp_manager is not None:
-                if self.use_dcp:
-                    self._snapshot_pcp_physical_slot_mappings(input_batch)
-                input_batch = self.pcp_manager.partition_input_batch(
-                    input_batch,
-                    self.req_states,
-                    self.input_buffers,
-                )
+            input_batch = partition_pcp_input_batch(
+                self.pcp_manager,
+                input_batch,
+                self.req_states,
+                self.input_buffers,
+                self.prepare_attn,
+                self.kv_cache_config,
+            )
             block_tables, slot_mappings = self.prepare_attn(input_batch)
 
             if self.lora_config:
@@ -1315,12 +1308,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 has_lora=self.lora_config is not None,
                 num_active_loras=batch_desc.num_active_loras,
             )
-            additional_forward_kwargs = (
-                {"pcp_manager": self.pcp_manager}
-                if self.pcp_manager is not None and not dummy_run
-                else None
-            )
-
             with set_forward_context(
                 attn_metadata,
                 self.vllm_config,
@@ -1331,7 +1318,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mapping=slot_mappings_by_layer,
                 skip_compiled=skip_compiled,
                 is_padding=input_batch.is_padding,
-                additional_forward_kwargs=additional_forward_kwargs,
+                additional_forward_kwargs=get_pcp_forward_context_kwargs(
+                    self.pcp_manager,
+                    dummy_run,
+                ),
             ):
                 self.kv_connector.pre_forward(scheduler_output)
                 if batch_desc.cg_mode == CUDAGraphMode.PIECEWISE:
@@ -1412,11 +1402,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
 
         # Last rank: sample tokens
-        if self.pcp_manager is not None:
-            assert hidden_states is not None
-            hidden_states, input_batch = self.pcp_manager.restore_for_sampling(
-                hidden_states, input_batch
-            )
+        assert hidden_states is not None
+        hidden_states, input_batch = restore_pcp_for_sampling(
+            self.pcp_manager,
+            hidden_states,
+            input_batch,
+        )
 
         sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output

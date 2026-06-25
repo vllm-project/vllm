@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
+
 import numpy as np
+import pytest
 import torch
 
+from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 
@@ -13,6 +17,31 @@ def _manager(rank: int, size: int = 2, dcp_size: int = 1) -> PCPManager:
         device=torch.device("cpu"),
         dcp_world_size=dcp_size,
     )
+
+
+def test_sparse_mla_pcp_rejects_cuda_graphs() -> None:
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=2,
+            dcp_comm_backend="ag_rs",
+        ),
+        model_config=SimpleNamespace(
+            use_mla=True,
+            hf_text_config=SimpleNamespace(index_topk=2048),
+        ),
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.PIECEWISE),
+    )
+
+    with pytest.raises(NotImplementedError, match="sparse MLA PCP"):
+        PCPManager.validate_config(
+            config,
+            dcp_size=1,
+            use_pp=False,
+            is_encoder_decoder=False,
+            supports_mm_inputs=False,
+            lora_config=None,
+            speculative_config=None,
+        )
 
 
 def test_dual_chunk_swap_even_partition() -> None:
@@ -34,6 +63,22 @@ def test_virtual_request_padding_uses_pcp_multiple() -> None:
     assert manager._pad_num_reqs(1) == 4
     assert manager._pad_num_reqs(4) == 4
     assert manager._pad_num_reqs(5) == 8
+
+
+def test_virtual_token_padding_mask_marks_collective_padding() -> None:
+    is_padding = torch.ones(8, dtype=torch.bool)
+
+    visible_mask = PCPManager._set_padding_mask(
+        is_padding,
+        num_tokens=5,
+        num_tokens_after_padding=7,
+    )
+
+    torch.testing.assert_close(
+        visible_mask,
+        torch.tensor([False, False, False, False, False, True, True]),
+    )
+    assert bool(is_padding[7])
 
 
 def test_dual_chunk_swap_uneven_partition() -> None:
@@ -116,25 +161,6 @@ def test_hidden_restore_indices_drop_duplicate_decode_rows() -> None:
     assert manager._hidden_restore_idx.tolist() == [0, 3, 4, 6, 7, 8, 9, 1, 2]
 
 
-def test_dcp_uses_virtual_token_mapping() -> None:
-    manager = _manager(rank=1, dcp_size=2)
-    num_scheduled = np.array([1, 8], dtype=np.int32)
-    num_computed = np.array([8, 0], dtype=np.int32)
-    is_prefilling = np.array([False, True], dtype=np.bool_)
-    query_start_loc = np.array([0, 1, 9], dtype=np.int32)
-
-    manager._build_hidden_restore_idx(
-        num_scheduled,
-        num_computed,
-        is_prefilling,
-        query_start_loc,
-    )
-
-    assert not manager.dcp_passthrough
-    assert manager._local_virtual_to_physical_idx is not None
-    assert manager._local_virtual_to_physical_idx.tolist() == [0, 3, 4, 5, 6]
-
-
 def test_mla_cache_gather_exchanges_grouped_latent_payloads() -> None:
     manager = _manager(rank=0)
     gathered_payloads: list[tuple[torch.Tensor, ...]] = []
@@ -148,11 +174,9 @@ def test_mla_cache_gather_exchanges_grouped_latent_payloads() -> None:
     manager._allgather_and_restore_token_tensors = (  # type: ignore[method-assign]
         fake_allgather_and_restore_token_tensors
     )
-    manager.set_physical_slot_mappings(
-        {
-            "layer": torch.tensor([40, 41, 42, 43], dtype=torch.int64),
-        }
-    )
+    manager._physical_slot_mappings_by_layer = {
+        "layer": torch.tensor([40, 41, 42, 43], dtype=torch.int64),
+    }
 
     kv_c_normed = torch.arange(12, dtype=torch.float32).view(4, 3)
     k_pe = torch.arange(8, dtype=torch.float32).view(4, 1, 2)
@@ -176,6 +200,57 @@ def test_mla_cache_gather_exchanges_grouped_latent_payloads() -> None:
     torch.testing.assert_close(restored_slots, torch.tensor([40, 41, 42, 43]))
 
 
+def test_mla_cache_gather_gate_uses_manager_pcp_world_size(monkeypatch) -> None:
+    from vllm.model_executor.layers.attention import mla_attention
+
+    class FakeImpl:
+        supports_pcp = True
+
+    class FakeLayer:
+        impl = FakeImpl()
+
+    class FakeManager:
+        pcp_world_size = 2
+
+        def gather_and_restore_mla_latent_cache_inputs(
+            self,
+            kv_c_normed: torch.Tensor,
+            k_pe: torch.Tensor,
+            slot_mapping: torch.Tensor,
+            layer_name: str,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            assert layer_name == "layers.0.self_attn"
+            return kv_c_normed + 10, k_pe + 20, slot_mapping + 30
+
+    class FakeForwardContext:
+        additional_kwargs = {"pcp_manager": FakeManager()}
+
+    monkeypatch.setattr(
+        mla_attention,
+        "get_forward_context",
+        lambda: FakeForwardContext(),
+    )
+
+    kv_c_normed = torch.arange(4, dtype=torch.float32)
+    k_pe = torch.arange(8, dtype=torch.float32).view(4, 1, 2)
+    slot_mapping = torch.arange(4, dtype=torch.int64)
+
+    restored_kv, restored_k_pe, restored_slots = (
+        mla_attention._maybe_gather_pcp_mla_latent_cache_inputs(
+            FakeLayer(),
+            object(),
+            kv_c_normed,
+            k_pe,
+            slot_mapping,
+            "layers.0.self_attn",
+        )
+    )
+
+    torch.testing.assert_close(restored_kv, kv_c_normed + 10)
+    torch.testing.assert_close(restored_k_pe, k_pe + 20)
+    torch.testing.assert_close(restored_slots, slot_mapping + 30)
+
+
 def test_indexer_cache_gather_exchanges_only_latent_k() -> None:
     manager = _manager(rank=0)
     gathered_payloads: list[torch.Tensor] = []
@@ -185,11 +260,9 @@ def test_indexer_cache_gather_exchanges_only_latent_k() -> None:
         return torch.flip(tensor, dims=(0,))
 
     manager._allgather_and_restore_tokens = fake_allgather_and_restore_tokens  # type: ignore[method-assign]
-    manager.set_physical_slot_mappings(
-        {
-            "indexer.k_cache": torch.tensor([80, 81, 82, 83], dtype=torch.int64),
-        }
-    )
+    manager._physical_slot_mappings_by_layer = {
+        "indexer.k_cache": torch.tensor([80, 81, 82, 83], dtype=torch.int64),
+    }
 
     k = torch.arange(16, dtype=torch.float32).view(4, 4)
     slot_mapping = torch.arange(4, dtype=torch.int64)

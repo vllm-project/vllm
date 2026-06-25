@@ -2008,6 +2008,11 @@ class VllmConfig:
             model_config is not None and model_config.use_mla
         ):
             unsupported.append("prefill context parallelism")
+        if (
+            self.parallel_config.prefill_context_parallel_size > 1
+            and self.cache_config.enable_prefix_caching
+        ):
+            unsupported.append("prefix caching with prefill context parallelism")
 
         if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
             unsupported.append("stock torch.compile")
