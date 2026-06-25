@@ -133,6 +133,29 @@ ResponseInputOutputMessage: TypeAlias = (
 ResponseInputOutputItem: TypeAlias = ResponseInputItemParam | ResponseOutputItem
 
 
+def _coerce_input_image_url(part: Any) -> Any:
+    """Normalize a chat-completions-style nested ``image_url`` to the flat
+    string the Responses API expects.
+
+    The Responses ``input_image`` content part defines ``image_url`` as a flat
+    string, whereas chat-completions ``image_url`` is a nested
+    ``{"url": ...}`` object. Clients that reuse chat-completions formatting send
+    the nested form, which otherwise fails strict validation. Coerce it here so
+    both shapes are accepted; non-``input_image`` parts are returned unchanged.
+
+    See https://github.com/vllm-project/vllm/issues/46631.
+    """
+    if (
+        isinstance(part, dict)
+        and part.get("type") == "input_image"
+        and isinstance(part.get("image_url"), dict)
+    ):
+        url = part["image_url"].get("url")
+        if isinstance(url, str):
+            return {**part, "image_url": url}
+    return part
+
+
 class ResponsesRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/responses/create
@@ -523,6 +546,24 @@ class ResponsesRequest(OpenAIBaseModel):
                         "leaving for Pydantic validation"
                     )
                     processed_input.append(item)
+
+            elif item.get("role") not in (None, "assistant"):
+                # User/system/developer messages (role present and not
+                # assistant; ``type`` is optional and often omitted): normalize
+                # chat-completions-style nested image_url ({"url": ...}) on
+                # input_image content parts to the flat string the Responses
+                # API schema expects. Clients reusing chat-completions image
+                # formatting otherwise fail strict validation with an opaque
+                # 400 that also echoes the entire (possibly multi-MB base64)
+                # image back to the user.
+                # See https://github.com/vllm-project/vllm/issues/46631.
+                content = item.get("content")
+                if isinstance(content, list):
+                    item = {
+                        **item,
+                        "content": [_coerce_input_image_url(c) for c in content],
+                    }
+                processed_input.append(item)
 
             elif item_type == "message" and item.get("role") == "assistant":
                 content = item.get("content")

@@ -182,3 +182,41 @@ def test_responses_request_empty_tools_named_tool_choice():
                 "tool_choice": NAMED_TOOL_CHOICE,
             }
         )
+
+
+# https://github.com/vllm-project/vllm/issues/46631
+IMAGE_URL = "https://example.com/image.png"
+
+
+def _input_image_message(image_url):
+    return {
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "What is this?"},
+                    {"type": "input_image", "image_url": image_url, "detail": "auto"},
+                ],
+            }
+        ],
+        "model": "test-model",
+    }
+
+
+def _image_url_of(request):
+    # The validated input_image content part is a TypedDict (plain dict).
+    part = request.input[0]["content"][1]
+    return part["image_url"]
+
+
+def test_responses_request_input_image_flat_url():
+    # The Responses-native flat string form is accepted unchanged.
+    request = ResponsesRequest.model_validate(_input_image_message(IMAGE_URL))
+    assert _image_url_of(request) == IMAGE_URL
+
+
+def test_responses_request_input_image_nested_url_coerced():
+    # chat-completions-style nested {"url": ...} is coerced to the flat string
+    # instead of failing strict validation with an opaque error (#46631).
+    request = ResponsesRequest.model_validate(_input_image_message({"url": IMAGE_URL}))
+    assert _image_url_of(request) == IMAGE_URL
