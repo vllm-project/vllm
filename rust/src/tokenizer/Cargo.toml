@@ -22,6 +22,7 @@ tracing.workspace = true
 criterion.workspace = true
 hf-hub.workspace = true
 tempfile.workspace = true
+tokio.workspace = true
 
 [[bench]]
 name = "hf"

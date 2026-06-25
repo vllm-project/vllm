@@ -5696,6 +5696,7 @@ dependencies = [
  "thiserror-ext",
  "tiktoken-rs 0.9.1",
  "tokenizers",
+ "tokio",
  "tracing",
 ]
 
