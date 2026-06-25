@@ -46,6 +46,34 @@ def test_sampling_params_trace_field_rejects_invalid_token_ids(invalid_ids):
         SamplingParams(trace_decode_token_ids=invalid_ids)
 
 
+def _make_model_config(vocab_size: int):
+    from unittest.mock import Mock
+
+    model_config = Mock()
+    model_config.get_vocab_size = lambda: vocab_size
+    return model_config
+
+
+def test_validate_trace_decode_token_ids_accepts_in_vocab():
+    params = SamplingParams(trace_decode_token_ids=[0, 50, 99])
+    # Should not raise.
+    params._validate_trace_decode_token_ids(_make_model_config(vocab_size=100))
+
+
+def test_validate_trace_decode_token_ids_rejects_out_of_vocab():
+    # The non-negative check passes at construction, but the token id exceeds
+    # the vocabulary; verify() must reject it before it reaches the sampler.
+    params = SamplingParams(trace_decode_token_ids=[0, 100])
+    with pytest.raises(ValueError, match="out-of-vocab"):
+        params._validate_trace_decode_token_ids(_make_model_config(vocab_size=100))
+
+
+def test_validate_trace_decode_token_ids_noop_when_unset():
+    params = SamplingParams(max_tokens=4)
+    # Should not raise when the field is unset.
+    params._validate_trace_decode_token_ids(_make_model_config(vocab_size=100))
+
+
 # ---------------------------------------------------------------------------
 # Sampler trace-replay injection
 # ---------------------------------------------------------------------------
