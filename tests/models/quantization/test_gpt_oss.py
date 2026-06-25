@@ -104,9 +104,11 @@ def test_gpt_oss_attention_quantization(
 
     model_args = EvaluationConfig(model_name).get_model_args(tp_size)
 
-    # Emulation backend on MI300, MI250 is opt-in
-    # following https://github.com/vllm-project/vllm/pull/45896
-    if not on_gfx950():
+    # Emulation backend on MI300, MI250 is opt-in for the MX-weight models
+    # (no native MX MoE kernel there), following
+    # https://github.com/vllm-project/vllm/pull/45896. Plain FP8 models run
+    # natively and have no FP8 emulation path, so don't force it on them.
+    if not on_gfx950() and "MXFP4" in model_name:
         model_args["moe_backend"] = "emulation"
 
     extra_run_kwargs = {
