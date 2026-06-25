@@ -43,6 +43,7 @@ QuantizationMethods = Literal[
     "fp8_per_channel",
     "int8_per_channel_weight_only",
     "mxfp8",
+    "oscar_int2",
 ]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
@@ -135,6 +136,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .moe_wna16 import MoeWNA16Config
     from .mxfp4 import GptOssMxfp4Config, Mxfp4Config
     from .online.base import OnlineQuantizationConfig
+    from .oscar.config import OscarConfig
     from .torchao import TorchAOConfig
 
     method_to_config: dict[str, type[QuantizationConfig]] = {
@@ -167,6 +169,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         # ModelOpt MXFP8 config (same format). The "mxfp8" online shorthand
         # below only applies to the `--quantization mxfp8` CLI path.
         "mxfp8": ModelOptMxFp8Config,
+        "oscar_int2": OscarConfig,
     }
 
     # Register online shorthands (e.g. "fp8_per_tensor") as quant methods.
