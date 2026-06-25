@@ -40,6 +40,10 @@ class PCPManager:
         pcp_world_size: int,
         pcp_rank: int,
         device: torch.device,
+        req_states: RequestState | None = None,
+        input_buffers: InputBuffers | None = None,
+        compute_slot_mappings: SlotMappingsComputer | None = None,
+        kv_cache_config: KVCacheConfig | None = None,
         dcp_world_size: int = 1,
         dcp_rank: int = 0,
         cp_interleave: int = 1,
@@ -53,31 +57,15 @@ class PCPManager:
 
         self._physical_batch: InputBatch | None = None
         self._physical_slot_mappings_by_layer: dict[str, torch.Tensor] | None = None
-        self._req_states: RequestState | None = None
-        self._input_buffers: InputBuffers | None = None
-        self._compute_slot_mappings: SlotMappingsComputer | None = None
-        self._kv_cache_config: KVCacheConfig | None = None
+        self._req_states = req_states
+        self._input_buffers = input_buffers
+        self._compute_slot_mappings = compute_slot_mappings
+        self._kv_cache_config = kv_cache_config
         self._hidden_restore_idx: torch.Tensor | None = None
         self._per_rank_num_tokens: list[int] | None = None
         self._restored_slot_mapping_cache: dict[
             tuple[int, torch.dtype, int], torch.Tensor
         ] = {}
-
-    def bind_input_context(
-        self,
-        req_states: RequestState,
-        input_buffers: InputBuffers,
-    ) -> None:
-        self._req_states = req_states
-        self._input_buffers = input_buffers
-
-    def bind_slot_mapping_context(
-        self,
-        compute_slot_mappings: SlotMappingsComputer,
-        kv_cache_config: KVCacheConfig,
-    ) -> None:
-        self._compute_slot_mappings = compute_slot_mappings
-        self._kv_cache_config = kv_cache_config
 
     @staticmethod
     def validate_config(
@@ -640,30 +628,49 @@ def get_pcp_forward_context_kwargs(
     return {"pcp_manager": manager}
 
 
-def maybe_build_pcp_runner_config(
+def get_pcp_max_num_input_reqs(
+    vllm_config: VllmConfig,
+    supports_mm_inputs: bool,
+) -> int:
+    parallel_config = vllm_config.parallel_config
+    pcp_size = parallel_config.prefill_context_parallel_size
+    max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+    if pcp_size <= 1:
+        return max_num_reqs
+
+    PCPManager.validate_config(vllm_config, supports_mm_inputs)
+    return max_num_reqs * 2 + pcp_size - 1
+
+
+def maybe_build_pcp_manager(
     vllm_config: VllmConfig,
     device: torch.device,
     supports_mm_inputs: bool,
-) -> tuple[PCPManager | None, int]:
+    req_states: RequestState,
+    input_buffers: InputBuffers,
+    compute_slot_mappings: SlotMappingsComputer,
+    kv_cache_config: KVCacheConfig,
+) -> PCPManager | None:
     parallel_config = vllm_config.parallel_config
     pcp_size = parallel_config.prefill_context_parallel_size
-    pcp_rank = get_pcp_group().rank_in_group if pcp_size > 1 else 0
-    max_num_reqs = vllm_config.scheduler_config.max_num_seqs
     if pcp_size <= 1:
-        return None, max_num_reqs
+        return None
 
     PCPManager.validate_config(vllm_config, supports_mm_inputs)
 
+    pcp_rank = get_pcp_group().rank_in_group
     dcp_size = parallel_config.decode_context_parallel_size
     dcp_rank = get_dcp_group().rank_in_group if dcp_size > 1 else 0
 
-    manager = PCPManager(
+    return PCPManager(
         pcp_world_size=pcp_size,
         pcp_rank=pcp_rank,
         device=device,
+        req_states=req_states,
+        input_buffers=input_buffers,
+        compute_slot_mappings=compute_slot_mappings,
+        kv_cache_config=kv_cache_config,
         dcp_world_size=dcp_size,
         dcp_rank=dcp_rank,
         cp_interleave=parallel_config.cp_kv_cache_interleave_size,
     )
-    max_num_input_reqs = max_num_reqs * 2 + pcp_size - 1
-    return manager, max_num_input_reqs

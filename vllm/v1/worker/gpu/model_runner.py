@@ -97,8 +97,10 @@ from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
 from vllm.v1.worker.gpu.pcp_manager import (
+    PCPManager,
     get_pcp_forward_context_kwargs,
-    maybe_build_pcp_runner_config,
+    get_pcp_max_num_input_reqs,
+    maybe_build_pcp_manager,
 )
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import PPHandler
@@ -209,11 +211,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
 
-        self.pcp_manager, max_num_input_reqs = maybe_build_pcp_runner_config(
+        max_num_input_reqs = get_pcp_max_num_input_reqs(
             self.vllm_config,
-            self.device,
             self.supports_mm_inputs,
         )
+        self.pcp_manager: PCPManager | None = None
 
         # Pooling models.
         self.is_pooling_model = self.model_config.runner_type == "pooling"
@@ -233,8 +235,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_tokens=self.max_num_tokens,
             device=self.device,
         )
-        if self.pcp_manager is not None:
-            self.pcp_manager.bind_input_context(self.req_states, self.input_buffers)
 
         if self.use_pp:
             self.pp_handler = PPHandler(
@@ -465,11 +465,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
         )
-        if self.pcp_manager is not None:
-            self.pcp_manager.bind_slot_mapping_context(
-                self.block_tables.compute_slot_mappings,
-                self.kv_cache_config,
-            )
+        self.pcp_manager = maybe_build_pcp_manager(
+            self.vllm_config,
+            self.device,
+            self.supports_mm_inputs,
+            self.req_states,
+            self.input_buffers,
+            self.block_tables.compute_slot_mappings,
+            self.kv_cache_config,
+        )
         initialize_mamba_ssu_backend(
             self.vllm_config.mamba_config, self.kv_cache_config
         )
