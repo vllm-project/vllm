@@ -899,12 +899,13 @@ def get_moe_wna16_block_config(
     config: dict[str, int],
     num_valid_tokens: int,
     real_top_k: int,
-    **_unused,
 ) -> dict[str, int]:
     """Triton WNA16 tile sizes — bs=1 wants a smaller N tile."""
     if "BLOCK_SIZE_N" in config and "BLOCK_SIZE_K" in config:
+        # optimal block config is set
         return {}
     if num_valid_tokens // real_top_k == 1:
+        # if bs=1, use a smaller BLOCK_SIZE_N
         return {"BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 64}
     return {"BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32}
 
@@ -947,9 +948,8 @@ def get_default_config(
             "num_stages": 3 if not current_platform.is_rocm() else num_stages_rocm,
         }
     elif dtype in ["int4_w4a16", "int8_w8a16"] and block_shape is not None:
-        # moe wna16 kernels
-        # WNA16 (INT4-W4A16 / INT8-W8A16): tile sizes only — Triton sets
-        # BLOCK_SIZE_N / BLOCK_SIZE_K downstream.
+        # WNA16 (INT4-W4A16 / INT8-W8A16): only set BLOCK_SIZE_M;
+        # BLOCK_SIZE_N / BLOCK_SIZE_K are set by get_moe_wna16_block_config.
         if M <= 20:
             config = {"BLOCK_SIZE_M": 16, "GROUP_SIZE_M": 1, "SPLIT_K": 1}
         elif M <= 40:

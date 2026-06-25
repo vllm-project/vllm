@@ -120,6 +120,9 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             MoEActivation.SILU,
             MoEActivation.GELU,
             MoEActivation.GELU_TANH,
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            MoEActivation.SWIGLUSTEP,
             MoEActivation.SILU_NO_MUL,
             MoEActivation.GELU_NO_MUL,
             MoEActivation.GELU_TANH_NO_MUL,
@@ -148,6 +151,15 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         if activation == MoEActivation.SILU and gemm1_clamp_limit is not None:
             swiglu_limit_func(output, input, float(gemm1_clamp_limit))
             return
+
+        # SWIGLUOAI_UNINTERLEAVE routes to silu_and_mul_with_clamp and needs the
+        # clamped-SwiGLU params (gemm1_clamp_limit / alpha / beta read from the
+        # quant config in __init__) forwarded; without a clamp_limit it asserts.
+        # Other activations ignore alpha/beta/clamp_limit.
+        if activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
+            assert gemm1_clamp_limit is not None, (
+                "SWIGLUOAI_UNINTERLEAVE requires gemm1_clamp_limit"
+            )
 
         super().activation(
             activation,

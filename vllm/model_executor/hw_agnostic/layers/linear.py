@@ -39,20 +39,8 @@ logger = init_logger(__name__)
 
 WEIGHT_LOADER_V2_SUPPORTED = [
     "UnquantizedLinearMethod",
-    "CompressedTensorsLinearMethod",
-    "CompressedTensorsLinearTransformMethod",
-    "AWQMarlinLinearMethod",
-    "AWQLinearMethod",
-    "AutoGPTQLinearMethod",
     "Fp8LinearMethod",
-    "FBGEMMFp8LinearMethod",
-    "ModelOptFp8LinearMethod",
-    "ModelOptFp8PcPtLinearMethod",
-    "ModelOptFp8PbWoLinearMethod",
-    "QuarkLinearMethod",
-    "ModelOptNvFp4LinearMethod",
-    "ModelOptNvFp4W4A16LinearMethod",
-    "HummingLinearMethod",
+    "Fp8PerTensorOnlineLinearMethod",
 ]
 
 
@@ -713,7 +701,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 if packed_dim == output_dim:
                     shard_size = shard_size // param.packed_factor
                     shard_offset = shard_offset // param.packed_factor
-                    # Special case for Marlin.
                     shard_size, shard_offset = adjust_marlin_shard(
                         param, shard_size, shard_offset
                     )
@@ -755,7 +742,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             if packed_dim == output_dim:
                 shard_size = round(shard_size // param.packed_factor)
                 shard_offset = round(shard_offset // param.packed_factor)
-                # Special case for Marlin.
                 shard_size, shard_offset = adjust_marlin_shard(
                     param, shard_size, shard_offset
                 )
@@ -1172,7 +1158,6 @@ class QKVParallelLinear(ColumnParallelLinear):
                     shard_size = round(shard_size // param.packed_factor)
                     shard_offset = round(shard_offset // param.packed_factor)
 
-                    # Special case for Marlin.
                     shard_size, shard_offset = adjust_marlin_shard(
                         param, shard_size, shard_offset
                     )
@@ -1235,7 +1220,6 @@ class QKVParallelLinear(ColumnParallelLinear):
                 shard_size = round(shard_size // param.packed_factor)
                 shard_offset = round(shard_offset // param.packed_factor)
 
-                # Special case for Marlin.
                 shard_size, shard_offset = adjust_marlin_shard(
                     param, shard_size, shard_offset
                 )

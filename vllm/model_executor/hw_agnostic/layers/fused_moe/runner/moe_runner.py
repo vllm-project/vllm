@@ -50,10 +50,6 @@ from vllm.utils.torch_utils import (
 )
 
 
-class ZeroExpertRouter:  # noqa: N801 — upstream public name
-    pass
-
-
 logger = init_logger(__name__)
 
 # Settings the hw-agnostic MoE pipeline accepts. Anything outside these
@@ -642,22 +638,6 @@ class MoERunner(MoERunnerInterface):
             assert shared_experts_input is not None
             self._shared_experts.maybe_sync_shared_experts_stream(shared_experts_input)
 
-    def _maybe_add_zero_expert_output(
-        self,
-        result: torch.Tensor,
-    ) -> torch.Tensor:
-        """Add the zero expert's contribution to the final result.
-
-        When a ZeroExpertRouter is used, it computes a bias-like output
-        from the "zero expert" that is added to the combined routed+shared
-        expert output.
-        """
-        if isinstance(self.router, ZeroExpertRouter):
-            zero_expert_output = self.router.zero_expert_output
-            assert zero_expert_output is not None
-            result = result + zero_expert_output
-        return result
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -743,9 +723,7 @@ class MoERunner(MoERunnerInterface):
         else:
             result = fused_output
 
-        result = self._maybe_reduce_final_output(result, og_hidden_dim_post_xform)
-
-        return self._maybe_add_zero_expert_output(result)
+        return self._maybe_reduce_final_output(result, og_hidden_dim_post_xform)
 
     @property
     def do_naive_dispatch_combine(self) -> bool:
