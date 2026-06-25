@@ -66,11 +66,6 @@ impl UnifiedParserOutput {
         self.events.push(UnifiedParserEvent::ToolCall(call));
     }
 
-    /// Append one tool-call event.
-    pub fn push_call(&mut self, call: ToolCallDelta) {
-        self.events.push(UnifiedParserEvent::ToolCall(call));
-    }
-
     /// Append parsed tool parser output as unified events.
     pub fn append_tool_output(&mut self, output: ToolParserOutput) {
         for event in output.events {
