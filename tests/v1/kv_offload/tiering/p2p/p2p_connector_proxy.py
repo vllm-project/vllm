@@ -162,13 +162,9 @@ async def _prefill(client_info, endpoint, req_data, request_id):
     """Send a prefill-only request (max_tokens=1) to the prefiller."""
     data = req_data.copy()
     data["kv_transfer_params"] = {
-        "do_remote_decode": True,
-        "do_remote_prefill": False,
-        "remote_engine_id": None,
-        "remote_block_ids": None,
-        "remote_host": global_args.decoder_p2p_connector_host,
-        "remote_port": global_args.decoder_p2p_connector_port,
-        "kv_request_id": request_id,
+        "decode": {
+            "kv_request_id": request_id,
+        },
     }
     data["stream"] = False
     data["max_tokens"] = 1
@@ -205,11 +201,11 @@ async def _handle_completions(api: str, request: Request):
         # Inject the prefiller's P2PConnector address so the decoder can pull
         # KV blocks from it via the P2PConnector transport.
         req_data["kv_transfer_params"] = {
-            "do_remote_prefill": True,
-            "do_remote_decode": False,
-            "remote_host": global_args.p2p_connector_host,
-            "remote_port": global_args.p2p_connector_port,
-            "kv_request_id": request_id,
+            "prefill": {
+                "kv_request_id": request_id,
+                "remote_host": global_args.p2p_connector_host,
+                "remote_port": global_args.p2p_connector_port,
+            },
         }
 
         decode_client = _get_next(request.app, "decode")
@@ -246,11 +242,11 @@ async def _handle_completions_decoder_first(api: str, request: Request):
 
         decode_data = req_data.copy()
         decode_data["kv_transfer_params"] = {
-            "do_remote_prefill": True,
-            "do_remote_decode": False,
-            "remote_host": global_args.p2p_connector_host,
-            "remote_port": global_args.p2p_connector_port,
-            "kv_request_id": request_id,
+            "prefill": {
+                "kv_request_id": request_id,
+                "remote_host": global_args.p2p_connector_host,
+                "remote_port": global_args.p2p_connector_port,
+            },
         }
 
         async def generate():
