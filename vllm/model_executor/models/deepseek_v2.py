@@ -128,6 +128,7 @@ class DeepseekAttention(nn.Module):
         max_position_embeddings: int = 8192,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        reduce_results: bool = True,
         prefix: str = "",
         **kwargs,
     ) -> None:
@@ -166,6 +167,7 @@ class DeepseekAttention(nn.Module):
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
+            reduce_results=reduce_results,
             quant_config=quant_config,
         )
 
@@ -425,6 +427,7 @@ class DeepseekV2Attention(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         topk_indices_buffer: torch.Tensor | None = None,
+        reduce_results: bool = True,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -491,6 +494,7 @@ class DeepseekV2Attention(nn.Module):
             self.num_heads * self.v_head_dim,
             self.hidden_size,
             bias=False,
+            reduce_results=reduce_results,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
@@ -904,6 +908,7 @@ class DeepseekV2MLAAttention(nn.Module):
         prefix: str = "",
         topk_indices_buffer: torch.Tensor | None = None,
         input_size: int | None = None,
+        reduce_results: bool = True,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -972,6 +977,7 @@ class DeepseekV2MLAAttention(nn.Module):
             self.num_heads * self.v_head_dim,
             self.hidden_size,
             bias=False,
+            reduce_results=reduce_results,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
@@ -1138,6 +1144,18 @@ class DeepseekV2DecoderLayer(nn.Module):
             attn_cls = DeepseekV2MLAAttention
         else:
             attn_cls = DeepseekV2Attention
+        is_moe_layer = (
+            config.n_routed_experts is not None
+            and layer_idx >= config.first_k_dense_replace
+            and layer_idx % moe_layer_freq == 0
+        )
+        # TODO(wentao): enable SP MoE with PP after the PP boundary logic can safely
+        # send/receive sequence-parallel hidden_states across stages.
+        self.use_sequence_parallel_moe = (
+            parallel_config.use_sequence_parallel_moe
+            and parallel_config.pipeline_parallel_size == 1
+            and is_moe_layer
+        )
         self.self_attn = attn_cls(
             vllm_config=vllm_config,
             config=config,
@@ -1153,20 +1171,8 @@ class DeepseekV2DecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
+            reduce_results=not self.use_sequence_parallel_moe,
         )
-        is_moe_layer = (
-            config.n_routed_experts is not None
-            and layer_idx >= config.first_k_dense_replace
-            and layer_idx % moe_layer_freq == 0
-        )
-        # TODO(wentao): enable SP MoE with PP after the PP boundary logic can safely
-        # send/receive sequence-parallel hidden_states across stages.
-        self.use_sequence_parallel_moe = (
-            parallel_config.use_sequence_parallel_moe
-            and parallel_config.pipeline_parallel_size == 1
-            and is_moe_layer
-        )
-        self.self_attn.o_proj.reduce_results = not self.use_sequence_parallel_moe
 
         if is_moe_layer:
             self.mlp = DeepseekV2MoE(
