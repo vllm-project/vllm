@@ -8,6 +8,7 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.config import get_current_vllm_config
 from vllm.distributed import get_dcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
@@ -304,6 +305,9 @@ def sparse_attn_indexer(
     topk_indices_buffer: torch.Tensor,
     skip_k_cache_insert: bool,
     use_fp4_cache: bool = False,
+    dcp_rank: int = 0,
+    dcp_world_size: int = 1,
+    cp_kv_cache_interleave_size: int = 1,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
@@ -472,9 +476,9 @@ def sparse_attn_indexer(
                 logits,
                 topk_indices,
                 topk_tokens,
-                chunk.dcp_rank,
-                chunk.dcp_world_size,
-                chunk.cp_kv_cache_interleave_size,
+                dcp_rank,
+                dcp_world_size,
+                cp_kv_cache_interleave_size,
                 row_starts=chunk.cu_seqlen_ks,
             )
 
@@ -612,9 +616,9 @@ def sparse_attn_indexer(
                 logits,
                 topk_indices,
                 topk_tokens,
-                decode_metadata.dcp_rank,
-                decode_metadata.dcp_world_size,
-                decode_metadata.cp_kv_cache_interleave_size,
+                dcp_rank,
+                dcp_world_size,
+                cp_kv_cache_interleave_size,
             )
 
         if decode_metadata.requires_padding:
@@ -648,6 +652,9 @@ def sparse_attn_indexer_fake(
     topk_indices_buffer: torch.Tensor | None,
     skip_k_cache_insert: bool,
     use_fp4_cache: bool = False,
+    dcp_rank: int = 0,
+    dcp_world_size: int = 1,
+    cp_kv_cache_interleave_size: int = 1,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -698,6 +705,13 @@ class SparseAttnIndexer(CustomOp):
         self.topk_indices_buffer = topk_indices_buffer
         self.skip_k_cache_insert = skip_k_cache_insert
         self.use_fp4_cache = use_fp4_cache
+        # DCP scalars are constant for the run; resolve them here (config is set
+        # during model construction) and pass them into the custom op, rather
+        # than threading them through per-step metadata.
+        parallel_config = get_current_vllm_config().parallel_config
+        self.dcp_world_size = parallel_config.decode_context_parallel_size
+        self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
+        self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
         if current_platform.is_cuda() and not has_deep_gemm():
             raise RuntimeError(
                 "Sparse Attention Indexer CUDA op requires DeepGEMM support in "
@@ -751,6 +765,9 @@ class SparseAttnIndexer(CustomOp):
             self.topk_indices_buffer,
             self.skip_k_cache_insert,
             self.use_fp4_cache,
+            self.dcp_rank,
+            self.dcp_world_size,
+            self.cp_kv_cache_interleave_size,
         )
 
     def forward_xpu(

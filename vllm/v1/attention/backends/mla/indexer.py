@@ -181,9 +181,6 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     token_end: int
     num_reqs: int
     skip_kv_gather: bool = False
-    dcp_rank: int = 0
-    dcp_world_size: int = 1
-    cp_kv_cache_interleave_size: int = 1
     local_cu_seq_lens: torch.Tensor | None = None
     local_total_seq_lens: int = 0
     max_local_total_seq_lens: int = 0
@@ -205,9 +202,6 @@ class DeepSeekV32IndexerDecodeMetadata:
     decode_lens: torch.Tensor
     requires_padding: bool
     schedule_metadata: torch.Tensor
-    dcp_rank: int = 0
-    dcp_world_size: int = 1
-    cp_kv_cache_interleave_size: int = 1
     global_seq_lens: torch.Tensor | None = None
 
 
@@ -729,9 +723,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 decode_lens=decode_lens,
                 requires_padding=requires_padding,
                 schedule_metadata=self.scheduler_metadata_buffer,
-                dcp_rank=self.dcp_rank,
-                dcp_world_size=self.dcp_world_size,
-                cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
                 global_seq_lens=global_seq_lens_for_decode,
             )
 
@@ -854,9 +845,6 @@ def build_prefill_chunk_metadata(
         token_end=token_end,
         num_reqs=num_reqs,
         skip_kv_gather=skip_kv_gather,
-        dcp_rank=dcp_rank,
-        dcp_world_size=dcp_world_size,
-        cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
         local_cu_seq_lens=local_cu_seq_lens,
         local_total_seq_lens=local_total_seq_lens,
         max_local_total_seq_lens=max_local_total_seq_lens,
