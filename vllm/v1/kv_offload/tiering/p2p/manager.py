@@ -481,7 +481,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
     @override
     def on_schedule_end(self) -> None:
-        # Flush any do_p2p_fetch lookups aggregated during this step.
+        # Flush any p2p lookups aggregated during this step.
         # One LookupMsg per (peer, kv_request_id) with unsent entries;
         # send-gating happens inside the session if not yet ready.
         for session in self._sessions.values():
