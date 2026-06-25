@@ -9,7 +9,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
@@ -31,6 +31,7 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
     AiterMLAHelper,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
@@ -44,6 +45,7 @@ def _convert_req_index_to_global_index_kernel(
     token_indices_ptr,  # int32 [num_tokens, NUM_TOPK_TOKENS]
     cu_seqlens_ptr,  # int32 [num_tokens + 1]
     out_ptr,  # int32 [num_tokens, NUM_TOPK_TOKENS]
+    seq_lens_ptr,  # int32 [num_requests] — actual KV length per request
     # shapes (compile-time where possible)
     max_num_blocks_per_req: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -76,21 +78,35 @@ def _convert_req_index_to_global_index_kernel(
     ti_ptr = token_indices_ptr + token_id * ti_stride0 + indice_id * ti_stride1
     tok = tl.load(ti_ptr)  # int32
 
-    # Only token == -1 should propagate as -1
+    # Sentinel -1 means "not selected / padding" — propagate as invalid.
     is_invalid_tok = tok < 0
 
     # Compute block id and in-block offset
     block_id = tok // BLOCK_SIZE
     inblock_off = tok % BLOCK_SIZE
 
-    # Guard block_table access
-    valid_block = (block_id < max_num_blocks_per_req) & (block_id >= 0)
+    # Per-request actual sequence length guard.
+    # max_num_blocks_per_req is the static tensor width (= max_model_len when
+    # block_size=1) and does NOT reflect how many entries are populated for
+    # this particular request.  At long ISL the indexer can emit sequence
+    # positions up to seq_len-1; positions beyond the request's actual KV
+    # length map to zero-initialised or stale block-table entries and must
+    # be suppressed here.
+    req_seq_len = tl.load(seq_lens_ptr + req)
+    valid_block = (
+        (block_id >= 0)
+        & (block_id < max_num_blocks_per_req)
+        & (tok < req_seq_len)  # per-request bound — the key long-context guard
+    )
+
     bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
     base = tl.load(bt_ptr, mask=valid_block, other=0)
 
-    # # If token == -1 OR block_id OOB, output 0; else base * BLOCK_SIZE + offset
+    # Write -1 for every invalid entry so the attention kernel skips it.
+    # Previously this wrote 0 (a valid physical slot), causing the kernel
+    # to attend to block 0 for every out-of-bound top-k index.
     out_val = tl.where(
-        is_invalid_tok | (~valid_block), 0, base * BLOCK_SIZE + inblock_off
+        is_invalid_tok | (~valid_block), -1, base * BLOCK_SIZE + inblock_off
     )
     out_ptr_ij = out_ptr + seq_start + indice_id
     out_ptr_ij_mask = (seq_start + indice_id) < seq_end
@@ -105,6 +121,7 @@ def triton_convert_req_index_to_global_index(
     token_indices: torch.Tensor,  # int32 [num_tokens, NUM_TOPK_TOKENS]
     cu_seqlens: torch.Tensor,  # int32 [num_tokens + 1]
     paged_kv_indices: torch.Tensor,  # int32 [num_tokens * topk] out_buffer
+    seq_lens: torch.Tensor,  # int32 [num_requests] — actual KV length per req
     BLOCK_SIZE: int = 64,
     NUM_TOPK_TOKENS: int = 2048,
     BLOCK_N: int = 128,  # tile width along columns
@@ -115,18 +132,19 @@ def triton_convert_req_index_to_global_index(
             token_indices[token_id, indice_id] // BLOCK_SIZE] * BLOCK_SIZE
         + token_indices[token_id, indice_id] % BLOCK_SIZE
 
-    Only when token_indices[token_id, indice_id] == -1 do we output -1.
-    For safety, we also output -1 if the derived block_id would be
-        out-of-bounds.
+    Outputs -1 when token_indices[token_id, indice_id] is -1 (padding),
+    when the derived block_id is out of the static table bounds, OR when
+    the sequence position exceeds the actual KV length of the owning request
+    (the long-context guard that prevents stale block-table reads at ISL >= 8K).
     """
     assert req_id.dtype == torch.int32
     assert block_table.dtype == torch.int32
     assert token_indices.dtype == torch.int32
+    assert seq_lens.dtype == torch.int32
     assert token_indices.shape[1] == NUM_TOPK_TOKENS
     assert NUM_TOPK_TOKENS % BLOCK_N == 0, (
-        f"NUM_TOPK_TOKENS ({NUM_TOPK_TOKENS}) must be divisible byBLOCK_N ({BLOCK_N})"
+        f"NUM_TOPK_TOKENS ({NUM_TOPK_TOKENS}) must be divisible by BLOCK_N ({BLOCK_N})"
     )
-    # print("req_id: ", req_id, flush=True)
     num_tokens = req_id.shape[0]
     _, max_num_blocks_per_req = block_table.shape
     tiles_per_row = NUM_TOPK_TOKENS // BLOCK_N
@@ -135,6 +153,7 @@ def triton_convert_req_index_to_global_index(
     req_id_c = req_id.contiguous()
     block_table_c = block_table.contiguous()
     token_indices_c = token_indices.contiguous()
+    seq_lens_c = seq_lens.contiguous()
 
     # Strides in elements
     bt_stride0, bt_stride1 = block_table_c.stride()
@@ -149,6 +168,7 @@ def triton_convert_req_index_to_global_index(
         token_indices_c,
         cu_seqlens,
         paged_kv_indices,
+        seq_lens_c,
         # shapes / constexprs
         max_num_blocks_per_req,
         BLOCK_SIZE,
@@ -322,6 +342,7 @@ class ROCMAiterMLASparseMetadata(AttentionMetadata):
 
     block_table: torch.Tensor
     req_id_per_token: torch.Tensor
+    seq_lens_per_req: torch.Tensor  # int32 [num_reqs] — actual KV length per request
 
     qo_indptr: torch.Tensor
     paged_kv_last_page_len: torch.Tensor
@@ -559,8 +580,14 @@ class ROCMAiterMLASparseMetadataBuilder(
             )
             self._prev_metadata_key = metadata_key
 
+        # Slice the actual per-request sequence lengths.  This is the same
+        # tensor used by the indexer decode path; slicing avoids a copy and
+        # is safe because num_reqs <= num_actual_tokens always holds.
+        num_reqs = common_attn_metadata.num_reqs
+        seq_lens_per_req = common_attn_metadata.seq_lens[:num_reqs]
+
         metadata = ROCMAiterMLASparseMetadata(
-            num_reqs=common_attn_metadata.num_reqs,
+            num_reqs=num_reqs,
             max_query_len=common_attn_metadata.max_query_len,
             max_seq_len=common_attn_metadata.max_seq_len,
             num_actual_tokens=common_attn_metadata.num_actual_tokens,
@@ -568,6 +595,7 @@ class ROCMAiterMLASparseMetadataBuilder(
             slot_mapping=common_attn_metadata.slot_mapping,
             block_table=common_attn_metadata.block_table_tensor,
             req_id_per_token=req_id_per_token,
+            seq_lens_per_req=seq_lens_per_req,
             block_size=self.kv_cache_spec.block_size,
             attn_out_dtype=self.model_dtype,
             topk_tokens=self.topk_tokens,
@@ -628,7 +656,7 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
         attn_type: str,
         kv_sharing_target_layer_name: str | None,
         # MLA Specific Arguments
-        topk_indice_buffer: torch.Tensor | None = None,
+        topk_indices_buffer: torch.Tensor | None = None,
         indexer: "Indexer | None" = None,
         **mla_args,
     ) -> None:
@@ -641,8 +669,19 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
         self.kv_cache_dtype = kv_cache_dtype
         self.kv_lora_rank: int = mla_args["kv_lora_rank"]
         self.softmax_scale = scale
-        assert indexer is not None
-        self.topk_indices_buffer: torch.Tensor | None = indexer.topk_indices_buffer
+        # The indexer carries the shared buffer for normal layers and tests;
+        # the explicitly-passed buffer covers backbone skip layers, whose
+        # indexer is not constructed (see deepseek_v2.py).
+        self.topk_indices_buffer: torch.Tensor | None = (
+            indexer.topk_indices_buffer if indexer is not None else topk_indices_buffer
+        )
+
+        vllm_config = get_current_vllm_config()
+        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        q_concat_shape = (max_tokens, num_heads, head_size)
+        (self.q_concat_buffer,) = current_workspace_manager().get_simultaneous(
+            (q_concat_shape, vllm_config.model_config.dtype),
+        )
 
     def _forward_mla(
         self,
@@ -701,9 +740,16 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
         # NOTE(lucas): for the sparse FlashMLA kernels the kernels want to use
         # MQA 576/512 approach for both prefill and decode
 
-        # Concatenate q if it's a tuple (ql_nope, q_pe)
+        fp8_attention = self.kv_cache_dtype.startswith("fp8")
         if isinstance(q, tuple):
-            q = torch.cat(q, dim=-1)
+            ql_nope, q_pe = q
+            if fp8_attention:
+                q = layer._decode_concat_quant_fp8_op(  # type: ignore[attr-defined]
+                    ql_nope, q_pe, layer._q_scale
+                )
+            else:
+                q = self.q_concat_buffer[: ql_nope.shape[0]]
+                ops.concat_mla_q(ql_nope, q_pe, q)
 
         num_actual_toks = attn_metadata.num_actual_tokens
 
@@ -717,17 +763,18 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
             topk_indices,
             attn_metadata.paged_kv_indptr,
             attn_metadata.paged_kv_indices,
+            attn_metadata.seq_lens_per_req,
             BLOCK_SIZE=attn_metadata.block_size,
             NUM_TOPK_TOKENS=attn_metadata.topk_tokens,
         )
 
         # write the latent and rope to kv cache
-        fp8_attention = self.kv_cache_dtype.startswith("fp8")
         if fp8_attention:
-            original_q_shape = q.shape
             kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(current_platform.fp8_dtype())
-            q, _ = ops.scaled_fp8_quant(q.view(q.shape[0], -1), layer._q_scale)
-            q = q.view(original_q_shape)
+            if q.dtype != current_platform.fp8_dtype():
+                original_q_shape = q.shape
+                q, _ = ops.scaled_fp8_quant(q.view(q.shape[0], -1), layer._q_scale)
+                q = q.view(original_q_shape)
         mla_padded_q = AiterMLAHelper.get_mla_padded_q(self.num_heads, q)
         attn_out = self._forward_mla(
             layer, mla_padded_q, kv_c_and_k_pe_cache, attn_metadata
