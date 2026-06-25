@@ -30,7 +30,6 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
-    get_tool_call_id_type,
 )
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.engine.protocol import (
@@ -222,9 +221,6 @@ class OpenAIServingResponses(OpenAIServing):
                 "For gpt-oss, we ignore --enable-auto-tool-choice "
                 "and always enable tool use."
             )
-
-        self.tool_call_id_type = get_tool_call_id_type(self.model_config)
-
         self.enable_auto_tools = enable_auto_tools
         # HACK(woosuk): This is a hack. We should use a better store.
         # FIXME: If enable_store=True, this may cause a memory leak since we
@@ -272,6 +268,7 @@ class OpenAIServingResponses(OpenAIServing):
             tokenizer,
             request.tools,
             chat_template_kwargs=chat_template_kwargs,
+            model_config=self.model_config,
         )
 
     def _validate_generator_input(
@@ -493,7 +490,6 @@ class OpenAIServingResponses(OpenAIServing):
                         chat_template=self.chat_template,
                         chat_template_content_format=self.chat_template_content_format,
                         enable_auto_tools=self.enable_auto_tools,
-                        tool_call_id_type=self.tool_call_id_type,
                     )
                 else:
                     context = SimpleContext(
@@ -1073,7 +1069,6 @@ class OpenAIServingResponses(OpenAIServing):
                 content=content,
                 tool_calls=tool_calls,
                 logprobs=logprobs,
-                tool_call_id_type=self.tool_call_id_type,
             )
 
         # Fallback when no parser is configured
@@ -1191,30 +1186,6 @@ class OpenAIServingResponses(OpenAIServing):
             # instructions are ignored.
             prev_msgs = self.msg_store[prev_response.id]
 
-            # FIXME(woosuk): The slice-delete-reappend cycle below is
-            # currently a no-op --- it removes messages then puts them all
-            # back unfiltered. It may be intentionally deferred (see FIXME
-            # above) or redundant if the Harmony encoder already strips
-            # analysis messages at render time. If analysis messages need
-            # to be dropped here, add a channel != "analysis" filter when
-            # re-appending, similar to auto_drop_analysis_messages in
-            # harmony_utils.py.
-            if len(prev_msgs) > 0:
-                last_msg = prev_msgs[-1]
-                assert isinstance(last_msg, OpenAIHarmonyMessage)
-                if last_msg.channel == "final":
-                    prev_final_msg_idx = -1
-                    for i in range(len(prev_msgs) - 2, -1, -1):
-                        prev_msg_i = prev_msgs[i]
-                        assert isinstance(prev_msg_i, OpenAIHarmonyMessage)
-                        if prev_msg_i.channel == "final":
-                            prev_final_msg_idx = i
-                            break
-                    recent_turn_msgs = prev_msgs[prev_final_msg_idx + 1 :]
-                    del prev_msgs[prev_final_msg_idx + 1 :]
-                    for msg in recent_turn_msgs:
-                        assert isinstance(msg, OpenAIHarmonyMessage)
-                        prev_msgs.append(msg)
             messages.extend(prev_msgs)
         # Append the new input.
         # Responses API supports simple text inputs without chat format.

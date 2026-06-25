@@ -1951,6 +1951,8 @@ class NixlBaseConnectorWorker:
         for block_ids in block_ids_for_heterogeneous_attn_post_process:
             self.post_process_device_kv_on_receive_heterogeneous_attn(block_ids)
 
+        self._sync_device_after_mamba_recv(done_recving, failed_recv_reqs)
+
         # Handle timeout to avoid stranding blocks on remote.
         now = time.perf_counter()
         while self._reqs_to_send:
@@ -1971,6 +1973,22 @@ class NixlBaseConnectorWorker:
             done_sending.add(req_id)
 
         return done_sending, done_recving
+
+    def _sync_device_after_mamba_recv(
+        self,
+        done_recving: set[str],
+        failed_recv_reqs: set[str],
+    ) -> None:
+        """Synchronize ROCm direct-GPU Mamba receives before model execution."""
+        if (
+            not current_platform.is_rocm()
+            or not self._has_mamba
+            or self.use_host_buffer
+            or not (done_recving - failed_recv_reqs)
+        ):
+            return
+
+        torch.accelerator.synchronize()
 
     def _get_new_notifs(self) -> set[str]:
         """Get req_ids which got a remote xfer notification.
