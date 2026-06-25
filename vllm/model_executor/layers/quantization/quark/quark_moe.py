@@ -508,10 +508,10 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
         self.weight_qscheme = self.weight_quant.get("qscheme", "per_tensor")
         self.static_input_scales = not self.input_quant.get("is_dynamic", False)
 
-        # The oracle/modular-kernel INT8 MoE path (TritonExperts) currently
-        # supports per-channel weights with dynamic per-token activations only.
-        # Per-tensor and static-activation INT8 MoE are not handled by the
-        # available backends.
+        # The oracle/modular-kernel INT8 MoE path supports per-channel weights
+        # with dynamic per-token activations only, matching the canonical
+        # CompressedTensorsW8A8Int8MoEMethod (per-tensor / static-activation
+        # INT8 MoE previously rode the legacy fused_experts path).
         if self.weight_qscheme != "per_channel" or self.static_input_scales:
             raise NotImplementedError(
                 "Quark INT8 Fused MoE only supports per-channel weight scales "
