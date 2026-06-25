@@ -161,14 +161,6 @@ def _merge_dcp_topk_global(
                 stable_topk_from_gathered_candidates_cutedsl,
             )
 
-            logger.info_once(
-                "DSA sparse indexer DCP CuteDSL topK merge path triggered "
-                "(rows=%d, local_candidates=%d, topk=%d, dcp_world_size=%d)",
-                topk_indices.shape[0],
-                topk_indices.shape[1],
-                topk_tokens,
-                dcp_world_size,
-            )
             packed = torch.empty(
                 (*topk_indices.shape, 2),
                 dtype=torch.float32,
