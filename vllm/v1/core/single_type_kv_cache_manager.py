@@ -19,6 +19,7 @@ from vllm.v1.core.kv_cache_utils import (
     KVCacheBlockListWithHitLength,
     get_cache_hit_length,
     has_partial_cache_hit,
+    resolve_block_hashes,
 )
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
@@ -479,7 +480,7 @@ class SingleTypeKVCacheManager(ABC):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
-    ) -> tuple[list[KVCacheBlock], ...]:
+    ) -> tuple[KVCacheBlockListWithHitLength, ...]:
         """
         Get the longest cache hit prefix of the blocks that is not longer than
         `max_length`. The prefix should be a common prefix hit for all the
@@ -617,7 +618,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         block_pool: BlockPool,
         block_size: int,
         hash_block_size: int,
-    ) -> tuple[list[KVCacheBlock], ...]:
+    ) -> tuple[KVCacheBlockListWithHitLength, ...]:
         assert block_size % hash_block_size == 0
         scale_factor = block_size // hash_block_size
         full_block_hashes = BlockHashListWithBlockSize(
@@ -628,7 +629,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             len(block_hashes),
         )
 
-        computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
+        computed_blocks: tuple[KVCacheBlockListWithHitLength, ...] = tuple(
             KVCacheBlockListWithHitLength() for _ in range(len(kv_cache_group_ids))
         )
         max_num_full_blocks = max_length // block_size
@@ -679,14 +680,21 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
-    ) -> tuple[list[KVCacheBlock], ...]:
+    ) -> tuple[KVCacheBlockListWithHitLength, ...]:
         assert isinstance(
             kv_cache_spec, FullAttentionSpec | ChunkedLocalAttentionSpec
         ), (
             "FullAttentionManager can only be used for full attention "
             "and chunked local attention groups"
         )
-        computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
+        block_hashes = resolve_block_hashes(
+            block_hashes,
+            block_pool.hash_block_size,
+            kv_cache_spec.block_size,
+            supports_fine_grained_hash_lookup=cls.supports_fine_grained_hash_lookup,
+            alignment_tokens=alignment_tokens,
+        )
+        computed_blocks: tuple[KVCacheBlockListWithHitLength, ...] = tuple(
             KVCacheBlockListWithHitLength() for _ in range(len(kv_cache_group_ids))
         )
         block_size = kv_cache_spec.block_size
@@ -932,12 +940,19 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
-    ) -> tuple[list[KVCacheBlock], ...]:
+    ) -> tuple[KVCacheBlockListWithHitLength, ...]:
         assert isinstance(kv_cache_spec, SlidingWindowSpec), (
             "SlidingWindowManager can only be used for sliding window groups"
         )
         assert dcp_world_size == 1, "DCP not support sliding window attn now."
         assert pcp_world_size == 1, "PCP not support sliding window attn now."
+        block_hashes = resolve_block_hashes(
+            block_hashes,
+            block_pool.hash_block_size,
+            kv_cache_spec.block_size,
+            supports_fine_grained_hash_lookup=cls.supports_fine_grained_hash_lookup,
+            alignment_tokens=alignment_tokens,
+        )
 
         # The number of contiguous blocks needed for a prefix cache hit.
         sliding_window_contiguous_blocks = cls._contiguous_blocks_for_hit(
@@ -951,7 +966,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         # which is good for low cache hit rate scenarios.
         max_num_blocks = max_length // kv_cache_spec.block_size
         computed_blocks = tuple(
-            [block_pool.null_block] * max_num_blocks
+            KVCacheBlockListWithHitLength([block_pool.null_block] * max_num_blocks)
             for _ in range(len(kv_cache_group_ids))
         )
         block_size = kv_cache_spec.block_size
@@ -1005,6 +1020,8 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             ):
                 for computed in computed_blocks:
                     computed.pop()
+        for computed in computed_blocks:
+            computed.hit_length = len(computed) * block_size
         return computed_blocks
 
     @classmethod
@@ -1126,7 +1143,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
-    ) -> tuple[list[KVCacheBlock], ...]:
+    ) -> tuple[KVCacheBlockListWithHitLength, ...]:
         """
         For chunked local attention, we need to find the longest cache hit
         prefix of the blocks that is not longer than `max_length`. The prefix
@@ -1175,6 +1192,13 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
             "KV cache groups with different block sizes are not compatible with "
             "chunked local attention now"
         )
+        block_hashes = resolve_block_hashes(
+            block_hashes,
+            block_pool.hash_block_size,
+            kv_cache_spec.block_size,
+            supports_fine_grained_hash_lookup=cls.supports_fine_grained_hash_lookup,
+            alignment_tokens=alignment_tokens,
+        )
         max_num_blocks = max_length // kv_cache_spec.block_size
         if max_length > 0:
             local_attention_start_idx = (
@@ -1191,8 +1215,10 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         local_attention_start_block_idx = (
             local_attention_start_idx // kv_cache_spec.block_size
         )
-        computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
-            [block_pool.null_block] * local_attention_start_block_idx
+        computed_blocks: tuple[KVCacheBlockListWithHitLength, ...] = tuple(
+            KVCacheBlockListWithHitLength(
+                [block_pool.null_block] * local_attention_start_block_idx
+            )
             for _ in range(len(kv_cache_group_ids))
         )
         for i in range(local_attention_start_block_idx, max_num_blocks):
@@ -1204,6 +1230,8 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
                     computed.append(cached)
             else:
                 break
+        for computed in computed_blocks:
+            computed.hit_length = len(computed) * kv_cache_spec.block_size
         return computed_blocks
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
@@ -1293,13 +1321,20 @@ class MambaManager(SingleTypeKVCacheManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
-    ) -> tuple[list[KVCacheBlock], ...]:
+    ) -> tuple[KVCacheBlockListWithHitLength, ...]:
         assert isinstance(kv_cache_spec, MambaSpec), (
             "MambaManager can only be used for mamba groups"
         )
         assert dcp_world_size == 1, "DCP not support mamba now."
         assert pcp_world_size == 1, "PCP not support mamba now."
-        computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
+        block_hashes = resolve_block_hashes(
+            block_hashes,
+            block_pool.hash_block_size,
+            kv_cache_spec.block_size,
+            supports_fine_grained_hash_lookup=cls.supports_fine_grained_hash_lookup,
+            alignment_tokens=alignment_tokens,
+        )
+        computed_blocks: tuple[KVCacheBlockListWithHitLength, ...] = tuple(
             KVCacheBlockListWithHitLength() for _ in range(len(kv_cache_group_ids))
         )
 
@@ -1759,7 +1794,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
-    ) -> tuple[list[KVCacheBlock], ...]:
+    ) -> tuple[KVCacheBlockListWithHitLength, ...]:
         assert isinstance(kv_cache_spec, CrossAttentionSpec), (
             "CrossAttentionManager can only be used for cross-attention groups"
         )

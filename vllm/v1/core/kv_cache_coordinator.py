@@ -10,8 +10,6 @@ from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
-    BlockHashList,
-    BlockHashListWithBlockSize,
     KVCacheBlock,
     KVCacheBlockListWithHitLength,
     get_cache_hit_length,
@@ -666,21 +664,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 - The number of tokens of the longest cache hit.
         """
 
-        def _get_block_hashes(
-            kv_cache_spec: KVCacheSpec,
-            manager_cls: type[SingleTypeKVCacheManager],
-        ) -> BlockHashList:
-            if kv_cache_spec.block_size == self.hash_block_size:
-                return block_hashes
-            if (
-                self.enable_partial_hash_hits
-                and manager_cls.supports_fine_grained_hash_lookup
-            ):
-                return block_hashes
-            return BlockHashListWithBlockSize(
-                block_hashes, self.hash_block_size, kv_cache_spec.block_size
-            )
-
         num_groups = len(self.kv_cache_config.kv_cache_groups)
         hit_length = max_cache_hit_length
         longest_hit_length = 0
@@ -723,7 +706,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                         curr_hit_length + spec.block_size, max_cache_hit_length
                     )
                 hit_blocks = manager_cls.find_longest_cache_hit(
-                    block_hashes=_get_block_hashes(spec, manager_cls),
+                    block_hashes=block_hashes,
                     max_length=_max_length,
                     kv_cache_group_ids=group_ids,
                     block_pool=self.block_pool,
@@ -755,15 +738,17 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             num_blocks = cdiv(hit_length, first_group.spec.block_size)
             for group_id in first_group.group_ids:
                 if (blks := hit_blocks_by_group[group_id]) is not None:
+                    # Full attention always returns a hit-length-carrying list.
+                    assert isinstance(blks, KVCacheBlockListWithHitLength)
                     del blks[num_blocks:]
-                    if isinstance(blks, KVCacheBlockListWithHitLength):
-                        blks.hit_length = hit_length
+                    blks.hit_length = hit_length
 
         # Uncached shared prefix detection: If any attn. group cached a longer prefix
         # than the current prefix, it is an uncached common prefix across requests:
         self.num_uncached_common_prefix_tokens = longest_hit_length - hit_length
         return tuple(
-            blocks if blocks is not None else [] for blocks in hit_blocks_by_group
+            blocks if blocks is not None else KVCacheBlockListWithHitLength()
+            for blocks in hit_blocks_by_group
         ), hit_length
 
     def find_longest_cache_hit_per_group(
@@ -777,28 +762,13 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             (blocks_per_group, hit_lengths_per_group)
         """
 
-        def _get_block_hashes(
-            kv_cache_spec: KVCacheSpec,
-            manager_cls: type[SingleTypeKVCacheManager],
-        ) -> BlockHashList:
-            if kv_cache_spec.block_size == self.hash_block_size:
-                return block_hashes
-            if (
-                self.enable_partial_hash_hits
-                and manager_cls.supports_fine_grained_hash_lookup
-            ):
-                return block_hashes
-            return BlockHashListWithBlockSize(
-                block_hashes, self.hash_block_size, kv_cache_spec.block_size
-            )
-
         num_groups = len(self.kv_cache_config.kv_cache_groups)
         hit_blocks: list[list[KVCacheBlock]] = [[] for _ in range(num_groups)]
         hit_lengths: list[int] = [0] * num_groups
 
         for spec, group_ids, manager_cls, use_eagle in self.attention_groups:
             blocks = manager_cls.find_longest_cache_hit(
-                block_hashes=_get_block_hashes(spec, manager_cls),
+                block_hashes=block_hashes,
                 max_length=max_cache_hit_length,
                 kv_cache_group_ids=group_ids,
                 block_pool=self.block_pool,

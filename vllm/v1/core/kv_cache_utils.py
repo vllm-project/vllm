@@ -2251,3 +2251,36 @@ class BlockHashListWithBlockSize:
 
 
 BlockHashList = list[BlockHash] | BlockHashListWithBlockSize
+
+
+def resolve_block_hashes(
+    block_hashes: BlockHashList,
+    hash_block_size: int,
+    block_size: int,
+    *,
+    supports_fine_grained_hash_lookup: bool = False,
+    alignment_tokens: int | None = None,
+) -> BlockHashList:
+    """Resolve the block-hash view at ``block_size``.
+
+    When ``block_size`` equals ``hash_block_size``, reuse the precomputed block
+    hashes directly; otherwise view them at ``block_size`` granularity.
+    Fine-grained lookup keeps the original hashes for partial cache hits.
+    """
+    if block_size == hash_block_size:
+        return block_hashes
+    if isinstance(block_hashes, BlockHashListWithBlockSize):
+        # Already a block-size view
+        assert block_hashes.scale_factor == block_size // hash_block_size
+        return block_hashes
+    # Fine-grained partial hits keep the raw hashes. The caller passes
+    # alignment_tokens = hash_block_size to enable them, else >= block_size.
+    if (
+        supports_fine_grained_hash_lookup
+        and alignment_tokens is not None
+        and alignment_tokens < block_size
+        and block_size % alignment_tokens == 0
+    ):
+        return block_hashes
+    assert block_size % hash_block_size == 0
+    return BlockHashListWithBlockSize(block_hashes, hash_block_size, block_size)
