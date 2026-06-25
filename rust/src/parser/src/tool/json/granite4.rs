@@ -86,14 +86,14 @@ impl Granite4ToolParser {
     /// Apply one parsed Granite 4 event to parser state and output.
     fn apply_event(&mut self, event: Granite4Event, output: &mut ToolParserOutput) -> Result<()> {
         match event {
-            Granite4Event::Text { len } => output.normal_text.push_str(&self.buffer[..len]),
+            Granite4Event::Text { len } => output.push_text(&self.buffer[..len]),
             Granite4Event::ToolCallStart => self.mode = Granite4Mode::Header,
             Granite4Event::ToolCallHeader { function_name } => {
                 let tool_index = self.emitted_tool_count;
                 self.emitted_tool_count += 1;
                 self.active_tool_index = Some(tool_index);
                 self.mode = Granite4Mode::Args { json_scan: None };
-                output.calls.push(ToolCallDelta {
+                output.push_call(ToolCallDelta {
                     tool_index,
                     name: Some(function_name),
                     arguments: String::new(),
@@ -125,7 +125,7 @@ impl Granite4ToolParser {
                 "Granite4 arguments without an active tool call"
             ));
         };
-        output.calls.push(ToolCallDelta {
+        output.push_call(ToolCallDelta {
             tool_index,
             name: None,
             arguments,
@@ -165,7 +165,7 @@ impl ToolParser for Granite4ToolParser {
     fn finish(&mut self) -> Result<ToolParserOutput> {
         let mut output = ToolParserOutput::default();
         match &self.mode {
-            Granite4Mode::Text => output.normal_text.push_str(&self.buffer),
+            Granite4Mode::Text => output.push_text(&self.buffer),
             Granite4Mode::Header | Granite4Mode::Args { .. } | Granite4Mode::Close => {
                 return Err(parsing_failed!("incomplete Granite4 tool call"));
             }
@@ -287,8 +287,8 @@ mod tests {
         let mut parser = Granite4ToolParser::new(&test_tools());
         let output = parser.parse_complete("Hello, world!").unwrap();
 
-        assert_eq!(output.normal_text, "Hello, world!");
-        assert!(output.calls.is_empty());
+        assert_eq!(output.normal_text(), "Hello, world!");
+        assert!(output.calls().is_empty());
     }
 
     #[test]
@@ -300,10 +300,10 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(output.normal_text, "");
-        assert_eq!(output.calls.len(), 1);
-        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
-        assert_eq!(output.calls[0].arguments, r#"{"city":"Boston"}"#);
+        assert_eq!(output.normal_text(), "");
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(output.calls()[0].arguments, r#"{"city":"Boston"}"#);
     }
 
     #[test]
@@ -317,9 +317,9 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(output.calls.len(), 1);
-        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
-        assert_eq!(output.calls[0].arguments, r#"{"city":"Boston"}"#);
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(output.calls()[0].arguments, r#"{"city":"Boston"}"#);
     }
 
     #[test]
@@ -333,22 +333,28 @@ mod tests {
 
         expect![[r#"
             ToolParserOutput {
-                normal_text: "before  middle  after",
-                calls: [
-                    ToolCallDelta {
-                        tool_index: 0,
-                        name: Some(
-                            "find_bbox",
-                        ),
-                        arguments: "{\"x\":1}",
-                    },
-                    ToolCallDelta {
-                        tool_index: 1,
-                        name: Some(
-                            "get_weather",
-                        ),
-                        arguments: "{\"city\":\"Boston\"}",
-                    },
+                events: [
+                    Text(
+                        "before  middle  after",
+                    ),
+                    ToolCall(
+                        ToolCallDelta {
+                            tool_index: 0,
+                            name: Some(
+                                "find_bbox",
+                            ),
+                            arguments: "{\"x\":1}",
+                        },
+                    ),
+                    ToolCall(
+                        ToolCallDelta {
+                            tool_index: 1,
+                            name: Some(
+                                "get_weather",
+                            ),
+                            arguments: "{\"city\":\"Boston\"}",
+                        },
+                    ),
                 ],
             }
         "#]]
@@ -363,10 +369,10 @@ mod tests {
 
         let output = collect_stream(&mut parser, &chunks);
 
-        assert_eq!(output.normal_text, "hello  bye");
-        assert_eq!(output.calls.len(), 1);
-        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
-        assert_eq!(output.calls[0].arguments, r#"{"city":"Tokyo"}"#);
+        assert_eq!(output.normal_text(), "hello  bye");
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(output.calls()[0].arguments, r#"{"city":"Tokyo"}"#);
     }
 
     #[test]
@@ -385,7 +391,7 @@ mod tests {
         for chunk in chunks {
             let next = parser.parse_chunk(chunk).unwrap();
             observed_arguments.extend(
-                next.calls
+                next.calls()
                     .iter()
                     .filter(|call| call.name.is_none())
                     .map(|call| call.arguments.clone()),
@@ -396,7 +402,7 @@ mod tests {
 
         assert_eq!(observed_arguments, [r#"{"city":"#, r#""Beijing""#, r#"}"#]);
         assert_eq!(
-            output.coalesce_calls().calls[0].arguments,
+            output.coalesce().calls()[0].arguments,
             r#"{"city":"Beijing"}"#
         );
     }
@@ -409,9 +415,9 @@ mod tests {
 
         let output = collect_stream(&mut parser, &chunks);
 
-        assert_eq!(output.calls.len(), 1);
-        assert_eq!(output.calls[0].name.as_deref(), Some("f"));
-        assert_eq!(output.calls[0].arguments, r#"{"a":1}"#);
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(output.calls()[0].name.as_deref(), Some("f"));
+        assert_eq!(output.calls()[0].arguments, r#"{"a":1}"#);
     }
 
     #[test]
@@ -435,29 +441,37 @@ mod tests {
 
         expect![[r#"
             ToolParserOutput {
-                normal_text: "Here goes the bbox call: \n Now the stock price call: \n  Now another bbox call: \n  See? I'm a helpful assistant.",
-                calls: [
-                    ToolCallDelta {
-                        tool_index: 0,
-                        name: Some(
-                            "find_bbox",
-                        ),
-                        arguments: "{\"coordinates\": [[23.54, 43.1], [-12.2, 54.3], [4, 5]], \"coordinate_type\": \"latlong\"}",
-                    },
-                    ToolCallDelta {
-                        tool_index: 1,
-                        name: Some(
-                            "get_stock_price",
-                        ),
-                        arguments: "{\"symbol\": \"AAPL\", \"start_date\": \"2021-01-01\", \"end_date\": \"2021-12-31\"}",
-                    },
-                    ToolCallDelta {
-                        tool_index: 2,
-                        name: Some(
-                            "find_bbox",
-                        ),
-                        arguments: "{\"coordinates\": [[23.54, 43.1], [-12.2, 54.3], [4, 5]], \"coordinate_type\": \"latlong\"}",
-                    },
+                events: [
+                    Text(
+                        "Here goes the bbox call: \n Now the stock price call: \n  Now another bbox call: \n  See? I'm a helpful assistant.",
+                    ),
+                    ToolCall(
+                        ToolCallDelta {
+                            tool_index: 0,
+                            name: Some(
+                                "find_bbox",
+                            ),
+                            arguments: "{\"coordinates\": [[23.54, 43.1], [-12.2, 54.3], [4, 5]], \"coordinate_type\": \"latlong\"}",
+                        },
+                    ),
+                    ToolCall(
+                        ToolCallDelta {
+                            tool_index: 1,
+                            name: Some(
+                                "get_stock_price",
+                            ),
+                            arguments: "{\"symbol\": \"AAPL\", \"start_date\": \"2021-01-01\", \"end_date\": \"2021-12-31\"}",
+                        },
+                    ),
+                    ToolCall(
+                        ToolCallDelta {
+                            tool_index: 2,
+                            name: Some(
+                                "find_bbox",
+                            ),
+                            arguments: "{\"coordinates\": [[23.54, 43.1], [-12.2, 54.3], [4, 5]], \"coordinate_type\": \"latlong\"}",
+                        },
+                    ),
                 ],
             }
         "#]].assert_debug_eq(&output);
