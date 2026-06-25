@@ -156,7 +156,7 @@ class EngineCoreEventType(enum.IntEnum):
 class EngineCoreEvent(msgspec.Struct):
     """A timestamped engine core event associated with a request.
 
-    The timestamp is a monotonic timestamps and is used for by the engine
+    The timestamp is a monotonic timestamp and is used by the engine
     frontend to calculate intervals between engine core events. These
     timestamps should not be compared with timestamps from other processes.
     """
