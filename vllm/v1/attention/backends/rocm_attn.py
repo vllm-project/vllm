@@ -29,6 +29,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode,
+    has_native_kv_cache_layout,
 )
 from vllm.v1.attention.ops.paged_attn import PagedAttention
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
@@ -478,16 +479,44 @@ class RocmAttentionImpl(AttentionImpl):
         key_cache, value_cache = PagedAttention.split_kv_cache(
             kv_cache, self.num_kv_heads, self.head_size
         )
-        triton_reshape_and_cache_flash(
-            key,
-            value,
-            key_cache,
-            value_cache,
-            slot_mapping,
-            self.kv_cache_dtype,
-            layer._k_scale,
-            layer._v_scale,
+
+        # Reshape the input keys and values and store them in the cache.
+        # Get the actual block_size from value_cache
+        # value_cache shape: [num_blocks, num_heads, head_size, block_size]
+        block_size = value_cache.shape[3]
+        has_native_layout = has_native_kv_cache_layout(key_cache, value_cache)
+        has_packed_blocks = (
+            key_cache.stride(0) == key_cache.shape[1:].numel()
+            and value_cache.stride(0) == value_cache.shape[1:].numel()
         )
+
+        if block_size in (16, 32) and has_native_layout and has_packed_blocks:
+            # Normal 16, 32 with contiguous blocks: use vLLM native HIP C++ logic.
+            PagedAttention.write_to_paged_cache(
+                key,
+                value,
+                key_cache,
+                value_cache,
+                slot_mapping,
+                self.kv_cache_dtype,
+                layer._k_scale,
+                layer._v_scale,
+            )
+        else:
+            # Non-standard blocks and hybrid attention/Mamba layouts need the
+            # stride-aware Triton writer. The native reshape_and_cache kernel
+            # assumes contiguous block storage and writes to the wrong hybrid
+            # cache blocks.
+            triton_reshape_and_cache_flash(
+                key,
+                value,
+                key_cache,
+                value_cache,
+                slot_mapping,
+                self.kv_cache_dtype,
+                layer._k_scale,
+                layer._v_scale,
+            )
 
     def fused_rope_kvcache_supported(self):
         return rocm_aiter_ops.is_enabled()
