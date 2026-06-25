@@ -5,9 +5,7 @@
 This backend calls ``aiter.flash_attn_varlen_func`` directly, which natively
 supports different q/k and v head dims (qk headdim 192, v headdim 128) without
 padding V, and dispatches to the fast ``aiter::fmha_fwd_`` kernel on
-gfx942/gfx950 (fp16/bf16). It also returns ``softmax_lse`` shaped ``(nheads, total_q)`` --
-exactly what ``merge_attn_states`` expects -- so no LSE transpose is required.
-
+gfx942/gfx950 (fp16/bf16).
 """
 
 from typing import TYPE_CHECKING
@@ -23,7 +21,7 @@ if TYPE_CHECKING:
 
 
 class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
-    """AITER FlashAttention backend for MLA prefill """
+    """AITER FlashAttention backend for MLA prefill"""
 
     @staticmethod
     def get_name() -> str:

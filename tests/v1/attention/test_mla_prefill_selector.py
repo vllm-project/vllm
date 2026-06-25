@@ -367,7 +367,8 @@ class TestROCmAiterFAPrefillSelection:
             AiterFlashAttnPrefillBackend,
         )
 
-        # gfx gating is simulated via the mocked validate_configuration, not the capability.
+        # gfx gating is simulated via the mocked validate_configuration,
+        # not the capability.
         capability = MagicMock()
         selector_config = MLAPrefillSelectorConfig(dtype=torch.bfloat16)
 
@@ -394,7 +395,8 @@ class TestROCmAiterFAPrefillSelection:
             pytest.skip("FLASH_ATTN backend not available")
             return
 
-        # the fallback is forced by the mocked validate_configuration, not the capability.
+        # the fallback is forced by the mocked validate_configuration,
+        # not the capability.
         capability = MagicMock()
         selector_config = MLAPrefillSelectorConfig(dtype=torch.bfloat16)
 
