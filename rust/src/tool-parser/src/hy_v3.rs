@@ -5,9 +5,9 @@ use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until};
 
 use super::parameters::ToolSchemas;
-use super::utils::{parse_buffered_event, safe_text_len};
+use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len, take_until_marker};
 use super::{Result, ToolCallDelta, ToolParser, ToolParserOutput};
-use crate::Tool;
+use crate::{StructuralTagModel, Tool};
 
 const TOOL_CALLS_START: &str = "<tool_calls>";
 const TOOL_CALLS_END: &str = "</tool_calls>";
@@ -21,10 +21,10 @@ const ARG_VALUE_END: &str = "</arg_value>";
 
 type HyV3Input<'i> = Partial<&'i str>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum HyV3Mode {
     Text,
-    ToolBlock,
+    ToolBlock { tool_call_end_scan: MarkerScanState },
     Done,
 }
 
@@ -81,7 +81,11 @@ impl HyV3ToolParser {
             HyV3Event::Text { len: consumed_len } => {
                 output.normal_text.push_str(&self.buffer[..consumed_len]);
             }
-            HyV3Event::ToolBlockStart => self.mode = HyV3Mode::ToolBlock,
+            HyV3Event::ToolBlockStart => {
+                self.mode = HyV3Mode::ToolBlock {
+                    tool_call_end_scan: MarkerScanState::default(),
+                };
+            }
             HyV3Event::ToolCall { name, raw_params } => {
                 let arguments = self.tool_parameters.convert_params_with_schema(&name, raw_params);
                 let arguments = serde_json::to_string(&arguments)
@@ -109,11 +113,15 @@ impl ToolParser for HyV3ToolParser {
         Ok(Box::new(Self::new(tools)))
     }
 
+    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
+        Some(StructuralTagModel::HyV3)
+    }
+
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         self.buffer.push_str(chunk);
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
-            parse_next_hy_v3_event(input, self.mode)
+            parse_next_hy_v3_event(input, &mut self.mode)
         })? {
             self.apply_event(event, output)?;
             self.buffer.drain(..consumed_len);
@@ -126,7 +134,7 @@ impl ToolParser for HyV3ToolParser {
         let mut output = ToolParserOutput::default();
         match self.mode {
             HyV3Mode::Text => output.normal_text.push_str(&self.buffer),
-            HyV3Mode::ToolBlock => return Err(parsing_failed!("incomplete HY3 tool call")),
+            HyV3Mode::ToolBlock { .. } => return Err(parsing_failed!("incomplete HY3 tool call")),
             HyV3Mode::Done => {}
         }
         let _ = self.reset();
@@ -141,10 +149,15 @@ impl ToolParser for HyV3ToolParser {
 }
 
 /// Parse a HY3 event for the current parser mode.
-fn parse_next_hy_v3_event(input: &mut HyV3Input<'_>, mode: HyV3Mode) -> ModalResult<HyV3Event> {
+fn parse_next_hy_v3_event(
+    input: &mut HyV3Input<'_>,
+    mode: &mut HyV3Mode,
+) -> ModalResult<HyV3Event> {
     match mode {
         HyV3Mode::Text => parse_text_event(input),
-        HyV3Mode::ToolBlock => parse_tool_block_event(input),
+        HyV3Mode::ToolBlock { tool_call_end_scan } => {
+            parse_tool_block_event(input, tool_call_end_scan)
+        }
         HyV3Mode::Done => ignored_rest_event(input),
     }
 }
@@ -165,8 +178,14 @@ fn safe_text_event(input: &mut HyV3Input<'_>) -> ModalResult<HyV3Event> {
 }
 
 /// Parse one event inside a HY3 tool block.
-fn parse_tool_block_event(input: &mut HyV3Input<'_>) -> ModalResult<HyV3Event> {
-    alt((tool_block_end_event, tool_call_event)).parse_next(input)
+fn parse_tool_block_event(
+    input: &mut HyV3Input<'_>,
+    tool_call_end_scan: &mut MarkerScanState,
+) -> ModalResult<HyV3Event> {
+    alt((tool_block_end_event, |input: &mut HyV3Input<'_>| {
+        tool_call_event(input, tool_call_end_scan)
+    }))
+    .parse_next(input)
 }
 
 /// Parse a HY3 tool-block end marker.
@@ -175,13 +194,16 @@ fn tool_block_end_event(input: &mut HyV3Input<'_>) -> ModalResult<HyV3Event> {
 }
 
 /// Parse a complete HY3 tool-call block.
-fn tool_call_event(input: &mut HyV3Input<'_>) -> ModalResult<HyV3Event> {
+fn tool_call_event(
+    input: &mut HyV3Input<'_>,
+    tool_call_end_scan: &mut MarkerScanState,
+) -> ModalResult<HyV3Event> {
     let (name, body) = seq!(
         _: ws0,
         _: literal(TOOL_CALL_START),
         take_until(0.., TOOL_SEP),
         _: literal(TOOL_SEP),
-        take_until(0.., TOOL_CALL_END),
+        take_until_marker(TOOL_CALL_END, tool_call_end_scan),
         _: literal(TOOL_CALL_END),
     )
     .parse_next(input)?;
