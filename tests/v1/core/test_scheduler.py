@@ -292,34 +292,32 @@ def test_schedule_prefills_gating(has_running: bool):
     assert any(r.req_id == "new0" for r in output.scheduled_new_reqs)
 
 
-def test_throttle_prefills_excludes_remote_kv_resume():
-    """A request resuming after a completed async KV load (num_computed_tokens
-    > 0, e.g. the decode side of P/D disaggregation) must NOT be throttled by
-    the DP prefill cadence: only fresh prefills are deferred. Otherwise the
-    resumed request's first (single-token) step would be needlessly delayed.
+def _setup_remote_kv_resume(num_prompt_tokens: int, matched_tokens: int):
+    """Drive a remote-KV request `r2` to the resume point (async load complete)
+    while another request `r1` is already decoding, so the step is throttle-
+    eligible. Returns the scheduler. The connector matches `matched_tokens` of
+    `r2`'s prompt; the rest (if any) is local prefill.
     """
     from tests.v1.kv_connector.unit.utils import create_model_runner_output
 
     BLOCK_SIZE = 16
-    NUM_MATCHED = BLOCK_SIZE * 2
     scheduler = create_scheduler(
         enable_prefix_caching=True,
-        use_kv_connector=mock_kv(matched_tokens=NUM_MATCHED, is_async=True),
+        use_kv_connector=mock_kv(matched_tokens=matched_tokens, is_async=True),
         block_size=BLOCK_SIZE,
     )
-
-    # Two remote-KV requests with distinct prompts (so r2 gets no local prefix
-    # cache hit from r1, only the connector's external async load).
+    # Distinct prompts so r2 gets no local prefix cache hit from r1, only the
+    # connector's external async load.
     r1, r2 = create_requests(
         num_requests=2,
-        num_tokens=NUM_MATCHED * 2,
+        num_tokens=num_prompt_tokens,
         max_tokens=20,
         block_size=BLOCK_SIZE,
         req_ids=["r1", "r2"],
     )
 
-    # r1: drive through its async KV load and into the running (decode) state,
-    # so that self.running is non-empty for the assertion below.
+    # r1: drive through its async KV load into the running (decode) state, so
+    # self.running is non-empty (which makes the next step throttle-eligible).
     scheduler.add_request(r1)
     _step_until_kv_transfer_finished(scheduler, ["r1"])
     output = scheduler.schedule()  # promote + schedule r1
@@ -337,12 +335,37 @@ def test_throttle_prefills_excludes_remote_kv_resume():
         output, create_model_runner_output([r1], finished_recving={"r2"})
     )
     assert "r2" in scheduler.finished_recving_kv_req_ids
+    return scheduler
 
-    # Throttle prefills. r2's load is complete, so it must be promoted and
-    # scheduled (a resume, not a fresh prefill) even though the running decode
-    # (r1) would otherwise make this a throttled step.
+
+def test_throttle_prefills_excludes_fully_transferred_remote_kv():
+    """A remote-KV resume whose whole prompt was transferred (no local prefill
+    left, e.g. the decode side of P/D disaggregation) must NOT be throttled by
+    the DP prefill cadence -- its single-token step has no prefill compute to
+    defer, so delaying it would be pointless.
+    """
+    block_size = 16
+    num_prompt = block_size * 2
+    # Fully matched: the whole prompt is loaded remotely.
+    scheduler = _setup_remote_kv_resume(num_prompt, matched_tokens=num_prompt)
+
     output = scheduler.schedule(throttle_prefills=True)
     assert "r2" in output.num_scheduled_tokens
+    assert "r1" in output.num_scheduled_tokens
+
+
+def test_throttle_prefills_defers_remote_kv_resume_with_local_prefill():
+    """A remote-KV resume with local prefill still to compute (the connector
+    only matched part of the prompt) IS throttled by the DP prefill cadence,
+    like any other request doing local prefill compute this step.
+    """
+    block_size = 16
+    num_prompt = block_size * 4
+    # Half matched: the remaining half is local prefill compute.
+    scheduler = _setup_remote_kv_resume(num_prompt, matched_tokens=num_prompt // 2)
+
+    output = scheduler.schedule(throttle_prefills=True)
+    assert "r2" not in output.num_scheduled_tokens  # deferred (has local prefill)
     assert "r1" in output.num_scheduled_tokens
 
 
@@ -1277,6 +1300,101 @@ def test_no_spec_tokens_scheduled_for_prefill_chunks():
     assert output.num_scheduled_tokens[req.request_id] == 4
     assert req.request_id in output.scheduled_spec_decode_tokens
     assert len(output.scheduled_spec_decode_tokens[req.request_id]) == num_spec_tokens
+
+
+def _model_output(scheduler, output, sampled):
+    """Feed `sampled` (per-request list) back to the scheduler."""
+    req_ids = list(output.num_scheduled_tokens.keys())
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=req_ids,
+            req_id_to_index={r: i for i, r in enumerate(req_ids)},
+            sampled_token_ids=sampled,
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+
+def test_spec_decode_padding_first_decode_step():
+    """A request taking its first decode step (whole prompt already computed via
+    a prefix-cache hit) is padded with placeholder (-1) spec tokens so it enters
+    the worker with the same 1 + num_spec_tokens shape as the other speculative
+    decodes, keeping the batch uniform.
+    """
+    num_spec = 3
+    scheduler = create_scheduler(
+        num_speculative_tokens=num_spec,
+        enable_prefix_caching=True,
+        block_size=16,
+    )
+    # Two identical 33-token prompts: 2 full blocks (32 tokens) get cached, so a
+    # second identical request hits num_computed == num_prompt_tokens - 1.
+    r1, r2 = create_requests(
+        num_requests=2, num_tokens=33, same_prompt=True, max_tokens=16
+    )
+
+    # Drive r1 through prefill so its prompt blocks are cached, then give it real
+    # drafts so it is a running speculative decode (1 + num_spec shape).
+    scheduler.add_request(r1)
+    out = scheduler.schedule()
+    assert out.num_scheduled_tokens[r1.request_id] == 33
+    _model_output(scheduler, out, [[100]])
+    scheduler.update_draft_token_ids(DraftTokenIds([r1.request_id], [[1, 2, 3]]))
+
+    # r2 arrives; its whole prompt is a prefix-cache hit -> first decode step.
+    scheduler.add_request(r2)
+    out = scheduler.schedule()
+
+    # r1 verifies its real drafts.
+    assert out.scheduled_spec_decode_tokens[r1.request_id] == [1, 2, 3]
+    # r2 is padded to the 1 + num_spec shape with placeholder (-1) drafts.
+    assert out.num_scheduled_tokens[r2.request_id] == 1 + num_spec
+    assert out.scheduled_spec_decode_tokens[r2.request_id] == [-1] * num_spec
+
+
+def test_spec_decode_padding_skipped_with_prefill_in_batch():
+    """Padding is skipped when the batch contains a prefill chunk: the batch is
+    already mixed/non-uniform, so padding a new decode request buys nothing.
+    """
+    num_spec = 3
+    scheduler = create_scheduler(
+        num_speculative_tokens=num_spec,
+        enable_prefix_caching=True,
+        block_size=16,
+        max_num_batched_tokens=64,
+    )
+    # r_warm + r_candidate share a prompt so r_candidate gets a full prefix hit.
+    r_warm, r_candidate = create_requests(
+        num_requests=2, num_tokens=33, same_prompt=True, max_tokens=1
+    )
+    # r_long has a different, long prompt that prefills over multiple chunks.
+    (r_long,) = create_requests(num_requests=1, num_tokens=100, max_tokens=16)
+
+    # Warm the prefix cache with r_warm's prompt (it finishes; blocks stay cached).
+    scheduler.add_request(r_warm)
+    out = scheduler.schedule()
+    assert out.num_scheduled_tokens[r_warm.request_id] == 33
+    _model_output(scheduler, out, [[100]])
+    assert r_warm.request_id in scheduler.finished_req_ids
+
+    # Start r_long; after one chunk it remains a prefill chunk in the running queue.
+    scheduler.add_request(r_long)
+    out = scheduler.schedule()
+    _model_output(scheduler, out, [[]])  # still prefilling, no sampled token
+    assert r_long.is_prefill_chunk
+
+    # r_candidate arrives (prefix-cache hit -> first decode step) alongside the
+    # in-flight prefill chunk.
+    scheduler.add_request(r_candidate)
+    out = scheduler.schedule()
+
+    # The batch has a prefill chunk, so r_candidate is NOT padded.
+    assert r_long.request_id in out.num_scheduled_tokens
+    assert out.num_scheduled_tokens[r_candidate.request_id] == 1
+    assert r_candidate.request_id not in out.scheduled_spec_decode_tokens
 
 
 def test_scheduler_stats_waiting_queues():
