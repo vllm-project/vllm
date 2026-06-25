@@ -213,6 +213,18 @@ class Gemma4Config(VerifyAndUpdateConfig):
 
         max_head_dim = max(head_dim, global_head_dim)
 
+        # KVarN runs all layers itself (its own backend, per-layer head_size up
+        # to 512), so it must not be overridden by the Gemma4 mixed-backend
+        # workaround below. MLA dtypes route elsewhere and are unaffected.
+        _cache_dtype = getattr(vllm_config.cache_config, "cache_dtype", None)
+        _is_kvarn = (
+            isinstance(_cache_dtype, str)
+            and _cache_dtype.startswith("kvarn_")
+            and not _cache_dtype.startswith("kvarn_mla")
+        )
+        if _is_kvarn:
+            return
+
         if is_fa_version_supported(4) and max_head_dim <= 512:
             if (
                 vllm_config.attention_config.flash_attn_version is None
@@ -491,7 +503,7 @@ class LlamaBidirectionalConfig(VerifyAndUpdateConfig):
             "last": "LAST",
         }
 
-        pooling_type = pooling_type_map.get(hf_config.pooling, None)
+        pooling_type = pooling_type_map.get(hf_config.pooling)
         if pooling_type is None:
             raise ValueError(f"pool_type {hf_config.pooling!r} not supported")
 

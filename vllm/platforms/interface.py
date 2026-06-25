@@ -709,6 +709,34 @@ class Platform:
                 attn_page_size_1_token = lcm(tq_page, skip_page)
             else:
                 attn_page_size_1_token = tq_page
+        elif cache_config.cache_dtype.startswith("kvarn_") and not (
+            cache_config.cache_dtype.startswith("kvarn_mla")
+        ):
+            # KVarN (non-MLA) packs K|V into a compressed per-(token,head) slot,
+            # like TQ. The standard FullAttentionSpec formula over-sizes the page
+            # (uses FP16 head_size*dtype) and trips unify_kv_cache_spec_page_size
+            # in hybrid models, because the mamba padding is then sized to the
+            # FP16 page while the real KVarN page is ~4x smaller and no longer
+            # divides it. Use the real KVarN slot bytes (matches the
+            # TQFullAttentionSpec built in attention.py for kvarn_ dtypes).
+            from vllm.model_executor.layers.quantization.kvarn.config import (
+                KVarNConfig,
+            )
+            from vllm.v1.kv_cache_interface import TQFullAttentionSpec
+
+            kvarn_cfg = KVarNConfig.from_cache_dtype(
+                cache_config.cache_dtype, model_config.get_head_size()
+            )
+            slot_bytes = kvarn_cfg.tile_bytes_aligned // kvarn_cfg.group
+            attn_page_size_1_token = TQFullAttentionSpec(
+                block_size=1,
+                num_kv_heads=model_config.get_num_kv_heads(parallel_config),
+                head_size=model_config.get_head_size(),
+                head_size_v=model_config.get_head_size(),
+                dtype=kv_cache_dtype,
+                kv_quant_mode=kv_quant_mode,
+                tq_slot_size=slot_bytes,
+            ).page_size_bytes
         else:
             attn_page_size_1_token = FullAttentionSpec(
                 block_size=1,

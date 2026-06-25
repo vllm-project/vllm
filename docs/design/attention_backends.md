@@ -107,6 +107,7 @@ Priority is **1 = highest** (tried first).
 | 3 | `TRITON_ATTN` |
 | 4 | `FLEX_ATTENTION` |
 | 5 | `TURBOQUANT` |
+| 6 | `KVARN` |
 
 **Ampere/Hopper (SM 8.x-9.x):**
 
@@ -117,6 +118,7 @@ Priority is **1 = highest** (tried first).
 | 3 | `TRITON_ATTN` |
 | 4 | `FLEX_ATTENTION` |
 | 5 | `TURBOQUANT` |
+| 6 | `KVARN` |
 
 ### MLA Attention (DeepSeek-style)
 
@@ -167,6 +169,7 @@ Priority is **1 = highest** (tried first).
 | `FLASH_ATTN` | FA4* | fp16, bf16 | `auto`, `float16`, `bfloat16` | %16 | Any | ✅ | ✅ | ❌ | ✅ | All | ≥10.0 |
 | `FLASH_ATTN_DIFFKV` | | fp16, bf16 | `auto` | Any | Any | ❌ | ❌ | ❌ | ✅ | Decoder | Any |
 | `FLEX_ATTENTION` | | fp16, bf16, fp32 | `auto`, `float16`, `bfloat16` | %16 | Any | ❌ | ✅ | ✅ | ❌ | Decoder, Encoder Only | Any |
+| `KVARN` | | fp16, bf16 | `kvarn_k4v4_g128`, `kvarn_k4v2_g128`, `kvarn_k4v4_g64`, `kvarn_k4v2_g64` | Any | Any | ❌ | ✅ | ✅ | ❌ | Decoder | Any |
 | `ROCM_AITER_FA` | | fp16, bf16 | `auto`, `float16`, `bfloat16`, `fp8`, `fp8_e4m3`, `fp8_e5m2` | 16, 32 | 64, 128, 256 | ✅ | ✅ | ❌ | ❌ | Decoder | N/A |
 | `ROCM_AITER_UNIFIED_ATTN` | | bf16 | `auto`, `bfloat16`, `fp8`, `fp8_e4m3` | %16 | Any | ✅ | ❌ | ✅ | ❌ | All | N/A |
 | `ROCM_ATTN` | | fp16, bf16, fp32 | `auto`, `float16`, `bfloat16`, `fp8`, `fp8_e4m3`, `fp8_e5m2` | %16 | 32, 64, 80, 96, 128, 160, 192, 224, 256 | ❌ | ✅ | ✅ | ❌ | Decoder, Encoder, Encoder Only | N/A |
