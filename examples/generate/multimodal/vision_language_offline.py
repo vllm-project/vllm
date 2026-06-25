@@ -2918,14 +2918,29 @@ def main(args):
 
     if req_data.use_llm_chat:
         if args.verify_mm_cache_hit_with_uuids:
-            raise ValueError("verify-mm-cache-hit-with-uuids is not supported when use_llm_chat is True.")
+            raise ValueError(
+                "verify-mm-cache-hit-with-uuids is not supported when "
+                "use_llm_chat is True."
+            )
 
-        images = [inputs["multi_modal_data"][modality]] if args.num_prompts == 1 else [inp["multi_modal_data"][modality] for inp in inputs]
+        images = (
+            [inputs["multi_modal_data"][modality]]
+            if args.num_prompts == 1
+            else [inp["multi_modal_data"][modality] for inp in inputs]
+        )
         messages = [
-            [{"role": "user", "content": [
-                {"type": "text", "text": prompts[i % len(prompts)]},
-                {"type": "image_url", "image_url": {"url": encode_image_url(images[i])}},
-            ]}]
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompts[i % len(prompts)]},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": encode_image_url(images[i])},
+                        },
+                    ],
+                }
+            ]
             for i in range(args.num_prompts)
         ]
 
@@ -2934,9 +2949,9 @@ def main(args):
 
         print("-" * 50)
         for o in outputs:
-             generated_text = o.outputs[0].text
-             print(generated_text)
-             print("-" * 50)
+            generated_text = o.outputs[0].text
+            print(generated_text)
+            print("-" * 50)
         return
 
     with time_counter(args.time_generate):
