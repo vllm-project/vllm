@@ -133,9 +133,9 @@ __device__ __forceinline__ float GroupReduceMax8(float val) {
   return val;
 }
 
-template <typename T, typename DST_DTYPE, int VEC_SIZE>
+template <typename T, typename DST_DTYPE, int VEC_SIZE, bool SCALE_IS_INVERTED>
 __device__ __forceinline__ uint4
-QuantizeRegisterGroup(const T (&regs)[VEC_SIZE], const float inv_y,
+QuantizeRegisterGroup(const T (&regs)[VEC_SIZE], const float scale,
                       const float min_8bit, const float max_8bit) {
   uint32_t packed_lo = 0;
   uint32_t packed_lo_hi = 0;
@@ -143,8 +143,13 @@ QuantizeRegisterGroup(const T (&regs)[VEC_SIZE], const float inv_y,
   uint32_t packed_hi = 0;
 #pragma unroll
   for (int i = 0; i < VEC_SIZE; ++i) {
-    float q =
-        fminf(fmaxf(static_cast<float>(regs[i]) * inv_y, min_8bit), max_8bit);
+    float q = static_cast<float>(regs[i]);
+    if constexpr (SCALE_IS_INVERTED) {
+      q *= scale;
+    } else {
+      q /= scale;
+    }
+    q = fminf(fmaxf(q, min_8bit), max_8bit);
     DST_DTYPE qb = DST_DTYPE(q);
     uint8_t byte = *reinterpret_cast<uint8_t*>(&qb);
     const int shift = (i & 3) * 8;
@@ -323,11 +328,9 @@ __global__ void per_token_group_quant_8bit_register_kernel(
     return;
   }
 
-  float inv_y = 1.0f / y_s;
-
   // pack into 16 fp8/int8 bytes (= uint4)
-  uint4 packed_out = QuantizeRegisterGroup<T, DST_DTYPE, VEC_SIZE>(
-      regs, inv_y, min_8bit, max_8bit);
+  uint4 packed_out = QuantizeRegisterGroup<T, DST_DTYPE, VEC_SIZE, false>(
+      regs, y_s, min_8bit, max_8bit);
   DST_DTYPE* group_output =
       static_cast<DST_DTYPE*>(output_q) +
       static_cast<int64_t>(mn_idx) * groups_per_row * GROUP_SIZE +
@@ -482,19 +485,23 @@ void per_token_group_quant_8bit(const torch::stable::Tensor& input,
 
     VLLM_STABLE_DISPATCH_HALF_TYPES(
         input.scalar_type(), "per_token_group_quant_8bit_register", ([&] {
-          if (dst_type == torch::headeronly::ScalarType::Float8_e4m3fn) {
-            LAUNCH_REG_KERNEL_FLAGS(scalar_t, __nv_fp8_e4m3);
-          } else if (dst_type == torch::headeronly::ScalarType::Char) {
+          if (dst_type == torch::headeronly::ScalarType::Char) {
             LAUNCH_REG_KERNEL_FLAGS(scalar_t, int8_t);
+          } else {
+            VLLM_STABLE_DISPATCH_FP8_TYPES(
+                dst_type, "per_token_group_quant_8bit_register_fp8",
+                ([&] { LAUNCH_REG_KERNEL_FLAGS(scalar_t, fp8_t); }));
           }
         }));
   } else {
     VLLM_STABLE_DISPATCH_FLOATING_TYPES(
         input.scalar_type(), "per_token_group_quant_8bit", ([&] {
-          if (dst_type == torch::headeronly::ScalarType::Float8_e4m3fn) {
-            LAUNCH_KERNEL(scalar_t, __nv_fp8_e4m3);
-          } else if (dst_type == torch::headeronly::ScalarType::Char) {
+          if (dst_type == torch::headeronly::ScalarType::Char) {
             LAUNCH_KERNEL(scalar_t, int8_t);
+          } else {
+            VLLM_STABLE_DISPATCH_FP8_TYPES(
+                dst_type, "per_token_group_quant_8bit_fp8",
+                ([&] { LAUNCH_KERNEL(scalar_t, fp8_t); }));
           }
         }));
   }
@@ -618,7 +625,7 @@ __global__ void per_token_group_quant_8bit_packed_register_kernel(
 
   // Quantize and pack into 16 fp8/int8 bytes (= uint4). VEC_SIZE==16 so we
   // fill four 32-bit words, four bytes each.
-  uint4 packed_out = QuantizeRegisterGroup<T, DST_DTYPE, VEC_SIZE>(
+  uint4 packed_out = QuantizeRegisterGroup<T, DST_DTYPE, VEC_SIZE, true>(
       regs, inv_y, min_8bit, max_8bit);
   DST_DTYPE* group_output =
       static_cast<DST_DTYPE*>(output_q) +
