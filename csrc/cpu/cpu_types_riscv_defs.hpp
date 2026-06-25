@@ -3,13 +3,17 @@
 
 // VLEN-to-LMUL mapping for RISC-V Vector extension.
 //
-// LMUL_<N> expands to the LMUL suffix giving N total bits of vector data:
-//   VLEN=128: LMUL_128=m1,  LMUL_256=m2,  LMUL_512=m4,  LMUL_1024=m8
-//   VLEN=256: LMUL_128=mf2, LMUL_256=m1,  LMUL_512=m2,  LMUL_1024=m4
+// LMUL_<N> expands to the LMUL suffix giving N total bits of vector data.
+// LMUL_64 is used by 8-lane int8/uint8 vectors.
+//   VLEN=128:
+//     LMUL_64=mf2, LMUL_128=m1, LMUL_256=m2, LMUL_512=m4, LMUL_1024=m8
+//   VLEN=256:
+//     LMUL_64=mf4, LMUL_128=mf2, LMUL_256=m1, LMUL_512=m2, LMUL_1024=m4
 
 #include <riscv_vector.h>
 
 #if __riscv_v_min_vlen == 128
+  #define LMUL_64 mf2
   #define LMUL_128 m1
   #define LMUL_256 m2
   #define LMUL_512 m4
@@ -17,6 +21,7 @@
   #define BOOL_256 b16
   #define BOOL_512 b8
 #elif __riscv_v_min_vlen == 256
+  #define LMUL_64 mf4
   #define LMUL_128 mf2
   #define LMUL_256 m1
   #define LMUL_512 m2
@@ -40,6 +45,16 @@
 #define RVVIB(base, lmul, btype) _RVV_PB(base, lmul, btype)
 
 // ---- Semantic fixed-vector typedefs (named by element count) ----
+
+// uint8 / int8
+typedef RVVTYPE(vuint8, LMUL_64, _t) fixed_u8x8_t
+    __attribute__((riscv_rvv_vector_bits(64)));
+typedef RVVTYPE(vint8, LMUL_64, _t) fixed_i8x8_t
+    __attribute__((riscv_rvv_vector_bits(64)));
+
+// int16
+typedef RVVTYPE(vint16, LMUL_128, _t) fixed_i16x8_t
+    __attribute__((riscv_rvv_vector_bits(128)));
 
 // float16
 typedef RVVTYPE(vfloat16, LMUL_128, _t) fixed_fp16x8_t
