@@ -17,14 +17,18 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="arc-ray-qwen3-30b-tcp-preflight-vllm-driver-exact-iface-v6-engine-timeout"
+SCRIPT_VERSION="arc-ray-qwen3-30b-tcp-preflight-vllm-driver-exact-iface-v7-health1200-engine2400"
 
 DEBUG_SLURM_SCRIPT="${DEBUG_SLURM_SCRIPT:-0}"
 NSYS_COPY_DEBUG="${NSYS_COPY_DEBUG:-0}"
 
 SRUN_COPY_TIMEOUT="${SRUN_COPY_TIMEOUT:-480s}"
 SERVER_SHUTDOWN_TIMEOUT_S="${SERVER_SHUTDOWN_TIMEOUT_S:-420}"
-HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-900}"
+
+# This must be longer than the observed model-load-to-health time.
+# Previous run proved VLLM_ENGINE_READY_TIMEOUT_S=2400 works, but the wrapper killed
+# the job at HEALTH_TIMEOUT_S=900 while vLLM was still loading.
+HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-1200}"
 
 # vLLM internal engine startup timeout. This is separate from the /health wait.
 export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-2400}"
@@ -619,6 +623,7 @@ echo "MODEL_ID=${MODEL_ID} HOST=${HOST} PORT=${PORT} TP=${TP} PP=${PP} EP=${EP}"
 echo "GPUS_PER_NODE=${GPUS_PER_NODE} NUM_NODES=${NUM_NODES} CPUS_PER_TASK=${CPUS_PER_TASK}"
 echo "MAX_MODEL_LEN=${MAX_MODEL_LEN}"
 echo "VLLM_ENGINE_READY_TIMEOUT_S=${VLLM_ENGINE_READY_TIMEOUT_S}"
+echo "HEALTH_TIMEOUT_S=${HEALTH_TIMEOUT_S}"
 echo "NCCL_IB_DISABLE=${NCCL_IB_DISABLE} NCCL_NET=${NCCL_NET} NCCL_IB_HCA=${NCCL_IB_HCA}"
 echo "NCCL_SOCKET_FAMILY=${NCCL_SOCKET_FAMILY} NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME}"
 echo "GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME} VLLM_HOST_IP=${VLLM_HOST_IP}"
