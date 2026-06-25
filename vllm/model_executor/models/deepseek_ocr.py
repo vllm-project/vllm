@@ -251,6 +251,74 @@ class DeepseekOCRProcessingInfo(BaseProcessingInfo):
         return ImageSize(width=640 * 2, height=640 * 2)
 
 
+# Unlimited-OCR supports up to 32 local crops (vs 6 for DeepSeek-OCR).
+# All other processing (gundam mode, base_size=1024, image_size=640) is identical.
+_UNLIMITED_OCR_MAX_CROPS = 32
+
+
+class UnlimitedOCRProcessingInfo(DeepseekOCRProcessingInfo):
+    """ProcessingInfo for Unlimited-OCR: same as DeepSeek-OCR but with
+    max_crops=32 instead of 6.  The higher crop count allows tiling very large
+    document pages into up to 32 640×640 patches, matching the SGLang reference
+    implementation (dynamic_preprocess max_num=32).
+    """
+
+    def get_hf_config(self):
+        from vllm.transformers_utils.configs.unlimited_ocr import UnlimitedOCRConfig
+
+        return self.ctx.get_hf_config(UnlimitedOCRConfig)
+
+    def get_hf_processor(self, **kwargs: object):
+        v1_processor_config = dict(
+            image_size=IMAGE_SIZE,
+            base_size=BASE_SIZE,
+            crop_mode=CROP_MODE,
+            strategy="v1",
+            max_crops=_UNLIMITED_OCR_MAX_CROPS,
+        )
+        return self.ctx.get_hf_processor(
+            DeepseekOCRProcessor,
+            **{**v1_processor_config, **kwargs},
+        )
+
+    def get_num_image_tokens(
+        self, *, image_width: int, image_height: int, cropping: bool = True
+    ) -> int:
+        patch_size = 16
+        downsample_ratio = 4
+
+        if CROP_MODE:
+            if image_width <= 640 and image_height <= 640:
+                crop_ratio = [1, 1]
+            else:
+                crop_ratio = count_tiles(
+                    image_width,
+                    image_height,
+                    max_num=_UNLIMITED_OCR_MAX_CROPS,
+                    image_size=IMAGE_SIZE,
+                )
+            num_width_tiles, num_height_tiles = crop_ratio
+        else:
+            num_width_tiles = num_height_tiles = 1
+
+        h = w = math.ceil((BASE_SIZE // patch_size) / downsample_ratio)
+        h2 = w2 = math.ceil((IMAGE_SIZE // patch_size) / downsample_ratio)
+
+        global_views_tokens = h * (w + 1)
+        if num_width_tiles > 1 or num_height_tiles > 1:
+            local_views_tokens = (num_height_tiles * h2) * (num_width_tiles * w2 + 1)
+        else:
+            local_views_tokens = 0
+
+        return global_views_tokens + local_views_tokens + 1
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        # With max_crops=32, the widest possible grid is 4×8 (aspect ratio 1:2).
+        # A 2560×5120 image (4×640 × 8×640) selects exactly 4×8=32 tiles and
+        # produces the maximum token count.
+        return ImageSize(width=640 * 4, height=640 * 8)
+
+
 class DeepseekOCRDummyInputsBuilder(BaseDummyInputsBuilder[DeepseekOCRProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)

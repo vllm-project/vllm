@@ -55,8 +55,8 @@ from .deepseek_ocr import (
     DeepseekOCRDummyInputsBuilder,
     DeepseekOCRForCausalLM,
     DeepseekOCRMultiModalProcessor,
-    DeepseekOCRProcessingInfo,
     NGramPerReqLogitsProcessor,
+    UnlimitedOCRProcessingInfo,
 )
 
 __all__ = [
@@ -67,7 +67,7 @@ __all__ = [
 
 @MULTIMODAL_REGISTRY.register_processor(
     DeepseekOCRMultiModalProcessor,
-    info=DeepseekOCRProcessingInfo,
+    info=UnlimitedOCRProcessingInfo,
     dummy_inputs=DeepseekOCRDummyInputsBuilder,
 )
 class UnlimitedOCRForCausalLM(DeepseekOCRForCausalLM):
