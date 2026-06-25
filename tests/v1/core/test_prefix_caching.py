@@ -1199,10 +1199,8 @@ def test_hybrid_mamba_align_partial_hash_hit():
     assert manager.get_blocks("1").get_block_ids()[1][1] == mamba_new_block_ids[0]
     assert (
         KVCacheBlockCopy(
-            kv_cache_group_id=1,
             src_block_id=partial_mamba_block[0].block_id,
             dst_block_id=mamba_new_block_ids[0],
-            num_tokens=mamba_block_size,
         )
         in manager.take_kv_cache_block_copies()
     )
@@ -1268,10 +1266,8 @@ def test_hybrid_full_attention_partial_hash_hit_uses_cow():
     assert full_new_block_ids[0] != partial_full_block[0].block_id
     assert (
         KVCacheBlockCopy(
-            kv_cache_group_id=0,
             src_block_id=partial_full_block[0].block_id,
             dst_block_id=full_new_block_ids[0],
-            num_tokens=2,
         )
         in manager.take_kv_cache_block_copies()
     )

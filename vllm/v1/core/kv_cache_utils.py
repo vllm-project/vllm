@@ -207,12 +207,8 @@ def has_partial_cache_hit(
 
 
 class KVCacheBlockCopy(NamedTuple):
-    """A pending copy between two KV cache blocks in one cache group."""
-
-    kv_cache_group_id: int
     src_block_id: int
     dst_block_id: int
-    num_tokens: int
 
 
 class FreeKVCacheBlockQueue:

@@ -1156,18 +1156,9 @@ class GPUModelRunner(
         if scheduler_output.new_block_ids_to_zero:
             self._zero_block_ids(scheduler_output.new_block_ids_to_zero)
         if scheduler_output.kv_cache_block_copies:
-            kv_caches = {
-                layer_name: layer.kv_cache
-                for layer_name, layer in (
-                    self.compilation_config.static_forward_context.items()
-                )
-                if hasattr(layer, "kv_cache")
-            }
             copy_kv_cache_blocks_inplace(
-                kv_caches,
-                self.attn_groups,
-                self._kernel_block_sizes,
-                self.cache_config.cache_dtype,
+                self.kv_caches,
+                self.kv_cache_config.num_blocks,
                 scheduler_output.kv_cache_block_copies,
             )
 

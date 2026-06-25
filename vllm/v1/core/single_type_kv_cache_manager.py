@@ -604,7 +604,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             max_admission_blocks_per_request=max_admission_blocks_per_request,
         )
         self.num_cached_hash_block: dict[str, int] = {}
-        self._partial_hit_reqs: dict[str, tuple[int, KVCacheBlock, int, bool]] = {}
+        self._partial_hit_reqs: dict[str, tuple[int, KVCacheBlock, bool]] = {}
         self._pending_cow_source_blocks: list[KVCacheBlock] = []
         self._kv_cache_block_copies: list[KVCacheBlockCopy] = []
 
@@ -797,7 +797,6 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             self._partial_hit_reqs[request_id] = (
                 block_idx,
                 source_block,
-                hit_length % self.block_size,
                 release_req_ref,
             )
             self.num_cached_block[request_id] = block_idx
@@ -807,8 +806,8 @@ class FullAttentionManager(SingleTypeKVCacheManager):
     ) -> list[KVCacheBlock]:
         new_blocks: list[KVCacheBlock] = []
         if request_id in self._partial_hit_reqs:
-            block_idx, source_block, copy_tokens, release_source_ref = (
-                self._partial_hit_reqs.pop(request_id)
+            block_idx, source_block, release_source_ref = self._partial_hit_reqs.pop(
+                request_id
             )
             cow_block = self.block_pool.get_new_blocks(1)[0]
             req_blocks = self.req_to_blocks[request_id]
@@ -820,10 +819,8 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             self.new_block_ids.append(cow_block.block_id)
             self._kv_cache_block_copies.append(
                 KVCacheBlockCopy(
-                    kv_cache_group_id=self.kv_cache_group_id,
                     src_block_id=source_block.block_id,
                     dst_block_id=cow_block.block_id,
-                    num_tokens=copy_tokens,
                 )
             )
             if not release_source_ref:
@@ -1562,10 +1559,8 @@ class MambaManager(SingleTypeKVCacheManager):
                     req_blocks[block_idx] = cow_block
                     self._kv_cache_block_copies.append(
                         KVCacheBlockCopy(
-                            kv_cache_group_id=self.kv_cache_group_id,
                             src_block_id=source_block.block_id,
                             dst_block_id=cow_block.block_id,
-                            num_tokens=self.block_size,
                         )
                     )
                     self._pending_cow_source_blocks.append(source_block)
@@ -1671,10 +1666,8 @@ class MambaManager(SingleTypeKVCacheManager):
                 source_block=source_block,
                 dst_block=snapshot_block,
                 copy=KVCacheBlockCopy(
-                    kv_cache_group_id=self.kv_cache_group_id,
                     src_block_id=source_block.block_id,
                     dst_block_id=snapshot_block.block_id,
-                    num_tokens=self.block_size,
                 ),
             )
         )
