@@ -4,6 +4,7 @@
 import json
 import logging
 import math
+import queue
 import sys
 import threading
 import types
@@ -760,7 +761,7 @@ def test_store_worker_get_block_ids_with_load_errors_delegates_to_recv_thread():
     recv_thread = MagicMock()
     recv_thread.get_and_clear_block_ids_with_load_errors.return_value = {3, 4}
     w = _make_bare_worker()
-    w.kv_recv_thread = recv_thread
+    w.kv_recv_threads = [recv_thread]
 
     assert w.get_block_ids_with_load_errors() == {3, 4}
     recv_thread.get_and_clear_block_ids_with_load_errors.assert_called_once_with()
@@ -1574,7 +1575,9 @@ def _make_bare_worker(
     worker.put_step = 1
     worker.enable_kv_events = False
     worker.kv_send_thread = None
-    worker.kv_recv_thread = None
+    worker.kv_recv_threads = []
+    worker.num_recv_threads = 1
+    worker.recv_request_queue = queue.Queue()
     worker.tp_size = 1
     worker.num_kv_head = 1
     worker.pp_size = 1
