@@ -59,65 +59,80 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         """Configure Unlimited-OCR attention backends for R-SWA and vision.
 
-        Preferred path (H20/H100, FA4 available):
-          - Use FlashAttention backend with a CuTE-DSL rswa_mask_mod.
-          - The mask is evaluated at token granularity inside the FA4 kernel,
-            so there is no block-boundary approximation.
-          - Full prefix caching is safe: the mask is computed from per-request
-            prefix_lens at runtime and does not depend on block-level metadata.
+        Backend selection — controlled by the standard ``--attention-config``
+        CLI argument (priority order):
 
-        Fallback path (FA4 unavailable):
-          - Use FlexAttention backend (existing R-SWA implementation).
-          - Restrict prefix caching to prompt tokens only (decode-token blocks
-            are not safely cacheable under the FlexAttention block-mask scheme).
+          1. ``--attention-config '{"backend": "FLASH_ATTN"}'``
+             → FA4 + rswa_mask_mod.  Exact token-level R-SWA; full prefix
+               caching safe.  ``flash_attn_version`` is forced to 4 if not
+               already set (R-SWA mask_mod requires FA4; FA3 cannot express it).
+               Raises if FA4 is not available on this device.
+
+          2. ``--attention-config '{"backend": "FLEX_ATTENTION"}'``
+             → FlexAttention R-SWA.  Prefix caching restricted to prompt tokens.
+
+          3. ``--attention-config '{"backend": "auto"}'`` (or omitted)
+             → Auto-detect: FA4 if available (H20/H100 SM90), else FlexAttention.
+
+        Example — force FlexAttention even on a machine with FA4::
+
+            vllm serve baidu/Unlimited-OCR \\
+                --attention-config '{"backend": "FLEX_ATTENTION"}'
         """
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
         from vllm.vllm_flash_attn import is_fa_version_supported
 
         attn_config = vllm_config.attention_config
+        fa4_available = is_fa_version_supported(4)
 
-        if is_fa_version_supported(4):
-            # FA4 path: rswa_mask_mod provides exact R-SWA semantics.
-            if attn_config.backend not in (
-                None,
-                AttentionBackendEnum.FLASH_ATTN,
-            ):
-                logger.warning(
-                    "Unlimited-OCR: overriding attention backend %s to "
-                    "FlashAttention (FA4 + rswa_mask_mod) for R-SWA.",
-                    attn_config.backend,
+        # ── step 1: resolve backend ─────────────────────────────────────────
+        # None means the user did not explicitly specify a backend; auto-select.
+        if attn_config.backend is None:
+            attn_config.backend = (
+                AttentionBackendEnum.FLASH_ATTN
+                if fa4_available
+                else AttentionBackendEnum.FLEX_ATTENTION
+            )
+            logger.info(
+                "Unlimited-OCR: auto-selected attention backend=%s "
+                "(fa4_available=%s).",
+                attn_config.backend.value,
+                fa4_available,
+            )
+
+        # ── step 2: configure the chosen backend ────────────────────────────
+        if attn_config.backend == AttentionBackendEnum.FLASH_ATTN:
+            if not fa4_available:
+                raise RuntimeError(
+                    "Unlimited-OCR: --attention-config backend=FLASH_ATTN "
+                    "requires FA4 (rswa_mask_mod), but FA4 is not available on "
+                    "this device/installation.  Use backend=FLEX_ATTENTION or "
+                    "upgrade vllm-flash-attn."
                 )
-            attn_config.backend = AttentionBackendEnum.FLASH_ATTN
             # On SM90 (H20), the default FA version is FA3 regardless of FA4
             # availability (FA4 is only auto-upgraded when head_size > 256).
             # The R-SWA mask_mod requires FA4, so force the version globally.
             if attn_config.flash_attn_version is None:
                 attn_config.flash_attn_version = 4
+            elif attn_config.flash_attn_version < 4:
+                logger.warning(
+                    "Unlimited-OCR: flash_attn_version=%d cannot express the "
+                    "R-SWA mask_mod; upgrading to 4.",
+                    attn_config.flash_attn_version,
+                )
+                attn_config.flash_attn_version = 4
             logger.info(
-                "Unlimited-OCR: using FlashAttention FA4 + rswa_mask_mod "
-                "for exact R-SWA; full prefix caching enabled. "
-                "(forced flash_attn_version=%d)",
+                "Unlimited-OCR: FlashAttention FA%d + rswa_mask_mod — "
+                "exact R-SWA, full prefix caching enabled.",
                 attn_config.flash_attn_version,
             )
-            # FA4 mask_mod is correct regardless of prefix caching; no
-            # restriction needed.
-        else:
-            # FlexAttention fallback path.
-            if attn_config.backend not in (
-                None,
-                AttentionBackendEnum.FLEX_ATTENTION,
-            ):
-                logger.warning(
-                    "Unlimited-OCR: language-model attention backend %s cannot "
-                    "express the R-SWA mask (only FlexAttention can on this "
-                    "device); overriding.",
-                    attn_config.backend,
-                )
-            attn_config.backend = AttentionBackendEnum.FLEX_ATTENTION
-            logger.info(
-                "Unlimited-OCR: FA4 unavailable — using FlexAttention for R-SWA."
-            )
 
+        elif attn_config.backend == AttentionBackendEnum.FLEX_ATTENTION:
+            logger.info(
+                "Unlimited-OCR: FlexAttention — R-SWA via Triton block mask%s.",
+                "" if not fa4_available else
+                " (FA4 available but not used; pass backend=FLASH_ATTN to upgrade)",
+            )
             # R-SWA windows the *generated* tokens, so a generated token's KV
             # is not a pure causal function of the prefix; reusing decode-token
             # blocks via prefix caching corrupts the FlexAttention R-SWA block
@@ -129,8 +144,15 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
                 logger.info(
                     "Unlimited-OCR: restricting prefix caching to prompt tokens "
                     "(decode-token blocks are not cacheable under FlexAttention "
-                    "R-SWA; use FA4 to enable full prefix caching)."
+                    "R-SWA; pass backend=FLASH_ATTN to enable full prefix caching)."
                 )
+
+        else:
+            raise ValueError(
+                f"Unlimited-OCR: unsupported attention backend "
+                f"{attn_config.backend!r} for R-SWA. "
+                "Use FLASH_ATTN (FA4) or FLEX_ATTENTION."
+            )
 
         mm_config = getattr(vllm_config.model_config, "multimodal_config", None)
         if mm_config is not None:
