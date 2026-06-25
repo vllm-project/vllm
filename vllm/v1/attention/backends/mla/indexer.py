@@ -258,12 +258,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         super().__init__(*args, **kwargs)
         scheduler_config = self.vllm_config.scheduler_config
         parallel_config = self.vllm_config.parallel_config
-        if parallel_config.decode_context_parallel_size > 1:
-            self.dcp_world_size = get_dcp_group().world_size
-            self.dcp_rank = get_dcp_group().rank_in_group
-        else:
-            self.dcp_world_size = 1
-            self.dcp_rank = 0
+        self.dcp_world_size = parallel_config.decode_context_parallel_size
+        self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
         # NOTE(Chen):an estimated max size of flattened_kv. Need to double check.
         self.max_prefill_buffer_size = get_max_prefill_buffer_size(self.vllm_config)

@@ -980,6 +980,7 @@ def test_persistent_topk_pads_surplus_with_negative_one():
         assert (idx[r] == -1).sum().item() == topk - min(sl, topk)
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 def test_sparse_decode_dcp_short_context_matches_non_dcp():
     """End-to-end DCP decode where the global seq_len < topk (so every rank's
     local top-k is surplus-padded). Exercises the kernel surplus -> merge mask

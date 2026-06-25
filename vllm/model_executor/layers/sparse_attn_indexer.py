@@ -391,11 +391,11 @@ def sparse_attn_indexer(
             prefill_metadata.chunks
             and prefill_metadata.chunks[0].local_cu_seq_lens is not None
         )
-        prefill_dcp_group = get_dcp_group() if chunks_under_dcp else None
-        prefill_dcp_world = prefill_dcp_group.world_size if prefill_dcp_group else 1
+        dcp_group = get_dcp_group() if chunks_under_dcp else None
+        dcp_world_size = dcp_group.world_size if dcp_group else 1
 
         for chunk in prefill_metadata.chunks:
-            use_dcp_prefill_candidates = prefill_dcp_world > 1
+            use_dcp_prefill_candidates = dcp_world_size > 1
             # Under DCP, cu_seqlen_ks/ke already hold this rank's local row
             # bounds (build_prefill_chunk_metadata localizes them in place).
             cu_seqlen_ks = chunk.cu_seqlen_ks

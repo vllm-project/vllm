@@ -287,9 +287,6 @@ class FlashInferMLASparseMetadataBuilder(
         self.mla_dims = get_mla_dims(self.model_config)
         self.topk_tokens = vllm_config.model_config.hf_config.index_topk
 
-        # Treat MTP/spec-decode query chunks as decode work. This backend
-        # flattens tokens before calling the FlashInfer sparse decode kernel,
-        # and the sparse indexer localizes each expanded token's DCP bound.
         self._init_reorder_batch_threshold(
             1,
             supports_spec_as_decode=True,
@@ -358,9 +355,8 @@ _fi_sparse_workspace: torch.Tensor | None = None
 def _get_workspace_buffer(device: torch.device) -> torch.Tensor:
     global _fi_sparse_workspace
     if _fi_sparse_workspace is None:
-        buffer_size = envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
         _fi_sparse_workspace = torch.zeros(
-            buffer_size,
+            envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,
             dtype=torch.uint8,
             device=device,
         )
@@ -534,15 +530,12 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
             lse = None
 
         out = o.view(-1, o.shape[-2], o.shape[-1])
-        if lse is None:
-            return out, None
-
-        lse = self._normalize_lse(lse, out.shape[0], out.shape[1])
-
-        empty_rows = (topk_indices_physical == -1).all(dim=-1)
-        out.masked_fill_(empty_rows.view(-1, 1, 1), 0.0)
-        lse.masked_fill_(empty_rows.view(-1, 1), float("-inf"))
-        return out.contiguous(), lse
+        if lse is not None:
+            lse = self._normalize_lse(lse, out.shape[0], out.shape[1])
+            empty_rows = (topk_indices_physical == -1).all(dim=-1)
+            out.masked_fill_(empty_rows.view(-1, 1, 1), 0.0)
+            lse.masked_fill_(empty_rows.view(-1, 1), float("-inf"))
+        return out, lse
 
     @staticmethod
     def _normalize_lse(
