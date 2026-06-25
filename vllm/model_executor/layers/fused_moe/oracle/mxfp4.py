@@ -6,13 +6,13 @@ from typing import TYPE_CHECKING, Literal, Union
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm import envs
 from vllm.config import get_current_vllm_config
 from vllm.config.kernel import MoEBackend
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
+    RoutedExperts,
 )
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
@@ -55,6 +55,40 @@ if has_triton_kernels():
             "version is compatible. Error: %s",
             e,
         )
+
+
+def _pack_deepgemm_mxfp4_scales(
+    w13_weight: torch.Tensor,
+    w2_weight: torch.Tensor,
+    w13_weight_scale: torch.Tensor,
+    w2_weight_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        deepgemm_post_process_weight_scale_block,
+    )
+
+    num_experts = w13_weight.shape[0]
+    intermediate_size_2 = w13_weight.shape[1]  # = intermediate*2
+    hidden_size = w13_weight.shape[2] * 2  # weight is FP4-packed
+    intermediate_size = w2_weight.shape[2] * 2  # weight is FP4-packed
+    block_shape = (1, 32)  # MXFP4 block (per-row, K=32)
+
+    return (
+        deepgemm_post_process_weight_scale_block(
+            ws=w13_weight_scale.data,
+            mn=intermediate_size_2,
+            k=hidden_size,
+            quant_block_shape=block_shape,
+            num_groups=num_experts,
+        ),
+        deepgemm_post_process_weight_scale_block(
+            ws=w2_weight_scale.data,
+            mn=hidden_size,
+            k=intermediate_size,
+            quant_block_shape=block_shape,
+            num_groups=num_experts,
+        ),
+    )
 
 
 class Mxfp4MoeBackend(Enum):
@@ -206,9 +240,9 @@ def backend_to_kernel_cls(
         return [AiterExperts]
 
     elif backend == Mxfp4MoeBackend.XPU:
-        from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExpertsMXFp4
+        from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExpertsMxFp4
 
-        return [XPUExpertsMXFp4]
+        return [XPUExpertsMxFp4]
 
     elif backend == Mxfp4MoeBackend.CPU:
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import CPUExpertsMxfp4
@@ -464,74 +498,6 @@ def select_mxfp4_moe_backend(
         _get_priority_backends_for_gpt_oss(), requested_activation_key
     )
 
-    # Handle explicit FlashInfer MXFP4 BF16 configuration.
-    if envs.is_set("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16"):
-        if not envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16:
-            for _b in (
-                Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
-                Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
-            ):
-                if _b in AVAILABLE_BACKENDS:
-                    AVAILABLE_BACKENDS.remove(_b)
-        else:
-            if current_platform.is_device_capability(90):
-                return _return_or_raise(
-                    Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
-                    config,
-                    kMxfp4Static,
-                    None,
-                    activation_format,
-                )
-            if current_platform.is_device_capability_family(100):
-                return _return_or_raise(
-                    Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
-                    config,
-                    kMxfp4Static,
-                    None,
-                    activation_format,
-                )
-            raise ValueError(
-                "VLLM_USE_FLASHINFER_MOE_MXFP4_BF16=1 is set but the "
-                "current device capability is not supported. "
-                "Only SM90 (CUTLASS) and SM100+ (TRTLLM) are supported."
-            )
-
-    # Handle explicit FlashInfer MXFP4 MXFP8 TRTLLM configuration.
-    if (
-        envs.is_set("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8")
-        and envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
-    ):
-        return _return_or_raise(
-            Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
-            config,
-            kMxfp4Static,
-            kMxfp8Dynamic,
-            activation_format,
-        )
-
-    # Handle explicit FlashInfer MXFP4 MXFP8 CUTLASS configuration.
-    if (
-        envs.is_set("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS")
-        and envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS
-    ):
-        return _return_or_raise(
-            Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
-            config,
-            kMxfp4Static,
-            kMxfp8Dynamic,
-            activation_format,
-        )
-
-    # Handle explicit Marlin MXFP4 configuration.
-    if envs.is_set("VLLM_MXFP4_USE_MARLIN") and envs.VLLM_MXFP4_USE_MARLIN:
-        return _return_or_raise(
-            Mxfp4MoeBackend.MARLIN,
-            config,
-            kMxfp4Static,
-            None,
-            activation_format,
-        )
-
     for backend in AVAILABLE_BACKENDS:
         # Use requested_activation_key if provided, otherwise use backend default
         act_key = (
@@ -571,7 +537,18 @@ def select_mxfp4_moe_backend(
             activation_format,
         )
 
-    if current_platform.is_cuda() or current_platform.is_rocm():
+    if current_platform.is_rocm():
+        backend = Mxfp4MoeBackend.TRITON_UNFUSED
+        logger.info_once(_make_log_backend(backend))
+        return _return_or_raise(
+            Mxfp4MoeBackend.TRITON_UNFUSED,
+            config,
+            kMxfp4Static,
+            None,
+            activation_format,
+        )
+
+    if current_platform.is_cuda():
         raise NotImplementedError(
             "No MXFP4 MoE backend supports the deployment configuration. "
             f"weight_key=kMxfp4Static, activation_key={activation_key}. "
@@ -697,6 +674,8 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     w2_weight_scale: torch.Tensor,
     w13_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
+    w13_input_scale: torch.Tensor | None = None,
+    w2_input_scale: torch.Tensor | None = None,
     _cache_permute_indices: dict[torch.Size, torch.Tensor] | None = None,
 ) -> tuple[
     torch.Tensor,
@@ -709,15 +688,18 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     """Convert loaded weights into backend-specific kernel format."""
 
     if mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
-        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-            _upcast_e8m0_to_fp32,
+        w13_weight_scale, w2_weight_scale = _pack_deepgemm_mxfp4_scales(
+            w13_weight,
+            w2_weight,
+            w13_weight_scale,
+            w2_weight_scale,
         )
 
         return (
             w13_weight.data,
             w2_weight.data,
-            _upcast_e8m0_to_fp32(w13_weight_scale.data),
-            _upcast_e8m0_to_fp32(w2_weight_scale.data),
+            w13_weight_scale,
+            w2_weight_scale,
             w13_bias,
             w2_bias,
         )
@@ -1164,8 +1146,13 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             weight_scale=w2_scale, flex_ctx=FlexCtx(rhs_data=w2_flex)
         )
 
+        # The original mxfp4 block scales have been swizzled into the
+        # precision configs above and are no longer read by the kernel, so
+        # drop the now-dead weight/scale Parameters to free their memory.
         del layer.w13_weight
         del layer.w2_weight
+        del layer.w13_weight_scale
+        del layer.w2_weight_scale
 
         return (
             w13_weight,
@@ -1211,8 +1198,29 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             w2_bias,
         )
     elif mxfp4_backend == Mxfp4MoeBackend.EMULATION:
-        # No additional transformation needed for emulation backend,
-        # weights are dequantized on the fly in the experts class.
+        w13_has_per_expert_scale = (
+            w13_input_scale is not None
+            and w13_input_scale.ndim == 1
+            and not all_close_1d(w13_input_scale)
+        )
+        w2_has_per_expert_scale = (
+            w2_input_scale is not None
+            and w2_input_scale.ndim == 1
+            and not all_close_1d(w2_input_scale)
+        )
+        if w13_has_per_expert_scale or w2_has_per_expert_scale:
+            logger.warning_once(
+                "Found input_scales that are not equal for OCP MX MoE "
+                "emulation. Using the maximum across experts for each layer."
+            )
+        if w13_input_scale is not None:
+            layer.w13_input_scale = torch.nn.Parameter(
+                w13_input_scale.max().to(torch.float32), requires_grad=False
+            )
+        if w2_input_scale is not None:
+            layer.w2_input_scale = torch.nn.Parameter(
+                w2_input_scale.max().to(torch.float32), requires_grad=False
+            )
         return (
             w13_weight,
             w2_weight,
@@ -1252,17 +1260,18 @@ def convert_weight_to_mxfp4_moe_kernel_format(
     """
 
     if mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
-        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-            _upcast_e8m0_to_fp32,
+        w13_weight_scale, w2_weight_scale = _pack_deepgemm_mxfp4_scales(
+            w13_weight,
+            w2_weight,
+            w13_weight_scale,
+            w2_weight_scale,
         )
 
-        # Weights stay as uint8 packed FP4 — no layout change needed.
-        # Convert E8M0 uint8 scales to float32.
         return (
             w13_weight.data,
             w2_weight.data,
-            _upcast_e8m0_to_fp32(w13_weight_scale.data),
-            _upcast_e8m0_to_fp32(w2_weight_scale.data),
+            w13_weight_scale,
+            w2_weight_scale,
             w13_bias,
             w2_bias,
         )
@@ -1504,8 +1513,13 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             weight_scale=w2_scale, flex_ctx=FlexCtx(rhs_data=w2_flex)
         )
 
+        # The original mxfp4 block scales have been swizzled into the
+        # precision configs above and are no longer read by the kernel, so
+        # drop the now-dead weight/scale Parameters to free their memory.
         del layer.w13_weight
         del layer.w2_weight
+        del layer.w13_weight_scale
+        del layer.w2_weight_scale
 
         return (
             w13_weight,
@@ -1632,12 +1646,11 @@ def make_mxfp4_moe_quant_config(
             gemm1_clamp_limit=swiglu_limit,
         )
     elif mxfp4_backend == Mxfp4MoeBackend.HUMMING:
-        from vllm.model_executor.layers.fused_moe.layer import FusedMoE
         from vllm.model_executor.layers.quantization.utils.humming_utils import (
             get_humming_moe_quant_config,
         )
 
-        assert isinstance(layer, FusedMoE)
+        assert isinstance(layer, RoutedExperts)
         return get_humming_moe_quant_config(
             layer,
             gemm1_alpha=gemm1_alpha,
@@ -1663,7 +1676,7 @@ def make_mxfp4_moe_kernel(
     experts_cls: type[mk.FusedMoEExperts],
     mxfp4_backend: Mxfp4MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    layer: "RoutedExperts | None" = None,
+    layer: RoutedExperts | None = None,
 ) -> mk.FusedMoEKernel:
     """Create a FusedMoEKernel for the given MXFP4 backend."""
     is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)

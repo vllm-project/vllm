@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import ClassVar, cast
 
 import torch
@@ -9,6 +9,7 @@ from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -73,14 +74,14 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
         # determines the SWA block size of 64 tokens per block.
         # TODO(yifan): make SWA block size automatically determined and configurable.
         self.block_size = 64
-        # uint8: legacy FlashMLA UE8M0 paged layout. bfloat16 / float8_e4m3fn:
-        # FlashInfer contiguous full-cache layout.
+        # uint8: fp8_ds_mla UE8M0 paged layout. bfloat16 / float8_e4m3fn:
+        # contiguous full-cache layout.
         assert self.dtype in (torch.uint8, torch.bfloat16, torch.float8_e4m3fn)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        # FlashMLA's UE8M0 paged layout needs 576B alignment; FlashInfer's
-        # contiguous bf16/fp8 cache uses the natural element-size page.
-        is_flashmla = self.cache_config.cache_dtype == "fp8_ds_mla"
+        # fp8_ds_mla's UE8M0 paged layout needs 576B alignment; contiguous
+        # bf16/fp8 cache uses the natural element-size page.
+        uses_fp8_ds_mla_layout = self.cache_config.cache_dtype == "fp8_ds_mla"
         return SlidingWindowMLASpec(
             block_size=self.block_size,
             num_kv_heads=1,
@@ -88,7 +89,7 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
             dtype=self.dtype,
             sliding_window=self.window_size,
             cache_dtype_str=self.cache_config.cache_dtype,
-            alignment=576 if is_flashmla else None,
+            alignment=576 if uses_fp8_ds_mla_layout else None,
             model_version="deepseek_v4",
         )
 
@@ -163,6 +164,11 @@ class DeepseekSparseSWAMetadata:
     token_to_req_indices: torch.Tensor | None = None  # [num_tokens]
     decode_swa_indices: torch.Tensor | None = None  # [num_decode_tokens, window_size]
     decode_swa_lens: torch.Tensor | None = None  # [num_decode_tokens]
+    # Paged-coordinate prefill SWA indices/lens (FP8 paged-direct prefill).
+    prefill_swa_indices: torch.Tensor | None = (
+        None  # [num_prefill_tokens, 1, window_size]
+    )
+    prefill_swa_lens: torch.Tensor | None = None  # [num_prefill_tokens]
 
     # Number of decode/prefill requests/tokens (batch is reordered: decodes first)
     num_decodes: int = 0
@@ -172,7 +178,12 @@ class DeepseekSparseSWAMetadata:
 
     # Pre-computed prefill metadata shared across all DeepseekV4 attention layers.
     prefill_seq_lens: torch.Tensor | None = None
+    prefill_seq_lens_cpu: torch.Tensor | None = None
     prefill_gather_lens: torch.Tensor | None = None
+    prefill_query_lens_cpu: torch.Tensor | None = None
+    prefill_window_size: int = 0
+    prefill_max_model_len: int = 0
+    prefill_max_num_batched_tokens: int = 0
 
     # Per-layer-type FlashMLA tile-scheduler metadata. One FlashMLASchedMeta
     # per present DeepseekV4 layer type, shared across all ~60 layers of that type
@@ -187,6 +198,82 @@ class DeepseekSparseSWAMetadata:
     tile_sched_swaonly: "FlashMLASchedMeta | None" = None
     tile_sched_c4a: "FlashMLASchedMeta | None" = None
     tile_sched_c128a: "FlashMLASchedMeta | None" = None
+    flashinfer_sparse_index_cache: dict[str, tuple[torch.Tensor, torch.Tensor]] = field(
+        default_factory=dict
+    )
+
+    def get_prefill_chunk_plan(
+        self, compress_ratio: int, prefill_chunk_size: int
+    ) -> list[tuple[int, int, int, int]]:
+        if self.num_prefills == 0:
+            return []
+
+        assert self.prefill_seq_lens_cpu is not None
+        assert self.prefill_query_lens_cpu is not None
+
+        # query_len <= max_num_batched_tokens and
+        # gather_len = query_len + min(prefix_len, window_size - 1), so the
+        # worst-case gathered width is bounded by
+        # max_num_batched_tokens + window_size - 1. The compressed prefix pool
+        # is bounded by ceil(max_model_len / compress_ratio).
+        max_workspace_area = prefill_chunk_size * (
+            (
+                0
+                if compress_ratio <= 1
+                else cdiv(self.prefill_max_model_len, compress_ratio)
+            )
+            + self.prefill_window_size
+            + self.prefill_max_num_batched_tokens
+        )
+        prefix_lens_cpu = self.prefill_seq_lens_cpu - self.prefill_query_lens_cpu
+        gather_lens_cpu = self.prefill_query_lens_cpu + torch.clamp(
+            prefix_lens_cpu, min=0, max=self.prefill_window_size - 1
+        )
+        compressed_lens_cpu = (
+            torch.zeros_like(self.prefill_seq_lens_cpu)
+            if compress_ratio <= 1
+            else torch.div(
+                self.prefill_seq_lens_cpu,
+                compress_ratio,
+                rounding_mode="floor",
+            )
+        )
+
+        chunk_plan: list[tuple[int, int, int, int]] = []
+        chunk_start = 0
+        while chunk_start < self.num_prefills:
+            chunk_max_compressed = int(compressed_lens_cpu[chunk_start].item())
+            chunk_max_gather = int(gather_lens_cpu[chunk_start].item())
+            chunk_end = chunk_start + 1
+
+            while chunk_end < self.num_prefills:
+                candidate_max_compressed = max(
+                    chunk_max_compressed,
+                    int(compressed_lens_cpu[chunk_end].item()),
+                )
+                candidate_max_gather = max(
+                    chunk_max_gather,
+                    int(gather_lens_cpu[chunk_end].item()),
+                )
+                candidate_width = candidate_max_compressed + candidate_max_gather
+                candidate_area = (chunk_end - chunk_start + 1) * candidate_width
+                if candidate_area > max_workspace_area:
+                    break
+                chunk_max_compressed = candidate_max_compressed
+                chunk_max_gather = candidate_max_gather
+                chunk_end += 1
+
+            chunk_plan.append(
+                (
+                    chunk_start,
+                    chunk_end,
+                    chunk_max_compressed,
+                    chunk_max_compressed + chunk_max_gather,
+                )
+            )
+            chunk_start = chunk_end
+
+        return chunk_plan
 
 
 class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
@@ -213,6 +300,10 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         self.head_size = mla_spec.head_size  # Already considered quantization.
         self.compress_ratio = mla_spec.compress_ratio
         self.block_size = mla_spec.block_size
+        self.max_model_len = self.vllm_config.model_config.max_model_len
+        self.max_num_batched_tokens = (
+            self.vllm_config.scheduler_config.max_num_batched_tokens
+        )
 
         # Handle MTP: adjust decode_threshold like the indexer does
         self.num_speculative_tokens = (
@@ -257,6 +348,20 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             dtype=torch.int32,
             device=self.device,
         )
+        # Allocated unconditionally — consumer picks paged-direct vs dequant
+        # at call time.
+        self.prefill_swa_indices = torch.zeros(
+            max_tokens,
+            1,
+            self.window_size,
+            dtype=torch.int32,
+            device=self.device,
+        )
+        self.prefill_swa_lens = torch.zeros(
+            max_tokens,
+            dtype=torch.int32,
+            device=self.device,
+        )
         self.is_valid_token = torch.zeros(
             max_tokens,
             dtype=torch.bool,
@@ -279,6 +384,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         """
         num_reqs = common_attn_metadata.num_reqs
         seq_lens = common_attn_metadata.seq_lens
+        seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
         query_start_loc = common_attn_metadata.query_start_loc
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         block_table = common_attn_metadata.block_table_tensor
@@ -315,6 +421,29 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
                 block_table,
                 block_table.stride(0),
                 self.block_size,
+                token_offset=0,
+                TRITON_BLOCK_SIZE=1024,
+            )
+
+        # Prefill SWA indices live in paged coordinates. `token_offset` lets
+        # the kernel read is_valid_token / token_to_req_indices at absolute
+        # prefill positions while writing output starting at index 0.
+        if num_prefill_tokens > 0:
+            prefill_swa_indices = self.prefill_swa_indices[:num_prefill_tokens]
+            prefill_swa_lens = self.prefill_swa_lens[:num_prefill_tokens]
+            _compute_swa_indices_and_lens_kernel[(num_prefill_tokens,)](
+                prefill_swa_indices,
+                prefill_swa_indices.stride(0),
+                prefill_swa_lens,
+                self.window_size,
+                query_start_loc,
+                seq_lens,
+                token_to_req_indices,
+                is_valid_token,
+                block_table,
+                block_table.stride(0),
+                self.block_size,
+                token_offset=num_decode_tokens,
                 TRITON_BLOCK_SIZE=1024,
             )
 
@@ -323,7 +452,9 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             num_decodes,
             num_prefills,
             seq_lens,
+            seq_lens_cpu,
             query_start_loc,
+            query_start_loc_cpu,
         )
 
         # Per-layer-type tile-scheduler plan holders. Empty FlashMLASchedMeta
@@ -342,6 +473,16 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             token_to_req_indices=token_to_req_indices,
             decode_swa_indices=self.decode_swa_indices[:num_decode_tokens],
             decode_swa_lens=self.decode_swa_lens[:num_decode_tokens],
+            prefill_swa_indices=(
+                self.prefill_swa_indices[:num_prefill_tokens]
+                if num_prefill_tokens > 0
+                else None
+            ),
+            prefill_swa_lens=(
+                self.prefill_swa_lens[:num_prefill_tokens]
+                if num_prefill_tokens > 0
+                else None
+            ),
             block_size=self.block_size,
             num_decodes=num_decodes,
             num_prefills=num_prefills,
@@ -350,7 +491,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             tile_sched_swaonly=tile_sched[_LAYER_TYPE_SWAONLY],
             tile_sched_c4a=tile_sched[_LAYER_TYPE_C4A],
             tile_sched_c128a=tile_sched[_LAYER_TYPE_C128A],
-            **deepseek_v4_fields,
+            **deepseek_v4_fields,  # type: ignore[arg-type]
         )
 
     def build_tile_scheduler(
@@ -376,6 +517,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             num_decode_tokens == 0
             or current_platform.is_rocm()
             or current_platform.is_xpu()
+            or current_platform.is_device_capability_family(120)
         ):
             return out
         for layer_type in self._layer_types:
@@ -391,20 +533,23 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         num_decodes: int,
         num_prefills: int,
         seq_lens: torch.Tensor,
+        seq_lens_cpu: torch.Tensor | None,
         query_start_loc: torch.Tensor,
-    ) -> dict[str, torch.Tensor | None]:
+        query_start_loc_cpu: torch.Tensor,
+    ) -> dict[str, torch.Tensor | int | None]:
         """Pre-compute DeepseekV4 prefill metadata during the metadata build phase.
 
         Returns a dict of keyword arguments to pass to the
         DeepseekSparseSWAMetadata constructor.
 
-        Note: C128A topk indices are computed by the FlashMLASparse builder
+        Note: C128A sparse metadata is computed by the FlashMLASparse builder
         (which owns the C128A block_table), not here.
         """
-        result: dict[str, torch.Tensor | None] = {}
+        result: dict[str, torch.Tensor | int | None] = {}
 
         # --- Prefill query metadata (single Triton kernel + CPU slicing) ---
         if num_prefills > 0:
+            assert seq_lens_cpu is not None
             pfx_gather_lens = torch.empty(
                 num_prefills, dtype=torch.int32, device=seq_lens.device
             )
@@ -419,7 +564,15 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             )
 
             result["prefill_seq_lens"] = seq_lens[num_decodes:]
+            result["prefill_seq_lens_cpu"] = seq_lens_cpu[num_decodes:]
             result["prefill_gather_lens"] = pfx_gather_lens
+            result["prefill_query_lens_cpu"] = (
+                query_start_loc_cpu[num_decodes + 1 : num_decodes + num_prefills + 1]
+                - query_start_loc_cpu[num_decodes : num_decodes + num_prefills]
+            ).to(dtype=torch.int32)
+            result["prefill_window_size"] = self.window_size
+            result["prefill_max_model_len"] = self.max_model_len
+            result["prefill_max_num_batched_tokens"] = self.max_num_batched_tokens
 
         return result
 
@@ -439,10 +592,14 @@ def _compute_prefill_metadata_kernel(
     """Compute prefill gather_lens in a single pass."""
     offset = tl.arange(0, BLOCK_SIZE)
     mask = offset < num_prefills
+    # SM12x + Triton 3.6 raises IMA on out-of-bounds address arithmetic for
+    # masked-off lanes even though the load mask gates the actual read, so
+    # clamp the offset. Caller guarantees num_prefills > 0.
+    safe_offset = tl.minimum(offset, num_prefills - 1)
 
-    seq_len = tl.load(seq_lens_ptr + num_decodes + offset, mask=mask)
-    qsl_start = tl.load(query_start_loc_ptr + num_decodes + offset, mask=mask)
-    qsl_end = tl.load(query_start_loc_ptr + num_decodes + offset + 1, mask=mask)
+    seq_len = tl.load(seq_lens_ptr + num_decodes + safe_offset, mask=mask)
+    qsl_start = tl.load(query_start_loc_ptr + num_decodes + safe_offset, mask=mask)
+    qsl_end = tl.load(query_start_loc_ptr + num_decodes + safe_offset + 1, mask=mask)
 
     query_len = qsl_end - qsl_start
     prefix_len = seq_len - query_len
@@ -451,7 +608,7 @@ def _compute_prefill_metadata_kernel(
     tl.store(prefill_gather_lens_ptr + offset, gather_len, mask=mask)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["token_offset"])
 def _compute_swa_indices_and_lens_kernel(
     swa_indices_ptr,
     swa_indices_stride,
@@ -464,12 +621,14 @@ def _compute_swa_indices_and_lens_kernel(
     block_table_ptr,
     block_table_stride,
     block_size,
+    token_offset,
     TRITON_BLOCK_SIZE: tl.constexpr,
 ):
-    token_idx = tl.program_id(0)
+    pid = tl.program_id(0)
+    token_idx = pid + token_offset
     is_valid = tl.load(is_valid_token_ptr + token_idx)
     if not is_valid:
-        tl.store(swa_lens_ptr + token_idx, 0)
+        tl.store(swa_lens_ptr + pid, 0)
         return
 
     req_idx = tl.load(token_to_req_indices_ptr + token_idx)
@@ -486,7 +645,7 @@ def _compute_swa_indices_and_lens_kernel(
     end_pos = pos + 1
 
     swa_len = end_pos - start_pos
-    tl.store(swa_lens_ptr + token_idx, swa_len)
+    tl.store(swa_lens_ptr + pid, swa_len)
 
     for i in range(0, window_size, TRITON_BLOCK_SIZE):
         offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
@@ -502,7 +661,7 @@ def _compute_swa_indices_and_lens_kernel(
 
         slot_ids = tl.where(offset < swa_len, slot_ids, -1)
         tl.store(
-            swa_indices_ptr + token_idx * swa_indices_stride + offset,
+            swa_indices_ptr + pid * swa_indices_stride + offset,
             slot_ids,
             mask=offset < window_size,
         )
