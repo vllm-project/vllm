@@ -417,8 +417,10 @@ class AttentionScheduler {
       has_decode_request = has_decode_request || (q_token_num == 1);
       decode_only_batch = decode_only_batch && (q_token_num == 1);
     }
-    int32_t q_head_per_kv = input.num_heads_q / input.num_heads_kv;
-    const bool supports_gqa = q_head_per_kv <= max_num_q_per_iter;
+    const int32_t original_q_head_per_kv =
+        input.num_heads_q / input.num_heads_kv;
+    int32_t q_head_per_kv = original_q_head_per_kv;
+    const bool supports_gqa = original_q_head_per_kv <= max_num_q_per_iter;
     const bool use_gqa_fast_path = supports_gqa && decode_only_batch;
     const bool use_gqa_scratchpad = supports_gqa && has_decode_request;
     if (!use_gqa_scratchpad) {
@@ -671,27 +673,62 @@ class AttentionScheduler {
     metadata_ptr->effective_thread_num = effective_thread_num;
 
     {
-      // Size for the largest q-head tile that the runtime can use.
-      // The runtime rounds q_head_tile_size and passes it into sc.update(),
-      // so sizing only for max_num_q_per_iter can under-allocate here.
       AttentionScratchPad sc(0, *metadata_ptr, 0x0);
-      const int32_t max_q_head_tile_size = default_tile_size;
-      const bool one_round = max_q_head_tile_size <= max_num_q_per_iter;
-      int64_t n = AttentionScheduler::calcu_tile_size_with_constant_q(
-          cache_size, input.head_dim, input.elem_size, input.q_buffer_elem_size,
-          input.logits_buffer_elem_size, input.output_buffer_elem_size,
-          max_num_q_per_iter, kv_len_alignment, max_q_head_tile_size,
-          one_round);
+      int64_t max_attention_scratchpad_size = 0;
 
-      sc.update(input.head_dim, input.q_buffer_elem_size,
-                input.logits_buffer_elem_size, input.output_buffer_elem_size,
-                max_num_q_per_iter, max_q_head_tile_size, n);
+      for (const AttentionWorkItemGroup& item : workitems) {
+        const bool curr_use_gqa =
+            use_gqa_fast_path || (supports_gqa && item.q_token_num == 1);
+        const int32_t curr_q_heads_per_kv =
+            curr_use_gqa ? original_q_head_per_kv : 1;
+        const int32_t curr_default_q_tile_token_num =
+            default_tile_size / curr_q_heads_per_kv;
+
+        for (int32_t q_token_offset = 0; q_token_offset < item.q_token_num;
+             q_token_offset += curr_default_q_tile_token_num) {
+          const int32_t actual_q_token_num = std::min(
+              curr_default_q_tile_token_num, item.q_token_num - q_token_offset);
+          const int32_t q_head_tile_size =
+              actual_q_token_num * curr_q_heads_per_kv;
+          const int32_t rounded_q_head_tile_size =
+              ((q_head_tile_size + max_num_q_per_iter - 1) /
+               max_num_q_per_iter) *
+              max_num_q_per_iter;
+
+          const int64_t n = AttentionScheduler::calcu_tile_size_with_constant_q(
+              cache_size, input.head_dim, input.elem_size,
+              input.q_buffer_elem_size, input.logits_buffer_elem_size,
+              input.output_buffer_elem_size, max_num_q_per_iter,
+              kv_len_alignment, rounded_q_head_tile_size,
+              rounded_q_head_tile_size <= max_num_q_per_iter);
+
+          sc.update(input.head_dim, input.q_buffer_elem_size,
+                    input.logits_buffer_elem_size,
+                    input.output_buffer_elem_size, max_num_q_per_iter,
+                    rounded_q_head_tile_size, n);
+
+          max_attention_scratchpad_size = std::max(
+              max_attention_scratchpad_size, sc.get_thread_scratchpad_size());
+        }
+      }
+
       metadata_ptr->attention_scratchpad_size_per_thread =
-          ((sc.get_thread_scratchpad_size() + 63) / 64) * 64;
+          ((max_attention_scratchpad_size + 63) / 64) * 64;
+
+      int32_t max_reduction_q_head_tile_size = 0;
+      for (const ReductionWorkItemGroup& item : reduce_workitems) {
+        const bool curr_use_gqa =
+            use_gqa_fast_path || (supports_gqa && item.q_token_id_num == 1);
+        const int32_t curr_q_heads_per_kv =
+            curr_use_gqa ? original_q_head_per_kv : 1;
+
+        max_reduction_q_head_tile_size =
+            std::max(max_reduction_q_head_tile_size,
+                     item.q_token_id_num * curr_q_heads_per_kv);
+      }
 
       sc.update(0, metadata_ptr->reduction_split_num, input.head_dim,
-                max_num_q_per_iter * split_kv_q_token_num_threshold,
-                input.output_buffer_elem_size);
+                max_reduction_q_head_tile_size, input.output_buffer_elem_size);
       metadata_ptr->reduction_scratchpad_size_per_kv_head =
           ((sc.get_reduction_scratchpad_size() + 63) / 64) * 64;
     }
