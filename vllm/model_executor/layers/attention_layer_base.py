@@ -19,6 +19,7 @@ class AttentionLayerBase(ABC):
     """
 
     impl: "AttentionImpl"
+    supports_dcp: bool = True
 
     @abstractmethod
     def get_attn_backend(self) -> type[AttentionBackend]:
