@@ -970,8 +970,11 @@ torch::Tensor mxfp4_gemm_rdna3(torch::Tensor a, torch::Tensor b_q_weight,
   // Zero-init: K-split (gridDim.z > 1) accumulates atomically into c.
   at::Tensor c = torch::zeros({size_m, size_n}, opts);
 
-  // Small M (decode) -> scalar GEMV; larger M (prefill/batch) -> WMMA.
-  const bool use_scalar = size_m <= 8;
+  // M=1 (single-token decode) -> scalar GEMV; M>=2 (batched decode / prefill)
+  // -> WMMA. The scalar path is O(M) per weight read, so it degrades fast with
+  // batch; the WMMA 16x16 tile is flat ~constant up to M=16 and far faster
+  // (e.g. M=8: 205us scalar -> ~49us WMMA on a 7900 XTX).
+  const bool use_scalar = size_m == 1;
   if (a.scalar_type() == torch::kHalf) {
     namespace mx = vllm::mxfp4_rdna3_wmma;
     auto* ap = (const half*)a.data_ptr();
