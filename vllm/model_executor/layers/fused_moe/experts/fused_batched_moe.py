@@ -36,6 +36,14 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 
+def _is_capturing_or_compiling() -> bool:
+    # torch.cuda.is_current_stream_capturing() is unavailable on non-CUDA torch
+    # builds (e.g. XPU); so graph capture is not used on those paths here.
+    return torch.compiler.is_compiling() or (
+        current_platform.is_cuda_alike() and torch.cuda.is_current_stream_capturing()
+    )
+
+
 @triton.jit
 def moe_mmk(
     a_ptrs,
@@ -72,7 +80,7 @@ def moe_mmk(
     use_w8a8: tl.constexpr,
     use_w8a16: tl.constexpr,
     per_act_token_quant: tl.constexpr,
-    # Tensor-descriptor operand loads 
+    # Tensor-descriptor operand loads
     # a_base_ptr, b_base_ptr are the (already expert/CTA-offset) bases
     # of A [M, K] and B [N, K]; descriptors load the per-K tiles.
     a_base_ptr=None,
@@ -86,16 +94,20 @@ def moe_mmk(
     offs_k = tl.arange(0, BLOCK_K)
 
     if USE_TD:
+        # The innermost (K) stride is a literal 1: the launcher only enables
+        # USE_TD when A/B are K-contiguous. make_tensor_descriptor requires the
+        # last stride to be a compile-time 1, so we must not pass the runtime
+        # stride_ak/stride_bk here.
         a_desc = tl.make_tensor_descriptor(
             a_base_ptr,
             shape=[M, K],
-            strides=[stride_am, stride_ak],
+            strides=[stride_am, 1],
             block_shape=[BLOCK_M, BLOCK_K],
         )
         b_desc = tl.make_tensor_descriptor(
             b_base_ptr,
             shape=[N, K],
-            strides=[stride_bn, stride_bk],
+            strides=[stride_bn, 1],
             block_shape=[BLOCK_N, BLOCK_K],
         )
     if use_w8a16:
@@ -484,8 +496,8 @@ def invoke_moe_batched_triton_kernel(
         stride_asm = 0
         stride_ask = 0
 
-    # VLLM_TRITON_MOE_USE_TD: unset=auto, 1=force on, 0=force off.
-    td_override = envs.VLLM_TRITON_MOE_USE_TD
+    # VLLM_TRITON_USE_TD: unset=auto, 1=force on, 0=force off.
+    td_override = envs.VLLM_TRITON_USE_TD
     use_td = current_platform.is_xpu() if td_override is None else td_override
     use_td = (
         use_td
@@ -676,10 +688,7 @@ class NaiveBatchedExperts(mk.FusedMoEExpertsModular):
 
         for expert in range(num_local_experts):
             # Indexing expert_num_tokens doesn't work w/cudagraphs or inductor
-            if (
-                torch.compiler.is_compiling()
-                or torch.cuda.is_current_stream_capturing()
-            ):
+            if _is_capturing_or_compiling():
                 num = hidden_states.shape[1]
             else:
                 num = int(expert_num_tokens[expert].item())
@@ -719,7 +728,7 @@ def batched_moe_kernel_quantize_input(
     per_act_token_quant: bool,
     block_shape: list[int] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    if torch.compiler.is_compiling() or torch.cuda.is_current_stream_capturing():
+    if _is_capturing_or_compiling():
         # Note: this does a bunch of extra work because expert_num_tokens is
         # ignored but it does support torch.compile + cudagraphs.
         hidden_dim = A.size(-1)
@@ -805,7 +814,10 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return current_platform.is_cuda_alike()
+        # XPU is enabled for the unquantized TD path (moe_mmk). It is not the
+        # auto-selected XPU backend; selection still requires the batched
+        # activation format (EP dispatch or the reference BatchedPrepareAndFinalize).
+        return current_platform.is_cuda_alike() or current_platform.is_xpu()
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
