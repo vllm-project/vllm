@@ -188,7 +188,6 @@ from vllm.v1.spec_decode.ngram_proposer_gpu import (
     update_ngram_gpu_tensors_incremental,
     update_scheduler_for_invalid_drafts,
 )
-from vllm.v1.spec_decode.orthrus import OrthrusProposer
 from vllm.v1.spec_decode.step3p5 import Step3p5MTPProposer
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.spec_decode.utils import update_num_computed_tokens_for_batch_change
@@ -436,6 +435,12 @@ class GPUModelRunner(
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
 
+        if self.speculative_config and self.speculative_config.use_orthrus():
+            raise ValueError(
+                "Orthrus speculative decoding is supported only by "
+                "Model Runner V2. Enable Model Runner V2 to use method='orthrus'."
+            )
+
         model_config = self.model_config
         cache_config = self.cache_config
         scheduler_config = self.scheduler_config
@@ -550,7 +555,6 @@ class GPUModelRunner(
                 | SuffixDecodingProposer
                 | EagleProposer
                 | DFlashProposer
-                | OrthrusProposer
                 | DraftModelProposer
                 | MedusaProposer
                 | ExtractHiddenStatesProposer
@@ -595,8 +599,6 @@ class GPUModelRunner(
             elif self.speculative_config.use_dflash():
                 self.drafter = DFlashProposer(self.vllm_config, self.device, self)
                 self.use_aux_hidden_state_outputs = True
-            elif self.speculative_config.use_orthrus():
-                self.drafter = OrthrusProposer(self.vllm_config, self.device, self)
             elif self.speculative_config.method == "suffix":
                 self.drafter = SuffixDecodingProposer(self.vllm_config)
             elif self.speculative_config.use_eagle():
@@ -2474,7 +2476,6 @@ class GPUModelRunner(
                     (
                         EagleProposer,
                         DFlashProposer,
-                        OrthrusProposer,
                         Gemma4Proposer,
                         ExtractHiddenStatesProposer,
                     ),
@@ -4417,12 +4418,7 @@ class GPUModelRunner(
         assert self.speculative_config is not None
         # Block-diffusion drafters query one extra bonus token beyond num_spec_tokens.
         num_drafter_query_tokens = self.num_spec_tokens + (
-            1
-            if (
-                self.speculative_config.use_dflash()
-                or self.speculative_config.use_orthrus()
-            )
-            else 0
+            1 if self.speculative_config.use_dflash() else 0
         )
         return (
             common_attn_metadata.max_seq_len + num_drafter_query_tokens
@@ -4514,7 +4510,6 @@ class GPUModelRunner(
             use_gpu_toks = (
                 spec_config.use_eagle()
                 or spec_config.use_dflash()
-                or spec_config.use_orthrus()
                 or spec_config.uses_draft_model()
                 or spec_config.uses_extract_hidden_states()
             ) and not spec_config.disable_padded_drafter_batch
@@ -4525,7 +4520,6 @@ class GPUModelRunner(
                     self.drafter,
                     EagleProposer
                     | DFlashProposer
-                    | OrthrusProposer
                     | DraftModelProposer
                     | ExtractHiddenStatesProposer
                     | Gemma4Proposer,
@@ -5008,14 +5002,12 @@ class GPUModelRunner(
         elif (
             spec_config.use_eagle()
             or spec_config.use_dflash()
-            or spec_config.use_orthrus()
             or spec_config.uses_draft_model()
         ):
             assert isinstance(
                 self.drafter,
                 EagleProposer
                 | DFlashProposer
-                | OrthrusProposer
                 | DraftModelProposer
                 | Gemma4Proposer,
             )
@@ -5984,7 +5976,6 @@ class GPUModelRunner(
                     self.drafter,
                     EagleProposer
                     | DFlashProposer
-                    | OrthrusProposer
                     | DraftModelProposer
                     | ExtractHiddenStatesProposer
                     | Gemma4Proposer,
@@ -6891,7 +6882,6 @@ class GPUModelRunner(
                 self.drafter,
                 EagleProposer
                 | DFlashProposer
-                | OrthrusProposer
                 | DraftModelProposer
                 | Gemma4Proposer,
             )
@@ -6948,7 +6938,6 @@ class GPUModelRunner(
                 self.drafter,
                 EagleProposer
                 | DFlashProposer
-                | OrthrusProposer
                 | ExtractHiddenStatesProposer
                 | Gemma4Proposer,
             )

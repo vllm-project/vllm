@@ -3,6 +3,7 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from tests.v1.core.utils import create_requests
@@ -21,6 +22,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
 )
 from vllm.v1.structured_output import StructuredOutputManager
+from vllm.v1.worker.gpu.spec_decode.orthrus.speculator import OrthrusSpeculator
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 # Matches defaults from tests/v1/spec_decode/test_eagle.py
@@ -63,7 +65,7 @@ def _orthrus_speculative_config(num_speculative_tokens: int) -> SpeculativeConfi
     )
 
 
-def _create_scheduler(speculative_config: SpeculativeConfig) -> Scheduler:
+def _create_vllm_config(speculative_config: SpeculativeConfig) -> VllmConfig:
     model_config = speculative_config.target_model_config
     scheduler_config = SchedulerConfig(
         max_num_seqs=16,
@@ -77,13 +79,18 @@ def _create_scheduler(speculative_config: SpeculativeConfig) -> Scheduler:
         cache_dtype="auto",
         enable_prefix_caching=False,
     )
-    vllm_config = VllmConfig(
+    return VllmConfig(
         scheduler_config=scheduler_config,
         model_config=model_config,
         cache_config=cache_config,
         parallel_config=ParallelConfig(),
         speculative_config=speculative_config,
     )
+
+
+def _create_scheduler(speculative_config: SpeculativeConfig) -> Scheduler:
+    vllm_config = _create_vllm_config(speculative_config)
+    cache_config = vllm_config.cache_config
     kv_cache_config = KVCacheConfig(
         num_blocks=NUM_BLOCKS,
         kv_cache_tensors=[],
@@ -194,13 +201,19 @@ def test_dflash_drafter_window_reserves_bonus_token():
     assert input_fits_in_drafter(plain_runner, SimpleNamespace(max_seq_len=97))
 
 
-def test_orthrus_drafter_window_reserves_bonus_token():
-    input_fits_in_drafter = GPUModelRunner._input_fits_in_drafter
-    orthrus_runner = SimpleNamespace(
-        num_spec_tokens=NUM_SPECULATIVE_TOKENS,
-        effective_drafter_max_model_len=100,
-        speculative_config=_orthrus_speculative_config(NUM_SPECULATIVE_TOKENS),
+def test_orthrus_rejected_by_v1_model_runner():
+    vllm_config = _create_vllm_config(
+        _orthrus_speculative_config(NUM_SPECULATIVE_TOKENS)
     )
 
-    assert input_fits_in_drafter(orthrus_runner, SimpleNamespace(max_seq_len=96))
-    assert not input_fits_in_drafter(orthrus_runner, SimpleNamespace(max_seq_len=97))
+    with pytest.raises(ValueError, match="Model Runner V2"):
+        GPUModelRunner(vllm_config, torch.device("cpu"))
+
+
+def test_orthrus_v2_speculator_reserves_bonus_query_token():
+    vllm_config = _create_vllm_config(
+        _orthrus_speculative_config(NUM_SPECULATIVE_TOKENS)
+    )
+    speculator = OrthrusSpeculator(vllm_config, torch.device("cpu"))
+
+    assert speculator.num_query_per_req == NUM_SPECULATIVE_TOKENS + 1
