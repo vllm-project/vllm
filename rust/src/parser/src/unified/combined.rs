@@ -36,9 +36,12 @@ impl CombinedParser {
             return Ok(());
         };
 
+        // Preserve any tool output that was already produced before the error.
         let mut tool_output = ToolParserOutput::default();
-        tool.parse_into(content, &mut tool_output)?;
+        let result = tool.parse_into(content, &mut tool_output);
         output.append_tool_output(tool_output);
+        result?;
+
         Ok(())
     }
 
@@ -238,6 +241,36 @@ mod tests {
         }
     }
 
+    struct PartialThenErrorToolParser;
+
+    impl ToolParser for PartialThenErrorToolParser {
+        fn create(_tools: &[Tool]) -> crate::tool::Result<Box<dyn ToolParser>>
+        where
+            Self: Sized + 'static,
+        {
+            Ok(Box::new(Self))
+        }
+
+        fn parse_into(
+            &mut self,
+            _chunk: &str,
+            output: &mut crate::tool::ToolParserOutput,
+        ) -> crate::tool::Result<()> {
+            output.normal_text.push_str("committed");
+            Err(crate::tool::ToolParserError::ParsingFailed {
+                message: "synthetic failure".to_string(),
+            })
+        }
+
+        fn finish(&mut self) -> crate::tool::Result<crate::tool::ToolParserOutput> {
+            Ok(crate::tool::ToolParserOutput::default())
+        }
+
+        fn reset(&mut self) -> String {
+            String::new()
+        }
+    }
+
     #[test]
     fn combined_parser_emits_reasoning_and_text() {
         let tokenizer = Arc::new(FakeTokenizer);
@@ -285,6 +318,20 @@ mod tests {
                     arguments: r#"{"location":"Paris"}"#.to_string(),
                 }),
             ]
+        );
+    }
+
+    #[test]
+    fn combined_parser_preserves_tool_output_on_parse_error() {
+        let mut parser = CombinedParser::new(None, Some(Box::new(PartialThenErrorToolParser)));
+        let mut output = UnifiedParserOutput::default();
+
+        let error = parser.parse_into("bad", &mut output).unwrap_err();
+
+        assert!(matches!(error, crate::unified::UnifiedParserError::Tool(_)));
+        assert_eq!(
+            output.events,
+            vec![UnifiedParserEvent::Text("committed".to_string())]
         );
     }
 
