@@ -496,6 +496,8 @@ class HummingIndexedExperts(HummingExpertsBase):
 
     @staticmethod
     def humming_gemm_type() -> "HummingGemmType":
+        from vllm.utils.humming import GemmType as HummingGemmType
+
         return HummingGemmType.INDEXED
 
     def prepare_humming_moe_kwargs(
@@ -647,6 +649,8 @@ class HummingGroupedExperts(HummingExpertsBase):
 
     @staticmethod
     def humming_gemm_type() -> "HummingGemmType":
+        from vllm.utils.humming import GemmType as HummingGemmType
+
         return HummingGemmType.GROUPED_CONTIGUOUS
 
     def apply(
@@ -764,6 +768,8 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
 
     @staticmethod
     def humming_gemm_type() -> "HummingGemmType":
+        from vllm.utils.humming import GemmType as HummingGemmType
+
         return HummingGemmType.GROUPED_MASKED
 
     def apply(
