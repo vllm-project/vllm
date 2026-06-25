@@ -1175,10 +1175,14 @@ class EngineCoreProc(EngineCore):
                 numa_utils.log_current_affinity_state(process_title)
 
             if data_parallel and vllm_config.kv_transfer_config is not None:
-                # modify the engine_id and append the local_dp_rank to it to ensure
-                # that the kv_transfer_config is unique for each DP rank.
+                # Append the global DP rank to engine_id so it is unique across
+                # all DP ranks. local_dp_rank cannot be used here: in external-LB
+                # / DP-supervisor mode each engine has data_parallel_size_local=1
+                # so local_dp_rank is always 0, and in multi-node internal-LB it
+                # repeats across nodes -- both cause engine_id collisions that
+                # misroute KV transfers.
                 vllm_config.kv_transfer_config.engine_id = (
-                    f"{vllm_config.kv_transfer_config.engine_id}_dp{local_dp_rank}"
+                    f"{vllm_config.kv_transfer_config.engine_id}_dp{dp_rank}"
                 )
                 logger.debug(
                     "Setting kv_transfer_config.engine_id to %s",
