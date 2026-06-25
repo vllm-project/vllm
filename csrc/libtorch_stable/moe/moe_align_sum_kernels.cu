@@ -637,41 +637,31 @@ void moe_sum(torch::stable::Tensor& input,   // [num_tokens, topk, hidden_size]
   const cudaStream_t stream =
       get_current_cuda_stream(output.get_device_index());
 
+#define MOE_SUM_CASE(TOPK)                                                   \
+  case TOPK:                                                                 \
+    VLLM_STABLE_DISPATCH_FLOATING_TYPES(                                     \
+        input.scalar_type(), "moe_sum_kernel", [&] {                         \
+          vllm::moe::moe_sum_kernel<scalar_t, TOPK>                          \
+              <<<grid, block, 0, stream>>>(                                  \
+                  reinterpret_cast<scalar_t*>(output.mutable_data_ptr()),    \
+                  reinterpret_cast<const scalar_t*>(input.const_data_ptr()), \
+                  hidden_size);                                              \
+        });                                                                  \
+    break
+
   switch (topk) {
-    case 2:
-      VLLM_STABLE_DISPATCH_FLOATING_TYPES(
-          input.scalar_type(), "moe_sum_kernel", [&] {
-            vllm::moe::moe_sum_kernel<scalar_t, 2><<<grid, block, 0, stream>>>(
-                reinterpret_cast<scalar_t*>(output.mutable_data_ptr()),
-                reinterpret_cast<const scalar_t*>(input.const_data_ptr()),
-                hidden_size);
-          });
-      break;
-
-    case 3:
-      VLLM_STABLE_DISPATCH_FLOATING_TYPES(
-          input.scalar_type(), "moe_sum_kernel", [&] {
-            vllm::moe::moe_sum_kernel<scalar_t, 3><<<grid, block, 0, stream>>>(
-                reinterpret_cast<scalar_t*>(output.mutable_data_ptr()),
-                reinterpret_cast<const scalar_t*>(input.const_data_ptr()),
-                hidden_size);
-          });
-      break;
-
-    case 4:
-      VLLM_STABLE_DISPATCH_FLOATING_TYPES(
-          input.scalar_type(), "moe_sum_kernel", [&] {
-            vllm::moe::moe_sum_kernel<scalar_t, 4><<<grid, block, 0, stream>>>(
-                reinterpret_cast<scalar_t*>(output.mutable_data_ptr()),
-                reinterpret_cast<const scalar_t*>(input.const_data_ptr()),
-                hidden_size);
-          });
-      break;
-
+    MOE_SUM_CASE(2);
+    MOE_SUM_CASE(3);
+    MOE_SUM_CASE(4);
+    MOE_SUM_CASE(5);
+    MOE_SUM_CASE(6);
+    MOE_SUM_CASE(7);
+    MOE_SUM_CASE(8);
     default:
       torch::stable::sum_out(output, input, std::array<int64_t, 1>{1});
       break;
   }
+#undef MOE_SUM_CASE
 }
 
 void moe_lora_align_block_size(
