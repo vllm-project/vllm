@@ -25,9 +25,10 @@
 ARG CUDA_VERSION=13.0.2
 ARG PYTHON_VERSION=3.12
 ARG UBUNTU_VERSION=22.04
-# DeepEPv2 requires NCCL >= 2.30.4. NVIDIA does not publish a
-# 2.30.4+cuda13.0 package, so use the first available CUDA 13 package.
-ARG NCCL_VERSION=2.30.4-1+cuda13.2
+# DeepEPv2 requires NCCL >= 2.30.4 (GIN backend).
+# This version is only used for CUDA 13+ builds; CUDA 12 falls back to
+# the default NCCL version shipped with the base image.
+ARG NCCL_VERSION=2.30.7
 
 # By parameterizing the base images, we allow third-party to use their own
 # base images. One use case is hermetic builds with base images stored in
@@ -467,8 +468,14 @@ WORKDIR /workspace
 
 # DeepEPv2 compiles against NCCL GIN device headers (ncclGinRequest_t etc.)
 # which are only in the pip package, not the apt libnccl-dev package.
+# Only needed for CUDA 13+; DeepEPv2 GIN is not supported on CUDA 12.
+ARG NCCL_VERSION
 RUN --mount=type=cache,target=/opt/uv/cache \
-    uv pip install --python /opt/venv/bin/python3 "nvidia-nccl-cu13>=2.30.4" --no-deps
+    CUDA_MAJOR=$(echo $CUDA_VERSION | cut -d. -f1) && \
+    if [ "$CUDA_MAJOR" -ge 13 ]; then \
+        uv pip install --python /opt/venv/bin/python3 \
+            "nvidia-nccl-cu${CUDA_MAJOR}==${NCCL_VERSION}" --no-deps; \
+    fi
 
 # Build DeepEP wheels
 COPY tools/ep_kernels/install_python_libraries.sh /tmp/install_python_libraries.sh
@@ -693,6 +700,7 @@ RUN apt-get update -y \
 # Install CUDA development tools for runtime JIT compilation
 # (FlashInfer, DeepGEMM, EP kernels all require compilation at runtime)
 RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
+    CUDA_MAJOR=$(echo $CUDA_VERSION | cut -d. -f1) && \
     apt-get update -y && \
     apt-get install -y --no-install-recommends --allow-change-held-packages \
         cuda-nvcc-${CUDA_VERSION_DASH} \
@@ -705,8 +713,19 @@ RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
         libnuma-dev \
         # numactl CLI for NUMA binding at runtime
         numactl && \
+    # Pin NCCL for DeepEPv2 GIN on CUDA 13+; CUDA 12 uses whatever
+    # version the base image ships.
+    if [ "$CUDA_MAJOR" -ge 13 ]; then \
+        NCCL_VER=$(apt-cache madison libnccl-dev \
+            | grep "${NCCL_VERSION}" | head -1 \
+            | awk -F'|' '{gsub(/^ +| +$/, "", $2); print $2}') ; \
+    else \
+        NCCL_VER=$(apt-cache madison libnccl-dev \
+            | grep "+cuda${CUDA_MAJOR}" | head -1 \
+            | awk -F'|' '{gsub(/^ +| +$/, "", $2); print $2}') ; \
+    fi && \
     apt-get install -y --no-install-recommends --allow-change-held-packages \
-        libnccl-dev=${NCCL_VERSION} libnccl2=${NCCL_VERSION} && \
+        libnccl-dev=${NCCL_VER} libnccl2=${NCCL_VER} && \
     rm -rf /var/lib/apt/lists/*
 
 # Install uv for faster pip installs
