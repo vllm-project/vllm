@@ -396,6 +396,9 @@ class DelegatingParser(Parser):
         token_ids: Sequence[int] = (),
     ) -> tuple[str | None, str | None]:
         if self._reasoning_parser is None:
+            # Subclass overrides extract_reasoning directly (not via delegate)
+            if type(self).extract_reasoning is not DelegatingParser.extract_reasoning:
+                return self.extract_reasoning(model_output, request)
             return None, model_output
         if hasattr(self._reasoning_parser, "extract_reasoning_with_token_ids"):
             return self._reasoning_parser.extract_reasoning_with_token_ids(
