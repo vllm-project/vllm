@@ -61,6 +61,36 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("moe_gptq_gemm_rdna3", torch::kCUDA, &moe_gptq_gemm_rdna3);
 #endif
 
+#ifdef VLLM_ROCM_GFX950
+  // DeepSeek-V4 fused compressors (gfx950 / CDNA4). kv_cache is written in place.
+  rocm_ops.def(
+      "dsv4_csa_compress(Tensor state_cache, int num_actual, Tensor ape, "
+      "Tensor token_to_req_indices, Tensor positions, Tensor slot_mapping, "
+      "Tensor block_table, int block_size, Tensor rms_norm_weight, "
+      "float rms_norm_eps, Tensor cos_sin_cache, Tensor! kv_cache, "
+      "Tensor kv_slot_mapping, int kv_cache_block_size, int scale_dim) -> ()");
+  rocm_ops.impl("dsv4_csa_compress", torch::kCUDA, &dsv4_csa_compress);
+
+  rocm_ops.def(
+      "dsv4_hca_compress(Tensor state_cache, int num_actual, Tensor ape, "
+      "Tensor token_to_req_indices, Tensor positions, Tensor slot_mapping, "
+      "Tensor block_table, int block_size, Tensor rms_norm_weight, "
+      "float rms_norm_eps, Tensor cos_sin_cache, Tensor! kv_cache, "
+      "Tensor kv_slot_mapping, int kv_cache_block_size, int scale_dim, "
+      "Tensor plan_scratch, Tensor counter_scratch) -> ()");
+  rocm_ops.impl("dsv4_hca_compress", torch::kCUDA, &dsv4_hca_compress);
+
+  rocm_ops.def(
+      "dsv4_indexer_compress(Tensor state_cache, int num_actual, Tensor ape, "
+      "Tensor token_to_req_indices, Tensor positions, Tensor slot_mapping, "
+      "Tensor block_table, int block_size, Tensor rms_norm_weight, "
+      "float rms_norm_eps, Tensor cos_sin_cache, Tensor! kv_cache, "
+      "Tensor kv_slot_mapping, int kv_cache_block_size, int scale_dim, "
+      "bool use_fp4_cache) -> ()");
+  rocm_ops.impl("dsv4_indexer_compress", torch::kCUDA,
+                &dsv4_indexer_compress);
+#endif
+
   // Custom attention op
   // Compute the attention between an input query and the cached
   // keys/values using PagedAttention.
