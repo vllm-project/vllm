@@ -4,8 +4,10 @@
 import torch
 from torch.nn.parameter import Parameter
 
+import vllm.envs as envs
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
+    dequant_mxfp8_to_bf16,
     mxfp8_e4m3_quantize,
     swizzle_mxfp8_scale,
 )
@@ -44,6 +46,15 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
             weight_scale_swizzled.contiguous(), requires_grad=False
         )
 
+        # Optional small-M BF16 fallback (see apply_weights). mm_mxfp8 pads M
+        # up to a 128-row tile, so at small M most GEMM rows are wasted. Cache
+        # a BF16-dequantized weight to enable a plain matmul there instead.
+        if envs.VLLM_MXFP8_BF16_FALLBACK_SMALL_M:
+            weight_bf16 = dequant_mxfp8_to_bf16(weight, weight_scale_2d)
+            layer.weight_bf16 = Parameter(
+                weight_bf16.contiguous(), requires_grad=False
+            )
+
     def apply_weights(
         self,
         layer: torch.nn.Module,
@@ -57,6 +68,19 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
 
         input_shape = x.shape
         input_2d = x.view(-1, K)
+        M = input_2d.shape[0]
+
+        # Small-M BF16 fallback: avoid mm_mxfp8's 128-row tile padding when
+        # M < 128. Only active when weight_bf16 was cached at load time
+        # (VLLM_MXFP8_BF16_FALLBACK_SMALL_M); otherwise behaviour is unchanged.
+        if M < 128 and hasattr(layer, "weight_bf16"):
+            output = torch.matmul(
+                input_2d.to(torch.bfloat16), layer.weight_bf16.t()
+            )
+            if bias is not None:
+                output = output + bias
+            return output.view(*input_shape[:-1], N).to(out_dtype)
+
         min_dim = 128
 
         assert min_dim <= K, (
