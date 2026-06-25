@@ -24,6 +24,211 @@ steps:
       commands:
       - pytest -v -s v1/attention
 
+- label: 'AMD x3: Basic Correctness'
+  key: amd-x3-basic-correctness
+  timeout_in_minutes: 40
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 3
+  source_file_dependencies:
+  - .buildkite/amd_workload/amd_workload.yaml
+  - .buildkite/test_areas/basic_correctness.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      commands:
+      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - pytest -v -s basic_correctness/test_mem.py
+      - pytest -v -s basic_correctness/test_basic_correctness.py
+      - pytest -v -s basic_correctness/test_cpu_offload.py
+
+- label: 'AMD x3: Benchmarks CLI Test'
+  key: amd-x3-benchmarks-cli-test
+  timeout_in_minutes: 20
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 3
+  source_file_dependencies:
+  - .buildkite/amd_workload/amd_workload.yaml
+  - .buildkite/test_areas/benchmarks.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      commands:
+      - pytest -v -s benchmarks/
+
+- label: 'AMD x3: Distributed NixlConnector PD accuracy (4 GPUs)'
+  key: amd-x3-distributed-nixlconnector-pd-accuracy-4-gpus
+  timeout_in_minutes: 110
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 3
+  source_file_dependencies:
+  - .buildkite/amd_workload/amd_workload.yaml
+  - .buildkite/test_areas/disaggregated.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_4
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      commands:
+      - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+      - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+
+- label: 'AMD x3: DP EP Distributed NixlConnector PD accuracy tests (4 GPUs)'
+  key: amd-x3-dp-ep-distributed-nixlconnector-pd-accuracy-tests-4-gpus
+  timeout_in_minutes: 50
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 3
+  source_file_dependencies:
+  - .buildkite/amd_workload/amd_workload.yaml
+  - .buildkite/test_areas/disaggregated.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_4
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      commands:
+      - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+      - DP_EP=1 ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+
+- label: 'AMD x3: CrossLayer KV layout Distributed NixlConnector PD accuracy tests (4 GPUs)'
+  key: amd-x3-crosslayer-kv-layout-distributed-nixlconnector-pd-accuracy-tests-4-gpus
+  timeout_in_minutes: 110
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 3
+  source_file_dependencies:
+  - .buildkite/amd_workload/amd_workload.yaml
+  - .buildkite/test_areas/disaggregated.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_4
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      commands:
+      - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+      - CROSS_LAYERS_BLOCKS=True ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+
+- label: 'AMD x3: Hybrid SSM NixlConnector PD accuracy tests (4 GPUs)'
+  key: amd-x3-hybrid-ssm-nixlconnector-pd-accuracy-tests-4-gpus
+  timeout_in_minutes: 60
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 3
+  source_file_dependencies:
+  - .buildkite/amd_workload/amd_workload.yaml
+  - .buildkite/test_areas/disaggregated.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_4
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      commands:
+      - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+      - HYBRID_SSM=1 ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+
+- label: 'AMD x3: NixlConnector PD + Spec Decode acceptance (2 GPUs)'
+  key: amd-x3-nixlconnector-pd-spec-decode-acceptance-2-gpus
+  timeout_in_minutes: 60
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 3
+  source_file_dependencies:
+  - .buildkite/amd_workload/amd_workload.yaml
+  - .buildkite/test_areas/disaggregated.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_2
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      commands:
+      - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+      - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_spec_decode_test.sh
+
+- label: 'AMD x3: Distributed DP Tests (2 GPUs)'
+  key: amd-x3-distributed-dp-tests-2-gpus
+  timeout_in_minutes: 20
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 3
+  source_file_dependencies:
+  - .buildkite/amd_workload/amd_workload.yaml
+  - .buildkite/test_areas/distributed.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_2
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      commands:
+      - export NCCL_CUMEM_HOST_ENABLE=0
+      - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
+      - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
+      - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
+      - DP_SIZE=2 pytest -v -s entrypoints/openai/test_multi_api_servers.py
+
+- label: 'AMD x3: Distributed Tests (2xH100-2xMI300)'
+  key: amd-x3-distributed-tests-2xh100-2xmi300
+  timeout_in_minutes: 180
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 3
+  source_file_dependencies:
+  - .buildkite/amd_workload/amd_workload.yaml
+  - .buildkite/test_areas/distributed.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_2
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/
+      commands:
+      - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_async_new_apis.py
+      - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048
+      - pytest -v -s tests/v1/distributed/test_dbo.py
+      - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py
+      - pytest -v -s tests/distributed/test_packed_tensor.py
+
 - label: 'AMD x3: Engine'
   key: amd-x3-engine
   timeout_in_minutes: 60
@@ -108,6 +313,27 @@ steps:
       working_dir: /vllm-workspace/tests
       commands:
       - pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py
+
+- label: 'AMD x3: V1 e2e (2 GPUs)'
+  key: amd-x3-v1-e2e-2-gpus
+  timeout_in_minutes: 60
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 3
+  source_file_dependencies:
+  - .buildkite/amd_workload/amd_workload.yaml
+  - .buildkite/test_areas/engine.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_2
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      commands:
+      - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "tensor_parallelism"
 
 - label: 'AMD x3: Entrypoints Integration (LLM)'
   key: amd-x3-entrypoints-integration-llm
@@ -247,6 +473,28 @@ steps:
       - bash ../tools/install_torchcodec_rocm.sh || exit 1
       - pytest -s entrypoints/openai/correctness/
 
+- label: 'AMD x3: EPLB Algorithm'
+  key: amd-x3-eplb-algorithm
+  timeout_in_minutes: 15
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 3
+  source_file_dependencies:
+  - .buildkite/amd_workload/amd_workload.yaml
+  - .buildkite/test_areas/expert_parallelism.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      commands:
+      - pytest -v -s distributed/test_eplb_algo.py
+      - pytest -v -s distributed/test_eplb_utils.py
+
 - label: 'AMD x3: Kernels Attention Test %N'
   key: amd-x3-kernels-attention-test
   timeout_in_minutes: 55
@@ -332,8 +580,8 @@ steps:
       commands:
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
 
-- label: 'AMD x3: LM Eval Large Models (H200)'
-  key: amd-x3-lm-eval-large-models-h200
+- label: 'AMD x3: LM Eval Large Models (8xH200)'
+  key: amd-x3-lm-eval-large-models-8xh200
   timeout_in_minutes: 180
   device: cpu-small
   no_plugin: true
@@ -454,6 +702,139 @@ steps:
       - pytest -v -s -m 'not cpu_test' v1/metrics
       - pip install -U git+https://github.com/robertgshaw2-redhat/lm-evaluation-harness.git@streaming-api
       - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
+
+- label: 'AMD x3: Metrics, Tracing (2 GPUs)'
+  key: amd-x3-metrics-tracing-2-gpus
+  timeout_in_minutes: 20
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 3
+  source_file_dependencies:
+  - .buildkite/amd_workload/amd_workload.yaml
+  - .buildkite/test_areas/misc.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi325_2
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      commands:
+      - pip install 'opentelemetry-sdk>=1.26.0' 'opentelemetry-api>=1.26.0' 'opentelemetry-exporter-otlp>=1.26.0' 'opentelemetry-semantic-conventions-ai>=0.4.1'
+      - pytest -v -s v1/tracing
+
+- label: 'AMD x3: Python-only Installation'
+  key: amd-x3-python-only-installation
+  timeout_in_minutes: 20
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 3
+  source_file_dependencies:
+  - .buildkite/amd_workload/amd_workload.yaml
+  - .buildkite/test_areas/misc.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      commands:
+      - bash standalone_tests/python_only_compile.sh
+
+- label: 'AMD x3: Model Executor'
+  key: amd-x3-model-executor
+  timeout_in_minutes: 35
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 3
+  source_file_dependencies:
+  - .buildkite/amd_workload/amd_workload.yaml
+  - .buildkite/test_areas/model_executor.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      commands:
+      - apt-get update && apt-get install -y curl libsodium23
+      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - export PYTHONFAULTHANDLER=1
+      - pytest -v -s model_executor -m '(not slow_test)' --timeout=900 --timeout-method=thread
+      - pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py --timeout=900 --timeout-method=thread
+
+- label: 'AMD x3: Basic Models Tests (Other)'
+  key: amd-x3-basic-models-tests-other
+  timeout_in_minutes: 45
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 3
+  source_file_dependencies:
+  - .buildkite/amd_workload/amd_workload.yaml
+  - .buildkite/test_areas/models_basic.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      commands:
+      - pytest -v -s models/test_terratorch.py models/test_transformers.py models/test_registry.py
+
+- label: 'AMD x3: Language Models Tests (Standard)'
+  key: amd-x3-language-models-tests-standard
+  timeout_in_minutes: 25
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 3
+  source_file_dependencies:
+  - .buildkite/amd_workload/amd_workload.yaml
+  - .buildkite/test_areas/models_language.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      commands:
+      - pip freeze | grep -E 'torch'
+      - pytest -v -s models/language -m 'core_model and (not slow_test)'
+
+- label: 'AMD x3: Language Models Tests (Extra Standard) %N'
+  key: amd-x3-language-models-tests-extra-standard
+  timeout_in_minutes: 45
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 6
+  source_file_dependencies:
+  - .buildkite/amd_workload/amd_workload.yaml
+  - .buildkite/test_areas/models_language.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      commands:
+      - pip freeze | grep -E 'torch'
+      - pytest -v -s models/language -m 'core_model and slow_test' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 - label: 'AMD x3: Language Models Tests (Hybrid) %N'
   key: amd-x3-language-models-tests-hybrid
@@ -593,6 +974,27 @@ steps:
       - pytest models/multimodal/generation/test_memory_leak.py -m core_model
       - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model
 
+- label: 'AMD x3: Multi-Modal Accuracy Eval (Small Models)'
+  key: amd-x3-multi-modal-accuracy-eval-small-models
+  timeout_in_minutes: 70
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 3
+  source_file_dependencies:
+  - .buildkite/amd_workload/amd_workload.yaml
+  - .buildkite/test_areas/models_multimodal.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/.buildkite/lm-eval-harness
+      commands:
+      - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
+
 - label: 'AMD x3: Multi-Modal Models (Extended Generation 1)'
   key: amd-x3-multi-modal-models-extended-generation-1
   device: cpu-small
@@ -656,6 +1058,26 @@ steps:
       working_dir: /vllm-workspace/tests
       commands:
       - pytest -s -v compile/passes --ignore compile/passes/distributed
+
+- label: 'AMD x3: Pytorch Nightly Dependency Override Check'
+  key: amd-x3-pytorch-nightly-dependency-override-check
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 3
+  source_file_dependencies:
+  - .buildkite/amd_workload/amd_workload.yaml
+  - .buildkite/test_areas/pytorch.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      commands:
+      - bash standalone_tests/pytorch_nightly_dependency.sh
 
 - label: 'AMD x3: Samplers Test'
   key: amd-x3-samplers-test
@@ -761,3 +1183,24 @@ steps:
       working_dir: /vllm-workspace/tests
       commands:
       - pytest -v -s v1/e2e/spec_decode -k "draft_model or no_sync or batch_inference"
+
+- label: 'AMD x3: Weight Loading Multiple GPU'
+  key: amd-x3-weight-loading-multiple-gpu
+  timeout_in_minutes: 45
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 3
+  source_file_dependencies:
+  - .buildkite/amd_workload/amd_workload.yaml
+  - .buildkite/test_areas/weight_loading.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_2
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      commands:
+      - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-amd.txt
