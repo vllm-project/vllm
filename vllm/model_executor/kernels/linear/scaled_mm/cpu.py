@@ -7,7 +7,6 @@ import torch
 from vllm import _custom_ops as ops
 from vllm import envs
 from vllm.model_executor.layers.quantization.utils import replace_parameter
-from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     convert_to_channelwise,
 )
@@ -72,9 +71,7 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         # scales being passed to the kernel), convert to the per-channel case.
         is_fused_module = len(layer.logical_widths) > 1
         weight_scale = getattr(layer, w_s_name)
-        is_per_tensor = (
-            self.config.weight_quant_key.scale.group_shape == GroupShape.PER_TENSOR
-        )
+        is_per_tensor = self.config.weight_quant_key.scale.group_shape.is_per_tensor()
         if is_fused_module and is_per_tensor:
             weight_scale = convert_to_channelwise(weight_scale, layer.logical_widths)
         replace_parameter(
@@ -165,9 +162,7 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         # CPU SGL kernels only support per-channel.
         # For per-tensor quant, convert to the per-channel case.
         weight_scale = getattr(layer, w_s_name)
-        is_per_tensor = (
-            self.config.weight_quant_key.scale.group_shape == GroupShape.PER_TENSOR
-        )
+        is_per_tensor = self.config.weight_quant_key.scale.group_shape.is_per_tensor()
         if is_per_tensor:
             weight_scale = convert_to_channelwise(weight_scale, layer.logical_widths)
         replace_parameter(

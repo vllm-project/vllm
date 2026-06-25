@@ -65,10 +65,15 @@ class QuarkW8A8Int8(QuarkScheme):
                 loaded_weight = loaded_weight.unsqueeze(-1)
             return weight_loader(param, loaded_weight, *args, **kwargs)
 
-        is_channelwise = self.qscheme == "per_channel"
-        weight_quant_key = (
-            kInt8StaticChannelSym if is_channelwise else kInt8StaticTensorSym
-        )
+        if self.qscheme == "per_channel":
+            weight_quant_key = kInt8StaticChannelSym
+        elif self.qscheme == "per_tensor":
+            weight_quant_key = kInt8StaticTensorSym
+        else:
+            raise ValueError(
+                f"Unsupported INT8 weight quantization qscheme: "
+                f'{self.qscheme}. Only "per_channel" and "per_tensor" are supported.'
+            )
 
         is_static = self.is_static_input_scheme is True
         input_symmetric = self.input_symmetric is True

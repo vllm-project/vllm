@@ -54,10 +54,15 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
     ):
         layer.logical_widths = output_partition_sizes
 
-        is_channelwise = self.strategy == QuantizationStrategy.CHANNEL
-        weight_quant_key = (
-            kInt8StaticChannelSym if is_channelwise else kInt8StaticTensorSym
-        )
+        if self.strategy == QuantizationStrategy.CHANNEL:
+            weight_quant_key = kInt8StaticChannelSym
+        elif self.strategy == QuantizationStrategy.TENSOR:
+            weight_quant_key = kInt8StaticTensorSym
+        else:
+            raise ValueError(
+                f"Unsupported INT8 weight quantization strategy: "
+                f"{self.strategy}. Only CHANNEL and TENSOR are supported."
+            )
 
         if self.is_static_input_scheme:
             activation_quant_key = QuantKey(
