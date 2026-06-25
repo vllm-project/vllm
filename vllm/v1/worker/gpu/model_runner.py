@@ -212,14 +212,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.pcp_manager, max_num_input_reqs = maybe_build_pcp_runner_config(
             self.vllm_config,
             self.device,
-            self.max_num_reqs,
-            self.dcp_size,
-            self.dcp_rank,
-            self.use_pp,
-            self.is_encoder_decoder,
             self.supports_mm_inputs,
-            self.lora_config,
-            self.speculative_config,
         )
 
         # Pooling models.

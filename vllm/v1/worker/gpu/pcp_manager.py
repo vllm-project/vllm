@@ -8,7 +8,7 @@ import numpy as np
 import torch
 
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.distributed.parallel_state import get_pcp_group
+from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
@@ -82,12 +82,7 @@ class PCPManager:
     @staticmethod
     def validate_config(
         vllm_config: VllmConfig,
-        dcp_size: int,
-        use_pp: bool,
-        is_encoder_decoder: bool,
         supports_mm_inputs: bool,
-        lora_config: Any,
-        speculative_config: Any,
     ) -> None:
         parallel_config = vllm_config.parallel_config
         model_config = vllm_config.model_config
@@ -97,17 +92,17 @@ class PCPManager:
 
         if not model_config.use_mla:
             raise NotImplementedError("MRV2 PCP currently supports MLA models only.")
-        if use_pp:
+        if parallel_config.pipeline_parallel_size > 1:
             raise NotImplementedError("MRV2 PCP does not support PP yet.")
-        if is_encoder_decoder:
+        if model_config.is_encoder_decoder:
             raise NotImplementedError(
                 "MRV2 PCP does not support encoder-decoder models yet."
             )
         if supports_mm_inputs:
             raise NotImplementedError("MRV2 PCP does not support MM inputs yet.")
-        if lora_config is not None:
+        if vllm_config.lora_config is not None:
             raise NotImplementedError("MRV2 PCP does not support LoRA yet.")
-        if speculative_config is not None:
+        if vllm_config.speculative_config is not None:
             raise NotImplementedError(
                 "MRV2 PCP does not support speculative decoding yet."
             )
@@ -120,6 +115,7 @@ class PCPManager:
                 "MRV2 sparse MLA PCP does not support CUDA graphs yet. "
                 "Set -cc.cudagraph_mode=NONE."
             )
+        dcp_size = parallel_config.decode_context_parallel_size
         if dcp_size > 1:
             if dcp_size != pcp_size:
                 raise NotImplementedError(
@@ -647,30 +643,19 @@ def get_pcp_forward_context_kwargs(
 def maybe_build_pcp_runner_config(
     vllm_config: VllmConfig,
     device: torch.device,
-    max_num_reqs: int,
-    dcp_size: int,
-    dcp_rank: int,
-    use_pp: bool,
-    is_encoder_decoder: bool,
     supports_mm_inputs: bool,
-    lora_config: Any,
-    speculative_config: Any,
 ) -> tuple[PCPManager | None, int]:
     parallel_config = vllm_config.parallel_config
     pcp_size = parallel_config.prefill_context_parallel_size
     pcp_rank = get_pcp_group().rank_in_group if pcp_size > 1 else 0
+    max_num_reqs = vllm_config.scheduler_config.max_num_seqs
     if pcp_size <= 1:
         return None, max_num_reqs
 
-    PCPManager.validate_config(
-        vllm_config,
-        dcp_size,
-        use_pp,
-        is_encoder_decoder,
-        supports_mm_inputs,
-        lora_config,
-        speculative_config,
-    )
+    PCPManager.validate_config(vllm_config, supports_mm_inputs)
+
+    dcp_size = parallel_config.decode_context_parallel_size
+    dcp_rank = get_dcp_group().rank_in_group if dcp_size > 1 else 0
 
     manager = PCPManager(
         pcp_world_size=pcp_size,

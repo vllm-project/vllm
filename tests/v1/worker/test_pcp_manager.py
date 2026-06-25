@@ -23,25 +23,23 @@ def test_sparse_mla_pcp_rejects_cuda_graphs() -> None:
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(
             prefill_context_parallel_size=2,
+            decode_context_parallel_size=1,
+            pipeline_parallel_size=1,
             dcp_comm_backend="ag_rs",
         ),
         model_config=SimpleNamespace(
             use_mla=True,
             hf_text_config=SimpleNamespace(index_topk=2048),
+            is_encoder_decoder=False,
+            is_multimodal_model=False,
         ),
         compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.PIECEWISE),
+        lora_config=None,
+        speculative_config=None,
     )
 
     with pytest.raises(NotImplementedError, match="sparse MLA PCP"):
-        PCPManager.validate_config(
-            config,
-            dcp_size=1,
-            use_pp=False,
-            is_encoder_decoder=False,
-            supports_mm_inputs=False,
-            lora_config=None,
-            speculative_config=None,
-        )
+        PCPManager.validate_config(config, supports_mm_inputs=False)
 
 
 def test_dual_chunk_swap_even_partition() -> None:
