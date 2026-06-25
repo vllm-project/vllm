@@ -509,9 +509,7 @@ class RocmAttentionImpl(AttentionImpl):
         # Packed logical (B, 2*H, N, C) -> (B, N, 2*H, C); split K/V on the
         # head-group dim (flash layout) for the fused rope+cache kernel.
         kv_cache_transposed = kv_cache.transpose(1, 2)
-        key_cache, value_cache = kv_cache_transposed.split(
-            self.num_kv_heads, dim=-2
-        )
+        key_cache, value_cache = kv_cache_transposed.split(self.num_kv_heads, dim=-2)
         flash_layout = True
 
         is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)
