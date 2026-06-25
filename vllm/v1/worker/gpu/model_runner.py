@@ -463,9 +463,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.parallel_config.tensor_parallel_size,
             self.kv_cache_config,
             self.max_num_reqs,
-            require_tp_aligned_capture_sizes=(
-                self.parallel_config.enable_sequence_parallel_mhc
-            ),
+            require_tp_aligned_capture_sizes=(self.parallel_config.enable_sp),
         )
         self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,
@@ -1151,7 +1149,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # the dispatch token count (captured cudagraph sizes are already
         # tp-aligned; this covers the eager / non-captured path). The extra
         # rows are flagged as padding below.
-        if self.parallel_config.enable_sequence_parallel_mhc:
+        if self.parallel_config.enable_sp:
             num_toks = round_up(num_toks, self.parallel_config.tensor_parallel_size)
 
         num_active_loras = 0

@@ -22,6 +22,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
@@ -40,7 +41,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import get_spec_layer_idx_from_weight_name
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.utils import maybe_prefix, sequence_parallel_chunk
 from vllm.models.deepseek_v4.common.ops import (
     fused_mtp_input_rmsnorm,
     mtp_shared_head_rmsnorm,
@@ -80,11 +81,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         self.config = config
         quant_config = vllm_config.quant_config
         self.rms_norm_eps = config.rms_norm_eps
-        # mHC sequence parallelism is intentionally NOT applied to the MTP
-        # draft: it is a single decoder block, so sharding its per-token mHC
-        # saves negligible compute while requiring tp-alignment of the entire
-        # spec-decode dispatch. The draft runs the standard full-token path and
-        # consumes the target's full pre-hc_head residual.
+        self.parallel_config = vllm_config.parallel_config
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -127,14 +124,14 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         self.shared_head = SharedHead(
             config=config, prefix=prefix, quant_config=quant_config
         )
+        # The draft decoder block participates in mHC SP like the target's
+        # layers (sharded-in / sharded-out when the forward engages SP).
         self.mtp_block = DeepseekV4DecoderLayer(
             vllm_config,
             prefix,
             topk_indices_buffer=topk_indices_buffer,
             aux_stream_list=aux_stream_list,
         )
-        # Force the draft decoder block to run without mHC SP (see above).
-        self.mtp_block.is_sequence_parallel = False
 
     def forward(
         self,
@@ -164,10 +161,22 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         hidden_states = self.h_proj(previous_hidden_states) + self.e_proj(
             inputs_embeds
         ).unsqueeze(-2)
+
+        sp_threshold = self.parallel_config.sp_threshold
+        is_sp_sharded = (
+            self.parallel_config.enable_sp and hidden_states.shape[0] >= sp_threshold
+        )
+        if is_sp_sharded:
+            hidden_states = sequence_parallel_chunk(hidden_states)
         hidden_states, residual, post_mix, res_mix = self.mtp_block(
-            positions=positions, x=hidden_states, input_ids=None
+            positions=positions,
+            x=hidden_states,
+            input_ids=None,
+            is_sp_sharded=is_sp_sharded,
         )
         hidden_states = mhc_post_tilelang(hidden_states, residual, post_mix, res_mix)
+        if is_sp_sharded:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
         # Return the flat pre-hc_head residual so it can be re-fed as the
         # next spec step's `previous_hidden_states` when
         # num_speculative_tokens > 1. hc_head is deferred to compute_logits.

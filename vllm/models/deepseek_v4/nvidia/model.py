@@ -16,6 +16,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
+    tensor_model_parallel_all_reduce,
     tensor_model_parallel_reduce_scatter,
 )
 from vllm.distributed.eplb.eplb_state import EplbLayerState
@@ -527,14 +528,8 @@ class DeepseekV4MoE(nn.Module):
                 "Enable it with --enable-expert-parallel, or pick a different "
                 "moe backend."
             )
-        # mHC sequence parallelism: the FusedMoE runs sharded-in/sharded-out
-        # (internal all-gather dispatch + reduce-scatter combine over the TP
-        # group), so the MoE adds no comm beyond the AllReduce it replaces.
-        # Only wired for the FusedMoE path; MegaMoE+SP is unsupported.
-        self.is_sequence_parallel = (
-            vllm_config.parallel_config.enable_sequence_parallel_mhc
-        )
-        if self.is_sequence_parallel and self.use_mega_moe:
+        self.enable_sp = vllm_config.parallel_config.enable_sp
+        if self.enable_sp and self.use_mega_moe:
             raise NotImplementedError(
                 "mHC sequence parallelism requires the FusedMoE path; "
                 "MegaMoE + sequence parallelism is not supported."
@@ -697,7 +692,7 @@ class DeepseekV4MoE(nn.Module):
             router_logits_dtype=torch.float32,
             enable_eplb=parallel_config.enable_eplb,
             num_redundant_experts=eplb_config.num_redundant_experts,
-            is_sequence_parallel=self.is_sequence_parallel,
+            is_sequence_parallel=self.enable_sp,
         )
 
     def forward(
@@ -813,15 +808,7 @@ class DeepseekV4DecoderLayer(nn.Module):
 
         config = vllm_config.model_config.hf_config
         self.hidden_size = config.hidden_size
-
-        # When set, the per-token mHC residual stream is sharded across the TP
-        # group: attention/ffn inputs are all-gathered to full and their full
-        # outputs are sliced back to this rank's token shard, so the mHC ops and
-        # RMSNorms run on 1/tp of the tokens. See ParallelConfig
-        # .enable_sequence_parallel_mhc.
-        self.is_sequence_parallel = (
-            vllm_config.parallel_config.enable_sequence_parallel_mhc
-        )
+        self.enable_sp = vllm_config.parallel_config.enable_sp
 
         self.rms_norm_eps = config.rms_norm_eps
         self.attn = _select_dsv4_attn_cls(vllm_config)(
@@ -830,11 +817,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             topk_indices_buffer=topk_indices_buffer,
             aux_stream_list=aux_stream_list,
         )
-        # Real Megatron-SP on the attention side: have wo_b return the
-        # un-reduced per-rank partial so the layer can replace its AllReduce
-        # with a ReduceScatter (AllReduce == ReduceScatter + AllGather, so this
-        # redistributes the existing reduce instead of adding comm on top).
-        if self.is_sequence_parallel:
+        if self.enable_sp:
             self.attn.wo_b.reduce_results = False
         self.ffn = DeepseekV4MoE(vllm_config, prefix=f"{prefix}.ffn")
 
@@ -897,6 +880,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         post_mix: torch.Tensor | None = None,
         res_mix: torch.Tensor | None = None,
         residual: torch.Tensor | None = None,
+        is_sp_sharded: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         attn_norm_weight = self.attn_norm.weight.data
         attn_norm_eps = self.attn_norm.variance_epsilon
@@ -935,16 +919,18 @@ class DeepseekV4DecoderLayer(nn.Module):
                 norm_weight=attn_norm_weight,
                 norm_eps=attn_norm_eps,
             )
-
-        # attn_norm is fused into mhc_pre_tilelang / mhc_fused_post_pre above.
-        # Under SP: all-gather the sharded stream to full tokens for attention,
-        # then reduce-scatter wo_b's partial output back to this rank's shard
-        # (replaces wo_b's AllReduce; net comm == baseline, mHC stays sharded).
-        if self.is_sequence_parallel:
+        if is_sp_sharded:
             x = tensor_model_parallel_all_gather(x, dim=0)
+
         x = self.attn(positions, x, None)
-        if self.is_sequence_parallel:
-            x = tensor_model_parallel_reduce_scatter(x, dim=0)
+        if self.enable_sp:
+            # When SP is enabled, attn o-proj returns an un-reduced per-rank partial.
+            if is_sp_sharded:
+                # `num_tokens` meets the sp_threshold, so we do reduce-scatter.
+                x = tensor_model_parallel_reduce_scatter(x, dim=0)
+            else:
+                # `num_tokens` does not meet the sp_threshold, so we do all-reduce.
+                x = tensor_model_parallel_all_reduce(x)
 
         ffn_norm_weight = self.ffn_norm.weight.data
         ffn_norm_eps = self.ffn_norm.variance_epsilon
@@ -966,17 +952,18 @@ class DeepseekV4DecoderLayer(nn.Module):
             norm_weight=ffn_norm_weight,
             norm_eps=ffn_norm_eps,
         )
-
-        # FFN, symmetric to attention: gather to full tokens, run the MoE with
-        # its final TP all-reduce disabled (is_sequence_parallel=True makes
-        # FusedMoE + shared experts return the un-reduced per-rank partial),
-        # then reduce-scatter that partial back to this rank's shard. AG + RS
-        # == the AllReduce it replaces, so the FFN adds no comm vs non-SP.
-        if self.is_sequence_parallel:
+        if is_sp_sharded:
             x = tensor_model_parallel_all_gather(x, dim=0)
+
         x = self.ffn(x, input_ids)
-        if self.is_sequence_parallel:
-            x = tensor_model_parallel_reduce_scatter(x, dim=0)
+        if self.enable_sp:
+            # When SP is enabled, MLP/MoE returns an un-reduced per-rank partial.
+            if is_sp_sharded:
+                # `num_tokens` meets the sp_threshold, so we do reduce-scatter.
+                x = tensor_model_parallel_reduce_scatter(x, dim=0)
+            else:
+                # `num_tokens` does not meet the sp_threshold, so we do all-reduce.
+                x = tensor_model_parallel_all_reduce(x)
         return x, residual, post_mix, res_mix
 
 
@@ -1080,6 +1067,17 @@ class DeepseekV4Model(nn.Module):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
+    def _is_sp_sharded(self, num_tokens: int) -> bool:
+        # Engage SP once the (tp-padded) token count clears the threshold. The
+        # runner pads eligible batches to a multiple of tp_size, so the chunk is
+        # exact. enable_sp guarantees sp_threshold is not None.
+        sp_threshold = self.parallel_config.sp_threshold
+        return (
+            self.parallel_config.enable_sp
+            and sp_threshold is not None
+            and num_tokens >= sp_threshold
+        )
+
     def make_empty_intermediate_tensors(
         self,
         batch_size: int,
@@ -1093,7 +1091,7 @@ class DeepseekV4Model(nn.Module):
         # Under mHC sequence parallelism the stream is token-sharded across the
         # TP group, so the per-rank PP buffer holds num_tokens / tp_size rows.
         num_tokens = batch_size
-        if self.parallel_config.enable_sequence_parallel_mhc:
+        if self._is_sp_sharded(batch_size):
             num_tokens = cdiv(batch_size, get_tensor_model_parallel_world_size())
         return IntermediateTensors(
             {
@@ -1112,21 +1110,32 @@ class DeepseekV4Model(nn.Module):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        # Whether to token-shard the mHC stream this forward (eager SP). A pure
+        # function of the full (padded) token count + threshold, so it is stable
+        # between cudagraph capture and replay for a given bucket. (The runner
+        # pads eligible batches to a multiple of tp_size, so an engaged forward's
+        # count is tp-aligned and the chunk is exact.)
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
                 hidden_states = self.embed_input_ids(input_ids)
             hidden_states = hidden_states.unsqueeze(-2).repeat(1, self.hc_mult, 1)
+            # Full token count is hidden_states.shape[0] here (before the chunk).
+            is_sp_sharded = self._is_sp_sharded(hidden_states.shape[0])
             # Shard the mHC residual stream along the token dim; it stays
-            # sharded through every layer (the runner pads num_tokens to a
-            # multiple of tp_size, so the chunk is exact). Non-first PP ranks
-            # already receive a sharded stream from the previous rank.
-            if self.parallel_config.enable_sequence_parallel_mhc:
+            # sharded through every layer. Non-first PP ranks already receive a
+            # sharded stream from the previous rank.
+            if is_sp_sharded:
                 hidden_states = sequence_parallel_chunk(hidden_states)
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
+            # Match the producing rank from the full (padded) token count on the
+            # forward context (rank-independent).
+            batch_descriptor = get_forward_context().batch_descriptor
+            assert batch_descriptor is not None
+            is_sp_sharded = self._is_sp_sharded(batch_descriptor.num_tokens)
 
         if self.use_mega_moe:
             input_ids = input_ids.to(torch.int64)
@@ -1140,6 +1149,7 @@ class DeepseekV4Model(nn.Module):
                 post_mix,
                 res_mix,
                 residual,
+                is_sp_sharded,
             )
         if layer is not None:
             hidden_states = mhc_post_tilelang(
@@ -1150,8 +1160,9 @@ class DeepseekV4Model(nn.Module):
             return IntermediateTensors({"hidden_states": hidden_states})
 
         # Reassemble the full token stream before the MTP buffer copy and the
-        # hc_head collapse (both need all tokens on this rank).
-        if self.parallel_config.enable_sequence_parallel_mhc:
+        # hc_head collapse (both need all tokens on this rank). Only when this
+        # forward actually sharded; otherwise the stream is already full.
+        if is_sp_sharded:
             hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
 
         # Stash pre-hc_head residual for the MTP draft (captured copy_).

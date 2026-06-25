@@ -490,7 +490,7 @@ class EngineArgs:
     all2all_backend: All2AllBackend = ParallelConfig.all2all_backend
     enable_elastic_ep: bool = ParallelConfig.enable_elastic_ep
     enable_dbo: bool = ParallelConfig.enable_dbo
-    use_sequence_parallel_mhc: bool = ParallelConfig.use_sequence_parallel_mhc
+    sp_threshold: int | None = ParallelConfig.sp_threshold
     ubatch_size: int = ParallelConfig.ubatch_size
     dbo_decode_token_threshold: int = ParallelConfig.dbo_decode_token_threshold
     dbo_prefill_token_threshold: int = ParallelConfig.dbo_prefill_token_threshold
@@ -1099,8 +1099,8 @@ class EngineArgs:
         )
         parallel_group.add_argument("--enable-dbo", **parallel_kwargs["enable_dbo"])
         parallel_group.add_argument(
-            "--use-sequence-parallel-mhc",
-            **parallel_kwargs["use_sequence_parallel_mhc"],
+            "--sp-threshold",
+            **parallel_kwargs["sp_threshold"],
         )
         parallel_group.add_argument(
             "--ubatch-size",
@@ -2097,7 +2097,7 @@ class EngineArgs:
             all2all_backend=self.all2all_backend,
             enable_elastic_ep=self.enable_elastic_ep,
             enable_dbo=self.enable_dbo,
-            use_sequence_parallel_mhc=self.use_sequence_parallel_mhc,
+            sp_threshold=self.sp_threshold,
             ubatch_size=self.ubatch_size,
             dbo_decode_token_threshold=self.dbo_decode_token_threshold,
             dbo_prefill_token_threshold=self.dbo_prefill_token_threshold,

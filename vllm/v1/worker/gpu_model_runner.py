@@ -3434,7 +3434,7 @@ class GPUModelRunner(
             return False
         return (
             self.compilation_config.pass_config.enable_sp
-            or self.vllm_config.parallel_config.enable_sequence_parallel_mhc
+            or self.vllm_config.parallel_config.enable_sp
         )
 
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
@@ -6949,9 +6949,7 @@ class GPUModelRunner(
             self.kv_cache_config,
             self.max_num_reqs,
             is_profiling=is_profiling,
-            require_tp_aligned_capture_sizes=(
-                self.parallel_config.enable_sequence_parallel_mhc
-            ),
+            require_tp_aligned_capture_sizes=(self.parallel_config.enable_sp),
         )
         # Trigger cudagraph dispatching keys initialization after
         # resolved cudagraph mode.
