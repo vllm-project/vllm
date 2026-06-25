@@ -1,44 +1,34 @@
 //! Default output processing pipeline.
 
-mod reasoning;
 mod structural_tag;
-mod tool;
+mod unified;
 
 use std::sync::Once;
 
-use futures::{Stream, StreamExt as _};
+use futures::StreamExt as _;
 use tracing::info;
-use trait_set::trait_set;
+use vllm_parser::unified::{CombinedParser, UnifiedParser};
 use vllm_text::tokenizer::DynTokenizer;
 
-use self::reasoning::reasoning_event_stream;
 use self::structural_tag::apply_structural_tag_constraint;
-use self::tool::tool_event_stream;
+use self::unified::unified_event_stream;
 use super::structured::structured_chat_event_stream;
 use crate::error::Result;
-use crate::output::{
-    AssistantEvent, ChatOutputProcessor, ContentEvent, DynChatEventStream,
-    DynDecodedTextEventStream,
-};
+use crate::output::{ChatOutputProcessor, DynChatEventStream, DynDecodedTextEventStream};
 use crate::parser::ParserSelection;
 use crate::parser::reasoning::{ReasoningParser, ReasoningParserFactory};
 use crate::parser::tool::{ToolParser, ToolParserFactory};
 use crate::request::ChatRequest;
 use crate::{Error, Result as ChatResult};
 
-trait_set! {
-    trait ContentEventStream = Stream<Item = Result<ContentEvent>> + Send + 'static;
-}
-
 /// Default request-scoped output processor used by Hugging Face style chat
 /// backends.
 ///
 /// This implementation assumes the backend already emitted decoded text deltas,
-/// then optionally layers reasoning parsing and tool-call parsing before
+/// then optionally layers unified reasoning and tool-call parsing before
 /// assembling final structured chat events.
 pub struct DefaultChatOutputProcessor {
-    reasoning_parser: Option<Box<dyn ReasoningParser>>,
-    tool_parser: Option<Box<dyn ToolParser>>,
+    parser: Box<dyn UnifiedParser>,
     parallel_tool_calls: bool,
 }
 
@@ -66,16 +56,17 @@ impl DefaultChatOutputProcessor {
         } else {
             None
         };
-        let reasoning_parser = Self::resolve_optional_reasoning_parser(
-            request,
-            model_id,
-            tokenizer,
-            reasoning_parser,
-        )?;
+        let reasoning_parser =
+            Self::resolve_optional_reasoning_parser(model_id, tokenizer, reasoning_parser)?;
+        let parser: Box<dyn UnifiedParser> =
+            Box::new(CombinedParser::new(reasoning_parser, tool_parser));
+
+        if parser.preserve_special_tokens() {
+            request.decode_options.skip_special_tokens = false;
+        }
 
         Ok(Self {
-            reasoning_parser,
-            tool_parser,
+            parser,
             parallel_tool_calls: request.parallel_tool_calls,
         })
     }
@@ -87,8 +78,7 @@ impl DefaultChatOutputProcessor {
     /// content is treated as opaque text.
     pub fn plain_text_only() -> Self {
         Self {
-            reasoning_parser: None,
-            tool_parser: None,
+            parser: Box::new(CombinedParser::plain_text_only()),
             parallel_tool_calls: true,
         }
     }
@@ -112,10 +102,6 @@ impl DefaultChatOutputProcessor {
 
         let parser = factory.create(parser_name, &request.tools)?;
 
-        if parser.preserve_special_tokens() {
-            request.decode_options.skip_special_tokens = false;
-        }
-
         apply_structural_tag_constraint(request, parser.as_ref())?;
 
         TOOL_PARSER_LOG_ONCE.call_once(|| info!(parser_name, "using tool parser"));
@@ -123,7 +109,6 @@ impl DefaultChatOutputProcessor {
     }
 
     fn resolve_optional_reasoning_parser(
-        request: &mut ChatRequest,
         model_id: &str,
         tokenizer: DynTokenizer,
         selection: &ParserSelection,
@@ -142,10 +127,6 @@ impl DefaultChatOutputProcessor {
 
         let parser = factory.create(parser_name, tokenizer)?;
 
-        if parser.preserve_special_tokens() {
-            request.decode_options.skip_special_tokens = false;
-        }
-
         REASONING_PARSER_LOG_ONCE.call_once(|| info!(parser_name, "using reasoning parser"));
         Ok(Some(parser))
     }
@@ -156,16 +137,14 @@ static REASONING_PARSER_LOG_ONCE: Once = Once::new();
 
 impl ChatOutputProcessor for DefaultChatOutputProcessor {
     /// Transforms a raw generate-output token stream into structured chat
-    /// events through three sequential stages once text decoding has
+    /// events through two sequential stages once text decoding has
     /// already happened:
     ///
-    /// 1. [`reasoning_event_stream`] — reasoning/content separation
-    /// 2. [`tool_event_stream`] — tool-call parsing
-    /// 3. [`structured_chat_event_stream`] — final block assembly
+    /// 1. [`unified_event_stream`] — reasoning and tool-call parsing
+    /// 2. [`structured_chat_event_stream`] — final block assembly
     fn process(self: Box<Self>, decoded: DynDecodedTextEventStream) -> Result<DynChatEventStream> {
-        let reasoning = reasoning_event_stream(decoded, self.reasoning_parser);
-        let tool = tool_event_stream(reasoning, self.tool_parser);
-        let structured = structured_chat_event_stream(tool, self.parallel_tool_calls);
+        let parsed = unified_event_stream(decoded, self.parser);
+        let structured = structured_chat_event_stream(parsed, self.parallel_tool_calls);
 
         Ok(structured.boxed())
     }
