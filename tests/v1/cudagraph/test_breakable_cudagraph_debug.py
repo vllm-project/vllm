@@ -10,25 +10,6 @@ import torch
 N = 1_000_003
 
 
-@pytest.fixture(autouse=True)
-def _reset_breakable_tls():
-    from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
-
-    BreakableCUDAGraphCapture._tls.active = None
-    yield
-    BreakableCUDAGraphCapture._tls.active = None
-
-
-@pytest.fixture
-def cuda_capture_stream():
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA required")
-    stream = torch.cuda.Stream()
-    with torch.cuda.stream(stream):
-        yield stream
-    torch.cuda.current_stream().wait_stream(stream)
-
-
 def test_good_inplace_mutation(cuda_capture_stream):
     from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 
@@ -169,3 +150,31 @@ def test_non_explicit_output_not_flagged_when_debug_off(cuda_capture_stream):
         cap.add_eager(leaky_break)
         x.add_(1.0)
     assert cap.num_eager_breaks == 1
+
+
+def test_check_non_explicit_outputs_rejects_user_memory_history(cuda_capture_stream):
+    from vllm.compilation.breakable_cudagraph_debug import check_non_explicit_outputs
+
+    def device_trace_actions():
+        trace = torch._C._cuda_memorySnapshot(None).get("device_traces", [])
+        return [e["action"] for e in trace[torch.cuda.current_device()]]
+
+    torch.cuda.memory._record_memory_history(None, clear_history=True)
+    try:
+        torch.cuda.memory._record_memory_history(
+            "all", context="alloc", stacks="python", clear_history=True
+        )
+        torch.empty(17, device="cuda")
+        assert device_trace_actions()
+
+        def inner():
+            return torch.empty(19, device="cuda")
+
+        with pytest.raises(RuntimeError, match="PyTorch CUDA memory history"):
+            check_non_explicit_outputs(inner, (), {})
+
+        torch.empty(23, device="cuda")
+        assert "alloc" in device_trace_actions()
+        assert torch._C._cuda_isHistoryEnabled()
+    finally:
+        torch.cuda.memory._record_memory_history(None, clear_history=True)

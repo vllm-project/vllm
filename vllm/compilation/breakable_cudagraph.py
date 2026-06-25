@@ -389,7 +389,7 @@ class BreakableCUDAGraphWrapper:
         get_offloader().sync_prev_onload()
 
         capture = BreakableCUDAGraphCapture(
-            pool=self.graph_pool, debug=envs.VLLM_BCG_DEBUG
+            pool=self.graph_pool, debug=envs.VLLM_BREAKABLE_CUDAGRAPH_DEBUG
         )
         with capture:
             output = self.runnable(*args, **kwargs)

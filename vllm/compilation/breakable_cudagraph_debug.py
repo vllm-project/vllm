@@ -37,6 +37,7 @@ from collections.abc import Callable
 from contextvars import ContextVar
 
 import torch
+from torch.utils._pytree import tree_iter
 
 # When debug capture is active this holds a list of `(weakref(storage),
 # storage.data_ptr())` tensors that the check should ignore. Holds no
@@ -58,22 +59,6 @@ def mark_bcg_output(*tensors: torch.Tensor) -> None:
             marked_outputs.append((weakref.ref(st), st.data_ptr()))
 
 
-# TODO: probably the exact same things a tree_iter
-def _collect_tensors(obj, acc) -> None:
-    """Mirrors the BCG's ``_copy_output`` function to gather tensors."""
-    if torch.is_tensor(obj):
-        acc.append(obj)
-    elif isinstance(obj, dict):
-        for v in obj.values():
-            _collect_tensors(v, acc)
-    elif isinstance(obj, (list, tuple)):
-        for v in obj:
-            _collect_tensors(v, acc)
-    elif hasattr(obj, "__dict__"):
-        for v in vars(obj).values():
-            _collect_tensors(v, acc)
-
-
 def _get_marked_output_ptrs(marked_outputs: list) -> set:
     return {
         ptr
@@ -83,9 +68,11 @@ def _get_marked_output_ptrs(marked_outputs: list) -> set:
 
 
 def _get_tensor_storage_ptrs(output) -> set:
-    tensors: list = []
-    _collect_tensors(output, tensors)
-    return {t.untyped_storage().data_ptr() for t in tensors if t.numel() > 0}
+    return {
+        t.untyped_storage().data_ptr()
+        for t in tree_iter(output)
+        if torch.is_tensor(t) and t.numel() > 0
+    }
 
 
 def _get_device_mem_trace(device_idx: int) -> list:
@@ -148,7 +135,19 @@ def check_non_explicit_outputs(inner: Callable, args: tuple, kwargs: dict):
         A ``(output, error_message_or_None)`` tuple, where ``output`` is the
         return value of ``inner`` and ``error_message_or_None`` describes any
         tensors that survive the call but are not explicitly returned.
+
+    Raises:
+        RuntimeError: If PyTorch CUDA memory history is already enabled. This
+        check uses PyTorch CUDA memory history internally, so users should not
+        use it while this check is active.
     """
+    if torch._C._cuda_isHistoryEnabled():
+        raise RuntimeError(
+            "BCG debug uses PyTorch CUDA memory history internally. Disable "
+            "PyTorch CUDA memory history before enabling "
+            "VLLM_BREAKABLE_CUDAGRAPH_DEBUG."
+        )
+
     device_idx = torch.accelerator.current_device_index()
     torch.cuda.memory._record_memory_history(
         "all",
