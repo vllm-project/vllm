@@ -2317,7 +2317,10 @@ class Scheduler(SchedulerInterface):
             total_computed_tokens=request.num_computed_tokens,
         )
 
-        block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
+        block_ids = self.kv_cache_manager.get_block_ids_for_computed_tokens(
+            request_id=request.request_id,
+            num_computed_tokens=request.num_computed_tokens,
+        )
 
         if not isinstance(self.connector, SupportsHMA):
             # NOTE(Kuntai): We should deprecate this code path after we enforce
