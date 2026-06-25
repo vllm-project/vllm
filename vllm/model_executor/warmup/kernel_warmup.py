@@ -47,7 +47,10 @@ def kernel_warmup(worker: "Worker"):
     )
 
     # Pooling models do not use the generation slot-mapping path.
-    if not worker.model_runner.is_pooling_model:
+    if (
+        not worker.use_v2_model_runner
+        and not worker.model_runner.is_pooling_model
+    ):
         warm_v1_block_table_kernels(
             getattr(worker.model_runner, "device", torch.device("cuda")),
             worker.scheduler_config.max_num_batched_tokens,
