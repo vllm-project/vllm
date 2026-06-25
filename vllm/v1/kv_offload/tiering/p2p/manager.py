@@ -228,11 +228,6 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             session.finish_request(kv_request_id)
             return
 
-        # Never bound to a session — drop any unbound stores and fail their
-        # jobs so the caller doesn't wait for the unbound-store timeout.
-        for batch in self._unbound_stores.pop(kv_request_id, []):
-            self._finished_jobs.append(JobResult(job_id=batch.job_id, success=False))
-
     @override
     def submit_store(self, job_metadata: JobMetadata) -> None:
         job_id = job_metadata.job_id
