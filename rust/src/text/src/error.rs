@@ -20,6 +20,11 @@ pub enum Error {
     Logprobs(#[from] LogprobsError),
     #[error(transparent)]
     TokenIds(#[from] TokenIdsError),
+    #[error(
+        "`min_tokens` must be less than or equal to `max_tokens`, \
+         got min_tokens={min_tokens}, max_tokens={max_tokens}"
+    )]
+    MinTokensExceedsMaxTokens { min_tokens: u32, max_tokens: u32 },
     #[error("`thinking_token_budget` must be a non-negative integer or -1 for unlimited.")]
     InvalidThinkingTokenBudget,
     #[error("text request stream `{request_id}` closed before terminal output")]

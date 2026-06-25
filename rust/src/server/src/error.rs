@@ -103,6 +103,7 @@ fn is_request_validation_error(error: &vllm_text::Error) -> bool {
             | vllm_text::Error::EmptyPromptTokenIds { .. }
             | vllm_text::Error::Logprobs(_)
             | vllm_text::Error::TokenIds(_)
+            | vllm_text::Error::MinTokensExceedsMaxTokens { .. }
             | vllm_text::Error::InvalidThinkingTokenBudget
             // An empty tokenized prompt detected later, at request prepare
             // time, surfaces through the transparent Llm wrapper.
@@ -138,6 +139,22 @@ mod tests {
         let response = api_error.to_error_response();
         assert_eq!(response.error.error_type, "invalid_request_error");
         assert!(response.error.message.contains("thinking_token_budget"));
+    }
+
+    #[test]
+    fn min_tokens_above_max_tokens_maps_to_invalid_request() {
+        let api_error = text_submit_error(
+            "failed to submit completion request",
+            vllm_text::Error::MinTokensExceedsMaxTokens {
+                min_tokens: 5,
+                max_tokens: 4,
+            },
+        );
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        let response = api_error.to_error_response();
+        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert!(response.error.message.contains("min_tokens=5"));
+        assert!(response.error.message.contains("max_tokens=4"));
     }
 
     #[test]
