@@ -6,8 +6,6 @@ from typing import TYPE_CHECKING
 from fastapi import FastAPI
 
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.scale_out.derender.serving import ServingDerender
-from vllm.entrypoints.scale_out.render.serving import ServingRender
 from vllm.tasks import SupportedTask
 
 if TYPE_CHECKING:
@@ -22,6 +20,9 @@ def init_render_state(
     state: "State",
     request_logger: RequestLogger | None,
 ):
+    from .derender.serving import ServingDerender
+    from .render.serving import ServingRender
+
     state.serving_render = ServingRender(
         state.openai_serving_models,
         state.online_renderer,
