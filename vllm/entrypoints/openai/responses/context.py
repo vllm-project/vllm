@@ -301,7 +301,6 @@ class ParsableContext(ConversationContext):
         chat_template_content_format: ChatTemplateContentFormatOption,
         response_parser: Parser | None = None,
         enable_auto_tools: bool = False,
-        tool_call_id_type: str = "random",
     ):
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
@@ -314,20 +313,8 @@ class ParsableContext(ConversationContext):
         self.num_init_messages = len(response_messages)
         self.finish_reason: str | None = None
         self.enable_auto_tools = enable_auto_tools
-        self.tool_call_id_type = tool_call_id_type
 
         self.response_parser = response_parser
-        if self.response_parser is None and parser_cls is not None:
-            chat_template_kwargs = request.build_chat_params(
-                default_template=chat_template,
-                default_template_content_format=chat_template_content_format,
-            ).chat_template_kwargs
-            self.response_parser = parser_cls(
-                tokenizer,
-                tools=request.tools,
-                chat_template_kwargs=chat_template_kwargs,
-            )
-
         self.parser_cls = parser_cls
         self.request = request
 
@@ -365,7 +352,6 @@ class ParsableContext(ConversationContext):
                     reasoning=reasoning,
                     content=content,
                     tool_calls=tool_calls,
-                    tool_call_id_type=self.tool_call_id_type,
                 )
             )
         elif completion.text:

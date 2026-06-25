@@ -35,6 +35,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
+    LookupResult,
     OffloadingManager,
     OffloadingSpec,
     OffloadKey,
@@ -393,15 +394,18 @@ class OffloadingConnectorScheduler:
         hit_count = 0
         defer_lookup = False
         for key in keys:
-            result = self.manager.lookup(key, req_context)
-            if result is None:
-                defer_lookup = True
-                # continue lookup to allow manager to kick-off async lookups
-                # for all blocks (until a miss is detected)
-                result = True
-            if not result:
-                break
-            hit_count += 1
+            match self.manager.lookup(key, req_context):
+                case LookupResult.HIT:
+                    hit_count += 1
+                case LookupResult.HIT_PENDING:
+                    defer_lookup = True
+                    hit_count += 1
+                case LookupResult.RETRY:
+                    # Don't break: keep scanning to let manager kick off
+                    # async lookups (until a miss is detected).
+                    defer_lookup = True
+                case LookupResult.MISS:
+                    break
         return hit_count if not defer_lookup else None
 
     def _sliding_window_lookup(
@@ -416,18 +420,25 @@ class OffloadingConnectorScheduler:
         defer_lookup = False
         consecutive_hits = 0
         for idx in range(len(keys) - 1, -1, -1):
-            result = self.manager.lookup(keys[idx], req_context)
-            if result is None:
-                defer_lookup = True
-                # continue lookup to allow manager to kick-off async lookups
-                # for all blocks (until a hit is detected)
-                result = False
-            if not result:
-                consecutive_hits = 0
-            else:
-                consecutive_hits += 1
-                if consecutive_hits == sliding_window_size:
-                    return idx + sliding_window_size if not defer_lookup else None
+            match self.manager.lookup(keys[idx], req_context):
+                case LookupResult.HIT:
+                    consecutive_hits += 1
+                case LookupResult.HIT_PENDING:
+                    # Block is in cache, just not readable yet — counts
+                    # as hit for the consecutive streak. Don't break:
+                    # keep scanning to let manager kick off async lookups.
+                    defer_lookup = True
+                    consecutive_hits += 1
+                case LookupResult.RETRY:
+                    # Block location uncertain — does not count as hit.
+                    # Don't break: keep scanning to let manager kick off
+                    # async lookups.
+                    defer_lookup = True
+                    consecutive_hits = 0
+                case LookupResult.MISS:
+                    consecutive_hits = 0
+            if consecutive_hits == sliding_window_size:
+                return idx + sliding_window_size if not defer_lookup else None
         return consecutive_hits if not defer_lookup else None
 
     def _touch(self, req_status: RequestOffloadState):

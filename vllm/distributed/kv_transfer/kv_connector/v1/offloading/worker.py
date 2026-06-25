@@ -124,13 +124,14 @@ class OffloadingConnectorWorker:
                     raise NotImplementedError
 
         packed_kv_cache_tensor = next(
-            (t for t in kv_cache_config.kv_cache_tensors if t.block_stride), None
+            (
+                t
+                for t in kv_cache_config.kv_cache_tensors
+                if t.block_stride and t.shared_by
+            ),
+            None,
         )
-        is_dsv4 = all(
-            isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
-            for group in kv_cache_config.kv_cache_groups
-        )
-        if packed_kv_cache_tensor is not None and not is_dsv4:
+        if packed_kv_cache_tensor is not None:
             (tensor,) = tensors_per_block[packed_kv_cache_tensor.shared_by[0]]
             block_stride = tensor.stride(0)
             packed_tensor = tensor.as_strided(
@@ -153,7 +154,7 @@ class OffloadingConnectorWorker:
         block_data_refs: dict[str, list[CanonicalKVCacheRef]] = defaultdict(list)
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             # Filter to layers that were actually processed above.
-            # _get_kv_cache_config_deepseek_v4 emits KVCacheTensor entries for
+            # Packed KV allocation emits KVCacheTensor entries for
             # every (tuple_idx, page_size) slot; slots where no group has a
             # layer at that index produce an empty shared_by (reserved memory
             # with no corresponding model layer).
