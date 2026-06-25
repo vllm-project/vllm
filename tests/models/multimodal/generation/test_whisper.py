@@ -4,11 +4,11 @@
 from collections.abc import Sequence
 from typing import Any
 
-import librosa
 import pytest
 from transformers import AutoModelForSpeechSeq2Seq
 
 from vllm.assets.audio import AudioAsset
+from vllm.multimodal.audio import AudioResampler
 from vllm.platforms import current_platform
 
 from ....conftest import HfRunner, PromptAudioInput, VllmRunner
@@ -41,6 +41,7 @@ def run_test(
     tensor_parallel_size: int,
     distributed_executor_backend: str | None = None,
     enforce_eager: bool = True,
+    gpu_memory_utilization: float = 0.9,
 ) -> None:
     """Inference result should be the same between hf and vllm.
 
@@ -57,6 +58,7 @@ def run_test(
         distributed_executor_backend=distributed_executor_backend,
         limit_mm_per_prompt={"audio": 2},
         enforce_eager=enforce_eager,
+        gpu_memory_utilization=gpu_memory_utilization,
         disable_custom_all_reduce=True,
     ) as vllm_model:
         vllm_outputs_per_case = [
@@ -93,13 +95,12 @@ def run_test(
 def resampled_assets() -> list[tuple[Any, int]]:
     audio_assets = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
     sampled_assets = []
+    resampler = AudioResampler(target_sr=WHISPER_SAMPLE_RATE)
     for asset in audio_assets:
         audio, orig_sr = asset.audio_and_sample_rate
         # Resample to Whisper's expected sample rate (16kHz)
         if orig_sr != WHISPER_SAMPLE_RATE:
-            audio = librosa.resample(
-                audio, orig_sr=orig_sr, target_sr=WHISPER_SAMPLE_RATE
-            )
+            audio = resampler.resample(audio, orig_sr=orig_sr)
         sampled_assets.append(
             (audio, WHISPER_SAMPLE_RATE),
         )
@@ -320,6 +321,7 @@ def test_models_distributed(
         tensor_parallel_size=2,
         distributed_executor_backend=distributed_executor_backend,
         enforce_eager=False,
+        gpu_memory_utilization=0.65,
     )
 
 

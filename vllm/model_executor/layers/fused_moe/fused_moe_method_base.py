@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import abstractmethod
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -9,6 +10,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
@@ -18,6 +20,10 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+    from vllm.model_executor.layers.fused_moe.runner.shared_experts import SharedExperts
 
 logger = init_logger(__name__)
 
@@ -36,17 +42,17 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         return self.moe_kernel is not None
 
     @property
-    def mk_owns_shared_expert(self) -> bool:
+    def mk_can_overlap_shared_experts(self) -> bool:
         # NOTE(rob): temporary attribute to indicate support for
         # completed migration to the new internal MK interface.
         return (
-            self.moe_kernel is not None and self.moe_kernel.shared_experts is not None
+            self.moe_kernel is not None and self.moe_kernel.can_overlap_shared_experts
         )
 
     @abstractmethod
     def create_weights(
         self,
-        layer: torch.nn.Module,
+        layer: "RoutedExperts",
         num_experts: int,
         hidden_size: int,
         intermediate_size_per_partition: int,
@@ -65,6 +71,38 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         """
         return False
 
+    def maybe_roundup_sizes(
+        self,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        act_dtype: torch.dtype,
+        moe_parallel_config: FusedMoEParallelConfig,
+    ) -> tuple[int, int]:
+        """
+        Given layer hidden size and intermediate size per partition and MoE
+        configurations, round up hidden_size and intermediate_size_per_partition
+        if necessary.
+
+        Args:
+            hidden_size: Layer hidden-size
+            intermediate_size_per_partition: Intermediate size per partition for
+                the layer.
+            act_dtype: Data type of the layer activations.
+            moe_parallel_config: Fused MoE parallelization strategy configuration.
+
+        Return:
+            A tuple of (rounded_hidden_size, rounded_intermediate_size_per_partition),
+            where:
+                - rounded_hidden_size is the possibly rounded up hidden size.
+                - rounded_intermediate_size_per_partition is the possibly rounded
+                  up intermediate size per partition.
+        """
+        from .all2all_utils import maybe_roundup_layer_hidden_size
+
+        return maybe_roundup_layer_hidden_size(
+            hidden_size, act_dtype, moe_parallel_config
+        ), intermediate_size_per_partition
+
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
@@ -80,7 +118,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     def select_gemm_impl(
         self,
         prepare_finalize: FusedMoEPrepareAndFinalizeModular,
-        layer: torch.nn.Module,
+        layer: "RoutedExperts",
     ) -> FusedMoEExpertsModular:
         # based on the all2all implementation, select the appropriate
         # gemm implementation
@@ -91,7 +129,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     @abstractmethod
     def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
+        self, layer: "RoutedExperts"
     ) -> FusedMoEQuantConfig | None:
         raise NotImplementedError
 
@@ -104,6 +142,14 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     @property
     def skip_forward_padding(self) -> bool:
         """Whether to skip the padding in the forward before applying the moe method."""
+        return False
+
+    @property
+    def has_unpadded_output(self) -> bool:
+        """
+        Indicates that the hidden_states output might be the unpadded
+        hidden_states shape rather than the full padded shape.
+        """
         return False
 
     @property
@@ -125,18 +171,44 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     def apply(
         self,
-        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
+        layer: "RoutedExperts",
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts: "SharedExperts | None",
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
+        """
+        Apply the MoE operation using modular kernels.
+
+        Args:
+            layer: RoutedExperts instance containing weight parameters
+            x: Input tensor
+            topk_weights: Expert weights from router
+            topk_ids: Selected expert IDs from router
+            shared_experts_input: Input for shared experts (if any)
+
+        Returns:
+            Output tensor from routed experts
+        """
         raise NotImplementedError
 
     def apply_monolithic(
         self,
-        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
+        layer: "RoutedExperts",
         x: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        input_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """
+        Apply the MoE operation using monolithic kernels.
+
+        Args:
+            layer: RoutedExperts instance containing weight parameters
+            x: Input tensor
+            router_logits: Router logits (routing done internally)
+
+        Returns:
+            Output tensor from routed experts
+        """
         raise NotImplementedError

@@ -32,6 +32,10 @@ from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
 
 logger = init_logger(__name__)
 
+# User-facing reason labels for waiting request breakdown
+WAITING_REASON_CAPACITY = "capacity"
+WAITING_REASON_DEFERRED = "deferred"
+
 PerEngineStatLoggerFactory = Callable[[VllmConfig, int], "StatLoggerBase"]
 AggregateStatLoggerFactory = type["AggregateStatLoggerBase"]
 StatLoggerFactory = AggregateStatLoggerFactory | PerEngineStatLoggerFactory
@@ -106,7 +110,9 @@ class LoggingStatLogger(StatLoggerBase):
         self.connector_prefix_caching_metrics = CachingMetrics()
         self.mm_caching_metrics = CachingMetrics()
 
-        self.spec_decoding_logging = SpecDecodingLogging()
+        model_config = self.vllm_config.model_config
+        is_diffusion = model_config is not None and model_config.is_diffusion
+        self.spec_decoding_logging = SpecDecodingLogging(is_diffusion=is_diffusion)
         kv_transfer_config = self.vllm_config.kv_transfer_config
         self.kv_connector_logging = KVConnectorLogging(kv_transfer_config)
         self.cudagraph_logging = None
@@ -222,12 +228,20 @@ class LoggingStatLogger(StatLoggerBase):
             "Running: %d reqs",
             "Waiting: %d reqs",
         ]
+        total_waiting = (
+            self.last_scheduler_stats.num_waiting_reqs
+            + self.last_scheduler_stats.num_skipped_waiting_reqs
+        )
         log_args: list[int | float | str] = [
             self.last_prompt_throughput,
             self.last_generation_throughput,
             self.last_scheduler_stats.num_running_reqs,
-            self.last_scheduler_stats.num_waiting_reqs,
+            total_waiting,
         ]
+
+        if self.last_scheduler_stats.num_skipped_waiting_reqs > 0:
+            log_parts.append("Deferred: %d reqs")
+            log_args.append(self.last_scheduler_stats.num_skipped_waiting_reqs)
 
         if self.num_preemptions > 0:
             log_parts.append("Preemptions: %d")
@@ -328,6 +342,9 @@ class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
             self.last_scheduler_stats.num_running_reqs += (
                 last_scheduler_stats.num_running_reqs
             )
+            self.last_scheduler_stats.num_skipped_waiting_reqs += (
+                last_scheduler_stats.num_skipped_waiting_reqs
+            )
             self.last_scheduler_stats.kv_cache_usage += (
                 last_scheduler_stats.kv_cache_usage
             )
@@ -421,7 +438,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         per_engine_labelvalues = self.per_engine_labelvalues
 
         self.spec_decoding_prom = self._spec_decoding_cls(
-            vllm_config.speculative_config, labelnames, per_engine_labelvalues
+            vllm_config.speculative_config,
+            labelnames,
+            per_engine_labelvalues,
+            is_diffusion=vllm_config.model_config.is_diffusion,
         )
         self.kv_connector_prom = self._kv_connector_cls(
             vllm_config, labelnames, per_engine_labelvalues
@@ -452,6 +472,28 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.gauge_scheduler_waiting = create_metric_per_engine(
             gauge_scheduler_waiting, per_engine_labelvalues
         )
+
+        gauge_waiting_by_reason = self._gauge_cls(
+            name="vllm:num_requests_waiting_by_reason",
+            documentation=(
+                "Number of waiting requests by reason. "
+                "Reason labels: 'capacity' = waiting for scheduling capacity; "
+                "'deferred' = deferred by transient constraints "
+                "(LoRA budget, KV transfer, blocked status). "
+                "Sum of all reasons equals vllm:num_requests_waiting."
+            ),
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames + ["reason"],
+        )
+        self.gauge_waiting_by_reason: dict[str, dict[int, Gauge]] = {}
+        for waiting_reason in [WAITING_REASON_CAPACITY, WAITING_REASON_DEFERRED]:
+            per_engine_labelvalues_with_reason = {
+                idx: labelvalues + [waiting_reason]
+                for idx, labelvalues in per_engine_labelvalues.items()
+            }
+            self.gauge_waiting_by_reason[waiting_reason] = create_metric_per_engine(
+                gauge_waiting_by_reason, per_engine_labelvalues_with_reason
+            )
 
         gauge_engine_sleep_state = self._gauge_cls(
             name="vllm:engine_sleep_state",
@@ -620,16 +662,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
         self.counter_prompt_tokens_cached = create_metric_per_engine(
             counter_prompt_tokens_cached, per_engine_labelvalues
-        )
-
-        # Recomputed tokens (last token recomputed when entire prompt is cached)
-        counter_prompt_tokens_recomputed = self._counter_cls(
-            name="vllm:prompt_tokens_recomputed",
-            documentation="Number of cached tokens recomputed for forward pass.",
-            labelnames=labelnames,
-        )
-        self.counter_prompt_tokens_recomputed = create_metric_per_engine(
-            counter_prompt_tokens_recomputed, per_engine_labelvalues
         )
 
         counter_generation_tokens = self._counter_cls(
@@ -1040,8 +1072,16 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.gauge_scheduler_running[engine_idx].set(
                 scheduler_stats.num_running_reqs
             )
-            self.gauge_scheduler_waiting[engine_idx].set(
+            total_waiting = (
                 scheduler_stats.num_waiting_reqs
+                + scheduler_stats.num_skipped_waiting_reqs
+            )
+            self.gauge_scheduler_waiting[engine_idx].set(total_waiting)
+            self.gauge_waiting_by_reason[WAITING_REASON_CAPACITY][engine_idx].set(
+                scheduler_stats.num_waiting_reqs
+            )
+            self.gauge_waiting_by_reason[WAITING_REASON_DEFERRED][engine_idx].set(
+                scheduler_stats.num_skipped_waiting_reqs
             )
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
 
@@ -1122,12 +1162,12 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 pts.get_by_source(source)
             )
         self.counter_prompt_tokens_cached[engine_idx].inc(pts.cached_tokens)
-        self.counter_prompt_tokens_recomputed[engine_idx].inc(pts.recomputed_tokens)
         self.counter_generation_tokens[engine_idx].inc(
             iteration_stats.num_generation_tokens
         )
         self.histogram_iteration_tokens[engine_idx].observe(
-            iteration_stats.num_prompt_tokens + iteration_stats.num_generation_tokens
+            iteration_stats.prompt_token_stats.computed
+            + iteration_stats.num_generation_tokens
         )
 
         for max_gen_tokens in iteration_stats.max_num_generation_tokens_iter:

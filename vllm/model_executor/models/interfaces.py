@@ -29,7 +29,7 @@ from torch import Tensor
 from transformers.models.whisper.tokenization_whisper import LANGUAGES
 from typing_extensions import Self, TypeIs
 
-from vllm.config import ModelConfig, SpeechToTextConfig
+from vllm.config import ModelConfig, SpeechToTextConfig, SpeechToTextParams
 from vllm.inputs import PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
@@ -42,14 +42,16 @@ from .interfaces_base import VllmModel
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.lora.model_manager import LoRAModelManager
     from vllm.model_executor.models.utils import WeightsMapper
     from vllm.multimodal.inputs import MultiModalFeatureSpec
     from vllm.multimodal.registry import _ProcessorFactories
     from vllm.sequence import IntermediateTensors
-    from vllm.v1.worker.gpu.mm.encoder_cudagraph_defs import (
+    from vllm.v1.worker.encoder_cudagraph_defs import (
         EncoderCudaGraphCaptureInputs,
         EncoderCudaGraphConfig,
         EncoderCudaGraphReplayBuffers,
+        EncoderItemSpec,
     )
 else:
     VllmConfig = object
@@ -207,7 +209,8 @@ class SupportsMultiModal(Protocol):
 
         raise NotImplementedError(
             f"No language model found in {type(self).__name__}! "
-            "You should initialize it via `_mark_language_model`."
+            "You should initialize it via `_mark_language_model`, "
+            "and make sure `embed_input_ids` is implemented."
         )
 
     @contextmanager
@@ -362,7 +365,9 @@ class SupportsMultiModal(Protocol):
             # to ensure that any external configuration requiring offset tracking,
             # e.g., LoRA, are applied correctly regardless of whether or not
             # we have multimodal tokens.
-            in_vocab_ids = input_ids.masked_fill(is_multimodal, 0)
+            in_vocab_ids = input_ids.masked_fill(
+                is_multimodal.to(device=input_ids.device, non_blocking=True), 0
+            )
             return embed_input_ids(in_vocab_ids)
 
         return embed_input_ids(input_ids)
@@ -416,11 +421,11 @@ class SupportsMultiModalPruning(Protocol):
 
     def recompute_mrope_positions(
         self,
-        input_ids: list[int],
-        multimodal_embeddings: MultiModalEmbeddings,
+        input_ids: list[int] | torch.Tensor,
+        multimodal_embeddings: Sequence[torch.Tensor],
         mrope_positions: torch.LongTensor,
         num_computed_tokens: int,
-    ) -> tuple[MultiModalEmbeddings, Tensor, int]:
+    ) -> tuple[Sequence[torch.Tensor], Tensor, int]:
         """
         Update part of input mrope positions (starting with
         num_computed_tokens index). Original mrope_positions are computed
@@ -430,8 +435,9 @@ class SupportsMultiModalPruning(Protocol):
 
         Args:
             input_ids: (N,) All input tokens of the prompt containing
-                entire sequence.
-            multimodal_embeddings: Tuple of multimodal embeddings that
+                entire sequence. Either a host-side list or an already
+                device-resident tensor.
+            multimodal_embeddings: Sequence of multimodal embeddings that
                 fits into the prefill chunk that is being processed.
             mrope_positions: Existing mrope positions (3, N) for entire
                 sequence
@@ -550,6 +556,7 @@ class SupportsLoRA(Protocol):
     packed_modules_mapping: dict[str, list[str]] = {}
     # Module prefixes to skip during LoRA loading (e.g., ["mtp."] for MTP layers)
     lora_skip_prefixes: ClassVar[list[str]] = []
+    lora_manager: "LoRAModelManager | None"
 
 
 # We can't use runtime_checkable with ClassVar for issubclass checks
@@ -1096,6 +1103,12 @@ class SupportsTranscription(Protocol):
     :meth:`get_language_token_ids`.
     """
 
+    no_space_languages: ClassVar[set[str]] = {"ja", "zh"}
+    """
+    Languages that don't need a space between words.
+    For example, Japanese (ja) and Chinese (zh) don't need a space between words.
+    """
+
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
         # language codes in supported_languages
@@ -1111,13 +1124,7 @@ class SupportsTranscription(Protocol):
     @classmethod
     def get_generation_prompt(
         cls,
-        audio: np.ndarray,
-        stt_config: SpeechToTextConfig,
-        model_config: ModelConfig,
-        language: str | None,
-        task_type: Literal["transcribe", "translate"],
-        request_prompt: str,
-        to_language: str | None,
+        stt_params: SpeechToTextParams,
     ) -> PromptType:
         """Get the prompt for the ASR model.
         The model has control over the construction, as long as it
@@ -1276,6 +1283,41 @@ def supports_any_eagle(
 ) -> TypeIs[type[SupportsEagleBase]] | TypeIs[SupportsEagleBase]:
     """Check if model supports any EAGLE variant (1, 2, or 3)."""
     return supports_eagle(model) or supports_eagle3(model)
+
+
+class LocalArgmaxMixin:
+    """Mixin for draft model heads in speculative decoding.
+
+    Provides a D2T-aware ``get_top_tokens`` that preserves the
+    local-argmax communication reduction even when the draft vocabulary
+    is smaller than the target vocabulary.
+
+    When ``draft_id_to_target_id`` is present (shape ``(draft_vocab_size,)``,
+    containing per-token offset to target vocab id), the draft argmax index
+    ``k`` is mapped to the target vocab id via::
+
+        target_id = k + draft_id_to_target_id[k]
+
+    This is mathematically equivalent to computing the full-vocab scatter
+    logits and taking the global argmax, but requires only
+    O(batch * 2 * tp_size) communication instead of O(batch * vocab_size).
+
+    Requires the subclass to expose:
+        ``self.logits_processor``: LogitsProcessor
+        ``self.lm_head``: ParallelLMHead
+        ``self.draft_id_to_target_id`` (optional): nn.Parameter
+    """
+
+    def get_top_tokens(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Vocab-parallel argmax with optional D2T remapping."""
+        top = self.logits_processor.get_top_tokens(
+            self.lm_head,
+            hidden_states,
+        )
+        d2t = getattr(self, "draft_id_to_target_id", None)
+        if d2t is not None:
+            top = top + d2t[top]
+        return top
 
 
 class EagleModelMixin:
@@ -1516,6 +1558,19 @@ class SupportsEncoderCudaGraph(Protocol):
 
     def get_encoder_cudagraph_config(self) -> "EncoderCudaGraphConfig": ...
 
+    def get_input_modality(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> str:
+        """Return the modality of the inputs (default: image-only)."""
+        return "image"
+
+    def get_max_frames_per_video(
+        self,
+    ) -> int:
+        """Return model-specific max frames per video."""
+        ...
+
     def get_encoder_cudagraph_budget_range(
         self,
         vllm_config: "VllmConfig",
@@ -1528,35 +1583,20 @@ class SupportsEncoderCudaGraph(Protocol):
           (e.g. max_num_batched_tokens)
 
         Used when ``encoder_cudagraph_token_budgets`` and/or
-        ``encoder_cudagraph_max_images_per_batch`` are not explicitly
+        ``encoder_cudagraph_max_vision_items_per_batch`` are not explicitly
         specified by the user.
         """
         ...
 
-    def get_encoder_cudagraph_num_items(
+    def get_encoder_cudagraph_item_specs(
         self,
         mm_kwargs: dict[str, Any],
-    ) -> int:
-        """Return the number of items (e.g. images) in the batch."""
-        ...
+    ) -> list["EncoderItemSpec"]:
+        """Return specs describing each item in the batch.
 
-    def get_encoder_cudagraph_per_item_output_tokens(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[int]:
-        """Return output token count for each item.
-
-        Used for greedy packing and DP load balancing.
-        """
-        ...
-
-    def get_encoder_cudagraph_per_item_input_sizes(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> list[int]:
-        """Return input size (e.g. patch count) for each item.
-
-        Used for input tensor slicing offsets.
+        Replaces the former separate methods for num_items,
+        per_item_output_tokens, and per_item_input_sizes.
+        The manager derives all three from this single return value.
         """
         ...
 
@@ -1578,12 +1618,36 @@ class SupportsEncoderCudaGraph(Protocol):
         """
         ...
 
+    def postprocess_encoder_output(
+        self,
+        output: torch.Tensor,
+        indices: list[int],
+        per_item_out_tokens: list[int],
+        dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
+        clone: bool = False,
+        batch_mm_kwargs: dict[str, Any] | None = None,
+        local_output: torch.Tensor | None = None,
+    ) -> None:
+        """
+        Post-process encoder output, directly call scatter_output_slices by default.
+
+        By default, delegates directly to scatter_output_slices.
+        Override this for models that require additional processing on the raw
+        encoder output prior to scattering, e.g. Step3-VL, which merges features
+        according to dynamic patch counts before scattering.
+        """
+        from vllm.model_executor.models.utils import scatter_output_slices
+
+        scatter_output_slices(output, indices, per_item_out_tokens, dest, clone)
+
     def prepare_encoder_cudagraph_capture_inputs(
         self,
         token_budget: int,
         max_batch_size: int,
+        max_frames_per_batch: int,
         device: torch.device,
         dtype: torch.dtype,
+        path: str = "default",
     ) -> "EncoderCudaGraphCaptureInputs":
         """Create dummy inputs and buffers for CUDA graph capture."""
         ...
@@ -1592,14 +1656,16 @@ class SupportsEncoderCudaGraph(Protocol):
         self,
         mm_kwargs: dict[str, Any],
         max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
     ) -> "EncoderCudaGraphReplayBuffers":
         """Compute buffer values from actual batch inputs for replay."""
         ...
 
     def encoder_cudagraph_forward(
         self,
-        mm_kwargs: dict[str, Any],
-        buffers: dict[str, torch.Tensor],
+        inputs: dict[str, torch.Tensor],
+        path: str = "default",
     ) -> torch.Tensor:
         """Run the encoder forward pass with precomputed buffers.
 
@@ -1610,6 +1676,7 @@ class SupportsEncoderCudaGraph(Protocol):
     def encoder_eager_forward(
         self,
         mm_kwargs: dict[str, Any],
+        path: str = "default",
     ) -> torch.Tensor:
         """Run the encoder forward pass without precomputed buffers.
 

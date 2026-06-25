@@ -1,0 +1,22 @@
+name: vllm_intel_ci
+job_dirs:
+  - ".buildkite/intel_jobs"
+run_all_patterns:
+  - ".buildkite/ci_config_intel.yaml"
+  - "docker/Dockerfile"
+  - "docker/Dockerfile.xpu"
+  - "CMakeLists.txt"
+  - "requirements/common.txt"
+  - "requirements/xpu.txt"
+  - "setup.py"
+  - "csrc/"
+  - "cmake/"
+run_all_exclude_patterns:
+  - "csrc/cpu/"
+  - "csrc/rocm/"
+  - "cmake/hipify.py"
+  - "cmake/cpu_extension.cmake"
+registries: public.ecr.aws/q9t5s3a7
+repositories:
+  main: "vllm-ci-test-repo"
+  premerge: "vllm-ci-test-repo"

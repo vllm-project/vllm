@@ -11,7 +11,7 @@ from PIL import Image
 
 from vllm.utils.serial_utils import tensor2base64
 
-from ..image import convert_image_mode, rgba_to_rgb
+from ..image import convert_image_mode, normalize_image, rgba_to_rgb
 from .base import MediaIO, MediaWithBytes
 
 MAGIC_NUMPY_PREFIX = b"\x93NUMPY"  # https://numpy.org/devdocs/reference/generated/numpy.lib.format.html#format-version-1-0
@@ -65,20 +65,25 @@ class ImageMediaIO(MediaIO[Image.Image]):
         elif image.mode == "RGBA" and self.image_mode == "RGB":
             return rgba_to_rgb(image, self.rgba_background_color)
         else:
-            return convert_image_mode(image, self.image_mode)
+            return convert_image_mode(
+                image, self.image_mode, self.rgba_background_color
+            )
 
     def load_bytes(self, data: bytes) -> MediaWithBytes[Image.Image]:
-        image = Image.open(BytesIO(data))
-        return MediaWithBytes(self._convert_image_mode(image), data)
+        try:
+            image = Image.open(BytesIO(data))
+            image = normalize_image(image)
+            image.load()
+            image = self._convert_image_mode(image)
+        except (OSError, Image.UnidentifiedImageError) as e:
+            raise ValueError(f"Failed to load image: {e}") from e
+        return MediaWithBytes(image, data)
 
     def load_base64(self, media_type: str, data: str) -> MediaWithBytes[Image.Image]:
         return self.load_bytes(pybase64.b64decode(data, validate=True))
 
     def load_file(self, filepath: Path) -> MediaWithBytes[Image.Image]:
-        with open(filepath, "rb") as f:
-            data = f.read()
-        image = Image.open(BytesIO(data))
-        return MediaWithBytes(self._convert_image_mode(image), data)
+        return self.load_bytes(filepath.read_bytes())
 
     def encode_base64(
         self,

@@ -37,10 +37,12 @@ ConfigT = TypeVar("ConfigT", bound=DataclassInstance)
 
 
 @overload
+@dataclass_transform(field_specifiers=(PydanticField,))
 def config(cls: type[ConfigT]) -> type[ConfigT]: ...
 
 
 @overload
+@dataclass_transform(field_specifiers=(PydanticField,))
 def config(
     *, config: ConfigDict | None = None, **kwargs: Any
 ) -> Callable[[type[ConfigT]], type[ConfigT]]: ...
@@ -277,6 +279,18 @@ def normalize_value(x):
         except Exception:
             return str(x)
 
+    # PretrainedConfig (must be before dataclass branch as these are now dataclasses)
+    if hasattr(x, "to_json_string") and callable(x.to_json_string):
+        try:
+            return x.to_json_string()
+        except (TypeError, ValueError):
+            # to_json_string() may fail for trust-remote-code configs
+            # with non-JSON-serializable nested objects. Fall back to
+            # normalizing the dict representation recursively.
+            if hasattr(x, "to_dict") and callable(x.to_dict):
+                return normalize_value(x.to_dict())
+            raise
+
     # Dataclasses: represent as (FQN, sorted(field,value) tuple) for stability.
     if is_dataclass(x):
         type_fqn = f"{x.__class__.__module__}.{x.__class__.__qualname__}"
@@ -293,18 +307,6 @@ def normalize_value(x):
         return tuple(sorted(repr(normalize_value(v)) for v in x))
     if isinstance(x, Sequence) and not isinstance(x, (str, bytes, bytearray)):
         return tuple(normalize_value(v) for v in x)
-
-    # PretrainedConfig
-    if hasattr(x, "to_json_string") and callable(x.to_json_string):
-        try:
-            return x.to_json_string()
-        except (TypeError, ValueError):
-            # to_json_string() may fail for trust-remote-code configs
-            # with non-JSON-serializable nested objects. Fall back to
-            # normalizing the dict representation recursively.
-            if hasattr(x, "to_dict") and callable(x.to_dict):
-                return normalize_value(x.to_dict())
-            raise
 
     # Unsupported type: e.g., modules, generators, open files, or objects
     # without a stable JSON/UUID representation. Hard-error to avoid

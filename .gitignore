@@ -12,6 +12,12 @@ vllm/third_party/triton_kernels/*
 # FlashMLA interface copied from source
 vllm/third_party/flashmla/flash_mla_interface.py
 
+# DeepGEMM vendored package built from source
+vllm/third_party/deep_gemm/
+
+# fmha_sm100 vendored package built from source
+vllm/third_party/fmha_sm100/
+
 # triton jit
 .triton
 
@@ -23,9 +29,13 @@ __pycache__/
 # C extensions
 *.so
 
+# Rust binaries
+vllm/vllm-rs
+
 # Distribution / packaging
 .Python
 build/
+!requirements/build/
 cmake-build-*/
 CMakeUserPresets.json
 develop-eggs/
@@ -189,7 +199,9 @@ cython_debug/
 .vscode/
 
 # Claude
-.claude/
+.claude/*
+!.claude/skills/
+!.claude/skills/**
 
 # Codex
 .codex/
@@ -226,13 +238,14 @@ actionlint
 shellcheck*/
 
 # Ignore moe/marlin_moe gen code
-csrc/moe/marlin_moe_wna16/kernel_*
+csrc/libtorch_stable/moe/marlin_moe_wna16/kernel_*
 
 # Ignore ep_kernels_workspace folder
 ep_kernels_workspace/
 
 # Allow tracked library source folders under submodules (e.g., benchmarks/lib)
 !vllm/benchmarks/lib/
+!.buildkite/scripts/lib/
 
 # Generated gRPC protobuf files (compiled at build time from vllm_engine.proto)
 vllm/grpc/vllm_engine_pb2.py

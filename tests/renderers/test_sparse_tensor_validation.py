@@ -12,6 +12,7 @@ import pybase64 as base64
 import pytest
 import torch
 
+from vllm.exceptions import VLLMValidationError
 from vllm.multimodal.media import AudioEmbeddingMediaIO, ImageEmbeddingMediaIO
 from vllm.renderers.embed_utils import safe_load_prompt_embeds
 
@@ -53,8 +54,14 @@ def _create_malicious_sparse_tensor() -> torch.Tensor:
     values = torch.tensor([1.0])
     shape = (3, 3)
 
-    # Create sparse tensor (this will be invalid)
-    sparse_tensor = torch.sparse_coo_tensor(indices, values, shape, dtype=torch.float32)
+    # Create sparse tensor (this will be invalid). Pass `check_invariants=False`
+    # explicitly so this fixture is robust to process-wide invariant-check state
+    # left enabled by other tests (the global flag isn't thread-local, and
+    # concurrent users of the `check_sparse_tensor_invariants` context manager
+    # can leak the "enabled" state across tests).
+    sparse_tensor = torch.sparse_coo_tensor(
+        indices, values, shape, dtype=torch.float32, check_invariants=False
+    )
     return sparse_tensor
 
 
@@ -117,7 +124,7 @@ class TestPromptEmbedsValidation:
         shape = (10, 10)
 
         malicious_tensor = torch.sparse_coo_tensor(
-            indices, values, shape, dtype=torch.float32
+            indices, values, shape, dtype=torch.float32, check_invariants=False
         )
         encoded = _encode_tensor(malicious_tensor)
 
@@ -132,11 +139,67 @@ class TestPromptEmbedsValidation:
         shape = (10, 10)
 
         malicious_tensor = torch.sparse_coo_tensor(
-            indices, values, shape, dtype=torch.float32
+            indices, values, shape, dtype=torch.float32, check_invariants=False
         )
         encoded = _encode_tensor(malicious_tensor)
 
         with pytest.raises((RuntimeError, ValueError)):
+            safe_load_prompt_embeds(model_config, encoded)
+
+    def test_hidden_size_mismatch_rejected(self, model_config):
+        """Tensors whose trailing dim doesn't match the model's hidden_size
+        must be rejected at parse time."""
+        # opt-125m has hidden_size=768, passing 512 triggers the check.
+        wrong_hidden = torch.randn(10, 512, dtype=torch.float32)
+        encoded = _encode_tensor(wrong_hidden)
+
+        with pytest.raises(VLLMValidationError, match="hidden_size"):
+            safe_load_prompt_embeds(model_config, encoded)
+
+    def test_float_dtype_mismatch_cast_to_model_dtype(self, model_config):
+        """Tensors whose dtype doesn't match the model's dtype but are still
+        floating-point are cast, since API clients generally can't know the
+        server's `--dtype` setting ahead of time."""
+        # Fixture pins model dtype to float32, upload a bfloat16 tensor.
+        mismatched_float = torch.randn(10, 768, dtype=torch.bfloat16)
+        encoded = _encode_tensor(mismatched_float)
+
+        result = safe_load_prompt_embeds(model_config, encoded)
+
+        assert result.dtype == torch.float32
+        assert result.shape == mismatched_float.shape
+
+    def test_non_float_dtype_rejected(self, model_config):
+        """Non-floating-point dtypes cannot be safely cast for embeddings
+        (e.g. integer tensors almost certainly indicate caller confusion),
+        so they are rejected at parse time."""
+        non_float = torch.randint(0, 100, (10, 768), dtype=torch.int32)
+        encoded = _encode_tensor(non_float)
+
+        with pytest.raises(VLLMValidationError, match="floating-point"):
+            safe_load_prompt_embeds(model_config, encoded)
+
+    def test_non_2d_tensor_rejected(self, model_config):
+        """Tensors that aren't 2D (even after squeezing a leading dim)
+        must be rejected with a clear error."""
+        # A 1D tensor cannot be interpreted as (num_tokens, hidden_size).
+        bad = torch.randn(768, dtype=torch.float32)
+        encoded = _encode_tensor(bad)
+
+        with pytest.raises(VLLMValidationError, match="2D tensor"):
+            safe_load_prompt_embeds(model_config, encoded)
+
+    def test_non_tensor_payload_rejected(self, model_config):
+        """Deserializing to a non-Tensor object must raise a clear error
+        instead of propagating an AssertionError."""
+        # `torch.save` will serialize a plain dict; `weights_only=True` allows
+        # loading built-in containers, so this exercises the isinstance check.
+        buffer = io.BytesIO()
+        torch.save({"not": "a tensor"}, buffer)
+        buffer.seek(0)
+        encoded = base64.b64encode(buffer.read())
+
+        with pytest.raises(VLLMValidationError, match="torch.Tensor"):
             safe_load_prompt_embeds(model_config, encoded)
 
 

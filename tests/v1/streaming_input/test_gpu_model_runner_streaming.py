@@ -35,11 +35,9 @@ def mock_model_runner_with_input_batch():
         max_model_len=1024,
         max_num_batched_tokens=1024,
         device="cpu",
-        pin_memory=False,
         vocab_size=32000,
         block_sizes=[16],
         kernel_block_sizes=[16],
-        is_spec_decode=False,
         logitsprocs=None,
         is_pooling_model=False,
     )

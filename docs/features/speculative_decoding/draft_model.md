@@ -33,9 +33,9 @@ vllm serve Qwen/Qwen3-4B-Thinking-2507 \
     --port 8000 \
     --seed 42 \
     -tp 1 \
-    --max_model_len 2048 \
-    --gpu_memory_utilization 0.8 \
-    --speculative_config '{"model": "Qwen/Qwen3-0.6B", "num_speculative_tokens": 5, "method": "draft_model"}'
+    --max-model-len 2048 \
+    --gpu-memory-utilization 0.8 \
+    --speculative-config '{"model": "Qwen/Qwen3-0.6B", "num_speculative_tokens": 5, "method": "draft_model"}'
 ```
 
 The code used to request as completions as a client remains unchanged:
@@ -77,4 +77,8 @@ The code used to request as completions as a client remains unchanged:
     ```
 
 !!! warning
-    Note: Please use `--speculative_config` to set all configurations related to speculative decoding. The previous method of specifying the model through `--speculative_model` and adding related parameters (e.g., `--num_speculative_tokens`) separately has been deprecated.
+    Note: Please use `--speculative-config` to set all configurations related
+    to speculative decoding. The previous method of specifying the model
+    through `--speculative-model` and adding related parameters such as
+    `--num-speculative-tokens` separately has been deprecated. For supported
+    keys and examples, see the [`--speculative-config` schema](README.md#--speculative-config-schema).
