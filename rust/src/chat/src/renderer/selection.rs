@@ -1,6 +1,7 @@
 use std::fmt;
 use std::str::FromStr;
 
+use itertools::Itertools;
 use serde_with::{DeserializeFromStr, SerializeDisplay};
 use strum::{EnumIter, IntoEnumIterator};
 
@@ -25,13 +26,6 @@ impl RendererSelection {
     pub const DEEPSEEK_V32_LITERAL: &str = "deepseek_v32";
     pub const DEEPSEEK_V4_LITERAL: &str = "deepseek_v4";
     pub const HF_LITERAL: &str = "hf";
-
-    fn expected_literals() -> String {
-        Self::iter()
-            .map(|selection| selection.to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
 
     /// Resolve the renderer selection using the given model type string, if
     /// it's `Auto`.
@@ -62,7 +56,7 @@ impl FromStr for RendererSelection {
         } else {
             Err(format!(
                 "unknown renderer `{value}` (expected one of: {})",
-                Self::expected_literals()
+                Self::iter().join(", ")
             ))
         }
     }
@@ -81,6 +75,8 @@ impl fmt::Display for RendererSelection {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr as _;
+
     use strum::IntoEnumIterator;
 
     use super::RendererSelection;
@@ -93,5 +89,14 @@ mod tests {
                 selection
             );
         }
+    }
+
+    #[test]
+    fn renderer_selection_expected_error_message() {
+        let err = RendererSelection::from_str("unknown").unwrap_err();
+        expect_test::expect![
+            "unknown renderer `unknown` (expected one of: auto, hf, deepseek_v32, deepseek_v4)"
+        ]
+        .assert_eq(&err);
     }
 }
