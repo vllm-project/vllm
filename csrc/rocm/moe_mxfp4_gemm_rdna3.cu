@@ -86,6 +86,182 @@ __device__ __forceinline__ void atomic_add_pk4(bf16_t* addr, bf162_t v01,
   }
 }
 
+// ---------------------------------------------------------------------------
+// WMMA path for the batched/prefill regime (BLOCK_SIZE_M == 16). The scalar
+// kernel above amortizes the per-tile dequant over BLOCK_SIZE_M tokens with
+// scalar FMAs (O(M) per weight read); at high decode concurrency that loses to
+// a matrix-engine GEMM. This reuses the 16x16x16 WMMA tiling from the dense
+// mxfp4_gemm_rdna3 kernel, with the MoE expert gather (A rows via
+// sorted_token_ids, weights via expert_ids) and a scatter epilogue.
+// ---------------------------------------------------------------------------
+using v16fp16 = _Float16 __attribute__((ext_vector_type(16)));
+using v16bf16 = __bf16 __attribute__((ext_vector_type(16)));
+using v8fp32 = float __attribute__((ext_vector_type(8)));
+
+__device__ __forceinline__ v8fp32 wmma_mma(v16fp16 a, v16fp16 b, v8fp32 c) {
+  return __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a, b, c);
+}
+__device__ __forceinline__ v8fp32 wmma_mma(v16bf16 a, v16bf16 b, v8fp32 c) {
+  return __builtin_amdgcn_wmma_f32_16x16x16_bf16_w32(a, b, c);
+}
+
+template <typename T>
+struct WmmaNative;
+template <>
+struct WmmaNative<half> {
+  using elem = _Float16;
+  using v16 = v16fp16;
+};
+template <>
+struct WmmaNative<bf16_t> {
+  using elem = __bf16;
+  using v16 = v16bf16;
+};
+
+using mxfp4_rdna3::dequant_mxfp4_8_bf16;
+using mxfp4_rdna3::dequant_mxfp4_8_fp16;
+
+template <typename FROM, typename TO>
+__device__ __forceinline__ TO wmoe_bitcast(FROM x) {
+  static_assert(sizeof(FROM) == sizeof(TO), "size");
+  TO r;
+  __builtin_memcpy(&r, &x, sizeof(TO));
+  return r;
+}
+
+// Atomic-add a pair of adjacent fp16/bf16 cells (one uint32 word), CAS retry.
+__device__ __forceinline__ void atomic_add_pk2(half* addr, half2 v) {
+  uint32_t* a = reinterpret_cast<uint32_t*>(addr);
+  uint32_t old = *a, prev;
+  do {
+    prev = old;
+    half2 sum = __hadd2(wmoe_bitcast<uint32_t, half2>(prev), v);
+    old = atomicCAS(a, prev, wmoe_bitcast<half2, uint32_t>(sum));
+  } while (prev != old);
+}
+__device__ __forceinline__ void atomic_add_pk2(bf16_t* addr, bf162_t v) {
+  uint32_t* a = reinterpret_cast<uint32_t*>(addr);
+  uint32_t old = *a, prev;
+  do {
+    prev = old;
+    bf162_t sum = __hadd2(wmoe_bitcast<uint32_t, bf162_t>(prev), v);
+    old = atomicCAS(a, prev, wmoe_bitcast<bf162_t, uint32_t>(sum));
+  } while (prev != old);
+}
+
+// 16 tokens x 16 N tile, one expert, single wave (32 threads), full K.
+template <typename T>
+__global__ void moe_gemm_mxfp4_wmma_kernel_rdna3(
+    const T* __restrict__ a, T* __restrict__ c,
+    const uint32_t* __restrict__ b_q_weight,
+    const uint8_t* __restrict__ b_scales_e8m0,
+    const float* __restrict__ topk_weights,
+    const int32_t* __restrict__ sorted_token_ids,
+    const int32_t* __restrict__ expert_ids,
+    const int32_t* __restrict__ num_tokens_post_padded, const int size_m,
+    const int size_n, const int size_k, const int groups, const int top_k,
+    const int expert_weight_stride, const int expert_scales_stride,
+    const bool mul_topk_weight, const int output_topk) {
+  using E = typename WmmaNative<T>::elem;
+  using V16 = typename WmmaNative<T>::v16;
+
+  const int token_block = blockIdx.x;
+  const int n_tile = blockIdx.y * 16;
+  if (token_block * 16 >= num_tokens_post_padded[0]) return;
+  const int expert_id = expert_ids[token_block];
+  if (expert_id == -1 || n_tile >= size_n) return;
+
+  const int lane = threadIdx.x;   // 0..31
+  const int lane_lo = lane & 15;
+  const int lane_hi = lane >> 4;
+
+  const uint32_t* expert_weights =
+      b_q_weight + (int64_t)expert_id * expert_weight_stride;
+  const uint8_t* expert_scales =
+      b_scales_e8m0 + (int64_t)expert_id * expert_scales_stride;
+
+  // Gather: lane_lo selects token slot; its source A row is token_id / top_k.
+  const int my_tok_id = sorted_token_ids[token_block * 16 + lane_lo];
+  const int my_tok_row = my_tok_id / top_k;
+  const T* a_row =
+      (my_tok_row < size_m) ? (a + (int64_t)my_tok_row * size_k) : nullptr;
+
+  constexpr uint32_t mant_bits = std::is_same<T, half>::value ? 10u : 7u;
+  const int groupsize = size_k / groups;  // == 32
+
+  v8fp32 c_acc = {0, 0, 0, 0, 0, 0, 0, 0};
+  __shared__ T b_lds[16][16];
+  const int actual_n = n_tile + lane_lo;  // this lane's N column for B-dequant
+
+  for (int k_tile = 0; k_tile < size_k; k_tile += 16) {
+    if (actual_n < size_n) {
+      const int my_k_octet = lane_hi;  // 0 -> K[0..7], 1 -> K[8..15]
+      const uint32_t qa =
+          expert_weights[((k_tile / 8) + my_k_octet) * size_n + actual_n];
+      const int32_t bias = mxfp4_e8m0_bias(
+          expert_scales[(k_tile / groupsize) * size_n + actual_n], mant_bits);
+      const int k_base = my_k_octet * 8;
+      if constexpr (std::is_same<T, half>::value) {
+        half dq[8];
+        dequant_mxfp4_8_fp16(qa, bias, dq);
+  #pragma unroll
+        for (int i = 0; i < 8; i++) b_lds[k_base + i][lane_lo] = dq[i];
+      } else {
+        bf16_t dq[8];
+        dequant_mxfp4_8_bf16(qa, bias, dq);
+  #pragma unroll
+        for (int i = 0; i < 8; i++) b_lds[k_base + i][lane_lo] = dq[i];
+      }
+    }
+    // Single wave: lanes that wrote b_lds are the same wave that reads it; the
+    // WMMA reads all 16 rows, so a wave barrier is needed for cross-lane reads.
+    __syncthreads();
+
+    V16 a_frag, b_frag;
+    if (a_row) {
+      __builtin_memcpy(&a_frag, a_row + k_tile, sizeof(V16));
+    } else {
+  #pragma unroll
+      for (int i = 0; i < 16; i++) a_frag[i] = (E)0;
+    }
+  #pragma unroll
+    for (int i = 0; i < 16; i++) b_frag[i] = wmoe_bitcast<T, E>(b_lds[i][lane_lo]);
+    c_acc = wmma_mma(a_frag, b_frag, c_acc);
+    __syncthreads();
+  }
+
+  // Scatter epilogue: c_acc[i] -> token slot m = 2*i + lane_hi, col = lane_lo.
+  // Pair adjacent columns (lane_lo, lane_lo^1) into one uint32 atomic add.
+  const bool is_even_lane = (lane_lo & 1) == 0;
+  const int out_n = n_tile + lane_lo;
+  #pragma unroll
+  for (int i = 0; i < 8; i++) {
+    float other = __shfl_xor(c_acc[i], 1);
+    if (!is_even_lane) continue;
+    const int m_slot = 2 * i + lane_hi;
+    const int tok_id = sorted_token_ids[token_block * 16 + m_slot];
+    if (tok_id / top_k >= size_m || out_n >= size_n) continue;
+    float v0 = c_acc[i], v1 = other;
+    if (mul_topk_weight && topk_weights != nullptr) {
+      const float tw = topk_weights[tok_id];
+      v0 *= tw;
+      v1 *= tw;
+    }
+    const int64_t out_row =
+        (output_topk > 0) ? (int64_t)(tok_id / output_topk) : (int64_t)tok_id;
+    T* dst = c + out_row * size_n + out_n;
+    if constexpr (std::is_same<T, half>::value) {
+      atomic_add_pk2(dst, __halves2half2(__float2half_rn(v0),
+                                         __float2half_rn(v1)));
+    } else {
+      bf162_t p;
+      p.x = __float2bfloat16(v0);
+      p.y = __float2bfloat16(v1);
+      atomic_add_pk2(dst, p);
+    }
+  }
+}
+
 template <typename T, int BLOCK_SIZE_M>
 __global__ void moe_gemm_mxfp4_kernel_rdna3(
     const T* __restrict__ a, T* __restrict__ c,
@@ -229,7 +405,31 @@ __global__ void moe_gemm_mxfp4_kernel_rdna3(
     const int32_t*, const int32_t*, const int32_t*, const int, const int,
     const int, const int, const int, const int, const int, const bool,
     const int) {}
+template <typename T>
+__global__ void moe_gemm_mxfp4_wmma_kernel_rdna3(
+    const T*, T*, const uint32_t*, const uint8_t*, const float*,
+    const int32_t*, const int32_t*, const int32_t*, const int, const int,
+    const int, const int, const int, const int, const int, const bool,
+    const int) {}
 #endif
+
+// WMMA launcher: 16x16 tiles, single wave, no K-split (enough blocks at the
+// batch sizes that select this path).
+template <typename T>
+void launch_moe_gemm_mxfp4_wmma(
+    const T* a, T* c, const uint32_t* b_q_weight, const uint8_t* b_scales_e8m0,
+    const float* topk_weights, const int32_t* sorted_token_ids,
+    const int32_t* expert_ids, const int32_t* num_tokens_post_padded,
+    int num_token_blocks, int size_m, int size_n, int size_k, int groups,
+    int top_k, int expert_weight_stride, int expert_scales_stride,
+    bool mul_topk_weight, int output_topk, cudaStream_t stream) {
+  dim3 block(32);
+  dim3 grid(num_token_blocks, (size_n + 15) / 16, 1);
+  moe_gemm_mxfp4_wmma_kernel_rdna3<T><<<grid, block, 0, stream>>>(
+      a, c, b_q_weight, b_scales_e8m0, topk_weights, sorted_token_ids,
+      expert_ids, num_tokens_post_padded, size_m, size_n, size_k, groups, top_k,
+      expert_weight_stride, expert_scales_stride, mul_topk_weight, output_topk);
+}
 
 template <typename T, int BLOCK_SIZE_M>
 void launch_moe_gemm_mxfp4(const T* a, T* c, const uint32_t* b_q_weight,
@@ -282,8 +482,15 @@ void dispatch_moe_gemm_mxfp4(
     case 8:
       L(std::integral_constant<int, 8>{});
       break;
+    case 16:
+      launch_moe_gemm_mxfp4_wmma<T>(
+          a, c, b_q_weight, b_scales_e8m0, topk_weights, sorted_token_ids,
+          expert_ids, num_tokens_post_padded, num_token_blocks, size_m, size_n,
+          size_k, groups, top_k, expert_weight_stride, expert_scales_stride,
+          mul_topk_weight, output_topk, stream);
+      break;
     default:
-      TORCH_CHECK(false, "moe_mxfp4_gemm_rdna3: block_size_m must be 1/2/4/8");
+      TORCH_CHECK(false, "moe_mxfp4_gemm_rdna3: block_size_m must be 1/2/4/8/16");
   }
 }
 

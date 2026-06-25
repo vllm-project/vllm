@@ -76,7 +76,9 @@ class RDNA3FusedMoEMixin:
 
         if global_num_experts <= 0:
             global_num_experts = layer.w13_weight_packed.shape[0]
-        block_size_m = 1 if num_tokens <= 4 else 4
+        # Scalar tiles (1/4) for low batch; the 16-wide WMMA tile wins once
+        # there are enough tokens to fill it (high decode concurrency / prefill).
+        block_size_m = 1 if num_tokens <= 4 else (4 if num_tokens < 16 else 16)
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
             topk_ids, block_size_m, global_num_experts, expert_map

@@ -102,7 +102,7 @@ class GptOssMxfp4RDNA3MoEMethod(GptOssMxfp4MoEMethod):
         gne = layer.global_num_experts
         if gne <= 0:
             gne = layer.w13_weight_packed.shape[0]
-        block_size_m = 1 if M <= 4 else 4
+        block_size_m = 1 if M <= 4 else (4 if M < 16 else 16)
         sti, eid, ntp = moe_align_block_size(
             topk_ids, block_size_m, gne, layer.expert_map
         )
