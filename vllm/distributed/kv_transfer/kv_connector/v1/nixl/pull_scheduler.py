@@ -238,6 +238,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
         # remove the conditional below
         delay_free_blocks = any(len(group) > 0 for group in block_ids)
         remote_num_tokens = 0
+        blocks_expiry_time = None
         if delay_free_blocks:
             # Prefill request on remote. It will be read from D upon completion
             request_kv_blocks_ttl = self._kv_lease_duration
@@ -254,6 +255,9 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             self._reqs_need_send[request.request_id] = (
                 time.perf_counter() + request_kv_blocks_ttl
             )
+            if is_d_node:
+                # D blocks expiry time exported for the turn-2 readback.
+                blocks_expiry_time = self._reqs_need_send[request.request_id]
             # NOTE HMA will "mark" empty/null blocks in groups with 0s (eg SWA ones),
             # trimming down after allocating for the whole sequence length. Empty
             # blocks are always at the start of the list.
@@ -272,4 +276,5 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             remote_port=self.side_channel_port,
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
             remote_num_tokens=remote_num_tokens,
+            remote_blocks_expiry_time=blocks_expiry_time,
         )
