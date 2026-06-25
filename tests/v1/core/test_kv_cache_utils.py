@@ -1912,7 +1912,7 @@ def _new_request_constant_mamba_test_inputs(
     )
 
 
-def test_request_constant_mamba_does_not_reduce_attention_pool():
+def test_request_constant_mamba_uses_shared_pool():
     (
         vllm_config,
         kv_cache_specs,
@@ -1929,26 +1929,26 @@ def test_request_constant_mamba_does_not_reduce_attention_pool():
 
     assert [pool.memory_model for pool in kv_cache_config.pool_configs] == [
         MemoryModel.TOKEN_PROPORTIONAL,
-        MemoryModel.REQUEST_CONSTANT,
     ]
-    assert [pool.num_blocks for pool in kv_cache_config.pool_configs] == [
-        attention_blocks,
-        request_blocks,
-    ]
-    assert kv_cache_config.group_to_pool_id == [0, 1]
+    assert kv_cache_config.num_blocks == attention_blocks + request_blocks
+    assert kv_cache_config.pool_configs[0].num_blocks == kv_cache_config.num_blocks
+    assert kv_cache_config.group_to_pool_id == [0, 0]
     assert kv_cache_config.kv_cache_tensors == [
         KVCacheTensor(
-            size=kv_cache_specs[0]["attn"].page_size_bytes * attention_blocks,
-            shared_by=["attn"],
-        ),
-        KVCacheTensor(
-            size=kv_cache_specs[0]["mamba"].page_size_bytes * request_blocks,
-            shared_by=["mamba"],
+            size=kv_cache_specs[0]["attn"].page_size_bytes
+            * (attention_blocks + request_blocks),
+            shared_by=["attn", "mamba"],
         ),
     ]
 
     _, max_concurrency = get_kv_cache_capacity(vllm_config, kv_cache_config)
-    assert max_concurrency == vllm_config.scheduler_config.max_num_seqs
+    attention_blocks_per_request = (
+        vllm_config.model_config.max_model_len // kv_cache_specs[0]["attn"].block_size
+    )
+    blocks_per_request = (
+        attention_blocks_per_request + kv_cache_specs[0]["mamba"].blocks_per_request
+    )
+    assert max_concurrency == kv_cache_config.num_blocks / blocks_per_request
 
 
 def test_request_constant_mamba_minimal_profile_config_uses_override():
@@ -1956,49 +1956,29 @@ def test_request_constant_mamba_minimal_profile_config_uses_override():
         vllm_config,
         kv_cache_specs,
         _,
-        request_blocks,
+        _,
         _,
     ) = _new_request_constant_mamba_test_inputs()
-    kv_cache_groups = kv_cache_utils.get_kv_cache_groups(
-        vllm_config,
-        kv_cache_specs[0],
-    )
 
-    with pytest.raises(ValueError, match="request-bounded KV cache groups"):
-        kv_cache_utils.get_kv_cache_config_from_groups(
-            vllm_config,
-            kv_cache_groups,
-            available_memory=0,
-        )
-
-    with pytest.raises(ValueError, match="request-bounded KV cache groups"):
-        kv_cache_utils.get_kv_cache_config_from_groups(
-            vllm_config,
-            kv_cache_groups,
-            available_memory=0,
-            check_available_memory=False,
-        )
+    with pytest.raises(ValueError, match="No available memory"):
+        get_kv_cache_configs(vllm_config, kv_cache_specs, [0])
 
     vllm_config.cache_config.num_gpu_blocks_override = 8
-    kv_cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
+    kv_cache_config = get_kv_cache_configs(
         vllm_config,
-        kv_cache_groups,
-        available_memory=0,
-        check_available_memory=False,
-    )
+        kv_cache_specs,
+        [0],
+    )[0]
 
     assert [pool.memory_model for pool in kv_cache_config.pool_configs] == [
         MemoryModel.TOKEN_PROPORTIONAL,
-        MemoryModel.REQUEST_CONSTANT,
     ]
-    assert [pool.num_blocks for pool in kv_cache_config.pool_configs] == [
-        8,
-        request_blocks,
-    ]
-    assert kv_cache_config.group_to_pool_id == [0, 1]
+    assert kv_cache_config.num_blocks == 8
+    assert kv_cache_config.pool_configs[0].num_blocks == kv_cache_config.num_blocks
+    assert kv_cache_config.group_to_pool_id == [0, 0]
 
 
-def test_request_constant_mamba_uses_legacy_pool_with_simple_cpu_offload():
+def test_request_constant_mamba_uses_shared_pool_with_simple_cpu_offload():
     (
         vllm_config,
         kv_cache_specs,
@@ -2026,7 +2006,7 @@ def test_request_constant_mamba_uses_legacy_pool_with_simple_cpu_offload():
     assert kv_cache_config.group_to_pool_id == [0, 0]
 
 
-def test_request_constant_mamba_override_uses_legacy_pool_with_simple_cpu_offload():
+def test_request_constant_mamba_override_uses_shared_pool_with_simple_cpu_offload():
     (
         vllm_config,
         kv_cache_specs,
@@ -2055,7 +2035,7 @@ def test_request_constant_mamba_override_uses_legacy_pool_with_simple_cpu_offloa
     assert kv_cache_config.group_to_pool_id == [0, 0]
 
 
-def test_request_constant_mamba_uses_legacy_pool_with_nested_simple_cpu_offload():
+def test_request_constant_mamba_uses_shared_pool_with_nested_simple_cpu_offload():
     (
         vllm_config,
         kv_cache_specs,

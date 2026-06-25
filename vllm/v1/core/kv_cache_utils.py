@@ -980,12 +980,14 @@ def _uses_simple_cpu_offload(vllm_config: VllmConfig) -> bool:
     )
 
 
-def _uses_request_constant_pools(
+def _uses_dedicated_request_constant_pools(
     vllm_config: VllmConfig, kv_cache_groups: list[KVCacheGroupSpec]
 ) -> bool:
-    return _has_request_constant_groups(
-        kv_cache_groups
-    ) and not _uses_simple_cpu_offload(vllm_config)
+    # Request-constant specs still consume blocks at runtime. MambaManager
+    # charges those fixed request blocks from the owning BlockPool when the
+    # request is admitted, so reserving max_num_seqs request slots in a separate
+    # pool only prevents inactive request slots from being reused by token KV.
+    return False
 
 
 def _request_constant_num_blocks(
@@ -1635,7 +1637,7 @@ def get_kv_cache_config_from_groups(
     available_memory: int,
     check_available_memory: bool = True,
 ) -> KVCacheConfig:
-    if _uses_request_constant_pools(vllm_config, kv_cache_groups):
+    if _uses_dedicated_request_constant_pools(vllm_config, kv_cache_groups):
         return _get_kv_cache_config_with_request_constant_groups(
             vllm_config, kv_cache_groups, available_memory, check_available_memory
         )
@@ -2045,7 +2047,7 @@ def get_kv_cache_capacity(
 def _max_memory_usage_bytes_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
-    use_request_constant_pools: bool = True,
+    use_request_constant_pools: bool = False,
 ) -> int:
     """
     Calculate maximum memory usage in bytes from KV cache groups.
@@ -2124,7 +2126,7 @@ def _estimate_max_model_len_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
-    use_request_constant_pools: bool = True,
+    use_request_constant_pools: bool = False,
 ) -> int:
     """
     Binary search for the maximum model length that fits in available memory.
@@ -2162,7 +2164,7 @@ def _auto_fit_max_model_len(
     vllm_config: VllmConfig,
     projected_groups_per_worker: list[list[KVCacheGroupSpec]],
     available_memory: list[int],
-    use_request_constant_pools: bool = True,
+    use_request_constant_pools: bool = False,
 ) -> None:
     """
     When max_model_len is set to -1, this function estimates the largest
@@ -2389,7 +2391,7 @@ def get_kv_cache_configs(
                 continue
             request_reserved_bytes = 0
             block_groups = groups
-            if _uses_request_constant_pools(vllm_config, groups):
+            if _uses_dedicated_request_constant_pools(vllm_config, groups):
                 (
                     token_groups_with_ids,
                     request_groups_with_ids,
@@ -2415,14 +2417,19 @@ def get_kv_cache_configs(
             vllm_config,
             projected_groups_per_worker,
             available_memory,
-            not _uses_simple_cpu_offload(vllm_config),
+            any(
+                _uses_dedicated_request_constant_pools(vllm_config, groups)
+                for groups in projected_groups_per_worker
+            ),
         )
 
     # Check if the available memory is enough per worker.
     for groups, avail_mem in zip(projected_groups_per_worker, available_memory):
         if not groups:
             continue
-        use_request_constant_pools = _uses_request_constant_pools(vllm_config, groups)
+        use_request_constant_pools = _uses_dedicated_request_constant_pools(
+            vllm_config, groups
+        )
         _check_enough_kv_cache_memory(
             avail_mem,
             partial(
