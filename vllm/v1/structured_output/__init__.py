@@ -278,7 +278,8 @@ class StructuredOutputManager:
                     and reasoner is not None
                     and not self.enable_in_reasoning
                 )
-                history_prefix: list[int] | None = None
+                simulated_buf: list[int] | None = None
+                history_len = 0
 
                 state_advancements = 0
                 post_reasoning_end_in_window = False
@@ -290,9 +291,11 @@ class StructuredOutputManager:
                         apply_bitmask = False
                         advance_grammar = False
                     elif detect_reasoning_end and not apply_bitmask:
-                        if history_prefix is None:
-                            history_prefix = list(request.all_token_ids)
-                        simulated = history_prefix + list(req_tokens[: i + 1])
+                        if simulated_buf is None:
+                            history = list(request.all_token_ids)
+                            history_len = len(history)
+                            simulated_buf = history + list(req_tokens)
+                        simulated = simulated_buf[: history_len + i + 1]
                         if reasoner.is_reasoning_end_streaming(simulated, [token]):
                             # Reasoning ended mid-window. Constrain the rest
                             # of the window via bitmask. Skip grammar advance
