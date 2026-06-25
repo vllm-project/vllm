@@ -6,8 +6,8 @@ pub use vllm_parser::tool::{
     DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser, DeepSeekV32ToolParser,
     Gemma4ToolParser, Glm45MoeToolParser, Glm47MoeToolParser, Granite4ToolParser, HermesToolParser,
     HyV3ToolParser, Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser,
-    MinimaxM2ToolParser, MinimaxM3ToolParser, MistralToolParser, Phi4MiniJsonToolParser,
-    Qwen3CoderToolParser, Qwen3XmlToolParser, ToolParser, ToolParserError,
+    LongcatToolParser, MinimaxM2ToolParser, MinimaxM3ToolParser, MistralToolParser,
+    Phi4MiniJsonToolParser, Qwen3CoderToolParser, Qwen3XmlToolParser, ToolParser, ToolParserError,
 };
 
 use crate::parser::ParserFactory;
@@ -30,6 +30,7 @@ pub mod names {
     pub const INTERNLM: &str = "internlm";
     pub const KIMI_K2: &str = "kimi_k2";
     pub const LLAMA3_JSON: &str = "llama3_json";
+    pub const LONGCAT: &str = "longcat";
     pub const LLAMA4_JSON: &str = "llama4_json";
     pub const MINIMAX_M2: &str = "minimax_m2";
     pub const MINIMAX_M3: &str = "minimax_m3";
@@ -73,6 +74,7 @@ impl ToolParserFactory {
             .register_parser::<KimiK2ToolParser>(names::KIMI_K2)
             .register_parser::<Llama3JsonToolParser>(names::LLAMA3_JSON)
             .register_parser::<Llama3JsonToolParser>(names::LLAMA4_JSON)
+            .register_parser::<LongcatToolParser>(names::LONGCAT)
             .register_parser::<MinimaxM2ToolParser>(names::MINIMAX_M2)
             .register_parser::<MinimaxM3ToolParser>(names::MINIMAX_M3)
             .register_parser::<MistralToolParser>(names::MISTRAL)
@@ -116,7 +118,8 @@ impl ToolParserFactory {
             .register_pattern("minimax-m3", names::MINIMAX_M3)
             .register_pattern("mm-m3", names::MINIMAX_M3)
             .register_pattern("minimax", names::MINIMAX_M2)
-            .register_pattern("mm-m2", names::MINIMAX_M2);
+            .register_pattern("mm-m2", names::MINIMAX_M2)
+            .register_pattern("longcat", names::LONGCAT);
 
         factory
     }

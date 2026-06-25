@@ -174,6 +174,11 @@ fn factory_new_resolves_default_patterns() {
         Some(names::MINIMAX_M2)
     );
 
+    assert_eq!(
+        factory.resolve_name_for_model("meituan-longcat/LongCat-Flash-Chat"),
+        Some(names::LONGCAT)
+    );
+
     // InternLM2 positive: both dashed and underscored versioned names route.
     assert_eq!(
         factory.resolve_name_for_model("internlm/internlm2-chat-7b"),
