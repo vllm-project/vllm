@@ -293,7 +293,8 @@ def _tilelang_cache_miss_key(
         if getattr(jit_impl, "mode", None) == "auto":
             mode = jit_impl._infer_jit_mode(*args, **call_kwargs)
             jit_impl.mode = mode
-            func.set_mode(mode)
+            if func is not None:
+                func.set_mode(mode)
         key, _ = parse_args(*args, **call_kwargs)
     except Exception:
         return None
@@ -334,8 +335,9 @@ def _format_tilelang_runtime_shapes(
         if not (hasattr(value, "shape") and hasattr(value, "dtype")):
             continue
         shape = getattr(value, "shape", None)
-        with suppress(TypeError):
-            shape = tuple(shape)
+        if shape is not None:
+            with suppress(TypeError):
+                shape = tuple(shape)
         items.append(f"{name}={_safe_repr(shape, max_len=80)}")
     return "{" + ", ".join(items) + "}"
 
