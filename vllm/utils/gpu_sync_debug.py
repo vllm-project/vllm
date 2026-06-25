@@ -25,7 +25,9 @@ _sync_check_enabled: bool = False
 
 def enable_gpu_sync_check() -> None:
     """Flip the sync-check gate on. Call once per worker, after warmup /
-    first-compile is complete."""
+    first-compile is complete. No-op unless `VLLM_GPU_SYNC_CHECK` is set."""
+    if envs.VLLM_GPU_SYNC_CHECK is None:
+        return
     global _sync_check_enabled
     _sync_check_enabled = True
     _install_compile_time_sync_suppressors()

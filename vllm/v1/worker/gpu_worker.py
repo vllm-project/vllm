@@ -732,9 +732,15 @@ class Worker(WorkerBase):
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
 
-        from vllm.compilation.compiler_interface import trigger_inductor_lazy_init
+        # Eagerly trigger inductor's once-per-process lazy inits during
+        # warmup (rather than on a later compile cache-miss at runtime).
+        c_config = self.compilation_config
+        if c_config.mode != CompilationMode.NONE and c_config.backend == "inductor":
+            from vllm.compilation.compiler_interface import (
+                trigger_inductor_lazy_init,
+            )
 
-        trigger_inductor_lazy_init(self.device)
+            trigger_inductor_lazy_init(self.device)
 
         # All warmup is done — start monitoring for unexpected JIT
         # compilations that would cause latency spikes during inference.
