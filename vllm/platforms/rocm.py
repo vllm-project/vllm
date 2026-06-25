@@ -790,7 +790,7 @@ class RocmPlatform(Platform):
 
         compilation_config = vllm_config.compilation_config
         parallel_config = vllm_config.parallel_config
-        # Added 2 lines below
+
         scheduler_config = vllm_config.scheduler_config
         model_config = vllm_config.model_config
 
