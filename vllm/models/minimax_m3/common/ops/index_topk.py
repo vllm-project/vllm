@@ -23,19 +23,6 @@ from vllm.utils.math_utils import round_up
 # One sparse block == one KV page.
 SPARSE_BLOCK_SIZE = 128
 
-# MI300-series (CDNA3 gfx942 / CDNA4 gfx950): in the decode index-score path one
-# query token (BLOCK_SIZE_HQ == 1) is scored against [N, D] keys, so
-# tl.dot([N,D] x [D,1]) is a degenerate GEMV that wastes >90% of the MFMA tile.
-# Replacing it with a vectorized fp32 multiply + reduce (numerically equivalent)
-# avoids the matrix core entirely. The win comes from the 1-wide matmul shape,
-# which is arch-independent, so enable it on both gfx942 and gfx950.
-_IS_ROCM_MI3XX = tl.constexpr(False)
-if current_platform.is_rocm():
-    from vllm.platforms.rocm import on_gfx942, on_gfx950
-
-    if on_gfx942() or on_gfx950():
-        _IS_ROCM_MI3XX = tl.constexpr(True)
-
 
 # ---------------------------------------------------------------------------
 # Bitonic top-k helpers (layout-agnostic).
@@ -386,17 +373,10 @@ def _decode_index_score_kernel(
             + off_k[:, None] * stride_ik_pos
             + off_d * stride_ik_d,
         )  # [N,D]
-        if _IS_ROCM_MI3XX and BLOCK_SIZE_HQ == 1:
-            # Degenerate GEMV (q is [D,1]): vectorized fp32 multiply + reduce
-            # instead of an MFMA tile. Numerically equivalent to tl.dot.
-            q_vec = tl.sum(q, axis=1).to(tl.float32)  # [D]
-            kq = tl.sum(k.to(tl.float32) * q_vec[None, :], axis=1)[:, None]  # [N,1]
-        else:
-            # fp32 accumulation is required for the fp8 (e4m3) index cache: q/k
-            # are loaded in their stored dtype (bf16 or e4m3) and the MMA
-            # accumulates in fp32 so the per-block max score is exact for the
-            # fp8 indexer too.
-            kq = tl.dot(k, q, out_dtype=tl.float32)  # [N,HQ]
+        # fp32 accumulation is required for the fp8 (e4m3) index cache: q/k are
+        # loaded in their stored dtype (bf16 or e4m3) and the MMA accumulates in
+        # fp32 so the per-block max score is exact for the fp8 indexer too.
+        kq = tl.dot(k, q, out_dtype=tl.float32)  # [N,HQ]
         kq = tl.where(pos_mask & q_mask[None, :], kq, float("-inf"))
         score = tl.max(kq, axis=0)  # [HQ]
         is_visible_block = blk < num_blocks_q
