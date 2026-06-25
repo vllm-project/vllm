@@ -185,24 +185,13 @@ def warmup_kernels(
     ]
     max_blocks_per_req = sum(decode_block_counts)
 
-    # Block 0 is reserved as the null block by BlockPool. Very small KV-cache
-    # configurations can have no allocatable blocks after auto-fit, but still
-    # initialize successfully so the frontend can reject oversized inputs.
-    num_usable_blocks = model_runner.kv_cache_config.num_blocks - 1
     num_reqs = min(
         model_runner.scheduler_config.max_num_seqs,
         model_runner.scheduler_config.max_num_batched_tokens
         // max(prompt_len, decode_query_len),
-        num_usable_blocks // max_blocks_per_req,
+        # Reserve block 0 (null block) and ensure we have enough blocks.
+        max(1, (model_runner.kv_cache_config.num_blocks - 1) // max_blocks_per_req),
     )
-    if num_reqs == 0:
-        logger.warning(
-            "Skipping model warmup because only %d usable KV blocks are "
-            "available for %d required warmup blocks.",
-            num_usable_blocks,
-            max_blocks_per_req,
-        )
-        return
 
     req_ids = [f"_warmup_{i}_" for i in range(num_reqs)]
 
