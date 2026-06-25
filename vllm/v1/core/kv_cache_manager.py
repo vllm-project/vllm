@@ -470,9 +470,7 @@ class KVCacheManager:
             # Exclude decode-generated tokens from caching so the committed
             # blocks match the prompt-only block hashes produced by the request
             # block hasher (see get_request_block_hasher(prompt_only=True)).
-            num_tokens_to_cache = min(
-                num_tokens_to_cache, request.num_prompt_tokens
-            )
+            num_tokens_to_cache = min(num_tokens_to_cache, request.num_prompt_tokens)
         self.coordinator.cache_blocks(request, num_tokens_to_cache)
 
         return self.create_kv_cache_blocks(new_blocks)

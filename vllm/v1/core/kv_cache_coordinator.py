@@ -361,9 +361,7 @@ class KVCacheCoordinator(ABC):
         """
         for manager in self.single_type_managers:
             if isinstance(manager, RSWAManager):
-                manager.remove_gap_blocks(
-                    request_id, prefix_len, total_computed_tokens
-                )
+                manager.remove_gap_blocks(request_id, prefix_len, total_computed_tokens)
 
     def get_blocks(self, request_id: str) -> tuple[list[KVCacheBlock], ...]:
         """

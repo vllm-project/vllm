@@ -462,7 +462,7 @@ class RSWASpec(FullAttentionSpec):
         return cdiv(max_model_len + self.rswa_window, self.block_size) + 2
 
     @classmethod
-    def merge(cls, specs: list["RSWASpec"]) -> "RSWASpec":
+    def merge(cls, specs: list[RSWASpec]) -> RSWASpec:
         assert all(isinstance(spec, RSWASpec) for spec in specs), (
             "All attention layers in the same KV cache group must be RSWASpec."
         )

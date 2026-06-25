@@ -94,8 +94,7 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
                 else AttentionBackendEnum.FLEX_ATTENTION
             )
             logger.info(
-                "Unlimited-OCR: auto-selected attention backend=%s "
-                "(fa4_available=%s).",
+                "Unlimited-OCR: auto-selected attention backend=%s (fa4_available=%s).",
                 attn_config.backend.value,
                 fa4_available,
             )
@@ -129,8 +128,11 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
         elif attn_config.backend == AttentionBackendEnum.FLEX_ATTENTION:
             logger.info(
                 "Unlimited-OCR: FlexAttention — R-SWA via Triton block mask%s.",
-                "" if not fa4_available else
-                " (FA4 available but not used; pass backend=FLASH_ATTN to upgrade)",
+                ""
+                if not fa4_available
+                else (
+                    " (FA4 available but not used; pass backend=FLASH_ATTN to upgrade)"
+                ),
             )
 
         else:
