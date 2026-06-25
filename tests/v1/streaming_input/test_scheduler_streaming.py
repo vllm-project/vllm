@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import unittest
+from collections import deque
 from unittest.mock import MagicMock
 
 import torch
@@ -53,6 +54,7 @@ def create_scheduler() -> Scheduler:
     vllm_config.model_config = MagicMock()
     vllm_config.model_config.skip_tokenizer_init = True
     vllm_config.model_config.is_multimodal_model = False
+    vllm_config.model_config.is_encoder_decoder = False
     vllm_config.model_config.max_model_len = 1024
     vllm_config.model_config.enable_return_routed_experts = False
     vllm_config.cache_config = MagicMock()
@@ -573,3 +575,115 @@ class TestStreamingScheduler(unittest.TestCase):
             cached_state_cycle1["prompt_token_ids"]
             is not cached_state_cycle3["prompt_token_ids"]
         ), "Cached states from different cycles should be independent objects."
+
+    def test_streaming_session_max_model_len_cap_via_handle_stopped(self):
+        """Streaming sessions must not exceed max_model_len.
+
+        When a resumable request accumulates tokens past max_model_len
+        through repeated _update_request_as_session calls (e.g. continuous
+        audio streaming), _handle_stopped_request must finish the request
+        with FINISHED_LENGTH_CAPPED instead of re-enqueuing it.
+
+        Regression test for https://github.com/vllm-project/vllm/issues/39996
+        """
+        scheduler = create_scheduler()
+        max_model_len = scheduler.max_model_len  # 1024
+
+        # Create a session with prompt that's near max_model_len.
+        prompt = list(range(max_model_len - 5))  # 1019 tokens
+        session = DummyRequest(
+            request_id="audio_session",
+            prompt_token_ids=prompt,
+            max_tokens=max_model_len,
+        )
+        scheduler.add_request(session)
+        session.num_computed_tokens = len(prompt)
+
+        # Simulate the session being stopped (e.g. EOS) and resumed.
+        session.status = RequestStatus.RUNNING
+        session._output_token_ids = [99]  # One output token
+        session.num_computed_tokens = len(prompt) + 1  # 1020
+
+        # Queue a streaming update that would push past max_model_len.
+        new_tokens = list(range(10))  # 10 new tokens → total = 1020 + 10 = 1030
+        next_chunk = DummyRequest(
+            request_id="audio_session",
+            prompt_token_ids=new_tokens,
+            max_tokens=max_model_len,
+        )
+        update = StreamingUpdate.from_request(next_chunk)
+        session.streaming_queue = deque([update])
+
+        # _handle_stopped_request should detect the overflow.
+        finished = scheduler._handle_stopped_request(session)
+
+        assert finished is True
+        assert session.status == RequestStatus.FINISHED_LENGTH_CAPPED
+
+    def test_streaming_session_max_model_len_cap_via_add_request(self):
+        """Streaming sessions must not exceed max_model_len via add_request.
+
+        When a session is in WAITING_FOR_STREAMING_REQ and a new chunk
+        pushes it past max_model_len, add_request must finish the request.
+
+        Regression test for https://github.com/vllm-project/vllm/issues/39996
+        """
+        scheduler = create_scheduler()
+        max_model_len = scheduler.max_model_len  # 1024
+
+        # Create a session near max_model_len.
+        prompt = list(range(max_model_len - 2))  # 1022 tokens
+        session = DummyRequest(
+            request_id="audio_session",
+            prompt_token_ids=prompt,
+            max_tokens=max_model_len,
+        )
+        scheduler.add_request(session)
+
+        # Simulate: session ran, stopped, now waiting for more input.
+        session.num_computed_tokens = len(prompt)
+        session.status = RequestStatus.WAITING_FOR_STREAMING_REQ
+        scheduler.num_waiting_for_streaming_input += 1
+
+        # New streaming chunk pushes past max_model_len.
+        new_tokens = list(range(10))  # 10 new tokens → total = 1022 + 10 = 1032
+        next_chunk = DummyRequest(
+            request_id="audio_session",
+            prompt_token_ids=new_tokens,
+            max_tokens=max_model_len,
+        )
+        scheduler.add_request(next_chunk)
+
+        # Session should be finished and removed.
+        assert session.status == RequestStatus.FINISHED_LENGTH_CAPPED
+        assert "audio_session" not in scheduler.requests
+
+    def test_streaming_session_length_capped_waiting_request_does_not_block_queue(
+        self,
+    ):
+        scheduler = create_scheduler()
+        max_model_len = scheduler.max_model_len
+
+        capped = DummyRequest(
+            request_id="audio_session",
+            prompt_token_ids=list(range(max_model_len)),
+            max_tokens=max_model_len,
+        )
+        capped.num_computed_tokens = max_model_len - 1
+        tail = DummyRequest(
+            request_id="tail",
+            prompt_token_ids=[1],
+            max_tokens=max_model_len,
+        )
+
+        scheduler.add_request(capped)
+        scheduler.add_request(tail)
+
+        output = scheduler.schedule()
+
+        assert output.finished_req_ids == {capped.request_id}
+        assert capped.status == RequestStatus.FINISHED_LENGTH_CAPPED
+        assert capped.request_id not in scheduler.requests
+        assert [req.req_id for req in output.scheduled_new_reqs] == [tail.request_id]
+        assert [req.request_id for req in scheduler.running] == [tail.request_id]
+        assert not scheduler.waiting
