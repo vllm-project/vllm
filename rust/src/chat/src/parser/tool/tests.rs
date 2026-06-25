@@ -174,6 +174,16 @@ fn factory_new_resolves_default_patterns() {
         Some(names::MINIMAX_M2)
     );
 
+    // Apertus models match the "apertus" substring pattern.
+    assert_eq!(
+        factory.resolve_name_for_model("swiss-ai/Apertus-8B-Instruct-2509"),
+        Some(names::APERTUS)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("swiss-ai/Apertus-70B-Instruct-2509"),
+        Some(names::APERTUS)
+    );
+
     // InternLM2 positive: both dashed and underscored versioned names route.
     assert_eq!(
         factory.resolve_name_for_model("internlm/internlm2-chat-7b"),
