@@ -1497,6 +1497,17 @@ class Gemma4Model(nn.Module, EagleModelMixin):
 
         return loaded_params
 
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        num_experts = getattr(self.config, "num_experts", None) or 0
+        return fused_moe_make_expert_params_mapping(
+            self,
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=num_experts,
+            num_redundant_experts=getattr(self, "num_redundant_experts", 0),
+        )
+
 
 class Gemma4ForCausalLM(
     nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts, SupportsEagle3
@@ -1714,3 +1725,6 @@ class Gemma4ForCausalLM(
 
         loader = AutoWeightsLoader(self, skip_substrs=skip)
         return loader.load_weights(_weight_iterator())
+
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        return self.model.get_expert_mapping()
