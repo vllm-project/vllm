@@ -559,6 +559,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             key_packed_size=self.tq_config.key_packed_size,
             value_quant_bits=self.tq_config.effective_value_quant_bits,
             key_fp8=self.tq_config.key_fp8,
+            PiT_half=layer._tq_PiT_half,
         )
 
     # ------------------------------------------------------------------ #

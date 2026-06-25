@@ -343,6 +343,153 @@ def _tq_fused_store_mse(
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# Fully fused MSE store: cast + norm + rotate (fp16) + bucketize
+# Replaces _fused_cast_normalize_kv + external GEMM (x_hat @ PiT) +
+# _tq_fused_store_mse with a SINGLE kernel launch, eliminating 4
+# intermediate tensors (x_hat, norms, v_flat, y) and 1 cuBLAS GEMM.
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@triton.jit
+def _tq_fused_cast_norm_rot_store_mse(
+    # Raw inputs
+    Key_ptr,  # [NH, D] bf16/fp16 — raw keys (post-RoPE)
+    Value_ptr,  # [NH, D] bf16/fp16 — raw values
+    PiT_half_ptr,  # [D, D] fp16 — rotation matrix (Pi^T in fp16)
+    # Quantization tables
+    Midpoints_ptr,  # [n_centroids-1] fp32
+    # Cache and indexing
+    KV_cache_ptr,  # [total_bytes] uint8 (flattened view)
+    Slot_mapping_ptr,  # [N] int32 — per-token slot indices
+    # Cache strides
+    stride_cache_block: tl.constexpr,
+    stride_cache_pos: tl.constexpr,
+    stride_cache_head: tl.constexpr,
+    # PiT_half strides
+    stride_pit_r,
+    stride_pit_c,
+    # Dimensions
+    D: tl.constexpr,
+    H: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    # TQ layout
+    MSE_BYTES: tl.constexpr,
+    KPS: tl.constexpr,
+    # Value quantization
+    VQB: tl.constexpr,
+    VAL_DATA_BYTES: tl.constexpr,
+    # Packing block sizes
+    BLOCK_VAL: tl.constexpr,
+    # MSE params
+    MSE_BITS: tl.constexpr,
+    N_CENTROIDS: tl.constexpr,
+    BLOCK_GRP: tl.constexpr = 16,
+):
+    """Fused: bf16→fp32 cast + L2 norm + normalize + fp16 rotation +
+    binary-search bucketize + MSE index pack + norm store + value quantize.
+
+    One program per (token, head) pair. All compute in registers —
+    eliminates 4 intermediate tensors and 1 cuBLAS GEMM launch.
+    """
+    pid = tl.program_id(0)
+    token_idx = pid // H
+    head_idx = pid % H
+
+    slot = tl.load(Slot_mapping_ptr + token_idx)
+    if slot < 0:
+        return
+    blk = (slot // BLOCK_SIZE).to(tl.int64)
+    off = (slot % BLOCK_SIZE).to(tl.int64)
+    head_idx_i64 = tl.cast(head_idx, tl.int64)
+    slot_base = (
+        blk * stride_cache_block
+        + off * stride_cache_pos
+        + head_idx_i64 * stride_cache_head
+    )
+
+    base = pid * D
+    d_offs = tl.arange(0, BLOCK_D)
+    d_mask = d_offs < D
+
+    # ── 1. KEY: bf16 → fp32 + L2 norm + normalize ──────────────────
+    k = tl.load(Key_ptr + base + d_offs, mask=d_mask, other=0.0).to(tl.float32)
+    norm = tl.sqrt(tl.sum(k * k, axis=0) + 1e-16)
+    x_hat = k / norm
+
+    # ── 2. ROTATION: y = x_hat @ PiT_half ──────────────────────────
+    # Load PiT_half: [BLOCK_D, BLOCK_D] fp16
+    pit_offs = d_offs[:, None] * stride_pit_r + d_offs[None, :] * stride_pit_c
+    pit_mask = d_mask[:, None] & d_mask[None, :]
+    PiT_half = tl.load(PiT_half_ptr + pit_offs, mask=pit_mask, other=0.0)
+
+    # Matrix-vector multiply via broadcast + reduce:
+    # y[j] = sum_i(x_hat[i] * PiT_half[i, j])
+    # x_hat_2d = tl.expand_dims(x_hat, axis=1)  # [D, 1]
+    x_hat_2d = x_hat[:, None]  # [D, 1] fp32
+    y_vec = tl.sum(x_hat_2d * PiT_half.to(tl.float32), axis=0)  # [D] fp32
+
+    # ── 3. BINARY SEARCH BUCKETIZE ─────────────────────────────────
+    lo = tl.zeros([BLOCK_D], dtype=tl.int32)
+    hi = tl.full([BLOCK_D], N_CENTROIDS - 1, dtype=tl.int32)
+    for _ in range(MSE_BITS):
+        mid = (lo + hi) >> 1
+        safe_mid = tl.minimum(mid, N_CENTROIDS - 2)
+        mid_val = tl.load(Midpoints_ptr + safe_mid, mask=d_mask, other=0.0)
+        lo = tl.where(y_vec >= mid_val, mid + 1, lo)
+        hi = tl.where(y_vec >= mid_val, hi, mid)
+    idx = tl.minimum(lo, N_CENTROIDS - 1)
+
+    # ── 4. PACK MSE INDICES ────────────────────────────────────────
+    if MSE_BITS == 4:
+        idx_pairs = tl.reshape(idx, [BLOCK_D // 2, 2])
+        shifts_4 = tl.arange(0, 2) * 4
+        packed = tl.sum((idx_pairs & 0xF) << shifts_4[None, :], axis=1).to(tl.uint8)
+        mse_offs = tl.arange(0, BLOCK_D // 2)
+        mse_mask = mse_offs < MSE_BYTES
+        tl.store(KV_cache_ptr + slot_base + mse_offs, packed, mask=mse_mask)
+
+    elif MSE_BITS == 3:
+        grp_offs = tl.arange(0, BLOCK_GRP)
+        grp_mask = grp_offs < (D // 8)
+        idx_grp = tl.reshape(idx, [BLOCK_GRP, 8])
+        shifts_3 = tl.arange(0, 8) * 3
+        packed_24 = tl.sum((idx_grp & 0x7) << shifts_3[None, :], axis=1)
+        b0 = (packed_24 & 0xFF).to(tl.uint8)
+        b1 = ((packed_24 >> 8) & 0xFF).to(tl.uint8)
+        b2 = ((packed_24 >> 16) & 0xFF).to(tl.uint8)
+        tl.store(KV_cache_ptr + slot_base + grp_offs * 3, b0, mask=grp_mask)
+        tl.store(KV_cache_ptr + slot_base + grp_offs * 3 + 1, b1, mask=grp_mask)
+        tl.store(KV_cache_ptr + slot_base + grp_offs * 3 + 2, b2, mask=grp_mask)
+
+    # ── 5. STORE vec_norm (fp16, 2 bytes) ──────────────────────────
+    norm_offset = MSE_BYTES
+    vn_f16 = norm.to(tl.float16)
+    vn_u16 = vn_f16.to(tl.uint16, bitcast=True)
+    tl.store(KV_cache_ptr + slot_base + norm_offset, (vn_u16 & 0xFF).to(tl.uint8))
+    tl.store(
+        KV_cache_ptr + slot_base + norm_offset + 1, ((vn_u16 >> 8) & 0xFF).to(tl.uint8)
+    )
+
+    # ── 6. VALUE QUANTIZE + PACK ───────────────────────────────────
+    _store_quantized_value(
+        Value_ptr,
+        KV_cache_ptr,
+        base,
+        slot_base,
+        d_offs,
+        d_mask,
+        D=D,
+        KPS=KPS,
+        VQB=VQB,
+        VAL_DATA_BYTES=VAL_DATA_BYTES,
+        BLOCK_D=BLOCK_D,
+        BLOCK_VAL=BLOCK_VAL,
+        BLOCK_GRP=BLOCK_GRP,
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # Fused cast + normalize (key) + cast (value) pre-op kernel
 # Replaces 3 PyTorch kernel launches (key.float, norm, key/norm) + 1
 # (value.float) with a single Triton kernel, reducing launch overhead
@@ -398,12 +545,13 @@ def triton_turboquant_store(
     value: torch.Tensor,  # [N, H, D] — raw values
     kv_cache: torch.Tensor,  # [num_blocks, block_size, Hk, padded_slot] uint8
     slot_mapping: torch.Tensor,  # [N] int32
-    PiT: torch.Tensor,  # [D, D] float32
+    PiT: torch.Tensor,  # [D, D] float32 (unused, kept for compat)
     midpoints: torch.Tensor,  # [n_centroids-1] float32
     mse_bits: int,
     key_packed_size: int,
     value_quant_bits: int,
     key_fp8: bool = False,
+    PiT_half: torch.Tensor | None = None,  # [D, D] fp16 — rotation matrix for fused store
 ):
     """Launch TQ store kernel (FP8 or MSE path)."""
     N, H, D = key.shape
@@ -455,39 +603,29 @@ def triton_turboquant_store(
         )
         return
 
-    # ── MSE PATH: fused pre-ops + external GEMM + fused bucketize/pack ──
-    # Step 1: Fused cast + norm + normalize (key) + cast (value) — 1 kernel
+    # ── MSE PATH: fully fused cast + norm + rotate + bucketize + pack ──
+    # Single kernel replaces 3-step process:
+    #   1. _fused_cast_normalize_kv (bf16→fp32, norm, normalize)
+    #   2. x_hat @ PiT (external cuBLAS GEMM)
+    #   3. _tq_fused_store_mse (bucketize + pack)
     # .contiguous() ensures correct pointer arithmetic in Triton regardless
     # of input tensor strides (critical for TP sharding / non-contiguous views).
-    x_hat = torch.empty(NH, D, dtype=torch.float32, device=key.device)
-    norms = torch.empty(NH, 1, dtype=torch.float32, device=key.device)
-    v_flat = torch.empty(NH, D, dtype=torch.float32, device=key.device)
-    grid_pre = (NH,)
-    _fused_cast_normalize_kv[grid_pre](
-        key.reshape(NH, D).contiguous(), value.reshape(NH, D).contiguous(),
-        x_hat, norms, v_flat,
-        D=D, BLOCK_D=BLOCK_D,
-        num_warps=4, num_stages=1,
-    )
-    # k_flat = key.float().reshape(NH, D)
-    # norms = k_flat.norm(dim=1, keepdim=True)
-    # x_hat = k_flat / (norms + 1e-8)
-    # v_flat = value.float().reshape(NH, D)
+    k_flat = key.reshape(NH, D).contiguous()
+    v_flat = value.reshape(NH, D).contiguous()
 
-    y = x_hat @ PiT
-
-    # Step 3: Fused kernel: bucketize + MSE index pack + norm store + value pack
     grid = (NH,)
-    _tq_fused_store_mse[grid](
-        y,
-        norms.squeeze(1),
+    _tq_fused_cast_norm_rot_store_mse[grid](
+        k_flat,
         v_flat,
+        PiT_half,
         midpoints,
         kv_cache.view(-1),
         slot_mapping,
         stride_cache_block=stride_block,
         stride_cache_pos=stride_pos,
         stride_cache_head=stride_head,
+        stride_pit_r=PiT_half.stride(0),
+        stride_pit_c=PiT_half.stride(1),
         D=D,
         H=H,
         BLOCK_SIZE=block_size,
