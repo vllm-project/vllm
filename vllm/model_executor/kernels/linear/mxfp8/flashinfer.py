@@ -16,6 +16,7 @@ from vllm.utils import flashinfer as vllm_flashinfer
 from vllm.utils.flashinfer import has_flashinfer_cutedsl
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
+from .triton_smallm import mxfp8_smallm_gemm
 
 
 class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
@@ -55,6 +56,13 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
                 weight_bf16.contiguous(), requires_grad=False
             )
 
+        # Optional small-M Triton GEMM (see apply_weights). The kernel indexes
+        # the scale row-major, so cache the un-swizzled [N, K/32] scale.
+        if envs.VLLM_MXFP8_TRITON_SMALLM:
+            layer.weight_scale_raw = Parameter(
+                weight_scale_2d.contiguous(), requires_grad=False
+            )
+
     def apply_weights(
         self,
         layer: torch.nn.Module,
@@ -69,6 +77,21 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
         input_shape = x.shape
         input_2d = x.view(-1, K)
         M = input_2d.shape[0]
+
+        # Small-M Triton MXFP8 GEMM: handle M < 128 natively instead of padding
+        # to mm_mxfp8's 128-row tile. Only active when weight_scale_raw was
+        # cached at load time (VLLM_MXFP8_TRITON_SMALLM). Takes precedence over
+        # the BF16 fallback below when both are enabled.
+        if M < 128 and hasattr(layer, "weight_scale_raw"):
+            input_mxfp8, input_scale = mxfp8_e4m3_quantize(
+                input_2d, is_sf_swizzled_layout=False
+            )
+            output = mxfp8_smallm_gemm(
+                input_mxfp8, input_scale, weight, layer.weight_scale_raw
+            )
+            if bias is not None:
+                output = output + bias
+            return output.view(*input_shape[:-1], N).to(out_dtype)
 
         # Small-M BF16 fallback: avoid mm_mxfp8's 128-row tile padding when
         # M < 128. Only active when weight_bf16 was cached at load time
