@@ -1,0 +1,17 @@
+model_name: "amd/Kimi-K2-Thinking-MXFP4"
+accuracy_threshold: 0.925
+tolerance: 0.1
+num_questions: 1319
+num_fewshot: 5
+startup_max_wait_seconds: 1800
+rocm_request_timeout_seconds: 3600
+server_args: >-
+  --max-model-len 4096
+  --tensor-parallel-size 8
+  --enable-auto-tool-choice
+  --tool-call-parser kimi_k2
+  --reasoning-parser kimi_k2
+  --attention-backend ROCM_AITER_MLA
+  --moe-backend aiter
+env:
+  VLLM_ROCM_USE_AITER: "1"
