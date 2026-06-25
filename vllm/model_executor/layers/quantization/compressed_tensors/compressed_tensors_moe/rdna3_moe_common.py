@@ -34,8 +34,8 @@ def select_block_size_m(num_tokens: int, top_k: int, num_experts: int) -> int:
         return 1
     if num_tokens >= 16:
         return 16
-    tpe = num_tokens * top_k / num_experts
-    return 4 if tpe >= 1.5 else 1
+    tokens_per_expert = num_tokens * top_k / num_experts
+    return 4 if tokens_per_expert >= 1.5 else 1
 
 
 def repack_experts(packed: torch.Tensor, scale: torch.Tensor, deinterleave: bool):
