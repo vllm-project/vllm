@@ -500,6 +500,20 @@ class ResponsesRequest(OpenAIBaseModel):
                 processed_input.append(item)
                 continue
 
+            # Accept chat-completions-style images (#46631): flatten
+            # image_url {"url": X} -> X and default the required `detail` to "auto".
+            if isinstance(item.get("content"), list):
+                content = []
+                for c in item["content"]:
+                    if isinstance(c, dict) and c.get("type") == "input_image":
+                        c = dict(c)
+                        image_url = c.get("image_url")
+                        if isinstance(image_url, dict) and "url" in image_url:
+                            c["image_url"] = image_url["url"]
+                        c.setdefault("detail", "auto")
+                    content.append(c)
+                item = {**item, "content": content}
+
             item_type = item.get("type")
 
             if item_type == "function_call":
