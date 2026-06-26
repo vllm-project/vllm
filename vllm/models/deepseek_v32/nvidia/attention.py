@@ -30,7 +30,6 @@ from vllm.model_executor.models.deepseek_v2 import (
     yarn_get_mscale,
 )
 from vllm.model_executor.models.utils import extract_layer_index
-from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_quantized_kv_cache
 
 if TYPE_CHECKING:
@@ -264,6 +263,12 @@ class DeepseekV32Attention(MLAAttention):
         self.num_local_heads = num_local_heads
         self.qk_head_dim = qk_head_dim
         self.indexer = indexer
+        # Whether the paged KV cache must be viewed as fp8 before the attention
+        # (per-tensor fp8; the fp8_ds_mla layout is read as uint8).
+        self._fp8_kv_needs_view = (
+            is_quantized_kv_cache(self.kv_cache_dtype)
+            and self.kv_cache_dtype != "fp8_ds_mla"
+        )
 
         # Remaining MLA projections (registered on this module).
         self.fused_qkv_a_proj = DeepSeekV2FusedQkvAProjLinear(
@@ -340,7 +345,7 @@ class DeepseekV32Attention(MLAAttention):
             dtype=q.dtype,
             device=q.device,
         )
-        self._sparse_attend(kv_c_normed, k_pe, ql_nope, q_pe, attn_latent)
+        self._sparse_attention(kv_c_normed, k_pe, ql_nope, q_pe, attn_latent)
 
         # V up-projection + output projection are metadata-independent GEMMs and
         # stay captured.
@@ -353,7 +358,7 @@ class DeepseekV32Attention(MLAAttention):
         return self.o_proj(output)[0]
 
     @eager_break_during_capture
-    def _sparse_attend(
+    def _sparse_attention(
         self,
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
@@ -390,10 +395,8 @@ class DeepseekV32Attention(MLAAttention):
 
         num_actual = attn_metadata.num_actual_tokens
         kv_cache = self.kv_cache
-        if is_quantized_kv_cache(self.kv_cache_dtype) and (
-            self.kv_cache_dtype != "fp8_ds_mla"
-        ):
-            kv_cache = kv_cache.view(current_platform.fp8_dtype())
+        if self._fp8_kv_needs_view:
+            kv_cache = kv_cache.view(torch.float8_e4m3fn)
 
         attn_out, _ = self.impl.forward_mqa(  # type: ignore[attr-defined]
             (ql_nope[:num_actual], q_pe[:num_actual]),
