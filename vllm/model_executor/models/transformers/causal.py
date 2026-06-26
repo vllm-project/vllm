@@ -36,16 +36,23 @@ class CausalMixin(VllmModelForTextGeneration):
             vllm_config=vllm_config, prefix=prefix
         )
 
-        # Tell `Base.load_weights` to skip
-        # `lm_head` if the model has tied word embeddings
+        # A tied-embedding model may still carry a *separately-learned*
+        # `lm_head.bias` (the weight is tied, the bias is not). Detect it so we
+        # keep loading + applying the bias while still tying the weight.
+        has_lm_head_bias = self._has_lm_head_bias()
+
+        # Tell `Base.load_weights` to skip the tied `lm_head.weight`. We must
+        # NOT skip the whole `lm_head.` prefix, or a present `lm_head.bias`
+        # would be dropped too.
         tie_word_embeddings = self._get_tie_word_embeddings()
         if tie_word_embeddings:
-            self.skip_prefixes.append("lm_head.")
+            self.skip_prefixes.append("lm_head.weight")
 
         if self.pp_group.is_last_rank:
             self.lm_head = ParallelLMHead(
                 self.text_config.vocab_size,
                 self.text_config.hidden_size,
+                bias=has_lm_head_bias,
                 quant_config=self.quant_config,
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
@@ -61,6 +68,22 @@ class CausalMixin(VllmModelForTextGeneration):
         else:
             self.lm_head = PPMissingLayer()
 
+    def _has_lm_head_bias(self) -> bool:
+        """True if the checkpoint ships a (non-tied) ``lm_head.bias`` tensor.
+
+        HF exporters that emit a learned output bias set an explicit config
+        flag; some configs spell it differently, so accept any known alias and
+        fall back to the model's own ``lm_head`` module when present.
+        """
+        for attr in ("lm_head_bias", "use_lm_head_bias", "output_bias"):
+            if getattr(self.text_config, attr, None):
+                return True
+        lm_head = getattr(self.model, "lm_head", None)
+        return getattr(lm_head, "bias", None) is not None
+
     def compute_logits(self, hidden_states: "torch.Tensor") -> "torch.Tensor | None":
-        logits = self.logits_processor(self.lm_head, hidden_states)
+        # Apply the learned output bias (if any). The unquantized logits path
+        # only honours a bias passed here, never ``lm_head.bias`` directly.
+        bias = getattr(self.lm_head, "bias", None)
+        logits = self.logits_processor(self.lm_head, hidden_states, bias)
         return logits
