@@ -509,6 +509,12 @@ def main():
         "standalone static-FP8 quant, true = FA4 writes FP8 directly. "
         "Default: both.",
     )
+    parser.add_argument(
+        "--fp8-output-pergroup",
+        action="store_true",
+        help="Use per-group (block, 1x128) dynamic FP8 for the FP8-output "
+        "comparison instead of per-tensor static.",
+    )
 
     # Batch specifications
     parser.add_argument(
@@ -647,6 +653,8 @@ def main():
             args.fp8_output_scale = yaml_config.get("fp8_output_scale", None)
         if args.fuse_quant_op is None:
             args.fuse_quant_op = yaml_config.get("fuse_quant_op", None)
+        if not args.fp8_output_pergroup:
+            args.fp8_output_pergroup = yaml_config.get("fp8_output_pergroup", False)
 
         # Check for special modes
         args.mode = yaml_config.get("mode", None)
@@ -823,10 +831,12 @@ def main():
     if fp8_output_scale is not None:
         decode_backend = backends[0]
         fuse_variants = args.fuse_quant_op or [False, True]
+        pergroup = getattr(args, "fp8_output_pergroup", False)
         label_of = {False: "post_quant", True: "fused"}
         console.print(
             f"[yellow]FP8 output comparison @ scale={fp8_output_scale} "
-            f"(prefill=fa4, decode impl={decode_backend})[/]"
+            f"({'per-group' if pergroup else 'static'}, prefill=fa4, "
+            f"decode impl={decode_backend})[/]"
         )
         fp8_results = []
         total = len(fuse_variants) * len(args.batch_specs)
@@ -842,15 +852,18 @@ def main():
                         num_kv_heads=args.num_kv_heads,
                         block_size=args.block_size,
                         device=args.device,
-                        repeats=args.repeats,
-                        warmup_iters=args.warmup_iters,
+                        warmup_ms=args.warmup_ms,
+                        ncu_profile=args.ncu_profile,
                         profile_memory=args.profile_memory,
                         kv_cache_dtype=args.kv_cache_dtype,
                         use_cuda_graphs=args.cuda_graphs,
                         prefill_backend="fa4",
                     )
                     result = run_benchmark(
-                        config, output_scale=fp8_output_scale, fuse_quant_op=fuse
+                        config,
+                        output_scale=fp8_output_scale,
+                        fuse_quant_op=fuse,
+                        output_pergroup=pergroup,
                     )
                     label = label_of[fuse]
                     labeled_config = replace(result.config, backend=label)

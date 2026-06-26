@@ -38,8 +38,10 @@ if(VLLM_FLASH_ATTN_SRC_DIR)
 else()
   FetchContent_Declare(
           vllm-flash-attn
-          GIT_REPOSITORY https://github.com/vllm-project/flash-attention.git
-          GIT_TAG 803020a8fa15407871341d41eba4919ade2ee1ee
+          # TEMP: point at carlyou/flash-attention per-group FP8 output branch to run CI
+          # against it pre-merge. Revert to vllm-project/flash-attention once the FA change lands.
+          GIT_REPOSITORY https://github.com/carlyou/flash-attention.git
+          GIT_TAG 3d1ac23b3eca212d37ef50c169e13bb0bd88adc0
           GIT_PROGRESS TRUE
           # Don't share the vllm-flash-attn build between build types
           BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn

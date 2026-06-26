@@ -16,6 +16,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8Dynamic64Sym,
     kFp8Dynamic128Sym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
@@ -63,20 +64,22 @@ def _make_fa_backend(version: int | None, is_vllm_fa: bool):
 @pytest.mark.parametrize(
     ("version", "is_vllm_fa", "dc_major", "quant_key", "expected"),
     [
-        # FA4 + vLLM-FA + Blackwell SM100/SM110 + static FP8 -> fused.
+        # FA4 + vLLM-FA + Blackwell SM100/SM110 + static / per-group FP8 -> fused.
         (4, True, 10, kFp8StaticTensorSym, True),
         (4, True, 11, kFp8StaticTensorSym, True),
+        (4, True, 10, kFp8Dynamic128Sym, True),
+        (4, True, 11, kFp8Dynamic64Sym, True),
         # Wrong compute capability (SM90 / SM120) -> not supported (#135).
         (4, True, 9, kFp8StaticTensorSym, False),
         (4, True, 12, kFp8StaticTensorSym, False),
+        (4, True, 9, kFp8Dynamic128Sym, False),
         # Not FA4.
         (3, True, 10, kFp8StaticTensorSym, False),
         (2, True, 10, kFp8StaticTensorSym, False),
         (None, True, 10, kFp8StaticTensorSym, False),
         # Upstream (ROCm) flash-attn, not vLLM-FA.
         (4, False, 10, kFp8StaticTensorSym, False),
-        # Quant keys not wired through FA4 yet.
-        (4, True, 10, kFp8Dynamic128Sym, False),
+        # NVFP4 not wired through FA4.
         (4, True, 10, kNvfp4Dynamic, False),
     ],
 )
