@@ -69,6 +69,7 @@ class CCA(MambaBase, CustomOp):
         self.head_dim = int(head_dim)
         self.latent_k_dim = self.num_k_heads * self.head_dim
         self.latent_q_dim = self.num_q_heads * self.head_dim
+        self.recurrent_v_dim = self.latent_k_dim // 2
         self.sqrt_head_dim = np.sqrt(self.head_dim)
         self.gqa_groups = self.num_q_heads // self.num_k_heads
         assert self.num_q_heads % self.num_k_heads == 0, (
@@ -79,59 +80,57 @@ class CCA(MambaBase, CustomOp):
         ) * self.head_dim
 
         # Projections
-        self.linear_q = ReplicatedLinear(
+        self.q_proj = ReplicatedLinear(
             self.hidden_size,
             self.latent_q_dim,
             bias=self.config.attention_bias,
             quant_config=quant_config,
             return_bias=False,
-            prefix=f"{prefix}.linear_q",
+            prefix=f"{prefix}.q_proj",
         )
-        self.linear_k = ReplicatedLinear(
+        self.k_proj = ReplicatedLinear(
             self.hidden_size,
             self.latent_k_dim,
             bias=self.config.attention_bias,
             quant_config=quant_config,
             return_bias=False,
-            prefix=f"{prefix}.linear_k",
+            prefix=f"{prefix}.k_proj",
         )
-        self.val_proj1 = ReplicatedLinear(
+        self.v_proj_current = ReplicatedLinear(
             self.hidden_size,
             self.latent_k_dim // 2,
             bias=self.config.attention_bias,
             quant_config=quant_config,
             return_bias=False,
-            prefix=f"{prefix}.val_proj1",
+            prefix=f"{prefix}.v_proj_current",
         )
-        self.val_proj2 = ReplicatedLinear(
+        self.v_proj_delayed = ReplicatedLinear(
             self.hidden_size,
             self.latent_k_dim // 2,
             bias=self.config.attention_bias,
             quant_config=quant_config,
             return_bias=False,
-            prefix=f"{prefix}.val_proj2",
+            prefix=f"{prefix}.v_proj_delayed",
         )
 
         # Depthwise + grouped conv along sequence (exactly like Megatron)
         in_out_ch = self.latent_k_dim + self.latent_q_dim
         self.in_out_ch = in_out_ch
-        self.conv_qk = nn.Sequential(
-            nn.Conv1d(
-                in_channels=in_out_ch,
-                out_channels=in_out_ch,
-                kernel_size=self.cca_time0,
-                groups=in_out_ch,
-                padding=0,
-                stride=1,
-            ),
-            nn.Conv1d(
-                in_channels=in_out_ch,
-                out_channels=in_out_ch,
-                kernel_size=self.cca_time1,
-                groups=(self.num_k_heads + self.num_q_heads),
-                padding=0,
-                stride=1,
-            ),
+        self.conv_qk_depthwise = nn.Conv1d(
+            in_channels=in_out_ch,
+            out_channels=in_out_ch,
+            kernel_size=self.cca_time0,
+            groups=in_out_ch,
+            padding=0,
+            stride=1,
+        )
+        self.conv_qk_grouped = nn.Conv1d(
+            in_channels=in_out_ch,
+            out_channels=in_out_ch,
+            kernel_size=self.cca_time1,
+            groups=(self.num_k_heads + self.num_q_heads),
+            padding=0,
+            stride=1,
         )
 
         # Per-k head temperature (Megatron: shape [num_k_heads])
@@ -148,7 +147,7 @@ class CCA(MambaBase, CustomOp):
         hidden_states: torch.Tensor,
         output: torch.Tensor,
     ):
-        return
+        self._forward_no_cache(hidden_states, output)
 
     def forward(
         self,
@@ -160,6 +159,57 @@ class CCA(MambaBase, CustomOp):
             output,
             self.prefix,
         )
+
+    def _forward_no_cache(
+        self,
+        hidden_states: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        """Project an uncached contiguous token sequence into q/k/v."""
+        num_tokens = hidden_states.shape[0]
+        hs = hidden_states.unsqueeze(1)  # [S, 1, H]
+
+        q = self.q_proj(hs)
+        k = self.k_proj(hs)
+        qk_packed0 = torch.cat([q, k], dim=-1)
+        del q
+        del k
+
+        query_pre = qk_packed0[..., :self.latent_q_dim].view(
+            *qk_packed0.shape[:2], self.num_q_heads, self.head_dim)
+        key_base = qk_packed0[..., self.latent_q_dim:].view(
+            *qk_packed0.shape[:2], self.num_k_heads, self.head_dim)
+
+        qk_packed2 = F.pad(qk_packed0.permute(1, 2, 0),
+                           (self.total_padding, 0))
+        qk_packed3 = self.conv_qk_grouped(
+            self.conv_qk_depthwise(qk_packed2)).permute(2, 0, 1)
+
+        query = qk_packed3[..., :self.latent_q_dim].view(
+            *qk_packed3.shape[:2], self.num_q_heads, self.head_dim)
+        key = qk_packed3[..., self.latent_q_dim:].view(
+            *qk_packed3.shape[:2], self.num_k_heads, self.head_dim)
+        query, key = self._add_grouped_qk_means_inplace(
+            query, key, query_pre, key_base)
+        query, key = self._rms_normalize_qk(query.contiguous(),
+                                            key.contiguous())
+
+        value_current = self.v_proj_current(hs)
+        delayed_v_state = self.v_proj_delayed(hs)
+        zero_delayed = self.v_proj_delayed(
+            hidden_states.new_zeros(1, 1, self.hidden_size))
+        value_delayed = torch.cat([zero_delayed, delayed_v_state[:-1]], dim=0)
+        value = torch.cat([value_current, value_delayed], dim=-1).contiguous()
+        value = value.view(num_tokens, 1, self.num_k_heads, self.head_dim)
+
+        q_end = self.latent_q_dim
+        k_end = q_end + self.latent_k_dim
+        output[:num_tokens, :q_end] = query.reshape(num_tokens,
+                                                    self.latent_q_dim)
+        output[:num_tokens, q_end:k_end] = key.reshape(num_tokens,
+                                                       self.latent_k_dim)
+        output[:num_tokens, k_end:] = value.reshape(num_tokens,
+                                                    self.latent_k_dim)
 
     def _rms_normalize_qk(
         self, query: torch.Tensor, key: torch.Tensor
@@ -221,8 +271,8 @@ class CCA(MambaBase, CustomOp):
         Output: [N, C, S_out]
         """
         # Stage 1: depthwise conv over sequence.
-        w0 = self.conv_qk[0].weight.squeeze(1)  # [C, K0]
-        b0 = self.conv_qk[0].bias  # [C] or None
+        w0 = self.conv_qk_depthwise.weight.squeeze(1)  # [C, K0]
+        b0 = self.conv_qk_depthwise.bias  # [C] or None
 
         x = x.to(w0.dtype)
         k0 = w0.shape[1]
@@ -232,8 +282,8 @@ class CCA(MambaBase, CustomOp):
             mid = mid + b0[None, :, None]
 
         # Stage 2: grouped conv over the depthwise output.
-        w1 = self.conv_qk[1].weight  # [C, D, K1]
-        b1 = self.conv_qk[1].bias  # [C] or None
+        w1 = self.conv_qk_grouped.weight  # [C, D, K1]
+        b1 = self.conv_qk_grouped.bias  # [C] or None
         g = self.num_k_heads + self.num_q_heads
         d = self.head_dim
         k1 = w1.shape[2]
@@ -257,7 +307,7 @@ class CCA(MambaBase, CustomOp):
             attn_metadata = attn_metadata[self.prefix]
             assert isinstance(attn_metadata, CCAAttentionMetadata)
             conv_states = self.kv_cache[0]
-            prev_hs = self.kv_cache[1]
+            recurrent_states = self.kv_cache[1]
             state_indices_tensor_p = attn_metadata.state_indices_tensor_p
             state_indices_tensor_d = attn_metadata.state_indices_tensor_d
             if state_indices_tensor_d is not None and state_indices_tensor_d.dim() > 1:
@@ -267,59 +317,8 @@ class CCA(MambaBase, CustomOp):
 
         if attn_metadata is None:
             # V1 profile run
-            hs = hidden_states.unsqueeze(0).transpose(0, 1).contiguous()
-            hs_d = F.pad(hs[:-1], pad=(0, 0, 0, 0, 1, 0))  # [S, B, H]
-            q = self.linear_q(hs)  # [S, B, latent_q_dim]
-            k = self.linear_k(hs)  # [S, B, latent_k_dim]
-            qk_packed0 = torch.cat([q, k], dim=-1)  # [S, B, latent_q + latent_k]
-            del q
-            del k
-
-            # Pre-mean tensors in head form (for "qk_mean_{q,k}" calc)
-            query_pre = qk_packed0[..., : self.latent_q_dim].view(
-                *qk_packed0.shape[:2], self.num_q_heads, self.head_dim
-            )  # [S, B, qh, dh]
-
-            key_base = qk_packed0[..., self.latent_q_dim :].view(
-                *qk_packed0.shape[:2], self.num_k_heads, self.head_dim
-            )  # [S, B, kh, dh]
-
-            qk_packed1 = qk_packed0.permute(1, 2, 0)  # [B, E, S]
-            qk_packed2 = F.pad(qk_packed1, (self.total_padding, 0))
-            qk_packed3 = self.conv_qk(qk_packed2).permute(2, 0, 1)  # [S, B, E]
-
-            # Build queries/keys from conv output + means
-            query = (
-                qk_packed3[..., : self.latent_q_dim]
-                .view(*qk_packed3.shape[:2], self.num_q_heads, self.head_dim)
-                .float()
-            )
-
-            key = (
-                qk_packed3[..., self.latent_q_dim :]
-                .view(*qk_packed3.shape[:2], self.num_k_heads, self.head_dim)
-                .float()
-            )
-            query, key = self._add_grouped_qk_means_inplace(
-                query, key, query_pre, key_base
-            )
-            del query_pre
-            del key_base
-            del qk_packed0
-            del qk_packed3
-
-            # Values from the two time streams
-            v1 = self.val_proj1(hs)  # [S, B, latent_k_dim/2]
-            v2 = self.val_proj2(hs_d)  # [S, B, latent_k_dim/2]
-            value = (
-                torch.cat([v1, v2], dim=-1)
-                .contiguous()
-                .view(*hs.shape[:2], self.num_k_heads, self.head_dim)
-            )  # [S, B, kh, dh]
-
-            query, key = self._rms_normalize_qk(query.contiguous(), key.contiguous())
-
-            return hs
+            self._forward_no_cache(hidden_states, output)
+            return
 
         num_prefills = attn_metadata.num_prefills  # request count
         num_decodes = attn_metadata.num_decode_tokens  # token count (=request)
@@ -328,7 +327,6 @@ class CCA(MambaBase, CustomOp):
         has_decode = num_decodes > 0
         num_actual_tokens = num_decodes + num_prefill_tokens
 
-        num_input_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states[:num_actual_tokens]
 
         # Batch size is effectively 1 in this path, so insert the singleton
@@ -336,8 +334,8 @@ class CCA(MambaBase, CustomOp):
         hs = hidden_states.unsqueeze(1)  # [S, 1, H]
         batch_size = hs.shape[1]
 
-        q = self.linear_q(hs)  # [S, B, latent_q_dim]
-        k = self.linear_k(hs)  # [S, B, latent_k_dim]
+        q = self.q_proj(hs)  # [S, B, latent_q_dim]
+        k = self.k_proj(hs)  # [S, B, latent_k_dim]
         qk_packed0 = torch.cat([q, k], dim=-1)  # [S, B, latent_q + latent_k]
         del q
         del k
@@ -364,14 +362,20 @@ class CCA(MambaBase, CustomOp):
             [num_decodes, num_prefill_tokens],
             dim=0,
         )
+        delayed_v_state = self.v_proj_delayed(hs[:num_actual_tokens])
+        delayed_v_state_d, delayed_v_state_p = torch.split(
+            delayed_v_state,
+            [num_decodes, num_prefill_tokens],
+            dim=0,
+        )
 
         qk_packed3 = torch.empty(
             (num_actual_tokens, batch_size, self.in_out_ch),
             device=hs.device,
             dtype=hs.dtype,
         )
-        hs2 = torch.empty(
-            (num_actual_tokens, batch_size, self.hidden_size),
+        value_delayed = torch.empty(
+            (num_actual_tokens, batch_size, self.recurrent_v_dim),
             device=hs.device,
             dtype=hs.dtype,
         )
@@ -382,23 +386,20 @@ class CCA(MambaBase, CustomOp):
             assert query_start_loc_p is not None
             # Prefill
             prefill_slice = slice(num_decodes, num_decodes + num_prefill_tokens)
-            hs2_prefill = hs2[prefill_slice]
+            value_delayed_prefill = value_delayed[prefill_slice]
             qk_packed3_prefill = qk_packed3[prefill_slice]
             for i in range(len(query_start_loc_p) - 1):
                 start_i, end_i = query_start_loc_p[i], query_start_loc_p[i + 1]
-                hs2_cur = hs_p[start_i:end_i, :, :]  # [S_cur, B, H]
                 qk_packed0_cur = qk_packed0_p[start_i:end_i, :, :]  # [S_cur, B, H]
+                delayed_v_state_cur = delayed_v_state_p[start_i:end_i]
                 qk_packed1_cur = qk_packed0_cur.permute(1, 2, 0)  # [1, H, S_cur]
 
                 if has_initial_states_p[i]:
-                    hs2_cached = (
-                        prev_hs[state_indices_tensor_p[i]].unsqueeze(0).unsqueeze(0)
-                    )  # [1, 1, H]
-                    if hs2_cached.dtype != hs2_cur.dtype:
-                        hs2_cached = hs2_cached.to(hs2_cur.dtype)
-                    hs2_cur = torch.cat(
-                        [hs2_cached, hs2_cur[:-1]], dim=0
-                    )  # [S_cur, 1, H]
+                    value_delayed_cached = recurrent_states[
+                        state_indices_tensor_p[i]].unsqueeze(0).unsqueeze(0)
+                    if value_delayed_cached.dtype != value_delayed.dtype:
+                        value_delayed_cached = value_delayed_cached.to(
+                            value_delayed.dtype)
                     qk_packed0_cached = conv_states[
                         state_indices_tensor_p[i]
                     ].unsqueeze(0)  # [1, H, total_padding]
@@ -408,27 +409,31 @@ class CCA(MambaBase, CustomOp):
                         [qk_packed0_cached, qk_packed1_cur], dim=-1
                     )  # [1, H, S_cur + total_padding]
                 else:
-                    hs2_cur = F.pad(hs2_cur[:-1], pad=(0, 0, 0, 0, 1, 0))
+                    value_delayed_cached = self.v_proj_delayed(
+                        hs_p.new_zeros(1, 1, self.hidden_size))
                     qk_packed2_cur = F.pad(qk_packed1_cur, (self.total_padding, 0))
 
-                hs2_prefill[start_i:end_i] = hs2_cur
+                value_delayed_prefill[start_i:end_i] = torch.cat(
+                    [value_delayed_cached, delayed_v_state_cur[:-1]], dim=0)
 
                 conv_states_cur = nn.functional.pad(
-                    qk_packed2_cur, (self.cca_time0 - qk_packed2_cur.shape[-1], 0)
+                    qk_packed2_cur,
+                    (self.total_padding - qk_packed2_cur.shape[-1], 0),
                 )
                 conv_states[state_indices_tensor_p[i]] = conv_states_cur.to(
                     device=conv_states.device, dtype=conv_states.dtype
                 )
 
                 # Computing conv
-                qk_packed3_cur = self.conv_qk(qk_packed2_cur).permute(
-                    2, 0, 1
-                )  # [S, B, E]
+                qk_packed3_cur = self.conv_qk_grouped(
+                    self.conv_qk_depthwise(qk_packed2_cur)
+                ).permute(2, 0, 1)  # [S, B, E]
                 qk_packed3_prefill[start_i:end_i] = qk_packed3_cur
 
-            prev_hs[state_indices_tensor_p] = hs_p[query_start_loc_p[1:] - 1, 0, :].to(
-                device=prev_hs.device, dtype=prev_hs.dtype
-            )
+            recurrent_states[state_indices_tensor_p] = delayed_v_state_p[
+                query_start_loc_p[1:] - 1, 0, :].to(
+                    device=recurrent_states.device,
+                    dtype=recurrent_states.dtype)
 
         if has_decode:
             assert state_indices_tensor_d is not None
@@ -490,38 +495,40 @@ class CCA(MambaBase, CustomOp):
                 device=conv_states.device, dtype=conv_states.dtype
             )
 
-            hs2_decode = prev_hs[safe_decode_indices].unsqueeze(1)  # [S, 1, H]
-            hs2_decode = torch.where(
+            value_delayed_decode = recurrent_states[safe_decode_indices].unsqueeze(1)
+            value_delayed_decode = torch.where(
                 decode_is_pad.view(-1, 1, 1),
-                hs2_decode.new_zeros(()),
-                hs2_decode,
+                value_delayed_decode.new_zeros(()),
+                value_delayed_decode,
             )
-            if hs2_decode.dtype != hs.dtype:
-                hs2_decode = hs2_decode.to(hs.dtype)
-            hs2[:num_decodes] = hs2_decode
-            new_prev_hs = hs_d[:, 0, :].to(prev_hs.dtype)
-            new_prev_hs = torch.where(
+            if value_delayed_decode.dtype != value_delayed.dtype:
+                value_delayed_decode = value_delayed_decode.to(value_delayed.dtype)
+            value_delayed[:num_decodes] = value_delayed_decode
+            new_recurrent_state = delayed_v_state_d[:, 0, :].to(
+                recurrent_states.dtype)
+            new_recurrent_state = torch.where(
                 decode_is_pad.view(-1, 1),
-                new_prev_hs.new_zeros(()),
-                new_prev_hs,
+                new_recurrent_state.new_zeros(()),
+                new_recurrent_state,
             )
-            prev_hs[safe_decode_indices] = new_prev_hs.to(
-                device=prev_hs.device, dtype=prev_hs.dtype
-            )
+            recurrent_states[safe_decode_indices] = new_recurrent_state.to(
+                device=recurrent_states.device,
+                dtype=recurrent_states.dtype)
 
         del qk_packed0_d
         del qk_packed0_p
         del hs_d
         del hs_p
+        del delayed_v_state_d
+        del delayed_v_state_p
 
         # Values from the two time streams
-        v1 = self.val_proj1(hs)  # [S, B, latent_k_dim/2]
-        v2 = self.val_proj2(hs2)
-        value = torch.cat([v1, v2], dim=-1).contiguous()
+        v1 = self.v_proj_current(hs)  # [S, B, latent_k_dim/2]
+        value = torch.cat([v1, value_delayed], dim=-1).contiguous()
         value = value.view(
             num_actual_tokens, batch_size, self.num_k_heads, self.head_dim
         )  # [S, B, kh, dh]
-        del hs2
+        del value_delayed
 
         # Build queries/keys from conv output + means
         query = (
@@ -575,7 +582,7 @@ class CCA(MambaBase, CustomOp):
             num_k_heads=self.num_k_heads,
             num_q_heads=self.num_q_heads,
             head_dim=self.head_dim,
-            hidden_size=self.hidden_size,
+            recurrent_state_size=self.recurrent_v_dim,
         )
 
     @property
