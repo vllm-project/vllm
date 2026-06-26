@@ -31,6 +31,7 @@ from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_message
 from vllm.utils.network_utils import get_open_zmq_ipc_path, get_tcp_uri
 from vllm.utils.system_utils import decorate_logs, kill_process_tree, set_process_title
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -114,7 +115,7 @@ class CpuGpuBuffer:
         *size: int | torch.SymInt,
         dtype: torch.dtype,
         device: torch.device,
-        pin_memory: bool,
+        pin_memory: bool = PIN_MEMORY,
         with_numpy: bool = True,
     ) -> None:
         # these buffers are mutable runtime state, so allocate them as normal
@@ -364,19 +365,23 @@ class RustFrontendProcessManager:
             cmd.extend(["--coordinator-address", stats_update_address])
         from vllm.entrypoints.serve.utils.api_utils import jsonify_non_default_args
 
-        args_json = json.dumps(
-            jsonify_non_default_args(
-                args,
-                exclude={
-                    "api_server_count",
-                    # Python passes the bootstrapped engine range explicitly.
-                    "data_parallel_rank",
-                    "data_parallel_external_lb",
-                    "data_parallel_hybrid_lb",
-                },
-            ),
-            sort_keys=True,
+        args_dict = jsonify_non_default_args(
+            args,
+            exclude={
+                "api_server_count",
+                # Python passes the bootstrapped engine range explicitly.
+                "data_parallel_rank",
+                "data_parallel_external_lb",
+                "data_parallel_hybrid_lb",
+            },
         )
+        # The Rust `frontend` subcommand parses --args-json via serde_json,
+        # which bypasses clap and therefore ignores any `#[arg(env = ...)]`
+        # declarations on SharedRuntimeArgs fields. Forward the env-driven
+        # ready timeout explicitly so VLLM_ENGINE_READY_TIMEOUT_S behaves the
+        # same on both Python and Rust frontends.
+        args_dict["engine_ready_timeout_secs"] = envs.VLLM_ENGINE_READY_TIMEOUT_S
+        args_json = json.dumps(args_dict, sort_keys=True)
         cmd.extend(["--args-json", args_json])
 
         logger.info("Launching Rust frontend: %s", " ".join(cmd))

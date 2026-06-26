@@ -367,6 +367,20 @@ remove_docker_container() {
 }
 trap remove_docker_container EXIT
 
+# python_only_compile.sh runs `python setup.py develop` and needs the full repo tree
+# under /vllm-workspace (Dockerfile.rocm test stage: mkdir src && mv vllm).
+# The ROCm wheel artifact tarball only ships a thin tree (tests, etc.), so
+# artifact images cannot satisfy that test — use the full rocm/vllm-ci image.
+_cmd_probe="${VLLM_TEST_COMMANDS:-}"
+if [[ -z "${_cmd_probe}" ]]; then
+  _cmd_probe="$*"
+fi
+if [[ "${VLLM_CI_USE_ARTIFACTS:-0}" == "1" && "${_cmd_probe}" == *python_only_compile.sh* ]]; then
+  echo "INFO: disabling VLLM_CI_USE_ARTIFACTS for python_only_compile (requires full /vllm-workspace tree)"
+  export VLLM_CI_USE_ARTIFACTS=0
+fi
+unset -v _cmd_probe
+
 if ! prepare_artifact_image; then
   echo "Using full ROCm CI image: ${image_name}"
   docker pull "${image_name}" || exit 1
@@ -425,6 +439,24 @@ else
 fi
 
 echo "Final commands: $commands"
+
+# The ROCm test image often ships /vllm-workspace without .git (artifact tarball unpack).
+# tests/standalone_tests/python_only_compile.sh uses merge-base(HEAD, origin/main) for
+# wheels.vllm.ai; compute on the agent (full git checkout) and pass into the container.
+vllm_standalone_merge_base=""
+checkout="${BUILDKITE_BUILD_CHECKOUT_PATH:-}"
+if [[ -z "${checkout}" || ! -d "${checkout}" ]]; then
+  checkout="."
+fi
+if git -C "${checkout}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  vllm_standalone_merge_base="$(
+    git -C "${checkout}" merge-base HEAD origin/main 2>/dev/null || true
+  )"
+fi
+if [[ -z "${vllm_standalone_merge_base}" ]]; then
+  vllm_standalone_merge_base="${BUILDKITE_COMMIT:-}"
+fi
+echo "INFO: passing VLLM_STANDALONE_MERGE_BASE into container: ${vllm_standalone_merge_base}"
 
 MYPYTHONPATH="/vllm-workspace"
 
@@ -525,6 +557,7 @@ else
     -e "VLLM_CACHE_ROOT=${CONTAINER_CACHE_ROOT}/vllm" \
     -e "XDG_CACHE_HOME=${CONTAINER_CACHE_ROOT}/xdg" \
     -e "PYTORCH_ROCM_ARCH=" \
+    -e "VLLM_STANDALONE_MERGE_BASE=${vllm_standalone_merge_base}" \
     --name "${container_name}" \
     "${image_name}" \
     /bin/bash -c "${CONTAINER_PREFLIGHT} && ${commands}"
