@@ -150,12 +150,54 @@ class TestCohereEmbedRequestParsing:
                     {"content": [{"type": "text", "text": "hello"}]},
                 ],
             },
+            {
+                "model": "test",
+                "inputs": [
+                    {
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": "image-uri"}}
+                        ]
+                    },
+                ],
+            },
         ],
     )
     def test_accepts_exactly_one_non_empty_input_field(self, request_body):
         request = CohereEmbedRequest(**request_body)
 
         assert request.model == "test"
+
+    @pytest.mark.parametrize(
+        ("content", "error"),
+        [
+            (
+                {"type": "text"},
+                "CohereEmbedContent with type='text' requires text",
+            ),
+            (
+                {"type": "image_url"},
+                "CohereEmbedContent with type='image_url' requires image_url.url",
+            ),
+            (
+                {"type": "image_url", "image_url": {}},
+                "CohereEmbedContent with type='image_url' requires image_url.url",
+            ),
+            (
+                {"type": "image_url", "image_url": {"url": ""}},
+                "CohereEmbedContent with type='image_url' requires image_url.url",
+            ),
+        ],
+    )
+    def test_rejects_invalid_mixed_content_payloads(self, content, error):
+        with pytest.raises(ValidationError, match=error):
+            CohereEmbedRequest(
+                model="test",
+                inputs=[
+                    {
+                        "content": [content],
+                    },
+                ],
+            )
 
 
 class TestResolveTruncation:
@@ -386,8 +428,8 @@ class TestPreProcessCohereOnline:
         handler._get_task_instruction_prefix = lambda _input_type: None
         handler._has_chat_template = lambda: False
         handler._preprocess_cmpl_online = preprocess_cmpl_online
-        handler._batch_render_chat = lambda *_args, **_kwargs: (
-            pytest.fail("text-only request should not require chat rendering")
+        handler._batch_render_chat = lambda *_args, **_kwargs: pytest.fail(
+            "text-only request should not require chat rendering"
         )
 
         handler._pre_process_cohere_online(ctx)
@@ -406,8 +448,8 @@ class TestPreProcessCohereOnline:
 
         handler._get_task_instruction_prefix = lambda _input_type: "query: "
         handler._has_chat_template = lambda: False
-        handler._batch_render_chat = lambda *_args, **_kwargs: (
-            pytest.fail("chat rendering should be skipped without a template")
+        handler._batch_render_chat = lambda *_args, **_kwargs: pytest.fail(
+            "chat rendering should be skipped without a template"
         )
         handler._preprocess_cmpl_online = preprocess_cmpl
 
@@ -443,8 +485,8 @@ class TestPreProcessCohereOnline:
         handler._get_task_instruction_prefix = lambda _input_type: "query: "
         handler._has_chat_template = lambda: True
         handler._batch_render_chat = batch_render_chat
-        handler._preprocess_cmpl_online = lambda *_args, **_kwargs: (
-            pytest.fail("completion path should be skipped when a template exists")
+        handler._preprocess_cmpl_online = lambda *_args, **_kwargs: pytest.fail(
+            "completion path should be skipped when a template exists"
         )
 
         handler._pre_process_cohere_online(ctx)

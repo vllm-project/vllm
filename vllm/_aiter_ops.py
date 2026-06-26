@@ -1019,23 +1019,26 @@ def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm_fake(
 
 
 def _rocm_aiter_per_tensor_quant_impl(
+    out: torch.Tensor,
     x: torch.Tensor,
-    quant_dtype: torch.dtype,
-    scale: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    from aiter.ops.quant import per_tensor_quant_hip
+    scale: torch.Tensor,
+    is_dynamic: bool,
+) -> None:
+    from aiter.ops.quant import dynamic_per_tensor_quant, static_per_tensor_quant
 
-    return per_tensor_quant_hip(x, scale, quant_dtype)
+    if is_dynamic:
+        dynamic_per_tensor_quant(out, x, scale)
+    else:
+        static_per_tensor_quant(out, x, scale)
 
 
 def _rocm_aiter_per_tensor_quant_fake(
+    out: torch.Tensor,
     x: torch.Tensor,
-    quant_dtype: torch.dtype,
-    scale: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return torch.empty_like(x, dtype=quant_dtype), torch.empty(
-        1, dtype=torch.float32, device=x.device
-    )
+    scale: torch.Tensor,
+    is_dynamic: bool,
+) -> None:
+    pass
 
 
 def _rocm_aiter_per_token_quant_impl(
@@ -1979,7 +1982,7 @@ class rocm_aiter_ops:
             direct_register_custom_op(
                 op_name="rocm_aiter_per_tensor_quant",
                 op_func=_rocm_aiter_per_tensor_quant_impl,
-                mutates_args=[],
+                mutates_args=["out", "scale"],
                 fake_impl=_rocm_aiter_per_tensor_quant_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
@@ -2392,7 +2395,12 @@ class rocm_aiter_ops:
         quant_dtype: torch.dtype,
         scale: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return torch.ops.vllm.rocm_aiter_per_tensor_quant(x, quant_dtype, scale)
+        out = torch.empty_like(x, dtype=quant_dtype)
+        is_dynamic = scale is None
+        if is_dynamic:
+            scale = torch.empty(1, dtype=torch.float32, device=x.device)
+        torch.ops.vllm.rocm_aiter_per_tensor_quant(out, x, scale, is_dynamic)
+        return out, scale
 
     @staticmethod
     def per_token_quant(

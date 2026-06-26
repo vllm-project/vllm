@@ -277,6 +277,7 @@ impl ChatRenderer for FakeChatBackend {
 
         Ok(RenderedPrompt {
             prompt: Prompt::Text(prompt),
+            effective_template_kwargs: request.chat_options.template_kwargs.clone(),
         })
     }
 }
@@ -1179,7 +1180,7 @@ async fn chat_stream_parses_tool_calls_automatically() {
                             ),
                             request_output(
                                 "chat-tool",
-                                bytes_to_token_ids(
+                                bytes_with_special_stop_token(
                                     b"\"arguments\":{\"city\":\"Paris\"}}\n</tool_call>",
                                 ),
                                 Some(EngineCoreFinishReason::Stop),
