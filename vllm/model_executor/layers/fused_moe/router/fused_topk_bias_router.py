@@ -320,7 +320,6 @@ def fused_topk_bias(
     return (
         topk_weights,
         topk_indices.to(torch.int32 if indices_type is None else indices_type),
-        None,
     )
 
 

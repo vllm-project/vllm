@@ -95,7 +95,7 @@ class AiterSharedRoutedFusedMoERouter(BaseRouter):
                 num_fse,
                 "sigmoid",
             )
-            return total_topk_weights_slice, total_topk_ids[:M], None
+            return total_topk_weights_slice, total_topk_ids[:M]
 
         routing_logits = router_logits[:, :-num_fse]
         shared_logits = router_logits[:, -num_fse:]
