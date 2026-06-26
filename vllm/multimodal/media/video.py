@@ -29,6 +29,12 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
         runtime_kwargs: dict[str, Any] | None,
     ) -> dict[str, Any]:
         merged = super().merge_kwargs(default_kwargs, runtime_kwargs)
+        # Do not allow untrusted per-request kwargs to weaken the admin-set
+        # size guard. If the server configured a limit, keep it authoritative.
+        if default_kwargs and "max_video_size_mb" in default_kwargs:
+            merged["max_video_size_mb"] = default_kwargs["max_video_size_mb"]
+        else:
+            merged.pop("max_video_size_mb", None)
         # fps and num_frames interact with each other, so if either is
         # overridden at request time, wipe the other from defaults to
         # avoid unintuitive cross-field interactions.
@@ -99,6 +105,9 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
         self, media_type: str, data: str
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         if media_type.lower() == "video/jpeg":
+            # Approximate the decoded payload size before processing frames.
+            raw_size = len(data) * 3 // 4
+            self._validate_video_size(raw_size, source="video/jpeg base64 payload")
             load_frame = partial(
                 self.image_io.load_base64,
                 "image/jpeg",
