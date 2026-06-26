@@ -920,15 +920,16 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
 
         # Set MoE hyperparameters
         self.moe_layers: list[MoERunner] = []
+        example_layer: FusedMoEBlock | None = None
         for layer in self.model.layers:
             if isinstance(layer, PPMissingLayer):
                 continue
             assert isinstance(layer, Step3p5DecoderLayer)
-            if hasattr(layer, "moe") and isinstance(layer.moe, FusedMoEBlock):
+            if isinstance(layer.moe, FusedMoEBlock):
+                example_layer = layer.moe
                 self.moe_layers.append(layer.moe.experts)
 
         assert len(self.moe_layers) > 0, "No MoE layers found in the model."
-        example_layer = self.moe_layers[0]
         self.num_moe_layers = len(self.moe_layers)
         self.num_expert_groups = 1
         self.num_shared_experts = 0
