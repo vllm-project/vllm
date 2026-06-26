@@ -52,7 +52,7 @@ minijinja = { version = "2.0", features = ["unstable_machinery", "json", "builti
 minijinja-contrib = { version = "2.0", features = ["pycompat"] }
 native-tls-vendored = { package = "native-tls", version = "0.2.18", features = ["vendored"] }
 ndarray = { version = "0.16.1", features = ["serde"] }
-openai-harmony = { git = "https://github.com/Inferact/openai-harmony", rev = "cfbadbc66f3158692bfeefa961e363aa7a6b9708", default-features = false, features = ["native-tls"] }
+openai-harmony = { package = "oss-harmony", git = "https://github.com/oss-harmony/harmony", tag = "v0.0.11", default-features = false }
 openai-protocol = "1.6.0"
 parking_lot = "0.12.5"
 paste = "1.0.15"
