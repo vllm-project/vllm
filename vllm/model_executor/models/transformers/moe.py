@@ -68,7 +68,7 @@ class TransformersMoERunner(MoERunner):
         We discard any extra kwargs because we cannot use them here."""
         # Note: we need to forward through a custom op so the topk_ids
         # can be transferred without interfering with cudagraphs.
-        return torch.ops.vllm._transformers_moe_forward(
+        return torch.ops.vllm.transformers_moe_forward(
             hidden_states,
             topk_ids.to(torch.int32),
             topk_weights.to(torch.float32),

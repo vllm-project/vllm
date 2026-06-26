@@ -925,7 +925,7 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
             if isinstance(layer, PPMissingLayer):
                 continue
             assert isinstance(layer, Step3p5DecoderLayer)
-            if isinstance(layer.moe, FusedMoEBlock):
+            if hasattr(layer, "moe") and isinstance(layer.moe, FusedMoEBlock):
                 example_layer = layer.moe
                 self.moe_layers.append(layer.moe.experts)
 
