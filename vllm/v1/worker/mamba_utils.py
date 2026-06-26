@@ -428,6 +428,12 @@ class MambaCopyBuffers:
     sizes: CpuGpuBuffer
     mamba_group_ids: list[int]
     mamba_spec: MambaSpec
+    # Per-request src columns for the copy-free align path (GDN only), staged by
+    # preprocess_mamba and resolved in GDNAttentionMetadataBuilder.build. Batch
+    # order; -1 == fresh. Unused (but harmless) on the Mamba2 pre-copy path.
+    src_ssm_col_buf: CpuGpuBuffer
+    conv_src_col_buf: CpuGpuBuffer
+    conv_src_off_buf: CpuGpuBuffer
     offset: int = 0
 
     @classmethod
@@ -451,6 +457,9 @@ class MambaCopyBuffers:
             sizes=make_buffer(n, dtype=torch.int32),
             mamba_group_ids=mamba_group_ids,
             mamba_spec=mamba_spec,
+            src_ssm_col_buf=make_buffer(max_num_reqs, dtype=torch.int32),
+            conv_src_col_buf=make_buffer(max_num_reqs, dtype=torch.int32),
+            conv_src_off_buf=make_buffer(max_num_reqs, dtype=torch.int32),
         )
 
 
@@ -751,6 +760,8 @@ class MambaSpecDecodeGPUContext:
             block_size=self.block_size,
             COPY_BLOCK_SIZE=1024,
             CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
+            HAS_IDX_MAPPING=False,
+            PRECOMPUTED_NEW_COMPUTED=False,
         )
 
     def run_fused_precopy(
@@ -962,17 +973,25 @@ def preprocess_mamba(
     mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
     copy_bufs: MambaCopyBuffers,
 ):
+    """Advance the per-request mamba ``state_idx`` for the current step.
+
+    Copy-free align: no state is copied. Instead we stage the per-request src
+    columns so the forward kernel reads the previous running state directly
+    from its source block (mirrors the V2 fused preprocess).
+    ``src_ssm_col = prev_state_idx + (num_accepted - 1)``,
+    ``conv_src_col = prev_state_idx``, ``conv_src_off = max(num_accepted-1, 0)``.
     """
-    Copy the mamba state of previous step to the last
-    (1 + num_speculative_blocks) block.
-    """
-    mamba_group_ids = copy_bufs.mamba_group_ids
     mamba_spec = copy_bufs.mamba_spec
     num_speculative_blocks = mamba_spec.num_speculative_blocks
     # TODO(Chen): we need to optimize this function a lot
     assert cache_config.enable_prefix_caching
     block_size = mamba_spec.block_size
     cleanup_mamba_state_idx(scheduler_output, mamba_state_idx)
+
+    num_reqs = len(input_batch.req_ids)
+    src_ssm_np = copy_bufs.src_ssm_col_buf.np
+    conv_col_np = copy_bufs.conv_src_col_buf.np
+    conv_off_np = copy_bufs.conv_src_off_buf.np
 
     copy_bufs.offset = 0
     for i, req_id in enumerate(input_batch.req_ids):
@@ -1000,21 +1019,30 @@ def preprocess_mamba(
         # Block 3: speculative block
         # And use block 1 to save the running state.
         curr_state_idx = num_blocks - 1 - num_speculative_blocks
+
+        # Copy-free: record the src columns the forward kernel reads from.
+        # ``num_accepted`` must be read BEFORE the reset below, matching the
+        # V2 fused-preprocess ordering (ssm_col uses last step's value).
+        num_accepted = int(input_batch.num_accepted_tokens_cpu[i])
+        src_ssm_np[i] = prev_state_idx + num_accepted - 1 if prev_state_idx >= 0 else -1
+        conv_col_np[i] = prev_state_idx
+        conv_off_np[i] = max(num_accepted - 1, 0)
+
         mamba_state_idx[req_id] = curr_state_idx
         if prev_state_idx != -1 and prev_state_idx != curr_state_idx:
-            collect_mamba_copy_meta(
-                copy_bufs,
-                kv_cache_config,
-                mamba_state_copy_funcs,
-                mamba_group_ids,
-                prev_state_idx,
-                curr_state_idx,
-                input_batch.num_accepted_tokens_cpu[i] - 1,
-                req_state,
-                forward_context,
-            )
+            # Reset on a block-boundary crossing so the forward kernel writes
+            # the new running state at init slot 0 of the new block (the GPU
+            # mirror is re-synced by the caller).
             input_batch.num_accepted_tokens_cpu[i] = 1
-    do_mamba_copy_block(copy_bufs)
+
+    # Tail-fill padded request slots so the build resolve treats them as
+    # fresh (-1 -> physical NULL block; kernel starts from zero state).
+    src_ssm_np[num_reqs:] = -1
+    conv_col_np[num_reqs:] = -1
+    conv_off_np[num_reqs:] = 0
+    copy_bufs.src_ssm_col_buf.copy_to_gpu()
+    copy_bufs.conv_src_col_buf.copy_to_gpu()
+    copy_bufs.conv_src_off_buf.copy_to_gpu()
 
 
 def postprocess_mamba_all(

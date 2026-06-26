@@ -8,6 +8,7 @@ from typing import Literal
 import torch
 
 from vllm.config import VllmConfig
+from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -22,6 +23,57 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
+
+
+@triton.jit
+def _gather_resolve_align_src_kernel(
+    idx_mapping_ptr,  # [>=n] batch position -> req state slot (-1 = filtered/PP)
+    src_ssm_col_ptr,  # [max_reqs] req-order SSM src column (-1 = fresh)
+    conv_src_col_ptr,  # [max_reqs] req-order conv src column (-1 = fresh)
+    conv_src_off_ptr,  # [max_reqs] req-order conv token offset
+    block_table_ptr,  # [num_reqs, max_blocks] int32 (FULL, non-windowed)
+    bt_stride0,
+    bt_stride1,
+    max_col,
+    ssm_phys_ptr,  # [num_reqs] int32 out (NULL_BLOCK_ID=0 for fresh)
+    conv_phys_ptr,  # [num_reqs] int32 out
+    conv_off_ptr,  # [num_reqs] int32 out (batch order)
+    n,
+    num_reqs,
+    BLOCK: tl.constexpr,
+):
+    """Gather the per-req align src COLUMNS into batch order (via idx_mapping)
+    and resolve them to physical block ids in one launch (SSM + conv together).
+    Rows in [n, num_reqs) are padding and rows whose req < 0 are filtered (PP);
+    both resolve to fresh (NULL_BLOCK_ID=0, offset 0).
+    """
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < num_reqs
+    valid = offs < n
+    req = tl.load(idx_mapping_ptr + offs, mask=valid, other=-1)
+    rmask = valid & (req >= 0)
+    req_safe = tl.maximum(req, 0)
+    # Gather: padding/filtered rows become fresh (-1 col, 0 off).
+    ssm_col = tl.where(
+        rmask, tl.load(src_ssm_col_ptr + req_safe, mask=rmask, other=-1), -1
+    )
+    conv_col = tl.where(
+        rmask, tl.load(conv_src_col_ptr + req_safe, mask=rmask, other=-1), -1
+    )
+    off = tl.where(rmask, tl.load(conv_src_off_ptr + req_safe, mask=rmask, other=0), 0)
+    # Resolve: col < 0 -> NULL(0); else block_table[row, clamp(col)]. Block-table
+    # loads use rmask (real cols, offs < n) not mask (offs < num_reqs): padded
+    # phys is discarded anyway, and this lets num_reqs exceed the block-table row
+    # count (resolving into a per-token CUDAGraph buffer) without an OOB read.
+    base = block_table_ptr + offs.to(tl.int64) * bt_stride0
+    ssm_c = tl.minimum(tl.maximum(ssm_col, 0), max_col).to(tl.int64)
+    conv_c = tl.minimum(tl.maximum(conv_col, 0), max_col).to(tl.int64)
+    ssm_phys = tl.load(base + ssm_c * bt_stride1, mask=rmask, other=0)
+    conv_phys = tl.load(base + conv_c * bt_stride1, mask=rmask, other=0)
+    tl.store(ssm_phys_ptr + offs, tl.where(ssm_col >= 0, ssm_phys, 0), mask=mask)
+    tl.store(conv_phys_ptr + offs, tl.where(conv_col >= 0, conv_phys, 0), mask=mask)
+    tl.store(conv_off_ptr + offs, off, mask=mask)
 
 
 class GDNAttentionBackend(AttentionBackend):
@@ -65,6 +117,20 @@ class GDNAttentionMetadata:
 
     num_accepted_tokens: torch.Tensor | None = None  # shape: [batch,]
 
+    # Read-side physical block ids for the mamba "align" SSM src redirect. When
+    # set, the SSM kernels source their initial state from these blocks instead
+    # of [non_]spec_state_indices_tensor, eliminating the SSM temporal pre-copy.
+    spec_ssm_src_state_indices: torch.Tensor | None = None  # shape: [num_spec_decodes,]
+    non_spec_ssm_src_state_indices: torch.Tensor | None = None  # shape: [num_decodes,]
+
+    # Read-side CONV src: physical block id (prev running block) + pre-reset
+    # intra-block token offset, so the conv kernel reads its init conv window
+    # from the prev block at that offset (copy-free conv pre).
+    spec_conv_src_state_indices: torch.Tensor | None = None
+    non_spec_conv_src_state_indices: torch.Tensor | None = None
+    spec_conv_src_offset: torch.Tensor | None = None
+    non_spec_conv_src_offset: torch.Tensor | None = None
+
     # Pre-computed FLA chunk metadata (avoids GPU->CPU sync in prepare_chunk_indices)
     chunk_indices: torch.Tensor | None = None
     chunk_offsets: torch.Tensor | None = None
@@ -102,6 +168,11 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
 
         self.gdn_prefill_backend: Literal["triton", "flashinfer", "cutedsl"]
         _, self.gdn_prefill_backend = _resolve_gdn_prefill_backend(vllm_config)
+
+        # Copy-free align (V1 and V2): the forward kernel reads the previous
+        # running state directly from its source block instead of pre-copying it.
+        # ``build`` resolves the src columns to physical block ids per step.
+        self.use_align_mode: bool = vllm_config.cache_config.mamba_cache_mode == "align"
 
         if self.speculative_config:
             assert self.speculative_config.num_speculative_tokens is not None
@@ -164,6 +235,93 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             dtype=torch.int32,
             device=device,
         )
+        # Persistent src buffers for full CUDAGraph (align only): SRC_PRERESOLVED
+        # is a constexpr baked at capture, so the src must flow through these
+        # fixed-address buffers -- a distinct object from the dst tensor, so the
+        # `src is not dst` selector bakes SRC_PRERESOLVED=True (NULL-filled at
+        # capture; each replay copies the real src into the same buffer).
+        self.spec_ssm_src_state_indices_buf: torch.Tensor | None = None
+        self.non_spec_ssm_src_state_indices_buf: torch.Tensor | None = None
+        self.spec_conv_src_state_indices_buf: torch.Tensor | None = None
+        self.non_spec_conv_src_state_indices_buf: torch.Tensor | None = None
+        self.spec_conv_src_offset_buf: torch.Tensor | None = None
+        self.non_spec_conv_src_offset_buf: torch.Tensor | None = None
+        if self.use_align_mode:
+            self.spec_ssm_src_state_indices_buf = torch.empty(
+                (self.decode_cudagraph_max_bs,),
+                dtype=torch.int32,
+                device=device,
+            )
+            self.non_spec_ssm_src_state_indices_buf = torch.empty(
+                (self.decode_cudagraph_max_bs,),
+                dtype=torch.int32,
+                device=device,
+            )
+            # CONV src physical-block + offset persistent buffers (same purpose).
+            self.spec_conv_src_state_indices_buf = torch.empty(
+                (self.decode_cudagraph_max_bs,), dtype=torch.int32, device=device
+            )
+            self.non_spec_conv_src_state_indices_buf = torch.empty(
+                (self.decode_cudagraph_max_bs,), dtype=torch.int32, device=device
+            )
+            self.spec_conv_src_offset_buf = torch.empty(
+                (self.decode_cudagraph_max_bs,), dtype=torch.int32, device=device
+            )
+            self.non_spec_conv_src_offset_buf = torch.empty(
+                (self.decode_cudagraph_max_bs,), dtype=torch.int32, device=device
+            )
+
+    @staticmethod
+    def _split_align_cache_src_info(
+        src_full: torch.Tensor | None,
+        spec_mask: torch.Tensor,
+        include_non_spec: bool = True,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        """Split full-batch mamba align-cache src indices into spec and
+        non-spec portions. When include_non_spec=False (pure spec-only
+        batch), skip the non-spec computation and return None for it."""
+        if src_full is None:
+            return None, None
+        spec = src_full[spec_mask].contiguous()
+        non_spec = src_full[~spec_mask].contiguous() if include_non_spec else None
+        return spec, non_spec
+
+    def _resolve_align_src_into(
+        self,
+        idx_mapping: torch.Tensor,
+        src_ssm_col: torch.Tensor,
+        conv_src_col: torch.Tensor,
+        conv_src_off: torch.Tensor,
+        block_table: torch.Tensor,
+        out_ssm: torch.Tensor,
+        out_conv: torch.Tensor,
+        out_off: torch.Tensor,
+        n: int,
+        out_len: int,
+    ) -> None:
+        """Resolve the per-req src columns into ``out_*[:out_len]``: ``[:n]`` are
+        the resolved real reqs and ``[n:out_len]`` are NULL-filled by the kernel,
+        so one launch both resolves and stages. ``out_*`` are the persistent
+        CUDAGraph buffers on the decode path, or a fresh full-batch tensor on the
+        eager path. The columns resolve against the FULL (non-windowed) block
+        table, since the previous running block can lie outside the window on a
+        block-boundary crossing."""
+        _gather_resolve_align_src_kernel[(triton.cdiv(out_len, 256),)](
+            idx_mapping,
+            src_ssm_col,
+            conv_src_col,
+            conv_src_off,
+            block_table,
+            block_table.stride(0),
+            block_table.stride(1),
+            block_table.size(1) - 1,
+            out_ssm,
+            out_conv,
+            out_off,
+            n,
+            out_len,
+            BLOCK=256,
+        )
 
     def build(  # type: ignore[override]
         self,
@@ -171,6 +329,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         common_attn_metadata: CommonAttentionMetadata,
         num_accepted_tokens: torch.Tensor | None = None,
         num_decode_draft_tokens_cpu: torch.Tensor | None = None,
+        align_src_ssm_col: torch.Tensor | None = None,
+        align_conv_src_col: torch.Tensor | None = None,
+        align_conv_src_off: torch.Tensor | None = None,
+        align_idx_mapping: torch.Tensor | None = None,
+        align_num_reqs: int = 0,
+        for_capture: bool = False,
         fast_build: bool = False,
     ) -> GDNAttentionMetadata:
         m = common_attn_metadata
@@ -482,6 +646,185 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
             non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
 
+        # --- Mamba "align" copy-free src resolution --------------------------
+        # Resolve the per-req src columns to physical block ids in spec/non-spec
+        # order. The cg_spec / cg_nonspec conditions mirror the state-index
+        # CUDAGraph staging above, so the src lands in the same buffer the SSM /
+        # conv kernels read at replay; the eager / mixed path resolves into a
+        # fresh full-batch tensor and splits it.
+        spec_ssm_src_state_indices: torch.Tensor | None = None
+        non_spec_ssm_src_state_indices: torch.Tensor | None = None
+        spec_conv_src_state_indices: torch.Tensor | None = None
+        non_spec_conv_src_state_indices: torch.Tensor | None = None
+        spec_conv_src_offset: torch.Tensor | None = None
+        non_spec_conv_src_offset: torch.Tensor | None = None
+        if self.use_align_mode:
+            # No cached state -> all-fresh NULL src. True at CUDAGraph capture and
+            # on the profiling / warmup dummy runs (which never run
+            # preprocess_mamba, so the runner has no columns to feed); a real
+            # forward always carries the columns. Mirrors V2's for_capture path.
+            no_src_state = for_capture or align_src_ssm_col is None
+            cg_spec = (
+                self.use_full_cuda_graph
+                and num_prefills == 0
+                and num_decodes == 0
+                and num_spec_decodes <= self.decode_cudagraph_max_bs
+                and num_spec_decode_tokens <= self.decode_cudagraph_max_bs
+            )
+            cg_nonspec = (
+                self.use_full_cuda_graph
+                and num_prefills == 0
+                and num_spec_decodes == 0
+                and num_decodes <= self.decode_cudagraph_max_bs
+            )
+            if cg_spec:
+                assert self.spec_ssm_src_state_indices_buf is not None
+                assert self.spec_conv_src_state_indices_buf is not None
+                assert self.spec_conv_src_offset_buf is not None
+                if no_src_state:
+                    # No cached state (capture / profiling): NULL-fill buffers.
+                    self.spec_ssm_src_state_indices_buf[:batch_size].fill_(
+                        NULL_BLOCK_ID
+                    )
+                    self.spec_conv_src_state_indices_buf[:batch_size].fill_(
+                        NULL_BLOCK_ID
+                    )
+                    self.spec_conv_src_offset_buf[:batch_size].fill_(0)
+                else:
+                    assert (
+                        align_idx_mapping is not None
+                        and align_src_ssm_col is not None
+                        and align_conv_src_col is not None
+                        and align_conv_src_off is not None
+                    )
+                    self._resolve_align_src_into(
+                        align_idx_mapping,
+                        align_src_ssm_col,
+                        align_conv_src_col,
+                        align_conv_src_off,
+                        m.block_table_tensor,
+                        self.spec_ssm_src_state_indices_buf,
+                        self.spec_conv_src_state_indices_buf,
+                        self.spec_conv_src_offset_buf,
+                        num_spec_decodes,
+                        batch_size,
+                    )
+                spec_ssm_src_state_indices = self.spec_ssm_src_state_indices_buf[
+                    :batch_size
+                ]
+                spec_conv_src_state_indices = self.spec_conv_src_state_indices_buf[
+                    :batch_size
+                ]
+                spec_conv_src_offset = self.spec_conv_src_offset_buf[:batch_size]
+            elif cg_nonspec:
+                assert self.non_spec_ssm_src_state_indices_buf is not None
+                assert self.non_spec_conv_src_state_indices_buf is not None
+                assert self.non_spec_conv_src_offset_buf is not None
+                if no_src_state:
+                    # No cached state (capture / profiling): NULL-fill buffers.
+                    self.non_spec_ssm_src_state_indices_buf[:batch_size].fill_(
+                        NULL_BLOCK_ID
+                    )
+                    self.non_spec_conv_src_state_indices_buf[:batch_size].fill_(
+                        NULL_BLOCK_ID
+                    )
+                    self.non_spec_conv_src_offset_buf[:batch_size].fill_(0)
+                else:
+                    assert (
+                        align_idx_mapping is not None
+                        and align_src_ssm_col is not None
+                        and align_conv_src_col is not None
+                        and align_conv_src_off is not None
+                    )
+                    self._resolve_align_src_into(
+                        align_idx_mapping,
+                        align_src_ssm_col,
+                        align_conv_src_col,
+                        align_conv_src_off,
+                        m.block_table_tensor,
+                        self.non_spec_ssm_src_state_indices_buf,
+                        self.non_spec_conv_src_state_indices_buf,
+                        self.non_spec_conv_src_offset_buf,
+                        num_decodes,
+                        batch_size,
+                    )
+                non_spec_ssm_src_state_indices = (
+                    self.non_spec_ssm_src_state_indices_buf[:batch_size]
+                )
+                non_spec_conv_src_state_indices = (
+                    self.non_spec_conv_src_state_indices_buf[:batch_size]
+                )
+                non_spec_conv_src_offset = self.non_spec_conv_src_offset_buf[
+                    :batch_size
+                ]
+            elif not for_capture:
+                # Eager / mixed path: no CUDAGraph decode buffer applies (prefill
+                # / mixed / over capture size / non-cudagraph run). Resolve into a
+                # fresh full-batch tensor and split it. The elif chain makes this
+                # mutually exclusive with the cg_* branches above.
+                block_table = m.block_table_tensor
+                num_reqs_full = block_table.size(0)
+                align_ssm_src_full = torch.empty(
+                    num_reqs_full, dtype=torch.int32, device=block_table.device
+                )
+                align_conv_src_full = torch.empty(
+                    num_reqs_full, dtype=torch.int32, device=block_table.device
+                )
+                align_conv_off_full = torch.empty(
+                    num_reqs_full, dtype=torch.int32, device=block_table.device
+                )
+                if align_src_ssm_col is None:
+                    # No cached state (profiling / warmup): all-fresh NULL src.
+                    align_ssm_src_full.fill_(NULL_BLOCK_ID)
+                    align_conv_src_full.fill_(NULL_BLOCK_ID)
+                    align_conv_off_full.fill_(0)
+                else:
+                    assert align_conv_src_col is not None
+                    assert align_conv_src_off is not None
+                    assert align_idx_mapping is not None
+                    self._resolve_align_src_into(
+                        align_idx_mapping,
+                        align_src_ssm_col,
+                        align_conv_src_col,
+                        align_conv_src_off,
+                        block_table,
+                        align_ssm_src_full,
+                        align_conv_src_full,
+                        align_conv_off_full,
+                        align_num_reqs,
+                        num_reqs_full,
+                    )
+                if spec_sequence_masks is None:
+                    # Pure non-spec batch: rows are already in non-spec order.
+                    non_spec_ssm_src_state_indices = align_ssm_src_full
+                    non_spec_conv_src_state_indices = align_conv_src_full
+                    non_spec_conv_src_offset = align_conv_off_full
+                elif num_prefills == 0 and num_decodes == 0:
+                    # Pure spec batch: the spec rows are the contiguous front
+                    # prefix (padded rows are always at the back), so a view
+                    # suffices instead of a boolean-mask gather.
+                    spec_ssm_src_state_indices = align_ssm_src_full[:num_spec_decodes]
+                    spec_conv_src_state_indices = align_conv_src_full[:num_spec_decodes]
+                    spec_conv_src_offset = align_conv_off_full[:num_spec_decodes]
+                else:
+                    # Mixed batch: split by the spec mask.
+                    assert spec_sequence_masks_cpu is not None
+                    spec_ssm_src_state_indices, non_spec_ssm_src_state_indices = (
+                        self._split_align_cache_src_info(
+                            align_ssm_src_full, spec_sequence_masks_cpu
+                        )
+                    )
+                    spec_conv_src_state_indices, non_spec_conv_src_state_indices = (
+                        self._split_align_cache_src_info(
+                            align_conv_src_full, spec_sequence_masks_cpu
+                        )
+                    )
+                    spec_conv_src_offset, non_spec_conv_src_offset = (
+                        self._split_align_cache_src_info(
+                            align_conv_off_full, spec_sequence_masks_cpu
+                        )
+                    )
+
         attn_metadata = GDNAttentionMetadata(
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
@@ -504,6 +847,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             spec_token_indx=spec_token_indx,
             non_spec_token_indx=non_spec_token_indx,
             num_accepted_tokens=num_accepted_tokens,
+            spec_ssm_src_state_indices=spec_ssm_src_state_indices,
+            non_spec_ssm_src_state_indices=non_spec_ssm_src_state_indices,
+            spec_conv_src_state_indices=spec_conv_src_state_indices,
+            non_spec_conv_src_state_indices=non_spec_conv_src_state_indices,
+            spec_conv_src_offset=spec_conv_src_offset,
+            non_spec_conv_src_offset=non_spec_conv_src_offset,
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
@@ -533,4 +882,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         num_accepted_tokens = torch.diff(m.query_start_loc)
         num_decode_draft_tokens_cpu = (num_accepted_tokens - 1).cpu()
 
-        return self.build(0, m, num_accepted_tokens, num_decode_draft_tokens_cpu)
+        return self.build(
+            0,
+            m,
+            num_accepted_tokens,
+            num_decode_draft_tokens_cpu,
+            for_capture=True,
+        )

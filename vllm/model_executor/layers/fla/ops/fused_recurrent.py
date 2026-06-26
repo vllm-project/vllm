@@ -13,14 +13,18 @@ import torch
 from vllm.triton_utils import tl, triton
 
 from .op import exp
+from .utils import select_ssm_src_indices
 
 
 @triton.heuristics(
     {
         "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-        "IS_CONTINUOUS_BATCHING": lambda args: args["ssm_state_indices"] is not None,
+        "IS_CONTINUOUS_BATCHING": lambda args: args["dst_ssm_state_indices"]
+        is not None,
         "IS_SPEC_DECODING": lambda args: args["num_accepted_tokens"] is not None,
+        # SRC_PRERESOLVED is passed explicitly (src and dst can both be 1D, so a
+        # None-check heuristic cannot tell them apart -- identity is used).
     }
 )
 @triton.jit(do_not_specialize=["N", "T"])
@@ -34,7 +38,8 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     h0,
     ht,
     cu_seqlens,
-    ssm_state_indices,
+    src_ssm_state_indices,
+    dst_ssm_state_indices,
     num_accepted_tokens,
     scale,
     N: tl.int64,  # num of sequences
@@ -58,6 +63,7 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     IS_CONTINUOUS_BATCHING: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
     IS_KDA: tl.constexpr,
+    SRC_PRERESOLVED: tl.constexpr,
 ):
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_n, i_hv = i_nh // HV, i_nh % HV
@@ -102,14 +108,18 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     b_h = tl.zeros([BV, BK], dtype=tl.float32)
     if USE_INITIAL_STATE:
         if IS_CONTINUOUS_BATCHING:
-            if IS_SPEC_DECODING:
-                i_t = tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1
+            if SRC_PRERESOLVED:
+                # copy-free align: read from the pre-resolved 1D physical src.
+                state_idx = tl.load(src_ssm_state_indices + i_n).to(tl.int64)
             else:
-                i_t = 0
-            # Load state index and check for invalid entries
-            state_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(
-                tl.int64
-            )
+                # no redirect: src aliases the 2D dst window; resolve column.
+                if IS_SPEC_DECODING:
+                    i_t = tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1
+                else:
+                    i_t = 0
+                state_idx = tl.load(
+                    src_ssm_state_indices + i_n * stride_indices_seq + i_t
+                ).to(tl.int64)
             # Skip if state index is invalid (NULL_BLOCK_ID=0)
             if state_idx <= 0:
                 return
@@ -150,9 +160,10 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
 
         # keep the states for multi-query tokens
         if INPLACE_FINAL_STATE:
-            # Load state index and check for invalid entries
+            # Write to the dst window at the per-token loop column i_t (distinct
+            # from the SRC_PRERESOLVED read offset num_accepted-1).
             final_state_idx = tl.load(
-                ssm_state_indices + i_n * stride_indices_seq + i_t
+                dst_ssm_state_indices + i_n * stride_indices_seq + i_t
             ).to(tl.int64)
             # Only store if state index is valid (not NULL_BLOCK_ID=0)
             if final_state_idx > 0:
@@ -186,6 +197,7 @@ def fused_recurrent_gated_delta_rule_fwd(
     inplace_final_state: bool = True,
     cu_seqlens: torch.Tensor | None = None,
     ssm_state_indices: torch.Tensor | None = None,
+    src_ssm_state_indices: torch.Tensor | None = None,
     num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -214,6 +226,13 @@ def fused_recurrent_gated_delta_rule_fwd(
     else:
         stride_indices_seq, stride_indices_tok = ssm_state_indices.stride()
 
+    src_ssm_state_indices, src_preresolved = select_ssm_src_indices(
+        src_ssm_state_indices, ssm_state_indices, N
+    )
+    if num_accepted_tokens is not None and ssm_state_indices is not None:
+        # the multi-token write loop indexes dst at column i_t -> needs a 2D dst
+        assert ssm_state_indices.ndim == 2
+
     grid = (NK, NV, N * HV)
     fused_recurrent_gated_delta_rule_fwd_kernel[grid](
         q=q,
@@ -225,7 +244,8 @@ def fused_recurrent_gated_delta_rule_fwd(
         h0=initial_state,
         ht=final_state,
         cu_seqlens=cu_seqlens,
-        ssm_state_indices=ssm_state_indices,
+        src_ssm_state_indices=src_ssm_state_indices,
+        dst_ssm_state_indices=ssm_state_indices,
         num_accepted_tokens=num_accepted_tokens,
         scale=scale,
         N=N,
@@ -245,6 +265,7 @@ def fused_recurrent_gated_delta_rule_fwd(
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         INPLACE_FINAL_STATE=inplace_final_state,
         IS_KDA=False,
+        SRC_PRERESOLVED=src_preresolved,
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -262,7 +283,8 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     o,
     h0,
     ht,
-    ssm_state_indices,
+    src_ssm_state_indices,
+    dst_ssm_state_indices,
     scale,
     stride_mixed_qkv_tok: tl.constexpr,
     stride_a_tok: tl.constexpr,
@@ -278,6 +300,7 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     BV: tl.constexpr,
     SOFTPLUS_THRESHOLD: tl.constexpr,
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
+    SRC_PRERESOLVED: tl.constexpr,
 ):
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_hv = i_nh // HV, i_nh % HV
@@ -289,16 +312,24 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     mask_v = o_v < V
     mask_h = mask_v[:, None] & mask_k[None, :]
 
-    state_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq).to(tl.int64)
+    dst_idx = tl.load(dst_ssm_state_indices + i_n * stride_indices_seq).to(tl.int64)
     p_o = o + (i_n * HV + i_hv) * V + o_v
 
-    # Skip if state index is invalid (NULL_BLOCK_ID=0)
-    if state_idx <= 0:
+    # Skip if the write (window) index is invalid (NULL_BLOCK_ID=0 -> padding)
+    if dst_idx <= 0:
         zero = tl.zeros([BV], dtype=tl.float32).to(p_o.dtype.element_ty)
         tl.store(p_o, zero, mask=mask_v)
         return
 
-    p_h0 = h0 + state_idx * stride_init_state_token
+    # copy-free align reads from the pre-resolved 1D src; otherwise reuse the
+    # already-loaded dst window index (no redirect).
+    src_idx = (
+        tl.load(src_ssm_state_indices + i_n).to(tl.int64)
+        if SRC_PRERESOLVED
+        else dst_idx
+    )
+
+    p_h0 = h0 + src_idx * stride_init_state_token
     p_h0 = p_h0 + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
     b_h = tl.load(p_h0, mask=mask_h, other=0).to(tl.float32)
 
@@ -331,7 +362,7 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     b_o = tl.sum(b_h * b_q[None, :], 1)
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), mask=mask_v)
 
-    p_ht = ht + state_idx * stride_final_state_token
+    p_ht = ht + dst_idx * stride_final_state_token
     p_ht = p_ht + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
     tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
 
@@ -346,6 +377,7 @@ def fused_recurrent_gated_delta_rule_packed_decode(
     initial_state: torch.Tensor,
     out: torch.Tensor,
     ssm_state_indices: torch.Tensor,
+    src_ssm_state_indices: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if mixed_qkv.ndim != 2:
@@ -445,6 +477,10 @@ def fused_recurrent_gated_delta_rule_packed_decode(
     stride_final_state_token = initial_state.stride(0)
     stride_indices_seq = ssm_state_indices.stride(0)
 
+    src_ssm_state_indices, src_preresolved = select_ssm_src_indices(
+        src_ssm_state_indices, ssm_state_indices, B
+    )
+
     NV = triton.cdiv(V, BV)
     grid = (NV, B * HV)
     fused_recurrent_gated_delta_rule_packed_decode_kernel[grid](
@@ -456,7 +492,8 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         o=out,
         h0=initial_state,
         ht=initial_state,
-        ssm_state_indices=ssm_state_indices,
+        src_ssm_state_indices=src_ssm_state_indices,
+        dst_ssm_state_indices=ssm_state_indices,
         scale=scale,
         stride_mixed_qkv_tok=stride_mixed_qkv_tok,
         stride_a_tok=stride_a_tok,
@@ -472,6 +509,7 @@ def fused_recurrent_gated_delta_rule_packed_decode(
         BV=BV,
         SOFTPLUS_THRESHOLD=20.0,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
+        SRC_PRERESOLVED=src_preresolved,
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -492,6 +530,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
         inplace_final_state: bool = True,
         cu_seqlens: torch.Tensor | None = None,
         ssm_state_indices: torch.Tensor | None = None,
+        src_ssm_state_indices: torch.Tensor | None = None,
         num_accepted_tokens: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = False,
     ):
@@ -506,6 +545,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
             inplace_final_state=inplace_final_state,
             cu_seqlens=cu_seqlens,
             ssm_state_indices=ssm_state_indices,
+            src_ssm_state_indices=src_ssm_state_indices,
             num_accepted_tokens=num_accepted_tokens,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         )
@@ -524,6 +564,7 @@ def fused_recurrent_gated_delta_rule(
     inplace_final_state: bool = True,
     cu_seqlens: torch.Tensor | None = None,
     ssm_state_indices: torch.Tensor | None = None,
+    src_ssm_state_indices: torch.Tensor | None = None,
     num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -554,7 +595,14 @@ def fused_recurrent_gated_delta_rule(
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
         ssm_state_indices (Optional[torch.Tensor]):
-            Indices to map the input sequences to the initial/final states.
+            Write (dst) indices mapping the input sequences to the final states.
+        src_ssm_state_indices (Optional[torch.Tensor]):
+            Optional read (src) indices for the initial state (mamba "align"
+            copy-free preprocess). When a distinct 1D ``[N]`` tensor of
+            pre-resolved physical indices is passed, the kernel reads the initial
+            state from it directly (``SRC_PRERESOLVED=True``). When omitted, the
+            read self-aliases to ``ssm_state_indices`` and the column is resolved
+            in-kernel from ``num_accepted_tokens`` (no prefix cache).
         num_accepted_tokens (Optional[torch.Tensor]):
             Number of accepted tokens for each sequence during decoding.
 
@@ -613,6 +661,7 @@ def fused_recurrent_gated_delta_rule(
         inplace_final_state,
         cu_seqlens,
         ssm_state_indices,
+        src_ssm_state_indices,
         num_accepted_tokens,
         use_qk_l2norm_in_kernel,
     )
