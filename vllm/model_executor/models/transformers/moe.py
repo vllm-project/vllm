@@ -107,7 +107,7 @@ def _transformers_moe_forward_fake(
 
 
 direct_register_custom_op(
-    op_name="_transformers_moe_forward",
+    op_name="transformers_moe_forward",
     op_func=_transformers_moe_forward,
     mutates_args=["hidden_states"],
     fake_impl=_transformers_moe_forward_fake,
