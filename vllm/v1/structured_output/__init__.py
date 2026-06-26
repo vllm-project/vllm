@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 import multiprocessing
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
@@ -290,7 +290,11 @@ class StructuredOutputManager:
                     if token == -1:
                         apply_bitmask = False
                         advance_grammar = False
-                    elif detect_reasoning_end and not apply_bitmask:
+                    elif (
+                        detect_reasoning_end
+                        and reasoner is not None
+                        and not apply_bitmask
+                    ):
                         if simulated_buf is None:
                             history = list(request.all_token_ids)
                             history_len = len(history)
@@ -423,7 +427,7 @@ class StructuredOutputManager:
 
     @staticmethod
     def _find_reasoning_end_index(
-        reasoner: "ReasoningParser", all_token_ids: list[int], start: int
+        reasoner: "ReasoningParser", all_token_ids: Sequence[int], start: int
     ) -> int:
         """Locates the last reasoning token within ``all_token_ids[start:]``.
 
