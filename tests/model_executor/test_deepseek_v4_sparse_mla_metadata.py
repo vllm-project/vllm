@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import torch
-
 from vllm.models.deepseek_v4 import sparse_mla
 from vllm.models.deepseek_v4.nvidia import flashmla
 
 
-def test_c128a_effective_topk_width_uses_current_positions() -> None:
+def test_c128a_effective_topk_width_from_max_pos() -> None:
+    # max_pos is the largest absolute token position; the width is a 128-aligned
+    # ceiling clamped to max_compressed_tokens.
     assert (
         sparse_mla._c128a_effective_topk_width(
-            positions=torch.tensor([0, 126], dtype=torch.int64),
+            max_pos=126,
             compress_ratio=128,
             max_compressed_tokens=4096,
             alignment=128,
@@ -19,7 +19,7 @@ def test_c128a_effective_topk_width_uses_current_positions() -> None:
     )
     assert (
         sparse_mla._c128a_effective_topk_width(
-            positions=torch.tensor([127, 1023], dtype=torch.int64),
+            max_pos=1023,
             compress_ratio=128,
             max_compressed_tokens=4096,
             alignment=128,
@@ -28,7 +28,7 @@ def test_c128a_effective_topk_width_uses_current_positions() -> None:
     )
     assert (
         sparse_mla._c128a_effective_topk_width(
-            positions=torch.tensor([524287], dtype=torch.int64),
+            max_pos=524287,
             compress_ratio=128,
             max_compressed_tokens=8192,
             alignment=128,
@@ -37,7 +37,7 @@ def test_c128a_effective_topk_width_uses_current_positions() -> None:
     )
     assert (
         sparse_mla._c128a_effective_topk_width(
-            positions=torch.tensor([1048575], dtype=torch.int64),
+            max_pos=1048575,
             compress_ratio=128,
             max_compressed_tokens=8192,
             alignment=128,

@@ -287,6 +287,7 @@ class DeepseekV4FlashMLAMetadataBuilder(
             self.c128a_decode_lens_buffer,
             self.c128a_prefill_buffer,
             max_compressed_tokens=self.c128a_max_compressed,
+            max_seq_len=cm.max_seq_len,
         )
 
         result: dict[str, torch.Tensor | None] = {}
@@ -312,6 +313,7 @@ def build_c128a_topk_metadata(
     decode_lens_buffer: torch.Tensor,
     prefill_buffer: torch.Tensor,
     max_compressed_tokens: int = 8192,
+    max_seq_len: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Single kernel for all C128A tokens (decode + prefill).
 
@@ -331,8 +333,20 @@ def build_c128a_topk_metadata(
         return global_decode, decode_lens, prefill_local
 
     KERNEL_BLOCK_SIZE = 1024
+    # max_pos = largest absolute token position in the batch. Prefer the
+    # CPU-side max_seq_len (== max over per-request context lengths, already
+    # computed without a device sync) over positions.max().item(), which is a
+    # data-dependent device->host sync on the per-step C128A metadata hot path
+    # that serializes the launch stream and kills CPU/GPU overlap. max_seq_len
+    # is an upper bound on (max_pos + 1); effective_topk's 128-aligned ceiling
+    # makes feeding an upper bound buffer-safe (only rounds the width up within
+    # the finite set). Fall back to the device sync when it is unavailable.
+    if max_seq_len is not None:
+        max_pos = int(max_seq_len) - 1
+    else:
+        max_pos = int(positions.max().item())
     effective_topk = _c128a_effective_topk_width(
-        positions=positions,
+        max_pos=max_pos,
         compress_ratio=compress_ratio,
         max_compressed_tokens=max_compressed_tokens,
         alignment=_C128A_TOPK_ALIGNMENT,
@@ -373,15 +387,20 @@ def build_c128a_topk_metadata(
 
 def _c128a_effective_topk_width(
     *,
-    positions: torch.Tensor,
+    max_pos: int,
     compress_ratio: int,
     max_compressed_tokens: int,
     alignment: int,
 ) -> int:
-    """Return the aligned C128A top-k width needed by current tokens."""
-    if positions.numel() == 0:
+    """Return the aligned C128A top-k width needed by ``max_pos``.
+
+    ``max_pos`` is the largest absolute token position in the batch. The width
+    is a 128-aligned ceiling clamped to ``max_compressed_tokens``, so passing an
+    upper bound for ``max_pos`` only ever rounds the width up within the same
+    finite set (buffer- and JIT-set-safe).
+    """
+    if max_pos < 0:
         return 0
-    max_pos = int(positions.max().item())
     max_num_compressed = min(
         max((max_pos + 1) // int(compress_ratio), 0),
         int(max_compressed_tokens),
