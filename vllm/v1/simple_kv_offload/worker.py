@@ -57,6 +57,10 @@ class SimpleCPUOffloadWorker:
         # Metadata for the current step
         self._connector_metadata: SimpleCPUOffloadMetadata | None = None
 
+        # Compute-done event recorded before each store; reused across steps
+        # (get_finished runs once per step, copy queue is FIFO).
+        self._store_compute_done: torch.Event | None = None
+
         # Pending event index sets, populated in bind_connector_metadata
         self._pending_load_event_indices: set[int] = set()
         self._pending_store_event_indices: set[int] = set()
@@ -206,9 +210,11 @@ class SimpleCPUOffloadWorker:
     ) -> tuple[set[str] | None, set[str] | None]:
         """Submit transfers and report completed events to the scheduler.
 
-        Called after model execution. The manager only schedules stores for
-        blocks whose KV data is confirmed computed, so we launch both loads
-        and stores immediately — no deferral or cross-stream sync needed.
+        Stores (GPU->CPU) read the live KV cache, which the compute stream may
+        still be writing under v1 overlapped execution, so they are ordered
+        after a compute-done event recorded on the current stream. Loads
+        (CPU->GPU) read stable pinned host memory and launch immediately. See
+        #45704 for the bug and #39306 for the srcAccessOrder rationale.
 
         Returns:
             tuple of (finished_sending, finished_recving).
@@ -218,7 +224,6 @@ class SimpleCPUOffloadWorker:
         # (1) Submit transfers
         metadata = self._connector_metadata
         if metadata is not None:
-            # Launch loads (CPU->GPU).
             if metadata.load_cpu_blocks:
                 self._backend.launch_copy(
                     metadata.load_cpu_blocks,
@@ -227,14 +232,17 @@ class SimpleCPUOffloadWorker:
                     event_idx=metadata.load_event,
                     events_list=self._load_events,
                 )
-            # Launch stores (GPU->CPU).
             if metadata.store_gpu_blocks:
+                if self._store_compute_done is None:
+                    self._store_compute_done = torch.Event()
+                self._store_compute_done.record(torch.cuda.current_stream())
                 self._backend.launch_copy(
                     metadata.store_gpu_blocks,
                     metadata.store_cpu_blocks,
                     is_store=True,
                     event_idx=metadata.store_event,
                     events_list=self._store_events,
+                    wait_event=self._store_compute_done,
                 )
 
         # (2) Track completed transfer events

@@ -23,28 +23,24 @@ kE2M1ToFloat_handle = SimpleNamespace(
 
 
 @triton.jit
-def _e2m1_inline(magnitude):
-    """Inline E2M1 lookup using binary tree - 3 levels instead of 7 sequential.
+def _e2m1_inline(nibble):
+    """Decode an NVFP4 nibble (4 bits: 1 sign + 3 magnitude) to float32.
 
-    Maps 3-bit magnitude to float: [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
-    Uses bit decomposition for fewer comparisons.
+    Uses direct IEEE 754 bit construction.
+    For magnitudes 2-7 the FP32 bit pattern is 0x3F000000 + (mag << 22),
+    which is a single shift + add + bitcast.  Magnitudes 0 (zero) and 1
+    (E2M1 subnormal = 0.5) are patched with two tl.where ops.
     """
-    # Bit 2 (MSB): separates 0-3 from 4-7
-    # Bit 1: separates within groups
-    # Bit 0 (LSB): separates within pairs
-    b2 = (magnitude >> 2) & 1  # 0 for mag 0-3, 1 for mag 4-7
-    b1 = (magnitude >> 1) & 1  # middle bit
-    b0 = magnitude & 1  # LSB
+    magnitude = nibble & 0x07
+    sign = (nibble >> 3) & 1
 
-    # For mag 0-3: [0.0, 0.5, 1.0, 1.5]
-    low_group = tl.where(
-        b1 == 1, tl.where(b0 == 1, 1.5, 1.0), tl.where(b0 == 1, 0.5, 0.0)
-    )
-    # For mag 4-7: [2.0, 3.0, 4.0, 6.0]
-    high_group = tl.where(
-        b1 == 1, tl.where(b0 == 1, 6.0, 4.0), tl.where(b0 == 1, 3.0, 2.0)
-    )
-    return tl.where(b2 == 1, high_group, low_group)
+    fp32_bits = 0x3F000000 + (magnitude.to(tl.int32) << 22)
+    val = fp32_bits.to(tl.float32, bitcast=True)
+
+    val = tl.where(magnitude == 0, 0.0, val)
+    val = tl.where(magnitude == 1, 0.5, val)
+
+    return tl.where(sign == 1, -val, val)
 
 
 @triton.jit
@@ -65,7 +61,7 @@ def _dequantize_nvfp4_kernel(
     """
     BLOCK_PACKED: tl.constexpr = BLOCK_SIZE // 2
 
-    row_idx = tl.program_id(0)
+    row_idx = tl.program_id(0).to(tl.int64)
     tile_idx = tl.program_id(1)
 
     if has_batch_global_scale:
@@ -105,16 +101,8 @@ def _dequantize_nvfp4_kernel(
     low_nibble = raw_bytes & 0x0F
     high_nibble = (raw_bytes >> 4) & 0x0F
 
-    # Binary tree E2M1 decode
-    low_mag = low_nibble & 0x07
-    low_val = _e2m1_inline(low_mag)
-    low_sign = (low_nibble >> 3) & 1
-    low_result = tl.where(low_sign == 1, -low_val, low_val) * scale_values
-
-    high_mag = high_nibble & 0x07
-    high_val = _e2m1_inline(high_mag)
-    high_sign = (high_nibble >> 3) & 1
-    high_result = tl.where(high_sign == 1, -high_val, high_val) * scale_values
+    low_result = _e2m1_inline(low_nibble) * scale_values
+    high_result = _e2m1_inline(high_nibble) * scale_values
 
     # Interleave for coalesced contiguous store
     result = tl.interleave(low_result, high_result)

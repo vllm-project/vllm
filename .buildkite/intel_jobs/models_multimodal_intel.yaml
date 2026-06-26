@@ -1,5 +1,5 @@
 group: Models - Multimodal
-depends_on: 
+depends_on:
   - image-build-xpu
 steps:
 - label: "Multi-Modal Models (Standard) 1: qwen2"
