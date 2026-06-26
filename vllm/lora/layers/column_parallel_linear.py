@@ -14,7 +14,6 @@ from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
     QKVParallelLinear,
-    UnquantizedLinearMethod,
 )
 from vllm.platforms import current_platform
 
@@ -303,18 +302,27 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     ) -> list[torch.Tensor | None]:
         return lora_a
 
-    def slice_lora_b(
-        self, lora_b: list[torch.Tensor | None]
+    def _slice_output_shards(
+        self, tensors: list[torch.Tensor | None]
     ) -> list[torch.Tensor | None]:
-        sliced_lora_b = [None] * self.n_slices
+        sliced_tensors = [None] * self.n_slices
         for i, (shard_id, shard_size) in enumerate(
             zip(self.output_ids, self.output_slices)
         ):
-            if (lora_b_i := lora_b[i]) is not None:
-                sliced_lora_b[i] = lora_b_i[
-                    shard_size * shard_id : shard_size * (shard_id + 1), :
-                ]
-        return sliced_lora_b
+            if (tensor_i := tensors[i]) is not None:
+                start = shard_size * shard_id
+                sliced_tensors[i] = tensor_i[start : start + shard_size, ...]
+        return sliced_tensors
+
+    def slice_lora_b(
+        self, lora_b: list[torch.Tensor | None]
+    ) -> list[torch.Tensor | None]:
+        return self._slice_output_shards(lora_b)
+
+    def slice_lora_magnitude_vector(
+        self, lora_magnitude_vector: list[torch.Tensor | None]
+    ) -> list[torch.Tensor | None]:
+        return self._slice_output_shards(lora_magnitude_vector)
 
     def expand_packed_lora(
         self,
@@ -377,16 +385,11 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         lora_b: list[torch.Tensor | None],
         lora_magnitude_vector: list[torch.Tensor | None],
     ) -> None:
-        if self.tp_size != 1:
-            raise NotImplementedError("DoRA currently only supports TP=1.")
-        if not isinstance(self.base_layer.quant_method, UnquantizedLinearMethod):
-            raise NotImplementedError("DoRA is not supported for quantized layers.")
-        if not hasattr(self.base_layer, "weight"):
-            raise NotImplementedError(
-                "DoRA requires access to the unquantized base layer weight."
-            )
-
-        base_weight = self.base_layer.weight
+        base_weight = self._get_dora_base_weight()
+        lora_b = self.slice_lora_b(lora_b)
+        lora_magnitude_vector = self.slice_lora_magnitude_vector(
+            lora_magnitude_vector
+        )
         output_offset = 0
         has_dora = False
         for i, output_size in enumerate(self.output_slices):
@@ -433,13 +436,6 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         assert isinstance(lora_b, list)
         assert len(lora_a) == len(lora_b)
         if lora_magnitude_vector is not None:
-            if type(self.base_layer) is maybe_get_oot_by_class(
-                MergedColumnParallelLinear
-            ):
-                raise NotImplementedError(
-                    "DoRA is not supported for MergedColumnParallelLinear "
-                    "packed LoRA layers."
-                )
             assert isinstance(lora_magnitude_vector, list)
             assert len(lora_magnitude_vector) == len(lora_b)
 
@@ -451,17 +447,14 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 lora_a, lora_b, lora_magnitude_vector
             )
 
-        if lora_magnitude_vector is not None and self.tp_size > 1:
-            raise NotImplementedError("DoRA currently only supports TP=1.")
-
-        if self.tp_size > 1:
-            lora_a = self.slice_lora_a(lora_a)
-            lora_b = self.slice_lora_b(lora_b)
-
         if lora_magnitude_vector is not None:
             self._set_packed_dora_scale(
                 index, lora_a, lora_b, lora_magnitude_vector
             )
+
+        if self.tp_size > 1:
+            lora_a = self.slice_lora_a(lora_a)
+            lora_b = self.slice_lora_b(lora_b)
 
         for i in range(self.n_slices):
             if (lora_a_i := lora_a[i]) is not None:
