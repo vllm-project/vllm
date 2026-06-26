@@ -10,7 +10,7 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncGenerator
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import jinja2
 from fastapi import Request
@@ -43,15 +43,57 @@ from vllm.entrypoints.openai.engine.protocol import (
     JsonSchemaResponseFormat,
     ResponseFormat,
     StreamOptions,
+    UsageInfo,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.api_utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-
-if TYPE_CHECKING:
-    from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+from vllm.renderers.online_renderer import OnlineRenderer
 
 logger = logging.getLogger(__name__)
+
+
+def _get_cached_tokens(usage: UsageInfo | None) -> int | None:
+    """Extract cached token count from OpenAI UsageInfo."""
+    if usage is None or usage.prompt_tokens_details is None:
+        return None
+    return usage.prompt_tokens_details.cached_tokens
+
+
+def _build_anthropic_usage(
+    prompt_tokens: int,
+    completion_tokens: int | None,
+    usage: UsageInfo | None,
+) -> AnthropicUsage:
+    """Build an AnthropicUsage from OpenAI-style token counts.
+
+    Anthropic defines ``total_input == input_tokens + cache_read +
+    cache_creation``.  vLLM's ``prompt_tokens`` is the total, so
+    ``input_tokens = prompt_tokens - cached_tokens``.
+
+    OpenAI usage only exposes ``cached_tokens`` (hits); there is no
+    cache-creation analog, so ``cache_creation_input_tokens`` is ``0``
+    when cache info is present.  When cache info is absent (e.g.
+    ``--enable-prompt-tokens-details`` off, or a streaming chunk that
+    hasn't carried it yet), cache fields are left **unset** so
+    ``exclude_unset=True`` serialization omits them entirely.
+
+    ``completion_tokens`` follows ``UsageInfo`` and may be ``None`` on
+    intermediate stream chunks; we coerce to ``0`` for the wire format.
+    """
+    output_tokens = completion_tokens or 0
+    cached = _get_cached_tokens(usage)
+    if cached is not None:
+        return AnthropicUsage(
+            input_tokens=prompt_tokens - cached,
+            output_tokens=output_tokens,
+            cache_read_input_tokens=cached,
+            cache_creation_input_tokens=0,
+        )
+    return AnthropicUsage(
+        input_tokens=prompt_tokens,
+        output_tokens=output_tokens,
+    )
 
 
 def wrap_data_with_event(data: str, event: str):
@@ -67,7 +109,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         models: OpenAIServingModels,
         response_role: str,
         *,
-        openai_serving_render: "OpenAIServingRender",
+        online_renderer: "OnlineRenderer",
         request_logger: RequestLogger | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
@@ -83,7 +125,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             engine_client=engine_client,
             models=models,
             response_role=response_role,
-            openai_serving_render=openai_serving_render,
+            online_renderer=online_renderer,
             request_logger=request_logger,
             chat_template=chat_template,
             chat_template_content_format=chat_template_content_format,
@@ -582,9 +624,10 @@ class AnthropicServingMessages(OpenAIServingChat):
             id=generator.id,
             content=[],
             model=generator.model,
-            usage=AnthropicUsage(
-                input_tokens=generator.usage.prompt_tokens,
-                output_tokens=generator.usage.completion_tokens,
+            usage=_build_anthropic_usage(
+                generator.usage.prompt_tokens,
+                generator.usage.completion_tokens,
+                generator.usage,
             ),
             kv_transfer_params=generator.kv_transfer_params,
         )
@@ -621,6 +664,12 @@ class AnthropicServingMessages(OpenAIServingChat):
                 input=json.loads(tool_call.function.arguments),
             )
             content += [anthropic_tool_call]
+
+        # Anthropic's canonical shape for an empty completion is a single
+        # empty text block, not []. Some strict clients assume content[0]
+        # exists, so emit one here.
+        if not content:
+            content.append(AnthropicContentBlock(type="text", text=""))
 
         result.content = content
 
@@ -765,11 +814,12 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     model=origin_chunk.model,
                                     stop_reason=None,
                                     stop_sequence=None,
-                                    usage=AnthropicUsage(
-                                        input_tokens=origin_chunk.usage.prompt_tokens
+                                    usage=_build_anthropic_usage(
+                                        origin_chunk.usage.prompt_tokens
                                         if origin_chunk.usage
                                         else 0,
-                                        output_tokens=0,
+                                        0,
+                                        origin_chunk.usage,
                                     ),
                                 ),
                             )
@@ -788,13 +838,14 @@ class AnthropicServingMessages(OpenAIServingChat):
                             chunk = AnthropicStreamEvent(
                                 type="message_delta",
                                 delta=AnthropicDelta(stop_reason=stop_reason),
-                                usage=AnthropicUsage(
-                                    input_tokens=origin_chunk.usage.prompt_tokens
+                                usage=_build_anthropic_usage(
+                                    origin_chunk.usage.prompt_tokens
                                     if origin_chunk.usage
                                     else 0,
-                                    output_tokens=origin_chunk.usage.completion_tokens
+                                    origin_chunk.usage.completion_tokens
                                     if origin_chunk.usage
                                     else 0,
+                                    origin_chunk.usage,
                                 ),
                             )
                             data = chunk.model_dump_json(exclude_unset=True)
