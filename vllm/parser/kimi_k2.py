@@ -119,6 +119,10 @@ def kimi_k2_config(thinking: bool = True) -> ParserEngineConfig:
                 ParserState.TOOL_BETWEEN,
                 (EventType.TOOL_CALL_END,),
             ),
+            (ParserState.TOOL_ARGS, "TOOL_SECTION_END"): Transition(
+                ParserState.TOOL_PREAMBLE,
+                (EventType.TOOL_CALL_END,),
+            ),
             (ParserState.TOOL_BETWEEN, "TOOL_START"): Transition(
                 ParserState.TOOL_NAME,
                 (EventType.TOOL_CALL_START,),
@@ -136,8 +140,8 @@ def kimi_k2_config(thinking: bool = True) -> ParserEngineConfig:
         },
         stream_arg_deltas=True,
         tool_args_json=True,
-        strip_trailing_reasoning_whitespace=False,
-        drop_whitespace_only_content_before_tools=False,
+        strip_trailing_reasoning_whitespace=True,
+        drop_whitespace_only_content_before_tools=True,
         strip_content_whitespace_with_tools=False,
         validate_tool_names=False,
     )
