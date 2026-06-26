@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 from math import prod
 
 import torch
@@ -446,3 +447,12 @@ def swiglu_limit_func(
         up = torch.clamp(up, min=-swiglu_limit, max=swiglu_limit)
 
     output.copy_(F.silu(gate) * up)
+
+
+@functools.lru_cache
+def enable_swap_ab(BLOCK_SIZE_M: int, BLOCK_SIZE_N: int) -> bool:
+    return (
+        current_platform.is_device_capability(90)
+        and BLOCK_SIZE_M < 64
+        and BLOCK_SIZE_N >= 64
+    )
