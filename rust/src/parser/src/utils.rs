@@ -1,10 +1,10 @@
-//! Shared helpers for tool parsers.
+//! Shared helpers for streaming parsers.
 
 use winnow::Parser;
 use winnow::error::{ContextError, ErrMode, ModalResult, Needed, StrContext, StrContextValue};
-use winnow::stream::{Offset, Partial, Stream};
+use winnow::stream::{FindSlice, Offset, Partial, Stream};
 
-use super::Result;
+use crate::tool::{Result, ToolParserError};
 
 /// Return the byte length of the longest proper prefix of `token` that is also
 /// a suffix of `buffer`.
@@ -15,7 +15,7 @@ use super::Result;
 /// The returned length is always a valid UTF-8 boundary in `token`, so callers
 /// can safely slice `&token[..len]` even when markers contain non-ASCII
 /// characters such as DeepSeek's DSML delimiters.
-pub(super) fn partial_prefix_len(buffer: &str, token: &str) -> usize {
+pub fn partial_prefix_len(buffer: &str, token: &str) -> usize {
     let Some(first_byte) = token.as_bytes().first().copied() else {
         return 0;
     };
@@ -44,9 +44,10 @@ pub(super) fn partial_prefix_len(buffer: &str, token: &str) -> usize {
 }
 
 /// Parse a safe text run before the next marker.
+/// This is the single-marker variant of [`safe_text_len_mul`].
 ///
 /// Returns the text length in bytes, and advances the input.
-pub(super) fn safe_text_len(input: &mut Partial<&str>, marker: &str) -> ModalResult<usize> {
+pub fn safe_text_len(input: &mut Partial<&str>, marker: &str) -> ModalResult<usize> {
     let text = **input;
     if text.is_empty() {
         return incomplete();
@@ -67,15 +68,53 @@ pub(super) fn safe_text_len(input: &mut Partial<&str>, marker: &str) -> ModalRes
     Ok(emit_len)
 }
 
+/// Parse a safe text run before the earliest next marker.
+/// This is the multi-marker variant of [`safe_text_len`].
+///
+/// Returns the text length in bytes, and advances the input.
+pub fn safe_text_len_mul(input: &mut Partial<&str>, markers: &[&str]) -> ModalResult<usize> {
+    let text = **input;
+    if text.is_empty() {
+        return incomplete();
+    }
+
+    if let Some(start_idx) = find_slice_mul(text, markers) {
+        input.next_slice(start_idx);
+        return Ok(start_idx);
+    }
+
+    let keep_len = markers.iter().map(|marker| partial_prefix_len(text, marker)).max().unwrap_or(0);
+    let emit_len = text.len().saturating_sub(keep_len);
+    if emit_len == 0 {
+        return incomplete();
+    }
+
+    input.next_slice(emit_len);
+    Ok(emit_len)
+}
+
+#[inline(always)]
+fn find_slice_mul(text: &str, markers: &[&str]) -> Option<usize> {
+    let range = match markers {
+        // Use the fast specialized `winnow::stream::FindSlice` impl for 1-3 markers.
+        [first] => text.find_slice(*first),
+        [first, second] => text.find_slice((*first, *second)),
+        [first, second, third] => text.find_slice((*first, *second, *third)),
+        // Fall back to a linear scan for 4+ markers.
+        _ => return markers.iter().filter_map(|marker| text.find(marker)).min(),
+    };
+    range.map(|range| range.start)
+}
+
 /// Streaming scan state for a buffered marker search [`take_until_marker`],
 /// so that we don't have to rescan the whole buffered prefix when resuming.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct MarkerScanState {
+pub struct MarkerScanState {
     scan_start: usize,
 }
 
 impl MarkerScanState {
-    pub(super) fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.scan_start = 0;
     }
 }
@@ -92,7 +131,7 @@ impl MarkerScanState {
 /// chunks while waiting for a closing marker. Plain `take_until` is still a
 /// better fit for one-shot parsers over a complete body, and for `1..` cases
 /// where an empty slice before the marker should be rejected.
-pub(super) fn take_until_marker<'i, 'a>(
+pub fn take_until_marker<'i, 'a>(
     marker: &'a str,
     state: &'a mut MarkerScanState,
 ) -> impl Parser<Partial<&'i str>, &'i str, ErrMode<ContextError>> + 'a {
@@ -137,7 +176,7 @@ fn floor_char_boundary(text: &str, index: usize) -> usize {
 
 /// Streaming lexical state for a top-level JSON object.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct JsonObjectScanState {
+pub struct JsonObjectScanState {
     object_depth: usize,
     array_depth: usize,
     in_string: bool,
@@ -155,7 +194,7 @@ enum JsonObjectScanPhase {
 
 impl JsonObjectScanState {
     /// Returns whether the top-level JSON object has closed.
-    pub(super) const fn complete(&self) -> bool {
+    pub const fn complete(&self) -> bool {
         matches!(self.phase, JsonObjectScanPhase::Complete)
     }
 }
@@ -165,7 +204,7 @@ impl JsonObjectScanState {
 /// The returned length is safe to emit as raw argument text. This scans only
 /// lexical boundaries from `{` through the matching `}`, preserving
 /// malformed-but-balanced JSON without deserializing or normalizing it.
-pub(super) fn take_json_object(
+pub fn take_json_object(
     input: &mut Partial<&str>,
     state: &mut JsonObjectScanState,
 ) -> ModalResult<usize> {
@@ -252,7 +291,7 @@ pub(super) fn take_json_object(
 }
 
 /// Parse a JSON string literal.
-pub(super) fn json_str(input: &mut Partial<&str>) -> ModalResult<String> {
+pub fn json_str(input: &mut Partial<&str>) -> ModalResult<String> {
     let text = **input;
     if text.is_empty() {
         return incomplete();
@@ -311,7 +350,7 @@ fn json_scan_error(label: &'static str, expected: StrContextValue) -> ErrMode<Co
 ///   of bytes consumed from the buffer.
 /// - `Ok(None)` if the buffer does not contain a full event yet, and more data is needed.
 /// - `Err` if a parsing error occurred.
-pub(super) fn parse_buffered_event<E>(
+pub fn parse_buffered_event<E>(
     buffer: &str,
     parse: impl FnOnce(&mut Partial<&str>) -> ModalResult<E>,
 ) -> Result<Option<(E, usize)>> {
@@ -322,7 +361,9 @@ pub(super) fn parse_buffered_event<E>(
         Err(ErrMode::Incomplete(_)) => return Ok(None),
         Err(ErrMode::Backtrack(e) | ErrMode::Cut(e)) => {
             // TODO: enrich context for error reporting
-            return Err(parsing_failed!("{}", e));
+            return Err(ToolParserError::ParsingFailed {
+                message: e.to_string(),
+            });
         }
     };
     let consumed_len = input.offset_from(&checkpoint);
@@ -334,7 +375,7 @@ pub(super) fn parse_buffered_event<E>(
 }
 
 /// Returns an error indicating that we need more data to continue parsing.
-pub(super) fn incomplete<T>() -> ModalResult<T> {
+pub fn incomplete<T>() -> ModalResult<T> {
     Err(ErrMode::Incomplete(Needed::Unknown))
 }
 
@@ -348,7 +389,7 @@ mod tests {
 
     use super::{
         JsonObjectScanState, MarkerScanState, json_str, partial_prefix_len, safe_text_len,
-        take_json_object, take_until_marker,
+        safe_text_len_mul, take_json_object, take_until_marker,
     };
 
     #[test]
@@ -402,6 +443,52 @@ mod tests {
         let mut input = Partial::new("<tool");
 
         let error = safe_text_len(&mut input, "<tool_call>").unwrap_err();
+
+        assert!(matches!(error, ErrMode::Incomplete(_)));
+    }
+
+    #[test]
+    fn safe_text_len_mul_stops_before_earliest_marker() {
+        let mut input = Partial::new("hello<channel|><|tool_call>");
+        let checkpoint = input.checkpoint();
+
+        let len = safe_text_len_mul(&mut input, &["<|tool_call>", "<channel|>"]).unwrap();
+
+        assert_eq!(len, "hello".len());
+        assert_eq!(input.offset_from(&checkpoint), "hello".len());
+        assert_eq!(*input, "<channel|><|tool_call>");
+    }
+
+    #[test]
+    fn safe_text_len_mul_holds_back_longest_partial_marker() {
+        let mut input = Partial::new("hello<|tool");
+        let checkpoint = input.checkpoint();
+
+        let len = safe_text_len_mul(&mut input, &["<|tool_call>", "<|channel>thought\n"]).unwrap();
+
+        assert_eq!(len, "hello".len());
+        assert_eq!(input.offset_from(&checkpoint), "hello".len());
+        assert_eq!(*input, "<|tool");
+    }
+
+    #[test]
+    fn safe_text_len_mul_skips_false_same_prefix_candidate() {
+        let mut input = Partial::new("hello<not_marker><|tool_call>");
+        let checkpoint = input.checkpoint();
+
+        let len = safe_text_len_mul(&mut input, &["<|tool_call>", "<|channel>thought\n"]).unwrap();
+
+        assert_eq!(len, "hello<not_marker>".len());
+        assert_eq!(input.offset_from(&checkpoint), "hello<not_marker>".len());
+        assert_eq!(*input, "<|tool_call>");
+    }
+
+    #[test]
+    fn safe_text_len_mul_reports_incomplete_for_only_partial_marker() {
+        let mut input = Partial::new("<|channel>thought");
+
+        let error =
+            safe_text_len_mul(&mut input, &["<|tool_call>", "<|channel>thought\n"]).unwrap_err();
 
         assert!(matches!(error, ErrMode::Incomplete(_)));
     }
