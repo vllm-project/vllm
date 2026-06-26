@@ -787,3 +787,79 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
     del engine
     torch.accelerator.empty_cache()
     cleanup_dist_env_and_memory()
+
+
+def _run_mamba_prefix_cache_v2_worker(enable_prefix_caching, result_queue) -> None:
+    """Build one V2 engine and return its greedily-decoded token ids.
+
+    Runs in its own spawned process so the engine's full KV-cache pool is
+    reclaimed by the OS on exit: in-process engine teardown does not reliably
+    free the reserved pool, so two ~30 GiB engines built back-to-back in one
+    process would exhaust a memory-tight CI GPU.
+    """
+    try:
+        os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+        os.environ["VLLM_USE_V2_MODEL_RUNNER"] = "1"
+        prompt_dataset = datasets.load_dataset("heheda/a_long_article")
+        full_prompt = prompt_dataset["train"][0]["text"]
+        sampling_params = SamplingParams(temperature=0.0, max_tokens=32)
+        kwargs: dict[str, Any] = dict(
+            model=MODEL,
+            block_size=BLOCK_SIZE,
+            enable_prefix_caching=enable_prefix_caching,
+            speculative_config={
+                "method": "qwen3_next_mtp",
+                "num_speculative_tokens": num_speculative_tokens,
+            },
+            max_num_batched_tokens=3072,
+            hf_overrides={"num_hidden_layers": NUM_HIDDEN_LAYERS},
+            seed=42,
+        )
+        if enable_prefix_caching:
+            kwargs["mamba_cache_mode"] = "align"
+        engine = LLM(**kwargs)
+        token_ids = engine.get_tokenizer().encode(full_prompt)
+        prefix = token_ids[: BLOCK_SIZE * 2 + 5]
+        prompts = [
+            TokensPrompt(prompt_token_ids=prefix),
+            TokensPrompt(prompt_token_ids=prefix + token_ids[BLOCK_SIZE * 2 + 5 :][:7]),
+        ]
+        outputs = engine.generate(prompts, sampling_params)
+        result_queue.put([list(o.outputs[0].token_ids) for o in outputs])
+        del engine
+        torch.accelerator.empty_cache()
+        cleanup_dist_env_and_memory()
+    except Exception:
+        traceback.print_exc()
+        raise
+
+
+def test_mamba_prefix_cache_v2():
+    """V2 model runner: align prefix caching must be output-equivalent to no cache.
+
+    Exercises the V2 pre-copy state migration end-to-end. Two prompts share a
+    multi-block prefix, so the second hits the prefix cache and triggers the
+    align pre-copy of the cached mamba state into the new running block. Because
+    that copy is byte-exact, greedy decoding with prefix caching must produce the
+    exact same tokens as decoding without prefix caching.
+    """
+
+    def _generate(enable_prefix_caching: bool) -> list[list[int]]:
+        ctx = mp.get_context("spawn")
+        result_queue = ctx.Queue()
+        proc = ctx.Process(
+            target=_run_mamba_prefix_cache_v2_worker,
+            args=(enable_prefix_caching, result_queue),
+        )
+        proc.start()
+        proc.join(timeout=600)
+        if proc.exitcode != 0:
+            raise RuntimeError(f"V2 generate process exited with {proc.exitcode}.")
+        return result_queue.get(timeout=10)
+
+    cached = _generate(enable_prefix_caching=True)
+    uncached = _generate(enable_prefix_caching=False)
+    assert cached == uncached, (
+        f"align prefix-cache output diverged from no-cache:\n"
+        f"  cached  ={cached}\n  uncached={uncached}"
+    )
