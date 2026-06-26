@@ -91,6 +91,7 @@ pub fn to_text_request(
         cache_salt: kv.map(|k| &k.cache_salt).filter(|s| !s.is_empty()).cloned(),
         add_special_tokens: true,
         data_parallel_rank: None,
+        reasoning_parser_kwargs: None,
         lora_request: None,
     })
 }

@@ -19,6 +19,7 @@ use serde_json::Value;
 use serde_with::{DefaultOnNull, OneOrMany, serde_as};
 use thiserror_ext::AsReport as _;
 use uuid::Uuid;
+use vllm_chat::ReasoningParserFactory;
 use vllm_engine_core_client::TransportMode;
 use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
@@ -91,7 +92,12 @@ pub enum Command {
 #[serde(transparent)]
 pub struct JsonStringList(pub Vec<String>);
 
-/// Runtime arguments shared by the external-engine and managed-engine paths.
+/// Runtime arguments shared by both paths of the Rust frontend:
+///
+/// - External-engine mode: Python-supervised bootstrap, `vllm serve` -> `vllm-rs frontend`.
+///   Arguments are deserialized from a single JSON object and defaults follow `serde` attrs.
+/// - Managed-engine mode: Rust-managed Python engine, `vllm-rs serve`.
+///   Arguments are parsed from CLI flags and defaults follow `clap` attrs.
 #[serde_as]
 #[derive(Educe, Clone, Args, PartialEq, Eq, Deserialize)]
 #[educe(Debug)]
@@ -114,12 +120,12 @@ pub struct SharedRuntimeArgs {
     /// Select the tool call parser depending on the model that you're using.
     /// Use `auto` to infer from the model or `none` to disable parsing.
     #[arg(long, default_value_t)]
-    #[serde(default)]
+    #[serde(default = "default_py_bootstrap_parser_selection")]
     pub tool_call_parser: ParserSelection,
     /// Select the reasoning parser depending on the model that you're using.
     /// Use `auto` to infer from the model or `none` to disable parsing.
     #[arg(long, default_value_t)]
-    #[serde(default)]
+    #[serde(default = "default_py_bootstrap_parser_selection")]
     pub reasoning_parser: ParserSelection,
     /// Select the chat renderer implementation.
     #[arg(long = "tokenizer-mode", default_value_t)]
@@ -402,6 +408,10 @@ fn default_cors_wildcard() -> JsonStringList {
     JsonStringList(vec!["*".to_string()])
 }
 
+fn default_py_bootstrap_parser_selection() -> ParserSelection {
+    ParserSelection::None
+}
+
 fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, String> {
     serde_json::from_str(value).map_err(|e| format!("invalid JSON object: {}", e.as_report()))
 }
@@ -526,15 +536,29 @@ impl ServeArgs {
     /// Build the managed Python-engine spawn configuration with the given
     /// handshake port.
     pub fn to_managed_engine_config(&self, handshake_port: u16) -> ManagedEngineConfig {
+        let reasoning_parser =
+            effective_engine_reasoning_parser(&self.runtime.reasoning_parser, &self.runtime.model);
+
         self.managed_engine.clone().into_config(
             self.runtime.model.clone(),
             self.runtime.max_model_len,
             self.runtime.max_logprobs,
+            reasoning_parser.as_deref(),
             self.runtime.language_model_only,
             self.runtime.disable_log_stats,
             self.runtime.shutdown_timeout,
             handshake_port,
         )
+    }
+}
+
+fn effective_engine_reasoning_parser(selection: &ParserSelection, model: &str) -> Option<String> {
+    match selection {
+        ParserSelection::Auto => ReasoningParserFactory::global()
+            .resolve_name_for_model(model)
+            .map(str::to_string),
+        ParserSelection::None => None,
+        ParserSelection::Explicit(name) => Some(name.clone()),
     }
 }
 

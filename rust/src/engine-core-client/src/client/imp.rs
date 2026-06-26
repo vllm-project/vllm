@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use arc_swap::ArcSwapOption;
 use parking_lot::Mutex;
 use thiserror_ext::AsReport as _;
+use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tracing::{debug, info, trace, warn};
 use vllm_metrics::METRICS;
@@ -26,6 +27,8 @@ use crate::{Error, Result, transport};
 
 pub(crate) struct ClientInner {
     input_send: RouterSendHalf,
+    /// The runtime handle used for sending messages to the engine.
+    handle: Handle,
     model_name: String,
     request_reg: Mutex<RequestRegistry>,
     utility_reg: Mutex<UtilityRegistry>,
@@ -37,11 +40,13 @@ impl ClientInner {
     /// handshake completes.
     pub fn new(
         input_send: RouterSendHalf,
+        handle: Handle,
         model_name: String,
         engines: &[ConnectedEngine],
     ) -> Self {
         Self {
             input_send,
+            handle,
             model_name,
             request_reg: Mutex::new(RequestRegistry::new(engines)),
             utility_reg: Mutex::new(UtilityRegistry::default()),
@@ -213,9 +218,19 @@ impl ClientInner {
         // frames instead of always producing a single msgpack frame.
         let payload = encode_msgpack(payload)?;
         let mut input_send = self.input_send.clone();
-        transport::send_message(&mut input_send, engine_id, request_type.to_frame(), payload)
-            .await?;
-        Ok(())
+        let engine_id = engine_id.clone();
+
+        self.handle
+            .spawn(async move {
+                transport::send_message(
+                    &mut input_send,
+                    &engine_id,
+                    request_type.to_frame(),
+                    payload,
+                )
+                .await
+            })
+            .await?
     }
 
     /// Handle an abort request by sending the abort message to the engine.
@@ -434,6 +449,7 @@ mod tests {
         let (send, _) = socket.split();
         ClientInner::new(
             send,
+            Handle::current(),
             "test-model".to_string(),
             &[ConnectedEngine {
                 engine_id: EngineId::from(b"engine-0"),

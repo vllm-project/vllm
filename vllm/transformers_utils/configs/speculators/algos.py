@@ -36,7 +36,16 @@ def update_eagle3(config_dict: dict, pre_trained_config: dict) -> None:
         "norm_before_residual", True
     )
     pre_trained_config["norm_before_fc"] = config_dict.get("norm_before_fc", False)
-    pre_trained_config["architectures"] = ["Eagle3LlamaForCausalLM"]
+    pre_trained_config["fc_norm"] = config_dict.get("fc_norm", False)
+    pre_trained_config["norm_output"] = config_dict.get("norm_output", False)
+    eagle3_arch_map = {
+        "qwen3": "Eagle3Qwen3ForCausalLM",
+        "llama": "Eagle3LlamaForCausalLM",
+    }
+    model_type = pre_trained_config.get("model_type", "llama")
+    if model_type not in eagle3_arch_map:
+        raise ValueError(f"Unsupported model_type {model_type} for Eagle3 speculator")
+    pre_trained_config["architectures"] = [eagle3_arch_map[model_type]]
     if config_dict.get("eagle_aux_hidden_state_layer_ids"):
         pre_trained_config["eagle_aux_hidden_state_layer_ids"] = config_dict[
             "eagle_aux_hidden_state_layer_ids"
@@ -59,7 +68,6 @@ def update_peagle(config_dict: dict, pre_trained_config: dict) -> None:
     - eagle_aux_hidden_state_layer_ids: Layer indices from the target model
         whose intermediate hidden states are used as auxiliary inputs
     """
-    pre_trained_config["architectures"] = ["PeagleLlamaForCausalLM"]
     pre_trained_config["draft_vocab_size"] = config_dict.get("draft_vocab_size")
     if config_dict.get("target_hidden_size") is not None:
         pre_trained_config["target_hidden_size"] = config_dict["target_hidden_size"]
@@ -67,6 +75,14 @@ def update_peagle(config_dict: dict, pre_trained_config: dict) -> None:
         "norm_before_residual", False
     )
     pre_trained_config["norm_before_fc"] = config_dict.get("norm_before_fc", False)
+    peagle_arch_map = {
+        "qwen3": "PeagleQwen3ForCausalLM",
+        "llama": "PeagleLlamaForCausalLM",
+    }
+    model_type = pre_trained_config.get("model_type", "llama")
+    if model_type not in peagle_arch_map:
+        raise ValueError(f"Unsupported model_type {model_type} for PEagle speculator")
+    pre_trained_config["architectures"] = [peagle_arch_map[model_type]]
     pre_trained_config["pard_token"] = config_dict["mask_token_id"]
     if config_dict.get("eagle_aux_hidden_state_layer_ids"):
         pre_trained_config["eagle_aux_hidden_state_layer_ids"] = config_dict[
