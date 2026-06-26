@@ -8,7 +8,7 @@ import pytest
 import torch
 
 import vllm._custom_ops as ops
-from tests.kernels.utils import opcheck
+from tests.kernels.utils import fp8_ulp_distance, opcheck
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
@@ -254,12 +254,16 @@ def test_rms_norm(
     # Per-block bf16 scales: allow a small relative tolerance for a few groups
     # whose abs-max flips by one ULP between the fused and reference paths. The
     # per-token and fp32 paths stay strict.
-    relax_block = group_size is not None and dtype == torch.bfloat16
+    relax_block_rocm = (
+        group_size is not None
+        and dtype == torch.bfloat16
+        and current_platform.is_rocm()
+    )
 
     def scales_close(rtol: float, atol: float) -> bool:
         if torch.allclose(ref_scales, ops_scales, rtol=rtol, atol=atol):
             return True
-        return relax_block and torch.allclose(
+        return relax_block_rocm and torch.allclose(
             ref_scales, ops_scales, rtol=1e-2, atol=atol
         )
 
@@ -273,25 +277,27 @@ def test_rms_norm(
         b = ops_out.to(dtype=torch.float32)
         ok = torch.allclose(a, b, atol=1e-6)
         if not ok:
-            # fallback: compare dequantized values with relaxed tolerance
-            if group_size is None:
-                a_deq = a * ref_scales.view(-1, 1)
-                b_deq = b * ops_scales.view(-1, 1)
+            if relax_block_rocm:
+                # ULP-flipped group scale can cross an E4M3 tie; tolerate a
+                # bounded count of isolated fp8 outliers.
+                ulp = fp8_ulp_distance(ref_out, ops_out)
+                max_outliers = ulp.numel() // 100_000 + 8
+                ok = int((ulp > 0).sum().item()) <= max_outliers
             else:
-                a_deq = a * ref_scales.repeat_interleave(group_size[1], dim=1)
-                b_deq = b * ops_scales.repeat_interleave(group_size[1], dim=1)
-            # NOTE: It is possible that some future test cases trigger this
-            # max diff due to precision issues. If such an error is
-            # encountered, it's recommended to inspect the differences between
-            # all corresponding elements from each tensor (e.g. by looping over
-            # them) and checking how many the max diff error shows up on (just
-            # a few bad elements should still be considered acceptable).
-            close = torch.isclose(a_deq, b_deq, rtol=5e-2, atol=5e-2)
-            # Per-block bf16: tolerate a few isolated outliers where a ULP-flipped
-            # group scale pushes its abs-max element into an adjacent quant
-            # bucket; require an exact match everywhere else.
-            max_outliers = (close.numel() // 100_000 + 8) if relax_block else 0
-            ok = int((~close).sum().item()) <= max_outliers
+                # CUDA (& non-bf16): compare dequantized values with relaxed tolerance.
+                if group_size is None:
+                    a_deq = a * ref_scales.view(-1, 1)
+                    b_deq = b * ops_scales.view(-1, 1)
+                else:
+                    a_deq = a * ref_scales.repeat_interleave(group_size[1], dim=1)
+                    b_deq = b * ops_scales.repeat_interleave(group_size[1], dim=1)
+                # NOTE: It is possible that some future test cases trigger this
+                # max diff due to precision issues. If such an error is
+                # encountered, it's recommended to inspect the differences between
+                # all corresponding elements from each tensor (e.g. by looping over
+                # them) and checking how many the max diff error shows up on (just
+                # a few bad elements should still be considered acceptable).
+                ok = torch.allclose(a_deq, b_deq, rtol=5e-2, atol=5e-2)
         assert ok
     if add_residual:
         assert torch.allclose(ref_residual, ops_residual)
