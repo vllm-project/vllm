@@ -133,6 +133,25 @@ ResponseInputOutputMessage: TypeAlias = (
 ResponseInputOutputItem: TypeAlias = ResponseInputItemParam | ResponseOutputItem
 
 
+def _normalize_chat_completions_image_parts(content: list) -> list:
+    """Flatten chat-completions ``input_image`` parts to the Responses schema.
+
+    Accepts the chat shape (nested ``image_url={"url": ...}`` and no ``detail``)
+    by flattening the URL and defaulting ``detail`` to ``"auto"``, since
+    ResponseInputImageParam requires a flat ``image_url`` string (#46631).
+    """
+    normalized = []
+    for part in content:
+        if isinstance(part, dict) and part.get("type") == "input_image":
+            part = dict(part)
+            image_url = part.get("image_url")
+            if isinstance(image_url, dict) and "url" in image_url:
+                part["image_url"] = image_url["url"]
+            part.setdefault("detail", "auto")
+        normalized.append(part)
+    return normalized
+
+
 class ResponsesRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/responses/create
@@ -500,19 +519,12 @@ class ResponsesRequest(OpenAIBaseModel):
                 processed_input.append(item)
                 continue
 
-            # Accept chat-completions-style images (#46631): flatten
-            # image_url {"url": X} -> X and default the required `detail` to "auto".
-            if isinstance(item.get("content"), list):
-                content = []
-                for c in item["content"]:
-                    if isinstance(c, dict) and c.get("type") == "input_image":
-                        c = dict(c)
-                        image_url = c.get("image_url")
-                        if isinstance(image_url, dict) and "url" in image_url:
-                            c["image_url"] = image_url["url"]
-                        c.setdefault("detail", "auto")
-                    content.append(c)
-                item = {**item, "content": content}
+            content = item.get("content")
+            if isinstance(content, list):
+                item = {
+                    **item,
+                    "content": _normalize_chat_completions_image_parts(content),
+                }
 
             item_type = item.get("type")
 
