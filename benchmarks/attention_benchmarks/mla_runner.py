@@ -66,6 +66,7 @@ def create_minimal_vllm_config(
     block_size: int = 128,
     max_num_seqs: int = 256,
     max_num_batched_tokens: int = 8192,
+    max_model_len: int = 32768,
     mla_dims: dict | None = None,
     index_topk: int | None = None,
     prefill_backend: str | None = None,
@@ -134,7 +135,7 @@ def create_minimal_vllm_config(
             trust_remote_code=True,
             dtype="bfloat16",
             seed=0,
-            max_model_len=32768,
+            max_model_len=max_model_len,
             quantization=None,
             enforce_eager=False,
             max_logprobs=20,
@@ -166,7 +167,7 @@ def create_minimal_vllm_config(
     scheduler_config = SchedulerConfig(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max(max_num_batched_tokens, max_num_seqs),
-        max_model_len=32768,
+        max_model_len=max_model_len,
         is_encoder_decoder=False,
         enable_chunked_prefill=True,
     )
@@ -791,7 +792,11 @@ def _run_single_benchmark(
     # Fill indexer with random indices for sparse backends
     is_sparse = backend_cfg.get("is_sparse", False)
     if is_sparse and indexer is not None:
-        indexer.fill_random_indices(total_q, max_kv_len)
+        indexer.fill_indices(
+            total_q,
+            max_kv_len,
+            getattr(config, "sparse_mla_topk_pattern", "random"),
+        )
 
     # Determine which forward methods to use based on metadata.
     # Non-sparse backends use .decode/.prefill sub-objects.
@@ -877,6 +882,12 @@ def _run_single_benchmark(
     # Build forward function (runs a single decode/prefill pass)
     def forward_fn():
         results = []
+        impl._sparse_mla_force_masked_mha = (  # type: ignore[attr-defined]
+            getattr(config, "sparse_mla_mha_mode", "auto") == "masked"
+        )
+        impl._sparse_mla_force_dense_mha = (  # type: ignore[attr-defined]
+            getattr(config, "sparse_mla_mha_mode", "auto") == "dense"
+        )
         if has_decode:
             results.append(impl.forward_mqa(decode_inputs, kv_cache, metadata, layer))
         if has_prefill:
@@ -888,7 +899,6 @@ def _run_single_benchmark(
                 metadata,
                 prefill_inputs["k_scale"],
                 prefill_fp8_output if fused_output else prefill_inputs["output"],
-                prefill_output_scale if fused_output else None,
             )
             if fused_output:
                 out = prefill_fp8_output
@@ -1000,12 +1010,20 @@ def _run_mla_benchmark_batched(
         sum(r.q_len for r in parse_batch_spec(cfg.batch_spec))
         for cfg, *_ in configs_with_params
     )
+    max_model_len = max(
+        max_total_q,
+        max(
+            getattr(cfg, "max_model_len", None) or 32768
+            for cfg, *_ in configs_with_params
+        ),
+    )
 
     # Create and set vLLM config for MLA (reused across all benchmarks)
     vllm_config = create_minimal_vllm_config(
         model_name="deepseek-v3",  # Used only for model path
         block_size=block_size,
         max_num_batched_tokens=max_total_q,
+        max_model_len=max_model_len,
         mla_dims=mla_dims,  # Use custom dims from config or default
         index_topk=index_topk if is_sparse else None,
         prefill_backend=prefill_backend,

@@ -158,6 +158,26 @@ class MockIndexer:
         )
         self.topk_indices_buffer[:num_tokens] = indices
 
+    def fill_indices(
+        self,
+        num_tokens: int,
+        max_kv_len: int,
+        pattern: str = "random",
+    ):
+        if pattern == "random":
+            self.fill_random_indices(num_tokens, max_kv_len)
+            return
+        if pattern == "prefix":
+            indices = torch.arange(
+                self.topk_tokens,
+                dtype=torch.int32,
+                device=self.topk_indices_buffer.device,
+            )
+            indices = (indices % max_kv_len).expand(num_tokens, -1)
+            self.topk_indices_buffer[:num_tokens] = indices
+            return
+        raise ValueError(f"Unknown sparse MLA topk pattern: {pattern}")
+
 
 class MockLayer(AttentionLayerBase):
     """Mock attention layer with scale parameters and impl.
@@ -252,6 +272,7 @@ class BenchmarkConfig:
     num_kv_heads: int
     block_size: int
     device: str
+    max_model_len: int | None = None
     dtype: torch.dtype = torch.float16
     profile_memory: bool = False
     use_cuda_graphs: bool = False
@@ -272,6 +293,9 @@ class BenchmarkConfig:
     num_kv_splits: int | None = None  # CUTLASS MLA
     reorder_batch_threshold: int | None = None  # FlashAttn MLA, FlashMLA
     sparse_mla_force_mqa: bool = False  # Force MQA path for sparse MLA
+    sparse_mla_mha_mode: str = "auto"  # "auto", "dense", or "masked"
+    sparse_mla_dense_mha_max_seq_len: int | None = None
+    sparse_mla_topk_pattern: str = "random"  # "random" or "prefix"
     num_splits: int | None = None  # FlashAttention split-K (0=auto, 1=disabled)
 
 
