@@ -127,8 +127,8 @@ if TYPE_CHECKING:
     from vllm.v1.executor import Executor
 else:
     Executor = Any
-    QuantizationMethods = Any
-    LoadFormats = Any
+    QuantizationMethods = str
+    LoadFormats = str
     UsageContext = Any
 
 
