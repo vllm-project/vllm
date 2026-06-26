@@ -43,8 +43,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kInt8DynamicTensorSym,
     kInt8DynamicTokenSym,
     kInt8StaticChannelSym,
+    kInt8StaticTensorSym,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl
@@ -110,7 +112,15 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 
         supported: list[tuple[QuantKey | None, QuantKey | None]] = [(None, None)]
         if device_supports_int8:
-            supported.append((kInt8StaticChannelSym, kInt8DynamicTokenSym))
+            # Activations are consumed as float and quantized to int8
+            # dynamically inside the kernel, so only dynamic-activation int8
+            # schemes are supported (static-activation int8 is not).
+            supported += [
+                # per-channel weight + dynamic per-token activation
+                (kInt8StaticChannelSym, kInt8DynamicTokenSym),
+                # per-tensor weight + dynamic per-tensor activation
+                (kInt8StaticTensorSym, kInt8DynamicTensorSym),
+            ]
         if current_platform.supports_fp8():
             supported += [
                 (kFp8Static128BlockSym, kFp8Dynamic128Sym),
