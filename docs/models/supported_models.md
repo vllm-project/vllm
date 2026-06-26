@@ -366,7 +366,6 @@ th {
 | ------------ | ------ | ----------------- | -------------------- | ------------------------- |
 | `AfmoeForCausalLM` | Afmoe | TBA | ✅︎ | ✅︎ |
 | `ApertusForCausalLM` | Apertus | `swiss-ai/Apertus-8B-2509`, `swiss-ai/Apertus-70B-Instruct-2509`, etc. | ✅︎ | ✅︎ |
-| `AquilaForCausalLM` | Aquila, Aquila2 | `BAAI/Aquila-7B`, `BAAI/AquilaChat-7B`, etc. | ✅︎ | ✅︎ |
 | `ArceeForCausalLM` | Arcee (AFM) | `arcee-ai/AFM-4.5B-Base`, etc. | ✅︎ | ✅︎ |
 | `ArcticForCausalLM` | Arctic | `Snowflake/snowflake-arctic-base`, `Snowflake/snowflake-arctic-instruct`, etc. | | ✅︎ |
 | `AXK1ForCausalLM` | A.X-K1 | `skt/A.X-K1`, etc. | | ✅︎ |
