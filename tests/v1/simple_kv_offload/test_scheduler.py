@@ -1839,3 +1839,102 @@ def test_cp_lazy_target_blocks_scaling(cp_world_size: int) -> None:
             f"cp_world_size={cp_world_size}: target_cp={target_cp} should be "
             f"less than target_base={target_base}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Test 18: Active request blocks are never evicted by LRU
+# ---------------------------------------------------------------------------
+def test_active_request_blocks_not_evicted() -> None:
+    """Prove that CPU LRU cannot evict blocks belonging to active requests.
+
+    CPU LRU draws candidates from the free queue, which only contains blocks
+    with ref_cnt == 0. Blocks with ref_cnt > 0 (e.g., mid-transfer during an
+    active store) are invisible to the allocator and therefore cannot be
+    evicted.
+
+    Setup:
+    - CPU: 5 total = 4 usable (null_block takes 1).
+    - Store req_a (2 blocks) + req_b (2 blocks) → fills CPU.
+    - After store completion, all CPU blocks have ref_cnt = 0.
+    - Simulate an active store for req_b by touching its CPU blocks
+      (ref_cnt → 1).
+    - Store req_c (2 blocks) → needs 2 CPU blocks → must evict.
+
+    Expected:
+    - req_a's blocks (ref_cnt = 0) are evicted.
+    - req_b's blocks (ref_cnt = 1) are protected and remain cached.
+    """
+    fix = make_scheduler(num_cpu_blocks=5, num_gpu_blocks=16, lazy=False)
+    sched = fix.scheduler
+
+    # Store req_a (2 blocks) + req_b (2 blocks) → fills CPU (4 usable).
+    req_a = make_request(num_blocks=2)
+    req_b = make_request(num_blocks=2)
+    kv_a = _alloc_and_register(fix, req_a, 2)
+    kv_b = _alloc_and_register(fix, req_b, 2)
+    sched.update_state_after_alloc(req_a, kv_a, num_external_tokens=0)
+    sched.update_state_after_alloc(req_b, kv_b, num_external_tokens=0)
+
+    ids_a = kv_a.get_block_ids()
+    ids_b = kv_b.get_block_ids()
+    sched_out1 = make_scheduler_output(
+        {req_a.request_id: 2 * BLOCK_SIZE, req_b.request_id: 2 * BLOCK_SIZE},
+        new_reqs={req_a.request_id: ids_a, req_b.request_id: ids_b},
+    )
+    meta1 = sched.build_connector_meta(sched_out1)
+    assert meta1.store_event >= 0
+    simulate_store_completion(sched, meta1.store_event)
+
+    # After store completion, all CPU blocks have ref_cnt = 0.
+    for bhash in req_a.block_hashes[:2]:
+        bhash_wg = make_block_hash_with_group_id(bhash, 0)
+        assert (
+            sched.cpu_block_pool.cached_block_hash_to_block.get_one_block(bhash_wg)
+            is not None
+        ), "req_a block should be cached after store"
+    for bhash in req_b.block_hashes[:2]:
+        bhash_wg = make_block_hash_with_group_id(bhash, 0)
+        assert (
+            sched.cpu_block_pool.cached_block_hash_to_block.get_one_block(bhash_wg)
+            is not None
+        ), "req_b block should be cached after store"
+
+    # Simulate an active store for req_b: touch its CPU blocks so
+    # ref_cnt goes from 0 → 1. This removes them from the free queue.
+    req_b_cpu_blocks = []
+    for bhash in req_b.block_hashes[:2]:
+        bhash_wg = make_block_hash_with_group_id(bhash, 0)
+        blk = sched.cpu_block_pool.cached_block_hash_to_block.get_one_block(bhash_wg)
+        assert blk is not None
+        req_b_cpu_blocks.append(blk)
+    sched.cpu_block_pool.touch(req_b_cpu_blocks)
+
+    # Store req_c (2 blocks) → needs 2 CPU blocks → must evict.
+    # Only req_a's blocks (ref_cnt = 0) are eviction candidates.
+    req_c = make_request(num_blocks=2)
+    kv_c = _alloc_and_register(fix, req_c, 2)
+    sched.update_state_after_alloc(req_c, kv_c, num_external_tokens=0)
+    ids_c = kv_c.get_block_ids()
+    sched_out2 = make_scheduler_output(
+        {req_c.request_id: 2 * BLOCK_SIZE},
+        new_reqs={req_c.request_id: ids_c},
+    )
+    meta2 = sched.build_connector_meta(sched_out2)
+    assert meta2.store_event >= 0
+    simulate_store_completion(sched, meta2.store_event)
+
+    # req_a's blocks (ref_cnt = 0) should be evicted.
+    for bhash in req_a.block_hashes[:2]:
+        bhash_wg = make_block_hash_with_group_id(bhash, 0)
+        assert (
+            sched.cpu_block_pool.cached_block_hash_to_block.get_one_block(bhash_wg)
+            is None
+        ), "req_a block (ref_cnt=0) should be evicted"
+
+    # req_b's blocks (ref_cnt = 1) should still be cached.
+    for bhash in req_b.block_hashes[:2]:
+        bhash_wg = make_block_hash_with_group_id(bhash, 0)
+        assert (
+            sched.cpu_block_pool.cached_block_hash_to_block.get_one_block(bhash_wg)
+            is not None
+        ), "req_b block (ref_cnt=1, active store) should NOT be evicted"

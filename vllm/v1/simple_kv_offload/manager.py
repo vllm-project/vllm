@@ -598,9 +598,16 @@ class SimpleCPUOffloadScheduler:
             aligned_tokens = confirmed_tokens // self.block_size * self.block_size
 
             for g in range(num_groups):
-                # FIXME (yifan): handle CPU cache eviction, where
-                # num_stored_blocks can be stale and omit evicted blocks in
-                # the middle of the request.
+                # NOTE: num_stored_blocks is a monotonic cursor — it only
+                # advances, never retreats. Blocks already stored (below the
+                # cursor) that are evicted from CPU cache by LRU are NOT
+                # re-stored here. This is safe because:
+                # 1. Active request blocks (ref_cnt > 0) cannot be evicted
+                #    by LRU — they are not in the free queue.
+                # 2. Finished request blocks (ref_cnt == 0) can be evicted,
+                #    but their offload state is cleaned up, so this loop
+                #    skips them (state is None or finished).
+                # See test_active_request_blocks_not_evicted.
                 already_stored_g = state.num_stored_blocks[g]
                 group_gpu_ids = block_ids_by_group[g]
 
