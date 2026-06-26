@@ -98,11 +98,13 @@ FI_ALLREDUCE_FUSION_MAX_SIZE_MB: dict[int, dict[int, float]] = {
         2: 64,  # 64MB
         4: 32,  # 32MB
         8: 1,  # 1MB
+        16: 64,  # 64MB (mnnvl multi-node)
     },
     103: {
         2: 64,  # 64MB
         4: 64,  # 64MB
         8: 2,  # 2MB
+        16: 64,  # 64MB (mnnvl multi-node)
     },
 }
 
@@ -155,6 +157,13 @@ if flashinfer_comm is not None:
         scale_factor: torch.Tensor | None = None,
         weight_bias: float = 0.0,
     ) -> None:
+        # handle transformers backend passing outer batch dim.
+        if allreduce_in.dim() != 2:
+            hidden = allreduce_in.shape[-1]
+            allreduce_in = allreduce_in.view(-1, hidden)
+            residual = residual.view(-1, hidden)
+            if norm_out is not None:
+                norm_out = norm_out.view(-1, hidden)
         num_tokens, hidden_size = allreduce_in.shape
         element_size = allreduce_in.element_size()
         current_tensor_size = num_tokens * hidden_size * element_size
@@ -231,7 +240,17 @@ if flashinfer_comm is not None:
             use_oneshot=use_oneshot,
             fp32_acc=fp32_acc,
             weight_bias=weight_bias,
-            trigger_completion_at_end=num_tokens > PDL_ADVANCE_LAUNCH_TOKENS,
+            # The one-shot Lamport all-reduce signals PDL completion before its
+            # output buffer is committed when trigger_completion_at_end is
+            # False, so the next PDL-launched kernel can read the uninitialized
+            # Lamport buffer and produce NaN. This only fires for
+            # num_tokens <= PDL_ADVANCE_LAUNCH_TOKENS (the batch=1 / spec-decode
+            # shapes, where the one-shot path is always selected). Complete at
+            # the end for the one-shot path; the two-shot path is synchronized
+            # and keeps the early completion. Related one-shot instability in
+            # the same kernel: flashinfer-ai/flashinfer#1223.
+            trigger_completion_at_end=use_oneshot
+            or num_tokens > PDL_ADVANCE_LAUNCH_TOKENS,
         )
 
     def call_trtllm_fused_allreduce_norm_fake(

@@ -6,12 +6,14 @@ import deep_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
     TopKWeightAndReduceDelegate,
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
@@ -116,6 +118,28 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         do_expand = not self.use_cudagraph
         do_cpu_sync = not self.use_cudagraph
 
+        # In do_expand=False mode, the recv buffer is the worst case
+        # R * num_max_tokens_per_rank. Defaulting to the buffer's init value
+        # (= max_num_batched_tokens) makes the experts process ~R*8192 rows even
+        # for a handful of decode tokens. Bound it to the actual DP-padded batch
+        # size (uniform across ranks): max(num_tokens_across_dp).
+        #
+        # DeepEP JIT-compiles a separate dispatch kernel per distinct
+        # num_max_tokens_per_rank, so feeding it the raw per-step size would make
+        # it recompile for every batch size (a cicc storm that starves the GPU at
+        # high concurrency). Round up to a power of 2 instead: this bounds the
+        # set to ~log2(max_num_batched_tokens) values (compiled once, then
+        # cached) while staying small for decode (e.g. 1 token -> 1) and capped
+        # at the buffer's init capacity for prefill.
+        num_max_tokens_per_rank = None
+        if not do_expand:
+            dp_meta = get_forward_context().dp_metadata
+            if dp_meta is not None:
+                n = int(dp_meta.num_tokens_across_dp_cpu.max())
+            else:
+                n = tokens.shape[0]
+            num_max_tokens_per_rank = 1 << max(n - 1, 0).bit_length()
+
         (
             recv_x,
             recv_topk_idx,
@@ -127,6 +151,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             topk_idx=rank_topk_ids,
             topk_weights=rank_topk_weights,
             num_experts=num_experts,
+            num_max_tokens_per_rank=num_max_tokens_per_rank,
             do_expand=do_expand,
             do_cpu_sync=do_cpu_sync,
             async_with_compute_stream=False,
@@ -196,17 +221,22 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 )
             recv_topk_idx = recv_topk_idx.unsqueeze(1)
         else:
-            # do_expand=False (decode/cudagraph mode): recv_topk_idx has
-            # LOCAL expert IDs (-1 for non-local and padding rows).
-            # Convert valid local IDs to global. Rows with -1 are
-            # skipped by expert kernels (TrtLLM tile-level skipping,
-            # DeepGemm is_computation_valid), so no need to zero
-            # hidden states, scales, or weights for padding rows.
-            valid_mask = recv_topk_idx >= 0
-            recv_topk_idx = torch.where(
-                valid_mask,
-                recv_topk_idx + self.rank_expert_offset,
+            # do_expand=False (decode/cudagraph mode): the dispatch only writes
+            # rows [0, num_recv_tokens); the rest of the worst-case-allocated
+            # buffer is left UNINITIALIZED. For valid rows, recv_topk_idx holds
+            # LOCAL expert IDs (-1 for non-local slots). Convert valid local IDs
+            # to global and force everything else to -1:
+            #   * non-local / out-of-range expert slots, and
+            #   * every row >= num_recv_tokens (uninitialized padding): its
+            #     stale contents can alias valid expert IDs and would otherwise
+            #     be treated as real routed tokens by experts that build routing
+            #     over *all* rows (e.g. triton MoE backend's make_routing_data),
+            #     polluting the per-expert token lists and corrupting real tokens.
+            recv_topk_idx = _globalize_recv_topk_idx(
                 recv_topk_idx,
+                psum_recv_per_rank,
+                self.rank_expert_offset,
+                self.num_experts,
             )
 
         # Reshape recv_topk_weights to match recv_topk_idx shape [N, 1]
@@ -392,3 +422,51 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             weight_and_reduce_impl,
             False,
         )
+
+
+@triton.jit
+def _globalize_recv_topk_idx_kernel(
+    topk_idx_ptr,  # [N*topk] local expert IDs (-1 = non-local), modified in place
+    psum_ptr,  # [P] per-scaleup-rank recv prefix sum; num_recv = psum[P-1]
+    P,
+    rank_expert_offset,
+    num_experts,
+    n_elements,  # N * topk
+    topk: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < n_elements
+    # num_recv_tokens read on-device (no host sync) -> cudagraph-safe.
+    num_recv = tl.load(psum_ptr + P - 1)
+    val = tl.load(topk_idx_ptr + offs, mask=mask, other=-1)
+    g = val + rank_expert_offset
+    row = offs // topk
+    # Keep a slot iff: it is a local expert (val >= 0), its global id is in
+    # range, and its row is a real received token (< num_recv). Otherwise -1.
+    valid = (val >= 0) & (g < num_experts) & (row < num_recv)
+    tl.store(topk_idx_ptr + offs, tl.where(valid, g, -1), mask=mask)
+
+
+def _globalize_recv_topk_idx(
+    recv_topk_idx: torch.Tensor,  # [N, topk] local expert IDs, -1 = non-local
+    psum_recv_per_rank: torch.Tensor,
+    rank_expert_offset: int,
+    num_experts: int,
+) -> torch.Tensor:
+    N, topk = recv_topk_idx.shape
+    n = N * topk
+    BLOCK = 1024
+    grid = (triton.cdiv(n, BLOCK),)
+    _globalize_recv_topk_idx_kernel[grid](
+        recv_topk_idx,
+        psum_recv_per_rank,
+        psum_recv_per_rank.shape[0],
+        rank_expert_offset,
+        num_experts,
+        n,
+        topk=topk,
+        BLOCK=BLOCK,
+    )
+    return recv_topk_idx
