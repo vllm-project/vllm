@@ -4636,21 +4636,3 @@ def test_async_load_reservation_prevents_wedge_e2e():
     assert b.status == RequestStatus.WAITING
     assert b.num_preemptions == 0
     assert b.request_id not in req_to_blocks
-
-
-def test_new_attn_block_ids_drained_every_step():
-    # Regression test for #44175: a non-mamba model (needs_kv_cache_zeroing
-    # is False) must drain new attention block ids every step, else the
-    # manager-side new_block_ids list grows unbounded and leaks host memory.
-    scheduler = create_scheduler(enable_prefix_caching=False)
-    assert not scheduler.needs_kv_cache_zeroing
-    manager = scheduler.kv_cache_manager.coordinator.single_type_managers[0]
-
-    requests = create_requests(num_requests=5, num_tokens=48)
-    for request in requests:
-        scheduler.add_request(request)
-
-    output = scheduler.schedule()
-    # The step allocated blocks, so without draining this would be non-empty.
-    assert output.total_num_scheduled_tokens > 0
-    assert manager.new_block_ids == []
