@@ -18,7 +18,8 @@ use crate::output::{ChatOutputProcessor, DynChatEventStream, DynDecodedTextEvent
 use crate::parser::ParserSelection;
 use crate::parser::reasoning::{ReasoningParser, ReasoningParserFactory};
 use crate::parser::tool::{ToolParser, ToolParserFactory};
-use crate::request::ChatRequest;
+use crate::parser::unified::UnifiedParserFactory;
+use crate::request::{ChatRequest, ChatTool};
 use crate::{Error, Result as ChatResult};
 
 /// Default request-scoped output processor used by Hugging Face style chat
@@ -46,20 +47,31 @@ impl DefaultChatOutputProcessor {
         tool_call_parser: &ParserSelection,
         reasoning_parser: &ParserSelection,
     ) -> ChatResult<Self> {
-        let tool_parsing_enabled = request.tool_parsing_enabled();
-        let tool_parser = if tool_parsing_enabled {
-            Some(Self::resolve_tool_parser(
-                request,
+        let parser = if tool_call_parser == reasoning_parser
+            && let Some(parser) = Self::resolve_optional_unified_parser(
+                &request.tools,
                 model_id,
+                tokenizer.clone(),
                 tool_call_parser,
-            )?)
+            )? {
+            parser
         } else {
-            None
+            let tool_parsing_enabled = request.tool_parsing_enabled();
+            let tool_parser = if tool_parsing_enabled {
+                Some(Self::resolve_tool_parser(
+                    &request.tools,
+                    model_id,
+                    tool_call_parser,
+                )?)
+            } else {
+                None
+            };
+            let reasoning_parser =
+                Self::resolve_optional_reasoning_parser(model_id, tokenizer, reasoning_parser)?;
+            Box::new(CombinedParser::new(reasoning_parser, tool_parser)) as Box<dyn UnifiedParser>
         };
-        let reasoning_parser =
-            Self::resolve_optional_reasoning_parser(model_id, tokenizer, reasoning_parser)?;
-        let parser: Box<dyn UnifiedParser> =
-            Box::new(CombinedParser::new(reasoning_parser, tool_parser));
+
+        apply_structural_tag_constraint(request, parser.structural_tag_model())?;
 
         if parser.preserve_special_tokens() {
             request.decode_options.skip_special_tokens = false;
@@ -84,7 +96,7 @@ impl DefaultChatOutputProcessor {
     }
 
     fn resolve_tool_parser(
-        request: &mut ChatRequest,
+        tools: &[ChatTool],
         model_id: &str,
         selection: &ParserSelection,
     ) -> ChatResult<Box<dyn ToolParser>> {
@@ -100,12 +112,34 @@ impl DefaultChatOutputProcessor {
             ParserSelection::Explicit(name) => name.as_str(),
         };
 
-        let parser = factory.create(parser_name, &request.tools)?;
-
-        apply_structural_tag_constraint(request, parser.as_ref())?;
+        let parser = factory.create(parser_name, tools)?;
 
         TOOL_PARSER_LOG_ONCE.call_once(|| info!(parser_name, "using tool parser"));
         Ok(parser)
+    }
+
+    fn resolve_optional_unified_parser(
+        tools: &[ChatTool],
+        model_id: &str,
+        tokenizer: DynTokenizer,
+        selection: &ParserSelection,
+    ) -> ChatResult<Option<Box<dyn UnifiedParser>>> {
+        let factory = UnifiedParserFactory::global();
+        let parser_name = match selection {
+            ParserSelection::Auto => factory.resolve_name_for_model(model_id),
+            ParserSelection::None => None,
+            ParserSelection::Explicit(name) if factory.contains(name) => Some(name.as_str()),
+            ParserSelection::Explicit(_) => None,
+        };
+
+        let Some(parser_name) = parser_name else {
+            return Ok(None);
+        };
+
+        let parser = factory.create(parser_name, tools, tokenizer)?;
+
+        UNIFIED_PARSER_LOG_ONCE.call_once(|| info!(parser_name, "using unified parser"));
+        Ok(Some(parser))
     }
 
     fn resolve_optional_reasoning_parser(
@@ -134,6 +168,7 @@ impl DefaultChatOutputProcessor {
 
 static TOOL_PARSER_LOG_ONCE: Once = Once::new();
 static REASONING_PARSER_LOG_ONCE: Once = Once::new();
+static UNIFIED_PARSER_LOG_ONCE: Once = Once::new();
 
 impl ChatOutputProcessor for DefaultChatOutputProcessor {
     /// Transforms a raw generate-output token stream into structured chat
@@ -147,5 +182,104 @@ impl ChatOutputProcessor for DefaultChatOutputProcessor {
         let structured = structured_chat_event_stream(parsed, self.parallel_tool_calls);
 
         Ok(structured.boxed())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use vllm_tokenizer::Tokenizer;
+
+    use super::DefaultChatOutputProcessor;
+    use crate::Error;
+    use crate::parser::ParserSelection;
+    use crate::request::ChatRequest;
+
+    struct FakeTokenizer;
+
+    impl Tokenizer for FakeTokenizer {
+        fn encode(
+            &self,
+            text: &str,
+            _add_special_tokens: bool,
+        ) -> vllm_tokenizer::Result<Vec<u32>> {
+            Ok(text.chars().map(u32::from).collect())
+        }
+
+        fn decode(
+            &self,
+            token_ids: &[u32],
+            _skip_special_tokens: bool,
+        ) -> vllm_tokenizer::Result<String> {
+            Ok(token_ids
+                .iter()
+                .map(|token_id| char::from_u32(*token_id).unwrap_or('\u{FFFD}'))
+                .collect())
+        }
+
+        fn token_to_id(&self, token: &str) -> Option<u32> {
+            match token {
+                "<|channel>" => Some(1),
+                "<channel|>" => Some(2),
+                _ => None,
+            }
+        }
+    }
+
+    fn tokenizer() -> Arc<FakeTokenizer> {
+        Arc::new(FakeTokenizer)
+    }
+
+    #[test]
+    fn equal_explicit_gemma4_uses_unified_parser() {
+        let mut request = ChatRequest::for_test();
+        let selection = ParserSelection::Explicit("gemma4".to_string());
+
+        DefaultChatOutputProcessor::new(
+            &mut request,
+            "other-model",
+            tokenizer(),
+            &selection,
+            &selection,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn auto_auto_gemma4_model_uses_unified_parser() {
+        let mut request = ChatRequest::for_test();
+
+        DefaultChatOutputProcessor::new(
+            &mut request,
+            "google/gemma-4-27b-it",
+            tokenizer(),
+            &ParserSelection::Auto,
+            &ParserSelection::Auto,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn mixed_gemma4_selection_uses_split_dummy_error() {
+        let mut request = ChatRequest::for_test();
+        let error = match DefaultChatOutputProcessor::new(
+            &mut request,
+            "other-model",
+            tokenizer(),
+            &ParserSelection::Auto,
+            &ParserSelection::Explicit("gemma4".to_string()),
+        ) {
+            Ok(_) => panic!("expected mixed Gemma4 parser selection to fail"),
+            Err(error) => error,
+        };
+
+        let Error::ParserInitialization { error, .. } = error else {
+            panic!("expected parser initialization error");
+        };
+        assert_eq!(
+            error.to_string(),
+            "`gemma4` only provides a unified parser; the same reasoning parser and tool parser should be specified together"
+        );
     }
 }
