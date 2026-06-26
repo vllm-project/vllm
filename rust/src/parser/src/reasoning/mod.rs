@@ -17,7 +17,6 @@
 mod cohere_cmd;
 mod deepseek_r1;
 mod delimited;
-mod gemma4;
 mod kimi;
 mod minimax_m3;
 mod qwen3;
@@ -29,8 +28,7 @@ use vllm_tokenizer::DynTokenizer;
 
 pub use self::cohere_cmd::CohereCmdReasoningParser;
 pub use self::deepseek_r1::DeepSeekR1ReasoningParser;
-pub(crate) use self::delimited::DelimitedReasoningParser;
-pub use self::gemma4::Gemma4ReasoningParser;
+pub(crate) use self::delimited::{DelimitedReasoningParser, last_reasoning_boundary};
 pub use self::kimi::KimiReasoningParser;
 pub use self::minimax_m3::MiniMaxM3ReasoningParser;
 pub use self::qwen3::Qwen3ReasoningParser;
@@ -129,6 +127,10 @@ pub trait ReasoningParser: Send {
 pub enum ReasoningError {
     #[error("tokenizer is missing reasoning delimiter token `{token}`")]
     MissingToken { token: String },
+    #[error(
+        "`{name}` only provides a unified parser; the same reasoning parser and tool parser should be specified together"
+    )]
+    DummyUnifiedParser { name: String },
 }
 
 #[cfg(test)]
