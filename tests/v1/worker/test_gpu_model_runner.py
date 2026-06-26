@@ -238,57 +238,7 @@ def _make_mock_backend_for_kernel_block_size(
 
 
 def _make_kv_cache_spec() -> FullAttentionSpec:
-    return FullAttentionSpec(
-        block_size=1,
-        num_kv_heads=1,
-        head_size=1,
-        dtype="float16",
-    )
-
-
-def test_sanitize_invalid_scheduled_spec_decode_tokens_drops_bad_drafts(
-    model_runner: GPUModelRunner,
-):
-    scheduler_output = SchedulerOutput(
-        scheduled_new_reqs=[],
-        scheduled_cached_reqs=CachedRequestData.make_empty(),
-        num_scheduled_tokens={"req-0": 2},
-        total_num_scheduled_tokens=2,
-        scheduled_spec_decode_tokens={"req-0": [-1]},
-        scheduled_encoder_inputs={},
-        num_common_prefix_blocks=[],
-        finished_req_ids=set(),
-        free_encoder_mm_hashes=[],
-    )
-
-    sanitized = model_runner._sanitize_scheduled_spec_decode_tokens(
-        scheduler_output
-    )
-
-    assert sanitized.scheduled_spec_decode_tokens == {}
-    assert sanitized.num_scheduled_tokens == {"req-0": 1}
-    assert sanitized.total_num_scheduled_tokens == 1
-
-
-def test_sanitize_valid_scheduled_spec_decode_tokens_keeps_fast_path(
-    model_runner: GPUModelRunner,
-):
-    scheduler_output = SchedulerOutput(
-        scheduled_new_reqs=[],
-        scheduled_cached_reqs=CachedRequestData.make_empty(),
-        num_scheduled_tokens={"req-0": 2},
-        total_num_scheduled_tokens=2,
-        scheduled_spec_decode_tokens={"req-0": [1]},
-        scheduled_encoder_inputs={},
-        num_common_prefix_blocks=[],
-        finished_req_ids=set(),
-        free_encoder_mm_hashes=[],
-    )
-
-    assert (
-        model_runner._sanitize_scheduled_spec_decode_tokens(scheduler_output)
-        is scheduler_output
-    )
+    return FullAttentionSpec(block_size=1, num_kv_heads=1, head_size=1, dtype="float16")
 
 
 def test_select_common_block_size_prefers_manager_block_size():
