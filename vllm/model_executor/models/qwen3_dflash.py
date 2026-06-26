@@ -205,14 +205,8 @@ class DFlashQwen3Attention(nn.Module):
             attn_type=attn_type,
             sinks=self.attention_sink_bias,
         )
-        if sliding_window is not None and not causal:
-            # Dedicated override for FlashAttention + non-causal SWA:
-            # we need to ensure that the sliding window is symmetric around the query
-            # (a sliding-window both forwards and backwards). This is a rare edge-case.
-            # FA3 can sometimes build the config incorrectly, so patch it here anyways.
-            impl_window = getattr(self.attn.impl, "sliding_window", None)
-            if isinstance(impl_window, tuple):
-                self.attn.impl.sliding_window = (sliding_window - 1, sliding_window - 1)
+        # NOTE: `causal` is currently unused here, but will be needed in the future
+        # to support models with different causality per-layer.
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
