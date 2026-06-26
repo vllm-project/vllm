@@ -8,6 +8,8 @@ import regex as re
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -54,6 +56,8 @@ from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLAAttention
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
+_USE_AITER_PRESHUFFLE = envs.VLLM_DSV4_AITER_PRESHUFFLE
+
 
 class DeepseekV4MLP(nn.Module):
     def __init__(
@@ -99,8 +103,43 @@ class DeepseekV4MLP(nn.Module):
         else:
             self.act_fn = SiluAndMul()
 
+        # gate_up_proj B-preshuffle (ColumnParallel -> no all-reduce); set at load.
+        self._gateup = (
+            _USE_AITER_PRESHUFFLE
+            and current_platform.is_rocm()
+            and rocm_aiter_ops.is_enabled()
+        )
+        self._gateup_pre: tuple[torch.Tensor, torch.Tensor] | None = None
+
+    def prepare_gateup_preshuffle(self) -> None:
+        # B-preshuffle a copy of the gate_up_proj weight; original stays unshuffled.
+        if not self._gateup:
+            return
+        w = getattr(self.gate_up_proj, "weight", None)
+        ws = getattr(self.gate_up_proj, "weight_scale_inv", None)  # per-block scale
+        if w is None or ws is None or w.dim() != 2 or w.shape[-1] % 128 != 0:
+            return
+        if ws.dtype == torch.float8_e8m0fnu:
+            from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+                _upcast_e8m0_to_fp32,
+            )
+
+            ws = _upcast_e8m0_to_fp32(ws).contiguous()
+        self._gateup_pre = (
+            rocm_aiter_ops.shuffle_weight(w.data, layout=(16, 16)),
+            ws,
+        )
+
     def forward(self, x):
-        gate_up, _ = self.gate_up_proj(x)
+        if self._gateup_pre is not None and x.dim() == 2:
+            w_pre, w_scale = self._gateup_pre
+            # gate_up via fp8 group-quant (col-major) + B-preshuffle GEMM.
+            x_fp8, x_scale = rocm_aiter_ops.group_fp8_quant_transpose_scale(x)
+            gate_up = rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
+                x_fp8, w_pre, x_scale, w_scale, output_dtype=x.dtype
+            )
+        else:
+            gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
@@ -817,6 +856,8 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP):
         for module in self.modules():
             if isinstance(module, DeepseekV4ROCMAiterMLAAttention):
                 module.prepare_attn_preshuffle()
+            elif isinstance(module, DeepseekV4MLP):
+                module.prepare_gateup_preshuffle()
         return loaded_params
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
