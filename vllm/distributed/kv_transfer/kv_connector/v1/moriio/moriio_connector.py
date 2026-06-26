@@ -407,6 +407,28 @@ class MoRIIOConnectorScheduler:
         self.request_id_to_transfer_id: dict[ReqId, TransferId] = {}
 
     def map_request_id(self, request_id: ReqId, transfer_id: TransferId):
+        prev_req = self.transfer_id_to_request_id.get(transfer_id)
+        if prev_req is not None and prev_req != request_id:
+            logger.warning(
+                "Duplicate transfer_id %s remapped from request %s to %s; "
+                "the previous mapping is overwritten (possible id collision).",
+                transfer_id,
+                prev_req,
+                request_id,
+            )
+            if self.request_id_to_transfer_id.get(prev_req) == transfer_id:
+                del self.request_id_to_transfer_id[prev_req]
+        prev_transfer = self.request_id_to_transfer_id.get(request_id)
+        if prev_transfer is not None and prev_transfer != transfer_id:
+            logger.warning(
+                "Request %s remapped from transfer_id %s to %s; "
+                "the previous mapping is overwritten.",
+                request_id,
+                prev_transfer,
+                transfer_id,
+            )
+            if self.transfer_id_to_request_id.get(prev_transfer) == request_id:
+                del self.transfer_id_to_request_id[prev_transfer]
         self.transfer_id_to_request_id[transfer_id] = request_id
         self.request_id_to_transfer_id[request_id] = transfer_id
 
@@ -414,12 +436,21 @@ class MoRIIOConnectorScheduler:
         if request_id in self.request_id_to_transfer_id:
             transfer_id = self.request_id_to_transfer_id[request_id]
             del self.request_id_to_transfer_id[request_id]
-            if transfer_id in self.transfer_id_to_request_id:
+            mapped_req_id = self.transfer_id_to_request_id.get(transfer_id)
+            if mapped_req_id == request_id:
                 del self.transfer_id_to_request_id[transfer_id]
-            else:
+            elif mapped_req_id is None:
                 logger.warning(
                     "transfer id not in transfer_id_to_request_id lookup"
                     "table. there is likely a bug!"
+                )
+            else:
+                logger.warning(
+                    "Not removing transfer_id %s while unmapping request %s: "
+                    "it now maps to request %s.",
+                    transfer_id,
+                    request_id,
+                    mapped_req_id,
                 )
         else:
             logger.warning(
@@ -696,12 +727,18 @@ class MoRIIOConnectorScheduler:
         """
 
         request_id = request.request_id
-        # Consumer: can unmap transfer_id<->request_id immediately since done_recving
-        #   has fired at this point (i.e. KV has been transferred)
-        # Producer: must keep the mapping until we get notification that blocks can
-        #   be freed, which may be several scheduler steps later.
+
+        def clear_mapping_if_done(delay_free_blocks: bool = False) -> None:
+            # Consumer: done_recving has fired at this point, so the mapping is
+            # no longer needed. Producer only keeps the mapping while block
+            # freeing is deferred until a later finished_sending signal.
+            if self.is_producer and delay_free_blocks:
+                return
+            if request_id in self.request_id_to_transfer_id:
+                self.unmap_request_id(request_id)
+
         if not self.is_producer:
-            self.unmap_request_id(request_id)
+            clear_mapping_if_done()
 
         params = request.kv_transfer_params
         logger.debug(
@@ -711,6 +748,7 @@ class MoRIIOConnectorScheduler:
             params,
         )
         if not params:
+            clear_mapping_if_done()
             return False, None
 
         if params.get("do_remote_prefill"):
@@ -728,12 +766,14 @@ class MoRIIOConnectorScheduler:
             else:
                 self._reqs_need_recv[request.request_id] = (request, [])
             params["do_remote_prefill"] = False
+            clear_mapping_if_done()
             return False, None
 
         if (
             not params.get("do_remote_decode")
             or request.status != RequestStatus.FINISHED_LENGTH_CAPPED
         ):
+            clear_mapping_if_done()
             return False, None
 
         # computed_block_ids = block_ids if all_full else block_ids[:-1]
@@ -750,6 +790,8 @@ class MoRIIOConnectorScheduler:
             self._deferred_send_deadlines[request.request_id] = (
                 time.monotonic() + self._defer_timeout
             )
+        else:
+            clear_mapping_if_done(delay_free_blocks=False)
 
         # Return KV transfer params forwarded verbatim to the decode instance by
         # the router.
