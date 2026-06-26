@@ -33,7 +33,11 @@ from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     RequestResponseMetadata,
 )
-from vllm.entrypoints.openai.responses.context import ConversationContext, SimpleContext
+from vllm.entrypoints.openai.responses.context import (
+    ConversationContext,
+    HarmonyContext,
+    SimpleContext,
+)
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseCreatedEvent,
     ResponseRawMessageAndToken,
@@ -678,6 +682,61 @@ class TestHarmonyPreambleStreaming:
             type_names = [e.type for e in events]
             assert "response.output_item.added" in type_names
             assert "response.output_item.done" in type_names
+
+    @pytest.mark.asyncio
+    async def test_finished_partial_message_flushes_after_final_delta(self):
+        """Streaming Harmony flush must happen after the last text delta."""
+        serving = _make_serving_instance_with_reasoning()
+        serving.tool_server = None
+
+        content_part = MagicMock()
+        content_part.text = "hello"
+        previous_item = MagicMock()
+        previous_item.channel = "final"
+        previous_item.recipient = None
+        previous_item.content = [content_part]
+
+        ctx = MagicMock(spec=HarmonyContext)
+        ctx.finish_reason = None
+        ctx.function_tool_names = None
+        ctx.last_append_segments = [
+            Segment(channel="final", recipient=None, delta="hello"),
+            Segment(
+                channel="final",
+                recipient=None,
+                delta="",
+                completed_message=previous_item,
+            ),
+        ]
+
+        async def result_generator():
+            yield ctx
+
+        request = ResponsesRequest(input="hi", tools=[], stream=True)
+        sampling_params = SamplingParams(max_tokens=64)
+        metadata = RequestResponseMetadata(request_id="req")
+        _identity_increment._counter = 0  # type: ignore
+
+        events = []
+        async for event in serving._process_harmony_streaming_events(
+            request=request,
+            sampling_params=sampling_params,
+            result_generator=result_generator(),
+            context=ctx,
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=metadata,
+            created_time=0,
+            _increment_sequence_number_and_return=_identity_increment,
+        ):
+            events.append(event)
+
+        type_names = [e.type for e in events]
+        assert "response.output_text.delta" in type_names
+        assert "response.output_text.done" in type_names
+        assert type_names.index("response.output_text.delta") < type_names.index(
+            "response.output_text.done"
+        )
 
 
 def _make_simple_context_with_output(text, token_ids, response_parser=None):

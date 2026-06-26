@@ -4,7 +4,7 @@
 from unittest.mock import patch
 
 import pytest
-from openai_harmony import Author, Message, Role, TextContent
+from openai_harmony import Author, HarmonyError, Message, Role, TextContent
 
 from vllm.entrypoints.openai.responses.context import (
     HarmonyContext,
@@ -20,6 +20,8 @@ def create_mock_request_output(
     output_token_ids=None,
     num_cached_tokens=0,
     finished=True,
+    finish_reason=None,
+    text="Test output",
 ):
     """Helper function to create a mock RequestOutput object for testing."""
     outputs = []
@@ -27,11 +29,11 @@ def create_mock_request_output(
     outputs = [
         CompletionOutput(
             index=0,
-            text="Test output",
+            text=text,
             token_ids=token_ids,
             cumulative_logprob=0.0,
             logprobs=None,
-            finish_reason=None,
+            finish_reason=finish_reason,
             stop_reason=None,
         )
     ]
@@ -74,7 +76,8 @@ class FakeHarmonyParser(HarmonyParser):
         self.reasoning_parser = None
         self.tool_parser = None
         self._chunk_results: list[ChunkResult] = []
-        self._flush_results: list[Segment | None] = []
+        self._flush_results: list[Segment | HarmonyError | None] = []
+        self.flush_count = 0
         self.processed_chunks: list[list[int]] = []
 
     def enqueue_chunk_result(
@@ -92,6 +95,9 @@ class FakeHarmonyParser(HarmonyParser):
     def enqueue_flush_result(self, segment: Segment | None) -> None:
         self._flush_results.append(segment)
 
+    def enqueue_flush_error(self) -> None:
+        self._flush_results.append(HarmonyError("unexpected EOS"))
+
     def process_chunk(self, token_ids) -> ChunkResult:
         self.processed_chunks.append(list(token_ids))
         if self._chunk_results:
@@ -99,8 +105,12 @@ class FakeHarmonyParser(HarmonyParser):
         return ChunkResult(segments=[], reasoning_token_count=0)
 
     def flush(self) -> Segment | None:
+        self.flush_count += 1
         if self._flush_results:
-            return self._flush_results.pop(0)
+            result = self._flush_results.pop(0)
+            if isinstance(result, HarmonyError):
+                raise result
+            return result
         return None
 
 
@@ -300,6 +310,120 @@ def test_commentary_with_recipient_counted_as_reasoning():
 
     assert context.num_reasoning_tokens == 3
     assert context.num_output_tokens == 3
+
+
+def test_harmony_context_flushes_finished_parser_state():
+    """EOS should let Harmony commit a final message before output conversion."""
+    committed_message = Message.from_role_and_content(Role.ASSISTANT, "Answer")
+    committed_message = committed_message.with_channel("final")
+    flush_segment = Segment(
+        channel="final",
+        recipient=None,
+        delta="",
+        completed_message=committed_message,
+    )
+
+    context, parser = make_harmony_context()
+    parser.enqueue_flush_result(flush_segment)
+
+    context.append_output(
+        create_mock_request_output(
+            prompt_token_ids=[1, 2],
+            output_token_ids=[10, 11],
+            finished=True,
+            finish_reason="stop",
+        )
+    )
+
+    assert parser.flush_count == 1
+    assert context.messages == [committed_message]
+    assert context.last_append_segments == [flush_segment]
+
+
+def test_harmony_context_flushes_length_outputs_as_incomplete():
+    """Max-token truncation should preserve partial output as incomplete."""
+    committed_message = Message.from_role_and_content(Role.ASSISTANT, "Answer")
+    committed_message = committed_message.with_channel("final")
+    flush_segment = Segment(
+        channel="final",
+        recipient=None,
+        delta="",
+        completed_message=committed_message,
+    )
+
+    context, parser = make_harmony_context()
+    parser.enqueue_flush_result(flush_segment)
+
+    context.append_output(
+        create_mock_request_output(
+            prompt_token_ids=[1, 2],
+            output_token_ids=[10, 11],
+            finished=True,
+            finish_reason="length",
+        )
+    )
+
+    assert parser.flush_count == 1
+    assert context.messages == [committed_message]
+    assert context.last_append_flush_status is True
+    assert context.last_append_segments == [flush_segment]
+
+
+def test_harmony_context_recovers_raw_output_on_flush_error():
+    """Malformed Harmony output should surface raw text instead of raising."""
+    context, parser = make_harmony_context()
+    raw_prefix = "<|channel|>final "
+    raw_delta = '{"answer": "hi"}<|return|>'
+    raw_output = raw_prefix + raw_delta
+
+    context.append_output(
+        create_mock_request_output(
+            prompt_token_ids=[1, 2],
+            output_token_ids=[10],
+            finished=False,
+            text=raw_prefix,
+        )
+    )
+    parser.enqueue_flush_error()
+
+    context.append_output(
+        create_mock_request_output(
+            output_token_ids=[11],
+            finished=True,
+            finish_reason="stop",
+            text=raw_delta,
+        )
+    )
+
+    assert parser.flush_count == 1
+    assert context.last_append_flush_status is False
+    assert len(context.messages) == 1
+    assert context.messages[0].channel == "final"
+    assert context.messages[0].content[0].text == raw_output
+    assert context.last_append_segments[0].delta == raw_delta
+    assert context.last_append_segments[1].completed_message is context.messages[0]
+
+
+def test_harmony_context_recovers_raw_length_output_as_incomplete():
+    """Raw fallback on max-token truncation should stay incomplete."""
+    context, parser = make_harmony_context()
+    parser.enqueue_flush_error()
+    raw_output = '<|channel|>final {"answer": "hi"}'
+
+    context.append_output(
+        create_mock_request_output(
+            prompt_token_ids=[1, 2],
+            output_token_ids=[10, 11],
+            finished=True,
+            finish_reason="length",
+            text=raw_output,
+        )
+    )
+
+    assert parser.flush_count == 1
+    assert context.last_append_flush_status is True
+    assert len(context.messages) == 1
+    assert context.messages[0].content[0].text == raw_output
 
 
 def test_zero_tokens_edge_case():

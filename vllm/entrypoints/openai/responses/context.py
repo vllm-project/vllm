@@ -624,14 +624,18 @@ class HarmonyContext(ConversationContext):
         self.all_turn_metrics: list[TurnMetrics] = []
         self.is_first_turn = True
         self.first_tok_of_message = True
+        self._raw_output_text = ""
         self.kv_transfer_params: dict[str, Any] | None = None
 
     def append_output(self, output: RequestOutput) -> None:
         if self.first_tok_of_message:
             self.finish_reason = None
+            self._raw_output_text = ""
             self._update_prefill_token_usage(output)
 
-        output_token_ids = output.outputs[0].token_ids
+        completion_output = output.outputs[0]
+        output_token_ids = completion_output.token_ids
+        self._raw_output_text += completion_output.text
         result = self.response_parser.process_chunk(output_token_ids)
         segments = result.segments
         self.num_reasoning_tokens += result.reasoning_token_count
@@ -642,11 +646,37 @@ class HarmonyContext(ConversationContext):
             self.kv_transfer_params = output.kv_transfer_params
 
         if output.finished:
-            self.finish_reason = output.outputs[0].finish_reason
-            flushed = self.response_parser.flush()
+            self.finish_reason = completion_output.finish_reason
+            flushed = None
+            recovered_from_harmony_error = False
+            try:
+                flushed = self.response_parser.flush()
+            except HarmonyError:
+                from vllm.parser.harmony import Segment
+
+                raw_message = Message.from_role_and_content(
+                    Role.ASSISTANT, self._raw_output_text
+                ).with_channel("final")
+                segments = [
+                    Segment(
+                        channel="final",
+                        recipient=None,
+                        delta=completion_output.text,
+                    ),
+                    Segment(
+                        channel="final",
+                        recipient=None,
+                        delta="",
+                        completed_message=raw_message,
+                    ),
+                ]
+                recovered_from_harmony_error = True
             if flushed is not None:
                 segments.append(flushed)
-            self.last_append_flush_status = flushed is not None
+            self.last_append_flush_status = flushed is not None or (
+                recovered_from_harmony_error
+                and completion_output.finish_reason == "length"
+            )
             self.all_turn_metrics.append(self.current_turn_metrics.copy())
             self.current_turn_metrics.reset()
 
