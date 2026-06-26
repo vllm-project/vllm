@@ -1374,8 +1374,11 @@ steps:
     - python3 basic/offline_inference/score.py
     # Multi-modal models
     - python3 generate/multimodal/audio_language_offline.py --seed 0
-    - python3 generate/multimodal/vision_language_offline.py --seed 0
-    - python3 generate/multimodal/vision_language_multi_image_offline.py --seed 0
+    # These two examples import transformers before vllm, so on ROCm the HIP context
+    # is initialized in the parent before vllm sets this guard, poisoning fork. Set it
+    # inline to keep torch.cuda.is_available() fork-safe (see vllm/env_override.py).
+    - PYTORCH_NVML_BASED_CUDA_CHECK=1 python3 generate/multimodal/vision_language_offline.py --seed 0
+    - PYTORCH_NVML_BASED_CUDA_CHECK=1 python3 generate/multimodal/vision_language_multi_image_offline.py --seed 0
     - python3 generate/multimodal/encoder_decoder_multimodal_offline.py --model-type whisper --seed 0
     # Pooling models
     - python3 pooling/embed/vision_embedding_offline.py --seed 0
@@ -1817,7 +1820,10 @@ steps:
   - pytest -v -s tests/models/test_transformers.py
   - pytest -v -s tests/models/multimodal/test_mapping.py
   - python3 examples/basic/offline_inference/chat.py
-  - python3 examples/generate/multimodal/vision_language_offline.py --model-type qwen2_5_vl
+  # This example imports transformers before vllm, so on ROCm the HIP context is
+  # initialized in the parent before vllm sets this guard, poisoning fork. Set it
+  # inline to keep torch.cuda.is_available() fork-safe (see vllm/env_override.py).
+  - PYTORCH_NVML_BASED_CUDA_CHECK=1 python3 examples/generate/multimodal/vision_language_offline.py --model-type qwen2_5_vl
   - VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/generate/multimodal/audio_language_offline.py --model-type whisper
 
 #-------------------------------------------------------  mi300 · quantization  --------------------------------------------------------#
@@ -2790,13 +2796,12 @@ steps:
     - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-gfx950.txt
 
-- label: LM Eval Qwen3-5 Models (B200-MI355) %N # TBD
-  timeout_in_minutes: 180
+- label: LM Eval Qwen3-5 Models (B200-MI355) # TBD
+  timeout_in_minutes: 120
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_2
   num_gpus: 2
   optional: true
-  parallelism: 4
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/model_executor/models/qwen3_5.py
@@ -2811,7 +2816,7 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-qwen35-mi355.txt --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-qwen35-mi355.txt
 
 - label: LM Eval Small Models (2xB200-2xMI355) # TBD
   timeout_in_minutes: 180
@@ -2894,8 +2899,11 @@ steps:
   - python3 basic/offline_inference/score.py
   # Multi-modal models
   - python3 generate/multimodal/audio_language_offline.py --seed 0
-  - python3 generate/multimodal/vision_language_offline.py --seed 0
-  - python3 generate/multimodal/vision_language_multi_image_offline.py --seed 0
+  # These two examples import transformers before vllm, so on ROCm the HIP context
+  # is initialized in the parent before vllm sets this guard, poisoning fork. Set it
+  # inline to keep torch.cuda.is_available() fork-safe (see vllm/env_override.py).
+  - PYTORCH_NVML_BASED_CUDA_CHECK=1 python3 generate/multimodal/vision_language_offline.py --seed 0
+  - PYTORCH_NVML_BASED_CUDA_CHECK=1 python3 generate/multimodal/vision_language_multi_image_offline.py --seed 0
   - python3 generate/multimodal/encoder_decoder_multimodal_offline.py --model-type whisper --seed 0
   # Pooling models
   - python3 pooling/embed/vision_embedding_offline.py --seed 0

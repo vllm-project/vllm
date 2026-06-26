@@ -21,7 +21,9 @@ tracing.workspace = true
 [dev-dependencies]
 criterion.workspace = true
 hf-hub.workspace = true
+reqwest.workspace = true
 tempfile.workspace = true
+tokio.workspace = true
 
 [[bench]]
 name = "hf"
