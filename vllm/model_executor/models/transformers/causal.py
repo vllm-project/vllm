@@ -72,18 +72,18 @@ class CausalMixin(VllmModelForTextGeneration):
         """True if the checkpoint ships a (non-tied) ``lm_head.bias`` tensor.
 
         HF exporters that emit a learned output bias set an explicit config
-        flag; some configs spell it differently, so accept any known alias and
-        fall back to the model's own ``lm_head`` module when present.
+        flag; some configs spell it differently, so accept any known alias.
+        (``self.model`` is the ``AutoModel`` base module, which has no head, so
+        there is nothing to fall back to there.)
         """
         for attr in ("lm_head_bias", "use_lm_head_bias", "output_bias"):
             if getattr(self.text_config, attr, None):
                 return True
-        lm_head = getattr(self.model, "lm_head", None)
-        return getattr(lm_head, "bias", None) is not None
+        return False
 
     def compute_logits(self, hidden_states: "torch.Tensor") -> "torch.Tensor | None":
         # Apply the learned output bias (if any). The unquantized logits path
         # only honours a bias passed here, never ``lm_head.bias`` directly.
-        bias = getattr(self.lm_head, "bias", None)
-        logits = self.logits_processor(self.lm_head, hidden_states, bias)
+        # ParallelLMHead always registers ``self.bias`` (None when bias=False).
+        logits = self.logits_processor(self.lm_head, hidden_states, self.lm_head.bias)
         return logits
