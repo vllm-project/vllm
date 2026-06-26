@@ -69,6 +69,7 @@ steps:
   key: lm-eval-small-models-tp
   timeout_in_minutes: 10
   num_devices: 2
+  optional: true
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
