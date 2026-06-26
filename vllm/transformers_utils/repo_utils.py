@@ -9,7 +9,7 @@ import time
 from collections.abc import Callable
 from functools import cache
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import huggingface_hub
 from huggingface_hub import HfApi, try_to_load_from_cache
@@ -288,7 +288,7 @@ def get_hf_file_bytes(
     if file_path is None:
         file_path = _try_download_from_hf_hub(model, file_name, revision)
 
-    if file_path is not None and file_path.is_file():
+    if isinstance(file_path, Path) and file_path.is_file():
         with open(file_path, "rb") as file:
             return file.read()
 
@@ -297,7 +297,20 @@ def get_hf_file_bytes(
 
 def try_get_local_file(
     model: str | Path, file_name: str, revision: str | None = "main"
-) -> Path | None:
+) -> Path | Any | None:
+    """
+    Try to get a local file from the HuggingFace repository.
+
+    The possible return values are:
+
+    - A `Path` object if the local file is found
+    - The `huggingface_hub._CACHED_NO_EXIST` sentinel if the file is known to not exist
+    - `None` if the file is not found and we cannot determine if it exists or not
+
+    Callers of this method should handle the `_CACHED_NO_EXIST` sentinel appropriately.
+    Checking if the return value `is not None` is not sufficient because it does not
+    distinguish between the file not existing and the file not being found.
+    """
     file_path = Path(model) / file_name
     if file_path.is_file():
         return file_path
@@ -308,6 +321,7 @@ def try_get_local_file(
             )
             if isinstance(cached_filepath, str):
                 return Path(cached_filepath)
+            return cached_filepath
         except ValueError:
             ...
     return None
@@ -335,7 +349,7 @@ def get_hf_file_to_dict(
     if file_path is None:
         file_path = _try_download_from_hf_hub(model, file_name, revision)
 
-    if file_path is not None and file_path.is_file():
+    if isinstance(file_path, Path) and file_path.is_file():
         with open(file_path) as file:
             return json.load(file)
 
