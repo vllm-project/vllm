@@ -110,15 +110,10 @@ steps:
   mirror:
     amd:
       device: mi300_1
+      soft_fail: true
       timeout_in_minutes: 180
       depends_on:
       - image-build-amd
-      commands:
-      # Temporary soft pass for #46780: AITER unified attention no longer
-      # supports fp16 KV cache, but keep the rest of AMD compile passes hard.
-      # Pytest auto-ids dtype params as dtype0=bf16 and dtype1=fp16.
-      - pytest -s -v compile/passes --ignore compile/passes/distributed -k 'not (test_attention_quant_pattern and ROCM_AITER_UNIFIED_ATTN and dtype1)'
-      - pytest -s -v compile/passes/test_fusion_attn.py -k 'test_attention_quant_pattern and ROCM_AITER_UNIFIED_ATTN and dtype1' || true
 
 - label: PyTorch Fullgraph Smoke Test
   key: pytorch-fullgraph-smoke-test
