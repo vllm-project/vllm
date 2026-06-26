@@ -538,7 +538,7 @@ def _pack_bitmatrix_triton(
         the third tensor axis used in the original 3D one-hot reduce.
       * Pre-compute (one<<rem) once and reuse it across columns.
       * `bm_cols` is a constexpr so the column loop is fully unrolled.
-      * Heuristic num_warps=4/num_stages=1 minimises launch / occupancy
+      * Heuristic num_warps=2/num_stages=1 minimises launch / occupancy
         overhead for this sub-30us kernel on CDNA.
     """
     pid_m = tl.program_id(0)
@@ -593,10 +593,10 @@ _HIP_KERNEL_SRC = r"""
 __global__ __launch_bounds__(256)
 void pack_bitmatrix_hip_kernel(uint32_t* __restrict__ bm,
                                const int16_t* __restrict__ topk,
-                               int n_rows,
+                               int64_t n_rows,
                                int bm_cols,
                                int topk_per_row) {
-    const int row = blockIdx.x * blockDim.x + threadIdx.x;
+    const int64_t row = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
     if (row >= n_rows) return;
 
     // Up to ceil(384/32) = 12 columns for typical configs; allocate 16 to
@@ -626,15 +626,15 @@ void pack_bitmatrix_hip_kernel(uint32_t* __restrict__ bm,
 // host-side hipLaunchKernelGGL macro in plain c++ code).
 void pack_bitmatrix_hip_launch(void* bm_ptr,
                                const void* topk_ptr,
-                               int n_rows,
+                               int64_t n_rows,
                                int bm_cols,
                                int topk_per_row,
                                void* stream) {
     const int threads = 256;
-    const int blocks = (n_rows + threads - 1) / threads;
+    const int64_t blocks = (n_rows + threads - 1) / threads;
     if (blocks <= 0) return;
     hipLaunchKernelGGL(pack_bitmatrix_hip_kernel,
-        dim3(blocks), dim3(threads), 0,
+        dim3((unsigned int)blocks), dim3(threads), 0,
         reinterpret_cast<hipStream_t>(stream),
         reinterpret_cast<uint32_t*>(bm_ptr),
         reinterpret_cast<const int16_t*>(topk_ptr),
@@ -671,7 +671,7 @@ def _maybe_load_hip_kernel():
 // Forward declaration of the kernel launcher implemented in the .hip TU.
 void pack_bitmatrix_hip_launch(void* bm_ptr,
                                const void* topk_ptr,
-                               int n_rows,
+                               int64_t n_rows,
                                int bm_cols,
                                int topk_per_row,
                                void* stream);
@@ -688,7 +688,7 @@ void launch_pack_bitmatrix_raw(
     pack_bitmatrix_hip_launch(
         reinterpret_cast<void*>(bm_ptr),
         reinterpret_cast<const void*>(topk_ptr),
-        (int)n_rows, (int)bm_cols, (int)topk_per_row,
+        n_rows, (int)bm_cols, (int)topk_per_row,
         (void*)stream.stream());
 }
 
@@ -711,10 +711,10 @@ void launch_pack_bitmatrix(
                 "VLLM_PACK_BM_HIP_BUILD_DIR",
                 _os.path.join(
                     _os.environ.get("TMPDIR", "/tmp"),
-                    "vllm_pack_bm_hip_v2",
+                    f"vllm_pack_bm_hip_v2_uid{_os.getuid()}",
                 ),
             )
-            _os.makedirs(build_dir, exist_ok=True)
+            _os.makedirs(build_dir, mode=0o700, exist_ok=True)
 
             mod = load_inline(
                 name="vllm_pack_bm_hip_v2",
