@@ -29,6 +29,7 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV32IndexerCache,
     yarn_get_mscale,
 )
+from vllm.model_executor.models.utils import extract_layer_index
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.attention.mla_attention import (
@@ -196,6 +197,27 @@ class DeepseekV32Attention(MLAAttention):
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
             scaling = scaling * mscale * mscale
 
+        # DSA "shared indexer" pattern: only some layers carry an indexer; the
+        # rest reuse the top-k written by the previous indexer layer into the
+        # shared topk_indices_buffer. DeepSeek-V3.2 builds it on every layer
+        # (index_topk_freq defaults to 1); GLM-5.2 uses index_topk_freq=4 so
+        # only layers [0,1,2,6,10,...] (+ MTP) carry one.
+        layer_id = extract_layer_index(prefix)
+        index_topk_freq = getattr(config, "index_topk_freq", 1)
+        index_topk_pattern = getattr(config, "index_topk_pattern", None)
+        index_skip_topk_offset = getattr(config, "index_skip_topk_offset", 2)
+        if index_topk_pattern is None:
+            skip_topk = (
+                max(layer_id - index_skip_topk_offset + 1, 0) % index_topk_freq != 0
+            )
+        elif 0 <= layer_id < len(index_topk_pattern):
+            skip_topk = index_topk_pattern[layer_id] == "S"
+        else:
+            skip_topk = False
+        # MTP/nextn layers always build a full indexer (they toggle at runtime).
+        num_hidden_layers = getattr(config, "num_hidden_layers", None)
+        is_mtp_layer = num_hidden_layers is not None and layer_id >= num_hidden_layers
+
         # Build kv_b_proj + indexer first; they are passed to MLAAttention.__init__
         # (which runs nn.Module.__init__ and registers them).
         kv_b_proj = ColumnParallelLinear(
@@ -205,16 +227,18 @@ class DeepseekV32Attention(MLAAttention):
             quant_config=quant_config,
             prefix=f"{prefix}.kv_b_proj",
         )
-        indexer = DeepseekV32Indexer(
-            vllm_config,
-            config,
-            hidden_size,
-            q_lora_rank,
-            quant_config,
-            cache_config,
-            topk_indices_buffer,
-            prefix=f"{prefix}.indexer",
-        )
+        indexer = None
+        if not skip_topk or is_mtp_layer:
+            indexer = DeepseekV32Indexer(
+                vllm_config,
+                config,
+                hidden_size,
+                q_lora_rank,
+                quant_config,
+                cache_config,
+                topk_indices_buffer,
+                prefix=f"{prefix}.indexer",
+            )
 
         # Set up the MLA engine (impl, KV cache, scales, backend, registration,
         # and process_weights_after_loading) via the MLAAttention base.
@@ -299,8 +323,11 @@ class DeepseekV32Attention(MLAAttention):
         )
 
         # Lightning indexer writes the top-k indices into the shared buffer;
-        # self-breaks via its sparse_attn_indexer op under capture.
-        self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)  # type: ignore[operator]
+        # self-breaks via its sparse_attn_indexer op under capture. "Shared"
+        # layers (indexer is None) reuse the top-k from the previous indexer
+        # layer already sitting in the buffer.
+        if self.indexer is not None:
+            self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)  # type: ignore[operator]
 
         output = torch.empty(
             (hidden_states.shape[0], self.num_local_heads * self.v_head_dim),
