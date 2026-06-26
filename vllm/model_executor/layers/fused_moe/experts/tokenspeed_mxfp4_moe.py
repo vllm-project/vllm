@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
+from tokenspeed_kernel_amd.ops.moe.fused_mxfp_gfx950 import gluon_mxfp_fused_moe
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -121,56 +122,15 @@ class TokenSpeedMxfp4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
                 "TokenSpeed MXFP4 MoE does not support apply_router_weight_on_input."
             )
 
-        # TODO: Re-enable after debugging CUDA graph failures in the small-M
-        # warp-decode path.
-        enable_warp_decode = False
+        enable_warp_decode = True
         w13_precision_config = self.quant_config._w1.scale
         w2_precision_config = self.quant_config._w2.scale
-        w13_kernel_weight = getattr(w1, "_gluon_shuffled", None)
-        w13_is_preshuffled = w13_kernel_weight is not None or bool(
-            getattr(w1, "is_shuffled_for_gluon_dot", False)
-        )
-        if w13_kernel_weight is None:
-            w13_kernel_weight = w1
-
-        w2_kernel_weight = getattr(w2, "_gluon_shuffled", None)
-        w2_is_preshuffled = w2_kernel_weight is not None or bool(
-            getattr(w2, "is_shuffled_for_gluon_dot", False)
-        )
-        if w2_kernel_weight is None:
-            w2_kernel_weight = w2
-
-        w13_original_k_pk = int(
-            getattr(w13_kernel_weight, "original_k_pk", hidden_states.shape[1] // 2)
-        )
-        w2_original_k_pk = int(
-            getattr(w2_kernel_weight, "original_k_pk", w13_kernel_weight.shape[-1] // 4)
-        )
-        w2_original_n = int(
-            getattr(w2_kernel_weight, "original_n", hidden_states.shape[1])
-        )
-
-        if w13_is_preshuffled:
-            w13_kernel_weight.is_shuffled_for_gluon_dot = True
-            w13_kernel_weight.original_k_pk = w13_original_k_pk
-            w13_kernel_weight.gluon_dot_block_k_pk = 128
-            w13_kernel_weight.gluon_dot_block_n = 128
-        if w2_is_preshuffled:
-            w2_kernel_weight.is_shuffled_for_gluon_dot = True
-            w2_kernel_weight.original_k_pk = w2_original_k_pk
-            w2_kernel_weight.original_n = w2_original_n
-            w2_kernel_weight.gluon_dot_block_k_pk = 128
-            w2_kernel_weight.gluon_dot_block_n = 128
-
-        from tokenspeed_kernel_amd.ops.moe.fused_mxfp_gfx950 import (
-            gluon_mxfp_fused_moe,
-        )
 
         return gluon_mxfp_fused_moe(
             hidden_states,
             router_logits,
-            w13_kernel_weight,
-            w2_kernel_weight,
+            w1,
+            w2,
             w13_bias=self.w1_bias,
             w2_bias=self.w2_bias,
             w13_precision_config=w13_precision_config,
