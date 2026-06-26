@@ -31,6 +31,7 @@ from vllm.multimodal.video import (
     VideoTargetMetadata,
     get_video_loader_backend_for_processor,
 )
+from vllm.platforms import current_platform
 from vllm.transformers_utils.processor import get_video_processor_cls_name_from_config
 
 from .utils import create_long_gop_video, create_video_from_image
@@ -74,6 +75,7 @@ def test_video_loader_type_doesnt_exist():
         VIDEO_LOADER_REGISTRY.load("non_existing_video_loader")
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 def test_pynvvideocodec_backend_accounts_raw_decoded_frames(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -132,6 +134,7 @@ def test_pynvvideocodec_backend_accounts_raw_decoded_frames(
     assert metadata["frames_indices"] == [0, 3, 6, 9]
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 def test_pynvvideocodec_codec_uses_dynamic_sampling_strategy(
     monkeypatch: pytest.MonkeyPatch,
 ):
