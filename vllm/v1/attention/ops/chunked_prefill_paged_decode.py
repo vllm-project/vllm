@@ -10,10 +10,13 @@
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .prefix_prefill import context_attention_fwd
+
+logger = init_logger(__name__)
 
 float8_info = torch.finfo(current_platform.fp8_dtype())
 
@@ -35,8 +38,8 @@ def cdiv_fn(x, y):
 def kernel_paged_attention_2d(
     output_ptr,  # [num_tokens, num_query_heads, head_size]
     query_ptr,  # [num_tokens, num_query_heads, head_size]
-    key_cache_ptr,  # [num_blks, num_kv_heads, blk_size, head_size]
-    value_cache_ptr,  # [num_blks, num_kv_heads, blk_size, head_size]
+    key_cache_ptr,  # [num_blks, num_kv_heads, head_size // x, blk_size, x]
+    value_cache_ptr,  # [num_blks, num_kv_heads, head_size, blk_size]
     sink_ptr,  # [num_query_heads]
     block_tables_ptr,  # [num_seqs, max_num_blocks_per_seq]
     seq_lens_ptr,  # [num_seqs]
@@ -59,10 +62,12 @@ def kernel_paged_attention_2d(
     HEAD_SIZE_PADDED: tl.constexpr,  # int, must be power of 2
     USE_ALIBI_SLOPES: tl.constexpr,  # bool
     SLIDING_WINDOW: tl.constexpr,  # int
+    x: tl.constexpr,  # int
     stride_k_cache_0: tl.int64,  # int
     stride_k_cache_1: tl.int64,  # int
     stride_k_cache_2: tl.int64,  # int
     stride_k_cache_3: tl.int64,  # int
+    stride_k_cache_4: tl.int64,  # int
     stride_v_cache_0: tl.int64,  # int
     stride_v_cache_1: tl.int64,  # int
     stride_v_cache_2: tl.int64,  # int
@@ -148,18 +153,21 @@ def kernel_paged_attention_2d(
         p_block_idx = tl.load(block_tables_ptr + block_table_offset + l_block_idx)
         internal_offsets = abs_token_idx % PHYSICAL_BLOCK_SIZE
 
+        # 5D addressing logic of K
         k_offset = (
             p_block_idx[None, :] * stride_k_cache_0
             + kv_head_idx * stride_k_cache_1
-            + internal_offsets[None, :] * stride_k_cache_2
-            + offs_d[:, None] * stride_k_cache_3
+            + (offs_d[:, None] // x) * stride_k_cache_2
+            + internal_offsets[None, :] * stride_k_cache_3
+            + (offs_d[:, None] % x) * stride_k_cache_4
         )
 
+        # 4D addressing logic of V (Slot is innermost)
         v_offset = (
             p_block_idx[:, None] * stride_v_cache_0
             + kv_head_idx * stride_v_cache_1
-            + internal_offsets[:, None] * stride_v_cache_2
-            + offs_d[None, :] * stride_v_cache_3
+            + offs_d[None, :] * stride_v_cache_2
+            + internal_offsets[:, None] * stride_v_cache_3
         )
 
         # K : (HEAD_SIZE, BLOCK_SIZE)
@@ -356,8 +364,10 @@ def chunked_prefill_paged_decode(
     )
 
     is_pow2 = block_size > 0 and (block_size & (block_size - 1) == 0)
+    if not is_pow2 or not has_native_layout:
+        use_custom = False
 
-    if use_custom and is_pow2 and has_native_layout:
+    if use_custom:
         _PARTITION_SIZE_ROCM = 256
         max_num_partitions = (
             max_seq_len + _PARTITION_SIZE_ROCM - 1
@@ -397,100 +407,105 @@ def chunked_prefill_paged_decode(
             v_scale=v_scale,
             fp8_out_scale=output_scale,
         )
-        return
+    else:
+        if not has_native_layout:
+            context_attention_fwd(
+                q=query,
+                k=key,
+                v=value,
+                o=output,
+                kv_cache_dtype=kv_cache_dtype,
+                k_cache=key_cache.transpose(2, 3),
+                v_cache=value_cache.transpose(2, 3),
+                b_loc=block_table,
+                b_start_loc=query_start_loc,
+                b_seq_len=seq_lens,
+                max_seq_len=max_seq_len,
+                max_input_len=max_query_len,
+                k_scale=k_scale,
+                v_scale=v_scale,
+                alibi_slopes=alibi_slopes,
+                sliding_window=sliding_window,
+                sm_scale=sm_scale,
+                skip_decode=False,
+                fp8_out_scale=output_scale,
+                sinks=sinks,
+                causal=causal,
+            )
+            return
 
-    if has_native_layout:
-        context_attention_fwd(
-            q=query,
-            k=key,
-            v=value,
-            o=output,
-            kv_cache_dtype=kv_cache_dtype,
-            k_cache=key_cache,
-            v_cache=value_cache,
-            b_loc=block_table,
-            b_start_loc=query_start_loc,
-            b_seq_len=seq_lens,
-            max_seq_len=max_seq_len,
-            max_input_len=max_query_len,
+        logger.warning_once(
+            "Cannot use ROCm custom paged attention kernel,"
+            " falling back to Triton implementation."
+        )
+        real_block_size = value_cache.shape[3]
+        # The standard model directly uses the original block_size.
+        # Non-standard 544 uses 32 to accommodate integer division logic.
+        # Cap at 128 to avoid exceeding GPU shared memory limits
+        # (e.g. hybrid Mamba models inflate block_size to 2048).
+        # The kernel handles TRITON_BLOCK_SIZE != PHYSICAL_BLOCK_SIZE
+        # via the l_block_idx/internal_offsets addressing logic.
+        MAX_TRITON_BLOCK_SIZE = 128
+        TRITON_BLOCK_SIZE = min(block_size, MAX_TRITON_BLOCK_SIZE) if is_pow2 else 32
+        if is_block_table_ptr:
+            # Using the physical base address of tensors
+            kv_element_size = key_cache.element_size()
+            block_byte_stride = key_cache.stride(0) * kv_element_size
+            # Get the starting physical address of the KV Cache
+            base_addr = key_cache.data_ptr()
+
+            # Normalization: Directly calculate the block offset
+            # of the pointer relative to the base address
+            processed_block_table = ((block_table - base_addr) // block_byte_stride).to(
+                torch.int32
+            )
+        else:
+            processed_block_table = block_table.to(torch.int32)
+
+        kernel_paged_attention_2d[
+            (
+                num_seqs,
+                num_kv_heads,
+            )
+        ](
+            output_ptr=output,
+            query_ptr=query,
+            key_cache_ptr=key_cache,
+            value_cache_ptr=value_cache,
+            sink_ptr=sinks,
+            block_tables_ptr=processed_block_table,
+            seq_lens_ptr=seq_lens,
+            alibi_slopes_ptr=alibi_slopes,
+            scale=sm_scale,
             k_scale=k_scale,
             v_scale=v_scale,
-            alibi_slopes=alibi_slopes,
-            sliding_window=sliding_window,
-            sm_scale=sm_scale,
-            skip_decode=False,
-            fp8_out_scale=output_scale,
-            sinks=sinks,
-            causal=causal,
+            out_scale_inv=1.0 / output_scale if output_scale is not None else 1.0,
+            num_query_heads=num_query_heads,
+            num_queries_per_kv=num_queries_per_kv,
+            num_queries_per_kv_padded=num_queries_per_kv_padded,
+            block_table_stride=processed_block_table.stride(0),
+            query_stride_0=query.stride(0),
+            query_stride_1=query.stride(1),
+            output_stride_0=output.stride(0),
+            output_stride_1=output.stride(1),
+            BLOCK_SIZE=TRITON_BLOCK_SIZE,
+            PHYSICAL_BLOCK_SIZE=real_block_size,
+            HEAD_SIZE=head_size,
+            HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
+            USE_ALIBI_SLOPES=use_alibi_slopes,
+            SLIDING_WINDOW=sliding_window,
+            x=key_cache.shape[4],
+            stride_k_cache_0=key_cache.stride(0),
+            stride_k_cache_1=key_cache.stride(1),
+            stride_k_cache_2=key_cache.stride(2),
+            stride_k_cache_3=key_cache.stride(3),
+            stride_k_cache_4=key_cache.stride(4),
+            stride_v_cache_0=value_cache.stride(0),
+            stride_v_cache_1=value_cache.stride(1),
+            stride_v_cache_2=value_cache.stride(2),
+            stride_v_cache_3=value_cache.stride(3),
+            filter_by_query_len=True,
+            query_start_len_ptr=query_start_loc,
+            USE_SINKS=sinks is not None,
+            USE_FP8=output_scale is not None,
         )
-        return
-
-    real_block_size = value_cache.shape[2]
-    # The standard model directly uses the original block_size.
-    # Non-standard 544 uses 32 to accommodate integer division logic.
-    # Cap at 128 to avoid exceeding GPU shared memory limits
-    # (e.g. hybrid Mamba models inflate block_size to 2048).
-    # The kernel handles TRITON_BLOCK_SIZE != PHYSICAL_BLOCK_SIZE
-    # via the l_block_idx/internal_offsets addressing logic.
-    MAX_TRITON_BLOCK_SIZE = 128
-    TRITON_BLOCK_SIZE = min(block_size, MAX_TRITON_BLOCK_SIZE) if is_pow2 else 32
-    if is_block_table_ptr:
-        # Using the physical base address of tensors
-        kv_element_size = key_cache.element_size()
-        block_byte_stride = key_cache.stride(0) * kv_element_size
-        # Get the starting physical address of the KV Cache
-        base_addr = key_cache.data_ptr()
-
-        # Normalization: Directly calculate the block offset
-        # of the pointer relative to the base address
-        processed_block_table = ((block_table - base_addr) // block_byte_stride).to(
-            torch.int32
-        )
-    else:
-        processed_block_table = block_table.to(torch.int32)
-
-    kernel_paged_attention_2d[
-        (
-            num_seqs,
-            num_kv_heads,
-        )
-    ](
-        output_ptr=output,
-        query_ptr=query,
-        key_cache_ptr=key_cache,
-        value_cache_ptr=value_cache,
-        sink_ptr=sinks,
-        block_tables_ptr=processed_block_table,
-        seq_lens_ptr=seq_lens,
-        alibi_slopes_ptr=alibi_slopes,
-        scale=sm_scale,
-        k_scale=k_scale,
-        v_scale=v_scale,
-        out_scale_inv=1.0 / output_scale if output_scale is not None else 1.0,
-        num_query_heads=num_query_heads,
-        num_queries_per_kv=num_queries_per_kv,
-        num_queries_per_kv_padded=num_queries_per_kv_padded,
-        block_table_stride=processed_block_table.stride(0),
-        query_stride_0=query.stride(0),
-        query_stride_1=query.stride(1),
-        output_stride_0=output.stride(0),
-        output_stride_1=output.stride(1),
-        BLOCK_SIZE=TRITON_BLOCK_SIZE,
-        PHYSICAL_BLOCK_SIZE=real_block_size,
-        HEAD_SIZE=head_size,
-        HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
-        USE_ALIBI_SLOPES=use_alibi_slopes,
-        SLIDING_WINDOW=sliding_window,
-        stride_k_cache_0=key_cache.stride(0),
-        stride_k_cache_1=key_cache.stride(1),
-        stride_k_cache_2=key_cache.stride(2),
-        stride_k_cache_3=key_cache.stride(3),
-        stride_v_cache_0=value_cache.stride(0),
-        stride_v_cache_1=value_cache.stride(1),
-        stride_v_cache_2=value_cache.stride(2),
-        stride_v_cache_3=value_cache.stride(3),
-        filter_by_query_len=True,
-        query_start_len_ptr=query_start_loc,
-        USE_SINKS=sinks is not None,
-        USE_FP8=output_scale is not None,
-    )
