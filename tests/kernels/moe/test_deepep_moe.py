@@ -361,17 +361,20 @@ def assert_deepep_close(
     k: int,
     use_fp8_dispatch: bool,
 ) -> None:
-    # Loosen tolerance for large k, which accumulates more error through the MoE.
-    atol = rtol = 7.6e-2 if k >= 2048 else 6e-2
-    percent = 1.0  # require all elements to match by default
-
     if use_fp8_dispatch and current_platform.is_fp8_fnuz():
-        # DeepEP's fp8 dispatch rounds differently than the emulated reference
-        # quant (more so on e4m3fnuz); allow a small fraction of outliers.
+        # ROCm e4m3fnuz rounds differently than the reference quant,
+        # so DeepEP's fp8 dispatch can yield a few outliers even with
+        # a correct kernel; allow a small fraction of mismatches here.
         atol = rtol = 1.5e-1
-        percent = 0.95
+        check_accuracy(expected, actual, atol=atol, rtol=rtol, percent=0.95)
+        return
 
-    check_accuracy(expected, actual, atol=atol, rtol=rtol, percent=percent)
+    torch.testing.assert_close(
+        expected,
+        actual,
+        atol=6e-2,
+        rtol=6e-2,
+    )
 
 
 def _deep_ep_moe(
