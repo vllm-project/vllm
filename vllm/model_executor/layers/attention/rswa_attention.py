@@ -23,15 +23,15 @@ class RSWAAttention(Attention):
         self._rswa_window = rswa_window
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
-        base = super().get_kv_cache_spec(vllm_config)
-        if base is None:
+        spec = super().get_kv_cache_spec(vllm_config)
+        if spec is None:
             return None
         return RSWASpec(
-            block_size=base.block_size,
-            num_kv_heads=base.num_kv_heads,
-            head_size=base.head_size,
-            head_size_v=getattr(base, "head_size_v", base.head_size),
-            dtype=base.dtype,
+            block_size=vllm_config.cache_config.block_size,
+            num_kv_heads=self.num_kv_heads,
+            head_size=self.head_size,
+            head_size_v=self.head_size_v,
+            dtype=self.kv_cache_torch_dtype,
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
             rswa_window=self._rswa_window,
         )
