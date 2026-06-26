@@ -36,7 +36,7 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
 )
 from vllm.v1.worker.workspace import current_workspace_manager
 
-_USE_AITER_ATTN_PRESHUFFLE = envs.VLLM_DSV4_AITER_ATTN_PRESHUFFLE
+_USE_AITER_PRESHUFFLE = envs.VLLM_DSV4_AITER_PRESHUFFLE
 
 
 def _build_indptr_from_lengths(lengths: torch.Tensor) -> torch.Tensor:
@@ -601,7 +601,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         return num_heads
 
     def prepare_attn_preshuffle(self) -> None:
-        if not _USE_AITER_ATTN_PRESHUFFLE:
+        if not _USE_AITER_PRESHUFFLE:
             return
         from vllm._aiter_ops import rocm_aiter_ops
         from vllm.model_executor.layers.quantization.utils.fp8_utils import (
