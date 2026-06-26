@@ -152,6 +152,20 @@ async def test_fetch_image_local_files(image_url: str):
             connector.fetch_image(f"file://{temp_dir}/../{os.path.basename(image_url)}")
 
 
+def test_fetch_video_local_file_size_limit():
+    with TemporaryDirectory() as temp_dir:
+        connector = MediaConnector(
+            allowed_local_media_path=temp_dir,
+            media_io_kwargs={"video": {"max_video_size_mb": 1}},
+        )
+        video_path = os.path.join(temp_dir, "oversized.mp4")
+        with open(video_path, "wb") as f:
+            f.write(b"0" * (2 * 1024 * 1024))
+
+        with pytest.raises(ValueError, match="exceeds the configured limit"):
+            connector.fetch_video(f"file://{video_path}")
+
+
 @pytest.mark.asyncio
 async def test_fetch_image_local_files_relative_allowed_path(tmp_path, monkeypatch):
     media_dir = tmp_path / "media"
