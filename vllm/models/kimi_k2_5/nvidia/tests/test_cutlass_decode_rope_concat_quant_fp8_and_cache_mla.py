@@ -14,7 +14,7 @@ pytest.importorskip("cutlass")
 pytest.importorskip("cutlass.torch")
 
 from vllm.models.kimi_k2_5.nvidia.ops.decode_rope_concat_quant_fp8_and_cache_mla import (  # noqa: E402, E501
-    _run_kimik25_decode_rope_concat_quant_fp8_and_cache_mla,
+    decode_rope_concat_quant_fp8_and_cache_mla,
 )
 
 KV_LORA_RANK = 512
@@ -114,7 +114,7 @@ def test_kimik25_decode_rope_concat_quant_fp8_and_cache_mla_matches_reference(
 
     actual_cache = torch.empty_like(expected_cache)
     actual_cache.fill_(123)
-    actual_q = _run_kimik25_decode_rope_concat_quant_fp8_and_cache_mla(
+    actual_q = decode_rope_concat_quant_fp8_and_cache_mla(
         positions=positions,
         ql_nope=ql_nope,
         q_pe=q_pe,

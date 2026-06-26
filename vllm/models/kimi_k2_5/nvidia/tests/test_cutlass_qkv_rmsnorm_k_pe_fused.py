@@ -13,7 +13,7 @@ pytest.importorskip("cutlass")
 pytest.importorskip("cutlass.torch")
 
 from vllm.models.kimi_k2_5.nvidia.ops.qkv_rmsnorm_k_pe_fused import (  # noqa: E402
-    _run_kimik25_qkv_rmsnorm_k_pe_fused,
+    qkv_rmsnorm_k_pe_fused,
 )
 
 # Default bf16 tolerances, from PyTorch's test_transformers.py
@@ -103,7 +103,7 @@ def test_kimik25_qkv_rmsnorm_k_pe_fused_matches_reference(
     )
     expected_k_pe = expected_k_pe.reshape(num_tokens, QK_ROPE_HEAD_DIM)
 
-    _run_kimik25_qkv_rmsnorm_k_pe_fused(
+    qkv_rmsnorm_k_pe_fused(
         data=data,
         positions=positions,
         k_pe=k_pe,

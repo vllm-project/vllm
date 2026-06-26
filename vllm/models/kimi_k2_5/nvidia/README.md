@@ -13,20 +13,19 @@ and vertically, in a maximal way without pulling GeMM kernels into the fusion.
 
 ## Compilation & caching convention
 
-Each kernel is a `@cute.kernel` device function plus a `@cute.jit` launcher,
-one per module under [`ops/`](./ops). Compilation is cached following the
-convention in
+Each kernel module under [`ops/`](./ops) defines a kernel class with a
+`@cute.kernel` device function, a `@cute.jit` launcher, and a cached
+`compile(...)` method. Compilation follows the convention in
 [`vllm/models/deepseek_v4`](vllm/models/deepseek_v4):
 
-- A `functools.cache`-decorated `_compile_*` helper builds **fake tensors**
-  (`cute.runtime.make_fake_tensor`, via the shared
-  [`ops/cutedsl_utils.py`](./ops/cutedsl_utils.py) helpers) with symbolic
-  shapes/strides (`cute.sym_int` / `cute.sym_int64`) and a fake stream, then
-  calls `cute.compile(..., options="--enable-tvm-ffi")`. The cache key is the
-  set of compile-time (constexpr) parameters only, so a kernel compiles once
-  per configuration and is reused across token counts.
+- A `functools.cache`-decorated `compile(...)` method builds **fake tensors**
+  inline with `cute.runtime.make_fake_tensor`, symbolic shapes/strides
+  (`cute.sym_int` / `cute.sym_int64`), and a fake stream, then calls
+  `cute.compile(..., options="--enable-tvm-ffi")`. The cache key is the set of
+  compile-time (constexpr) parameters only, so a kernel compiles once per
+  configuration and is reused across token counts.
 - The compiled executor is invoked **directly with torch tensors** and sources
-  its launch stream from the TVM-FFI environment, so the public `_run_*`
+  its launch stream from the TVM-FFI environment, so the public kernel
   wrappers do not build CuTe tensors or pass a stream at call time.
 
 ## Testing
