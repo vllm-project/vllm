@@ -132,4 +132,4 @@ backends:
 device: "cuda:0"
 profile_memory: true
 sparse_mla_dense_mha_max_seq_len: 32768
-sparse_mla_topk_pattern: "prefix"
+sparse_mla_topk_pattern: "random"

@@ -714,6 +714,9 @@ def main():
         args.sparse_mla_dense_mha_max_seq_len = yaml_config.get(
             "sparse_mla_dense_mha_max_seq_len", None
         )
+        args.sparse_mla_masked_mha_max_seq_len = yaml_config.get(
+            "sparse_mla_masked_mha_max_seq_len", None
+        )
 
         # Parameter sweep configuration
         if "parameter_sweep" in yaml_config:
@@ -1080,6 +1083,9 @@ def main():
 
         sparse_mla_topk_pattern = getattr(args, "sparse_mla_topk_pattern", "random")
         dense_mha_max_seq_len = getattr(args, "sparse_mla_dense_mha_max_seq_len", None)
+        masked_mha_max_seq_len = getattr(
+            args, "sparse_mla_masked_mha_max_seq_len", None
+        )
         variants = [
             ("dense_mha", False, "dense"),
             ("masked_mha", False, "masked"),
@@ -1093,6 +1099,10 @@ def main():
                     variant_label == "dense_mha"
                     and dense_mha_max_seq_len is not None
                     and q_len > dense_mha_max_seq_len
+                ) or (
+                    variant_label == "masked_mha"
+                    and masked_mha_max_seq_len is not None
+                    and q_len > masked_mha_max_seq_len
                 ):
                     continue
                 total += len(backends)
@@ -1106,6 +1116,10 @@ def main():
                             variant_label == "dense_mha"
                             and dense_mha_max_seq_len is not None
                             and q_len > dense_mha_max_seq_len
+                        ) or (
+                            variant_label == "masked_mha"
+                            and masked_mha_max_seq_len is not None
+                            and q_len > masked_mha_max_seq_len
                         ):
                             continue
                         config = BenchmarkConfig(
@@ -1122,6 +1136,7 @@ def main():
                             sparse_mla_force_mqa=force_mqa,
                             sparse_mla_mha_mode=mha_mode,
                             sparse_mla_dense_mha_max_seq_len=dense_mha_max_seq_len,
+                            sparse_mla_masked_mha_max_seq_len=masked_mha_max_seq_len,
                             sparse_mla_topk_pattern=sparse_mla_topk_pattern,
                         )
 

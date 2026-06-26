@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import get_mla_dims
 from vllm.triton_utils import tl, triton
@@ -402,6 +403,7 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
         else:
             from vllm.model_executor.layers.attention.sparse_mla_mask import (
                 dense_mask_mod,
+                dense_mask_to_block_sparse,
             )
 
             prefill_query_lens_cpu = attn_metadata.prefill_query_lens_cpu  # type: ignore[attr-defined]
@@ -426,21 +428,59 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
                 max_seq_len,
                 q.device,
             )
-            attn_out, _ = flash_attn_varlen_func(
-                q=q,
-                k=k,
-                v=v,
-                cu_seqlens_q=cu_seqlens,
-                cu_seqlens_k=cu_seqlens,
-                max_seqlen_q=max_seq_len,
-                max_seqlen_k=max_seq_len,
-                softmax_scale=self.scale,
-                causal=True,
-                return_softmax_lse=True,
-                fa_version=4,
-                mask_mod=dense_mask_mod,
-                aux_tensors=[dense_mask],
-            )
+            if envs.VLLM_SPARSE_MLA_USE_BLOCK_SPARSE:
+                # FA4 varlen sparsity validates against q_stage * tile_m.
+                sparse_tile_m = 128 if max_seq_len <= 128 else 256
+                mask_words_per_tile = 128 // 32
+                num_mask_n_blocks = triton.cdiv(max_seq_len, 128)
+                padded_mask_words = num_mask_n_blocks * mask_words_per_tile
+                if dense_mask.shape[2] < padded_mask_words:
+                    dense_mask = torch.nn.functional.pad(
+                        dense_mask, (0, padded_mask_words - dense_mask.shape[2])
+                    )
+
+                block_sparse_tensors = dense_mask_to_block_sparse(
+                    dense_mask,
+                    max_seqlen_q=max_seq_len,
+                    max_seqlen_k=max_seq_len,
+                    seq_lens_q=q_lens,
+                    seq_lens_k=q_lens,
+                    tile_m=sparse_tile_m,
+                    tile_n=128,
+                )
+
+                attn_out, _ = flash_attn_varlen_func(
+                    q=q,
+                    k=k,
+                    v=v,
+                    cu_seqlens_q=cu_seqlens,
+                    cu_seqlens_k=cu_seqlens,
+                    max_seqlen_q=max_seq_len,
+                    max_seqlen_k=max_seq_len,
+                    softmax_scale=self.scale,
+                    causal=False,
+                    return_softmax_lse=True,
+                    fa_version=4,
+                    mask_mod=dense_mask_mod,
+                    block_sparse_tensors=block_sparse_tensors,
+                    aux_tensors=[dense_mask],
+                )
+            else:
+                attn_out, _ = flash_attn_varlen_func(
+                    q=q,
+                    k=k,
+                    v=v,
+                    cu_seqlens_q=cu_seqlens,
+                    cu_seqlens_k=cu_seqlens,
+                    max_seqlen_q=max_seq_len,
+                    max_seqlen_k=max_seq_len,
+                    softmax_scale=self.scale,
+                    causal=True,
+                    return_softmax_lse=True,
+                    fa_version=4,
+                    mask_mod=dense_mask_mod,
+                    aux_tensors=[dense_mask],
+                )
 
         attn_out = attn_out[..., : self.v_head_dim]
         output.copy_(attn_out.flatten(start_dim=-2))

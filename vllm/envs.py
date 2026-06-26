@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
+    VLLM_SPARSE_MLA_USE_BLOCK_SPARSE: bool = True
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
     VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
@@ -1039,6 +1040,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # denial-of-service via excessively large fan-out. Default: 16384.
     "VLLM_MAX_N_SEQUENCES": lambda: int(
         os.environ.get("VLLM_MAX_N_SEQUENCES", "16384")
+    ),
+    # Dev switch for Sparse MLA masked MHA. Block-sparse metadata is faster for
+    # long contexts but can be slower for short contexts.
+    "VLLM_SPARSE_MLA_USE_BLOCK_SPARSE": lambda: bool(
+        int(os.getenv("VLLM_SPARSE_MLA_USE_BLOCK_SPARSE", "1"))
     ),
     # a list of plugin names to load, separated by commas.
     # if this is not set, it means all plugins will be loaded
