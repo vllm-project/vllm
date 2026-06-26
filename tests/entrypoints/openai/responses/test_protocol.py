@@ -12,8 +12,7 @@ from vllm.entrypoints.openai.responses.protocol import (
 
 
 def test_input_image_accepts_chat_completions_format() -> None:
-    # Regression test for #46631: /v1/responses must accept the chat-completions
-    # image format (nested image_url + missing `detail`), which previously failed.
+    # Regression test for #46631: nested image_url + missing detail must be accepted.
     req = ResponsesRequest.model_validate(
         {
             "model": "test",
