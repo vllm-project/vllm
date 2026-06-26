@@ -287,23 +287,15 @@ def chunked_prefill_paged_decode(
     if sliding_window is None or sliding_window <= 0:
         sliding_window = 0
 
-    has_native_layout = has_native_kv_cache_layout(key_cache, value_cache)
-
     if max_query_len > 1:
-        if has_native_layout:
-            prefill_key_cache = key_cache
-            prefill_value_cache = value_cache
-        else:
-            prefill_key_cache = key_cache.transpose(2, 3)
-            prefill_value_cache = value_cache.transpose(2, 3)
         context_attention_fwd(
             q=query,
             k=key,
             v=value,
             o=output,
             kv_cache_dtype=kv_cache_dtype,
-            k_cache=prefill_key_cache,
-            v_cache=prefill_value_cache,
+            k_cache=key_cache,
+            v_cache=value_cache,
             b_loc=block_table,
             b_start_loc=query_start_loc,
             b_seq_len=seq_lens,
@@ -320,7 +312,7 @@ def chunked_prefill_paged_decode(
             causal=causal,
         )
 
-    block_size = value_cache.shape[3] if has_native_layout else value_cache.shape[2]
+    block_size = value_cache.shape[3]
     num_seqs = len(seq_lens)
     num_query_heads = query.shape[1]
     # key may be None in cross-attention decode (already cached from encoder)
@@ -362,6 +354,7 @@ def chunked_prefill_paged_decode(
         alibi_slopes,
         sinks,
     )
+    has_native_layout = has_native_kv_cache_layout(key_cache, value_cache)
 
     is_pow2 = block_size > 0 and (block_size & (block_size - 1) == 0)
     if not is_pow2 or not has_native_layout:
@@ -408,32 +401,6 @@ def chunked_prefill_paged_decode(
             fp8_out_scale=output_scale,
         )
     else:
-        if not has_native_layout:
-            context_attention_fwd(
-                q=query,
-                k=key,
-                v=value,
-                o=output,
-                kv_cache_dtype=kv_cache_dtype,
-                k_cache=key_cache.transpose(2, 3),
-                v_cache=value_cache.transpose(2, 3),
-                b_loc=block_table,
-                b_start_loc=query_start_loc,
-                b_seq_len=seq_lens,
-                max_seq_len=max_seq_len,
-                max_input_len=max_query_len,
-                k_scale=k_scale,
-                v_scale=v_scale,
-                alibi_slopes=alibi_slopes,
-                sliding_window=sliding_window,
-                sm_scale=sm_scale,
-                skip_decode=False,
-                fp8_out_scale=output_scale,
-                sinks=sinks,
-                causal=causal,
-            )
-            return
-
         logger.warning_once(
             "Cannot use ROCm custom paged attention kernel,"
             " falling back to Triton implementation."

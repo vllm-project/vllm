@@ -17,6 +17,7 @@ from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, set_random_seed
 from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode,
 )
+from vllm.v1.attention.ops.paged_attn import PagedAttention
 from vllm.v1.attention.ops.prefix_prefill import context_attention_fwd
 
 NUM_HEADS = [64]
@@ -167,12 +168,25 @@ def test_contexted_kv_attention(
         cache_dtype = dtype
     else:
         cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
-    k_cache = torch.zeros(
-        cache_size, block_size, num_kv_heads, head_size, dtype=cache_dtype
-    )
-    v_cache = torch.zeros(
-        cache_size, block_size, num_kv_heads, head_size, dtype=cache_dtype
-    )
+    use_native_cache = op is chunked_prefill_paged_decode
+    if use_native_cache:
+        kv_cache = torch.zeros(
+            cache_size,
+            2 * num_kv_heads,
+            block_size,
+            head_size,
+            dtype=cache_dtype,
+        )
+        k_cache, v_cache = PagedAttention.split_kv_cache(
+            kv_cache, num_kv_heads, head_size
+        )
+    else:
+        k_cache = torch.zeros(
+            cache_size, block_size, num_kv_heads, head_size, dtype=cache_dtype
+        )
+        v_cache = torch.zeros(
+            cache_size, block_size, num_kv_heads, head_size, dtype=cache_dtype
+        )
     k = torch.zeros(sum(query_lens), num_kv_heads, head_size, dtype=dtype)
     v = torch.zeros(sum(query_lens), num_kv_heads, head_size, dtype=dtype)
     values = torch.arange(0, cache_size, dtype=torch.int32)
@@ -198,28 +212,39 @@ def test_contexted_kv_attention(
                 end_loc = b_seq_start_loc[i] + b_ctx_len[i]
             else:
                 end_loc = start_loc + block_size
-            start_slot = block_table[i, block_id] * block_size
-            end_slot = start_slot + end_loc - start_loc
-            k_cache.view(-1, num_kv_heads, head_size)[start_slot:end_slot].copy_(
-                key[start_loc:end_loc]
-            )
-            v_cache.view(-1, num_kv_heads, head_size)[start_slot:end_slot].copy_(
-                value[start_loc:end_loc]
-            )
+            if use_native_cache:
+                num_slots = end_loc - start_loc
+                k_cache[block_table[i, block_id], :, :, :num_slots].copy_(
+                    key[start_loc:end_loc]
+                    .view(num_slots, num_kv_heads, head_size // k_cache.shape[4], -1)
+                    .permute(1, 2, 0, 3)
+                )
+                v_cache[block_table[i, block_id], :, :, :num_slots].copy_(
+                    value[start_loc:end_loc].permute(1, 2, 0)
+                )
+            else:
+                start_slot = block_table[i, block_id] * block_size
+                end_slot = start_slot + end_loc - start_loc
+                k_cache.view(-1, num_kv_heads, head_size)[start_slot:end_slot].copy_(
+                    key[start_loc:end_loc]
+                )
+                v_cache.view(-1, num_kv_heads, head_size)[start_slot:end_slot].copy_(
+                    value[start_loc:end_loc]
+                )
             cur_ctx += block_size
             block_id += 1
-    # transpose K_cache[num_blocks, block_size, num_kv_heads, head_size]
-    # to K_cache[num_blocks, num_kv_heads, block_size, head_size]
-    k_cache = k_cache.permute(0, 2, 1, 3).contiguous()
-    # transpose V_cache[num_blocks, block_size, num_kv_heads, head_size]
-    # to V_cache[num_blocks, num_kv_heads, block_size, head_size]
-    v_cache = v_cache.permute(0, 2, 1, 3).contiguous()
-    k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
-
-    # context_attention_fwd expects [num_blocks, num_kv_heads, head_size, block_size]
     if op is context_attention_fwd:
+        # transpose K_cache[num_blocks, block_size, num_kv_heads, head_size]
+        # to K_cache[num_blocks, num_kv_heads, block_size, head_size]
+        k_cache = k_cache.permute(0, 2, 1, 3).contiguous()
+        # transpose V_cache[num_blocks, block_size, num_kv_heads, head_size]
+        # to V_cache[num_blocks, num_kv_heads, block_size, head_size]
+        v_cache = v_cache.permute(0, 2, 1, 3).contiguous()
+        # context_attention_fwd expects
+        # [num_blocks, num_kv_heads, head_size, block_size]
         k_cache = k_cache.transpose(2, 3)
         v_cache = v_cache.transpose(2, 3)
+    k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
 
     # Warm up the Triton kernel by calling it once before actually measuring
     # generation time
@@ -407,12 +432,25 @@ def test_contexted_kv_attention_alibi(
         cache_dtype = dtype
     else:
         cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
-    k_cache = torch.zeros(
-        cache_size, block_size, num_kv_heads, head_size, dtype=cache_dtype
-    )
-    v_cache = torch.zeros(
-        cache_size, block_size, num_kv_heads, head_size, dtype=cache_dtype
-    )
+    use_native_cache = op is chunked_prefill_paged_decode
+    if use_native_cache:
+        kv_cache = torch.zeros(
+            cache_size,
+            2 * num_kv_heads,
+            block_size,
+            head_size,
+            dtype=cache_dtype,
+        )
+        k_cache, v_cache = PagedAttention.split_kv_cache(
+            kv_cache, num_kv_heads, head_size
+        )
+    else:
+        k_cache = torch.zeros(
+            cache_size, block_size, num_kv_heads, head_size, dtype=cache_dtype
+        )
+        v_cache = torch.zeros(
+            cache_size, block_size, num_kv_heads, head_size, dtype=cache_dtype
+        )
     k = torch.zeros(sum(query_lens), num_kv_heads, head_size, dtype=dtype)
     v = torch.zeros(sum(query_lens), num_kv_heads, head_size, dtype=dtype)
     values = torch.arange(0, cache_size, dtype=torch.int32)
@@ -438,27 +476,37 @@ def test_contexted_kv_attention_alibi(
                 end_loc = b_seq_start_loc[i] + b_ctx_len[i]
             else:
                 end_loc = start_loc + block_size
-            start_slot = block_table[i, block_id] * block_size
-            end_slot = start_slot + end_loc - start_loc
-            k_cache.view(-1, num_kv_heads, head_size)[start_slot:end_slot].copy_(
-                key[start_loc:end_loc]
-            )
-            v_cache.view(-1, num_kv_heads, head_size)[start_slot:end_slot].copy_(
-                value[start_loc:end_loc]
-            )
+            if use_native_cache:
+                num_slots = end_loc - start_loc
+                k_cache[block_table[i, block_id], :, :, :num_slots].copy_(
+                    key[start_loc:end_loc]
+                    .view(num_slots, num_kv_heads, head_size // k_cache.shape[4], -1)
+                    .permute(1, 2, 0, 3)
+                )
+                v_cache[block_table[i, block_id], :, :, :num_slots].copy_(
+                    value[start_loc:end_loc].permute(1, 2, 0)
+                )
+            else:
+                start_slot = block_table[i, block_id] * block_size
+                end_slot = start_slot + end_loc - start_loc
+                k_cache.view(-1, num_kv_heads, head_size)[start_slot:end_slot].copy_(
+                    key[start_loc:end_loc]
+                )
+                v_cache.view(-1, num_kv_heads, head_size)[start_slot:end_slot].copy_(
+                    value[start_loc:end_loc]
+                )
             cur_ctx += block_size
             block_id += 1
-    # transpose K_cache[num_blocks, block_size, num_kv_heads, head_size]
-    # to K_cache[num_blocks, num_kv_heads, block_size, head_size]
-    k_cache = k_cache.permute(0, 2, 1, 3).contiguous()
-    # transpose V_cache[num_blocks, block_size, num_kv_heads, head_size]
-    # to V_cache[num_blocks, num_kv_heads, block_size, head_size]
-    v_cache = v_cache.permute(0, 2, 1, 3).contiguous()
-    k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
-
     if op is context_attention_fwd:
+        # transpose K_cache[num_blocks, block_size, num_kv_heads, head_size]
+        # to K_cache[num_blocks, num_kv_heads, block_size, head_size]
+        k_cache = k_cache.permute(0, 2, 1, 3).contiguous()
+        # transpose V_cache[num_blocks, block_size, num_kv_heads, head_size]
+        # to V_cache[num_blocks, num_kv_heads, block_size, head_size]
+        v_cache = v_cache.permute(0, 2, 1, 3).contiguous()
         k_cache = k_cache.transpose(2, 3)
         v_cache = v_cache.transpose(2, 3)
+    k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
 
     # Warm up the Triton kernel by calling it once before actually measuring
     # generation time
