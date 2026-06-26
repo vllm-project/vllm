@@ -1044,7 +1044,7 @@ def get_max_concurrency_for_kv_cache_config(
                     group.kv_cache_spec.blocks_per_request for group in active_groups
                 )
                 max_concurrencies.append(
-                    (pool_config.num_blocks - 1) / blocks_per_request
+                    max(pool_config.num_blocks - 1, 0) / blocks_per_request
                 )
                 continue
 
@@ -1054,7 +1054,9 @@ def get_max_concurrency_for_kv_cache_config(
             )
             memory_per_block = _pool_bytes_per_block(vllm_config, active_groups)
             num_block_per_request = cdiv(max_memory_usage_per_request, memory_per_block)
-            max_concurrencies.append(pool_config.num_blocks / num_block_per_request)
+            max_concurrencies.append(
+                max(pool_config.num_blocks - 1, 0) / num_block_per_request
+            )
         if not max_concurrencies:
             return 0.0
         return min(max_concurrencies)
@@ -1070,7 +1072,7 @@ def get_max_concurrency_for_kv_cache_config(
         * num_layer_per_group
     )
     num_block_per_request = cdiv(max_memory_usage_per_request, memory_per_block)
-    max_concurrency = kv_cache_config.num_blocks / num_block_per_request
+    max_concurrency = max(kv_cache_config.num_blocks - 1, 0) / num_block_per_request
     return max_concurrency
 
 
@@ -2160,6 +2162,26 @@ def _estimate_max_model_len_from_groups(
         vllm_config.model_config.max_model_len = original_max
 
 
+def _get_fit_available_memory(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    available_memory: int,
+    use_request_constant_pools: bool = False,
+) -> int:
+    """Available memory for per-request fit checks, excluding null blocks."""
+    if not kv_cache_groups:
+        return available_memory
+
+    fit_groups = kv_cache_groups
+    if use_request_constant_pools and _has_request_constant_groups(kv_cache_groups):
+        token_groups_with_ids, _ = _get_groups_by_memory_model(kv_cache_groups)
+        fit_groups = [group for _, group in token_groups_with_ids]
+        if not fit_groups:
+            return available_memory
+
+    return max(available_memory - _pool_bytes_per_block(vllm_config, fit_groups), 0)
+
+
 def _auto_fit_max_model_len(
     vllm_config: VllmConfig,
     projected_groups_per_worker: list[list[KVCacheGroupSpec]],
@@ -2412,24 +2434,37 @@ def get_kv_cache_configs(
             adjusted_memory.append(request_reserved_bytes + override * bytes_per_block)
         available_memory = adjusted_memory
 
+    use_request_constant_pools_per_worker = [
+        _uses_dedicated_request_constant_pools(vllm_config, groups)
+        for groups in projected_groups_per_worker
+    ]
+    fit_available_memory = [
+        _get_fit_available_memory(
+            vllm_config, groups, avail_mem, use_request_constant_pools
+        )
+        for groups, avail_mem, use_request_constant_pools in zip(
+            projected_groups_per_worker,
+            available_memory,
+            use_request_constant_pools_per_worker,
+        )
+    ]
+
     if vllm_config.model_config.original_max_model_len == -1:
         _auto_fit_max_model_len(
             vllm_config,
             projected_groups_per_worker,
-            available_memory,
-            any(
-                _uses_dedicated_request_constant_pools(vllm_config, groups)
-                for groups in projected_groups_per_worker
-            ),
+            fit_available_memory,
+            any(use_request_constant_pools_per_worker),
         )
 
     # Check if the available memory is enough per worker.
-    for groups, avail_mem in zip(projected_groups_per_worker, available_memory):
+    for groups, avail_mem, use_request_constant_pools in zip(
+        projected_groups_per_worker,
+        fit_available_memory,
+        use_request_constant_pools_per_worker,
+    ):
         if not groups:
             continue
-        use_request_constant_pools = _uses_dedicated_request_constant_pools(
-            vllm_config, groups
-        )
         _check_enough_kv_cache_memory(
             avail_mem,
             partial(

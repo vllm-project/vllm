@@ -1438,7 +1438,7 @@ def test_get_max_concurrency_for_kv_cache_config():
     max_concurrency_full_attention = get_max_concurrency_for_kv_cache_config(
         vllm_config, kv_cache_config_full_attention
     )
-    assert max_concurrency_full_attention == 1.5
+    assert max_concurrency_full_attention == (int(1024 * 1.5) - 1) / 1024
 
     kv_cache_config_sliding_window = KVCacheConfig(
         num_blocks=129 * 3,
@@ -1450,7 +1450,7 @@ def test_get_max_concurrency_for_kv_cache_config():
     max_concurrency_sliding_window = get_max_concurrency_for_kv_cache_config(
         vllm_config, kv_cache_config_sliding_window
     )
-    assert max_concurrency_sliding_window == 3
+    assert max_concurrency_sliding_window == pytest.approx((129 * 3 - 1) / 129)
 
     kv_cache_config_hybrid_model = KVCacheConfig(
         num_blocks=(1024 + 129) * 3,
@@ -1465,11 +1465,13 @@ def test_get_max_concurrency_for_kv_cache_config():
     max_concurrency_hybrid_model = get_max_concurrency_for_kv_cache_config(
         vllm_config, kv_cache_config_hybrid_model
     )
-    assert max_concurrency_hybrid_model == 3
+    assert max_concurrency_hybrid_model == pytest.approx(
+        ((1024 + 129) * 3 - 1) / (1024 + 129)
+    )
     num_tokens, max_concurrency = get_kv_cache_capacity(
         vllm_config, kv_cache_config_hybrid_model
     )
-    assert num_tokens == max_concurrency_hybrid_model * max_model_len
+    assert num_tokens == int(max_concurrency_hybrid_model * max_model_len)
     assert max_concurrency == max_concurrency_hybrid_model
 
 
@@ -1948,7 +1950,7 @@ def test_request_constant_mamba_uses_shared_pool():
     blocks_per_request = (
         attention_blocks_per_request + kv_cache_specs[0]["mamba"].blocks_per_request
     )
-    assert max_concurrency == kv_cache_config.num_blocks / blocks_per_request
+    assert max_concurrency == (kv_cache_config.num_blocks - 1) / blocks_per_request
 
 
 def test_request_constant_mamba_minimal_profile_config_uses_override():
@@ -2454,16 +2456,13 @@ def test_auto_fit_max_model_len():
     model_config.original_max_model_len = -1
     vllm_config = VllmConfig(model_config=model_config)
 
-    # With limited memory, max_model_len should be reduced
-    # Need memory for at least max_model_len tokens
-    # 32 blocks worth of memory for 2 layers = can fit 32*16=512 tokens
+    # With limited memory, max_model_len should be reduced.
     limited_memory = mem_per_block_per_layer * 2 * 32
     _kv_cache_configs = get_kv_cache_configs(
         vllm_config, [kv_cache_specs], [limited_memory]
     )
-    # Should be reduced to fit in memory
-    assert vllm_config.model_config.max_model_len < 1024
-    assert vllm_config.model_config.max_model_len > 0
+    # 32 allocated blocks leave 31 usable blocks after BlockPool's null block.
+    assert vllm_config.model_config.max_model_len == 31 * 16
 
 
 def test_auto_fit_max_model_len_with_hybrid():
@@ -2492,10 +2491,37 @@ def test_auto_fit_max_model_len_with_hybrid():
 
     mamba_request_blocks = scheduler_config.max_num_seqs * (1 + gamma) + 1
     available_memory = mem_per_block_per_layer * (1024 // 16 + mamba_request_blocks)
-    _kv_cache_configs = get_kv_cache_configs(
+    kv_cache_configs = get_kv_cache_configs(
         vllm_config, [kv_cache_specs], [available_memory]
     )
-    assert vllm_config.model_config.max_model_len == 1024
+    kv_cache_config = kv_cache_configs[0]
+    assert vllm_config.model_config.max_model_len == 1168
+
+    def can_admit_full_sequence(model_len: int) -> bool:
+        block_size = kv_cache_specs["layer_2"].block_size
+        kv_cache_manager = KVCacheManager(
+            kv_cache_config=kv_cache_config,
+            max_model_len=model_len,
+            scheduler_block_size=block_size,
+            hash_block_size=block_size,
+        )
+        request = make_request(
+            request_id=f"req_{model_len}",
+            prompt_token_ids=list(range(model_len)),
+            block_size=block_size,
+        )
+        return (
+            kv_cache_manager.allocate_slots(
+                request,
+                num_new_tokens=1,
+                full_sequence_must_fit=True,
+                has_scheduled_reqs=False,
+            )
+            is not None
+        )
+
+    assert can_admit_full_sequence(1168)
+    assert not can_admit_full_sequence(1184)
 
 
 def test_auto_fit_max_model_len_not_triggered():
@@ -2538,9 +2564,8 @@ def test_auto_fit_max_model_len_respects_num_gpu_blocks_override():
 
     get_kv_cache_configs(vllm_config, [kv_cache_specs], [large_available_memory])
 
-    # 32 blocks * block_size 16 = 512 token slots, so max_model_len must
-    # auto-fit at or below that.
-    assert 0 < vllm_config.model_config.max_model_len <= 32 * 16
+    # 32 allocated blocks leave 31 usable blocks after BlockPool's null block.
+    assert vllm_config.model_config.max_model_len == 31 * 16
 
 
 def test_check_enough_kv_cache_memory_respects_num_gpu_blocks_override():
