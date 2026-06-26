@@ -317,4 +317,15 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
             return False
         if start_index < 0:
             return True
-        return end_index > start_index
+        if end_index <= start_index:
+            return False
+        # Only treat the end token as a real reasoning-block close if it
+        # sits at the tail of the sequence (within the last few tokens).
+        # The MiniMax M3 system prompt contains <mm:think></mm:think> as
+        # instruction text; those in-prompt occurrences must not be mistaken
+        # for a completed reasoning block at the generation boundary.
+        tail_start = max(0, len(input_ids) - len(self._end_token_ids) - 4)
+        tail_end_index = self._rfind_token_sequence(
+            input_ids[tail_start:], self._end_token_ids
+        )
+        return tail_end_index >= 0
