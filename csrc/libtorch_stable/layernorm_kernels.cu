@@ -20,20 +20,26 @@ __global__ void rms_norm_kernel(
     const int64_t input_stride_d4,        // input.stride(-4)
     const int64_t input_shape_d2,         // input.size(-2)
     const int64_t input_shape_d3,         // input.size(-3)
-    const scalar_t* __restrict__ weight,  // [hidden_size], null if !HasWeight
+    const scalar_t* __restrict__ weight,  // [hidden_size] or
+                                          // [num_groups, hidden_size];
+                                          // null if !HasWeight
+    const int64_t weight_stride,          // 0 or weight.stride(0)
     const float epsilon, const int num_tokens, const int hidden_size) {
   __shared__ float s_variance;
   float variance = 0.0f;
   const scalar_t* input_row;
+  const scalar_t* weight_row;
   if constexpr (NUM_DIMS == 2) {
     // 2D for layernorm normal case [batch_size, hidden]
     input_row = input + blockIdx.x * input_stride_d2;
+    weight_row = weight + blockIdx.x * weight_stride;
   } else if constexpr (NUM_DIMS == 3) {
     // 3D for q/k norm [batch_size, num_heads, head_size]
     int batch_idx = blockIdx.x / input_shape_d2;
     int head_idx = blockIdx.x % input_shape_d2;
     input_row =
         input + batch_idx * input_stride_d3 + head_idx * input_stride_d2;
+    weight_row = weight + batch_idx * weight_stride;
   } else if constexpr (NUM_DIMS == 4) {
     // 4D for transformers model_impl qk norm [batch, seq, head, head_dim]
     int batch_idx = blockIdx.x / (input_shape_d3 * input_shape_d2);
@@ -42,6 +48,7 @@ __global__ void rms_norm_kernel(
     int head_idx = remaining % input_shape_d2;
     input_row = input + batch_idx * input_stride_d4 +
                 seq_idx * input_stride_d3 + head_idx * input_stride_d2;
+    weight_row = weight + batch_idx * weight_stride;
   }
 
   auto vec_op = [&variance](const vec_n_t<scalar_t, VEC_SIZE>& vec) {
@@ -69,7 +76,7 @@ __global__ void rms_norm_kernel(
 
   scalar_t* out_row = out + blockIdx.x * hidden_size;
   auto* v_in = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(input_row);
-  auto* v_w = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(weight);
+  auto* v_w = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(weight_row);
   auto* v_out = reinterpret_cast<vec_n_t<scalar_t, VEC_SIZE>*>(out_row);
   for (int i = threadIdx.x; i < hidden_size / VEC_SIZE; i += blockDim.x) {
     vec_n_t<scalar_t, VEC_SIZE> dst;
@@ -211,15 +218,24 @@ fused_add_rms_norm_kernel(
 
 void rms_norm(torch::stable::Tensor& out,    // [..., hidden_size]
               torch::stable::Tensor& input,  // [..., hidden_size]
-              std::optional<torch::stable::Tensor> weight,  // [hidden_size]
-              double epsilon) {
+              std::optional<torch::stable::Tensor> weight, double epsilon) {
   STD_TORCH_CHECK(out.is_contiguous());
   if (input.stride(-1) != 1) {
     input = torch::stable::contiguous(input);
   }
   STD_TORCH_CHECK(input.stride(-1) == 1);
+  int64_t weight_stride = 0;
   if (weight.has_value()) {
     STD_TORCH_CHECK(weight->is_contiguous());
+    if (weight->dim() == 1) {
+      STD_TORCH_CHECK(weight->size(0) == input.size(-1));
+    } else if (weight->dim() == 2) {
+      STD_TORCH_CHECK(weight->size(0) == input.size(0));
+      STD_TORCH_CHECK(weight->size(-1) == input.size(-1));
+      weight_stride = weight->stride(0);
+    } else {
+      STD_TORCH_CHECK(false, "rms_norm weight must be 1D or 2D");
+    }
   }
 
   int hidden_size = input.size(-1);
@@ -256,16 +272,16 @@ void rms_norm(torch::stable::Tensor& out,    // [..., hidden_size]
                       out.mutable_data_ptr<scalar_t>(),
                       input.const_data_ptr<scalar_t>(), input_stride_d2,
                       input_stride_d3, input_stride_d4, input_shape_d2,
-                      input_shape_d3, weight_ptr, epsilon, num_tokens,
-                      hidden_size);
+                      input_shape_d3, weight_ptr, weight_stride, epsilon,
+                      num_tokens, hidden_size);
             } else {
               vllm::rms_norm_kernel<scalar_t, vec_size, tensor_rank, false>
                   <<<grid, block, 0, stream>>>(
                       out.mutable_data_ptr<scalar_t>(),
                       input.const_data_ptr<scalar_t>(), input_stride_d2,
                       input_stride_d3, input_stride_d4, input_shape_d2,
-                      input_shape_d3, weight_ptr, epsilon, num_tokens,
-                      hidden_size);
+                      input_shape_d3, weight_ptr, /*weight_stride=*/0, epsilon,
+                      num_tokens, hidden_size);
             }
           });
         });
