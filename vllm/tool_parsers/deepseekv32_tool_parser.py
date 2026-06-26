@@ -72,6 +72,10 @@ class DeepSeekV32ToolParser(ToolParser):
         self._active_param_mode: str | None = None
         self._active_param_parts: list[str] = []
         self._args_started: list[bool] = []
+        # Whitespace pending decision about whether it precedes a tool
+        # call (drop) or regular content (emit). See
+        # ``_process_streaming_buffer`` for why this is needed.
+        self._pending_whitespace: str = ""
 
         # Regex patterns for complete parsing
         self.tool_call_complete_regex = re.compile(
@@ -244,6 +248,7 @@ class DeepSeekV32ToolParser(ToolParser):
         self.prev_tool_call_arr.clear()
         self.streamed_args_for_tool.clear()
         self._args_started.clear()
+        self._pending_whitespace = ""
 
     def _add_tool_call_delta(
         self,
@@ -409,15 +414,27 @@ class DeepSeekV32ToolParser(ToolParser):
                     )
                     sendable_idx = len(self._buffer) - overlap
                     if sendable_idx > 0:
-                        content_parts.append(self._buffer[:sendable_idx])
+                        sendable = self._buffer[:sendable_idx]
                         self._buffer = self._buffer[sendable_idx:]
+                        if not sendable.strip():
+                            if self.current_tool_index == 0:
+                                self._pending_whitespace += sendable
+                        else:
+                            content_parts.append(
+                                self._pending_whitespace + sendable
+                            )
+                            self._pending_whitespace = ""
                     return
 
                 if start_idx > 0:
-                    content_parts.append(self._buffer[:start_idx])
+                    prefix = self._buffer[:start_idx]
                     self._buffer = self._buffer[start_idx:]
+                    if prefix.strip():
+                        content_parts.append(self._pending_whitespace + prefix)
+                    self._pending_whitespace = ""
                     continue
 
+                self._pending_whitespace = ""
                 self._buffer = self._buffer[len(self.tool_call_start_token) :]
                 self._in_tool_calls = True
                 continue
