@@ -127,7 +127,7 @@ def init_attn_backend(
     kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, attn_groups)
 
     # Phase 3: create metadata builders and determine cudagraph support.
-    attn_backend_workspace: torch.Tensor | None = None
+    attn_backend_workspace: object | None = None
     min_cg_support = AttentionCGSupport.ALWAYS
     min_cg_attn_backend = None
     for kv_cache_group_id, groups in enumerate(attn_groups):
@@ -143,10 +143,16 @@ def init_attn_backend(
             )
             builder = group.get_metadata_builder(0)
             if attn_backend_workspace is None:
-                if hasattr(builder, "_get_workspace_buffer"):
+                if hasattr(builder, "get_workspace_buffer_state"):
+                    attn_backend_workspace = builder.get_workspace_buffer_state()
+                elif hasattr(builder, "_get_workspace_buffer"):
                     attn_backend_workspace = builder._get_workspace_buffer()
             else:
-                if hasattr(builder, "set_workspace_buffer"):
+                if hasattr(builder, "set_workspace_buffer_state"):
+                    builder.set_workspace_buffer_state(attn_backend_workspace)
+                elif isinstance(attn_backend_workspace, torch.Tensor) and hasattr(
+                    builder, "set_workspace_buffer"
+                ):
                     builder.set_workspace_buffer(attn_backend_workspace)
             # Check cudagraph support for the attention backend
             cg_support = builder.get_cudagraph_support(

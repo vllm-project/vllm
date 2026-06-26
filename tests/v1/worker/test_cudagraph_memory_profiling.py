@@ -49,24 +49,80 @@ def test_flashinfer_separate_cudagraph_memory_profile_gate():
 
 def test_flashinfer_workspace_buffer_uses_workspace_manager():
     pytest.importorskip("flashinfer")
-    from vllm.v1.attention.backends.flashinfer import FlashInferMetadataBuilder
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    FlashInferMetadataBuilder = flashinfer_backend.FlashInferMetadataBuilder
+
+    def make_builder():
+        builder = FlashInferMetadataBuilder.__new__(FlashInferMetadataBuilder)
+        builder._workspace_buffer = None
+        builder._workspace_state = flashinfer_backend._FlashInferWorkspaceState()
+        builder.device = torch.device("cpu")
+        builder.use_dcp = False
+        return builder
 
     reset_workspace_manager()
     init_workspace_manager(torch.device("cpu"))
     try:
-        first_builder = FlashInferMetadataBuilder.__new__(FlashInferMetadataBuilder)
-        first_builder._workspace_buffer = None
-        first_builder.device = torch.device("cpu")
-        first = first_builder._get_workspace_buffer()
+        first_builder = make_builder()
+        first_state = first_builder.get_workspace_buffer_state()
+        first = first_builder._get_workspace_buffer(
+            first_builder._native_initial_workspace_buffer_size()
+        )
 
-        second_builder = FlashInferMetadataBuilder.__new__(FlashInferMetadataBuilder)
-        second_builder._workspace_buffer = None
-        second_builder.device = torch.device("cpu")
-        second = second_builder._get_workspace_buffer()
+        second_builder = make_builder()
+        second_builder.set_workspace_buffer_state(first_state)
+        second = second_builder._get_workspace_buffer(
+            second_builder._native_initial_workspace_buffer_size()
+        )
 
         assert first.device.type == "cpu"
         assert first.dtype == torch.uint8
+        assert first.numel() == 1
         assert first.data_ptr() == second.data_ptr()
+    finally:
+        reset_workspace_manager()
+
+
+def test_flashinfer_workspace_buffer_growth_resets_registered_wrappers():
+    pytest.importorskip("flashinfer")
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    class FakeWrapper:
+        def __init__(self, float_workspace_buffer):
+            self._float_workspace_buffer = float_workspace_buffer
+            self._int_workspace_buffer = torch.empty(1, dtype=torch.uint8)
+            self.reset_calls = 0
+
+        def reset_workspace_buffer(self, float_workspace_buffer, int_workspace_buffer):
+            self._float_workspace_buffer = float_workspace_buffer
+            self._int_workspace_buffer = int_workspace_buffer
+            self.reset_calls += 1
+
+    FlashInferMetadataBuilder = flashinfer_backend.FlashInferMetadataBuilder
+    builder = FlashInferMetadataBuilder.__new__(FlashInferMetadataBuilder)
+    builder._workspace_buffer = None
+    builder._workspace_state = flashinfer_backend._FlashInferWorkspaceState()
+    builder.device = torch.device("cpu")
+    builder.use_dcp = False
+
+    reset_workspace_manager()
+    init_workspace_manager(torch.device("cpu"))
+    try:
+        wrapper = FakeWrapper(
+            builder._get_workspace_buffer(
+                builder._native_initial_workspace_buffer_size()
+            )
+        )
+        builder._register_workspace_wrapper(wrapper)
+        builder._ensure_flashinfer_wrapper_workspace(wrapper, 1024)
+
+        assert builder._workspace_buffer.numel() == 1024
+        assert wrapper._float_workspace_buffer.data_ptr() == (
+            builder._workspace_buffer.data_ptr()
+        )
+        assert wrapper._float_workspace_buffer.numel() == 1024
+        assert wrapper.reset_calls >= 1
     finally:
         reset_workspace_manager()
 
@@ -125,8 +181,8 @@ def test_separate_profile_accounts_persistent_and_graph_pool(monkeypatch):
     runner._freeze_gc = null_context
     runner._cleanup_profiling_kv_cache = lambda: cleanup_calls.append("cleanup")
     runner.maybe_remove_all_loras = lambda lora_config: None
-    runner._warmup_before_cudagraph_capture = (
-        lambda *args, **kwargs: warmup_calls.append(kwargs)
+    runner._warmup_before_cudagraph_capture = lambda *args, **kwargs: (
+        warmup_calls.append(kwargs)
     )
     runner._warmup_and_capture = lambda *args, **kwargs: capture_calls.append(kwargs)
 
