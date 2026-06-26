@@ -394,13 +394,14 @@ class TritonAttentionImpl(AttentionImpl):
     def _ensure_scale_caches(self, kv_cache: torch.Tensor) -> None:
         """Extract per-head scale views from the padded content dimension.
 
-        The KV cache is packed as the contiguous logical shape
+        The KV cache is packed as logical shape
         ``(num_blocks, nkv, block_size, 2 * (hs + pad))`` where
         ``pad = sizeof(float32) / sizeof(cache_dtype)``.  The content dim holds
         ``[K(hs) | K_scale(pad) | V(hs) | V_scale(pad)]`` per (head, slot); the
         last ``pad`` elements of each half hold one float32 scale.  We create
         strided float32 views over those bytes.  ``kv_cache`` must be the
-        contiguous packed tensor (call before any transpose).
+        packed logical tensor (call before any transpose), but may have HND or
+        NHD physical strides.
 
         Scale shape: ``(num_blocks, block_size, num_kv_heads)``
         """
@@ -419,14 +420,21 @@ class TritonAttentionImpl(AttentionImpl):
             raw
         )
 
-        # C-contiguous strides (in float32 units) for the packed layout
-        # (num_blocks, nkv, block_size, content).
-        block_f32 = nkv * block_size * content * dtype_sz // 4  # between blocks
-        head_f32 = block_size * content * dtype_sz // 4  # between heads
-        slot_f32 = content * dtype_sz // 4  # between slots
+        def to_f32_units(elements: int) -> int:
+            nbytes = elements * dtype_sz
+            assert nbytes % 4 == 0
+            return nbytes // 4
+
+        # Actual strides (in float32 units) from the tensor. The logical cache
+        # may be physically NHD, so do not assume C-contiguous HND layout.
+        strides = kv_cache.stride()
+        block_f32 = to_f32_units(strides[0])
+        head_f32 = to_f32_units(strides[1])
+        slot_f32 = to_f32_units(strides[2])
         # Scale sits at byte offset hs within each (K, then V) content half.
-        k_scale_off_f32 = hs * dtype_sz // 4
-        v_scale_off_f32 = (padded_hs + hs) * dtype_sz // 4
+        base_off_f32 = to_f32_units(kv_cache.storage_offset())
+        k_scale_off_f32 = base_off_f32 + to_f32_units(hs)
+        v_scale_off_f32 = base_off_f32 + to_f32_units(padded_hs + hs)
 
         # K scales (first content half)
         self._k_scale_cache = torch.as_strided(
