@@ -923,21 +923,26 @@ class VideoBackend(
         )
 
         if backend == "opencv":
-            cap = cls.open_video_capture(data)
-            _check_frame_pixel_limit(
-                int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-                int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
-            )
-            source = cls._prepare_source(cls.get_video_metadata(cap))
-            frame_idx = cls.compute_frames_index_to_sample(
-                source=source, target=target, **kwargs
-            )
-            frames, valid = cls.read_frames(
-                cap,
-                frame_idx,
-                total_frames_num=source.total_frames_num,
-                frame_recovery=frame_recovery,
-            )
+            try:
+                cap = cls.open_video_capture(data)
+                _check_frame_pixel_limit(
+                    int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                    int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+                )
+                source = cls._prepare_source(cls.get_video_metadata(cap))
+                frame_idx = cls.compute_frames_index_to_sample(
+                    source=source, target=target, **kwargs
+                )
+                frames, valid = cls.read_frames(
+                    cap,
+                    frame_idx,
+                    total_frames_num=source.total_frames_num,
+                    frame_recovery=frame_recovery,
+                )
+            except Exception as e:
+                raise ValueError(
+                    f"Failed to load video with OpenCV backend: {e}"
+                ) from e
         elif backend == "pyav":
             assert not frame_recovery, (
                 "frame_recovery is only available for `opencv` backend"

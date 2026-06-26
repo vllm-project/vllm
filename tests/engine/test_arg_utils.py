@@ -264,8 +264,7 @@ def test_hf_token_cli_arg(cli_args, expected):
             },
         ),
     ],
-)
-def test_media_io_kwargs_parser(arg, expected):
+)def test_media_io_kwargs_parser(arg, expected):
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     if arg is None:
         args = parser.parse_args([])
@@ -273,6 +272,15 @@ def test_media_io_kwargs_parser(arg, expected):
         args = parser.parse_args(["--media-io-kwargs", arg])
 
     assert args.media_io_kwargs == expected
+
+
+def test_max_video_size_mb_cli_arg():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(["--max-video-size-mb", "1024"])
+    engine_args = EngineArgs.from_cli_args(args)
+
+    assert args.max_video_size_mb == 1024
+    assert engine_args.max_video_size_mb == 1024
 
 
 @pytest.mark.parametrize(

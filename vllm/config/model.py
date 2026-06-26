@@ -354,6 +354,7 @@ class ModelConfig:
     limit_mm_per_prompt: InitVar[dict[str, int | dict[str, int]] | None] = None
     enable_mm_embeds: InitVar[bool | None] = None
     media_io_kwargs: InitVar[dict[str, dict[str, Any]] | None] = None
+    max_video_size_mb: InitVar[int | None] = None
     mm_processor_kwargs: InitVar[dict[str, Any] | None] = None
     mm_processor_cache_gb: InitVar[float | None] = None
     mm_processor_cache_type: InitVar[MMCacheType | None] = None
@@ -476,12 +477,12 @@ class ModelConfig:
                 setattr(config, key, value)
 
     def __post_init__(
-        self,
-        # Multimodal config init vars
+        self,        # Multimodal config init vars
         language_model_only: bool,
         limit_mm_per_prompt: dict[str, int | dict[str, int]] | None,
         enable_mm_embeds: bool | None,
         media_io_kwargs: dict[str, dict[str, Any]] | None,
+        max_video_size_mb: int | None,
         mm_processor_kwargs: dict[str, Any] | None,
         mm_processor_cache_gb: float | None,
         mm_processor_cache_type: MMCacheType | None,
@@ -674,13 +675,20 @@ class ModelConfig:
 
         self.original_max_model_len = self.max_model_len
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
-
         if self.is_encoder_decoder:
             mm_processor_cache_gb = 0
             logger.info("Encoder-decoder model detected, disabling mm processor cache.")
 
         # Init multimodal config if needed
         if self._model_info.supports_multimodal:
+            if max_video_size_mb is not None and max_video_size_mb < 0:
+                raise ValueError("max_video_size_mb must be a non-negative integer")
+            if max_video_size_mb is not None:
+                media_io_kwargs = dict(media_io_kwargs or {})
+                video_io_kwargs = dict(media_io_kwargs.get("video", {}))
+                video_io_kwargs["max_video_size_mb"] = max_video_size_mb
+                media_io_kwargs["video"] = video_io_kwargs
+
             if (
                 mm_encoder_tp_mode == "data"
                 and not self._model_info.supports_multimodal_encoder_tp_data
