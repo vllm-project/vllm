@@ -48,11 +48,18 @@ class QuantizeMethodBase(ABC):
         raise NotImplementedError
 
     # Not required functions
-    def tie_weights(self, layer: torch.nn.Module, *args, **kwargs):
-        """Tie layer's weights for the layer from another layer/tensors.
+    def tie_weights(self, layer: torch.nn.Module, embed_tokens: torch.nn.Module):
+        """Tie ``layer``'s weight to ``embed_tokens``' weight.
+
+        The default shares the weight tensor, which is the standard behavior for
+        tied word embeddings and matches what ``ParallelLMHead.tie_weights`` did
+        directly before quantization methods became responsible for it.
+        Quantization methods that need special weight handling (e.g. repacked
+        weights) override this.
 
         Expects create_weights to have been called before on the layer."""
-        raise NotImplementedError
+        layer.weight = embed_tokens.weight
+        return layer
 
     def process_weights_after_loading(self, layer: nn.Module) -> None:
         """Process the weight after loading.
