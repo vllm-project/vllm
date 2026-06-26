@@ -207,10 +207,8 @@ class QuarkOCP_MX(QuarkScheme):
             self.input_dtype != "mxfp4" or self.weight_dtype != "mxfp4"
         )
 
-        # gfx1100 has no native FP4, so statically-quantized weight-only MXFP4
-        # linears run on the native RDNA3 HIP GEMM instead of dequant-to-bf16
-        # emulation (activations stay in bf16 == W4A16). The kernel is chosen
-        # per-layer in process_weights_after_loading once shapes are known.
+        # On gfx1100 run weight-only MXFP4 linears on the native RDNA3 GEMM
+        # instead of dequant emulation; chosen per-layer once shapes are known.
         self.rdna3_kernel = None
         if self.weight_dtype == "mxfp4" and not self.dynamic_mxfp4_quant:
             from vllm.model_executor.kernels.linear.mxfp4.rocm import (

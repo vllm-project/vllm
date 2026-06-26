@@ -753,10 +753,8 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         )
 
     elif mxfp4_backend == Mxfp4MoeBackend.RDNA3_MXFP4:
-        # [E, K/8, N] uint32 + [E, K/32, N] uint8. GPT-OSS stores gate/up
-        # interleaved in a fused tensor (de-interleave so the gate_up output is
-        # contiguous [gate || up]); standard checkpoints with separate
-        # gate_proj/up_proj are already [gate_all, up_all] after _load_w13.
+        # Only GPT-OSS stores gate/up interleaved in a fused tensor; separate
+        # gate_proj/up_proj checkpoints are already contiguous after _load_w13.
         from vllm.config import get_current_vllm_config
         from vllm.model_executor.layers.fused_moe.experts.rdna3_mxfp4_moe import (
             repack_experts_rdna3,

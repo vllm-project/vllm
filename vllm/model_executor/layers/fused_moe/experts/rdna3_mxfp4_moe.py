@@ -207,12 +207,10 @@ class RDNA3Mxfp4Experts(mk.FusedMoEExpertsModular):
         else:
             apply_moe_activation(activation, act_out, w1_out)
 
-        # down GEMM. The kernel can fuse the top-k reduction + weight multiply
-        # into its epilogue (output_topk), but that path produces wrong results
-        # under tensor parallelism (verified: correct at TP1, garbage at TP2 --
-        # the per-rank partial down-proj is later all-reduced by the layer).
-        # A per-expert bias must also be added before the weighted reduction.
-        # In both cases write unreduced rows and reduce in Python instead.
+        # down GEMM. The kernel's fused output_topk reduce is wrong under TP
+        # (each rank's down-proj is a partial the layer all-reduces afterwards);
+        # a per-expert bias likewise needs adding before the reduction. In both
+        # cases write unreduced rows and reduce in Python instead.
         unfused = w2_bias is not None or get_tensor_model_parallel_world_size() > 1
         if unfused:
             w2_out = torch.zeros(total, hidden, dtype=dtype, device=device)
