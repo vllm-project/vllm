@@ -761,12 +761,11 @@ class Worker(WorkerBase):
 
         # All warmup is done — start monitoring for unexpected JIT
         # compilations that would cause latency spikes during inference.
-        from vllm.triton_utils.jit_monitor import (
-            activate as activate_triton_jit_monitor,
-        )
+        from vllm.utils.jit_monitor import activate as activate_jit_monitor
 
-        activate_triton_jit_monitor(
-            verbose=self.observability_config.jit_monitor_verbose
+        activate_jit_monitor(
+            mode=self.observability_config.jit_monitor_mode,
+            verbose=self.observability_config.jit_monitor_verbose,
         )
 
         # Freeze the worker heap so the GC won't scan static objects
@@ -1184,6 +1183,14 @@ class Worker(WorkerBase):
         # can be reclaimed when running in-process
         if model_runner := getattr(self, "model_runner", None):
             model_runner.shutdown()
+
+        # Release kept-alive cumem pools while the pluggable allocator wrappers
+        # and callbacks are still alive, so MemPool teardown is not deferred to
+        # interpreter finalization (pytorch/pytorch#145168).
+        from vllm.device_allocator.cumem import CuMemAllocator
+
+        if CuMemAllocator.instance is not None:
+            CuMemAllocator.instance.release_pools()
 
     def elastic_ep_execute(self, execute_method: str, *args, **kwargs):
         return self.elastic_ep_executor.execute(execute_method, *args, **kwargs)

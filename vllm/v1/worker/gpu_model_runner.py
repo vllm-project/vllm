@@ -3152,7 +3152,16 @@ class GPUModelRunner(
 
                 mm_hash = mm_feature.identifier
                 encoder_output = self.encoder_cache.get(mm_hash, None)
-                assert encoder_output is not None, f"Encoder cache miss for {mm_hash}."
+                if encoder_output is None:
+                    # A feature starting at/after the processed boundary is only
+                    # reached via the drafter's +1 look-ahead and might not be
+                    # encoded yet; fall back to the token embedding for drafting.
+                    if (
+                        start_pos
+                        >= req_state.num_computed_tokens + num_scheduled_tokens
+                    ):
+                        continue
+                    raise RuntimeError(f"Encoder cache miss for {mm_hash}.")
 
                 if (is_embed := pos_info.is_embed) is not None:
                     is_embed = is_embed[start_idx:end_idx]
