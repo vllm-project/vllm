@@ -186,7 +186,7 @@ class PassConfig:
         """
 
         MiB = 1024 * 1024
-        FI_SUPPORTED_WORLD_SIZES = [2, 4, 8]
+        FI_SUPPORTED_WORLD_SIZES = [2, 4, 8, 16]
         if world_size not in FI_SUPPORTED_WORLD_SIZES:
             return None
         max_size_mb = self.fi_allreduce_fusion_max_size_mb

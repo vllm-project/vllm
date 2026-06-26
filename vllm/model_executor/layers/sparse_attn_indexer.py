@@ -431,6 +431,21 @@ def sparse_attn_indexer(
                 )
             num_rows = logits.shape[0]
 
+            # cooperative_topk is upstream's Hopper-tuned TMA top-k kernel.
+            # Keep it OFF for SM12x (capability family 120): consumer Blackwell
+            # keeps the validated SM120 short-row / persistent path below, so
+            # this sync stays behaviour-identical on our boxes. Enabling
+            # cooperative_topk on SM12x is a separate, to-be-validated perf
+            # experiment.
+            use_cooperative_topk = (
+                current_platform.is_cuda()
+                and topk_tokens in (512, 1024, 2048)
+                and num_rows <= 32
+                and logits.stride(0) % 4 == 0  # TMA 16-byte alignment
+                and current_platform.has_device_capability(90)
+                and not current_platform.is_device_capability_family(120)
+            )
+
             if _use_sm120_short_row_topk_decode(logits, topk_tokens):
                 torch.ops._C.top_k_per_row_decode(
                     logits,
@@ -441,6 +456,19 @@ def sparse_attn_indexer(
                     logits.stride(0),
                     logits.stride(1),
                     topk_tokens,
+                )
+            elif use_cooperative_topk:
+                workspace_manager = current_workspace_manager()
+                (topk_workspace,) = workspace_manager.get_simultaneous(
+                    ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
+                )
+                torch.ops._C.cooperative_topk(
+                    logits,
+                    seq_lens,
+                    topk_indices,
+                    topk_workspace,
+                    topk_tokens,
+                    logits_width,
                 )
             elif current_platform.is_cuda() and topk_tokens in (512, 1024, 2048):
                 workspace_manager = current_workspace_manager()

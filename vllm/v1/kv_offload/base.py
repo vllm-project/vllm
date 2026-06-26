@@ -5,9 +5,9 @@ Core abstractions for KV cache offloading in vLLM v1.
 """
 
 from abc import ABC, abstractmethod
-from collections.abc import Collection, Iterable, Iterator, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
-from enum import Enum
+from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, NewType
 
 import numpy as np
@@ -23,7 +23,6 @@ if TYPE_CHECKING:
         OffloadingConnectorStats,
     )
     from vllm.v1.kv_cache_interface import KVCacheConfig
-    from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
 # `OffloadKey` identifies an offloaded block. It combines a block hash with
 # its KV cache group index, encoded as raw bytes to avoid tuple GC overhead.
@@ -52,6 +51,15 @@ def get_offload_group_idx(key: OffloadKey) -> int:
 class ReqContext:
     req_id: str
     kv_transfer_params: dict[str, Any] | None = None
+
+
+class LookupResult(Enum):
+    """Result of OffloadingManager.lookup()."""
+
+    MISS = auto()
+    HIT = auto()
+    HIT_PENDING = auto()
+    RETRY = auto()
 
 
 class OffloadPolicy(Enum):
@@ -159,7 +167,7 @@ class OffloadingKVEventsConfig:
 
 class OffloadingManager(ABC):
     @abstractmethod
-    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         """
         Checks whether a single block is offloaded and ready to be read.
 
@@ -168,10 +176,9 @@ class OffloadingManager(ABC):
             req_context: per-request context (e.g. kv_transfer_params).
 
         Returns:
-            True if the block is offloaded and ready, False if not,
-            or None if the lookup should be retried later.
-            Returning None will delay the request handling by the vLLM
-            scheduler.
+            HIT if the block is offloaded and ready, MISS if not found,
+            HIT_PENDING if found but not yet readable, or RETRY if the
+            lookup should be retried later.
         """
         pass
 
@@ -277,16 +284,16 @@ class OffloadingManager(ABC):
         """
         Called when a request has finished.
 
-        By the time this is called, all per-request offload calls for this
-        request (prepare_store/complete_store, prepare_load/complete_load,
-        touch, lookup) have already been issued, and none will follow. The
-        scheduler defers this call until the request is finished and has no
-        in-flight transfer jobs.
+        By the time this is called, the scheduler will issue no more
+        submit-side calls for this request, such as prepare_store() and
+        prepare_load(). Completion callbacks for already-submitted transfers
+        (complete_store() and complete_load()) may still arrive afterward.
 
-        Note this signals only that no further calls will be made; it does NOT
-        imply the data has been persisted. Asynchronous transfers already
-        submitted for this request (e.g. CPU->secondary cascades) may still be
-        in flight. This is the right place to release per-request bookkeeping.
+        This hook does NOT imply the data has been persisted. Asynchronous
+        transfers already submitted for this request may still be in flight.
+        Managers that cascade to lower tiers should delay those tiers'
+        on_request_finished() calls until no more lower-tier submit calls can
+        be issued for this request.
 
         Args:
             req_context: per-request context.
@@ -432,6 +439,41 @@ class CanonicalKVCaches:
     group_data_refs: list[list[CanonicalKVCacheRef]]
 
 
+@dataclass
+class TransferResult:
+    job_id: int
+    success: bool
+    transfer_size: int | None = None
+    transfer_time: float | None = None
+
+
+class OffloadingWorker(ABC):
+    """Runs in the worker process. Performs async KV transfers for ONE
+    offloaded medium (e.g. CPU). Direction is explicit via submit_store /
+    submit_load, so there is no (src_medium, dst_medium) routing."""
+
+    @abstractmethod
+    def submit_store(
+        self, job_id: int, src_spec: GPULoadStoreSpec, dst_spec: LoadStoreSpec
+    ) -> bool:
+        """Async GPU -> offloaded medium."""
+
+    @abstractmethod
+    def submit_load(
+        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: GPULoadStoreSpec
+    ) -> bool:
+        """Async offloaded medium -> GPU."""
+
+    @abstractmethod
+    def get_finished(self) -> list[TransferResult]: ...
+
+    @abstractmethod
+    def wait(self, job_ids: set[int]) -> None: ...
+
+    def shutdown(self) -> None:
+        return
+
+
 class OffloadingSpec(ABC):
     """Spec for an offloading connector"""
 
@@ -524,16 +566,14 @@ class OffloadingSpec(ABC):
         pass
 
     @abstractmethod
-    def get_handlers(
-        self, kv_caches: CanonicalKVCaches
-    ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], "OffloadingHandler"]]:
+    def get_worker(self, kv_caches: CanonicalKVCaches) -> OffloadingWorker:
         """
-        Get offloading handlers along with their respective src and dst types.
+        Get an OffloadingWorker that handles async KV transfers for this spec.
 
         Args:
             kv_caches: Canonicalized KV caches.
 
-        Yields:
-            Tuples of (src_type, dst_type, offloading_handler).
+        Returns:
+            An OffloadingWorker instance for this medium.
         """
         pass

@@ -285,7 +285,13 @@ class RoutedExperts(PluggableLayer):
             and expert_data.dtype == torch.uint8
             and loaded_weight.dtype == e8m0_dtype
         ):
-            return loaded_weight.view(torch.uint8)
+            # ue8m0 scales (DeepSeek-V4 mega-MoE) share the byte layout of
+            # uint8; reinterpret the bits instead of value-casting.
+            loaded_weight = loaded_weight.view(torch.uint8)
+        if loaded_weight.shape != expert_data.shape and loaded_weight.numel() == 1:
+            # Per-tensor scales arrive 0-D or as shape-(1,) (llm-compressor
+            # NVFP4); match the destination shape so copy_ won't broadcast.
+            loaded_weight = loaded_weight.reshape(expert_data.shape)
         return loaded_weight
 
     def _load_per_tensor_weight_scale(
@@ -545,7 +551,9 @@ class RoutedExperts(PluggableLayer):
     ):
         param_data = param.data
 
-        # Input scales can be loaded directly and should be equal.
+        # Used for both scalar input_scale and the size-2 `weight_shape`
+        # param (compressed-tensors). Assign directly so both shapes load;
+        # _to_scalar's reshape(()) would reject the size-2 weight_shape.
         param_data[expert_id] = loaded_weight
 
     def _load_g_idx(
@@ -713,7 +721,9 @@ class RoutedExperts(PluggableLayer):
             ):
                 scale_expert_id = global_expert_id if use_global_sf else expert_id
                 scale_shard_id = 0 if shard_id == "w1" else 1
-                param.data[scale_expert_id][scale_shard_id] = loaded_weight.reshape(())
+                param.data[scale_expert_id][scale_shard_id] = self._to_scalar(
+                    loaded_weight
+                )
                 return True if return_success else None
 
             if (

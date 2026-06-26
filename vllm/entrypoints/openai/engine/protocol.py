@@ -362,6 +362,13 @@ class DeltaMessage(OpenAIBaseModel):
             self.reasoning = self.reasoning_content
         return self
 
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        data = handler(self)
+        if len(data.get("tool_calls", [])) == 0:
+            data.pop("tool_calls", None)
+        return data
+
 
 class GenerationError(Exception):
     """raised when finish_reason indicates internal server error (500)"""
