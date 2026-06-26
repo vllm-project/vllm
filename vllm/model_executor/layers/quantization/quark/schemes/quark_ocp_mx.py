@@ -294,9 +294,9 @@ class QuarkOCP_MX(QuarkScheme):
                 layer.weight_scale.data, requires_grad=False
             )
             self.rdna3_kernel.process_weights_after_loading(layer)
-            layer._rdna3 = True
             return
-        layer._rdna3 = False
+        # Shapes not supported by the HIP kernel; fall back to emulation.
+        self.rdna3_kernel = None
 
         if self.emulate:
             if self.dynamic_mxfp4_quant:
@@ -393,8 +393,7 @@ class QuarkOCP_MX(QuarkScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if getattr(layer, "_rdna3", False):
-            assert self.rdna3_kernel is not None
+        if self.rdna3_kernel is not None:
             return self.rdna3_kernel.apply_weights(layer, x, bias)
         if self.emulate:
             dq_w = self.dequant_func(layer.weight, layer.weight_scale, x.dtype)

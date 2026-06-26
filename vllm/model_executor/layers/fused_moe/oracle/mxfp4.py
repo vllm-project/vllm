@@ -314,13 +314,12 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
     """Available backends in priority order, BF16-act variant before
     activation-quantized variant within each vendor family."""
     _AVAILABLE_BACKENDS = [
-        # gfx1100 native HIP kernel; is_supported_config gates it off elsewhere.
-        Mxfp4MoeBackend.RDNA3_MXFP4,
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
         Mxfp4MoeBackend.AITER_MXFP4_BF16,
         Mxfp4MoeBackend.AITER_MXFP4_FP8,
         Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
+        Mxfp4MoeBackend.RDNA3_MXFP4,
         Mxfp4MoeBackend.TRITON,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
@@ -341,7 +340,7 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
     backend-level ``is_supported_config`` check filters by device capability).
     """
     if current_platform.is_rocm():
-        return [Mxfp4MoeBackend.RDNA3_MXFP4, Mxfp4MoeBackend.AITER_MXFP4_BF16]
+        return [Mxfp4MoeBackend.AITER_MXFP4_BF16]
     if current_platform.is_xpu():
         return [Mxfp4MoeBackend.XPU]
     _AVAILABLE_BACKENDS = [
@@ -549,21 +548,10 @@ def select_mxfp4_moe_backend(
         )
 
     if current_platform.is_rocm():
-        # ROCm has no native FP4 compute, so activation-quantized MXFP4
-        # (W4A4/W4A8) degrades to weight-only. On gfx1100 the native HIP
-        # kernel handles that faster than the Triton-unfused fallback.
-        from vllm.model_executor.layers.fused_moe.experts.rdna3_mxfp4_moe import (
-            RDNA3Mxfp4Experts,
-        )
-
-        backend = (
-            Mxfp4MoeBackend.RDNA3_MXFP4
-            if RDNA3Mxfp4Experts._supports_current_device()
-            else Mxfp4MoeBackend.TRITON_UNFUSED
-        )
+        backend = Mxfp4MoeBackend.TRITON_UNFUSED
         logger.info_once(_make_log_backend(backend))
         return _return_or_raise(
-            backend,
+            Mxfp4MoeBackend.TRITON_UNFUSED,
             config,
             kMxfp4Static,
             None,

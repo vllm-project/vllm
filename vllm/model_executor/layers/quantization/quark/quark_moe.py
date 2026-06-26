@@ -1013,9 +1013,13 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 moe, activation_key=kFp8StaticTensorSym
             )
         elif self.ocp_mx_scheme == "w_mxfp4_a_mxfp4":
-            # W4A4: MXFP4 weights + MXFP4 activations
+            # W4A4: MXFP4 weights + MXFP4 activations. Platforms without native
+            # FP4 (e.g. gfx1100) compute this weight-only with bf16 activations,
+            # so request a weight-only backend instead of the mxfp4-activation
+            # variant.
+            act_key = kMxfp4Dynamic if current_platform.supports_mx() else None
             self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
-                moe, activation_key=kMxfp4Dynamic
+                moe, activation_key=act_key
             )
 
         # Validation for unsupported schemes
