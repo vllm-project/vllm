@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from vllm.v1.kv_offload.tiering.base import SecondaryTierManager
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.v1.kv_offload.base import OffloadingSpec
 
 
 class SecondaryTierFactory:
@@ -29,31 +29,45 @@ class SecondaryTierFactory:
         cls,
         tier_config: dict,
         primary_kv_view: memoryview,
-        vllm_config: "VllmConfig",
+        offloading_spec: "OffloadingSpec",
     ) -> SecondaryTierManager:
+        tier_cls = cls.get_tier_class(tier_config)
         config = tier_config.copy()
+        tier_type = config.pop("type")
+        return tier_cls(
+            offloading_spec=offloading_spec,
+            primary_kv_view=primary_kv_view,
+            tier_type=tier_type,
+            **config,
+        )
 
-        tier_type = config.pop("type", None)
+    @classmethod
+    def get_tier_class(cls, tier_config: dict) -> type[SecondaryTierManager]:
+        tier_type = tier_config.get("type")
         if not tier_type:
             raise ValueError("Secondary tier configuration must include 'type'")
-
         if tier_type not in cls._registry:
             raise ValueError(
                 f"Unknown secondary tier type: {tier_type!r}. "
                 f"Supported types: {list(cls._registry)}"
             )
-
-        tier_cls = cls._registry[tier_type]()
-        return tier_cls(
-            vllm_config=vllm_config,
-            primary_kv_view=primary_kv_view,
-            tier_type=tier_type,
-            **config,
-        )
+        return cls._registry[tier_type]()
 
 
 SecondaryTierFactory.register_tier(
     "example",
     "vllm.v1.kv_offload.tiering.example.manager",
     "ExampleSecondaryTierManager",
+)
+
+SecondaryTierFactory.register_tier(
+    "fs",
+    "vllm.v1.kv_offload.tiering.fs.manager",
+    "FileSystemTierManager",
+)
+
+SecondaryTierFactory.register_tier(
+    "obj",
+    "vllm.v1.kv_offload.tiering.obj.manager",
+    "ObjectStoreSecondaryTierManager",
 )

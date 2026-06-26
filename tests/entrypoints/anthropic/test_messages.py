@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+
 import anthropic
 import pytest
 import pytest_asyncio
@@ -153,3 +155,39 @@ async def test_anthropic_tool_call_streaming(client: anthropic.AsyncAnthropic):
 
     async for chunk in resp:
         print(chunk.model_dump_json())
+
+
+@pytest.mark.asyncio
+async def test_anthropic_structured_output(client: anthropic.AsyncAnthropic):
+    response = await client.messages.create(
+        model="claude-3-7-sonnet-latest",
+        max_tokens=1024,
+        messages=[
+            {
+                "role": "user",
+                "content": "Extract the key information from this email:"
+                "John Smith (john@example.com) is interested in our "
+                "Enterprise plan and wants to schedule a demo for next Tuesday at 2pm.",
+            }
+        ],
+        output_config={
+            "format": {
+                "type": "json_schema",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "email": {"type": "string"},
+                        "plan_interest": {"type": "string"},
+                        "demo_requested": {"type": "boolean"},
+                    },
+                    "required": ["name", "email", "plan_interest", "demo_requested"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+    )
+    print(response.content[0].text)
+    json_obj = json.loads(response.content[0].text)
+    for key in ["name", "email", "plan_interest", "demo_requested"]:
+        assert key in json_obj, f"Missing key in output: {key}"

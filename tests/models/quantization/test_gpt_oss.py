@@ -22,7 +22,14 @@ import pytest
 from packaging import version
 
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx950
+
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx950
+else:
+
+    def on_gfx950() -> bool:
+        return False
+
 
 MODEL_ACCURACIES = {
     # Full quantization: attention linears and MoE linears
@@ -96,6 +103,11 @@ def test_gpt_oss_attention_quantization(
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
     model_args = EvaluationConfig(model_name).get_model_args(tp_size)
+
+    # Emulation backend on MI300, MI250 is opt-in
+    # following https://github.com/vllm-project/vllm/pull/45896
+    if not on_gfx950():
+        model_args["moe_backend"] = "emulation"
 
     extra_run_kwargs = {
         "gen_kwargs": {"max_gen_toks": 8000},
