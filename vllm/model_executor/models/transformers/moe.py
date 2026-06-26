@@ -125,20 +125,6 @@ class MoEMixin(MixtureOfExperts):
         # Skip MixtureOfExperts.__init__ and call the next class in MRO
         super(MixtureOfExperts, self).__init__(vllm_config=vllm_config, prefix=prefix)
 
-    def set_eplb_state(
-        self,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
-    ):
-        for moe_layer_idx, mlp_layer in enumerate(self.mlp_layers):
-            mlp_layer.experts.set_eplb_state(
-                moe_layer_idx=moe_layer_idx,
-                expert_load_view=expert_load_view,
-                logical_to_physical_map=logical_to_physical_map,
-                logical_replica_count=logical_replica_count,
-            )
-
     def update_physical_experts_metadata(
         self,
         num_physical_experts: int,
