@@ -474,6 +474,12 @@ ARG NVSHMEM_VER
 ARG NCCL_VERSION
 RUN --mount=type=cache,target=/opt/uv/cache \
     mkdir -p /tmp/ep_kernels_workspace/dist && \
+    CUDA_MAJOR=$(echo $CUDA_VERSION | cut -d. -f1) && \
+    if [ "$CUDA_MAJOR" -ge 13 ] && [ -n "$NCCL_VERSION" ]; then \
+        echo "nvidia-nccl-cu${CUDA_MAJOR}==${NCCL_VERSION}" \
+            > /tmp/nccl-override.txt && \
+        export UV_OVERRIDE=/tmp/nccl-override.txt; \
+    fi && \
     export TORCH_CUDA_ARCH_LIST='9.0a 10.0a' && \
     /tmp/install_python_libraries.sh \
         --workspace /tmp/ep_kernels_workspace \
@@ -721,6 +727,18 @@ RUN mkdir -p "${UV_PYTHON_INSTALL_DIR}" "${UV_CACHE_DIR}" \
     && chgrp -R 0 /opt/uv \
     && chmod -R g+rwX,a+rX /opt/uv
 
+# DeepEPv2 GIN requires NCCL >= 2.30.4 at both compile and runtime. torch pins
+# an older version as a transitive dep; this override forces uv to use our
+# pinned version whenever nvidia-nccl-cu* is resolved. Empty on CUDA 12 (no-op).
+RUN CUDA_MAJOR=$(echo $CUDA_VERSION | cut -d. -f1) && \
+    if [ "$CUDA_MAJOR" -ge 13 ]; then \
+        echo "nvidia-nccl-cu${CUDA_MAJOR}==${NCCL_VERSION}" \
+            > /etc/uv-overrides.txt; \
+    else \
+        touch /etc/uv-overrides.txt; \
+    fi
+ENV UV_OVERRIDE=/etc/uv-overrides.txt
+
 # ----------------------------------------------------------------------
 # Non-root support (opt-in)
 # ----------------------------------------------------------------------
@@ -884,15 +902,6 @@ RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm
     uv pip install --system ep_kernels/dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
-# DeepEPv2 GIN requires NCCL >= 2.30.4 at runtime. torch pins an older
-# version, so upgrade after all wheel installs are done.
-RUN --mount=type=cache,target=/opt/uv/cache \
-    CUDA_MAJOR=$(echo $CUDA_VERSION | cut -d. -f1) && \
-    if [ "$CUDA_MAJOR" -ge 13 ]; then \
-        uv pip install --system \
-            "nvidia-nccl-cu${CUDA_MAJOR}==${NCCL_VERSION}" --no-deps; \
-    fi
-
 # nvidia-cutlass-dsl[cu13] installs -libs-base and -libs-cu13 wheels that
 # share paths with different content. Force -libs-cu13 last after runtime
 # dependency installs so uv cannot leave base files behind.
@@ -978,16 +987,6 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/opt/uv/cache \
     uv pip install --system -e tests/vllm_test_utils
-
-# Re-upgrade NCCL after dev requirements (which re-pin torch's older NCCL).
-ARG CUDA_VERSION
-ARG NCCL_VERSION
-RUN --mount=type=cache,target=/opt/uv/cache \
-    CUDA_MAJOR=$(echo $CUDA_VERSION | cut -d. -f1) && \
-    if [ "$CUDA_MAJOR" -ge 13 ]; then \
-        uv pip install --system \
-            "nvidia-nccl-cu${CUDA_MAJOR}==${NCCL_VERSION}" --no-deps; \
-    fi
 
 # enable fast downloads from hf (for testing)
 ENV HF_XET_HIGH_PERFORMANCE 1
