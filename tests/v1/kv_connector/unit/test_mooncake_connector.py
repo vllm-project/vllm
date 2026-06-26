@@ -149,6 +149,8 @@ async def test_build_transfer_params_separates_prefill_pp_layers():
     worker.is_kv_producer = True
     worker.tp_rank = 0
     worker.tp_size = 1
+    worker.kv_cache_config = _make_test_kv_cache_config()
+    worker._physical_blocks_per_logical_kv_block = 1
     worker.transfer_topo = SimpleNamespace(local_replicates_kv_cache=False)
 
     block_len = 256
