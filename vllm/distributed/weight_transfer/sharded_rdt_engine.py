@@ -608,6 +608,19 @@ class ShardedRDTWeightTransferEngine(
                 time.perf_counter() - t0,
             )
 
+        # Hardcoded profiling: patch Ray's NIXL transport so this worker's
+        # register/transfer/deregister calls accumulate into per-process
+        # counters we can snapshot around each pull. Fail-soft.
+        from vllm.distributed.weight_transfer._nixl_profile import install_nixl_timing
+
+        install_nixl_timing()
+
+        # Measure the per-RPC fixed-cost floor from THIS worker to its trainer,
+        # on the same path produce takes: a bare Ray actor call (no nixl) and a
+        # tiny nixl pull (warmup). Their difference isolates the nixl
+        # control-plane overhead; the bare call is the pure Ray dispatch RTT.
+        self._measure_rpc_baseline()
+
         # Bake the replay plan now. This is a pure dry run: the trainer's gather
         # cache is empty at init, so nothing can (or does) get pulled — we only
         # record how each slice is fetched and where it lands, then restore the
@@ -635,6 +648,66 @@ class ShardedRDTWeightTransferEngine(
         dp_rank = getattr(pc, "data_parallel_rank", 0) or 0
         global_worker_index = dp_rank * tp_size + tp_rank
         return global_worker_index % num_producers
+
+    def _measure_rpc_baseline(self, n: int = 30) -> None:
+        """Time the bare Ray actor-call RTT and the tiny-nixl-pull RTT.
+
+        Hardcoded benchmark probe. ``ping`` is a no-op method (pure Ray
+        dispatch, no nixl); ``rdt_warmup`` returns a 1-element tensor over nixl
+        (Ray dispatch + full nixl control plane + negligible data). The
+        difference is the per-RPC nixl control-plane fixed cost; ``ping`` alone
+        is the Ray dispatch floor. Results go to the consumer timing file as a
+        ``mode=baseline`` record so the driver can read them.
+        """
+        import json
+        import os
+
+        import ray
+
+        actor = self._trainer_actor
+        ping = getattr(actor, "ping", None)
+        warmup = getattr(actor, "rdt_warmup", None)
+        bare_ms = nixl_ms = None
+        try:
+            if ping is not None:
+                ray.get(ping.remote())  # prime
+                t0 = time.perf_counter()
+                for _ in range(n):
+                    ray.get(ping.remote())
+                bare_ms = (time.perf_counter() - t0) / n * 1e3
+            if warmup is not None:
+                ray.get(warmup.remote())  # prime (also warms the nixl connection)
+                t0 = time.perf_counter()
+                for _ in range(n):
+                    ray.get(warmup.remote())
+                nixl_ms = (time.perf_counter() - t0) / n * 1e3
+        except Exception as e:
+            logger.warning("RPC baseline probe failed: %r", e)
+            return
+
+        logger.info(
+            "[RDT-TIMING] rpc baseline: bare_ray=%.3fms nixl_ping=%.3fms "
+            "(nixl control-plane ~= %.3fms)",
+            bare_ms or 0.0,
+            nixl_ms or 0.0,
+            (nixl_ms - bare_ms) if (bare_ms and nixl_ms) else 0.0,
+        )
+        os.makedirs(
+            os.path.dirname(ShardedRDTWeightTransferEngine._CONSUMER_TIMING_FILE),
+            exist_ok=True,
+        )
+        with open(ShardedRDTWeightTransferEngine._CONSUMER_TIMING_FILE, "a") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "pid": os.getpid(),
+                        "mode": "baseline",
+                        "bare_ray_ms": bare_ms,
+                        "nixl_ping_ms": nixl_ms,
+                    }
+                )
+                + "\n"
+            )
 
     def receive_weights(
         self,
@@ -939,9 +1012,15 @@ class ShardedRDTWeightTransferEngine(
         _t_recv = time.perf_counter()
 
         # One batched pull for every unique source slice this group needs.
+        # Snapshot the consumer-side NIXL counters around the pull so the delta
+        # is exactly this pull's registration / transfer / deregistration split.
+        from vllm.distributed.weight_transfer import _nixl_profile
+
+        _nixl_before = _nixl_profile.snapshot()
         _t_pull = time.perf_counter()
         results = self._pull({c.src for g in groups for c in g.copies})
         pull_seconds = time.perf_counter() - _t_pull
+        _nixl_delta = _nixl_profile.delta(_nixl_before, _nixl_profile.snapshot())
 
         _t_proc = time.perf_counter()
         for g in groups:
@@ -974,8 +1053,19 @@ class ShardedRDTWeightTransferEngine(
             info.reset()
         process_seconds = time.perf_counter() - _t_proc
         self._log_timing(
-            "replay", time.perf_counter() - _t_recv, pull_seconds, 1, process_seconds
+            "replay",
+            time.perf_counter() - _t_recv,
+            pull_seconds,
+            1,
+            process_seconds,
+            _nixl_delta,
         )
+
+    # Hardcoded profiling sink: vLLM workers run in an EngineCore subprocess
+    # whose logs are not streamed to the driver, so each receive_weights call
+    # appends one JSON line here. The driver truncates it at sync-loop start and
+    # aggregates it at the end. Single-node benchmark scaffolding only.
+    _CONSUMER_TIMING_FILE = "/tmp/rdt_profile/consumer.jsonl"
 
     @staticmethod
     def _log_timing(
@@ -984,36 +1074,47 @@ class ShardedRDTWeightTransferEngine(
         pull_seconds: float,
         pull_calls: int,
         process_seconds: float,
+        nixl_delta: dict | None = None,
     ) -> None:
         """Log a one-line timing summary for one ``receive_weights`` call.
 
-        ``mode`` is ``replay`` or ``unbaked``. ``pull_seconds`` isolates the
-        NIXL transfer; ``process_seconds`` is the scatter/materialize/quantize/
+        ``mode`` is ``replay`` or ``unbaked``. ``pull_seconds`` is the full
+        ``ray.get`` round trip; ``nixl_delta`` (when present) splits that into the
+        consumer-side registration / transfer / deregistration measured by the
+        NIXL patch. ``process_seconds`` is the scatter/materialize/quantize/
         kernel-copy work after the pull.
         """
+        nixl_delta = nixl_delta or {}
         logger.info(
             "[RDT-TIMING] receive_weights mode=%s total=%.4fs nixl_pull=%.4fs "
-            "(%d pull%s) process=%.4fs",
+            "(%d pull%s) process=%.4fs | nixl_transfer=%.4fs register=%.4fs "
+            "(%d) dereg=%.4fs",
             mode,
             total_seconds,
             pull_seconds,
             pull_calls,
             "" if pull_calls == 1 else "s",
             process_seconds,
+            nixl_delta.get("transfer_seconds", 0.0),
+            nixl_delta.get("register_seconds", 0.0),
+            nixl_delta.get("register_calls", 0),
+            nixl_delta.get("deregister_seconds", 0.0),
         )
-        # vLLM workers run in an EngineCore subprocess whose logs are not
-        # streamed to the driver; optionally append the timing to a file so
-        # benchmarks can read the pull/process split deterministically.
+
+        import json
         import os
 
-        timing_file = os.environ.get("VLLM_RDT_TIMING_FILE")
-        if timing_file:
-            with open(timing_file, "a") as f:
-                f.write(
-                    f"mode={mode} total={total_seconds:.4f} "
-                    f"nixl_pull={pull_seconds:.4f} pull_calls={pull_calls} "
-                    f"process={process_seconds:.4f}\n"
-                )
+        os.makedirs(os.path.dirname(ShardedRDTWeightTransferEngine._CONSUMER_TIMING_FILE), exist_ok=True)
+        record = {
+            "pid": os.getpid(),
+            "mode": mode,
+            "total": total_seconds,
+            "pull": pull_seconds,
+            "process": process_seconds,
+            **nixl_delta,
+        }
+        with open(ShardedRDTWeightTransferEngine._CONSUMER_TIMING_FILE, "a") as f:
+            f.write(json.dumps(record) + "\n")
 
     def shutdown(self) -> None:
         self._trainer_actor = None

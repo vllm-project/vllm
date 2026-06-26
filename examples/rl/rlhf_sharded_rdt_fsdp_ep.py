@@ -42,6 +42,175 @@ Inference workers are mapped 1:1 onto the trainer ranks (static load
 balancing) so the trainer-side clone + NIC egress is spread across all
 ranks instead of funneling through rank 0; workers resolve their assigned
 rank via ``ray.get_actor(...)``.
+
+================================================================================
+PROFILING OUTPUT — HOW TO READ IT
+================================================================================
+This script is instrumented with hardcoded profiling (no env vars). The goal is
+to attribute every weight-sync second: clone, NIXL transfer, memory
+registration, all-gather, fixed per-RPC overhead, and the worker-side copies —
+and to check whether transfer is spread across NICs. If you are porting this to
+bigger models/hardware, this section explains every line so you can interpret a
+fresh run.
+
+THREE PROCESSES (who measures what)
+  - driver        : this script's main(). Orchestrates gather + update_weights
+                    and PRINTS every ``[profile]`` line. Reads trainer counters
+                    via Ray methods and worker counters via a JSONL file.
+  - trainer ranks : ``FSDPTrainWorker`` actors = NIXL *producers* (4, one/FSDP
+                    rank). Clone slices, serve pulls. Counters exposed via
+                    ``get_produce_timing`` / ``get_nixl_timing`` Ray methods.
+  - vLLM workers  : EngineCore subprocesses = NIXL *consumers* (4, DP=4). Run
+                    ``receive_weights``/``_replay``/``_pull``. Their logs are NOT
+                    streamed to the driver, so each appends one JSON line per
+                    pull to ``/tmp/rdt_profile/consumer.jsonl``; the driver reads
+                    it at the end. They also log ``[RDT-TIMING]`` lines visible in
+                    the run log prefixed by ``(RayWorkerProc pid=...)``.
+
+THE MEASUREMENT SHIM
+  ``vllm/distributed/weight_transfer/_nixl_profile.py`` monkeypatches Ray's
+  ``NixlTensorTransport`` (``register_memory`` / ``deregister_memory`` /
+  ``transfer`` / ``check_xfer_state`` / ``extract_tensor_transport_metadata`` /
+  desc calls) to accumulate per-process timers. Installed in BOTH the trainer
+  actors (``FSDPTrainWorker.__init__``) and the vLLM workers (engine
+  ``init_transfer_engine``). NIXL is one-sided, so the producer process only
+  *registers* (never ``transfer``s) and the consumer process *transfers* — the
+  same patch, read per-process, cleanly separates registration from transfer.
+  It also reads per-NIC EFA/RDMA hardware counters from ``/sys`` (name-agnostic).
+
+UNIT MODEL (critical for reading the numbers)
+  one run        = SYNC_ITERS weight syncs (env RDT_SYNC_ITERS, default 3).
+  one sync/iter  = N layer GROUPS (pre + one-per-decoder-layer + post).
+  one group      = one ``engine.update_weights`` = one batched "produce" RPC
+                   PER vLLM worker. So  #produce RPCs/iter = #groups x #workers.
+  iter 0 is COLD (first registration + CUDA warmup); iters 1+ are WARM (the
+  steady state RL cares about). NOTE: the RPC-floor baseline probe at init calls
+  rdt_warmup, which PRE-WARMS the same NIXL connection produce uses — so the
+  one-time connection-setup cost is absorbed into init, not iter 0 (this is why
+  iter 0 looks less cold than it would without profiling). Read the WARM iters.
+
+--------------------------------------------------------------------------------
+PER-ITER ``[profile]`` BLOCK (printed by the driver, once per sync iter)
+--------------------------------------------------------------------------------
+  total weight-sync wall time   : end-to-end wall for the whole iter (the number
+                                  to minimize). Everything below is a component.
+  trainer all-gather (overlap'd): time the driver blocked on ``full_tensor``
+                                  all-gather. NOTE: this is the OVERLAPPED TAIL —
+                                  gather(K+1) is launched before awaiting
+                                  update_weights(K), so warm iters show ~0. It is
+                                  the critical-path contribution, not raw cost.
+  trainer produce calls (all)   : total produce RPCs this iter (= #groups x
+                                  #workers). The fixed-cost multiplier.
+  trainer specs (slices) total  : total slices shipped (sum of batch sizes).
+  trainer gather-cache wait     : time a produce call blocked waiting for its
+                                  layer to be gathered. Should be ~0 (driver
+                                  gathers before firing update_weights).
+  trainer slice+clone (slowest) : per-rank clone (contiguous copy for NIXL) time,
+                                  MAX across ranks (ranks clone in parallel, so
+                                  wall ~ slowest). This is data touch #1.
+  producer NIXL register (slow) : time the trainer spent in NIXL register_memory
+                                  (fresh clone buffers => one reg/slice/iter).
+                                  ``producer xfer`` should be ~0 (producers never
+                                  call transfer; sanity check the one-sided split).
+  producer method total (slow)  : wall spent INSIDE rdt_produce_weights_batched
+                                  (= gather-wait + clone). The worker blocks on
+                                  this during its pull.
+  producer extract (slow)       : time in Ray's extract_tensor_transport_metadata
+                                  (runs AFTER the method returns): cuda.sync +
+                                  register + build descriptors. ``cuda.sync`` is
+                                  isolated (= extract - register - descs); it has
+                                  been small here, but watch it on bigger models.
+  bytes produced (all ranks)    : total GiB cloned+served this iter.
+  per-rank GiB                  : GiB per trainer rank — checks the 1:1 load
+                                  balance is even (all ranks ~equal = balanced).
+  agg clone throughput          : total bytes / slowest-rank clone time
+                                  (AGGREGATE across ranks, not per-rank).
+
+--------------------------------------------------------------------------------
+END-OF-RUN BLOCKS (printed once, after all iters)
+--------------------------------------------------------------------------------
+RPC-FLOOR BASELINE (per worker, measured at init)
+  bare Ray RTT     : round-trip of a no-op Ray actor call (``ping``). Pure Ray
+                     dispatch floor, no NIXL. (~0.8 ms here.)
+  nixl-ping RTT    : round-trip of a 1-element NIXL pull (``rdt_warmup``). Full
+                     nixl control-plane for a trivial payload.
+  nixl control-plane = nixl-ping - bare. The per-RPC FIXED overhead that does NOT
+                     scale with payload (Ray object resolution + agent handshake).
+
+CONSUMER-SIDE NIXL (WARM iters only — each worker's first ``n_groups`` replay
+  records, i.e. the cold iter 0, are skipped; falls back to all records if
+  SYNC_ITERS=1. An ``UNBAKED fallback fired`` line appears above it if the rare
+  per-slice path ran — those records are EXCLUDED from these averages.)
+  pull           : sum of the worker's ``ray.get(produce.remote(...))`` walls.
+  transfer       : actual NIXL/RDMA read wall (data touch #2). Small.
+  register (Nregs): consumer-side dest-buffer registration (fresh buffers/pull).
+  dereg          : consumer-side deregistration.
+  descs          : consumer descriptor build/serialize.
+  recv-residual  : pull - transfer - register - dereg - descs. This is NOT pure
+                   overhead: it still contains the clone-wait + fixed RPC floor +
+                   producer extract, which all happen on the TRAINER during the
+                   worker's ray.get. Split it using the producer + baseline lines.
+  avg pull/RPC   : pull / (#groups x #warm iters). Compare directly to the
+                   RPC-FLOOR nixl-ping: (avg pull/RPC - nixl-ping) is the
+                   payload-dependent part of each pull.
+  process        : printed on the next line — the post-pull scatter copy (touch
+                   #3) + kernel copy (touch #4), summed. SEPARATE from pull;
+                   ~two device copies of the worker's slice. Not split today.
+
+PER-NIC RDMA byte deltas
+  Per-EFA-device byte counters diffed across the run, + "max device share".
+  CAVEAT: SINGLE-NODE transfers go over cuda_ipc/NVLink, NOT the NICs, so this
+  reads ~0 on one node. It is only meaningful MULTI-NODE *and* where ``/sys``
+  exposes EFA ``hw_counters``. Even share across devices = good balance; one
+  device at ~100% = affinity/``UCX_NET_DEVICES`` problem. App-level balance is
+  separately confirmed by the per-iter ``per-rank GiB`` line.
+
+Per-pull worker log lines (in the run log, ``(RayWorkerProc pid=...)``):
+  ``[RDT-TIMING] receive_weights mode=replay total=.. nixl_pull=.. (1 pull)
+    process=.. | nixl_transfer=.. register=.. (N) dereg=..``
+  ``process`` = the post-pull scatter work (see DATA TOUCHES). ``mode=unbaked``
+  is the rare per-slice fallback path (should not appear in steady state).
+
+--------------------------------------------------------------------------------
+THE PER-RPC DECOMPOSITION (the punchline — how to split one ``pull``)
+--------------------------------------------------------------------------------
+  pull (worker ray.get of one produce RPC) =
+      fixed Ray+nixl control-plane     <- RPC-FLOOR: bare + nixl-ping
+    + clone-wait (trainer)             <- producer method total / #groups
+    + transfer                         <- CONSUMER transfer
+    + registration (producer+consumer) <- producer register + CONSUMER register
+    + descriptors (producer+consumer)  <- CONSUMER descs (+ producer, in extract)
+    + producer cuda.sync               <- producer extract - register - descs
+  ``process`` (scatter/quant/kernel copy) is SEPARATE from pull (happens after).
+
+DATA TOUCHES — the same bytes are moved 4x; only some are isolated:
+  #1 trainer clone        -> per-iter "slice+clone"            (isolated)
+  #2 NIXL transfer        -> CONSUMER "transfer"               (isolated)
+  #3 scatter copy         -> recv buffer -> materialized param  ) both lumped into
+  #4 kernel copy          -> param -> persistent kernel storage ) worker "process"
+  (#3 and #4 are NOT split today; "process" ~= two device copies of the layer.
+   ~half is the copy-into-dest. Splitting them is the next instrumentation TODO.)
+
+HOW TO INTERPRET / SCALING TO BIGGER MODELS
+  - FIXED cost (Ray dispatch + nixl control-plane, ~6 ms/RPC here) scales only
+    with #RPCs (~#layers). Levers: fewer/larger gather groups; pipeline the pulls
+    to hide latency.
+  - PAYLOAD cost (clone + transfer + registration + descs + the two process
+    copies) scales with model BYTES/SLICES. On bigger models this dominates; the
+    clone is the single biggest payload term -> zero-copy views is the top lever.
+  - So: if ``avg pull/RPC`` >> ``nixl-ping``, you are payload-bound (chase clone/
+    copies). If they are close, you are RPC-bound (chase RPC count / pipelining).
+  - REFERENCE (Qwen3-30B-A3B, TP1/DP4/EP4, 8xH100, nixl 1.3.0, WARM iter):
+    total ~1.3 s; per-RPC pull ~18 ms ~= 33% fixed control-plane (~6 ms) +
+    29% clone (~5 ms) + 15% transfer (~3 ms) + 8% registration + 8% descs +
+    3% cuda.sync. process ~3 ms/RPC = two ~16 GiB/worker copies at ~250 GiB/s.
+    These shift with model/hardware — recompute, don't assume.
+
+FILES
+  /tmp/rdt_profile/consumer.jsonl — truncated before init each run. Lines are
+    either ``{"mode":"baseline", bare_ray_ms, nixl_ping_ms}`` (one per worker) or
+    per-pull records ``{pull, transfer_seconds, register_seconds, descs_seconds,
+    deregister_seconds, process, ...}``. The driver parses both at the end.
 """
 
 import asyncio
@@ -252,9 +421,44 @@ class FSDPTrainWorker:
         self._produce_wait_seconds = 0.0
         self._produce_slice_seconds = 0.0
         self._produce_bytes = 0
+        # Total wall time spent *inside* the produce method (entry->exit). The
+        # gap between the worker's pull and this is Ray dispatch + the post-return
+        # extract (cuda.sync + register) + control plane + recv.
+        self._produce_method_seconds = 0.0
+
+        # Hardcoded profiling: patch Ray's NIXL transport in this producer
+        # process so register_memory (the producer-side memory registration that
+        # fires for every fresh clone) is timed. This process never calls
+        # transfer(), so its transfer_seconds stays ~0 -- the split is implicit.
+        from vllm.distributed.weight_transfer._nixl_profile import install_nixl_timing
+
+        install_nixl_timing()
 
     def get_rank(self):
         return self.rank
+
+    def ping(self):
+        """No-op Ray method: measures the bare Ray actor-call RTT (no nixl)."""
+        return None
+
+    # ---------- profiling helpers ----------
+
+    def get_nixl_timing(self) -> dict:
+        """Per-process NIXL counters (producer-side registration etc.)."""
+        from vllm.distributed.weight_transfer import _nixl_profile
+
+        return _nixl_profile.snapshot()
+
+    def reset_nixl_timing(self) -> None:
+        from vllm.distributed.weight_transfer import _nixl_profile
+
+        _nixl_profile.reset()
+
+    def read_nic_counters(self) -> dict:
+        """Read this node's per-EFA-device RDMA hardware counters."""
+        from vllm.distributed.weight_transfer import _nixl_profile
+
+        return _nixl_profile.read_efa_counters()
 
     def get_weight_metadata(self):
         return self.weight_names, self.weight_dtype_names, self.weight_shapes
@@ -322,6 +526,7 @@ class FSDPTrainWorker:
         inference workers spread their pulls across ranks rather than hammering
         rank 0.
         """
+        _t_method0 = time.perf_counter()
         needed = sorted({name for name, _ in specs})
 
         _t_wait0 = time.perf_counter()
@@ -367,6 +572,7 @@ class FSDPTrainWorker:
             self._produce_wait_seconds += wait_seconds
             self._produce_slice_seconds += slice_seconds
             self._produce_bytes += nbytes
+            self._produce_method_seconds += time.perf_counter() - _t_method0
 
         return out
 
@@ -379,6 +585,7 @@ class FSDPTrainWorker:
                 "wait_seconds": self._produce_wait_seconds,
                 "slice_seconds": self._produce_slice_seconds,
                 "bytes": self._produce_bytes,
+                "method_seconds": self._produce_method_seconds,
             }
 
     def reset_produce_timing(self) -> None:
@@ -390,6 +597,7 @@ class FSDPTrainWorker:
             self._produce_wait_seconds = 0.0
             self._produce_slice_seconds = 0.0
             self._produce_bytes = 0
+            self._produce_method_seconds = 0.0
 
     def free_group(self, names: list[str]) -> None:
         """Drop a layer group's gathered full tensors from the rank-0 cache.
@@ -534,6 +742,16 @@ async def main():
         f"(max group size = {max(len(g) for g in layer_groups)} params)."
     )
 
+    # Truncate the worker-side consumer timing file BEFORE init: the engine
+    # writes its per-worker RPC-baseline record (bare Ray RTT + tiny-nixl RTT)
+    # during init_weight_transfer_engine, and per-pull records during the sync
+    # loop. Both must survive into the driver's end-of-run read.
+    import json
+
+    consumer_file = "/tmp/rdt_profile/consumer.jsonl"
+    os.makedirs(os.path.dirname(consumer_file), exist_ok=True)
+    open(consumer_file, "w").close()
+
     print(
         f"[sync] Initializing sharded RDT engine on vLLM workers "
         f"(warmup={'on' if WARMUP else 'off'}); dry-run baking replay plans..."
@@ -559,6 +777,14 @@ async def main():
     print("[sync] Pausing generation...")
     await engine.pause_generation(mode="abort")
 
+    # ---- Hardcoded profiling setup ----
+    # (consumer_file already truncated above, before init, so the baseline
+    # records the engine wrote during init are preserved.)
+    # Snapshot per-NIC RDMA counters before any transfer. Read from rank 0's
+    # actor (co-located with the GPUs/NICs that egress, unlike the driver which
+    # may sit on the head node). Single node -> these are node-global counters.
+    nic_before = ray.get(fsdp_workers[0].read_nic_counters.remote())
+
     # Run SYNC_ITERS back-to-back syncs. The plans were baked at init, so every
     # sync is a replay. Each iter brackets the per-group loop in its own
     # start/finish_weight_update, since initialize/finalize_layerwise_reload run
@@ -567,8 +793,16 @@ async def main():
         # Zero produce counters on every rank so each iter is timed
         # independently (every rank now produces a share of the slices).
         ray.get([w.reset_produce_timing.remote() for w in fsdp_workers])
+        # Zero per-process NIXL counters too, so producer-side registration time
+        # is attributed per iter (bake-iter vs replay-iters).
+        ray.get([w.reset_nixl_timing.remote() for w in fsdp_workers])
 
         await engine.start_weight_update(is_checkpoint_format=True)
+
+        # Accumulated wall time spent in the collective gather (full_tensor
+        # all-gather) for this iter, summed over groups. Measured as the slowest
+        # rank per group since gather_futs are awaited together.
+        allgather_seconds = 0.0
 
         # Per-layer transfer loop. The two interleaved operations:
         #
@@ -597,7 +831,9 @@ async def main():
             if prev_task is not None:
                 await prev_task
                 ray.get([w.free_group.remote(prev_names) for w in fsdp_workers])
+            _t_gather = time.perf_counter()
             ray.get(gather_futs)
+            allgather_seconds += time.perf_counter() - _t_gather
             prev_task = asyncio.create_task(
                 engine.update_weights(
                     WeightTransferUpdateRequest(update_info=asdict(group_info))
@@ -626,6 +862,22 @@ async def main():
         calls = sum(p["calls"] for p in ptimings)
         specs = sum(p["specs"] for p in ptimings)
         wait_max = max(p["wait_seconds"] for p in ptimings)
+        # Producer-side NIXL counters (this iter): registration is the cost that
+        # fires for every fresh clone buffer. transfer_seconds should be ~0 here
+        # (producers are passive RDMA responders, never call transfer()).
+        ntimings = ray.get([w.get_nixl_timing.remote() for w in fsdp_workers])
+        reg_s_max = max(n["register_seconds"] for n in ntimings)
+        reg_calls = sum(n["register_calls"] for n in ntimings)
+        prod_xfer = sum(n["transfer_seconds"] for n in ntimings)
+        # Producer-side post-return extract = cuda.sync + register + descs.
+        # Isolate the per-RPC cuda.synchronize() by subtracting register+descs.
+        extract_s_max = max(n["extract_seconds"] for n in ntimings)
+        sync_per_rank = [
+            n["extract_seconds"] - n["register_seconds"] - n["descs_seconds"]
+            for n in ntimings
+        ]
+        cuda_sync_max = max(sync_per_rank)
+        method_s_max = max(p["method_seconds"] for p in ptimings)
         print("=" * 60)
         print(
             f"[profile] iter {sync_iter} [REPLAY]  warmup={'ON' if WARMUP else 'OFF'}"
@@ -633,10 +885,23 @@ async def main():
         if sync_iter == 0:
             print(f"[profile] init_weight_transfer_engine : {_init_seconds:.3f} s")
         print(f"[profile] total weight-sync wall time : {_sync_seconds:.3f} s")
+        print(f"[profile] trainer all-gather (overlap'd): {allgather_seconds:.3f} s")
         print(f"[profile] trainer produce calls (all) : {calls}")
         print(f"[profile] trainer specs (slices) total: {specs}")
         print(f"[profile] trainer gather-cache wait    : {wait_max:.3f} s (max)")
         print(f"[profile] trainer slice+clone (slowest): {slice_s_max:.3f} s")
+        print(
+            f"[profile] producer NIXL register (slow): {reg_s_max:.3f} s "
+            f"({reg_calls} regs; producer xfer={prod_xfer:.3f}s should be ~0)"
+        )
+        print(
+            f"[profile] producer method total (slow) : {method_s_max:.3f} s "
+            f"(time inside rdt_produce_weights_batched: wait+clone)"
+        )
+        print(
+            f"[profile] producer extract (slow)      : {extract_s_max:.3f} s "
+            f"of which cuda.sync ~= {cuda_sync_max:.3f} s  <-- scales w/ GPU work?"
+        )
         print(f"[profile] bytes produced (all ranks)   : {gib:.3f} GiB")
         print(
             "[profile] per-rank GiB                 : "
@@ -648,6 +913,119 @@ async def main():
                 f"{gib / slice_s_max:.1f} GiB/s"
             )
         print("=" * 60)
+
+    # ---- Consumer-side NIXL breakdown (read from the worker timing file) ----
+    # Lines are mode=baseline (one per worker, the RPC-floor probe), mode=replay
+    # (one per baked pull), or mode=unbaked (the rare per-slice fallback path).
+    # Separate all three. For replay, split each worker's records into cold
+    # (iter 0) vs warm (iters 1+) using the known group count, so the
+    # steady-state numbers aren't diluted by the cold iter, and so unbaked
+    # records (pull=0) never sneak into the per-pull average.
+    from collections import defaultdict
+
+    n_groups = len(layer_groups)
+    baselines: list[dict] = []
+    replay_by_pid: dict[int, list[dict]] = defaultdict(list)
+    unbaked: list[dict] = []
+    with open(consumer_file) as f:
+        for line in f:
+            rec = json.loads(line)
+            mode = rec.get("mode")
+            if mode == "baseline":
+                baselines.append(rec)
+            elif mode == "unbaked":
+                unbaked.append(rec)
+            else:
+                replay_by_pid[rec["pid"]].append(rec)
+
+    def _agg(rows: list[dict]) -> dict:
+        d = dict.fromkeys(
+            ("pull", "transfer", "register", "dereg", "descs", "process"), 0.0
+        )
+        d["n"] = d["count"] = 0
+        for r in rows:
+            d["pull"] += r.get("pull", 0.0)
+            d["transfer"] += r.get("transfer_seconds", 0.0)
+            d["register"] += r.get("register_seconds", 0.0)
+            d["dereg"] += r.get("deregister_seconds", 0.0)
+            d["descs"] += r.get("descs_seconds", 0.0)
+            d["process"] += r.get("process", 0.0)
+            d["n"] += r.get("register_calls", 0)
+            d["count"] += 1
+        return d
+
+    # ---- The decisive numbers: is the residual a fixed RPC cost or scaling? ----
+    print("=" * 60)
+    print("[profile] RPC-FLOOR BASELINE (per worker, measured at init)")
+    for b in sorted(baselines, key=lambda r: r["pid"]):
+        bare = b.get("bare_ray_ms") or 0.0
+        nixl = b.get("nixl_ping_ms") or 0.0
+        print(
+            f"[profile]   pid={b['pid']}: bare Ray RTT={bare:.3f} ms  "
+            f"nixl-ping RTT={nixl:.3f} ms  (nixl control-plane ~= {nixl - bare:.3f} ms)"
+        )
+    if unbaked:
+        u = _agg(unbaked)
+        print(
+            f"[profile] UNBAKED fallback fired: {u['count']} records, "
+            f"total={u['pull'] + u['process']:.3f}s -- per-slice path; investigate "
+            f"if non-zero (these are EXCLUDED from the per-pull averages below)."
+        )
+    print("=" * 60)
+    # Warm-only (skip each worker's first n_groups replay records = cold iter 0).
+    # Falls back to all records if only the cold iter ran (SYNC_ITERS=1).
+    warm_label = "WARM iters only" if SYNC_ITERS > 1 else "COLD iter only"
+    print(f"[profile] CONSUMER-SIDE NIXL ({warm_label}, per worker pid)")
+    for pid, rows in sorted(replay_by_pid.items()):
+        warm_rows = rows[n_groups:] if len(rows) > n_groups else rows
+        a = _agg(warm_rows)
+        cnt = max(a["count"], 1)
+        residual = a["pull"] - a["transfer"] - a["register"] - a["dereg"] - a["descs"]
+        per_pull_ms = a["pull"] / cnt * 1e3
+        print(
+            f"[profile]   pid={pid}: pull={a['pull']:.3f}s "
+            f"transfer={a['transfer']:.3f}s register={a['register']:.3f}s "
+            f"({a['n']} regs) dereg={a['dereg']:.3f}s descs={a['descs']:.3f}s "
+            f"recv-residual={residual:.3f}s | avg pull/RPC={per_pull_ms:.2f} ms"
+        )
+        print(
+            f"[profile]            process (scatter+kernel copies, touches #3+#4): "
+            f"{a['process']:.3f}s  (separate from pull; ~2 device copies of the data)"
+        )
+    print("=" * 60)
+
+    # ---- Per-NIC RDMA counter deltas (is transfer spread across EFA devices?) --
+    nic_after = ray.get(fsdp_workers[0].read_nic_counters.remote())
+    print("[profile] PER-NIC RDMA byte deltas over the whole sync run")
+    byte_deltas: list[tuple[str, int]] = []
+    for key, after_val in nic_after.items():
+        d = after_val - nic_before.get(key, 0)
+        # Focus on byte-volume counters that actually moved.
+        if d > 0 and "bytes" in key:
+            byte_deltas.append((key, d))
+    if not byte_deltas:
+        print("[profile]   (no *_bytes counters moved -- check counter names below)")
+        # Fall back to any counter that moved, to surface what EFA exposes.
+        for key, after_val in sorted(nic_after.items()):
+            d = after_val - nic_before.get(key, 0)
+            if d > 0:
+                print(f"[profile]   {key}  += {d}")
+    else:
+        for key, d in sorted(byte_deltas, key=lambda kv: -kv[1]):
+            print(f"[profile]   {key}  += {d / (1024**3):.3f} GiB")
+        # How evenly did the egress spread across distinct devices?
+        per_dev: dict[str, int] = {}
+        for key, d in byte_deltas:
+            dev = key.split(":", 1)[0]
+            per_dev[dev] = per_dev.get(dev, 0) + d
+        n_dev = len(per_dev)
+        tot = sum(per_dev.values())
+        print(
+            f"[profile]   -> {n_dev} EFA device(s) moved bytes; "
+            f"max/total share = {max(per_dev.values()) / tot:.1%}"
+            if tot
+            else "[profile]   -> no bytes moved"
+        )
 
     print("[sync] Resuming generation...")
     await engine.resume_generation()
