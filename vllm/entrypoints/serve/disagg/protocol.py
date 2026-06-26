@@ -82,6 +82,13 @@ class GenerateRequest(BaseModel):
             raise ValueError("token_ids must not contain negative values")
         return v
 
+    token_offsets: list[tuple[int, int]] | None = None
+    """Char-level (start, end) offsets per token, relative to the
+    tokenized source string. Present only when the request set
+    `return_token_offsets=True` and the renderer was able to compute
+    them (Fast tokenizer, text input, no multimodal data). List length
+    equals `token_ids` length when present. None otherwise."""
+
     features: MultiModalFeatures | None = None
     """Multimodal hashes and placeholder positions (populated for MM inputs)."""
 
