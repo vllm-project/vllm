@@ -51,6 +51,35 @@ def _fp8_mla_prefill_supported() -> bool:
     return True
 
 
+@functools.lru_cache(maxsize=1)
+def _mla_reduce_v1_requires_num_kv_splits() -> bool:
+    """Whether the installed ``mla_reduce_v1`` takes the ``num_kv_splits`` arg.
+
+    AITER PR #3391 (first released in v0.1.16) added a *required* positional
+    ``num_kv_splits: int`` to ``mla_reduce_v1``, inserted between
+    ``max_seqlen_q`` and ``final_output``; older builds use the legacy
+    signature.
+    """
+    try:
+        import inspect
+
+        from aiter import mla_reduce_v1
+
+        if "num_kv_splits" in inspect.signature(mla_reduce_v1).parameters:
+            return True
+    except (ImportError, ValueError, TypeError):
+        pass
+
+    try:
+        import torch
+
+        op = getattr(getattr(torch.ops, "aiter", None), "mla_reduce_v1", None)
+        schema = getattr(getattr(op, "default", None), "_schema", None)
+        return "num_kv_splits" in str(schema)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 class AiterMLABackend(MLACommonBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
@@ -697,6 +726,15 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             self._mla_prefill_ps_asm_fwd = mla_prefill_ps_asm_fwd
             self._mla_reduce_v1 = mla_reduce_v1
 
+            # AITER PR #3391 (>= v0.1.16) made num_kv_splits a required arg of
+            # mla_reduce_v1.  None signals the legacy signature (older AITER);
+            # otherwise pass the per-reduce-tile split upper bound.
+            self._mla_reduce_num_kv_splits: int | None = None
+            if _mla_reduce_v1_requires_num_kv_splits():
+                from aiter.jit.utils.chip_info import get_cu_num
+
+                self._mla_reduce_num_kv_splits = get_cu_num()
+
     def _flash_attn_varlen_diff_headdims(
         self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
     ):
@@ -792,16 +830,20 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         )
 
         # Phase 2: reduction across KV splits.
-        self._mla_reduce_v1(
+
+        reduce_args: list = [
             logits,
             attn_lse,
             attn_metadata.fp8_prefill_reduce_indptr,
             attn_metadata.fp8_prefill_reduce_final_map,
             attn_metadata.fp8_prefill_reduce_partial_map,
             tile_q,
-            out_3d,
-            final_lse,
-        )
+        ]
+        if self._mla_reduce_num_kv_splits is not None:
+            reduce_args.append(self._mla_reduce_num_kv_splits)
+        reduce_args.append(out_3d)
+        reduce_args.append(final_lse)
+        self._mla_reduce_v1(*reduce_args)
 
     def forward_mha(
         self,
