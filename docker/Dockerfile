@@ -898,13 +898,6 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         fi; \
     fi
 
-# Download FlashInfer precompiled cubins AFTER all pip installs are done.
-# This must run after the vLLM wheel and EP kernels installs above, because
-# those can reinstall/touch flashinfer packages. Downloading cubins earlier
-# (in the flashinfer-jit-cache layer) causes ~2.5 GB of layer duplication
-# when a later pip install overwrites flashinfer package files.
-RUN flashinfer show-config && flashinfer download-cubin
-
 # CUDA image changed from /usr/local/nvidia to /usr/local/cuda in 12.8 but will
 # return to /usr/local/nvidia in 13.0 to allow container providers to mount drivers
 # consistently from the host (see https://github.com/vllm-project/vllm/issues/18859).
