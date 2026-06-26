@@ -575,11 +575,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # stored as a single fused tensor with interleaved GQA layout, so we
         # use one output shard to preserve the interleaving across TP ranks.
         # When gqa_interleaved_layout=False (Qwen3.5), the checkpoint has
-        # separate qkv and z weights, so we use 2 independent output sizes.
+        # separate q, k, v, z weights, so we use 4 independent output sizes.
         output_sizes = (
             [sum((key_dim, key_dim, value_dim, value_dim))]
             if self.gqa_interleaved_layout
-            else [key_dim + key_dim + value_dim, value_dim]
+            else [key_dim, key_dim, value_dim, value_dim]
         )
         return MergedColumnParallelLinear(
             input_size=hidden_size,
