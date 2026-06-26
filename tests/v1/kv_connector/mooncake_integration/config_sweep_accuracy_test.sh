@@ -2,9 +2,7 @@
 set -euo pipefail
 
 # Utility to run Mooncake P/D integration tests sequentially with varying TP
-# configurations. Kept intentionally lean: only symmetric TP is exercised for
-# now. Hetero-TP, DP/EP, hybrid-SSM and sliding-window paths exist in the
-# connector but are unverified end-to-end, so they are left out (see below).
+# configurations.
 SCRIPT="v1/kv_connector/mooncake_integration/run_accuracy_test.sh"
 
 # Symmetric TP configurations (default model: Qwen/Qwen3-0.6B).
@@ -12,12 +10,6 @@ tp_configs=(
   "GPU_MEMORY_UTILIZATION=0.6 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=1"
   "GPU_MEMORY_UTILIZATION=0.6 PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=2"
 )
-
-# Unverified hetero-TP configs. The connector has the code path
-# (_get_tp_ratio / _compute_sender_transfer_plan) but it is not validated
-# end-to-end yet. Uncomment to try once it is trusted.
-#   "GPU_MEMORY_UTILIZATION=0.6 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2"
-#   "GPU_MEMORY_UTILIZATION=0.6 PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=1"
 
 configs=("${tp_configs[@]}")
 
