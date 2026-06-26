@@ -68,7 +68,9 @@ mod tests {
     use crate::tool::{ToolParser, ToolParserTestExt as _};
 
     fn build_tool_call(function_name: &str, arguments: &str) -> String {
-        format!(r#"<longcat_tool_call>{{"name":"{function_name}","arguments":{arguments}}}</longcat_tool_call>"#)
+        format!(
+            r#"<longcat_tool_call>{{"name":"{function_name}","arguments":{arguments}}}</longcat_tool_call>"#
+        )
     }
 
     #[test]
