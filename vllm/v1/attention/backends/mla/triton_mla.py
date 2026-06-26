@@ -86,6 +86,40 @@ class TritonMLABackend(MLACommonBackend):
         return True
 
 
+class TritonMLADecodeWorkspace:
+    """Split-KV attn logits scratch shared across all TritonMLA executions.
+
+    Mirrors ``SM100Workspace`` in cutlass_mla.py: a single buffer, grown on
+    demand, reused across all MLA layers and steps since the scratch is only
+    live within one ``decode_attention_fwd`` call.
+    """
+
+    def __init__(self) -> None:
+        self._buf: torch.Tensor | None = None
+
+    def ensure_size(self, numel: int, device: torch.device) -> None:
+        if self._buf is None or self._buf.device != device:
+            self._buf = torch.empty(numel, dtype=torch.float32, device=device)
+        elif self._buf.numel() < numel:
+            self._buf.resize_(numel)
+
+    def get_buf(
+        self,
+        B: int,
+        q_num_heads: int,
+        num_kv_splits: int,
+        lse_dim: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        numel = B * q_num_heads * num_kv_splits * lse_dim
+        self.ensure_size(numel, device)
+        assert self._buf is not None
+        return self._buf[:numel].view(B, q_num_heads, num_kv_splits, lse_dim)
+
+
+g_attn_logits_workspace = TritonMLADecodeWorkspace()
+
+
 class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
     can_return_lse_for_decode: bool = True
 
@@ -141,6 +175,9 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         self._sm_count = current_platform.num_compute_units()
 
+        # Share the split-KV attn logits scratch across all executions.
+        self._workspace = g_attn_logits_workspace
+
     def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
@@ -182,18 +219,10 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             max_splits = self._sm_count * occupancy_multiplier
             num_kv_splits = min(ideal_splits, max_splits)
 
-        # TODO(lucas) Allocate ahead of time
-        attn_logits = torch.empty(
-            (
-                B,
-                q_num_heads,
-                num_kv_splits,
-                # NOTE: the +1 stores the LogSumExp (LSE) that the stage2
-                # kernel uses to merge partial attention outputs across splits.
-                self.kv_lora_rank + 1,
-            ),
-            dtype=torch.float32,
-            device=q.device,
+        # NOTE: the +1 stores the LogSumExp (LSE) that the stage2 kernel uses to
+        # merge partial attention outputs across splits.
+        attn_logits = self._workspace.get_buf(
+            B, q_num_heads, num_kv_splits, self.kv_lora_rank + 1, q.device
         )
 
         # Add a head dim of 1
