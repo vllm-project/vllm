@@ -277,9 +277,12 @@ impl JsonParamType {
 
 /// Convert one parameter input to a normalized JSON value.
 fn convert_with_optional_schema(param_type: Option<&JsonParamType>, input: &ParamInput) -> Value {
-    // For literal `null`, always convert to JSON null value.
+    // Coerce the literal text `null` to JSON null, except for `string`-typed
+    // params, where it must stay the string "null": a model emitting the literal
+    // text "null" for a string field means the string, not a missing value.
     if let ParamInput::Text(value) = input
         && value.eq_ignore_ascii_case("null")
+        && param_type != Some(&JsonParamType::String)
     {
         return Value::Null;
     }
@@ -685,21 +688,24 @@ mod tests {
     }
 
     #[test]
-    fn convert_params_preserves_null_for_known_param() {
-        let schemas = ToolSchemas::from_tools(&[test_tool(
-            "convert",
-            json!({
-                "type": "object",
-                "properties": {
-                    "value": { "type": "string" }
-                }
-            }),
-        )]);
+    fn string_param_preserves_literal_null_text() {
+        // A `string`-typed param whose value is the literal text "null"/"NULL"
+        // must stay a string (the original case is preserved), rather than being
+        // coerced to JSON null. Non-string types keep coercing "null" to null.
+        let params = ToolSchema::from_schema(&json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" },
+                "count": { "type": "integer" },
+                "anything": {}
+            }
+        }));
 
-        let converted = schemas
-            .convert_params_with_schema("convert", vec![("value".to_string(), "NULL".to_string())]);
-
-        assert_eq!(converted.get("value"), Some(&json!(null)));
+        assert_eq!(params.convert("name", text("null")), json!("null"));
+        assert_eq!(params.convert("name", text("NULL")), json!("NULL"));
+        // Non-string and schema-less params are unchanged: "null" -> null.
+        assert_eq!(params.convert("count", text("null")), json!(null));
+        assert_eq!(params.convert("anything", text("null")), json!(null));
     }
 
     #[test]
@@ -841,7 +847,7 @@ mod tests {
                 "user_id": 42,
                 "urgent": true,
                 "note": "Please leave at front desk.",
-                "nil": null,
+                "nil": "NULL",
                 "shipping": {
                     "city": "Singapore",
                     "zip": 18956
