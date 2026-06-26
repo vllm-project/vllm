@@ -4,6 +4,7 @@
 import asyncio
 import math
 from collections.abc import AsyncGenerator, Iterable, Iterator, Mapping
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -43,6 +44,11 @@ from vllm.utils.torch_utils import is_torch_equal_or_newer
 from .utils import (
     _flatten_embeddings,
 )
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.speech_to_text.realtime.protocol import (
+        RealtimeSessionConfig,
+    )
 
 logger = init_logger(__name__)
 
@@ -237,6 +243,7 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
         audio_stream: AsyncGenerator[np.ndarray, None],
         input_stream: asyncio.Queue[list[int]],
         model_config: ModelConfig,
+        session_config: "RealtimeSessionConfig | None" = None,
     ) -> AsyncGenerator[PromptType, None]:
         tokenizer = cached_tokenizer_from_config(model_config)
         audio_encoder = tokenizer.instruct.audio_encoder

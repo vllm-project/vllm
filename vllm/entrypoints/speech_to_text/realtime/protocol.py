@@ -29,12 +29,24 @@ class InputAudioBufferCommit(OpenAIBaseModel):
     final: bool = False
 
 
+class RealtimeSessionConfig(OpenAIBaseModel):
+    """Optional realtime transcription session parameters."""
+
+    language: str | None = None
+    """ISO-639-1 language code used to guide transcription."""
+
+    prompt: str | None = None
+    """Optional text prompt to guide transcription."""
+
+
 # Server -> Client Events
 class SessionUpdate(OpenAIBaseModel):
     """Configure session parameters"""
 
     type: Literal["session.update"] = "session.update"
     model: str | None = None
+    language: str | None = None
+    prompt: str | None = None
 
 
 class SessionCreated(OpenAIBaseModel):

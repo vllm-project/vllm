@@ -18,6 +18,7 @@
 
 import asyncio
 from collections.abc import AsyncGenerator, Mapping
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -29,11 +30,13 @@ from vllm.model_executor.models.interfaces import (
     SupportsRealtime,
 )
 from vllm.model_executor.models.qwen3_asr import (
+    _ASR_TEXT_TAG,
     Qwen3ASRDummyInputsBuilder,
     Qwen3ASRForConditionalGeneration,
     Qwen3ASRMultiModalProcessor,
     Qwen3ASRProcessingInfo,
     _get_feat_extract_output_lengths,
+    _sanitize_transcription_user_text,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import _I, BaseMultiModalProcessorCache
@@ -46,6 +49,11 @@ from vllm.multimodal.processing.processor import (
 )
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.processor import cached_processor_from_config
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.speech_to_text.realtime.protocol import (
+        RealtimeSessionConfig,
+    )
 
 logger = init_logger(__name__)
 
@@ -183,11 +191,35 @@ class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealt
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
     @classmethod
+    def _get_realtime_prompt_template(
+        cls,
+        audio_placeholder: str | None,
+        session_config: "RealtimeSessionConfig | None" = None,
+    ) -> str:
+        request_prompt = session_config.prompt if session_config is not None else None
+        context = _sanitize_transcription_user_text(request_prompt or "")
+        system_turn = f"<|im_start|>system\n{context}<|im_end|>\n" if context else ""
+
+        prompt = (
+            f"{system_turn}"
+            f"<|im_start|>user\n{audio_placeholder}<|im_end|>\n"
+            f"<|im_start|>assistant\n"
+        )
+
+        language = session_config.language if session_config is not None else None
+        if language:
+            full_lang_name = cls.supported_languages.get(language, language)
+            prompt += f"language {full_lang_name}{_ASR_TEXT_TAG}"
+
+        return prompt
+
+    @classmethod
     async def buffer_realtime_audio(
         cls,
         audio_stream: AsyncGenerator[np.ndarray, None],
         input_stream: asyncio.Queue[list[int]],
         model_config: ModelConfig,
+        session_config: "RealtimeSessionConfig | None" = None,
     ) -> AsyncGenerator[PromptType, None]:
         processor = cached_processor_from_config(model_config)
         feature_extractor = processor.feature_extractor
@@ -202,8 +234,9 @@ class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealt
         )
 
         audio_placeholder = cls.get_placeholder_str("audio", 0)
-        prompt_template = (
-            f"<|im_start|>user\n{audio_placeholder}<|im_end|>\n<|im_start|>assistant\n"
+        prompt_template = cls._get_realtime_prompt_template(
+            audio_placeholder,
+            session_config,
         )
 
         prompt_token_ids = tokenizer.encode(prompt_template)

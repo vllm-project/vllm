@@ -172,7 +172,13 @@ Audio must be sent as base64-encoded PCM16 audio at 16kHz sample rate, mono chan
 | ----- | ----------- |
 | `input_audio_buffer.append` | Send base64-encoded audio chunk: `{"type": "input_audio_buffer.append", "audio": "<base64>"}` |
 | `input_audio_buffer.commit` | Trigger transcription processing or end: `{"type": "input_audio_buffer.commit", "final": bool}` |
-| `session.update` | Configure session: `{"type": "session.update", "model": "model-name"}` |
+| `session.update` | Configure session: `{"type": "session.update", "model": "model-name", "language": "en", "prompt": "domain terms"}` |
+
+`session.update` requires `model`. The `language` and `prompt` fields are
+optional and are used by realtime transcription models that support them.
+`language` is an ISO-639-1 language code such as `"en"` or `"zh"`. `prompt` is
+optional text that guides transcription style, terminology, names, or domain
+vocabulary.
 
 ### Server → Client Events
 
