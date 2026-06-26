@@ -211,6 +211,7 @@ from vllm.config import (
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import (
     get_dcp_group,
+    get_tp_group,
     is_global_first_rank,
 )
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -343,10 +344,9 @@ def _maybe_gather_pcp_mla_latent_cache_inputs(
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     layer_slot_mapping: torch.Tensor | None,
+    use_pcp: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    additional_kwargs = get_forward_context().additional_kwargs
-    per_rank_num_tokens = additional_kwargs.get("pcp_per_rank_num_tokens")
-    if per_rank_num_tokens is None or attn_metadata is None:
+    if not use_pcp or attn_metadata is None:
         return kv_c_normed, k_pe, layer_slot_mapping
     if not getattr(attn_layer.impl, "supports_pcp", False):
         raise NotImplementedError(
@@ -358,7 +358,6 @@ def _maybe_gather_pcp_mla_latent_cache_inputs(
         kv_c_normed,
         k_pe,
         layer_slot_mapping,
-        per_rank_num_tokens,
     )
 
 
@@ -511,6 +510,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.use_direct_call = not current_platform.opaque_attention_op()
 
         vllm_config = get_current_vllm_config()
+        parallel_config = vllm_config.parallel_config
+        self.tp_size = parallel_config.tensor_parallel_size
+        self.pcp_size = parallel_config.prefill_context_parallel_size
+        self.dcp_size = parallel_config.decode_context_parallel_size
+        self.use_pcp = self.pcp_size > 1
+        self.use_replicated_q_dcp = self.use_pcp and self.dcp_size == self.pcp_size
+        self.use_tp_pcp_dcp = (
+            self.use_pcp
+            and self.tp_size > 1
+            and self.dcp_size == self.tp_size * self.pcp_size
+        )
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -617,6 +627,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     kv_c_normed,
                     k_pe,
                     layer_slot_mapping,
+                    self.use_pcp,
                 )
             )
             self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
@@ -718,12 +729,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
 
         num_actual_toks = attn_metadata.num_actual_tokens
-        use_pcp_dcp = (
-            get_forward_context().additional_kwargs.get("pcp_per_rank_num_tokens")
-            is not None
-            and self.impl.dcp_world_size > 1
+        use_replicated_q_dcp = (
+            self.use_replicated_q_dcp and self.impl.dcp_world_size > 1
         )
-        if use_pcp_dcp and quant_key is not None:
+        use_tp_pcp_dcp = self.use_tp_pcp_dcp and self.impl.dcp_world_size > 1
+        if (use_replicated_q_dcp or use_tp_pcp_dcp) and quant_key is not None:
             raise NotImplementedError(
                 "MRV2 MLA PCP+DCP does not support fused output quantization yet."
             )
@@ -770,7 +780,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 mha_output = output
                 mha_output_scale = None
 
-            pcp_dcp_kwargs = {"use_pcp_dcp": True} if use_pcp_dcp else {}
+            replicated_q_dcp_kwargs = (
+                {"use_replicated_q_dcp": True} if use_replicated_q_dcp else {}
+            )
             self.impl.forward_mha(  # type: ignore[attr-defined]
                 q[num_mqa_tokens:],
                 k_c_normed[num_mqa_tokens:],
@@ -780,7 +792,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self._k_scale,
                 output=mha_output[num_mqa_tokens:num_actual_toks],
                 output_scale=mha_output_scale,
-                **pcp_dcp_kwargs,
+                **replicated_q_dcp_kwargs,
             )
 
         if num_mqa_tokens > 0:
@@ -847,10 +859,18 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             else:
                 mqa_q = (mqa_ql_nope, mqa_q_pe)
             if self.impl.dcp_world_size > 1:
-                if use_pcp_dcp:
+                if use_replicated_q_dcp:
                     assert not self.dcp_a2a, (
                         "MRV2 MLA PCP+DCP does not support A2A combine yet."
                     )
+                elif use_tp_pcp_dcp:
+                    assert not self.dcp_a2a, (
+                        "MRV2 MLA PCP+DCP does not support A2A combine yet."
+                    )
+                    assert not fp8_attention, "DCP not support fp8 kvcache now."
+                    if isinstance(mqa_q, tuple):
+                        mqa_q = torch.cat(mqa_q, dim=-1)
+                    mqa_q = get_tp_group().all_gather(mqa_q, dim=1)
                 else:
                     assert not fp8_attention, "DCP not support fp8 kvcache now."
                     if isinstance(mqa_q, tuple):
@@ -863,13 +883,23 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             attn_out, lse = self.impl.forward_mqa(mqa_q, kv_cache, attn_metadata, self)  # type: ignore[attr-defined]
             if self.impl.dcp_world_size > 1:
                 assert lse is not None
-                if use_pcp_dcp:
+                if use_replicated_q_dcp:
                     attn_out = cp_lse_ag_out_ar(
                         attn_out,
                         lse,
                         get_dcp_group(),
                         is_lse_base_on_e=True,
                     )
+                elif use_tp_pcp_dcp:
+                    attn_out = cp_lse_ag_out_ar(
+                        attn_out,
+                        lse,
+                        get_dcp_group(),
+                        is_lse_base_on_e=True,
+                    )
+                    tp_rank = get_tp_group().rank_in_group
+                    head_start = tp_rank * self.num_heads
+                    attn_out = attn_out[:, head_start : head_start + self.num_heads]
                 elif self.dcp_a2a:
                     attn_out = dcp_a2a_lse_reduce(
                         attn_out,
@@ -1116,6 +1146,7 @@ def unified_mla_kv_cache_update(
                 kv_c_normed,
                 k_pe,
                 layer_slot_mapping,
+                getattr(attn_layer, "use_pcp", False),
             )
         )
         attn_layer.impl.do_kv_cache_update(  # type: ignore[attr-defined]
@@ -2597,7 +2628,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         k_scale: torch.Tensor,
         output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
-        use_pcp_dcp: bool = False,
+        use_replicated_q_dcp: bool = False,
     ) -> None:
         assert attn_metadata.prefill is not None
         assert self.dcp_world_size != -1
@@ -2642,7 +2673,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             assert prefill_metadata.chunked_context is not None
             suffix_output, suffix_lse = output_prefill
             if self.dcp_world_size > 1:
-                if use_pcp_dcp:
+                if use_replicated_q_dcp:
                     context_output, context_lse = (
                         self._dcp_compute_local_prefill_context(
                             q,

@@ -98,7 +98,6 @@ from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
 from vllm.v1.worker.gpu.pcp_manager import (
     PCPManager,
-    get_pcp_forward_context_kwargs,
     get_pcp_max_num_input_reqs,
     maybe_build_pcp_manager,
 )
@@ -1228,8 +1227,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         slot_mappings_by_layer = None
         if not (dummy_run and skip_attn_for_dummy_run):
             assert slot_mappings is not None
+            cache_slot_mappings = (
+                slot_mappings
+                if self.pcp_manager is None or dummy_run
+                else self.pcp_manager.cache_slot_mappings(slot_mappings)
+            )
             slot_mappings_by_layer = build_slot_mappings_by_layer(
-                slot_mappings, self.kv_cache_config
+                cache_slot_mappings, self.kv_cache_config
             )
             assert block_tables is not None
             attn_metadata = self.model_state.prepare_attn(
@@ -1315,10 +1319,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mapping=slot_mappings_by_layer,
                 skip_compiled=skip_compiled,
                 is_padding=input_batch.is_padding,
-                additional_forward_kwargs=get_pcp_forward_context_kwargs(
-                    self.pcp_manager,
-                    dummy_run,
-                ),
             ):
                 self.kv_connector.pre_forward(scheduler_output)
                 if batch_desc.cg_mode == CUDAGraphMode.PIECEWISE:

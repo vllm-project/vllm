@@ -8,6 +8,7 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
@@ -82,16 +83,11 @@ def kv_cache_as_quant_view(
 def _maybe_gather_pcp_indexer_cache_inputs(
     k: torch.Tensor,
     slot_mapping: torch.Tensor,
+    use_pcp: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    additional_kwargs = get_forward_context().additional_kwargs
-    per_rank_num_tokens = additional_kwargs.get("pcp_per_rank_num_tokens")
-    if per_rank_num_tokens is None:
+    if not use_pcp:
         return k, slot_mapping
-    return gather_indexer_cache_inputs(
-        k,
-        slot_mapping,
-        per_rank_num_tokens,
-    )
+    return gather_indexer_cache_inputs(k, slot_mapping)
 
 
 @eager_break_during_capture
@@ -111,6 +107,7 @@ def sparse_attn_indexer(
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor,
     skip_k_cache_insert: bool,
+    use_pcp: bool,
     use_fp4_cache: bool = False,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
@@ -153,6 +150,7 @@ def sparse_attn_indexer(
             total_seq_lens,
             topk_indices_buffer,
             skip_k_cache_insert,
+            use_pcp,
             use_fp4_cache,
         )
     attn_metadata_narrowed = attn_metadata[k_cache_prefix]
@@ -181,6 +179,7 @@ def sparse_attn_indexer(
         k, slot_mapping_for_cache = _maybe_gather_pcp_indexer_cache_inputs(
             k,
             slot_mapping,
+            use_pcp,
         )
         # scale_fmt can be None, but the function expects str
         assert scale_fmt is not None
@@ -435,6 +434,7 @@ def sparse_attn_indexer_fake(
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor | None,
     skip_k_cache_insert: bool,
+    use_pcp: bool,
     use_fp4_cache: bool = False,
 ) -> torch.Tensor:
     return topk_indices_buffer
@@ -486,6 +486,9 @@ class SparseAttnIndexer(CustomOp):
         self.topk_indices_buffer = topk_indices_buffer
         self.skip_k_cache_insert = skip_k_cache_insert
         self.use_fp4_cache = use_fp4_cache
+        self.use_pcp = (
+            get_current_vllm_config().parallel_config.prefill_context_parallel_size > 1
+        )
         if current_platform.is_cuda() and not has_deep_gemm():
             raise RuntimeError(
                 "Sparse Attention Indexer CUDA op requires DeepGEMM support in "
@@ -538,6 +541,7 @@ class SparseAttnIndexer(CustomOp):
             self.max_total_seq_len,
             self.topk_indices_buffer,
             self.skip_k_cache_insert,
+            self.use_pcp,
             self.use_fp4_cache,
         )
 

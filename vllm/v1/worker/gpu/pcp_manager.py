@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
 from dataclasses import replace
-from typing import Any
 
 import numpy as np
 import torch
@@ -10,6 +9,7 @@ import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import (
@@ -21,8 +21,21 @@ from vllm.v1.worker.gpu.input_batch import (
 from vllm.v1.worker.gpu.states import RequestState
 
 SlotMappingsComputer = Callable[
-    [torch.Tensor, torch.Tensor, torch.Tensor, int], torch.Tensor
+    [torch.Tensor, torch.Tensor, torch.Tensor, int, torch.Tensor | None], torch.Tensor
 ]
+
+
+def allgather_padded_token_tensors(
+    tensors: tuple[torch.Tensor, ...],
+) -> tuple[torch.Tensor, ...]:
+    pcp_group = get_pcp_group()
+    return tuple(
+        pcp_group.all_gather(
+            tensor if tensor.is_contiguous() else tensor.contiguous(),
+            dim=0,
+        )
+        for tensor in tensors
+    )
 
 
 def allgather_token_tensors(
@@ -80,25 +93,22 @@ def gather_mla_latent_cache_inputs(
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     slot_mapping: torch.Tensor,
-    per_rank_num_tokens: list[int] | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     num_tokens = kv_c_normed.shape[0]
     k_pe_flat = k_pe.reshape(num_tokens, -1)
-    gathered_kv_c, gathered_k_pe_flat, gathered_slots = allgather_token_tensors(
-        (kv_c_normed, k_pe_flat, slot_mapping[:num_tokens]),
-        per_rank_num_tokens,
+    gathered_kv_c, gathered_k_pe_flat = allgather_padded_token_tensors(
+        (kv_c_normed, k_pe_flat),
     )
     gathered_k_pe = gathered_k_pe_flat.view(-1, *k_pe.shape[1:])
-    return gathered_kv_c, gathered_k_pe, gathered_slots
+    return gathered_kv_c, gathered_k_pe, slot_mapping[: gathered_kv_c.shape[0]]
 
 
 def gather_indexer_cache_inputs(
     k: torch.Tensor,
     slot_mapping: torch.Tensor,
-    per_rank_num_tokens: list[int] | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    num_tokens = k.shape[0]
-    return allgather_token_tensors((k, slot_mapping[:num_tokens]), per_rank_num_tokens)
+    (gathered_k,) = allgather_padded_token_tensors((k,))
+    return gathered_k, slot_mapping[: gathered_k.shape[0]]
 
 
 @triton.jit
@@ -193,6 +203,8 @@ class PCPManager:
         self._compute_slot_mappings = compute_slot_mappings
         self._hidden_restore_idx: torch.Tensor | None = None
         self._per_rank_num_tokens: list[int] | None = None
+        self._all_rank_segments: list[list[tuple[int, int, int]]] | None = None
+        self._cache_slot_mappings: torch.Tensor | None = None
 
     @staticmethod
     def validate_config(
@@ -232,12 +244,11 @@ class PCPManager:
             )
         dcp_size = parallel_config.decode_context_parallel_size
         if dcp_size > 1:
-            if dcp_size != pcp_size:
+            tp_size = parallel_config.tensor_parallel_size
+            if dcp_size not in (pcp_size, tp_size * pcp_size):
                 raise NotImplementedError(
-                    "MRV2 MLA PCP+DCP currently implements only the replicated-Q "
-                    "layout where decode_context_parallel_size equals "
-                    "prefill_context_parallel_size. Full TP x PCP DCP needs the "
-                    "gathered-Q/reduce-scatter path."
+                    "MRV2 MLA PCP+DCP currently supports only "
+                    "decode_context_parallel_size equal to PCP or TP x PCP."
                 )
             if parallel_config.dcp_comm_backend != "ag_rs":
                 raise NotImplementedError(
@@ -253,11 +264,6 @@ class PCPManager:
             // self.pcp_world_size
             * self.pcp_world_size
         )
-
-    def forward_context_kwargs(self) -> dict[str, Any]:
-        return {
-            "pcp_per_rank_num_tokens": self._per_rank_num_tokens,
-        }
 
     @staticmethod
     def _set_padding_mask(
@@ -354,6 +360,7 @@ class PCPManager:
             )
             for rank in range(self.pcp_world_size)
         ]
+        self._all_rank_segments = all_rank_segments
         self._per_rank_num_tokens = [
             sum(num_tokens for _, _, num_tokens in segments)
             for segments in all_rank_segments
@@ -404,6 +411,7 @@ class PCPManager:
 
         physical_batch = self._copy_physical_batch(input_batch)
         self._physical_batch = physical_batch
+        self._cache_slot_mappings = None
 
         num_scheduled_tokens = physical_batch.num_scheduled_tokens
         num_computed_tokens = physical_batch.num_computed_tokens_np
@@ -605,12 +613,86 @@ class PCPManager:
         num_tokens_padded: int,
     ) -> torch.Tensor:
         assert self._compute_slot_mappings is not None
-        return self._compute_slot_mappings(
+        local_slot_mappings = self._compute_slot_mappings(
             idx_mapping,
             query_start_loc,
             positions,
             num_tokens_padded,
+            None,
         )
+        self._cache_slot_mappings = self._compute_cache_slot_mappings(
+            local_slot_mappings
+        )
+        return local_slot_mappings
+
+    def _compute_cache_slot_mappings(
+        self,
+        local_slot_mappings: torch.Tensor,
+    ) -> torch.Tensor:
+        assert self._compute_slot_mappings is not None
+        assert self._physical_batch is not None
+        assert self._all_rank_segments is not None
+        assert self._per_rank_num_tokens is not None
+
+        padded_num_tokens = max(self._per_rank_num_tokens)
+        full_num_tokens = padded_num_tokens * self.pcp_world_size
+        if full_num_tokens == local_slot_mappings.shape[1]:
+            return local_slot_mappings
+
+        physical_batch = self._physical_batch
+        idx_mapping_entries: list[int] = []
+        query_start_locs = [0]
+        positions_np = np.zeros(full_num_tokens, dtype=np.int64)
+        is_padding_np = np.zeros(full_num_tokens, dtype=np.bool_)
+
+        for rank, segments in enumerate(self._all_rank_segments):
+            rank_start = rank * padded_num_tokens
+            cursor = rank_start
+            for req_idx, start_pos, num_tokens in segments:
+                idx_mapping_entries.append(int(physical_batch.idx_mapping_np[req_idx]))
+                positions_np[cursor : cursor + num_tokens] = np.arange(
+                    start_pos,
+                    start_pos + num_tokens,
+                    dtype=np.int64,
+                )
+                cursor += num_tokens
+                query_start_locs.append(cursor)
+
+            rank_end = rank_start + padded_num_tokens
+            if cursor < rank_end:
+                idx_mapping_entries.append(0)
+                is_padding_np[cursor:rank_end] = True
+                cursor = rank_end
+                query_start_locs.append(cursor)
+
+        idx_mapping_np = np.array(idx_mapping_entries, dtype=np.int32)
+        query_start_loc_np = np.array(query_start_locs, dtype=np.int32)
+        idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
+        query_start_loc = async_copy_to_gpu(query_start_loc_np, device=self.device)
+        positions = async_copy_to_gpu(positions_np, device=self.device)
+
+        cache_slot_mappings = torch.empty(
+            local_slot_mappings.shape[0],
+            full_num_tokens,
+            dtype=local_slot_mappings.dtype,
+            device=local_slot_mappings.device,
+        )
+        cache_slot_mappings = self._compute_slot_mappings(
+            idx_mapping,
+            query_start_loc,
+            positions,
+            full_num_tokens,
+            cache_slot_mappings,
+        )
+        if is_padding_np.any():
+            is_padding = async_copy_to_gpu(is_padding_np, device=self.device)
+            cache_slot_mappings.masked_fill_(is_padding.unsqueeze(0), PAD_SLOT_ID)
+        return cache_slot_mappings
+
+    def cache_slot_mappings(self, slot_mappings: torch.Tensor) -> torch.Tensor:
+        if self._cache_slot_mappings is None:
+            return slot_mappings
+        return self._cache_slot_mappings
 
     def restore_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if self._hidden_restore_idx is None or self._per_rank_num_tokens is None:
@@ -630,15 +712,6 @@ class PCPManager:
         assert self._physical_batch is not None
         physical_batch = self._physical_batch
         return self.restore_hidden_states(hidden_states), physical_batch
-
-
-def get_pcp_forward_context_kwargs(
-    manager: PCPManager | None,
-    dummy_run: bool,
-) -> dict[str, Any] | None:
-    if manager is None or dummy_run:
-        return None
-    return manager.forward_context_kwargs()
 
 
 def get_pcp_max_num_input_reqs(
