@@ -28,6 +28,57 @@ from vllm.triton_utils import tl, triton
 from .fused_indexer_q import _fp32x2_to_fp4x2
 
 
+def compress_norm_rope_store_xpu_mxfp4(
+    state_cache: torch.Tensor,
+    num_actual: int,
+    token_to_req_indices: torch.Tensor,
+    positions: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    block_table: torch.Tensor,
+    block_size: int,
+    state_width: int,
+    cos_sin_cache: torch.Tensor,
+    kv_cache: torch.Tensor,
+    k_cache_metadata: Any,
+    pdl_kwargs: dict,
+    head_dim: int,
+    rope_head_dim: int,
+    compress_ratio: int,
+    overlap: bool,
+    use_fp4_cache: bool,
+    rms_norm_weight: torch.Tensor,
+    rms_norm_eps: float,
+    quant_block: int,
+    token_stride: int,
+    scale_dim: int,
+) -> None:
+    """XPU SYCL kernel launcher for the fused MXFP4 compress+norm+RoPE+insert.
+
+    Calls the optimized SYCL kernel registered in vllm-xpu-kernels via
+    torch.ops._xpu_C.fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn.
+    """
+    torch.ops._xpu_C.fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn(
+        state_cache,
+        token_to_req_indices[:num_actual],
+        positions[:num_actual],
+        slot_mapping[:num_actual],
+        block_table,
+        block_size,
+        state_width,
+        rms_norm_weight,
+        rms_norm_eps,
+        cos_sin_cache,
+        kv_cache,
+        k_cache_metadata.slot_mapping[:num_actual],
+        kv_cache.shape[1],  # paged KV cache block size (tokens per block)
+        head_dim,
+        rope_head_dim,
+        compress_ratio,
+        int(overlap),
+        quant_block,
+    )
+
+
 def compress_norm_rope_store_triton(
     state_cache: torch.Tensor,
     num_actual: int,
