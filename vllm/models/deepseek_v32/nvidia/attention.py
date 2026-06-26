@@ -307,11 +307,11 @@ class DeepseekV32Attention(MLAAttention):
             dtype=q.dtype,
             device=q.device,
         )
-        self._attend(q, kv_c_normed, k_pe, output)
+        self._attention(q, kv_c_normed, k_pe, output)
         return self.o_proj(output)[0]
 
     @eager_break_during_capture
-    def _attend(
+    def _attention(
         self,
         q: torch.Tensor,
         kv_c_normed: torch.Tensor,
