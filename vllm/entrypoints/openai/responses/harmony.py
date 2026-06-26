@@ -67,7 +67,7 @@ def _parse_harmony_format_message(chat_msg: dict) -> Message:
         contents = [TextContent(text="")]
 
     if name:
-        msg = Message.from_author_and_contents(Author.new(Role(role), name), contents)
+        msg = Message(author=Author.new(Role(role), name), content=contents)
     else:
         msg = Message.from_role_and_contents(Role(role), contents)
 
