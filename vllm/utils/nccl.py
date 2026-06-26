@@ -62,3 +62,21 @@ def find_nccl_include_paths() -> list[str] | None:
             out.append(p)
             seen.add(p)
     return out or None
+
+
+def find_nccl_library_paths() -> list[str] | None:
+    """Return possible library paths containing `libnccl.so`.
+
+    Looks inside the `nvidia-nccl-cuXX` pip package.
+    """
+    paths: list[str] = []
+    try:
+        spec = importlib.util.find_spec("nvidia.nccl")
+        if spec and (locs := getattr(spec, "submodule_search_locations", None)):
+            for loc in locs:
+                lib_dir = os.path.join(loc, "lib")
+                if os.path.isdir(lib_dir):
+                    paths.append(lib_dir)
+    except Exception as e:
+        logger.debug("Failed to find nccl library path from nvidia.nccl package: %s", e)
+    return paths or None
