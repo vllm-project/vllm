@@ -14,6 +14,8 @@ from vllm.config import (
 )
 from vllm.platforms import current_platform
 from vllm.platforms.cpu import CpuPlatform
+from vllm.platforms.interface import DeviceCapability
+from vllm.v1.attention.backend import AttentionBackend
 
 if current_platform.is_cuda():
     from vllm.platforms.cuda import CudaPlatform
@@ -25,8 +27,34 @@ if current_platform.is_rocm():
 else:
     RocmPlatform = None
 
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_backend
 from vllm.v1.attention.selector import _cached_get_attn_backend, get_attn_backend
+
+
+class RejectNvfp4FlashAttentionBackend(AttentionBackend):
+    @staticmethod
+    def get_name() -> str:
+        return "FLASH_ATTN"
+
+    @staticmethod
+    def get_impl_cls():
+        return None
+
+    @staticmethod
+    def get_builder_cls():
+        return None
+
+    @staticmethod
+    def get_required_kv_cache_layout():
+        return None
+
+    @staticmethod
+    def get_kv_cache_shape(*args, **kwargs):
+        return ()
+
+    @classmethod
+    def supports_kv_cache_dtype(cls, kv_cache_dtype):
+        return kv_cache_dtype != "nvfp4"
 
 
 @pytest.fixture(autouse=True)
@@ -538,6 +566,43 @@ def test_flash_attn_rejects_unhandled_kv_cache_dtypes(kv_cache_dtype: str):
     from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 
     assert not FlashAttentionBackend.supports_kv_cache_dtype(kv_cache_dtype)
+
+
+@pytest.mark.skipif(CudaPlatform is None, reason="CudaPlatform not available")
+def test_cuda_auto_selects_flashinfer_for_nvfp4_without_fa(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    pytest.importorskip("flashinfer")
+
+    monkeypatch.setattr(
+        CudaPlatform,
+        "get_device_capability",
+        classmethod(lambda cls, device_id=0: DeviceCapability(8, 6)),
+    )
+    register_backend(
+        AttentionBackendEnum.FLASH_ATTN,
+        f"{__name__}.RejectNvfp4FlashAttentionBackend",
+    )
+
+    try:
+        vllm_config = VllmConfig(
+            attention_config=AttentionConfig(backend=None),
+            cache_config=CacheConfig(block_size=16),
+        )
+
+        with (
+            set_current_vllm_config(vllm_config),
+            patch("vllm.platforms.current_platform", CudaPlatform()),
+        ):
+            backend = get_attn_backend(
+                head_size=512,
+                dtype=torch.bfloat16,
+                kv_cache_dtype="nvfp4",
+            )
+    finally:
+        AttentionBackendEnum.FLASH_ATTN.clear_override()
+
+    assert backend.get_name() == "FLASHINFER"
 
 
 @pytest.mark.parametrize("kv_cache_dtype", ["fp8", "fp8_e4m3"])

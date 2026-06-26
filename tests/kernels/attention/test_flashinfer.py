@@ -17,6 +17,8 @@ except ImportError:
 
 import torch
 
+from vllm.platforms.interface import DeviceCapability
+
 NUM_HEADS = [(32, 8), (6, 1)]
 HEAD_SIZES = [128, 256]
 BLOCK_SIZES = [16, 32]
@@ -146,6 +148,26 @@ def _make_cg_decode_wrapper(
     )
 
 
+def test_flashinfer_backend_accepts_nvfp4_kv_cache() -> None:
+    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+
+    invalid_reasons = FlashInferBackend.validate_configuration(
+        head_size=128,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="nvfp4",
+        block_size=16,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+        use_mm_prefix=False,
+        use_per_head_quant_scales=False,
+        device_capability=DeviceCapability(8, 6),
+        attn_type="decoder",
+    )
+
+    assert invalid_reasons == []
+
+
 def test_fast_decode_plan_importable() -> None:
     """fast_decode_plan must be importable from flashinfer.decode.
 
@@ -202,6 +224,93 @@ def test_fast_plan_decode_warmup_uses_full_plan(dtype: torch.dtype) -> None:
     assert wrapper.vllm_first_call is False, (
         "vllm_first_call should be False after the first fast_plan_decode call"
     )
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@torch.inference_mode
+def test_fast_plan_decode_accepts_nvfp4_kv_plan_dtype(dtype: torch.dtype) -> None:
+    from vllm.v1.attention.backends.flashinfer import fast_plan_decode
+
+    torch.set_default_device("cuda")
+    set_random_seed(0)
+
+    kv_lens = [128, 64]
+    block_size = 16
+    num_seqs = len(kv_lens)
+    num_query_heads, num_kv_heads = 8, 2
+    head_size = 128
+
+    kv_indptr, kv_indices, kv_last_page_lens, _ = _make_paged_kv_metadata(
+        kv_lens, block_size, NUM_BLOCKS
+    )
+
+    workspace = torch.empty(128 * 1024 * 1024, dtype=torch.int8)
+    wrapper = _make_cg_decode_wrapper(num_seqs, kv_indices.clone(), workspace)
+
+    fast_plan_decode(
+        wrapper,
+        indptr_cpu=kv_indptr,
+        indices=kv_indices,
+        last_page_len_cpu=kv_last_page_lens,
+        num_qo_heads=num_query_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_size,
+        page_size=block_size,
+        q_data_type=dtype,
+        kv_data_type=torch.uint8,
+        o_data_type=dtype,
+    )
+
+    assert wrapper.vllm_first_call is False
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@torch.inference_mode
+def test_flashinfer_prefill_accepts_nvfp4_kv_plan_dtype(
+    dtype: torch.dtype,
+) -> None:
+    torch.set_default_device("cuda")
+    set_random_seed(0)
+
+    batch_size = 2
+    qo_len = 8
+    kv_len = 16
+    block_size = 16
+    num_query_heads, num_kv_heads = 8, 2
+    head_size = 128
+    num_pages_per_seq = (kv_len + block_size - 1) // block_size
+    total_num_pages = num_pages_per_seq * batch_size
+
+    q_indptr = (
+        torch.arange(0, batch_size + 1, device="cuda", dtype=torch.int32) * qo_len
+    )
+    kv_indptr = (
+        torch.arange(0, batch_size + 1, device="cuda", dtype=torch.int32)
+        * num_pages_per_seq
+    )
+    kv_indices = torch.arange(0, total_num_pages, device="cuda", dtype=torch.int32)
+    kv_last_page_len = torch.full(
+        (batch_size,), kv_len, dtype=torch.int32, device="cuda"
+    )
+
+    workspace = torch.empty(128 * 1024 * 1024, dtype=torch.int8)
+    wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(workspace, "NHD")
+
+    wrapper.plan(
+        q_indptr,
+        kv_indptr,
+        kv_indices,
+        kv_last_page_len,
+        num_query_heads,
+        num_kv_heads,
+        head_size,
+        block_size,
+        q_data_type=dtype,
+        kv_data_type=torch.uint8,
+        o_data_type=dtype,
+    )
+
+    assert wrapper._cached_kv_data_type == torch.uint8
 
 
 @pytest.mark.parametrize("kv_lens", [[1328, 18, 463], [1, 54, 293, 70]])
