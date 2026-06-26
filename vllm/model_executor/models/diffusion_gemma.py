@@ -28,6 +28,7 @@ from transformers import AutoModel
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -49,10 +50,12 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor, async_copy_to_gpu
+from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.penalties import use_penalty
+from vllm.v1.worker.gpu.states import RequestState
 
 from .interfaces import (
     SupportsMultiModal,
@@ -497,6 +500,13 @@ def _compiled_sample_step(
     ST: int,
     # Sampler config
     entropy_bound: float,
+    # Tensor-parallel vocab sharding for the self-conditioning matmul.
+    # ``embed_weight`` is vocab-sharded ([vocab/tp, hidden]) while ``probs``
+    # spans the full vocab; [sc_vocab_start, sc_vocab_end) is this rank's slice.
+    sc_vocab_start: int,
+    sc_vocab_end: int,
+    tp_size: int,
+    tp_group_name: str,
 ) -> torch.Tensor:
     """Compiled decode step: temperature → Gumbel sample → probs/confidence →
     accept/renoise → convergence, all as vectorized PyTorch ops.
@@ -627,7 +637,17 @@ def _compiled_sample_step(
     # sc_embeds directly. Storing the [.., hidden] soft embed instead of the full
     # [.., vocab] probs avoids a giant persistent buffer.
     sc_keep = (is_denoise & ~is_encoder_phase[decode_slots])[:, None, None]
-    soft_embeds = torch.matmul(probs.to(embed_weight.dtype), embed_weight) * normalizer
+    # Self-conditioning soft embed = probs @ embed_tokens.weight. Under tensor
+    # parallelism the embedding is vocab-sharded ([vocab/tp, hidden]) while
+    # probs spans the full vocab, so each rank multiplies its local vocab slice
+    # [sc_vocab_start, sc_vocab_end) and the partials are summed across ranks.
+    local_probs = probs[..., sc_vocab_start:sc_vocab_end].to(embed_weight.dtype)
+    soft_embeds = torch.matmul(
+        local_probs, embed_weight[: sc_vocab_end - sc_vocab_start]
+    )
+    if tp_size > 1:
+        soft_embeds = torch.ops.vllm.all_reduce(soft_embeds, group_name=tp_group_name)
+    soft_embeds = soft_embeds * normalizer
     sc_embeds[decode_slots] = soft_embeds * sc_keep
 
     # Overwrite canvas with argmax for newly converged denoise requests
@@ -841,6 +861,12 @@ class DiffusionGemmaModelState(ModelState):
             raise ValueError(
                 f"entropy_bound must be a positive float (got {entropy_bound})"
             )
+        # The self-conditioning matmul (probs @ embed_tokens.weight) runs over a
+        # vocab-parallel embedding shard. Hand the sampler this rank's vocab
+        # slice and TP group so it can all-reduce the partial products.
+        embed_tokens = self.model.model.embed_tokens
+        shard = embed_tokens.shard_indices
+        tp_group = get_tp_group()
         return DiffusionSampler(
             sampler=sampler,
             diffusion_config=diffusion_config,
@@ -850,8 +876,12 @@ class DiffusionGemmaModelState(ModelState):
             t_max=gen["t_max"],
             entropy_bound=entropy_bound,
             confidence_threshold=gen["confidence_threshold"],
-            embed_weight=self.model.model.embed_tokens.weight,
+            embed_weight=embed_tokens.weight,
             normalizer=self.model.model.normalizer,
+            sc_vocab_start=shard.org_vocab_start_index,
+            sc_vocab_end=shard.org_vocab_end_index,
+            tp_size=tp_group.world_size,
+            tp_group_name=tp_group.unique_name,
         ), None
 
     def apply_staged_writes(self) -> None:
@@ -869,7 +899,12 @@ class DiffusionGemmaModelState(ModelState):
         if idx is not None:
             self.diffusion_states.remove_request(idx)
 
-    def get_mm_embeddings(self, scheduled_encoder_inputs, input_batch):
+    def get_mm_embeddings(
+        self,
+        scheduled_encoder_inputs: dict[str, list[int]],
+        input_batch: InputBatch,
+        req_states: RequestState,
+    ) -> torch.Tensor:
         if not self.supports_mm_inputs:
             return None
 
@@ -880,14 +915,7 @@ class DiffusionGemmaModelState(ModelState):
             encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
             self.encoder_cache.encoder_outputs.update(zip(mm_hashes, encoder_outputs))
 
-        mm_embeds, is_mm_embed = self.encoder_runner.gather_mm_embeddings(
-            input_batch.req_ids,
-            input_batch.num_tokens,
-            input_batch.num_scheduled_tokens,
-            input_batch.query_start_loc_np,
-            input_batch.prefill_len_np,
-            input_batch.num_computed_prefill_tokens_np,
-        )
+        mm_embeds, is_mm_embed = self.gather_mm_embeddings(input_batch)
 
         if not mm_embeds:
             # No MM tokens in this batch (e.g. all-decode step).
@@ -1054,13 +1082,24 @@ class DiffusionSampler:
         entropy_bound: float,
         embed_weight: torch.Tensor,
         normalizer: torch.Tensor,
+        sc_vocab_start: int = 0,
+        sc_vocab_end: int | None = None,
+        tp_size: int = 1,
+        tp_group_name: str = "",
     ):
         self.sampling_states = sampler.sampling_states
         self.req_states = sampler.req_states
         # Self-conditioning soft embed = probs @ embed_weight * normalizer,
-        # computed in the sampler (see _compiled_sample_step).
+        # computed in the sampler (see _compiled_sample_step). ``embed_weight``
+        # is the vocab-parallel shard; [sc_vocab_start, sc_vocab_end) is this
+        # rank's slice of the full vocab and tp_* drive the cross-rank
+        # all-reduce.
         self.embed_weight = embed_weight
         self.normalizer = normalizer
+        self.sc_vocab_start = sc_vocab_start
+        self.sc_vocab_end = sc_vocab_end if sc_vocab_end is not None else vocab_size
+        self.tp_size = tp_size
+        self.tp_group_name = tp_group_name
         self.canvas_length = (
             diffusion_config.canvas_length if diffusion_config is not None else 32
         )
@@ -1299,6 +1338,10 @@ class DiffusionSampler:
             CL=self.canvas_length,
             ST=states.stability_threshold,
             entropy_bound=self.entropy_bound,
+            sc_vocab_start=self.sc_vocab_start,
+            sc_vocab_end=self.sc_vocab_end,
+            tp_size=self.tp_size,
+            tp_group_name=self.tp_group_name,
         )
 
         # --- Logprobs: stash on convergence, return on commit ---
