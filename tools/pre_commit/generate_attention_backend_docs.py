@@ -925,7 +925,8 @@ def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
         return {}
 
     # Analyze the functions to determine FA3/FA4-specific features
-    fa3_supports_fp8 = True
+    fa3_supports_fp8 = False
+    fa4_supports_fp8 = False
     fa3_supports_sinks = False
     fa4_supports_sinks = False
     fa3_compute_cap: str | None = None
@@ -934,6 +935,31 @@ def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef):
             continue
+
+        # Check flash_attn_supports_kv_cache_dtype for fp8 support per FA version.
+        # Looks for `fa_version == 3/4` or `get_flash_attn_version() == 3/4`.
+        if node.name == "flash_attn_supports_kv_cache_dtype":
+            for n in ast.walk(node):
+                if (
+                    isinstance(n, ast.Compare)
+                    and len(n.ops) == 1
+                    and isinstance(n.ops[0], ast.Eq)
+                ):
+                    is_version_compare = (
+                        isinstance(n.left, ast.Name) and n.left.id == "fa_version"
+                    ) or (
+                        isinstance(n.left, ast.Call)
+                        and isinstance(n.left.func, ast.Name)
+                        and n.left.func.id == "get_flash_attn_version"
+                    )
+                    if is_version_compare and isinstance(
+                        n.comparators[0], ast.Constant
+                    ):
+                        val = n.comparators[0].value
+                        if val == 3:
+                            fa3_supports_fp8 = True
+                        elif val == 4:
+                            fa4_supports_fp8 = True
 
         # Check flash_attn_supports_sinks - looks for `fa_version == 3/4`
         # or `get_flash_attn_version() == 3/4` (also accepts `in (3, 4)`)
@@ -1041,7 +1067,7 @@ def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
         },
         "fa4": {
             "compute_capability": fa4_compute_cap,
-            "supports_fp8": False,
+            "supports_fp8": fa4_supports_fp8,
             "supports_sink": fa4_supports_sinks,
         },
     }
@@ -1090,6 +1116,20 @@ def parse_flashinfer_trtllm_features() -> dict[str, dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
+def _apply_fp8_support(kv_cache_dtypes: str, supports_fp8: bool) -> str:
+    """Add or remove fp8 dtypes from a comma-separated kv_cache_dtypes string.
+
+    The base FLASH_ATTN backend lists fp8 dtypes in ``supported_kv_cache_dtypes``,
+    but actual support varies by FA version (e.g. FA2 has no fp8 support), so each
+    variant's row is normalized to match its own capability.
+    """
+    fp8_dtypes = ["fp8", "fp8_e4m3", "fp8_e5m2"]
+    base_dtypes = [d for d in kv_cache_dtypes.split(", ") if d not in fp8_dtypes]
+    if supports_fp8:
+        return ", ".join(base_dtypes + fp8_dtypes)
+    return ", ".join(base_dtypes)
+
+
 def _expand_flash_attn_variants(
     all_backends: list[dict[str, Any]],
     fa_features: dict[str, dict[str, Any]],
@@ -1110,6 +1150,9 @@ def _expand_flash_attn_variants(
         fa2["_sort_key"] = "FLASH_ATTN"
         fa2["_sort_order"] = 0
         fa2["supports_sink"] = fa_features["fa2"]["supports_sink"]
+        fa2["kv_cache_dtypes"] = _apply_fp8_support(
+            backend["kv_cache_dtypes"], fa_features["fa2"]["supports_fp8"]
+        )
 
         # Create FA3 entry (uses parsed compute_capability from fa_utils)
         fa3 = backend.copy()
@@ -1119,11 +1162,9 @@ def _expand_flash_attn_variants(
         if fa_features["fa3"]["compute_capability"]:
             fa3["compute_capability"] = fa_features["fa3"]["compute_capability"]
         fa3["supports_sink"] = fa_features["fa3"]["supports_sink"]
-        if fa_features["fa3"]["supports_fp8"]:
-            base_dtypes = backend["kv_cache_dtypes"].split(", ")
-            fp8_dtypes = ["fp8", "fp8_e4m3", "fp8_e5m2"]
-            new_dtypes = [d for d in fp8_dtypes if d not in base_dtypes]
-            fa3["kv_cache_dtypes"] = ", ".join(base_dtypes + new_dtypes)
+        fa3["kv_cache_dtypes"] = _apply_fp8_support(
+            backend["kv_cache_dtypes"], fa_features["fa3"]["supports_fp8"]
+        )
 
         expanded.append(fa2)
         expanded.append(fa3)
@@ -1137,6 +1178,9 @@ def _expand_flash_attn_variants(
             if fa_features["fa4"].get("compute_capability"):
                 fa4["compute_capability"] = fa_features["fa4"]["compute_capability"]
             fa4["supports_sink"] = fa_features["fa4"]["supports_sink"]
+            fa4["kv_cache_dtypes"] = _apply_fp8_support(
+                backend["kv_cache_dtypes"], fa_features["fa4"]["supports_fp8"]
+            )
             expanded.append(fa4)
 
     return expanded
