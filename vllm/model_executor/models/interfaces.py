@@ -43,6 +43,7 @@ from .interfaces_base import VllmModel
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.lora.model_manager import LoRAModelManager
+    from vllm.model_executor.layers.fused_moe import MoERunner
     from vllm.model_executor.models.utils import WeightsMapper
     from vllm.multimodal.inputs import MultiModalFeatureSpec
     from vllm.multimodal.registry import _ProcessorFactories
@@ -53,12 +54,6 @@ if TYPE_CHECKING:
         EncoderCudaGraphReplayBuffers,
         EncoderItemSpec,
     )
-else:
-    VllmConfig = object
-    WeightsMapper = object
-    MultiModalFeatureSpec = object
-    _ProcessorFactories = object
-    IntermediateTensors = object
 
 logger = init_logger(__name__)
 
@@ -883,7 +878,7 @@ class MixtureOfExperts(Protocol):
     num_redundant_experts: int
     """Number of redundant experts in this model."""
 
-    moe_layers: Iterable[nn.Module]
+    moe_layers: Iterable[MoERunner]
     """List of MoE layers in this model."""
 
     def set_eplb_state(
@@ -908,6 +903,7 @@ class MixtureOfExperts(Protocol):
             logical_to_physical_map: Mapping from logical to physical experts.
             logical_replica_count: Count of replicas for each logical expert.
         """
+        self.expert_weights = []
         for layer_idx, layer in enumerate(self.moe_layers):
             # Register the expert weights.
             self.expert_weights.append(layer.get_expert_weights())
