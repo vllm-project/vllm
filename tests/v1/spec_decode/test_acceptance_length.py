@@ -104,13 +104,13 @@ EAGLE3_MODEL_CONFIGS = [
     ),
 ]
 
-# expected_acceptance_length values are placeholders pending calibration.
+# Baselines measured on MT-Bench (greedy): DeepSeek-V3 tp=8, DSV4-Flash NVFP4 tp=4.
 MTP_MODEL_CONFIGS = [
     SpecDecodeModelConfig(
         method="mtp",
         model="deepseek-ai/DeepSeek-V3",
         num_speculative_tokens=1,
-        expected_acceptance_length=1.60,
+        expected_acceptance_length=1.882,
         id="deepseek-v3-mtp-fp8-tp8",
         tp_size=8,
         gpu_memory_utilization=0.9,
@@ -129,7 +129,7 @@ MTP_MODEL_CONFIGS = [
         method="mtp",
         model="nvidia/DeepSeek-V4-Flash-NVFP4",
         num_speculative_tokens=1,
-        expected_acceptance_length=1.60,
+        expected_acceptance_length=1.094,
         id="deepseek-v4-flash-mtp-nvfp4-tp4",
         tp_size=4,
         gpu_memory_utilization=0.9,
@@ -176,9 +176,9 @@ def get_available_attention_backends() -> list[str]:
     )
 
     return [
-        backend.name
-        for backend, _ in valid_backends
-        if backend not in EXCLUDED_BACKENDS
+        candidate.backend.name
+        for candidate in valid_backends
+        if candidate.backend not in EXCLUDED_BACKENDS
     ]
 
 
