@@ -50,6 +50,7 @@ def _fwd_kernel(
     out_scale_inv,
     B_Start_Loc,
     B_Seqlen,
+    x: tl.constexpr,
     Out,
     stride_b_loc_b,
     stride_b_loc_s,
@@ -89,8 +90,6 @@ def _fwd_kernel(
     USE_SINKS: tl.constexpr,
     USE_FP8: tl.constexpr,
     CAUSAL: tl.constexpr = True,
-    K_CACHE_NATIVE: tl.constexpr = False,
-    K_CACHE_X: tl.constexpr = 1,
     MAX_Q_LEN: tl.constexpr = 0,
     MAX_CTX_LEN: tl.constexpr = 0,
     FP8_MIN: tl.constexpr = float8_info.min,
@@ -175,21 +174,14 @@ def _fwd_kernel(
         # each token within its physical block.
         internal_offsets = token_indices % PHYSICAL_BLOCK_SIZE
 
-        if K_CACHE_NATIVE:
-            off_k = (
-                bn[None, :] * stride_k_cache_bs
-                + cur_kv_head * stride_k_cache_h
-                + (offs_d[:, None] // K_CACHE_X) * stride_k_cache_d
-                + internal_offsets[None, :] * stride_k_cache_bl
-                + (offs_d[:, None] % K_CACHE_X) * stride_k_cache_x
-            )
-        else:
-            off_k = (
-                bn[None, :] * stride_k_cache_bs
-                + cur_kv_head * stride_k_cache_h
-                + offs_d[:, None] * stride_k_cache_d
-                + internal_offsets[None, :] * stride_k_cache_bl
-            )
+        # Addressing of K (5D)
+        off_k = (
+            bn[None, :] * stride_k_cache_bs
+            + cur_kv_head * stride_k_cache_h
+            + (offs_d[:, None] // x) * stride_k_cache_d
+            + internal_offsets[None, :] * stride_k_cache_bl
+            + (offs_d[:, None] % x) * stride_k_cache_x
+        )
 
         # Addressing of V (4D)
         off_v = (
@@ -387,6 +379,7 @@ def _fwd_kernel_alibi(
     B_Seqlen,
     Alibi_slopes,
     block_size,
+    x,
     Out,
     stride_b_loc_b,
     stride_b_loc_s,
@@ -418,8 +411,6 @@ def _fwd_kernel_alibi(
     BLOCK_DMODEL_PADDED: tl.constexpr,  # head size padded to a power of 2
     BLOCK_N: tl.constexpr,
     SKIP_DECODE: tl.constexpr,
-    K_CACHE_NATIVE: tl.constexpr = False,
-    K_CACHE_X: tl.constexpr = 1,
 ):
     # attn_bias[]
     cur_batch = tl.program_id(0)
@@ -482,21 +473,13 @@ def _fwd_kernel_alibi(
             other=0,
         ).to(tl.int64)
         internal_offsets = (start_n + offs_n) % block_size
-        if K_CACHE_NATIVE:
-            off_k = (
-                bn[None, :] * stride_k_cache_bs
-                + cur_kv_head * stride_k_cache_h
-                + (offs_d[:, None] // K_CACHE_X) * stride_k_cache_d
-                + internal_offsets[None, :] * stride_k_cache_bl
-                + (offs_d[:, None] % K_CACHE_X) * stride_k_cache_x
-            )
-        else:
-            off_k = (
-                bn[None, :] * stride_k_cache_bs
-                + cur_kv_head * stride_k_cache_h
-                + offs_d[:, None] * stride_k_cache_d
-                + internal_offsets[None, :] * stride_k_cache_bl
-            )
+        off_k = (
+            bn[None, :] * stride_k_cache_bs
+            + cur_kv_head * stride_k_cache_h
+            + (offs_d[:, None] // x) * stride_k_cache_d
+            + internal_offsets[None, :] * stride_k_cache_bl
+            + (offs_d[:, None] % x) * stride_k_cache_x
+        )
         off_v = (
             bn[:, None] * stride_v_cache_bs
             + cur_kv_head * stride_v_cache_h
@@ -738,10 +721,6 @@ def context_attention_fwd(
     if sliding_window is None or sliding_window <= 0:
         sliding_window = 0
 
-    k_cache_native = k_cache.dim() == 5
-    k_cache_x = k_cache.shape[4] if k_cache_native else 1
-    k_cache_stride_x = k_cache.stride(4) if k_cache_native else 0
-
     if is_block_table_ptr:
         kv_element_size = k_cache.element_size()
         block_byte_stride = k_cache.stride(0) * kv_element_size
@@ -779,6 +758,7 @@ def context_attention_fwd(
             b_seq_len,
             alibi_slopes,
             v_cache.shape[3],
+            k_cache.shape[4],
             o,
             b_loc.stride(0),
             b_loc.stride(1),
@@ -798,7 +778,7 @@ def context_attention_fwd(
             k_cache.stride(1),
             k_cache.stride(2),
             k_cache.stride(3),
-            k_cache_stride_x,
+            k_cache.stride(4),
             v_cache.stride(0),
             v_cache.stride(1),
             v_cache.stride(2),
@@ -810,8 +790,6 @@ def context_attention_fwd(
             BLOCK_DMODEL_PADDED=Lk_padded,
             BLOCK_N=BLOCK,
             SKIP_DECODE=skip_decode,
-            K_CACHE_NATIVE=k_cache_native,
-            K_CACHE_X=k_cache_x,
             num_warps=NUM_WARPS,
             num_stages=1,
         )
@@ -854,6 +832,7 @@ def context_attention_fwd(
         1.0 / fp8_out_scale if fp8_out_scale is not None else 1.0,
         b_start_loc,
         b_seq_len,
+        k_cache.shape[4],
         o,
         processed_b_loc.stride(0),
         processed_b_loc.stride(1),
@@ -873,7 +852,7 @@ def context_attention_fwd(
         stride_k_cache_h=k_cache.stride(1),
         stride_k_cache_d=k_cache.stride(2),
         stride_k_cache_bl=k_cache.stride(3),
-        stride_k_cache_x=k_cache_stride_x,
+        stride_k_cache_x=k_cache.stride(4),
         stride_v_cache_bs=v_cache.stride(0),
         stride_v_cache_h=v_cache.stride(1),
         stride_v_cache_d=v_cache.stride(2),
@@ -887,8 +866,6 @@ def context_attention_fwd(
         SLIDING_WINDOW=sliding_window,
         SKIP_DECODE=skip_decode,
         USE_FP8=fp8_out_scale is not None,
-        K_CACHE_NATIVE=k_cache_native,
-        K_CACHE_X=k_cache_x,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         num_unroll_cache=4,
