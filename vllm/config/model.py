@@ -679,6 +679,7 @@ class ModelConfig:
             SP_WHITELIST = {
                 "Qwen3VLForConditionalGeneration",
                 "Qwen2_5_VLForConditionalGeneration",
+                "Qwen3OmniMoeForConditionalGeneration"
             }
             if not arch in SP_WHITELIST:
                 # Force-disable SP for non-whitelisted models
