@@ -11,6 +11,38 @@ Step 2 is necessary for multi-node deployment.
 
 All scripts accept a positional argument as workspace path for staging the build, defaulting to `$(pwd)/ep_kernels_workspace`.
 
+## NCCL version requirement (CUDA 13+)
+
+DeepEPv2 uses the NCCL GIN (GPU-Initiated Networking) backend, which requires
+NCCL >= 2.30.4 at both compile time and runtime. PyTorch 2.11 pins
+`nvidia-nccl-cu13==2.28.9` as a transitive dependency, so you need to
+override it.
+
+**With uv** (recommended):
+
+```bash
+# Create an override file
+echo "nvidia-nccl-cu13>=2.30.4" > /tmp/nccl-override.txt
+export UV_OVERRIDE=/tmp/nccl-override.txt
+
+# All subsequent uv pip install commands will respect the override
+uv pip install vllm
+```
+
+**With pip**:
+
+```bash
+pip install vllm
+pip install "nvidia-nccl-cu13>=2.30.4" --no-deps
+```
+
+The override / reinstall must happen before building DeepEP (for GIN device
+headers) and must remain in place at runtime. You can verify with:
+
+```bash
+python -c "from vllm.utils.import_utils import has_deep_ep_v2; print(has_deep_ep_v2())"
+```
+
 ## Usage
 
 ```bash
