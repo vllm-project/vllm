@@ -1093,13 +1093,16 @@ def fastsafetensors_weights_iterator(
         try:
             pl = _make_loader(nogds)
             for name, tensor in pl.iterate_weights():
-                yielded = True
                 if _should_skip_safetensors_weight(
                     name,
                     local_expert_ids,
                     weight_name_filter,
                 ):
                     continue
+                # Only mark `yielded` once a tensor is actually emitted to the
+                # caller: tensors skipped by the EP / name filter must not defeat
+                # the nogds fallback below (restarting is safe until a real yield).
+                yielded = True
                 yield name, tensor
         except RuntimeError as e:
             if nogds or yielded or "gds" not in str(e):
