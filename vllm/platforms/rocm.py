@@ -27,8 +27,10 @@ logger = init_logger(__name__)
 try:
     from amdsmi import (
         AmdSmiException,
+        AmdSmiMemoryType,
         amdsmi_get_gpu_asic_info,
         amdsmi_get_gpu_device_uuid,
+        amdsmi_get_gpu_memory_total,
         amdsmi_get_processor_handles,
         amdsmi_init,
         amdsmi_shut_down,
@@ -117,6 +119,14 @@ def _sync_hip_cuda_env_vars():
     hip_val = os.environ.get("HIP_VISIBLE_DEVICES") or None
     cuda_val = os.environ.get("CUDA_VISIBLE_DEVICES") or None
 
+    if cuda_val is not None:
+        logger.warning_once(
+            "Using CUDA_VISIBLE_DEVICES on ROCm is deprecated and support "
+            "will be removed in vLLM v0.26.0. Please use HIP_VISIBLE_DEVICES "
+            "instead.",
+            scope="process",
+        )
+
     if hip_val is not None and cuda_val is not None:
         if hip_val != cuda_val:
             raise ValueError(
@@ -165,6 +175,14 @@ def _query_gcn_arch_from_amdsmi() -> str:
         if target_gfx:
             return target_gfx
     raise RuntimeError("amdsmi did not return valid GCN arch")
+
+
+@with_amdsmi_context
+def _query_total_memory_from_amdsmi(physical_device_id: int) -> int:
+    """Query total VRAM (bytes) from amdsmi. Raises if not available."""
+    handles = amdsmi_get_processor_handles()
+    handle = handles[physical_device_id]
+    return amdsmi_get_gpu_memory_total(handle, AmdSmiMemoryType.VRAM)
 
 
 def _get_gcn_arch() -> str:
@@ -443,7 +461,6 @@ class RocmPlatform(Platform):
         "auto_awq",
         "awq_marlin",  # will be overwritten with awq
         "gptq",
-        "gptq_marlin",
         "auto_gptq",
         "fp8",
         "deepseek_v4_fp8",
@@ -726,8 +743,22 @@ class RocmPlatform(Platform):
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
-        device_props = torch.cuda.get_device_properties(device_id)
-        return device_props.total_memory
+        # Query total VRAM via amdsmi so we don't initialize a HIP context in
+        # the calling process. torch.cuda.get_device_properties() creates a
+        # HIP context, which makes vLLM fall back from `fork` to `spawn` for
+        # worker processes. Keeping this query context-free preserves `fork`
+        # where it is otherwise valid (e.g. out-of-tree models registered in
+        # the parent process).
+        try:
+            physical_device_id = cls.device_id_to_physical_device_id(device_id)
+            return _query_total_memory_from_amdsmi(physical_device_id)
+        except Exception as e:
+            logger.debug("Failed to get total memory via amdsmi: %s", e)
+            logger.warning_once(
+                "Failed to get total memory via amdsmi, falling back to "
+                "torch.cuda. This will initialize CUDA."
+            )
+        return torch.cuda.get_device_properties(device_id).total_memory
 
     @classmethod
     def apply_config_platform_defaults(cls, vllm_config: "VllmConfig") -> None:

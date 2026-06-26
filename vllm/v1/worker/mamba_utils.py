@@ -257,9 +257,10 @@ class MambaCopyBuffers:
             for gid in mamba_group_ids
         ) * len(copy_funcs)
         n = max_num_reqs * entries_per_req
+
         return cls(
-            src_ptrs=make_buffer(n, dtype=torch.int64),
-            dst_ptrs=make_buffer(n, dtype=torch.int64),
+            src_ptrs=make_buffer(n, dtype=torch.uint64),
+            dst_ptrs=make_buffer(n, dtype=torch.uint64),
             sizes=make_buffer(n, dtype=torch.int32),
             mamba_group_ids=mamba_group_ids,
             mamba_spec=mamba_spec,
