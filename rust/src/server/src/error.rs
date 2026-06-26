@@ -78,7 +78,7 @@ impl IntoResponse for ApiError {
 /// the client's fault and map to HTTP 400, mirroring the Python frontend.
 /// Everything else stays an internal 500.
 pub fn text_submit_error(context: &'static str, error: vllm_text::Error) -> ApiError {
-    if is_request_validation_error(&error) {
+    if error.is_request_validation_error() {
         return invalid_request!("{error}");
     }
     server_error!("{}: {}", context, error.to_report_string())
@@ -87,28 +87,10 @@ pub fn text_submit_error(context: &'static str, error: vllm_text::Error) -> ApiE
 /// Like [`text_submit_error`], for the chat pipeline (which both wraps the
 /// text errors and raises its own prompt-length variant).
 pub fn chat_submit_error(context: &'static str, error: vllm_chat::Error) -> ApiError {
-    match &error {
-        vllm_chat::Error::PromptTooLong { .. } => invalid_request!("{error}"),
-        vllm_chat::Error::Text(text_error) if is_request_validation_error(text_error) => {
-            invalid_request!("{error}")
-        }
-        _ => server_error!("{}: {}", context, error.to_report_string()),
+    if error.is_request_validation_error() {
+        return invalid_request!("{error}");
     }
-}
-
-fn is_request_validation_error(error: &vllm_text::Error) -> bool {
-    matches!(
-        error,
-        vllm_text::Error::PromptTooLong { .. }
-            | vllm_text::Error::EmptyPromptTokenIds { .. }
-            | vllm_text::Error::Logprobs(_)
-            | vllm_text::Error::TokenIds(_)
-            | vllm_text::Error::MinTokensExceedsMaxTokens { .. }
-            | vllm_text::Error::InvalidThinkingTokenBudget
-            // An empty tokenized prompt detected later, at request prepare
-            // time, surfaces through the transparent Llm wrapper.
-            | vllm_text::Error::Llm(vllm_llm::Error::EmptyPromptTokenIds { .. })
-    )
+    server_error!("{}: {}", context, error.to_report_string())
 }
 
 #[cfg(test)]

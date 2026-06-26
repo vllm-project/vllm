@@ -37,6 +37,24 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+impl Error {
+    /// Whether this error represents invalid user request parameters.
+    pub fn is_request_validation_error(&self) -> bool {
+        match self {
+            Self::PromptTooLong { .. }
+            | Self::EmptyPromptTokenIds { .. }
+            | Self::Logprobs(_)
+            | Self::TokenIds(_)
+            | Self::MinTokensExceedsMaxTokens { .. }
+            | Self::InvalidThinkingTokenBudget
+            // An empty tokenized prompt detected later, at request prepare
+            // time, surfaces through the transparent Llm wrapper.
+            | Self::Llm(LlmError::EmptyPromptTokenIds { .. }) => true,
+            _ => false,
+        }
+    }
+}
+
 impl From<vllm_tokenizer::TokenizerError> for Error {
     fn from(error: vllm_tokenizer::TokenizerError) -> Self {
         Self::Tokenizer(error.0)

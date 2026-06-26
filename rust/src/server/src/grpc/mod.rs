@@ -155,22 +155,9 @@ impl pb::generate_server::Generate for GenerateServiceImpl {
 
 fn text_error_to_status(error: vllm_text::Error) -> Status {
     let message = error.to_report_string();
-    if is_text_request_validation_error(&error) {
+    if error.is_request_validation_error() {
         Status::invalid_argument(message)
     } else {
         Status::internal(message)
     }
-}
-
-fn is_text_request_validation_error(error: &vllm_text::Error) -> bool {
-    matches!(
-        error,
-        vllm_text::Error::PromptTooLong { .. }
-            | vllm_text::Error::EmptyPromptTokenIds { .. }
-            | vllm_text::Error::Logprobs(_)
-            | vllm_text::Error::TokenIds(_)
-            | vllm_text::Error::MinTokensExceedsMaxTokens { .. }
-            | vllm_text::Error::InvalidThinkingTokenBudget
-            | vllm_text::Error::Llm(vllm_llm::Error::EmptyPromptTokenIds { .. })
-    )
 }
