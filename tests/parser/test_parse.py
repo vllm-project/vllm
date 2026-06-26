@@ -2,13 +2,34 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import os
+from types import SimpleNamespace
 
 import pytest
 
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.parser.abstract_parser import _WrappedParser
-from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
-from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
+_STRICT_TOOL_CALLING_ENV = "VLLM_ENFORCE_STRICT_TOOL_CALLING"
+_STRICT_TOOL_CALLING_ENV_VALUE = os.environ.get(_STRICT_TOOL_CALLING_ENV)
+os.environ[_STRICT_TOOL_CALLING_ENV] = "0"
+
+from vllm.entrypoints.openai.chat_completion.protocol import (  # noqa: E402
+    ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest  # noqa: E402
+from vllm.parser.abstract_parser import DelegatingParser  # noqa: E402
+from vllm.parser.utils import count_history_tool_calls  # noqa: E402
+from vllm.reasoning.basic_parsers import (  # noqa: E402
+    BaseThinkingReasoningParser,
+)
+from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser  # noqa: E402
+
+
+@pytest.fixture(scope="module", autouse=True)
+def restore_strict_tool_calling_env():
+    yield
+    if _STRICT_TOOL_CALLING_ENV_VALUE is None:
+        os.environ.pop(_STRICT_TOOL_CALLING_ENV, None)
+    else:
+        os.environ[_STRICT_TOOL_CALLING_ENV] = _STRICT_TOOL_CALLING_ENV_VALUE
 
 
 class ThinkReasoningParser(BaseThinkingReasoningParser):
@@ -64,10 +85,55 @@ TOOLS = [
 ]
 
 
-def make_parser(tokenizer, reasoning=False, tool=False):
-    _WrappedParser.reasoning_parser_cls = ThinkReasoningParser if reasoning else None
-    _WrappedParser.tool_parser_cls = Hermes2ProToolParser if tool else None
-    return _WrappedParser(tokenizer)
+KIMI_K2_MODEL_CONFIG = SimpleNamespace(
+    hf_text_config=SimpleNamespace(model_type="kimi_k2"),
+    hf_overrides=None,
+)
+
+HISTORY_MESSAGES = [
+    {"role": "user", "content": "first"},
+    {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": "functions.get_current_weather:0",
+                "type": "function",
+                "function": {
+                    "name": "get_current_weather",
+                    "arguments": "{}",
+                },
+            },
+            {
+                "id": "functions.get_forecast:1",
+                "type": "function",
+                "function": {
+                    "name": "get_forecast",
+                    "arguments": "{}",
+                },
+            },
+        ],
+    },
+    {
+        "role": "tool",
+        "tool_call_id": "functions.get_current_weather:0",
+        "content": "{}",
+    },
+    {
+        "role": "tool",
+        "tool_call_id": "functions.get_forecast:1",
+        "content": "{}",
+    },
+    {"role": "user", "content": "again"},
+]
+
+
+def make_parser(tokenizer, reasoning=False, tool=False, **kwargs):
+    class TestParser(DelegatingParser):
+        reasoning_parser_cls = ThinkReasoningParser if reasoning else None
+        tool_parser_cls = Hermes2ProToolParser if tool else None
+
+    return TestParser(tokenizer, **kwargs)
 
 
 @pytest.mark.parametrize(
@@ -210,6 +276,107 @@ def test_parse_required_tool_choice(tokenizer):
     assert json.loads(tool_calls[0].arguments) == {"city": "Dallas"}
     assert tool_calls[1].name == "get_time"
     assert json.loads(tool_calls[1].arguments) == {"timezone": "UTC"}
+
+
+def test_parse_required_tool_choice_kimi_k2_ids(tokenizer):
+    parser = make_parser(
+        tokenizer, reasoning=False, tool=True, model_config=KIMI_K2_MODEL_CONFIG
+    )
+    functions_json = json.dumps(
+        [
+            {"name": "get_current_weather", "parameters": {"city": "Dallas"}},
+            {"name": "get_forecast", "parameters": {"city": "Dallas", "days": 2}},
+        ]
+    )
+    request = make_request(tools=TOOLS, tool_choice="required")
+    _, content, tool_calls = parser.parse(
+        functions_json, request, enable_auto_tools=True
+    )
+
+    assert content is None
+    assert tool_calls is not None
+    assert [tc.id for tc in tool_calls] == [
+        "functions.get_current_weather:0",
+        "functions.get_forecast:1",
+    ]
+
+
+def test_parse_required_tool_choice_kimi_k2_ids_after_history(tokenizer):
+    parser = make_parser(
+        tokenizer, reasoning=False, tool=True, model_config=KIMI_K2_MODEL_CONFIG
+    )
+    functions_json = json.dumps(
+        [{"name": "get_current_weather", "parameters": {"city": "Dallas"}}]
+    )
+    request = make_request(
+        messages=HISTORY_MESSAGES,
+        tools=TOOLS,
+        tool_choice="required",
+    )
+    _, _, tool_calls = parser.parse(functions_json, request, enable_auto_tools=True)
+
+    assert tool_calls is not None
+    assert tool_calls[0].id == "functions.get_current_weather:2"
+
+
+def test_count_history_tool_calls_responses_request():
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "test-model",
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_0",
+                    "name": "get_current_weather",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "get_forecast",
+                    "arguments": "{}",
+                },
+            ],
+        }
+    )
+
+    assert count_history_tool_calls(request) == 2
+
+
+def test_parse_required_tool_choice_random_ids_deferred(tokenizer):
+    parser = make_parser(tokenizer, reasoning=False, tool=True)
+    functions_json = json.dumps(
+        [{"name": "get_current_weather", "parameters": {"city": "Dallas"}}]
+    )
+    request = make_request(
+        messages=HISTORY_MESSAGES,
+        tools=TOOLS,
+        tool_choice="required",
+    )
+    _, _, tool_calls = parser.parse(functions_json, request, enable_auto_tools=True)
+
+    assert tool_calls is not None
+    assert tool_calls[0].id is None
+
+
+def test_parse_named_tool_choice_kimi_k2_id(tokenizer):
+    parser = make_parser(
+        tokenizer, reasoning=False, tool=True, model_config=KIMI_K2_MODEL_CONFIG
+    )
+    request = make_request(
+        tools=TOOLS,
+        tool_choice={
+            "type": "function",
+            "function": {"name": "get_weather"},
+        },
+    )
+    _, content, tool_calls = parser.parse(
+        TOOL_ARGUMENTS, request, enable_auto_tools=True
+    )
+
+    assert content is None
+    assert tool_calls is not None
+    assert tool_calls[0].id == "functions.get_weather:0"
 
 
 def test_parse_named_tool_choice_content_none(tokenizer):

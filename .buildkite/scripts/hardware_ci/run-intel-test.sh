@@ -243,8 +243,10 @@ container_name="xpu_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head
 
 # ---- Command source selection ----
 commands=""
+commands_source=""
 if [[ -n "${VLLM_TEST_COMMANDS:-}" ]]; then
   commands="${VLLM_TEST_COMMANDS}"
+  commands_source="env"
   echo "Commands sourced from VLLM_TEST_COMMANDS (quoting preserved)"
 elif [[ $# -gt 0 ]]; then
   all_yaml=true
@@ -303,8 +305,12 @@ if [[ -z "$commands" ]]; then
 fi
 
 echo "Raw commands: $commands"
-commands=$(re_quote_pytest_markers "$commands")
-echo "After re-quoting: $commands"
+if [[ "$commands_source" != "env" ]]; then
+  commands=$(re_quote_pytest_markers "$commands")
+  echo "After re-quoting: $commands"
+else
+  echo "Skipping re-quoting for VLLM_TEST_COMMANDS input"
+fi
 commands=$(apply_intel_test_overrides "$commands")
 echo "Final commands: $commands"
 
@@ -324,23 +330,6 @@ IMAGE="${IMAGE_TAG_XPU:-${image_name}}"
 
 echo "Using image: ${IMAGE}"
 
-if docker image inspect "${IMAGE}" >/dev/null 2>&1; then
-  echo "Image already exists locally, skipping pull"
-else
-  echo "Image not found locally, waiting for lock..."
-
-  flock /tmp/docker-pull.lock bash -c "
-    if docker image inspect '${IMAGE}' >/dev/null 2>&1; then
-      echo 'Image already pulled by another runner'
-    else
-      echo 'Pulling image...'
-      timeout 900 docker pull '${IMAGE}'
-    fi
-  "
-
-  echo "Pull step completed"
-fi
-
 remove_docker_container() {
   docker rm -f "${container_name}" || true
 }
@@ -357,9 +346,12 @@ export HF_TOKEN ZE_AFFINITY_MASK
 
 {
   flock 9
-  if ! docker image inspect "${IMAGE}" >/dev/null 2>&1; then
-    echo 'Image missing before container creation, pulling again...'
+  if docker image inspect "${IMAGE}" >/dev/null 2>&1; then
+    echo "Image already exists locally, skipping pull"
+  else
+    echo "Image not found locally, pulling image..."
     timeout 900 docker pull "${IMAGE}"
+    echo "Pull step completed"
   fi
 
   docker create \
@@ -372,10 +364,12 @@ export HF_TOKEN ZE_AFFINITY_MASK
     --entrypoint='' \
     -e HF_TOKEN \
     -e ZE_AFFINITY_MASK \
+    -e BUILDKITE_PARALLEL_JOB \
+    -e BUILDKITE_PARALLEL_JOB_COUNT \
     -e CMDS \
     --name "${container_name}" \
     "${IMAGE}" \
-    bash -c 'set -e; echo "ZE_AFFINITY_MASK is ${ZE_AFFINITY_MASK:-}"; eval "$CMDS"' \
+    bash -c 'set -e; source /opt/intel/oneapi/setvars.sh --force; source /opt/intel/oneapi/ccl/2021.15/env/vars.sh --force; echo "ZE_AFFINITY_MASK is ${ZE_AFFINITY_MASK:-}"; eval "$CMDS"' \
     >/dev/null
 } 9>/tmp/docker-pull.lock
 

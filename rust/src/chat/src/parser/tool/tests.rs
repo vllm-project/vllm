@@ -1,6 +1,6 @@
-use vllm_tool_parser::Result;
+use vllm_parser::tool::{Result, ToolParserOutput};
 
-use super::{ToolParser, ToolParserFactory, ToolParserOutput, names};
+use super::{ToolParser, ToolParserFactory, names};
 use crate::Error;
 use crate::request::ChatTool;
 
@@ -146,12 +146,24 @@ fn factory_new_resolves_default_patterns() {
         Some(names::GEMMA4)
     );
     assert_eq!(
+        factory.resolve_name_for_model("ibm-granite/granite-4.0-h-tiny"),
+        Some(names::GRANITE4)
+    );
+    assert_eq!(
         factory.resolve_name_for_model("NousResearch/Hermes-3-Llama-3.1-8B"),
         Some(names::HERMES)
     );
     assert_eq!(
         factory.resolve_name_for_model("tencent/Hy3-preview"),
         Some(names::HY_V3)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("MiniMax/MiniMax-M3-Text"),
+        Some(names::MINIMAX_M3)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("org/mm-m3-base"),
+        Some(names::MINIMAX_M3)
     );
     assert_eq!(
         factory.resolve_name_for_model("MiniMax/MiniMax-M2-01"),
@@ -190,4 +202,15 @@ fn factory_new_resolves_default_patterns() {
         factory.resolve_name_for_model("internlm/Intern-S1-Pro"),
         None
     );
+}
+
+#[test]
+fn factory_new_registers_phi4_mini_json_by_name() {
+    // phi-4-mini is registered by explicit name only (matching Python's
+    // `--tool-call-parser phi4_mini_json`); it is intentionally not mapped to
+    // any model-name pattern.
+    let factory = ToolParserFactory::new();
+
+    assert!(factory.contains(names::PHI4_MINI_JSON));
+    factory.create(names::PHI4_MINI_JSON, &[]).unwrap();
 }

@@ -615,8 +615,7 @@ class GraniteSpeechForConditionalGeneration(
             )
 
         with self._mark_tower_model(vllm_config, "audio"):
-            # Conformer encoder
-            self.encoder = GraniteSpeechCTCEncoder(
+            self.encoder = self._build_encoder(
                 config=config.encoder_config,
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "encoder"),
@@ -632,6 +631,18 @@ class GraniteSpeechForConditionalGeneration(
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
+        )
+
+    def _build_encoder(
+        self,
+        config: PretrainedConfig,
+        quant_config: QuantizationConfig | None,
+        prefix: str,
+    ) -> "GraniteSpeechCTCEncoder":
+        return GraniteSpeechCTCEncoder(
+            config=config,
+            quant_config=quant_config,
+            prefix=prefix,
         )
 
     def _parse_and_validate_audio_input(

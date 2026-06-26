@@ -25,7 +25,9 @@ _sync_check_enabled: bool = False
 
 def enable_gpu_sync_check() -> None:
     """Flip the sync-check gate on. Call once per worker, after warmup /
-    first-compile is complete."""
+    first-compile is complete. No-op unless `VLLM_GPU_SYNC_CHECK` is set."""
+    if envs.VLLM_GPU_SYNC_CHECK is None:
+        return
     global _sync_check_enabled
     _sync_check_enabled = True
     _install_compile_time_sync_suppressors()
@@ -36,16 +38,12 @@ _compile_time_suppressors_installed: bool = False
 
 def _install_compile_time_sync_suppressors() -> None:
     """Wrap torch inductor/aot_autograd compile entry points so the
-    synchronizing ops those passes perform (e.g. `constant_fold_uniform_value`
-    calling `.item()` on uniform-valued constants) don't trip the
+    synchronizing ops those passes perform don't trip the
     sync-check mode we set around `execute_model` / `sample_tokens`.
 
     Warmup-time compiles already run under the gate (before
-    `enable_gpu_sync_check`), but post-warmup compiles (runtime
-    recompiles from dynamic shape variants, pipeline-parallel fresh
-    compile cache, etc.) fire inside `execute_model`. We intentionally
-    only want to flag *model-execution* syncs — compile-time work is
-    third-party and unavoidable.
+    `enable_gpu_sync_check`), but post-warmup compiles fire inside
+    `execute_model` and we want to avoid this tripping the sync check.
     """
     global _compile_time_suppressors_installed
     if _compile_time_suppressors_installed:
@@ -72,10 +70,7 @@ def _install_compile_time_sync_suppressors() -> None:
         # joint_graph_passes`, which binds the *function object* at import
         # time. Patching just the module attribute won't update that rebind,
         # so patch every already-imported reference we can find. Restrict
-        # the scan to torch's compile-time modules — iterating all of
-        # `sys.modules` triggers `__getattr__` shims on third-party packages
-        # (e.g. transformers image_processing modules emit a deprecation
-        # warning on every attribute access).
+        # the scan to torch's compile-time modules.
         import sys as _sys
 
         setattr(_jg, "joint_graph_passes", _wrapped_joint)  # noqa: B010
@@ -120,7 +115,7 @@ if current_platform.is_cuda_alike():
         caller's (filename, lineno), so different
         `with gpu_sync_allowed(first_only=True):` lines track independently.
         """
-        if torch.compiler.is_compiling():
+        if envs.VLLM_GPU_SYNC_CHECK is None or torch.compiler.is_compiling():
             return _noop_cm()
         prev_mode = torch.cuda.get_sync_debug_mode()
         if not prev_mode:
@@ -138,9 +133,6 @@ if current_platform.is_cuda_alike():
         when `VLLM_GPU_SYNC_CHECK` is set *and* the gate has been flipped by
         `enable_gpu_sync_check()`. Before the gate flips (i.e. during
         engine setup / warmup) the decorated function runs as-is.
-
-        The env var is parsed once at decoration time; this module is imported
-        lazily after `VllmConfig.__post_init__` has finalized `VLLM_GPU_SYNC_CHECK`.
         """
         mode = envs.VLLM_GPU_SYNC_CHECK
         if mode is None:
@@ -164,6 +156,7 @@ if current_platform.is_cuda_alike():
         return wrapper
 
 else:
+    # No-op the methods in non-CUDA cases.
 
     def gpu_sync_allowed(first_only: bool = False):
         return _noop_cm()

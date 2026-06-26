@@ -7,7 +7,7 @@ import torch.nn as nn
 
 from vllm.config.model import LogprobsMode
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.bad_words import apply_bad_words
@@ -59,11 +59,16 @@ class Sampler(nn.Module):
     9. Return the final `SamplerOutput`.
     """
 
-    def __init__(self, logprobs_mode: LogprobsMode = "raw_logprobs"):
+    def __init__(
+        self,
+        logprobs_mode: LogprobsMode = "raw_logprobs",
+        use_fp64_gumbel: bool = False,
+    ):
         super().__init__()
-        self.topk_topp_sampler = TopKTopPSampler(logprobs_mode)
-        self.pin_memory = is_pin_memory_available()
+        self.topk_topp_sampler = TopKTopPSampler(logprobs_mode, use_fp64_gumbel)
+        self.pin_memory = PIN_MEMORY
         self.logprobs_mode = logprobs_mode
+        self.use_fp64_gumbel = use_fp64_gumbel
 
     def forward(
         self,
