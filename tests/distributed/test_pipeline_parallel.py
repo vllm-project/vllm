@@ -102,8 +102,6 @@ class PPTestSettings:
 
 TEXT_GENERATION_MODELS = {
     # [Decoder-only]
-    # Uses Llama
-    # "BAAI/AquilaChat-7B": PPTestSettings.fast(),
     "Snowflake/snowflake-arctic-instruct": PPTestSettings.fast(load_format="dummy"),
     "bigscience/bloomz-1b1": PPTestSettings.fast(),
     "zai-org/chatglm3-6b": PPTestSettings.fast(),
