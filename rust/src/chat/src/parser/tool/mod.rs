@@ -1,13 +1,13 @@
 //! Tool parser registration and selection boundary for `vllm-chat`.
 
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 pub use vllm_parser::tool::{
     DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser, DeepSeekV32ToolParser,
-    Gemma4ToolParser, Glm45MoeToolParser, Glm47MoeToolParser, Granite4ToolParser, HermesToolParser,
-    HyV3ToolParser, Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser,
-    MinimaxM2ToolParser, MinimaxM3ToolParser, MistralToolParser, Phi4MiniJsonToolParser,
-    Qwen3CoderToolParser, Qwen3XmlToolParser, ToolParser, ToolParserError,
+    Glm45MoeToolParser, Glm47MoeToolParser, Granite4ToolParser, HermesToolParser, HyV3ToolParser,
+    Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser, MinimaxM2ToolParser,
+    MinimaxM3ToolParser, MistralToolParser, Phi4MiniJsonToolParser, Qwen3CoderToolParser,
+    Qwen3XmlToolParser, ToolParser, ToolParserError,
 };
 
 use crate::parser::ParserFactory;
@@ -40,7 +40,8 @@ pub mod names {
 }
 
 /// Constructor signature for one registered tool parser implementation.
-type ToolParserCreator = fn(&[ChatTool]) -> vllm_parser::tool::Result<Box<dyn ToolParser>>;
+type ToolParserCreator =
+    Arc<dyn Fn(&[ChatTool]) -> vllm_parser::tool::Result<Box<dyn ToolParser>> + Send + Sync>;
 
 /// Registry and model matcher for tool parsers.
 pub type ToolParserFactory = ParserFactory<ToolParserCreator>;
@@ -65,7 +66,7 @@ impl ToolParserFactory {
             .register_parser::<DeepSeekV4ToolParser>(names::DEEPSEEK_V4)
             .register_parser::<Glm45MoeToolParser>(names::GLM45)
             .register_parser::<Glm47MoeToolParser>(names::GLM47)
-            .register_parser::<Gemma4ToolParser>(names::GEMMA4)
+            .register_unified_dummy(names::GEMMA4)
             .register_parser::<Granite4ToolParser>(names::GRANITE4)
             .register_parser::<HermesToolParser>(names::HERMES)
             .register_parser::<HyV3ToolParser>(names::HY_V3)
@@ -126,7 +127,17 @@ impl ToolParserFactory {
     where
         T: ToolParser + 'static,
     {
-        self.register_creator(name, T::create)
+        self.register_creator(name, Arc::new(T::create))
+    }
+
+    /// Register one unified-only parser name in the split tool registry.
+    pub fn register_unified_dummy(&mut self, name: &str) -> &mut Self {
+        let name = name.to_string();
+        let registered_name = name.clone();
+        self.register_creator(
+            &registered_name,
+            Arc::new(move |_| Err(ToolParserError::DummyUnifiedParser { name: name.clone() })),
+        )
     }
 
     /// Construct a parser from an exact name.
@@ -137,7 +148,7 @@ impl ToolParserFactory {
             available_names: self.list(),
         })?;
 
-        creator(tools).map_err(|error| crate::Error::ParserInitialization {
+        creator.as_ref()(tools).map_err(|error| crate::Error::ParserInitialization {
             kind: "tool",
             name: name.to_string(),
             error: error.into(),

@@ -1,14 +1,19 @@
 //! Unified parser interface for reasoning and tool-call deltas.
 
 mod combined;
+mod gemma4;
 
 use thiserror::Error;
+use thiserror_ext::Macro;
 use vllm_tokenizer::DynTokenizer;
 
 pub use combined::CombinedParser;
+pub use gemma4::Gemma4UnifiedParser;
 
 use crate::reasoning::ReasoningError;
-use crate::tool::{StructuralTagModel, Tool, ToolCallDelta, ToolParserError, ToolParserOutput};
+use crate::tool::{
+    StructuralTagModel, Tool, ToolCallDelta, ToolParserError, ToolParserEvent, ToolParserOutput,
+};
 
 /// Result alias for unified parser operations.
 pub type Result<T> = std::result::Result<T, UnifiedParserError>;
@@ -33,31 +38,115 @@ pub struct UnifiedParserOutput {
 
 impl UnifiedParserOutput {
     /// Append one visible text event if `delta` is non-empty.
-    pub fn push_text(&mut self, delta: String) {
-        if delta.is_empty() {
+    pub fn push_text(&mut self, delta: impl AsRef<str> + Into<String>) {
+        if delta.as_ref().is_empty() {
             return;
         }
-        self.events.push(UnifiedParserEvent::Text(delta));
+        if let Some(UnifiedParserEvent::Text(last_text)) = self.events.last_mut() {
+            last_text.push_str(delta.as_ref());
+            return;
+        }
+        self.events.push(UnifiedParserEvent::Text(delta.into()));
     }
 
     /// Append one reasoning text event if `delta` is non-empty.
-    pub fn push_reasoning(&mut self, delta: String) {
-        if delta.is_empty() {
+    pub fn push_reasoning(&mut self, delta: impl AsRef<str> + Into<String>) {
+        if delta.as_ref().is_empty() {
             return;
         }
-        self.events.push(UnifiedParserEvent::Reasoning(delta));
+        if let Some(UnifiedParserEvent::Reasoning(last_text)) = self.events.last_mut() {
+            last_text.push_str(delta.as_ref());
+            return;
+        }
+        self.events.push(UnifiedParserEvent::Reasoning(delta.into()));
+    }
+
+    /// Append one tool-call event.
+    pub fn push_call(&mut self, call: ToolCallDelta) {
+        self.events.push(UnifiedParserEvent::ToolCall(call));
     }
 
     /// Append parsed tool parser output as unified events.
     pub fn append_tool_output(&mut self, output: ToolParserOutput) {
-        // TODO: make ToolParserOutput carry ordered events and remove this text-first flattening.
-        self.push_text(output.normal_text);
-        self.events.extend(output.calls.into_iter().map(UnifiedParserEvent::ToolCall));
+        for event in output.events {
+            match event {
+                ToolParserEvent::Text(text) => self.push_text(text),
+                ToolParserEvent::ToolCall(call) => self.push_call(call),
+            }
+        }
     }
 
     /// Append another parser output onto this one.
-    pub fn append(&mut self, mut other: Self) {
-        self.events.append(&mut other.events);
+    pub fn append(&mut self, other: Self) {
+        for event in other.events {
+            match event {
+                UnifiedParserEvent::Text(text) => self.push_text(text),
+                UnifiedParserEvent::Reasoning(reasoning) => self.push_reasoning(reasoning),
+                UnifiedParserEvent::ToolCall(call) => self.push_call(call),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{UnifiedParserEvent, UnifiedParserOutput};
+    use crate::tool::ToolCallDelta;
+
+    #[test]
+    fn unified_parser_output_coalesces_adjacent_text_events() {
+        let mut output = UnifiedParserOutput::default();
+        output.push_text("hello");
+        output.push_text(" ");
+        output.push_text("world");
+        output.push_reasoning("think");
+        output.push_reasoning("ing");
+        output.push_call(ToolCallDelta {
+            tool_index: 0,
+            name: Some("lookup".to_string()),
+            arguments: "{}".to_string(),
+        });
+        output.push_text("!");
+
+        assert_eq!(
+            output.events,
+            vec![
+                UnifiedParserEvent::Text("hello world".to_string()),
+                UnifiedParserEvent::Reasoning("thinking".to_string()),
+                UnifiedParserEvent::ToolCall(ToolCallDelta {
+                    tool_index: 0,
+                    name: Some("lookup".to_string()),
+                    arguments: "{}".to_string(),
+                }),
+                UnifiedParserEvent::Text("!".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn unified_parser_output_append_coalesces_adjacent_events() {
+        let mut output = UnifiedParserOutput::default();
+        output.push_text("hello");
+
+        let mut other = UnifiedParserOutput::default();
+        other.push_text(" ");
+        other.push_text("world");
+        other.push_reasoning("think");
+        output.append(other);
+
+        let mut after_reasoning = UnifiedParserOutput::default();
+        after_reasoning.push_reasoning("ing");
+        after_reasoning.push_text("!");
+        output.append(after_reasoning);
+
+        assert_eq!(
+            output.events,
+            vec![
+                UnifiedParserEvent::Text("hello world".to_string()),
+                UnifiedParserEvent::Reasoning("thinking".to_string()),
+                UnifiedParserEvent::Text("!".to_string()),
+            ]
+        );
     }
 }
 
@@ -103,10 +192,15 @@ pub trait UnifiedParser: Send {
 }
 
 /// Errors produced while creating or running unified parsers.
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Macro)]
+#[thiserror_ext(macro(path = "crate::unified", mangle))]
 pub enum UnifiedParserError {
     #[error("combined parser is constructed from split parser instances")]
     CombinedParserConstructor,
+    #[error("tokenizer is missing unified parser token `{token}`")]
+    MissingToken { token: String },
+    #[error("unified parser parsing failed: {message}")]
+    ParsingFailed { message: String },
     #[error(transparent)]
     Reasoning(#[from] ReasoningError),
     #[error(transparent)]
