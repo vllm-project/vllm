@@ -679,7 +679,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             and output_quant.num_bits == 8
             and not output_quant.dynamic
         )
-        return is_intN_weight and (is_static_int8_in or is_static_int8_out)
+        return is_intN_weight and (is_static_int8_in and is_static_int8_out)
 
     def _get_scheme_from_parts(
         self,
