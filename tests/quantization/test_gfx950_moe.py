@@ -23,8 +23,10 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     select_mxfp4_moe_backend,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kInt8DynamicTensorSym,
     kInt8DynamicTokenSym,
     kInt8StaticChannelSym,
+    kInt8StaticTensorSym,
     kMxfp4Dynamic,
 )
 from vllm.platforms import current_platform
@@ -139,6 +141,25 @@ def test_int8_dispatches_to_triton():
         config,
         weight_key=kInt8StaticChannelSym,
         activation_key=kInt8DynamicTokenSym,
+    )
+    assert backend == Int8MoeBackend.TRITON
+    assert experts_cls is not None
+
+
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="Requires ROCm")
+@pytest.mark.parametrize(
+    "weight_key,activation_key",
+    [
+        (kInt8StaticChannelSym, kInt8DynamicTokenSym),
+        (kInt8StaticTensorSym, kInt8DynamicTensorSym),
+    ],
+)
+def test_int8_dynamic_schemes_dispatch_to_triton(weight_key, activation_key):
+    """Both dynamic-activation INT8 MoE schemes (per-channel + per-tensor
+    weights) select the Triton backend on ROCm."""
+    config = _make_int8_moe_config()
+    backend, experts_cls = select_int8_moe_backend(
+        config, weight_key=weight_key, activation_key=activation_key
     )
     assert backend == Int8MoeBackend.TRITON
     assert experts_cls is not None
