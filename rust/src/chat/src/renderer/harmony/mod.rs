@@ -33,11 +33,14 @@ struct Options {
 }
 
 impl HarmonyChatRenderer {
-    /// Create a new Harmony renderer with options loaded from the environment.
+    /// Create a Harmony renderer for production use.
     ///
-    /// - `VLLM_SYSTEM_START_DATE`: If set, this date will be used as the system start date.
-    /// - `VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS`: If set to a non-zero integer, system
-    ///   instructions will be included in the prompt.
+    /// Environment-derived options are resolved once at construction time:
+    ///
+    /// - `VLLM_SYSTEM_START_DATE` pins the Harmony system start date. When it is
+    ///   unset, the renderer uses the current local date with a UTC fallback.
+    /// - `VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS` moves leading instructions
+    ///   into the system model identity when set to a non-zero integer.
     pub fn new() -> Result<Self> {
         Self::with_options(
             env_system_start_date(),
@@ -45,7 +48,11 @@ impl HarmonyChatRenderer {
         )
     }
 
-    /// Create a new Harmony renderer with the given options.
+    /// Create a Harmony renderer with explicit preamble options.
+    ///
+    /// Tests use this constructor to avoid process-global environment mutation.
+    /// Production code should call [`Self::new`] so the renderer observes the
+    /// same environment contract as the Python Harmony path.
     pub fn with_options(
         system_start_date: impl Into<String>,
         use_system_instructions: bool,
@@ -59,6 +66,10 @@ impl HarmonyChatRenderer {
         })
     }
 
+    /// Render a chat request directly to Harmony token IDs.
+    ///
+    /// Harmony owns both prompt formatting and tokenization, so the Rust
+    /// frontend bypasses the generic HF tokenizer path for GPT-OSS input.
     fn render_token_ids(&self, request: &ChatRequest) -> Result<Vec<u32>> {
         if request.has_multimodal() {
             return Err(Error::UnsupportedMultimodalContent("image_url"));
@@ -97,6 +108,8 @@ impl HarmonyChatRenderer {
 }
 
 impl ChatRenderer for HarmonyChatRenderer {
+    /// Render a chat request as [`Prompt::TokenIds`] with template kwargs echoed
+    /// for downstream accounting/debugging.
     fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
         Ok(RenderedPrompt {
             prompt: Prompt::TokenIds(self.render_token_ids(request)?),
@@ -105,6 +118,11 @@ impl ChatRenderer for HarmonyChatRenderer {
     }
 }
 
+/// Convert a vLLM chat request into a full Harmony conversation.
+///
+/// This adds the Harmony system/developer preamble, peels at most one leading
+/// system/developer instruction message, and then lowers the remaining chat
+/// history message-by-message.
 fn to_harmony_messages(request: &ChatRequest, options: &Options) -> Result<Vec<Message>> {
     let (instructions, leading_developer_tools, remaining_messages) =
         peel_leading_instructions(&request.messages)?;
@@ -119,6 +137,10 @@ fn to_harmony_messages(request: &ChatRequest, options: &Options) -> Result<Vec<M
     Ok(messages)
 }
 
+/// Extract the optional leading instruction message used by the Harmony preamble.
+///
+/// Python only peels the first leading `system` or `developer` message. Later
+/// system/developer messages stay in the conversation and are lowered normally.
 #[allow(clippy::type_complexity)]
 fn peel_leading_instructions(
     messages: &[ChatMessage],
@@ -140,6 +162,12 @@ fn peel_leading_instructions(
     }
 }
 
+/// Build the Harmony preamble for one request.
+///
+/// The preamble always contains a system message with date and reasoning-effort
+/// metadata. Leading instructions live either in the system model identity or in
+/// a developer message depending on `use_system_instructions`; request-level and
+/// leading developer tools are attached to the developer message.
 fn build_harmony_preamble(
     request: &ChatRequest,
     instructions: Option<String>,
@@ -178,6 +206,7 @@ fn build_harmony_preamble(
     Ok(messages)
 }
 
+/// Collect request-level and leading developer function tools for the preamble.
 fn preamble_tool_descriptions(
     request: &ChatRequest,
     leading_developer_tools: Option<&[ChatTool]>,
@@ -192,6 +221,10 @@ fn preamble_tool_descriptions(
     tools
 }
 
+/// Construct the Harmony system content for the request preamble.
+///
+/// Harmony defaults the reasoning effort to `medium` when none is provided, so
+/// this only sets an explicit effort after validating vLLM's request value.
 fn system_content(
     instructions: Option<&str>,
     reasoning_effort: Option<ReasoningEffort>,
@@ -215,6 +248,11 @@ fn system_content(
     Ok(content)
 }
 
+/// Lower a single vLLM chat message into one or more Harmony messages.
+///
+/// Assistant messages can split into separate analysis, final, commentary, and
+/// tool-call messages. Tool responses require the earlier assistant tool-call ID
+/// map so the Harmony tool author can include `functions.{name}`.
 fn to_harmony_message(
     message: &ChatMessage,
     tool_call_names: &std::collections::HashMap<String, String>,
@@ -262,6 +300,11 @@ fn to_harmony_message(
     })
 }
 
+/// Lower a non-leading system/developer message.
+///
+/// Harmony treats most extra system/developer messages as developer
+/// instructions. When system-instructions mode is enabled, system messages are
+/// rendered as system model-identity additions to match Python.
 fn system_or_developer_message(
     role: &str,
     instructions: String,
@@ -278,6 +321,7 @@ fn system_or_developer_message(
     Ok(developer_message(Some(instructions), tools))
 }
 
+/// Build a Harmony developer message with optional instructions and function tools.
 fn developer_message(instructions: Option<String>, tools: Option<&[ChatTool]>) -> Message {
     let mut content = DeveloperContent::new();
     if let Some(instructions) = instructions.filter(|text| !text.is_empty()) {
@@ -292,6 +336,12 @@ fn developer_message(instructions: Option<String>, tools: Option<&[ChatTool]>) -
     Message::from_role_and_content(Role::Developer, content)
 }
 
+/// Lower assistant history into Harmony channels.
+///
+/// Plain assistant text goes to `final`. When the assistant has tool calls,
+/// visible text goes to `commentary`, reasoning goes to `analysis`, and each
+/// function call becomes a `commentary` message to `functions.{name}` with JSON
+/// constrained content.
 fn assistant_messages(content: &[AssistantContentBlock]) -> Vec<Message> {
     let mut messages = Vec::new();
     let has_tool_calls = content.has_tool_calls();
@@ -331,6 +381,7 @@ fn assistant_messages(content: &[AssistantContentBlock]) -> Vec<Message> {
     messages
 }
 
+/// Build the tool-call ID to function-name map used by later tool responses.
 fn tool_call_names(messages: &[ChatMessage]) -> std::collections::HashMap<String, String> {
     let mut names = std::collections::HashMap::new();
     for message in messages {
@@ -344,6 +395,10 @@ fn tool_call_names(messages: &[ChatMessage]) -> std::collections::HashMap<String
     names
 }
 
+/// Drop stale assistant analysis messages using vLLM Python's policy.
+///
+/// Once an assistant final message exists, earlier analysis messages represent
+/// chain-of-thought for completed turns and should not be replayed to the model.
 fn auto_drop_analysis_messages(messages: Vec<Message>) -> Vec<Message> {
     // Match vLLM Python's Harmony cleanup: once an assistant final message exists,
     // previous assistant analysis messages are stale chain-of-thought and should
@@ -367,10 +422,12 @@ fn auto_drop_analysis_messages(messages: Vec<Message>) -> Vec<Message> {
         .collect()
 }
 
+/// Flatten vLLM text content and reject unsupported multimodal parts.
 fn flatten_text(content: &ChatContent) -> Result<String> {
     content.try_flatten_to_text()
 }
 
+/// Convert vLLM function tool definitions to Harmony tool descriptions.
 fn to_tool_descriptions(tools: &[ChatTool]) -> Vec<ToolDescription> {
     tools
         .iter()
@@ -384,6 +441,7 @@ fn to_tool_descriptions(tools: &[ChatTool]) -> Vec<ToolDescription> {
         .collect()
 }
 
+/// Map supported OpenAI reasoning-effort values onto Harmony's enum.
 fn to_harmony_reasoning_effort(
     reasoning_effort: ReasoningEffort,
 ) -> Result<HarmonyReasoningEffort> {
@@ -401,6 +459,7 @@ fn to_harmony_reasoning_effort(
     }
 }
 
+/// Resolve the system start date from the environment or the current date.
 fn env_system_start_date() -> String {
     std::env::var(SYSTEM_START_DATE_ENV)
         .ok()
@@ -408,6 +467,7 @@ fn env_system_start_date() -> String {
         .unwrap_or_else(current_date)
 }
 
+/// Format today's date as `YYYY-MM-DD`, preferring local time.
 fn current_date() -> String {
     const DATE_FORMAT: &[time::format_description::FormatItem<'static>] =
         format_description!("[year]-[month]-[day]");
@@ -415,6 +475,7 @@ fn current_date() -> String {
     now.format(DATE_FORMAT).expect("static date format should be valid")
 }
 
+/// Resolve the env flag that places leading instructions in system identity.
 fn env_use_harmony_system_instructions() -> bool {
     std::env::var(HARMONY_SYSTEM_INSTRUCTIONS_ENV)
         .ok()
