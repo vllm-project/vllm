@@ -26,11 +26,11 @@ PARTITION_SIZE_ROCM = 256
 DTYPES = [torch.bfloat16]
 NUM_GEN_SEQS = [7]  # Arbitrary values for testing
 NUM_PREFILL_SEQS = [3]  # Arbitrary values for testing
-NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
+NUM_HEADS = [(32, 8), (40, 40), (64, 8)]  # Arbitrary values for testing
 
 # This should be sync with get_supported_head_sizes() in
 # vllm.v1.attention.ops.paged_attn.PagedAttention
-HEAD_SIZES = [32, 80, 128, 256]
+HEAD_SIZES = [32, 64, 80, 128, 256]
 
 BLOCK_SIZES = [16, 32]
 USE_ALIBI = [False, True]
@@ -353,8 +353,10 @@ def test_paged_attention(
                     kv_cache_dtype,
                     k_scale,
                     v_scale,
+                    None,
+                    "f16",
                 ),
-                cond=(head_size == HEAD_SIZES[0] and block_size == BLOCK_SIZES[0]),
+                cond=(head_size == 64 and block_size == BLOCK_SIZES[0]),
             )
 
     else:
