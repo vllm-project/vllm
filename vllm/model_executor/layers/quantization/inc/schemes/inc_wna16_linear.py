@@ -8,8 +8,9 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
+from vllm.model_executor.layers.quantization.awq import AWQConfig
+from vllm.model_executor.layers.quantization.awq_marlin import AWQMarlinConfig
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_marlin_supported,
 )
@@ -124,12 +125,12 @@ class INCWNA16LinearScheme(INCLinearScheme):
             )
 
         if use_marlin:
-            from vllm.model_executor.layers.quantization.auto_awq import (
-                AutoAWQMarlinLinearMethod,
+            from vllm.model_executor.layers.quantization.awq_marlin import (
+                AWQMarlinLinearMethod,
             )
 
-            return AutoAWQMarlinLinearMethod(
-                AutoAWQConfig(
+            return AWQMarlinLinearMethod(
+                AWQMarlinConfig(
                     weight_bits=self.layer_config.bits,
                     group_size=self.layer_config.group_size,
                     zero_point=not self.layer_config.sym,
@@ -139,16 +140,13 @@ class INCWNA16LinearScheme(INCLinearScheme):
                 )
             )
 
-        from vllm.model_executor.layers.quantization.auto_awq import (
-            AutoAWQLinearMethod,
-        )
+        from vllm.model_executor.layers.quantization.awq import AWQLinearMethod
 
-        return AutoAWQLinearMethod(
-            AutoAWQConfig(
+        return AWQLinearMethod(
+            AWQConfig(
                 weight_bits=self.layer_config.bits,
                 group_size=self.layer_config.group_size,
                 zero_point=not self.layer_config.sym,
-                lm_head_quantized=False,
             )
         )
 

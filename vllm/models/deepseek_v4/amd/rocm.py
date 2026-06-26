@@ -14,7 +14,6 @@ from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4FlashMLAMetadata,
     DeepseekV4FlashMLAMetadataBuilder,
 )
-from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
@@ -797,7 +796,6 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 assert attn_metadata is not None
                 assert compressed_k_cache is not None
                 block_table = attn_metadata.block_table[num_decodes:]
-                # compressed_k_cache is OCP on every platform (Triton encoder).
                 dequantize_and_gather_k_cache(
                     kv[:chunk_size],
                     compressed_k_cache,
@@ -806,7 +804,6 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                     block_table=block_table[chunk_start:chunk_end],
                     block_size=attn_metadata.block_size // self.compress_ratio,
                     offset=0,
-                    use_fnuz=False,
                 )
 
             swa_block_table = swa_metadata.block_table[num_decodes:]
@@ -818,7 +815,6 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 block_table=swa_block_table[chunk_start:chunk_end],
                 block_size=swa_metadata.block_size,
                 offset=N,
-                use_fnuz=current_platform.is_fp8_fnuz(),
             )
 
             query_start = (

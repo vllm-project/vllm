@@ -2,16 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm.triton_utils import HAS_TRITON, tl, tldevice, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
 
-# Smallest positive value produced by Triton's fp32 `tl.rand`. Used to clamp
-# zero draws before the flipped Gumbel transform below.
+# Smallest positive normal fp32 value. Used to clamp the uniform draw so that
+# `log(u)` cannot produce -inf (and thus `-log(-log(u))` stays finite).
 #
 # Triton requires globals accessed from `@triton.jit` functions to be wrapped
 # in `tl.constexpr(...)`. We can only do that when Triton is actually
 # available — on the CPU worker path `tl` is a placeholder whose `constexpr`
 # attribute is `None`, and `tl.constexpr(...)` would crash at import time.
-_TL_RAND_MIN = tl.constexpr(4.6566127342e-10) if HAS_TRITON else 4.6566127342e-10
+_FP32_TINY = (
+    tl.constexpr(float.fromhex("0x1p-126")) if HAS_TRITON else float.fromhex("0x1p-126")
+)
 
 
 @triton.jit
@@ -129,17 +131,10 @@ def gumbel_block_argmax(
 
         if USE_FP64:
             u = tl_rand64(gumbel_seed, block, includes_zero=False)
-            gumbel_noise = -tl.log(-tl.log(u))
         else:
             u = tl.rand(gumbel_seed, block)
-            u = tl.maximum(u, _TL_RAND_MIN)
-            # Draw the large-noise tail (which decides the argmax winner) from u -> 0,
-            # where fp32 has fine resolution, instead of u -> 1, where fp32 spacing is
-            # ~2**-24. The naive `-log(-log(u))` puts the winning tail at u -> 1,
-            # hard-capping the noise at ~16.6 and coarsely quantizing it; using
-            # `log1p(-u)` == `log(1 - u)` keeps the tail in the well-resolved region.
-            # Note `1 - u` would lose precision for small u, so `log1p` is required.
-            gumbel_noise = -tl.log(-tldevice.log1p(-u))
+            u = tl.maximum(u, _FP32_TINY)
+        gumbel_noise = -tl.log(-tl.log(u))
 
         # Apply gumbel noise.
         logits = tl.where(mask, logits + gumbel_noise, float("-inf"))

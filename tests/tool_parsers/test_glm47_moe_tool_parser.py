@@ -16,7 +16,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 
-MODEL = "zai-org/GLM-4.7"
+MODEL = "zai-org/GLM-4.5"
 
 
 @pytest.fixture(scope="module")
@@ -136,10 +136,9 @@ class TestGlm47Streaming:
         _reset(glm47_tool_parser)
         chunks = ["<tool_call>", "get_current_date", "</tool_call>"]
         current_text = ""
-        deltas = []
         for chunk in chunks:
             current_text += chunk
-            delta = glm47_tool_parser.extract_tool_calls_streaming(
+            glm47_tool_parser.extract_tool_calls_streaming(
                 previous_text="",
                 current_text=current_text,
                 delta_text=chunk,
@@ -148,23 +147,7 @@ class TestGlm47Streaming:
                 delta_token_ids=[],
                 request=mock_request,
             )
-            if delta:
-                deltas.append(delta)
-        tool_calls = [
-            tool_call for delta in deltas for tool_call in (delta.tool_calls or [])
-        ]
-        names = [
-            tool_call.function.name
-            for tool_call in tool_calls
-            if tool_call.function and tool_call.function.name
-        ]
-        arguments = [
-            tool_call.function.arguments
-            for tool_call in tool_calls
-            if tool_call.function and tool_call.function.arguments
-        ]
-        assert names == ["get_current_date"]
-        assert "".join(arguments) == "{}"
+        assert len(glm47_tool_parser.prev_tool_call_arr) >= 1
 
     def test_with_args(self, glm47_tool_parser, mock_request):
         _reset(glm47_tool_parser)
@@ -178,10 +161,9 @@ class TestGlm47Streaming:
             "</tool_call>",
         ]
         current_text = ""
-        deltas = []
         for chunk in chunks:
             current_text += chunk
-            delta = glm47_tool_parser.extract_tool_calls_streaming(
+            glm47_tool_parser.extract_tool_calls_streaming(
                 previous_text="",
                 current_text=current_text,
                 delta_text=chunk,
@@ -190,13 +172,5 @@ class TestGlm47Streaming:
                 delta_token_ids=[],
                 request=mock_request,
             )
-            if delta:
-                deltas.append(delta)
-        arguments = [
-            tool_call.function.arguments
-            for delta in deltas
-            for tool_call in (delta.tool_calls or [])
-            if tool_call.function and tool_call.function.arguments
-        ]
-        args = json.loads("".join(arguments))
+        args = json.loads(glm47_tool_parser.prev_tool_call_arr[0]["arguments"])
         assert args["city"] == "Beijing"

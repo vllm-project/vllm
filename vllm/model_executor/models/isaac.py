@@ -1,17 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Mapping, Sequence
-from typing import Annotated, Any
+from typing import Optional, Union, Annotated, Any
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
+import transformers
 from transformers.image_processing_utils import BatchFeature
 
+if not hasattr(transformers.cache_utils, "SlidingWindowCache"):
+    try:
+        from transformers.cache_utils import StaticCache
+        transformers.cache_utils.SlidingWindowCache = StaticCache
+    except ImportError:
+        try:
+            from transformers.cache_utils import DynamicCache
+            transformers.cache_utils.SlidingWindowCache = DynamicCache
+        except ImportError:
+            pass
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import parallel_state
@@ -176,7 +186,7 @@ def create_pixel_shuffle_index_map(
     seq_sizes: torch.Tensor,
     token_grids: torch.Tensor,
     scale_factor: int = 1,
-    device: torch.device | None = None,
+    device: Optional[torch.device] = None,
 ) -> torch.Tensor:
     """
     Build a gather-index map that tells us, for every *output* token after
@@ -358,7 +368,7 @@ class IsaacProcessingInfo(BaseProcessingInfo):
         )
         return ImageSize(width=target_width, height=target_height)
 
-    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
     def get_mm_max_tokens_per_item(
@@ -479,7 +489,7 @@ class Siglip2VisionAttention(nn.Module):
     def __init__(
         self,
         config: PixelShuffleSiglip2VisionConfig,
-        quant_config: QuantizationConfig | None = None,
+        quant_config: Optional[QuantizationConfig] = None,
         *,
         prefix: str = "",
     ) -> None:
@@ -541,7 +551,7 @@ class Siglip2VisionAttention(nn.Module):
         hidden_states: torch.Tensor,
         *,
         cu_seqlens: torch.Tensor,
-        max_seqlen: torch.Tensor | None,
+        max_seqlen: Optional[torch.Tensor],
     ) -> torch.Tensor:
         batch_size, _, _ = hidden_states.shape
         if batch_size != 1:
@@ -569,7 +579,7 @@ class Siglip2EncoderLayer(nn.Module):
     def __init__(
         self,
         config: PixelShuffleSiglip2VisionConfig,
-        quant_config: QuantizationConfig | None = None,
+        quant_config: Optional[QuantizationConfig] = None,
         *,
         prefix: str = "",
     ) -> None:
@@ -593,7 +603,7 @@ class Siglip2EncoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         *,
         cu_seqlens: torch.Tensor,
-        max_seqlen: torch.Tensor | None,
+        max_seqlen: Optional[torch.Tensor],
     ) -> torch.Tensor:
         residual = hidden_states
 
@@ -617,7 +627,7 @@ class Siglip2Encoder(nn.Module):
     def __init__(
         self,
         config: PixelShuffleSiglip2VisionConfig,
-        quant_config: QuantizationConfig | None = None,
+        quant_config: Optional[QuantizationConfig] = None,
         *,
         prefix: str = "",
     ) -> None:
@@ -638,8 +648,8 @@ class Siglip2Encoder(nn.Module):
         self,
         inputs_embeds: torch.Tensor,
         *,
-        cu_seqlens: torch.Tensor | None = None,
-        max_seqlen: torch.Tensor | None = None,
+        cu_seqlens: Optional[torch.Tensor] = None,
+        max_seqlen: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         hidden_states = inputs_embeds
         for encoder_layer in self.layers:
@@ -655,7 +665,7 @@ class Siglip2VisionTransformer(nn.Module):
     def __init__(
         self,
         config: PixelShuffleSiglip2VisionConfig,
-        quant_config: QuantizationConfig | None = None,
+        quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -754,7 +764,7 @@ class IsaacVisionEmbedding(nn.Module):
         vision_cfg: PixelShuffleSiglip2VisionConfig,
         hidden_dim: int,
         output_dim: int,
-        quant_config: QuantizationConfig | None = None,
+        quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -830,7 +840,7 @@ class IsaacForConditionalGeneration(
     )
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
         if modality.startswith("image"):
             return "<image>"
 
@@ -955,7 +965,7 @@ class IsaacForConditionalGeneration(
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> IsaacImagePixelInputs | None:
+    ) -> Optional[IsaacImagePixelInputs]:
         pixel_values = kwargs.get("pixel_values")
         image_grid_thw = kwargs.get("image_grid_thw")
         if pixel_values is None or image_grid_thw is None:
@@ -986,7 +996,7 @@ class IsaacForConditionalGeneration(
         sizes = spatial_grids.prod(-1) // (merge_size * merge_size)
         return tuple(vision_embeddings.split(sizes.tolist()))
 
-    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
+    def embed_multimodal(self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return ()
@@ -994,12 +1004,12 @@ class IsaacForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor | None,
+        input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         return self.language_model(
             input_ids=input_ids,
             positions=positions,
@@ -1008,7 +1018,7 @@ class IsaacForConditionalGeneration(
             **kwargs,
         )
 
-    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor) -> Optional[torch.Tensor]:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

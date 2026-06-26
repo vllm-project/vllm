@@ -982,8 +982,6 @@ class ModelConfig:
                 "auto_gptq",
                 "gptq",
                 "gptq_marlin",
-                "auto_awq",
-                "awq",
                 "awq_marlin",
                 "inc",
                 "moe_wna16",

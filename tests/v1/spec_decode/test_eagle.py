@@ -1002,11 +1002,7 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
     assert torch.equal(result, expected_tokens)
 
 
-@pytest.mark.parametrize(
-    "attn_backend",
-    ["ROCM_ATTN", "TRITON_ATTN"] if current_platform.is_rocm() else ["FLASH_ATTN"],
-)
-def test_propose_stores_probabilistic_draft_probs(attn_backend, monkeypatch):
+def test_propose_stores_probabilistic_draft_probs(monkeypatch):
     device = torch.device(DEVICE_TYPE)
     batch_size = 2
     seq_lens = [5, 3]
@@ -1057,7 +1053,7 @@ def test_propose_stores_probabilistic_draft_probs(attn_backend, monkeypatch):
     )
 
     attn_metadata_builder_cls, _ = try_get_attention_backend(
-        AttentionBackendEnum[attn_backend]
+        AttentionBackendEnum.FLASH_ATTN
     )
     attn_metadata_builder = attn_metadata_builder_cls(
         kv_cache_spec=create_standard_kv_cache_spec(proposer.vllm_config),

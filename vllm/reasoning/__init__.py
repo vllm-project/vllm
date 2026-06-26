@@ -53,12 +53,8 @@ _REASONING_PARSERS_TO_REGISTER = {
         "Gemma4ParserReasoningAdapter",
     ),
     "glm45": (
-        "glm47_moe_reasoning_parser",
-        "Glm47MoeParserReasoningAdapter",
-    ),
-    "glm47": (
-        "glm47_moe_reasoning_parser",
-        "Glm47MoeParserReasoningAdapter",
+        "deepseek_v3_reasoning_parser",
+        "DeepSeekV3ReasoningWithThinkingParser",
     ),
     "openai_gptoss": (
         "gptoss_reasoning_parser",

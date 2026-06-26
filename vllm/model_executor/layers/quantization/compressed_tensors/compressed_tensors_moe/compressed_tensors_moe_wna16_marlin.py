@@ -453,9 +453,9 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         replace_parameter(layer, "w13_weight_scale", w13_scales)
         replace_parameter(layer, "w2_weight_scale", w2_scales)
 
-        # CPU fused_experts_cpu requires zero points even for symmetric quant
-        if not self.symmetric or self.wna16_backend == WNA16MoEBackend.CPU:
+        if w13_qzeros is not None:
             replace_parameter(layer, "w13_weight_zero_point", w13_qzeros)
+        if w2_qzeros is not None:
             replace_parameter(layer, "w2_weight_zero_point", w2_qzeros)
 
         # Marlin-specific parameters (not needed for Flashinfer)

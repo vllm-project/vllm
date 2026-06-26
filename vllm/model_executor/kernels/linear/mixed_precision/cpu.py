@@ -177,7 +177,7 @@ class CPUWNA16LinearKernel(MPLinearKernel):
             and (supports_amx or supports_riscv)
         )
         # layer.use_w4a8 = False
-        # AWQ format will be converted to GPTQ format in `AutoAWQMarlinLinearMethod`
+        # AWQ format will be converted to GPTQ format in `AWQMarlinLinearMethod`
         if layer.use_w4a8:
             self._process_gptq_weights_w4a8(layer)
         else:
