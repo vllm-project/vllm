@@ -518,7 +518,7 @@ struct FP32Vec16 : public VectorizedRegWrapper<FP32Vec16, 4, float> {
     r.reg.val[3] = Vectorized<float>(fast_tanhf_f32x4(reg.val[3]));
     return r;
   }
-  
+
   static FORCE_INLINE void load_even_odd(const float* ptr, FP32Vec16& even,
                                          FP32Vec16& odd) noexcept {
     const float32x4x2_t x01 = vuzpq_f32(vld1q_f32(ptr), vld1q_f32(ptr + 4));
