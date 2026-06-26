@@ -105,7 +105,7 @@ class MediaConnector:
         self.connection = connection
 
         if allowed_local_media_path:
-            allowed_local_media_path_ = Path(allowed_local_media_path)
+            allowed_local_media_path_ = Path(allowed_local_media_path).resolve()
 
             if not allowed_local_media_path_.exists():
                 raise ValueError(
