@@ -340,16 +340,10 @@ def rocm_aiter_fused_experts(
             moe_config.intermediate_size_per_partition
             - moe_config.intermediate_size_per_partition_unpadded
         )
-        # Round hidden_pad/intermediate_pad to match AITER's CK/FlyDSL MoE
-        # dispatch (currently pinned to v0.1.13.post1):
-        # https://github.com/ROCm/aiter/blob/v0.1.13.post1/aiter/fused_moe.py#L1073
-        # https://github.com/ROCm/aiter/blob/v0.1.13.post1/aiter/fused_moe.py#L1099
-        # TODO: Revisit this once we bump AITER to 0.1.15 with padding fixes
-        # for CK/FlyDSL MoE GEMM e.g. https://github.com/ROCm/aiter/pull/3401
-        hidden_pad = hidden_pad // 128 * 128
-        intermediate_pad = (
-            intermediate_pad // 64 * 64 * (2 if moe_config.tp_size == 1 else 1)
-        )
+        # Pass raw padding deltas; AITER's CK/FlyDSL MoE kernels handle
+        # internal alignment (// 64, // 128) and packing (* 2 for g1u1)
+        # themselves. Pre-rounding here was redundant and the tp_size==1
+        # doubling was a perf accident that masked incorrect tile geometry.
 
         # https://github.com/ROCm/aiter/pull/3123 specialized the AITER stage1 GEMMs
         # for interleaved vs separated gate and up weights.
