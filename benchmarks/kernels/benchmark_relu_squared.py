@@ -71,7 +71,7 @@ def benchmark_relu_squared(
 
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(
-        description="Benchmark ReLUSquaredActivation: custom kernel vs forward_native (eager mode)."
+        description="Benchmark ReLUSquaredActivation: custom kernel vs native."
     )
     parser.add_argument(
         "--dtype",
