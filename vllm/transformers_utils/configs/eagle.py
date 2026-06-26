@@ -72,6 +72,17 @@ class EAGLEConfig(PretrainedConfig):
                 else f"DFlash{arch}"
                 for arch in self.model.architectures
             ]
+        elif method == "dflash":
+            assert self.model is not None, (
+                "model should not be None when method is dflash"
+            )
+            kwargs["architectures"] = [
+                arch
+                if arch.startswith("DFlash") or arch.endswith("DFlash")
+                else f"DFlash{arch}"
+                for arch in self.model.architectures
+            ]
+            self._normalize_dflash_layer_ids(kwargs)
         else:
             raise ValueError(
                 f"Invalid method {method}. Supported methods are "
@@ -84,6 +95,52 @@ class EAGLEConfig(PretrainedConfig):
             for k, v in self.model.to_dict().items():
                 if k not in kwargs:
                     setattr(self, k, v)
+
+    @staticmethod
+    def _normalize_dflash_layer_ids(kwargs: dict) -> None:
+        """Derive eagle_aux_hidden_state_layer_ids from dflash target_layer_ids.
+
+        DFlash requires eagle_aux_hidden_state_layer_ids = [id+1 for id in
+        target_layer_ids].  When a caller supplies target_layer_ids at the
+        top level or inside dflash_config but omits
+        eagle_aux_hidden_state_layer_ids, this method fills the gap so that
+        both representations stay consistent.
+
+        Raises ValueError if the two fields are both present but conflict.
+        """
+        top_ids = kwargs.get("target_layer_ids")
+        dflash_cfg = kwargs.get("dflash_config") or {}
+        nested_ids = (
+            dflash_cfg.get("target_layer_ids") if isinstance(dflash_cfg, dict) else None
+        )
+
+        if (
+            top_ids is not None
+            and nested_ids is not None
+            and list(top_ids) != list(nested_ids)
+        ):
+            raise ValueError(
+                f"DFlash target_layer_ids conflict: top-level {top_ids} != "
+                f"dflash_config.target_layer_ids {nested_ids}"
+            )
+
+        selected = top_ids if top_ids is not None else nested_ids
+        if selected is None:
+            return
+
+        expected_aux = [layer_id + 1 for layer_id in selected]
+        existing_aux = kwargs.get("eagle_aux_hidden_state_layer_ids")
+        if existing_aux is not None and list(existing_aux) != expected_aux:
+            raise ValueError(
+                f"DFlash eagle_aux_hidden_state_layer_ids {existing_aux} conflicts "
+                f"with target_layer_ids {selected} (expected {expected_aux})"
+            )
+        if existing_aux is None:
+            kwargs["eagle_aux_hidden_state_layer_ids"] = expected_aux
+
+        if isinstance(dflash_cfg, dict) and nested_ids is None:
+            dflash_cfg["target_layer_ids"] = list(selected)
+            kwargs["dflash_config"] = dflash_cfg
 
     @classmethod
     def from_pretrained(
