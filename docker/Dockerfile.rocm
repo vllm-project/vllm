@@ -104,6 +104,16 @@ ENV SCCACHE_IDLE_TIMEOUT=${USE_SCCACHE:+0}
 ARG COMMON_WORKDIR
 WORKDIR ${COMMON_WORKDIR}
 
+# Override the base image's source-built torch (Dockerfile.rocm_base compiles
+# ROCm/pytorch release/2.11) with the published torch 2.13.0 ROCm test-channel
+# wheels. ROCm/pytorch has no release/2.13 source branch yet, so install the
+# prebuilt +rocm7.1 wheels from the test index. Every FROM-base stage inherits
+# this, so vLLM is compiled and run against torch 2.13.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system --reinstall \
+    torch==2.13.0+rocm7.1 torchvision==0.28.0+rocm7.1 torchaudio==2.11.0+rocm7.1 \
+    --extra-index-url https://download.pytorch.org/whl/test/rocm7.1
+
 
 # -----------------------
 # vLLM fetch stages
