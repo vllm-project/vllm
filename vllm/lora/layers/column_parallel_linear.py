@@ -22,10 +22,10 @@ from .utils import _fully_sharded_can_replace, _not_fully_sharded_can_replace
 
 
 def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
-    """
-    For `ColumnParallelLinearWithLoRA` or classes that inherit from
-    `ColumnParallelLinearWithLoRA`, they share the same `apply` logic.
-    """
+    """Fully-sharded (S-LoRA) apply path for column-parallel LoRA layers."""
+    assert layer.lora_config.fully_sharded_loras, (
+        "_mcp_apply is only used for fully sharded LoRA"
+    )
     assert (
         layer.n_slices
         == len(layer.lora_a_stacked)
@@ -341,7 +341,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
             and base_forward is not merged_forward
         ):
             return self._apply_base_forward(x)
-        return _mcp_apply(x, bias, self)
+        return super().apply(x, bias)
 
     @classmethod
     def can_replace_layer(
