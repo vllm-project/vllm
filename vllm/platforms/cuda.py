@@ -231,6 +231,10 @@ class CudaPlatformBase(Platform):
             import vllm._qutlass_C  # noqa: F401
         except ImportError as e:
             logger.warning_once("Failed to import from vllm._qutlass_C: %r", e)
+        try:
+            import vllm.rwkv7_ops  # noqa: F401
+        except ImportError as e:
+            logger.warning_once("Failed to import from vllm.rwkv7_ops: %r", e)
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:

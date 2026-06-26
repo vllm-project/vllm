@@ -154,6 +154,7 @@ class Worker(WorkerBase):
         self.weight_transfer_engine: WeightTransferEngine | None = None
         self._weight_update_active = False
         self._is_checkpoint_format = True
+        self._model_handles_weight_update = False
 
         # Torch/CUDA profiler. Enabled and configured through profiler_config.
         # Profiler wrapper is created lazily in profile() when start is called,
@@ -1138,6 +1139,21 @@ class Worker(WorkerBase):
         typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
         self.weight_transfer_engine.init_transfer_engine(typed_init_info)
 
+    def _abort_model_weight_update(self) -> None:
+        abort_weight_update = getattr(
+            self.model_runner.model, "abort_weight_update", None
+        )
+        if callable(abort_weight_update):
+            try:
+                abort_weight_update()
+            except Exception:
+                logger.exception("Failed to abort model weight update")
+
+    def _reset_weight_update_state(self) -> None:
+        self._weight_update_active = False
+        self._is_checkpoint_format = True
+        self._model_handles_weight_update = False
+
     def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
         """
         Start a new weight update session.
@@ -1155,6 +1171,7 @@ class Worker(WorkerBase):
                 "active. Call finish_weight_update first."
             )
 
+        model_handles_weight_update = False
         if is_checkpoint_format:
             from vllm.model_executor.model_loader.reload import (
                 initialize_layerwise_reload,
@@ -1162,9 +1179,25 @@ class Worker(WorkerBase):
 
             model = self.model_runner.model
             with torch.device(self.device):
-                initialize_layerwise_reload(model)
+                start_model_update = getattr(model, "start_weight_update", None)
+                if callable(start_model_update):
+                    model_handles_weight_update = bool(start_model_update())
+                if model_handles_weight_update:
+                    world_size = getattr(
+                        getattr(self, "parallel_config", None), "world_size", 1
+                    )
+                    if world_size != 1:
+                        self._abort_model_weight_update()
+                        self._reset_weight_update_state()
+                        raise NotImplementedError(
+                            "RWKV7 checkpoint-format weight updates currently "
+                            "require TP=1 and PP=1"
+                        )
+                if not model_handles_weight_update:
+                    initialize_layerwise_reload(model)
 
         self._is_checkpoint_format = is_checkpoint_format
+        self._model_handles_weight_update = model_handles_weight_update
         self._weight_update_active = True
 
     def update_weights(self, update_info: dict) -> None:
@@ -1238,8 +1271,11 @@ class Worker(WorkerBase):
             update_succeeded = True
         finally:
             if not update_succeeded:
-                self._weight_update_active = False
-                self._is_checkpoint_format = True
+                if self._is_checkpoint_format and getattr(
+                    self, "_model_handles_weight_update", False
+                ):
+                    self._abort_model_weight_update()
+                self._reset_weight_update_state()
 
     def finish_weight_update(self) -> None:
         """Finish the current weight update session."""
@@ -1250,17 +1286,34 @@ class Worker(WorkerBase):
                 "finish_weight_update called without a matching start_weight_update."
             )
 
-        if self._is_checkpoint_format:
-            from vllm.model_executor.model_loader.reload import (
-                finalize_layerwise_reload,
-            )
+        finish_succeeded = False
+        try:
+            if self._is_checkpoint_format:
+                from vllm.model_executor.model_loader.reload import (
+                    finalize_layerwise_reload,
+                )
 
-            model = self.model_runner.model
-            with torch.device(self.device):
-                finalize_layerwise_reload(model, self.model_config)
+                model = self.model_runner.model
+                with torch.device(self.device):
+                    if self._model_handles_weight_update:
+                        model.finish_weight_update()
+                    else:
+                        finalize_layerwise_reload(model, self.model_config)
 
-        self._weight_update_active = False
-        self._is_checkpoint_format = True
+                model_state = getattr(self.model_runner, "model_state", None)
+                reset_state = getattr(model_state, "reset_after_weight_update", None)
+                if callable(reset_state):
+                    reset_state()
+            finish_succeeded = True
+        finally:
+            if not finish_succeeded:
+                if self._is_checkpoint_format and getattr(
+                    self, "_model_handles_weight_update", False
+                ):
+                    self._abort_model_weight_update()
+                self._reset_weight_update_state()
+
+        self._reset_weight_update_state()
 
     def shutdown(self) -> None:
         gc.unfreeze()

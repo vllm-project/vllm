@@ -610,6 +610,8 @@ class ModelConfig:
                 self.tokenizer_mode = "deepseek_v32"
             elif arch == "DeepseekV4ForCausalLM":
                 self.tokenizer_mode = "deepseek_v4"
+            elif arch == "RWKV7ForCausalLM":
+                self.tokenizer_mode = "rwkv"
 
             if self.tokenizer_mode != "auto":
                 logger.info(

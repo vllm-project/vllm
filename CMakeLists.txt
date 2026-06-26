@@ -443,6 +443,47 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     endif()
     FetchContent_MakeAvailable(cutlass)
 
+    set(RWKV7_CUDA_SRCS
+      "csrc/libtorch_stable/rwkv7/rwkv7_fast_ops_fp16.cu"
+      "csrc/libtorch_stable/rwkv7/rwkv7_v3a_ops.cu"
+      "csrc/libtorch_stable/rwkv7/rwkv7_wkv_fp16_v2.cu"
+      "csrc/libtorch_stable/rwkv7/rwkv7_wkv_fp32_v2.cu")
+
+    set(RWKV7_EXT_SRC
+      "csrc/libtorch_stable/rwkv7/rwkv7_fast_ops_fp16.cpp"
+      ${RWKV7_CUDA_SRCS}
+      "csrc/libtorch_stable/rwkv7/rwkv7_registration.cpp"
+      "csrc/libtorch_stable/rwkv7/rwkv7_v3a_ops.cpp"
+      "csrc/libtorch_stable/rwkv7/rwkv7_wkv_fp16_v2.cpp"
+      "csrc/libtorch_stable/rwkv7/rwkv7_wkv_fp32_v2.cpp")
+
+    set_source_files_properties(${RWKV7_CUDA_SRCS}
+      PROPERTIES COMPILE_FLAGS "-std=c++17 -O3 --extra-device-vectorization -Xptxas -O3")
+    set_source_files_properties(
+      "csrc/libtorch_stable/rwkv7/rwkv7_fast_ops_fp16.cu"
+      "csrc/libtorch_stable/rwkv7/rwkv7_v3a_ops.cu"
+      "csrc/libtorch_stable/rwkv7/rwkv7_wkv_fp32_v2.cu"
+      PROPERTIES COMPILE_FLAGS "-std=c++17 -O3 --use_fast_math --extra-device-vectorization -Xptxas -O3")
+    set_source_files_properties(
+      "csrc/libtorch_stable/rwkv7/rwkv7_wkv_fp32_v2.cpp"
+      "csrc/libtorch_stable/rwkv7/rwkv7_wkv_fp32_v2.cu"
+      PROPERTIES COMPILE_DEFINITIONS "_IO_FP16_")
+    set_gencode_flags_for_srcs(
+      SRCS "${RWKV7_CUDA_SRCS}"
+      CUDA_ARCHS "${CUDA_ARCHS}")
+
+    define_extension_target(
+      rwkv7_ops
+      DESTINATION vllm
+      LANGUAGE ${VLLM_GPU_LANG}
+      SOURCES ${RWKV7_EXT_SRC}
+      COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+      ARCHITECTURES ${VLLM_GPU_ARCHES}
+      INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR} ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
+      USE_SABI 3
+      WITH_SOABI)
+    target_compile_definitions(rwkv7_ops PRIVATE USE_CUDA)
+
     list(APPEND VLLM_STABLE_EXT_SRC
       "csrc/libtorch_stable/cuda_view.cu"
       "csrc/libtorch_stable/cuda_utils_kernels.cu"

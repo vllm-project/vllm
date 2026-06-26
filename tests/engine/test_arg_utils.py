@@ -4,12 +4,14 @@
 import json
 from argparse import ArgumentError
 from contextlib import AbstractContextManager, nullcontext
+from types import SimpleNamespace
 from typing import Annotated, Literal
 
 import pytest
 from pydantic import Field
 
 from vllm.config import AttentionConfig, CompilationConfig, ModelConfig, config
+from vllm.config.scheduler import SchedulerConfig
 from vllm.engine.arg_utils import (
     EngineArgs,
     _expand_json_human_readable_numbers,
@@ -467,6 +469,32 @@ def test_attention_config():
     engine_args = EngineArgs.from_cli_args(args)
     with pytest.raises(ValueError, match="mutually exclusive"):
         engine_args.create_engine_config()
+
+
+@pytest.mark.parametrize(
+    "architectures",
+    [
+        ["RWKV7ForCausalLM"],
+        ["OtherArchitecture", "RWKV7ForCausalLM"],
+    ],
+)
+def test_rwkv7_allows_concurrent_partial_prefill(architectures):
+    engine_args = EngineArgs(
+        max_num_partial_prefills=SchedulerConfig.max_num_partial_prefills + 1,
+    )
+    model_config = SimpleNamespace(architectures=architectures)
+
+    engine_args._check_feature_supported(model_config)
+
+
+def test_non_rwkv7_rejects_concurrent_partial_prefill():
+    engine_args = EngineArgs(
+        max_num_partial_prefills=SchedulerConfig.max_num_partial_prefills + 1,
+    )
+    model_config = SimpleNamespace(architectures=["LlamaForCausalLM"])
+
+    with pytest.raises(NotImplementedError, match="Concurrent Partial Prefill"):
+        engine_args._check_feature_supported(model_config)
 
 
 def test_prefix_cache_default():

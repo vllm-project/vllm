@@ -634,10 +634,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @torch.inference_mode()
     def _dummy_sampler_run(self, hidden_states: torch.Tensor) -> None:
         num_reqs = hidden_states.shape[0]
-        logits = self.model.compute_logits(hidden_states)
         dummy_input_batch = InputBatch.make_dummy(
             num_reqs, num_reqs, self.input_buffers
         )
+        compute_sampling_logits = getattr(self.model, "compute_sampling_logits", None)
+        logits = None
+        if callable(compute_sampling_logits):
+            logits = compute_sampling_logits(
+                hidden_states,
+                dummy_input_batch.logits_indices,
+                dummy_input_batch,
+            )
+        if logits is None:
+            logits = self.model.compute_logits(hidden_states)
 
         # NOTE(woosuk): During the initial memory profiling, the sampler may skip
         # top_k, top_p, and logprobs, using less GPU memory than what is possible
@@ -862,6 +871,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Decode first, then prefill.
         # batch_idx -> req_id
         req_ids = sorted(num_tokens_per_req, key=num_tokens_per_req.get)  # type: ignore[arg-type]
+        sort_scheduled_req_ids = getattr(
+            self.model_state,
+            "sort_scheduled_req_ids",
+            None,
+        )
+        if sort_scheduled_req_ids is not None:
+            req_ids = sort_scheduled_req_ids(
+                req_ids,
+                num_tokens_per_req,
+                self.req_states,
+            )
         numtoks_iter = map(num_tokens_per_req.get, req_ids)
         num_scheduled_tokens = np.fromiter(numtoks_iter, dtype=np.int32, count=num_reqs)
 
@@ -1050,8 +1070,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         input_batch: InputBatch,
         grammar_output: GrammarOutput | None,
     ) -> tuple[SamplerOutput, torch.Tensor, torch.Tensor]:
-        sample_hidden_states = hidden_states[input_batch.logits_indices]
-        logits = self.model.compute_logits(sample_hidden_states)
+        compute_sampling_logits = getattr(self.model, "compute_sampling_logits", None)
+        logits = None
+        if callable(compute_sampling_logits):
+            logits = compute_sampling_logits(
+                hidden_states,
+                input_batch.logits_indices,
+                input_batch,
+            )
+        if logits is None:
+            sample_hidden_states = hidden_states[input_batch.logits_indices]
+            logits = self.model.compute_logits(sample_hidden_states)
         if grammar_output is not None:
             # Apply grammar bitmask to the logits in-place.
             assert self.structured_outputs_worker is not None
@@ -1273,6 +1302,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # NOTE(woosuk): Here, we don't need to pass the input tensors,
             # because they are already copied to the CUDA graph input buffers.
             assert self.cudagraph_manager is not None
+            prepare_cudagraph_inputs = getattr(
+                self.model, "prepare_cudagraph_inputs", None
+            )
+            if prepare_cudagraph_inputs is not None:
+                prepare_cudagraph_inputs(model_inputs)
             self.kv_connector.pre_forward(scheduler_output)
             model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
         else:
@@ -1363,9 +1397,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Optimistically update num_computed_tokens for entire batch here.
             # Will be adjusted for rejections if necessary in update_requests.
             self.postprocess_num_computed_tokens(input_batch)
-            if not all_decode_next:
+            if not all_decode_next or self.model_state.has_pending_postprocess_state():
                 # Might contain non-final prefill chunks, which will be scheduled
-                # in the immediate next step (rather than in pp_size steps).
+                # in the immediate next step (rather than in pp_size steps), or
+                # model-specific recurrent state that must be made resident before
+                # the next scheduler step.
                 self.model_state.postprocess_state(input_batch.idx_mapping, 0)
 
             # Post-step KV connector related operations.

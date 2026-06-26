@@ -35,6 +35,10 @@ from vllm.model_executor.model_loader.weight_utils import (
     safetensors_weights_iterator,
 )
 from vllm.tracing import instrument
+from vllm.transformers_utils.configs.rwkv7 import (
+    download_rwkv7_pth_source,
+    try_parse_rwkv7_pth_source,
+)
 from vllm.transformers_utils.repo_utils import list_filtered_repo_files
 
 logger = init_logger(__name__)
@@ -145,6 +149,20 @@ class DefaultModelLoader(BaseModelLoader):
         load_format = self.load_config.load_format
         use_safetensors = False
         index_file = SAFE_WEIGHTS_INDEX_NAME
+
+        rwkv7_source = try_parse_rwkv7_pth_source(model_name_or_path)
+        if rwkv7_source is not None:
+            if load_format not in {"auto", "hf", "pt"}:
+                raise ValueError(
+                    "RWKV7 raw .pth checkpoints require load_format='auto', "
+                    f"'hf', or 'pt', but got {load_format!r}."
+                )
+            checkpoint = download_rwkv7_pth_source(
+                rwkv7_source,
+                cache_dir=self.load_config.download_dir,
+                revision=revision,
+            )
+            return str(checkpoint.parent), [str(checkpoint)], False
 
         # First check for 'auto' format that mistral files format are present.
         # This is to load mistral models with official format by default.
@@ -447,7 +465,12 @@ class DefaultModelLoader(BaseModelLoader):
     def track_weights_loading(
         self, model: nn.Module, loaded_weights: set[str] | None
     ) -> None:
-        weights_to_load = {name for name, _ in model.named_parameters()}
+        raw_weight_names = getattr(model, "raw_weight_names", None)
+        weights_to_load = (
+            set(raw_weight_names)
+            if raw_weight_names is not None
+            else {name for name, _ in model.named_parameters()}
+        )
         if loaded_weights is not None:
             # ignore online quantization scales
             for name, module in model.named_modules():

@@ -36,6 +36,35 @@ def test_nixl_side_channel_host_is_not_compile_factor(
     assert "VLLM_NIXL_SIDE_CHANNEL_HOST" not in envs.compile_factors()
 
 
+def test_rwkv7_runtime_environment_variables_are_registered() -> None:
+    rwkv7_env = {
+        "VLLM_RWKV7_WKV_MODE": "fp32io16",
+        "VLLM_RWKV7_EMB_DEVICE": "cuda",
+    }
+
+    with patch.dict(os.environ, rwkv7_env, clear=True):
+        envs.validate_environ(hard_fail=True)
+
+        assert envs.VLLM_RWKV7_WKV_MODE == "fp32io16"
+        assert envs.VLLM_RWKV7_EMB_DEVICE == "cuda"
+
+
+def test_rwkv7_wkv_mode_defaults_to_fp16() -> None:
+    with patch.dict(os.environ, {}, clear=True):
+        assert envs.environment_variables["VLLM_RWKV7_WKV_MODE"]() == "fp16"
+
+
+def test_rwkv7_model_is_not_a_registered_runtime_environment_variable() -> None:
+    assert "VLLM_RWKV7_MODEL" not in environment_variables
+    assert not hasattr(envs, "VLLM_RWKV7_MODEL")
+
+    with (
+        patch.dict(os.environ, {"VLLM_RWKV7_MODEL": "/tmp/rwkv7-model"}, clear=True),
+        pytest.raises(ValueError, match="VLLM_RWKV7_MODEL"),
+    ):
+        envs.validate_environ(hard_fail=True)
+
+
 def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_HOST_IP", "1.1.1.1")
     monkeypatch.setenv("VLLM_PORT", "1234")

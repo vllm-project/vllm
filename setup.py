@@ -777,6 +777,7 @@ class precompiled_wheel_utils:
                             "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
                             "vllm/cumem_allocator.abi3.so",
                             "vllm/spinloop.abi3.so",
+                            "vllm/rwkv7_ops.abi3.so",
                             # ROCm-specific libraries
                             "vllm/_rocm_C.abi3.so",
                         }
@@ -1156,6 +1157,8 @@ if _build_custom_ops():
     if _is_cuda() or _is_hip():
         ext_modules.append(CMakeExtension(name="vllm._C_stable_libtorch"))
         ext_modules.append(CMakeExtension(name="vllm._moe_C_stable_libtorch"))
+    if _is_cuda():
+        ext_modules.append(CMakeExtension(name="vllm.rwkv7_ops"))
 
 package_data = {
     "vllm": [
@@ -1163,6 +1166,7 @@ package_data = {
         "libs/*.so*",
         "model_executor/layers/fused_moe/configs/*.json",
         "model_executor/layers/quantization/utils/configs/*.json",
+        "tokenizers/assets/*.txt",
         "entrypoints/serve/instrumentator/static/*.js",
         "entrypoints/serve/instrumentator/static/*.css",
         "distributed/kv_transfer/kv_connector/v1/hf3fs/utils/*.cpp",

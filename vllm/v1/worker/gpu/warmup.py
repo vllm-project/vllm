@@ -183,14 +183,21 @@ def warmup_kernels(
     decode_block_deltas = [
         d - p for d, p in zip(decode_block_counts, prefill_block_counts)
     ]
-    max_blocks_per_req = sum(decode_block_counts)
+    if num_kv_cache_groups == 0:
+        max_reqs_by_kv_cache = model_runner.scheduler_config.max_num_seqs
+    else:
+        max_blocks_per_req = sum(decode_block_counts)
+        # Reserve block 0 (null block) and ensure we have enough blocks.
+        max_reqs_by_kv_cache = max(
+            1,
+            (model_runner.kv_cache_config.num_blocks - 1) // max_blocks_per_req,
+        )
 
     num_reqs = min(
         model_runner.scheduler_config.max_num_seqs,
         model_runner.scheduler_config.max_num_batched_tokens
         // max(prompt_len, decode_query_len),
-        # Reserve block 0 (null block) and ensure we have enough blocks.
-        max(1, (model_runner.kv_cache_config.num_blocks - 1) // max_blocks_per_req),
+        max_reqs_by_kv_cache,
     )
 
     req_ids = [f"_warmup_{i}_" for i in range(num_reqs)]
