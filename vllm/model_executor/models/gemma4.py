@@ -1373,16 +1373,9 @@ class Gemma4Model(nn.Module, EagleModelMixin):
         #   moe.experts.{id}.gate_proj → FusedMoE w1 (shard of w13)
         #   moe.experts.{id}.up_proj   → FusedMoE w3 (shard of w13)
         #   moe.experts.{id}.down_proj → FusedMoE w2
-        num_experts = getattr(self.config, "num_experts", None) or 0
         # Strategy A: dot-separated suffix
         # (standard AWQ/GPTQ e.g. .qweight, .scales, .weight)
-        dot_suffix_expert_params_mapping = fused_moe_make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=num_experts,
-        )
+        dot_suffix_expert_params_mapping = self.get_expert_mapping()
         # Strategy B: underscore-separated suffix
         # (CompressedTensors-format AWQ/W4A16 _packed, _scale)
         underscore_suffix_expert_params_mapping = [
