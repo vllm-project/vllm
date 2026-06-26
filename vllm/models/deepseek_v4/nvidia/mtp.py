@@ -163,8 +163,12 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         ).unsqueeze(-2)
 
         sp_threshold = self.parallel_config.sp_threshold
+        tp_size = self.parallel_config.tensor_parallel_size
+        # Never shard fewer tokens than tp ranks -> plain TP.
         is_sp_sharded = (
-            self.parallel_config.enable_sp and hidden_states.shape[0] >= sp_threshold
+            self.parallel_config.enable_sp
+            and hidden_states.shape[0] >= sp_threshold
+            and hidden_states.shape[0] >= tp_size
         )
         if is_sp_sharded:
             hidden_states = sequence_parallel_chunk(hidden_states)

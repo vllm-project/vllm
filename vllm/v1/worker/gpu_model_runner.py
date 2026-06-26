@@ -3425,22 +3425,11 @@ class GPUModelRunner(
             async_output_copy_stream=self._get_or_create_async_output_copy_stream(),
         )
 
-    def _requires_sequence_parallel_padding(self) -> bool:
-        # Either the SP compilation pass (collective fusion) or DSV4's eager
-        # mHC sequence parallelism requires num_tokens to be a multiple of the
-        # TP size so all-gather / chunk are exact.
-        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        if tp_size <= 1:
-            return False
-        return (
-            self.compilation_config.pass_config.enable_sp
-            or self.vllm_config.parallel_config.enable_sp
-        )
-
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
-        # Pad tokens to multiple of tensor_parallel_size when SP is enabled.
-        if self._requires_sequence_parallel_padding():
-            tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        # Pad tokens to multiple of tensor_parallel_size when
+        # enabled collective fusion for SP
+        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        if self.compilation_config.pass_config.enable_sp and tp_size > 1:
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 
@@ -3897,7 +3886,7 @@ class GPUModelRunner(
             num_tokens_padded, disable_full=use_cascade_attn or has_encoder_output
         )
         num_tokens_padded = batch_descriptor.num_tokens
-        if self._requires_sequence_parallel_padding():
+        if self.compilation_config.pass_config.enable_sp:
             assert (
                 batch_descriptor.num_tokens
                 % self.vllm_config.parallel_config.tensor_parallel_size
@@ -6949,7 +6938,6 @@ class GPUModelRunner(
             self.kv_cache_config,
             self.max_num_reqs,
             is_profiling=is_profiling,
-            sp_capture_min_tokens=self.parallel_config.sp_threshold,
         )
         # Trigger cudagraph dispatching keys initialization after
         # resolved cudagraph mode.

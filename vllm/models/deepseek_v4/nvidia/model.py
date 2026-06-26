@@ -1070,12 +1070,14 @@ class DeepseekV4Model(nn.Module):
     def _is_sp_sharded(self, num_tokens: int) -> bool:
         # Engage SP once the (tp-padded) token count clears the threshold. The
         # runner pads eligible batches to a multiple of tp_size, so the chunk is
-        # exact. enable_sp guarantees sp_threshold is not None.
+        # exact. enable_sp guarantees sp_threshold is not None. Never shard
+        # fewer tokens than tp ranks (can't give each rank a token) -> plain TP.
         sp_threshold = self.parallel_config.sp_threshold
         return (
             self.parallel_config.enable_sp
             and sp_threshold is not None
             and num_tokens >= sp_threshold
+            and num_tokens >= self.parallel_config.tensor_parallel_size
         )
 
     def make_empty_intermediate_tensors(
