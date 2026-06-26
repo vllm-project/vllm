@@ -20,6 +20,7 @@ from vllm.multimodal.media.audio import load_audio
 REALTIME_ENV_OVERRIDES = {
     **ROCM_ENV_OVERRIDES,
     "VLLM_ENGINE_ITERATION_TIMEOUT_S": "600",
+    "VLLM_REALTIME_AUDIO_IDLE_TIMEOUT_S": "600",
 }
 
 MISTRAL_FORMAT_ARGS = [

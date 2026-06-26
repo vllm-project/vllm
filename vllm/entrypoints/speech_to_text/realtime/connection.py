@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import contextlib
 import json
 from collections.abc import AsyncGenerator
 from http import HTTPStatus
@@ -42,17 +43,86 @@ class RealtimeConnection:
     - Error handling and cleanup
     """
 
+    _IDLE_CLOSE_REASON = "Realtime session idle timeout."
+    _IDLE_STOP_GRACE_S = 5.0
+
     def __init__(self, websocket: WebSocket, serving: OpenAIServingRealtime):
         self.websocket = websocket
         self.connection_id = f"ws-{uuid4()}"
         self.serving = serving
         self.audio_queue: asyncio.Queue[np.ndarray | None] = asyncio.Queue()
         self.generation_task: asyncio.Task | None = None
+        self.idle_watchdog_task: asyncio.Task | None = None
 
         self._is_connected = False
         self._is_model_validated = False
+        self._audio_input_finished = False
 
         self._max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
+        self._idle_timeout_s = envs.VLLM_REALTIME_AUDIO_IDLE_TIMEOUT_S
+
+    def _is_idle_watchdog_enabled(self) -> bool:
+        return self._idle_timeout_s > 0
+
+    def _cancel_idle_watchdog(self) -> None:
+        task = self.idle_watchdog_task
+        self.idle_watchdog_task = None
+        if task is not None and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+
+    def _reset_idle_watchdog(self) -> None:
+        if not self._is_idle_watchdog_enabled() or self._audio_input_finished:
+            return
+
+        self._cancel_idle_watchdog()
+        self.idle_watchdog_task = asyncio.create_task(self._run_idle_watchdog())
+
+    async def _run_idle_watchdog(self) -> None:
+        try:
+            await asyncio.sleep(self._idle_timeout_s)
+            logger.warning(
+                "Realtime session %s idle for %.1f seconds. Closing session.",
+                self.connection_id,
+                self._idle_timeout_s,
+            )
+            await self.force_stop_generation()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if self.idle_watchdog_task is asyncio.current_task():
+                self.idle_watchdog_task = None
+
+    def _finish_audio_input(self) -> None:
+        if self._audio_input_finished:
+            return
+        self._audio_input_finished = True
+        self._cancel_idle_watchdog()
+        self.audio_queue.put_nowait(None)
+
+    async def force_stop_generation(self) -> None:
+        """Stop an idle realtime session and release its engine request."""
+        self._finish_audio_input()
+
+        if self.generation_task is not None and not self.generation_task.done():
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(self.generation_task),
+                    timeout=self._IDLE_STOP_GRACE_S,
+                )
+            except TimeoutError:
+                self.generation_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self.generation_task
+
+        await self.close(self._IDLE_CLOSE_REASON)
+
+    async def close(self, reason: str | None = None) -> None:
+        if not self._is_connected:
+            return
+
+        self._is_connected = False
+        with contextlib.suppress(RuntimeError):
+            await self.websocket.close(code=1000, reason=reason)
 
     async def handle_connection(self):
         """Main connection loop."""
@@ -134,6 +204,7 @@ class RealtimeConnection:
 
                 # Put audio chunk in queue
                 self.audio_queue.put_nowait(audio_array)
+                self._reset_idle_watchdog()
 
             except Exception as e:
                 logger.error("Failed to decode audio: %s", e)
@@ -154,9 +225,11 @@ class RealtimeConnection:
             commit_event = InputAudioBufferCommit(**event)
             # final signals that the audio is finished
             if commit_event.final:
-                self.audio_queue.put_nowait(None)
+                self._finish_audio_input()
             else:
-                await self.start_generation()
+                started = await self.start_generation()
+                if started:
+                    self._reset_idle_watchdog()
         else:
             await self.send_error(f"Unknown event type: {event_type}", "unknown_event")
 
@@ -168,11 +241,12 @@ class RealtimeConnection:
                 break
             yield audio_chunk
 
-    async def start_generation(self):
+    async def start_generation(self) -> bool:
         """Start the transcription generation task."""
         if self.generation_task is not None and not self.generation_task.done():
             logger.warning("Generation already in progress, ignoring commit")
-            return
+            return False
+        self._audio_input_finished = False
 
         # Create audio stream generator
         audio_stream = self.audio_stream_generator()
@@ -187,6 +261,7 @@ class RealtimeConnection:
         self.generation_task = asyncio.create_task(
             self._run_generation(streaming_input_gen, input_stream)
         )
+        return True
 
     async def _run_generation(
         self,
@@ -264,6 +339,8 @@ class RealtimeConnection:
         except Exception as e:
             logger.exception("Error in generation: %s", e)
             await self.send_error(sanitize_message(str(e)), "processing_error")
+        finally:
+            self._cancel_idle_watchdog()
 
     async def send(
         self, event: SessionCreated | TranscriptionDelta | TranscriptionDone
@@ -280,10 +357,14 @@ class RealtimeConnection:
     async def cleanup(self):
         """Cleanup resources."""
         # Signal audio stream to stop
-        self.audio_queue.put_nowait(None)
+        self._finish_audio_input()
 
         # Cancel generation task if running
-        if self.generation_task and not self.generation_task.done():
+        if self.generation_task is not None and not self.generation_task.done():
             self.generation_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self.generation_task
+
+        self._cancel_idle_watchdog()
 
         logger.debug("Connection cleanup complete: %s", self.connection_id)
