@@ -1,27 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek V3.2 (DSA) MLA attention — NVIDIA SM100.
-
-A single ``DeepseekV32Attention`` class is the whole attention block: the MLA
-projections, q/kv RMSNorm, RoPE, the lightning indexer, *and* the sparse-MLA
-attention engine. It subclasses ``MLAAttention`` directly (the attention *is*
-the MLA engine — there is no ``self.mla_attn`` wrapper member), collapsing the
-generic stack — ``DeepseekV2MLAAttention`` + ``MultiHeadLatentAttentionWrapper``
-+ ``MLAModules`` + ``Indexer`` — into one attention class plus one small
-``DeepseekV32Indexer``.
-
-The model runs eager under the breakable CUDA graph (no torch.compile). The
-metadata-dependent attention core (KV-cache insert + sparse MQA attend) runs in
-``_attend``, wrapped with ``@eager_break_during_capture`` so the captured graph
-breaks around it — instead of going through ``MLAAttention.forward``'s
-``unified_mla_attention_with_output`` custom op. The lightning indexer
-self-breaks via its own ``sparse_attn_indexer`` op.
-
-The heavy, well-tested MLA decode mechanics (``W_UK``/``W_UV`` absorption, KV
-cache, scales, ``forward_impl``, ``process_weights_after_loading``) are inherited
-from ``MLAAttention`` rather than duplicated.
-"""
-
 from typing import TYPE_CHECKING
 
 import torch
@@ -59,13 +37,6 @@ if TYPE_CHECKING:
 
 
 class DeepseekV32Indexer(nn.Module):
-    """Lightning indexer (DSA) selecting the top-k tokens for the sparse attend.
-
-    Owns the fp8 (ue8m0) side K-cache (``DeepseekV32IndexerCache``) and the
-    ``SparseAttnIndexer`` op, which writes the selected indices into the shared
-    ``topk_indices_buffer`` that the sparse MLA backend reads back.
-    """
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -187,17 +158,6 @@ class DeepseekV32Indexer(nn.Module):
 
 
 class DeepseekV32Attention(MLAAttention):
-    """Unified DSA MLA attention with the lightning-indexer branch.
-
-    Subclasses ``MLAAttention``: the attention *is* the MLA engine. ``__init__``
-    builds the MLA projections + indexer and then calls ``MLAAttention.__init__``
-    to set up the sparse backend impl, KV cache, scales, and registration; the
-    decode mechanics (``W_UK``/``W_UV`` absorption, ``forward_impl``,
-    ``process_weights_after_loading``, ``_v_up_proj``) are inherited. ``forward``
-    is overridden to do the projections + RoPE + indexer and an explicit
-    ``@eager_break_during_capture`` attend. q_lora_rank is always set for DSA.
-    """
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -358,13 +318,6 @@ class DeepseekV32Attention(MLAAttention):
         k_pe: torch.Tensor,
         output: torch.Tensor,
     ) -> None:
-        """KV-cache insert + sparse MQA attend. Runs eagerly inside the break.
-
-        This is the metadata-dependent body of ``MLAAttention.forward`` (the
-        direct-call branch), reusing the inherited ``forward_impl`` for the
-        ``W_UK``/``W_UV`` decode mechanics, but exposed as an explicit
-        breakable-cudagraph break point instead of the ``unified_mla`` op.
-        """
         if self.calculate_kv_scales:
             self.calc_kv_scales(q, kv_c_normed, k_pe)
 

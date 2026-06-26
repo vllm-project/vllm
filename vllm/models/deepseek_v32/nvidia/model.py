@@ -1,19 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek V3.2 (DSA) model — NVIDIA SM100.
-
-Reuses the DeepSeek V2/V3 decoder/MoE/MLP/weight-loading logic; the structural
-changes are:
-
-* attention is the unified ``DeepseekV32Attention`` (one class, no torch.compile,
-  no ``MLAAttention`` wrapper);
-* ``DeepseekV32Model`` is a plain ``nn.Module`` (no ``@support_torch_compile``),
-  so the model runs eager under the breakable CUDA graph.
-
-The same code serves any DSA checkpoint, including GLM-5.2 (``glm_moe_dsa``),
-since the architecture is config-driven.
-"""
-
 from itertools import islice
 
 import torch
@@ -42,13 +28,6 @@ from .attention import DeepseekV32Attention
 
 
 class DeepseekV32DecoderLayer(DeepseekV2DecoderLayer):
-    """DSA decoder layer: always-MLA via the unified ``DeepseekV32Attention``.
-
-    Subclasses ``DeepseekV2DecoderLayer`` so the inherited ``forward`` and the
-    ``set_moe_parameters`` ``isinstance`` check keep working; only ``__init__``
-    is replaced to drop the MHA branches and the fp16-overflow hacks.
-    """
-
     def __init__(
         self,
         vllm_config: VllmConfig,
