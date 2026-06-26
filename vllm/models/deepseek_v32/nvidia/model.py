@@ -11,7 +11,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.models.deepseek_v2 import (
-    DeepseekV2DecoderLayer,
     DeepseekV2ForCausalLM,
     DeepseekV2MLP,
     DeepseekV2Model,
@@ -27,7 +26,7 @@ from vllm.sequence import IntermediateTensors
 from .attention import DeepseekV32Attention
 
 
-class DeepseekV32DecoderLayer(DeepseekV2DecoderLayer):
+class DeepseekV32DecoderLayer(torch.nn.Module):
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -35,7 +34,7 @@ class DeepseekV32DecoderLayer(DeepseekV2DecoderLayer):
         config=None,
         topk_indices_buffer: torch.Tensor | None = None,
     ) -> None:
-        torch.nn.Module.__init__(self)
+        super().__init__()
 
         if config is None:
             config = vllm_config.model_config.hf_config
@@ -80,7 +79,7 @@ class DeepseekV32DecoderLayer(DeepseekV2DecoderLayer):
         )
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
 
-    def forward(  # type: ignore[override]
+    def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
@@ -98,22 +97,9 @@ class DeepseekV32DecoderLayer(DeepseekV2DecoderLayer):
 
 
 class DeepseekV32Model(torch.nn.Module):
-    """DSA backbone. Plain ``nn.Module`` (no ``@support_torch_compile``).
-
-    Reuses ``DeepseekV2Model``'s ``forward`` / ``embed_input_ids`` /
-    ``load_weights`` (which only read instance attributes set below and
-    module-level helpers in ``deepseek_v2``), but builds
-    ``DeepseekV32DecoderLayer`` and stays uncompiled so the runner wraps it in
-    the breakable CUDA graph.
-    """
-
     fall_back_to_pt_during_load = False
 
-    # Reuse the validated weight loading from DeepseekV2Model. These are plain
-    # functions on the class (``@support_torch_compile`` only rewrites
-    # ``__init__``), so referencing them here does not inherit compilation.
-    # ``forward`` is defined below.
-    embed_input_ids = DeepseekV2Model.embed_input_ids
+    # Reuse the validated weight loading from DeepseekV2Model.
     load_weights = DeepseekV2Model.load_weights
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -173,6 +159,9 @@ class DeepseekV32Model(torch.nn.Module):
             vllm_config.parallel_config.eplb_config.num_redundant_experts
         )
 
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor | None,
@@ -219,3 +208,20 @@ class DeepseekV32ForCausalLM(DeepseekV2ForCausalLM):
     """
 
     model_cls = DeepseekV32Model
+
+    def set_moe_parameters(self):
+        # Same as the base, but keyed on the MoE block type rather than the
+        # decoder-layer type (DeepseekV32DecoderLayer is a plain nn.Module).
+        self.expert_weights = []
+        self.num_expert_groups = getattr(self.config, "n_group", 1)
+        self.moe_layers = []
+        self.moe_mlp_layers = []
+        example_moe = None
+        for layer in self.model.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+            if isinstance(layer.mlp, DeepseekV2MoE):
+                example_moe = layer.mlp
+                self.moe_mlp_layers.append(layer.mlp)
+                self.moe_layers.append(layer.mlp.experts)
+        self.extract_moe_parameters(example_moe)
