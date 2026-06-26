@@ -309,8 +309,11 @@ class DFlashQwen3Model(nn.Module):
         else:
             self._fused_kv_bias = None
 
-        # K-norm weights: list of [head_dim] tensors, one per layer.
-        self._k_norm_weights = [a.k_norm.weight.data for a in layers_attn]
+        # K-norm weights stacked into one contiguous [num_layers, head_dim]
+        # tensor so the per-layer K-norm runs as a single grouped kernel.
+        self._k_norm_weights = torch.stack(
+            [a.k_norm.weight.data for a in layers_attn], dim=0
+        ).contiguous()
 
         # RoPE parameters
         self._rope_head_size = attn0.rotary_emb.head_size
@@ -392,15 +395,15 @@ class DFlashQwen3Model(nn.Module):
         all_k = all_kv[0]  # [L, num_ctx, nkv, hd], contiguous
         all_v = all_kv[1]  # [L, num_ctx, nkv, hd], contiguous
 
-        # --- Per-layer RMSNorm K (3D: [num_ctx, nkv, hd] per layer) ---
+        # --- Grouped RMSNorm K across all layers ([L, num_ctx, nkv, hd]) ---
+        # The weight is selected per layer by the outermost (layer) index.
         all_k_normed = torch.empty_like(all_k)
-        for i in range(L):
-            ops.rms_norm(
-                all_k_normed[i],
-                all_k[i],
-                self._k_norm_weights[i],
-                self._rms_norm_eps,
-            )
+        ops.rms_norm(
+            all_k_normed,
+            all_k,
+            self._k_norm_weights,
+            self._rms_norm_eps,
+        )
 
         # --- Fused RoPE across all layers ---
         # View as [L * num_ctx, kv] so RoPE sees one big batch (no copy).
