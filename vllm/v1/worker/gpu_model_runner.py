@@ -6443,16 +6443,39 @@ class GPUModelRunner(
             if self.encoder_cudagraph_manager is not None:
                 logger.info("Initialized EncoderCudaGraphManager for vision encoder")
 
+    def _profile_seq_lens_for_cudagraph_memory(
+        self,
+        cudagraph_runtime_mode: CUDAGraphMode,
+        desc_index: int,
+        desc: BatchDescriptor,
+    ) -> int | None:
+        if cudagraph_runtime_mode != CUDAGraphMode.FULL or desc_index != 0:
+            return None
+        return min(self.max_model_len, self.max_num_tokens // desc.num_tokens)
+
+    def _requires_separate_cudagraph_memory_profiling(self) -> bool:
+        for attn_group in self._kv_cache_spec_attn_group_iterator():
+            builder_cls = attn_group.backend.get_builder_cls()
+            if builder_cls.requires_separate_cudagraph_memory_profiling(
+                self.vllm_config, attn_group.kv_cache_spec
+            ):
+                return True
+        return False
+
     @torch.inference_mode()
     def profile_cudagraph_memory(self) -> int:
+        self.cudagraph_memory_persistent_estimate = 0
+        self.cudagraph_memory_graph_pool_estimate = 0
+
         with set_current_vllm_config(self.vllm_config):
             self._init_minimal_kv_cache_for_profiling()
 
         saved_num_cudagraph_captured = compilation_counter.num_cudagraph_captured
+        use_separate_profiling = self._requires_separate_cudagraph_memory_profiling()
 
         capture_descs = self.cudagraph_dispatcher.get_capture_descs()
-        # Use a temporary manager for memory profiling. The persistent manager
-        # is initialized later so it does not keep profiling-only graph state.
+        # Use a temporary encoder manager for memory profiling so encoder
+        # profiling graphs do not persist after the estimate is collected.
         encoder_cudagraph_manager = self._create_encoder_cudagraph_manager()
 
         decoder_graphs = sum(len(descs) for _, descs in capture_descs)
@@ -6481,6 +6504,11 @@ class GPUModelRunner(
             )
 
         logger.info("Profiling CUDA graph memory: %s", ", ".join(graph_groups))
+        if use_separate_profiling:
+            logger.info(
+                "Using separate CUDA graph memory profiling for persistent "
+                "warmup allocations and graph-pool allocations"
+            )
 
         # Use a temporary pool for profiling to avoid fragmentation in the main pool.
         profiling_pool = current_platform.graph_pool_handle()
@@ -6495,6 +6523,8 @@ class GPUModelRunner(
 
         shared_memory_estimate = {}
         per_graph_estimate = {}
+        persistent_memory_estimate = 0
+        decoder_memory_estimate = 0
         encoder_memory_estimate = 0
 
         # Cleanup-only guard: CUDA graph capture errors should still propagate
@@ -6505,45 +6535,87 @@ class GPUModelRunner(
                 torch.accelerator.synchronize()
                 torch.accelerator.empty_cache()
 
-                for mode, descs in capture_descs:
-                    profile_descs = descs[:2]
-                    mem_samples: list[int] = []
+                if use_separate_profiling:
+                    reserved_before = torch.accelerator.memory_reserved(self.device)
+                    for mode, descs in capture_descs:
+                        for i, desc in enumerate(descs):
+                            self._warmup_before_cudagraph_capture(
+                                desc,
+                                cudagraph_runtime_mode=mode,
+                                profile_seq_lens=(
+                                    self._profile_seq_lens_for_cudagraph_memory(
+                                        mode, i, desc
+                                    )
+                                ),
+                            )
 
-                    for i, desc in enumerate(profile_descs):
-                        mem_before = torch.cuda.mem_get_info()[0]
-                        self._warmup_and_capture(
-                            desc,
-                            cudagraph_runtime_mode=mode,
-                            profile_seq_lens=(
-                                min(
-                                    self.max_model_len,
-                                    self.max_num_tokens // desc.num_tokens,
-                                )
-                                if mode == CUDAGraphMode.FULL and i == 0
-                                else None
-                            ),
-                        )
-                        torch.accelerator.synchronize()
-                        free_after = torch.cuda.mem_get_info()[0]
-                        mem_samples.append(mem_before - free_after)
-
-                    first_capture = mem_samples[0]
-                    # Use at least 1 MiB per graph for driver overhead
-                    per_graph = max(
-                        mem_samples[1] if len(mem_samples) > 1 else 0, 1 << 20
+                    torch.accelerator.synchronize()
+                    torch.accelerator.empty_cache()
+                    reserved_after = torch.accelerator.memory_reserved(self.device)
+                    persistent_memory_estimate = max(
+                        reserved_after - reserved_before, 0
                     )
 
-                    shared_memory_estimate[mode] = first_capture
-                    per_graph_estimate[mode] = per_graph * (len(descs) - 1)
+                    mem_before = torch.cuda.mem_get_info()[0]
+                    for mode, descs in capture_descs:
+                        for i, desc in enumerate(descs):
+                            self._warmup_and_capture(
+                                desc,
+                                cudagraph_runtime_mode=mode,
+                                profile_seq_lens=(
+                                    self._profile_seq_lens_for_cudagraph_memory(
+                                        mode, i, desc
+                                    )
+                                ),
+                                num_warmups=0,
+                            )
+                            torch.accelerator.synchronize()
+                    free_after = torch.cuda.mem_get_info()[0]
+                    decoder_memory_estimate = max(mem_before - free_after, 0)
 
                     logger.debug(
-                        "Estimated %s CUDA graph memory: "
-                        "%.2f MiB first-capture + (%d-1) × %.2f MiB per-graph",
-                        mode.name,
-                        first_capture / (1 << 20),
-                        len(descs),
-                        per_graph / (1 << 20),
+                        "Estimated decoder CUDA graph memory with separate "
+                        "profiling: %.2f MiB persistent + %.2f MiB graph pool",
+                        persistent_memory_estimate / (1 << 20),
+                        decoder_memory_estimate / (1 << 20),
                     )
+                else:
+                    for mode, descs in capture_descs:
+                        profile_descs = descs[:2]
+                        mem_samples: list[int] = []
+
+                        for i, desc in enumerate(profile_descs):
+                            mem_before = torch.cuda.mem_get_info()[0]
+                            self._warmup_and_capture(
+                                desc,
+                                cudagraph_runtime_mode=mode,
+                                profile_seq_lens=(
+                                    self._profile_seq_lens_for_cudagraph_memory(
+                                        mode, i, desc
+                                    )
+                                ),
+                            )
+                            torch.accelerator.synchronize()
+                            free_after = torch.cuda.mem_get_info()[0]
+                            mem_samples.append(mem_before - free_after)
+
+                        first_capture = mem_samples[0]
+                        # Use at least 1 MiB per graph for driver overhead
+                        per_graph = max(
+                            mem_samples[1] if len(mem_samples) > 1 else 0, 1 << 20
+                        )
+
+                        shared_memory_estimate[mode] = first_capture
+                        per_graph_estimate[mode] = per_graph * (len(descs) - 1)
+
+                        logger.debug(
+                            "Estimated %s CUDA graph memory: "
+                            "%.2f MiB first-capture + (%d-1) × %.2f MiB per-graph",
+                            mode.name,
+                            first_capture / (1 << 20),
+                            len(descs),
+                            per_graph / (1 << 20),
+                        )
 
                 if encoder_cudagraph_manager is not None:
                     mem_before = torch.cuda.mem_get_info()[0]
@@ -6579,12 +6651,18 @@ class GPUModelRunner(
         # FULL and PIECEWISE graphs share the global pool at runtime and are
         # never replayed concurrently, so the pool overlays their memory.
         # Take the max to avoid double-counting the overlap.
-        decoder_estimate = max(shared_memory_estimate.values(), default=0) + sum(
-            per_graph_estimate.values()
-        )
+        if use_separate_profiling:
+            decoder_estimate = decoder_memory_estimate
+        else:
+            decoder_estimate = max(shared_memory_estimate.values(), default=0) + sum(
+                per_graph_estimate.values()
+            )
         # Encoder graphs use a manager-local pool at runtime, separate from the
         # decoder pool, so add their estimate instead of overlaying it.
-        total_estimate = decoder_estimate + encoder_memory_estimate
+        graph_pool_estimate = decoder_estimate + encoder_memory_estimate
+        total_estimate = persistent_memory_estimate + graph_pool_estimate
+        self.cudagraph_memory_persistent_estimate = int(persistent_memory_estimate)
+        self.cudagraph_memory_graph_pool_estimate = int(graph_pool_estimate)
         logger.info(
             "Estimated CUDA graph memory: %.2f GiB total",
             total_estimate / (1 << 30),
@@ -6660,7 +6738,7 @@ class GPUModelRunner(
         )
         return cuda_graph_size
 
-    def _warmup_and_capture(
+    def _warmup_before_cudagraph_capture(
         self,
         desc: BatchDescriptor,
         cudagraph_runtime_mode: CUDAGraphMode,
@@ -6683,6 +6761,22 @@ class GPUModelRunner(
                 num_active_loras=desc.num_active_loras,
                 profile_seq_lens=profile_seq_lens,
             )
+
+    def _warmup_and_capture(
+        self,
+        desc: BatchDescriptor,
+        cudagraph_runtime_mode: CUDAGraphMode,
+        profile_seq_lens: int | None = None,
+        allow_microbatching: bool = False,
+        num_warmups: int | None = None,
+    ):
+        self._warmup_before_cudagraph_capture(
+            desc,
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
+            profile_seq_lens=profile_seq_lens,
+            allow_microbatching=allow_microbatching,
+            num_warmups=num_warmups,
+        )
         self._dummy_run(
             desc.num_tokens,
             cudagraph_runtime_mode=cudagraph_runtime_mode,

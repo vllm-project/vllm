@@ -71,10 +71,15 @@ from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    KVCacheSpec,
     KVQuantMode,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    is_workspace_manager_initialized,
+)
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT = 2048 * 1024 * 1024
 
@@ -782,15 +787,44 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         else:
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
+    @classmethod
+    def requires_separate_cudagraph_memory_profiling(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> bool:
+        kv_specs = (
+            kv_cache_spec.kv_cache_specs.values()
+            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs)
+            else [kv_cache_spec]
+        )
+        for spec in kv_specs:
+            if not isinstance(spec, AttentionSpec):
+                continue
+            head_size_v = getattr(spec, "head_size_v", None) or spec.head_size
+            if max(spec.head_size, head_size_v) >= 512:
+                return True
+        return False
+
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
             buffer_size = envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
             if envs.VLLM_BATCH_INVARIANT:
                 buffer_size = FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT
-            self._workspace_buffer = torch.zeros(
-                buffer_size, dtype=torch.uint8, device=self.device
-            )
+            if self.use_vllm_workspace_manager_for_workspace_buffer():
+                manager = current_workspace_manager()
+                (self._workspace_buffer,) = manager.get_simultaneous(
+                    ((buffer_size,), torch.uint8),
+                )
+            else:
+                self._workspace_buffer = torch.zeros(
+                    buffer_size, dtype=torch.uint8, device=self.device
+                )
         return self._workspace_buffer
+
+    @staticmethod
+    def use_vllm_workspace_manager_for_workspace_buffer() -> bool:
+        return is_workspace_manager_initialized()
 
     def set_workspace_buffer(self, workspace_buffer: torch.Tensor):
         self._workspace_buffer = workspace_buffer
