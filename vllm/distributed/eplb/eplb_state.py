@@ -27,6 +27,7 @@ physical experts.
 """
 
 import threading
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -447,10 +448,14 @@ class EplbState:
         self._init_should_record_tensor(model)
         expert_buffer = [torch.empty_like(w) for w in model.expert_weights[0]]
 
+        assert self.parallel_config.eplb_config.communicator is not None, (
+            "EPLB communicator backend must be set by ParallelConfig"
+        )
         communicator = create_eplb_communicator(
             group_coordinator=get_eplb_group(),
             backend=self.parallel_config.eplb_config.communicator,
-            expert_weights=model.expert_weights[0],
+            expert_weights=model.expert_weights,
+            expert_buffer=expert_buffer,
         )
 
         model_state = EplbModelState(
@@ -652,7 +657,8 @@ class EplbState:
             )
 
         for ls in layer_states:
-            ls.should_record_tensor = self.should_record_tensor
+            if ls is not None:
+                ls.should_record_tensor = self.should_record_tensor
 
     def rearrange(
         self,
@@ -766,6 +772,7 @@ class EplbState:
                     eplb_model_state.physical_to_logical_map,
                     new_physical_to_logical_map,
                     eplb_model_state.model.expert_weights,
+                    eplb_model_state.expert_buffer,
                     ep_group,
                     eplb_model_state.communicator,
                     is_profile,
@@ -819,6 +826,45 @@ class EplbState:
                 is_profile=is_profile,
             )
 
+    def drain_async(self) -> None:
+        """Drain in-flight async EPLB by consuming all remaining layer results.
+
+        Each pending result is acknowledged (consumed_event recorded) so the
+        async worker can proceed, but the transferred weights are intentionally
+        NOT applied — a full synchronous rearrange is expected to follow.
+
+        Ranks are kept in lockstep via _all_ranks_result_ready (all_reduce
+        on the EP CPU group).  The async worker's coordinated-stop collectives
+        use the separate EPLB group, so the two sets of collectives do not
+        interfere.
+
+        No-op when no async cycle is in progress (rebalanced=False).
+        """
+        if not self.is_async:
+            return
+        for model_key, ms in self.model_states.items():
+            needs_drain = ms.rebalanced
+            if needs_drain:
+                logger.info(
+                    "Draining async EPLB worker for model %s",
+                    model_key,
+                )
+            while ms.rebalanced:
+                if self._all_ranks_result_ready(ms):
+                    result = ms.pending_result
+                    assert result is not None
+                    if result.layer_idx == ms.model.num_moe_layers - 1:
+                        ms.rebalanced = False
+                    ms.pending_result = None
+                    result.consumed_event.record()
+                else:
+                    time.sleep(0.001)
+            if needs_drain:
+                logger.info(
+                    "Async EPLB worker drained for model %s",
+                    model_key,
+                )
+
     def _all_ranks_result_ready(self, model_state: EplbModelState) -> bool:
         parallel_state = get_ep_group()
         has_result = int(model_state.pending_result is not None)
@@ -844,8 +890,9 @@ class EplbState:
         """
         All-reduce a list of tensors.
         """
+        ep_group = get_ep_group().device_group
         if len(tensor_list) == 1:
-            all_reduce(tensor_list[0], group=get_ep_group().device_group)
+            all_reduce(tensor_list[0], group=ep_group)
             return tensor_list
         assert all(t.dim() == 2 for t in tensor_list), "All tensors must be 2D."
         assert all(t.shape[1] == tensor_list[0].shape[1] for t in tensor_list), (
@@ -857,7 +904,6 @@ class EplbState:
         shapes = [t.shape for t in tensor_list]
         concat_tensor = torch.cat(tensor_list, dim=0)
 
-        ep_group = get_ep_group().device_group
         all_reduce(concat_tensor, group=ep_group)
 
         all_reduce_list = []
@@ -939,6 +985,17 @@ class EplbLayerState:
     sliding window before the next rearrangement, so recording them wastes
     GPU work.
     """
+
+    def set_layer_state(
+        self,
+        moe_layer_idx: int,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+    ) -> None:
+        self.expert_load_view = expert_load_view[moe_layer_idx]
+        self.logical_to_physical_map = logical_to_physical_map[moe_layer_idx]
+        self.logical_replica_count = logical_replica_count[moe_layer_idx]
 
 
 def _node_count_with_rank_mapping(

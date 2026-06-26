@@ -14,8 +14,8 @@
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/gemm/collective/collective_builder.hpp"
 
-#include "core/math.hpp"
-#include "cutlass_extensions/common.hpp"
+#include "libtorch_stable/core/math.hpp"
+#include "libtorch_stable/cutlass_extensions/common.hpp"
 // clang-format on
 
 /*
@@ -141,7 +141,7 @@ struct cutlass_3x_gemm_sm100 {
               sizeof(typename CollectiveEpilogue::SharedStorage))>,
           KernelSchedule>::CollectiveOp;
 
-  using GemmKernel = enable_sm100f_only<cutlass::gemm::kernel::GemmUniversal<
+  using GemmKernel = enable_sm100_to_sm120<cutlass::gemm::kernel::GemmUniversal<
       Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue, void>>;
 };
 
@@ -202,7 +202,7 @@ struct cutlass_3x_gemm_sm120 {
               sizeof(typename CollectiveEpilogue::SharedStorage))>,
           KernelSchedule>::CollectiveOp;
 
-  using GemmKernel = enable_sm120_only<cutlass::gemm::kernel::GemmUniversal<
+  using GemmKernel = enable_sm120_family<cutlass::gemm::kernel::GemmUniversal<
       Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue, void>>;
 };
 

@@ -895,7 +895,7 @@ class SiglipVisionModel(nn.Module):
         self.vision_model = SiglipVisionTransformer(
             config,
             quant_config=quant_config,
-            prefix=f"{prefix}.vision_model",
+            prefix=maybe_prefix(prefix, "vision_model"),
         )
         self.quant_config = quant_config
 
@@ -943,21 +943,6 @@ class SiglipVisionModel(nn.Module):
             if "head.mlp" in name or "head.probe" in name:
                 continue
             if "packing_position_embedding" in name:
-                continue
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                param = params_dict[scale_name]
-                weight_loader = getattr(
-                    param,
-                    "weight_loader",
-                    default_weight_loader,
-                )
-                loaded_weight = (
-                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
-                )
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
                 continue
             for (
                 param_name,

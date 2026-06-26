@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import replace
 from typing import Any
 
 import torch
@@ -9,10 +10,12 @@ from typing_extensions import override
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
-from vllm.triton_utils import triton
 from vllm.v1.attention.backend import CommonAttentionMetadata
-from vllm.v1.spec_decode.eagle import SpecDecodeBaseProposer
-from vllm.v1.spec_decode.utils import copy_and_expand_dflash_inputs_kernel
+from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
+from vllm.v1.spec_decode.utils import (
+    copy_and_expand_dflash_inputs_kernel,
+    next_power_of_2,
+)
 
 logger = init_logger(__name__)
 
@@ -67,10 +70,27 @@ class DFlashProposer(SpecDecodeBaseProposer):
         # For DFlash we use the input embeddings to embed the mask token
         self.parallel_drafting_hidden_state_tensor = None
 
+        self.dflash_causal = self.dflash_config.get("causal", False)
+
     @override
-    def _raise_if_multimodal(self):
+    def _create_draft_vllm_config(self) -> VllmConfig:
+        base = super()._create_draft_vllm_config()
+        # The draft model is text-only — clear the target's multimodal
+        # flag so flash_attn is not rejected for mm_prefix support.
+        arch = base.model_config.model_arch_config
+        if arch.is_mm_prefix_lm:
+            base.model_config.model_arch_config = replace(arch, is_mm_prefix_lm=False)
+        return replace(
+            base,
+            attention_config=replace(
+                base.attention_config,
+                use_non_causal=not self.dflash_causal,
+            ),
+        )
+
+    @override
+    def _warn_if_multimodal(self):
         # Override to allow multimodal inputs since DFlash supports Qwen3.5 models
-        # Support for multimodal inputs has not been tested.
         pass
 
     @override
@@ -108,8 +128,8 @@ class DFlashProposer(SpecDecodeBaseProposer):
         # and token_indices_to_sample
         max_ctx_per_req = cad.max_query_len
         max_tokens_per_req = max_ctx_per_req + num_query_per_req
-        BLOCK_SIZE = min(256, triton.next_power_of_2(max_tokens_per_req))
-        num_blocks = triton.cdiv(max_tokens_per_req, BLOCK_SIZE)
+        BLOCK_SIZE = min(256, next_power_of_2(max_tokens_per_req))
+        num_blocks = (max_tokens_per_req + BLOCK_SIZE - 1) // BLOCK_SIZE
         grid = (batch_size, num_blocks)
 
         has_num_rejected = num_rejected_tokens_gpu is not None
@@ -151,6 +171,12 @@ class DFlashProposer(SpecDecodeBaseProposer):
         if has_num_rejected:
             effective_seq_lens = effective_seq_lens - num_rejected_tokens_gpu
 
+        # Skip num_rejected_tokens (GPU-only); overestimating is fine here.
+        new_seq_lens_cpu_upper_bound = (
+            cad.seq_lens_cpu_upper_bound + num_query_per_req
+            if cad.seq_lens_cpu_upper_bound is not None
+            else None
+        )
         new_cad = CommonAttentionMetadata(
             query_start_loc=new_query_start_loc,
             seq_lens=effective_seq_lens + num_query_per_req,
@@ -160,13 +186,14 @@ class DFlashProposer(SpecDecodeBaseProposer):
             ),
             _seq_lens_cpu=None,
             _num_computed_tokens_cpu=None,
+            seq_lens_cpu_upper_bound=new_seq_lens_cpu_upper_bound,
             num_reqs=cad.num_reqs,
             num_actual_tokens=num_query_total,
             max_query_len=num_query_per_req,
             max_seq_len=cad.max_seq_len + num_query_per_req,
             block_table_tensor=cad.block_table_tensor,
             slot_mapping=query_slot_mapping,
-            causal=False,  # Non-causal attention is required for DFlash
+            causal=self.dflash_causal,
         )
 
         return num_query_total, token_indices_to_sample, new_cad
@@ -263,20 +290,20 @@ class DFlashProposer(SpecDecodeBaseProposer):
         per_group, per_layer = super().build_per_group_and_layer_attn_metadata(
             cad, draft_index
         )
-        for layer_name, attn_metadata in per_layer.items():
-            assert getattr(attn_metadata, "causal", None) is False, (
-                f"Attention metadata for layer {layer_name} does not have"
-                " non-causal support, which is required for DFlash."
-                " Consider using a different attention backend, such as FlashAttention."
-            )
+        if not self.dflash_causal:
+            # Require all layers to support non-causal attention when required by DFlash
+            for layer_name, attn_metadata in per_layer.items():
+                assert getattr(attn_metadata, "causal", None) is False, (
+                    f"Attention metadata for layer {layer_name} does not have"
+                    " non-causal support, which is required for DFlash."
+                    " Consider using a different attention backend, e.g FlashAttention."
+                )
         return per_group, per_layer
 
     @override
     def _get_eagle3_use_aux_hidden_state_from_config(self):
-        use_aux_hidden_state = True
-        dflash_config = getattr(
-            self.draft_model_config.hf_config, "dflash_config", None
-        )
-        if dflash_config is not None:
-            use_aux_hidden_state = dflash_config.get("use_aux_hidden_state", True)
-        return use_aux_hidden_state
+        return self.dflash_config.get("use_aux_hidden_state", True)
+
+    @property
+    def dflash_config(self):
+        return getattr(self.draft_model_config.hf_config, "dflash_config", None) or {}

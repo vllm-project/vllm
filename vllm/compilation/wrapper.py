@@ -53,12 +53,6 @@ class TorchCompileWithNoGuardsWrapper:
     since we drop all guards.
     """
 
-    def check_invariants_and_forward(self, *args: Any, **kwargs: Any) -> Any:
-        assert hasattr(self, "_check_shape_invariants")
-        self._check_shape_invariants(*args, **kwargs)
-
-        return self.forward(*args, **kwargs)
-
     def _call_with_optional_nvtx_range(
         self, callable_fn: Callable[P, R], *args: P.args, **kwargs: P.kwargs
     ) -> Any:
@@ -115,6 +109,9 @@ class TorchCompileWithNoGuardsWrapper:
                     "compilation_config.dynamic_shapes_config.evaluate_guards "
                     "requires VLLM_USE_BYTECODE_HOOK=0. "
                 )
+                assert ds_type != DynamicShapesType.UNBACKED, (
+                    "UNBACKED dynamic shapes do not add guards"
+                )
 
                 options["guard_filter_fn"] = lambda x: [
                     entry.guard_type == "SHAPE_ENV" for entry in x
@@ -129,19 +126,6 @@ class TorchCompileWithNoGuardsWrapper:
 
         compiled_ptr: Any = self.forward
         # Validate that unbacked dynamic shapes require VLLM_USE_BYTECODE_HOOK=False
-
-        if ds_type == DynamicShapesType.UNBACKED:
-            # reason is that bytecode does torch._dynamo.eval_frame.
-            # remove_from_cache(self.original_code_object()) to force a new
-            # re-compilation. And if we use
-            # compiled_ptr = self.check_invariants_and_forward
-            # it will reset all entries.
-            assert not envs.VLLM_USE_BYTECODE_HOOK, (
-                "UNBACKED dynamic shapes requires VLLM_USE_BYTECODE_HOOK=0. "
-            )
-            assert not self.evaluate_guards, "UNBACKED dynamic shapes do not add guards"
-
-            compiled_ptr = self.check_invariants_and_forward
 
         # Apply the constrain_to_fx_strides patch before first compilation.
         # This covers STOCK_TORCH_COMPILE and DYNAMO_ONCE paths. The VLLM
@@ -170,7 +154,9 @@ class TorchCompileWithNoGuardsWrapper:
             )
 
         if envs.VLLM_USE_BYTECODE_HOOK and mode != CompilationMode.STOCK_TORCH_COMPILE:
-            torch._dynamo.convert_frame.register_bytecode_hook(self.bytecode_hook)
+            self._bytecode_hook_handle = (
+                torch._dynamo.convert_frame.register_bytecode_hook(self.bytecode_hook)
+            )
             self._compiled_bytecode: CodeType | None = None
 
     def aot_compile(self, *args: Any, **kwargs: Any) -> Any:
@@ -276,6 +262,12 @@ class TorchCompileWithNoGuardsWrapper:
                 f"(please search for the usage of the function `update`):\n{src}"
             )
             raise RuntimeError(msg)
+
+    def cleanup(self) -> None:
+        """Remove the bytecode hook registered by this instance."""
+        handle = getattr(self, "_bytecode_hook_handle", None)
+        if handle is not None:
+            handle.remove()
 
     @contextmanager
     def _dispatch_to_compiled_code(self) -> Generator[None, None, None]:

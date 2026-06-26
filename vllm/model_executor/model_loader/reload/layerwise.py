@@ -3,7 +3,7 @@
 import inspect
 from collections.abc import Callable
 from functools import wraps
-from weakref import WeakKeyDictionary
+from weakref import WeakKeyDictionary, WeakSet
 
 import torch
 
@@ -21,7 +21,13 @@ from .meta import (
     restore_layer_on_meta,
 )
 from .types import LayerReloadingInfo
-from .utils import get_layer_params_buffers, get_layer_size, get_layer_tensors
+from .utils import (
+    get_info_size,
+    get_layer_params_buffers,
+    get_layer_size,
+    get_layer_tensors,
+    has_device_tensors,
+)
 
 logger = init_logger(__name__)
 
@@ -42,6 +48,9 @@ __all__ = [
 LAYERWISE_INFO: WeakKeyDictionary[torch.nn.Module, LayerReloadingInfo] = (
     WeakKeyDictionary()
 )
+
+# Global set used to track loading for logging purposes only
+LOADING_LAYERS: WeakSet[torch.nn.Module] = WeakSet()
 
 
 def get_layerwise_info(layer: torch.nn.Module) -> LayerReloadingInfo:
@@ -114,7 +123,8 @@ def initialize_online_processing(layer: torch.nn.Module):
     Called by either `initialize_layerwise_reload` or an online quantization scheme,
     prevents double wrapping in the case of online quantization + reloading
 
-    :param layer: layer whose parameter weight loaders will be wrapped
+    Args:
+        layer: layer whose parameter weight loaders will be wrapped
     """
     info = get_layerwise_info(layer)
 
@@ -174,11 +184,30 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
             info.load_numel_total,
         )
 
+        # Do not online process attention layers, must wait until finalize
+        if isinstance(layer, (Attention, MLAAttention)):
+            return ret
+
+        # Log warnings allocating excessive buffers on device
+        if has_device_tensors(bound_args):
+            LOADING_LAYERS.add(layer)
+            if len(LOADING_LAYERS) >= 2:
+                names = sorted([layer.__class__.__name__ for layer in LOADING_LAYERS])
+                mem_used = sum(
+                    get_info_size(LAYERWISE_INFO[layer]) for layer in LOADING_LAYERS
+                )
+                logger.warning_once(
+                    "Allocating %.1f MB of device memory to buffers to load %s layers. "
+                    "This extra memory usage can be avoided by ordering weights "
+                    "by their parent layer when reloading.",
+                    mem_used / 1e6,
+                    str(list(names)),
+                )
+
         # Process and copy when all weights are loaded
-        if info.load_numel >= info.load_numel_total and not isinstance(  # type: ignore[operator]
-            layer, (Attention, MLAAttention)
-        ):
+        if info.load_numel >= info.load_numel_total:  # type: ignore[operator]
             _layerwise_process(layer, info)
+            LOADING_LAYERS.discard(layer)
 
         return ret
 
@@ -194,8 +223,9 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
     This function should be applied after `initialize_layerwise_reload` is applied
     unwrap the layerwise weight loaders.
 
-    :param model: model to finalize processing for
-    :param model_config: config needed for applying processing to attention layers
+    Args:
+        model: model to finalize processing for
+        model_config: config needed for applying processing to attention layers
     """
     if hasattr(model, "_original_do_torchao_reload"):
         model._do_torchao_reload = model._original_do_torchao_reload
@@ -239,6 +269,8 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
     for layer, info in deferred_attn:
         _finalize_attention_layer(layer, info, model_config)
         info.reset()
+
+    LOADING_LAYERS.clear()
 
 
 def finalize_layerwise_reload(*args, **kwargs):
@@ -350,6 +382,8 @@ def _copy_and_restore_kernel_tensors(layer: torch.nn.Module, info: LayerReloadin
     for name, param in parameters.items():
         param.data.copy_(getattr(layer, name))
     for name, buffer in buffers.items():
+        if name not in layer._buffers:
+            continue
         buffer.data.copy_(getattr(layer, name))
 
     _place_kernel_tensors(layer, info)

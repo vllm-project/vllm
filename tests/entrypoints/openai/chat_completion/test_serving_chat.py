@@ -23,7 +23,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
-from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+from vllm.entrypoints.openai.chat_completion.serving import (
+    OpenAIServingChat,
+    _get_mm_token_counts,
+    _make_prompt_tokens_details,
+)
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     RequestResponseMetadata,
@@ -34,16 +38,17 @@ from vllm.entrypoints.openai.models.serving import (
     OpenAIServingModels,
 )
 from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import TokensPrompt
+from vllm.multimodal.inputs import PlaceholderRange
 from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.parser import HarmonyParser
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.mistral import MistralRenderer
+from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tokenizers import get_tokenizer
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
-from vllm.tool_parsers import ToolParserManager
 from vllm.v1.engine.async_llm import AsyncLLM
 
 GPT_OSS_MODEL_NAME = "openai/gpt-oss-20b"
@@ -460,7 +465,7 @@ class TestGPTOSSChat:
         )
 
         msg = tool_choice_none.choices[0].message
-        assert len(msg.tool_calls) == 0
+        assert msg.tool_calls is None
 
 
 class TestGPTOSSSpeculativeChat:
@@ -538,6 +543,7 @@ class MockModelConfig:
     is_encoder_decoder: bool = False
     is_multimodal_model: bool = False
     renderer_num_workers: int = 1
+    enable_prompt_embeds: bool = False
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
@@ -561,34 +567,42 @@ def _build_renderer(model_config: MockModelConfig):
     )
 
 
-def _build_serving_render(
+def _build_online_renderer(
     engine, model_registry: OpenAIModelRegistry
-) -> OpenAIServingRender:
-    return OpenAIServingRender(
+) -> OnlineRenderer:
+    return OnlineRenderer(
         model_config=engine.model_config,
         renderer=engine.renderer,
-        model_registry=model_registry,
         request_logger=None,
         chat_template=CHAT_TEMPLATE,
         chat_template_content_format="auto",
     )
 
 
-def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
+def _build_serving_chat(
+    engine: AsyncLLM,
+    *,
+    reasoning_parser: str = "",
+    tool_parser: str | None = None,
+    enable_auto_tools: bool = False,
+) -> OpenAIServingChat:
     models = OpenAIServingModels(
         engine_client=engine,
         base_model_paths=BASE_MODEL_PATHS,
     )
-    openai_serving_render = _build_serving_render(engine, models.registry)
+    online_renderer = _build_online_renderer(engine, models.registry)
 
     serving_chat = OpenAIServingChat(
         engine,
         models,
         response_role="assistant",
-        openai_serving_render=openai_serving_render,
+        online_renderer=online_renderer,
         chat_template=CHAT_TEMPLATE,
         chat_template_content_format="auto",
         request_logger=None,
+        reasoning_parser=reasoning_parser,
+        tool_parser=tool_parser,
+        enable_auto_tools=enable_auto_tools,
     )
 
     return serving_chat
@@ -599,19 +613,20 @@ class MockEngine:
     model_config: MockModelConfig = field(default_factory=MockModelConfig)
     input_processor: MagicMock = field(default_factory=MagicMock)
     renderer: MagicMock = field(default_factory=MagicMock)
+    errored: bool = False
 
 
 async def _async_serving_chat_init():
     engine = MockEngine()
 
     models = OpenAIServingModels(engine, BASE_MODEL_PATHS)
-    openai_serving_render = _build_serving_render(engine, models.registry)
+    online_renderer = _build_online_renderer(engine, models.registry)
 
     serving_completion = OpenAIServingChat(
         engine,
         models,
         response_role="assistant",
-        openai_serving_render=openai_serving_render,
+        online_renderer=online_renderer,
         chat_template=CHAT_TEMPLATE,
         chat_template_content_format="auto",
         request_logger=None,
@@ -622,6 +637,37 @@ async def _async_serving_chat_init():
 def test_async_serving_chat_init():
     serving_completion = asyncio.run(_async_serving_chat_init())
     assert serving_completion.chat_template == CHAT_TEMPLATE
+
+
+def test_mm_prompt_tokens_details():
+    # Text-only input has no multimodal placeholders.
+    assert _get_mm_token_counts({"type": "tokens"}) == {}
+
+    # Per-modality counts sum each modality's placeholder ranges.
+    counts = _get_mm_token_counts(
+        {
+            "mm_placeholders": {
+                "image": [
+                    PlaceholderRange(offset=0, length=576),
+                    PlaceholderRange(offset=600, length=24),
+                ],
+                "video": [PlaceholderRange(offset=700, length=1200)],
+            }
+        }
+    )
+    assert counts == {"image": 600, "video": 1200}
+
+    # Gated off, or nothing to report -> no details.
+    assert _make_prompt_tokens_details(False, 5, counts) is None
+    assert _make_prompt_tokens_details(True, None, None) is None
+
+    # Zero cached_tokens is still reported (not None), matching the cached-only
+    # behavior; multimodal counts ride alongside even when cached_tokens is None.
+    assert _make_prompt_tokens_details(True, 0, None).cached_tokens == 0
+    details = _make_prompt_tokens_details(True, None, counts)
+    assert details.cached_tokens is None
+    assert details.multimodal_tokens == {"image": 600, "video": 1200}
+    assert _make_prompt_tokens_details(True, 3, counts).cached_tokens == 3
 
 
 @pytest.mark.asyncio
@@ -635,7 +681,7 @@ async def test_serving_chat_returns_correct_model_name():
     serving_chat = _build_serving_chat(mock_engine)
     messages = [{"role": "user", "content": "what is 1+1?"}]
 
-    async def return_model_name(*args):
+    async def return_model_name(*args, **kwargs):
         return args[3]
 
     serving_chat.chat_completion_full_generator = return_model_name
@@ -804,6 +850,101 @@ async def test_serving_chat_should_set_correct_max_tokens():
         await serving_chat.create_chat_completion(req)
 
     assert mock_engine.generate.call_args.args[1].max_tokens == 5
+
+
+@pytest.mark.asyncio
+async def test_serving_chat_truncate_prompt_tokens_max_token_accounting():
+    """When truncate_prompt_tokens is set, max_tokens must be calculated using
+    the truncated prompt length, not the original prompt length.
+
+    Regression: without the fix, get_max_tokens received the untruncated prompt
+    length, causing the output budget to be underestimated.
+    """
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_chat = _build_serving_chat(mock_engine)
+
+    # "what is 1+1?" tokenizes to 7 tokens with the test chat template
+    # (max_model_len=100 -> max_tokens = 93 without truncation, confirmed by
+    # test_serving_chat_should_set_correct_max_tokens above).
+    messages = [{"role": "user", "content": "what is 1+1?"}]
+
+    # Baseline: no truncation -> max_tokens = 100 - 7 = 93.
+    req = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+    assert mock_engine.generate.call_args.args[1].max_tokens == 93
+
+    # With truncate_prompt_tokens=5 (less than 7): the effective prompt length
+    # is 5, so max_tokens should be 100 - 5 = 95, not 93.
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=messages,
+        truncate_prompt_tokens=5,
+    )
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+    assert mock_engine.generate.call_args.args[1].max_tokens == 95
+
+    # With truncate_prompt_tokens=-1 (meaning use full max_model_len as the
+    # truncation limit, i.e., no practical truncation vs the window): effective
+    # length = min(7, 100) = 7 -> max_tokens = 93 again.
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=messages,
+        truncate_prompt_tokens=-1,
+    )
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+    assert mock_engine.generate.call_args.args[1].max_tokens == 93
+
+
+@pytest.mark.asyncio
+async def test_serving_chat_truncation_side_controls_prompt_truncation():
+    model_config = MockModelConfig()
+    model_config.model = MODEL_NAME_SHORT
+    model_config.tokenizer = MODEL_NAME_SHORT
+    mock_engine = MockEngine(
+        model_config=model_config,
+        renderer=_build_renderer(model_config),
+    )
+
+    serving_chat = _build_serving_chat(mock_engine)
+    messages = [
+        {
+            "role": "user",
+            "content": "Summarize how prompt truncation works in one sentence.",
+        }
+    ]
+
+    full_token_ids = await _render_chat_prompt_token_ids(
+        serving_chat,
+        messages,
+        model_name=MODEL_NAME_SHORT,
+    )
+    assert len(full_token_ids) > 4
+
+    right_token_ids = await _render_chat_prompt_token_ids(
+        serving_chat,
+        messages,
+        model_name=MODEL_NAME_SHORT,
+        truncate_prompt_tokens=4,
+        truncation_side="right",
+    )
+    assert right_token_ids == full_token_ids[:4]
+
+    left_token_ids = await _render_chat_prompt_token_ids(
+        serving_chat,
+        messages,
+        model_name=MODEL_NAME_SHORT,
+        truncate_prompt_tokens=4,
+        truncation_side="left",
+    )
+    assert left_token_ids == full_token_ids[-4:]
 
 
 @pytest.mark.asyncio
@@ -1059,6 +1200,37 @@ async def test_serving_chat_data_parallel_rank_extraction():
     assert mock_engine.generate.call_args.kwargs["data_parallel_rank"] is None
 
 
+async def _render_chat_prompt_token_ids(
+    serving_chat: OpenAIServingChat,
+    messages: list[dict[str, str]],
+    *,
+    model_name: str = MODEL_NAME,
+    truncate_prompt_tokens: int | None = None,
+    truncation_side: str | None = None,
+) -> list[int]:
+    request = ChatCompletionRequest(
+        model=model_name,
+        messages=messages,
+        max_tokens=1,
+        temperature=0.0,
+        return_token_ids=True,
+        truncate_prompt_tokens=truncate_prompt_tokens,
+        truncation_side=truncation_side,
+    )
+
+    result = await serving_chat.render_chat_request(request)
+    assert not isinstance(result, ErrorResponse)
+
+    _, engine_inputs = result
+    assert len(engine_inputs) == 1
+
+    prompt_token_ids = serving_chat._extract_prompt_components(
+        engine_inputs[0]
+    ).token_ids
+    assert prompt_token_ids is not None
+    return prompt_token_ids
+
+
 class TestServingChatWithHarmony:
     """
     These tests ensure Chat Completion requests are being properly converted into
@@ -1082,15 +1254,21 @@ class TestServingChatWithHarmony:
         mock_engine = MagicMock(spec=AsyncLLM)
         mock_engine.errored = False
         mock_engine.model_config = MockModelConfig()
+        mock_engine.model_config.hf_config = MockHFConfig(model_type="gpt_oss")
+        mock_engine.model_config.hf_text_config = MockHFConfig(model_type="gpt_oss")
         mock_engine.input_processor = MagicMock()
         mock_engine.renderer = _build_renderer(mock_engine.model_config)
         return mock_engine
 
     @pytest.fixture()
     def serving_chat(self, mock_engine) -> OpenAIServingChat:
-        chat = _build_serving_chat(mock_engine)
-        chat.use_harmony = True
-        chat.tool_parser = ToolParserManager.get_tool_parser("openai")
+        chat = _build_serving_chat(
+            mock_engine,
+            reasoning_parser="openai_gptoss",
+            tool_parser="openai",
+            enable_auto_tools=True,
+        )
+        assert chat.parser_cls is HarmonyParser
         return chat
 
     def mock_request_output_from_req_and_token_ids(
@@ -1149,6 +1327,7 @@ class TestServingChatWithHarmony:
         stream: bool = False,
     ) -> ChatCompletionResponse:
         harmony_token_ids = get_encoding().encode(harmony_str, allowed_special="all")
+        tokenizer = get_tokenizer(GPT_OSS_MODEL_NAME)
 
         async def result_generator():
             if stream:
@@ -1170,17 +1349,33 @@ class TestServingChatWithHarmony:
             else serving_chat.chat_completion_full_generator
         )
 
+        chat_template_kwargs = serving_chat._effective_chat_template_kwargs(req)
+        if stream:
+            extra_kwargs: dict[str, Any] = {
+                "chat_template_kwargs": chat_template_kwargs,
+            }
+        else:
+            parser = None
+            if serving_chat.parser_cls is not None:
+                parser = serving_chat.parser_cls(
+                    tokenizer,
+                    req.tools,
+                    chat_template_kwargs=chat_template_kwargs,
+                )
+            extra_kwargs = {"parser": parser}
+
         result = generator_func(
             request=req,
             result_generator=result_generator(),
             request_id=req.request_id,
             model_name=req.model,
             conversation=[],
-            tokenizer=get_tokenizer(req.model),
+            tokenizer=tokenizer,
             request_metadata=RequestResponseMetadata(
                 request_id=req.request_id,
                 model_name=req.model,
             ),
+            **extra_kwargs,
         )
 
         if stream:
@@ -1188,14 +1383,19 @@ class TestServingChatWithHarmony:
         return await result
 
     @pytest.mark.asyncio
-    async def test_simple_chat(self, serving_chat, stream):
+    @pytest.mark.parametrize(
+        "include_reasoning", [True, False], ids=["with_reasoning", "no_reasoning"]
+    )
+    async def test_simple_chat(self, serving_chat, stream, include_reasoning):
         messages = [{"role": "user", "content": "what is 1+1?"}]
 
         # Test the Harmony messages for the first turn's input
-        req = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
-        input_messages, _ = (
-            serving_chat.openai_serving_render._make_request_with_harmony(req)
+        req = ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=messages,
+            include_reasoning=include_reasoning,
         )
+        input_messages, _ = serving_chat.online_renderer._make_request_with_harmony(req)
         verify_harmony_messages(
             input_messages,
             [
@@ -1214,7 +1414,11 @@ class TestServingChatWithHarmony:
         response = await self.generate_response_from_harmony_str(
             serving_chat, req, response_str, stream=stream
         )
-        verify_chat_response(response, content=final_str, reasoning=reasoning_str)
+        verify_chat_response(
+            response,
+            content=final_str,
+            reasoning=reasoning_str if include_reasoning else None,
+        )
 
         # Add the output messages from the first turn as input to the second turn
         for choice in response.choices:
@@ -1222,17 +1426,72 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the second turn's input
         req_2 = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
-        input_messages_2, _ = (
-            serving_chat.openai_serving_render._make_request_with_harmony(req_2)
+        input_messages_2, _ = serving_chat.online_renderer._make_request_with_harmony(
+            req_2
+        )
+        expected_input_messages_2 = [
+            {"role": "system"},
+            {"role": "user"},
+        ]
+        if include_reasoning:
+            expected_input_messages_2.append(
+                {
+                    "role": "assistant",
+                    "channel": "analysis",
+                }
+            )
+        expected_input_messages_2.append(
+            {"role": "assistant", "channel": "final", "content": final_str}
         )
         verify_harmony_messages(
             input_messages_2,
+            expected_input_messages_2,
+        )
+
+    @pytest.mark.asyncio
+    async def test_system_message_without_tools(self, serving_chat, stream):
+        """Leading system message produces a developer message with
+        DeveloperContent (# Instructions header)."""
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Hello"},
+        ]
+        req = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
+        input_messages, _ = serving_chat.online_renderer._make_request_with_harmony(req)
+        verify_harmony_messages(
+            input_messages,
             [
                 {"role": "system"},
-                {"role": "user"},
-                # The analysis message should be dropped on subsequent inputs because
-                # of the subsequent assistant message to the final channel.
-                {"role": "assistant", "channel": "final", "content": final_str},
+                {
+                    "role": "developer",
+                    "instructions": "You are a helpful assistant.",
+                },
+                {"role": "user", "content": "Hello"},
+            ],
+        )
+
+    @pytest.mark.asyncio
+    async def test_system_message_with_tools(self, serving_chat, stream, weather_tools):
+        """Leading system message is folded into the developer message
+        alongside tool definitions."""
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "What's the weather?"},
+        ]
+        req = ChatCompletionRequest(
+            model=MODEL_NAME, messages=messages, tools=weather_tools
+        )
+        input_messages, _ = serving_chat.online_renderer._make_request_with_harmony(req)
+        verify_harmony_messages(
+            input_messages,
+            [
+                {"role": "system"},
+                {
+                    "role": "developer",
+                    "instructions": "You are a helpful assistant.",
+                    "tool_definitions": ["get_weather"],
+                },
+                {"role": "user", "content": "What's the weather?"},
             ],
         )
 
@@ -1245,9 +1504,7 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the first turn's input
         req = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
-        input_messages, _ = (
-            serving_chat.openai_serving_render._make_request_with_harmony(req)
-        )
+        input_messages, _ = serving_chat.online_renderer._make_request_with_harmony(req)
         verify_harmony_messages(
             input_messages,
             [
@@ -1291,8 +1548,8 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the second turn's input
         req_2 = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
-        input_messages_2, _ = (
-            serving_chat.openai_serving_render._make_request_with_harmony(req_2)
+        input_messages_2, _ = serving_chat.online_renderer._make_request_with_harmony(
+            req_2
         )
         verify_harmony_messages(
             input_messages_2,
@@ -1322,91 +1579,6 @@ class TestServingChatWithHarmony:
         )
 
     @pytest.mark.asyncio
-    async def test_tools_and_reasoning(
-        self, serving_chat, stream, weather_tools, weather_messages_start
-    ):
-        tools = weather_tools
-        messages = list(weather_messages_start)
-
-        # Test the Harmony messages for the first turn's input
-        req = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
-        input_messages, _ = (
-            serving_chat.openai_serving_render._make_request_with_harmony(req)
-        )
-        verify_harmony_messages(
-            input_messages,
-            [
-                {"role": "system"},
-                {"role": "developer", "tool_definitions": ["get_weather"]},
-                {"role": "user", "content": messages[0]["content"]},
-            ],
-        )
-
-        # Test the Chat Completion response for the first turn's output
-        reasoning_str = "I'll call get_weather."
-        tool_args_str = '{"location": "Paris"}'
-        response_str = (
-            f"<|channel|>analysis<|message|>{reasoning_str}<|end|>"
-            "<|start|>assistant to=functions.get_weather<|channel|>commentary"
-            f"<|constrain|>json<|message|>{tool_args_str}<|call|>"
-        )
-        response = await self.generate_response_from_harmony_str(
-            serving_chat, req, response_str, stream=stream
-        )
-        verify_chat_response(
-            response,
-            reasoning=reasoning_str,
-            tool_calls=[("get_weather", tool_args_str)],
-        )
-
-        tool_call = response.choices[0].message.tool_calls[0]
-
-        # Add the output messages from the first turn as input to the second turn
-        for choice in response.choices:
-            messages.append(choice.message.model_dump(exclude_none=True))
-
-        # Add our tool output message
-        messages.append(
-            {
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "content": "20 degrees Celsius",
-            },
-        )
-
-        # Test the Harmony messages for the second turn's input
-        req_2 = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
-        input_messages_2, _ = (
-            serving_chat.openai_serving_render._make_request_with_harmony(req_2)
-        )
-        verify_harmony_messages(
-            input_messages_2,
-            [
-                {"role": "system"},
-                {"role": "developer"},
-                {"role": "user"},
-                {
-                    "role": "assistant",
-                    "channel": "analysis",
-                    "content": reasoning_str,
-                },
-                {
-                    "role": "assistant",
-                    "channel": "commentary",
-                    "recipient": "functions.get_weather",
-                    "content": tool_args_str,
-                },
-                {
-                    "role": "tool",
-                    "author_name": "functions.get_weather",
-                    "channel": "commentary",
-                    "recipient": "assistant",
-                    "content": "20 degrees Celsius",
-                },
-            ],
-        )
-
-    @pytest.mark.asyncio
     async def test_multi_turn_tools_and_reasoning(
         self, serving_chat, stream, weather_tools, weather_messages_start
     ):
@@ -1415,9 +1587,7 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the first turn's input
         req = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
-        input_messages, _ = (
-            serving_chat.openai_serving_render._make_request_with_harmony(req)
-        )
+        input_messages, _ = serving_chat.online_renderer._make_request_with_harmony(req)
         verify_harmony_messages(
             input_messages,
             [
@@ -1461,8 +1631,8 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the second turn's input
         req_2 = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
-        input_messages_2, _ = (
-            serving_chat.openai_serving_render._make_request_with_harmony(req_2)
+        input_messages_2, _ = serving_chat.online_renderer._make_request_with_harmony(
+            req_2
         )
         verify_harmony_messages(
             input_messages_2,
@@ -1473,7 +1643,6 @@ class TestServingChatWithHarmony:
                 {
                     "role": "assistant",
                     "channel": "analysis",
-                    "content": reasoning_str,
                 },
                 {
                     "role": "assistant",
@@ -1513,8 +1682,8 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the third turn's input
         req_3 = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
-        input_messages_3, _ = (
-            serving_chat.openai_serving_render._make_request_with_harmony(req_3)
+        input_messages_3, _ = serving_chat.online_renderer._make_request_with_harmony(
+            req_3
         )
         verify_harmony_messages(
             input_messages_3,
@@ -1522,6 +1691,11 @@ class TestServingChatWithHarmony:
                 {"role": "system"},
                 {"role": "developer"},
                 {"role": "user"},
+                {
+                    "role": "assistant",
+                    "channel": "analysis",
+                    "content": reasoning_str,
+                },
                 {
                     "role": "assistant",
                     "channel": "commentary",
@@ -1578,8 +1752,8 @@ class TestServingChatWithHarmony:
 
         # Test the Harmony messages for the fourth turn's input
         req_4 = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
-        input_messages_4, _ = (
-            serving_chat.openai_serving_render._make_request_with_harmony(req_4)
+        input_messages_4, _ = serving_chat.online_renderer._make_request_with_harmony(
+            req_4
         )
         verify_harmony_messages(
             input_messages_4,
@@ -1587,6 +1761,10 @@ class TestServingChatWithHarmony:
                 {"role": "system"},
                 {"role": "developer"},
                 {"role": "user"},
+                {
+                    "role": "assistant",
+                    "channel": "analysis",
+                },
                 {"role": "assistant"},
                 {"role": "tool"},
                 {
@@ -1629,17 +1807,17 @@ class TestServingChatWithHarmony:
             },
         ]
         req = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
-        input_messages, _ = (
-            serving_chat.openai_serving_render._make_request_with_harmony(req)
-        )
+        input_messages, _ = serving_chat.online_renderer._make_request_with_harmony(req)
 
         verify_harmony_messages(
             input_messages,
             [
                 {"role": "system"},
                 {"role": "user", "content": messages[0]["content"]},
-                # The reasoning that would have resulted in an analysis message is
-                # dropped because of a later assistant message to the final channel.
+                {
+                    "role": "assistant",
+                    "channel": "analysis",
+                },
                 {
                     "role": "assistant",
                     "channel": "final",
@@ -1662,9 +1840,7 @@ class TestServingChatWithHarmony:
             },
         ]
         req = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
-        input_messages, _ = (
-            serving_chat.openai_serving_render._make_request_with_harmony(req)
-        )
+        input_messages, _ = serving_chat.online_renderer._make_request_with_harmony(req)
 
         verify_harmony_messages(
             input_messages,
@@ -1693,9 +1869,7 @@ class TestServingChatWithHarmony:
             },
         ]
         req = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
-        input_messages, _ = (
-            serving_chat.openai_serving_render._make_request_with_harmony(req)
-        )
+        input_messages, _ = serving_chat.online_renderer._make_request_with_harmony(req)
 
         verify_harmony_messages(
             input_messages,
@@ -1725,14 +1899,14 @@ async def test_tool_choice_validation_without_parser():
         engine_client=mock_engine,
         base_model_paths=BASE_MODEL_PATHS,
     )
-    openai_serving_render = _build_serving_render(mock_engine, models.registry)
+    online_renderer = _build_online_renderer(mock_engine, models.registry)
 
     # Create serving_chat without tool_parser (enable_auto_tools=False)
     serving_chat = OpenAIServingChat(
         mock_engine,
         models,
         response_role="assistant",
-        openai_serving_render=openai_serving_render,
+        online_renderer=online_renderer,
         chat_template=CHAT_TEMPLATE,
         chat_template_content_format="auto",
         request_logger=None,
@@ -1794,13 +1968,13 @@ async def test_streaming_n_gt1_independent_tool_parsers():
         engine_client=mock_engine,
         base_model_paths=BASE_MODEL_PATHS,
     )
-    openai_serving_render = _build_serving_render(mock_engine, models.registry)
+    online_renderer = _build_online_renderer(mock_engine, models.registry)
 
     serving_chat = OpenAIServingChat(
         mock_engine,
         models,
         response_role="assistant",
-        openai_serving_render=openai_serving_render,
+        online_renderer=online_renderer,
         chat_template=CHAT_TEMPLATE,
         chat_template_content_format="auto",
         request_logger=None,
@@ -1892,8 +2066,10 @@ async def test_streaming_n_gt1_independent_tool_parsers():
             finished=True,
         )
 
-    # Collect tool-call deltas per choice from the SSE stream.
+    # Collect tool-call deltas and finish_reasons per choice from the SSE
+    # stream.
     tc_deltas_by_choice: dict[int, list[dict]] = {i: [] for i in range(num_choices)}
+    finish_reasons_by_choice: dict[int, list[str]] = {i: [] for i in range(num_choices)}
     async for chunk_str in serving_chat.chat_completion_stream_generator(
         request=request,
         result_generator=result_generator(),
@@ -1916,6 +2092,8 @@ async def test_streaming_n_gt1_independent_tool_parsers():
                 if delta.get("tool_calls"):
                     for tc in delta["tool_calls"]:
                         tc_deltas_by_choice[idx].append(tc)
+                if choice.get("finish_reason") is not None:
+                    finish_reasons_by_choice[idx].append(choice["finish_reason"])
 
     # Both choices must independently produce the correct tool call.
     for choice_idx in range(num_choices):
@@ -1941,141 +2119,11 @@ async def test_streaming_n_gt1_independent_tool_parsers():
             f"Choice {choice_idx}: expected {{'city': 'Tokyo'}}, got {parsed_args}"
         )
 
-
-class TestCreateRemainingArgsDelta:
-    """Tests for _create_remaining_args_delta helper function.
-
-    This helper is used when streaming tool calls to preserve id/type/name
-    fields in the finish chunk, which would otherwise be lost.
-    """
-
-    def test_preserves_id_type_name(self):
-        """Test that id, type, and name are preserved from original delta."""
-        from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-        from vllm.entrypoints.openai.engine.protocol import (
-            DeltaFunctionCall,
-            DeltaMessage,
-            DeltaToolCall,
+        reasons = finish_reasons_by_choice[choice_idx]
+        assert len(reasons) == 1, (
+            f"Choice {choice_idx}: expected exactly 1 finish_reason, got {reasons}"
         )
-
-        original_delta = DeltaMessage(
-            tool_calls=[
-                DeltaToolCall(
-                    index=0,
-                    id="call_abc123",
-                    type="function",
-                    function=DeltaFunctionCall(
-                        name="get_weather",
-                        arguments='{"location": "Paris"}',
-                    ),
-                )
-            ]
+        assert reasons[0] == "tool_calls", (
+            f"Choice {choice_idx}: expected finish_reason='tool_calls', "
+            f"got '{reasons[0]}'"
         )
-
-        result = OpenAIServingChat._create_remaining_args_delta(
-            original_delta, '", "unit": "celsius"}', 0
-        )
-
-        assert len(result.tool_calls) == 1
-        tc = result.tool_calls[0]
-        assert tc.index == 0
-        assert tc.id == "call_abc123"
-        assert tc.type == "function"
-        assert tc.function.name == "get_weather"
-        assert tc.function.arguments == '", "unit": "celsius"}'
-
-    def test_matches_by_index(self):
-        """Test that the correct tool call is matched by index."""
-        from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-        from vllm.entrypoints.openai.engine.protocol import (
-            DeltaFunctionCall,
-            DeltaMessage,
-            DeltaToolCall,
-        )
-
-        original_delta = DeltaMessage(
-            tool_calls=[
-                DeltaToolCall(
-                    index=0,
-                    id="call_first",
-                    type="function",
-                    function=DeltaFunctionCall(name="func_a", arguments="{}"),
-                ),
-                DeltaToolCall(
-                    index=1,
-                    id="call_second",
-                    type="function",
-                    function=DeltaFunctionCall(name="func_b", arguments="{}"),
-                ),
-            ]
-        )
-
-        result = OpenAIServingChat._create_remaining_args_delta(
-            original_delta, '{"extra": true}', 1
-        )
-
-        assert len(result.tool_calls) == 1
-        tc = result.tool_calls[0]
-        assert tc.index == 1
-        assert tc.id == "call_second"
-        assert tc.function.name == "func_b"
-
-    def test_no_matching_tool_call(self):
-        """Test graceful handling when no matching tool call is found."""
-        from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-        from vllm.entrypoints.openai.engine.protocol import (
-            DeltaFunctionCall,
-            DeltaMessage,
-            DeltaToolCall,
-        )
-
-        original_delta = DeltaMessage(
-            tool_calls=[
-                DeltaToolCall(
-                    index=0,
-                    id="call_zero",
-                    type="function",
-                    function=DeltaFunctionCall(name="func", arguments="{}"),
-                )
-            ]
-        )
-
-        result = OpenAIServingChat._create_remaining_args_delta(
-            original_delta, '{"arg": 1}', 5
-        )
-
-        assert len(result.tool_calls) == 1
-        tc = result.tool_calls[0]
-        assert tc.index == 5
-        assert tc.id is None
-        assert tc.type is None
-        assert tc.function.name is None
-        assert tc.function.arguments == '{"arg": 1}'
-
-    def test_function_is_none(self):
-        """Test handling when original tool call has no function."""
-        from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-        from vllm.entrypoints.openai.engine.protocol import DeltaMessage, DeltaToolCall
-
-        original_delta = DeltaMessage(
-            tool_calls=[
-                DeltaToolCall(
-                    index=0,
-                    id="call_nofunc",
-                    type="function",
-                    function=None,
-                )
-            ]
-        )
-
-        result = OpenAIServingChat._create_remaining_args_delta(
-            original_delta, '{"data": "value"}', 0
-        )
-
-        assert len(result.tool_calls) == 1
-        tc = result.tool_calls[0]
-        assert tc.index == 0
-        assert tc.id == "call_nofunc"
-        assert tc.type == "function"
-        assert tc.function.name is None
-        assert tc.function.arguments == '{"data": "value"}'

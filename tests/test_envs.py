@@ -28,6 +28,14 @@ def test_getattr_without_cache(monkeypatch: pytest.MonkeyPatch):
     assert not hasattr(envs.__getattr__, "cache_info")
 
 
+def test_nixl_side_channel_host_is_not_compile_factor(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("VLLM_NIXL_SIDE_CHANNEL_HOST", "10.0.0.15")
+
+    assert "VLLM_NIXL_SIDE_CHANNEL_HOST" not in envs.compile_factors()
+
+
 def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_HOST_IP", "1.1.1.1")
     monkeypatch.setenv("VLLM_PORT", "1234")
@@ -93,6 +101,36 @@ def test_is_envs_cache_enabled() -> None:
 
     disable_envs_cache()
     assert not envs._is_envs_cache_enabled()
+
+
+def test_precompiled_install_flags_are_orthogonal() -> None:
+    # The Rust frontend flag is independent of the C-extension precompiled
+    # flag: requesting the precompiled Rust frontend must not implicitly
+    # enable the precompiled C extensions.
+    with patch.dict(os.environ, {"VLLM_USE_PRECOMPILED_RUST": "1"}, clear=True):
+        assert environment_variables["VLLM_USE_PRECOMPILED"]() is False
+        assert environment_variables["VLLM_USE_PRECOMPILED_RUST"]() is True
+
+    # ...and the reverse: requesting precompiled C extensions (here via a
+    # wheel location, which enables VLLM_USE_PRECOMPILED) must not flip the
+    # Rust frontend flag.
+    with patch.dict(
+        os.environ, {"VLLM_PRECOMPILED_WHEEL_LOCATION": "/tmp/vllm.whl"}, clear=True
+    ):
+        assert environment_variables["VLLM_USE_PRECOMPILED"]() is True
+        assert environment_variables["VLLM_USE_PRECOMPILED_RUST"]() is False
+
+    # ...and with both set together, each flag is still parsed independently.
+    with patch.dict(
+        os.environ,
+        {
+            "VLLM_PRECOMPILED_WHEEL_LOCATION": "/tmp/vllm.whl",
+            "VLLM_USE_PRECOMPILED_RUST": "1",
+        },
+        clear=True,
+    ):
+        assert environment_variables["VLLM_USE_PRECOMPILED"]() is True
+        assert environment_variables["VLLM_USE_PRECOMPILED_RUST"]() is True
 
 
 class TestEnvWithChoices:
