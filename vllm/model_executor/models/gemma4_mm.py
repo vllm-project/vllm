@@ -1026,6 +1026,7 @@ class Gemma4ForConditionalGeneration(
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
         self.model_dtype = vllm_config.model_config.dtype
+        self.vllm_config = vllm_config
 
         # Only quantize towers when the quant method supports their
         # dimensions.  BNB/torchao handle arbitrary sizes; other methods
@@ -1710,8 +1711,21 @@ class Gemma4ForConditionalGeneration(
             EncoderCudaGraphCaptureInputs,
         )
 
+        import math
         max_size = max(max_batch_size, max_frames_per_batch)
-        per_item_patches = token_budget * 4
+        # per_item_patches must satisfy k² × per_item_output == per_item_patches
+        # for integer k (_avg_pool_by_positions requirement), and must be large
+        # enough to hold any real image. The largest real image has
+        # default_output_length * pooling_kernel_size² patches (e.g. 280×9=2520
+        # for gemma4). k = ceil(sqrt(max_real_patches / per_item_output)) is the
+        # smallest valid k. When max_batch_size=4 this reduces to the original
+        # token_budget * 4 formula.
+        per_item_output = token_budget // max_batch_size
+        pooling_k = getattr(self.vision_tower.config, "pooling_kernel_size", 3)
+        default_out = getattr(self.vision_tower.config, "default_output_length", 280)
+        max_real_patches = default_out * pooling_k * pooling_k
+        k = math.ceil(math.sqrt(max_real_patches / per_item_output))
+        per_item_patches = k * k * per_item_output
 
         patch_size = self.vision_tower.config.patch_size
         num_channels = getattr(self.vision_tower.config, "num_channels", 3)
