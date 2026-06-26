@@ -19,8 +19,6 @@ import vllm._custom_ops as ops
 
 HEAD_DIM = 128
 ROTARY_DIM = 64
-NORM_ROPE_ATOL = 1.25e-2
-NORM_ROPE_RTOL = 1e-2
 
 
 def _op_available() -> bool:
@@ -150,8 +148,8 @@ def test_dense_norm_rope(num_tokens, num_heads, num_kv_heads):
         eps,
     ).view(num_tokens, kvsz)
 
-    torch.testing.assert_close(q_out, q_ref, rtol=NORM_ROPE_RTOL, atol=NORM_ROPE_ATOL)
-    torch.testing.assert_close(k_out, k_ref, rtol=NORM_ROPE_RTOL, atol=NORM_ROPE_ATOL)
+    torch.testing.assert_close(q_out, q_ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(k_out, k_ref, rtol=1e-2, atol=1e-2)
     # V is untouched.
     torch.testing.assert_close(v_out, v_in, rtol=0, atol=0)
 
@@ -258,14 +256,10 @@ def test_sparse_full(num_tokens, block_size, kv_cache_dtype):
         ik_orig.view(num_tokens, 1, HEAD_DIM), ik_w, positions, cos_sin, eps
     ).view(num_tokens, HEAD_DIM)
 
-    torch.testing.assert_close(q_out, q_ref, rtol=NORM_ROPE_RTOL, atol=NORM_ROPE_ATOL)
-    torch.testing.assert_close(k_out, k_ref, rtol=NORM_ROPE_RTOL, atol=NORM_ROPE_ATOL)
-    torch.testing.assert_close(
-        index_q, iq_ref, rtol=NORM_ROPE_RTOL, atol=NORM_ROPE_ATOL
-    )
-    torch.testing.assert_close(
-        index_k, ik_ref, rtol=NORM_ROPE_RTOL, atol=NORM_ROPE_ATOL
-    )
+    torch.testing.assert_close(q_out, q_ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(k_out, k_ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(index_q, iq_ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(index_k, ik_ref, rtol=1e-2, atol=1e-2)
 
     # ── Cache inserts. ──
     # Main cache layout is [num_blocks, num_kv_heads, block_size, 2*head_dim];
@@ -302,8 +296,8 @@ def test_sparse_full(num_tokens, block_size, kv_cache_dtype):
             torch.testing.assert_close(
                 kv_cache[b, :, pos, :HEAD_DIM],
                 k_ref_h[t],
-                rtol=NORM_ROPE_RTOL,
-                atol=NORM_ROPE_ATOL,
+                rtol=1e-2,
+                atol=1e-2,
             )
             torch.testing.assert_close(
                 kv_cache[b, :, pos, HEAD_DIM:], v_ref_h[t], rtol=0, atol=0
