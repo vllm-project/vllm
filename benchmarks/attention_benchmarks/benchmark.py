@@ -75,7 +75,11 @@ def run_mla_benchmark(config: BenchmarkConfig, **kwargs) -> BenchmarkResult:
     from mla_runner import run_mla_benchmark as run_mla
 
     return run_mla(
-        config.backend, config, prefill_backend=config.prefill_backend, **kwargs
+        config.backend,
+        config,
+        prefill_backend=config.prefill_backend,
+        sparse_mla_force_mqa=config.sparse_mla_force_mqa,
+        **kwargs,
     )
 
 
@@ -683,6 +687,9 @@ def main():
             args.num_q_heads = model.get("num_q_heads", args.num_q_heads)
             args.num_kv_heads = model.get("num_kv_heads", args.num_kv_heads)
             args.block_size = model.get("block_size", args.block_size)
+            args.max_model_len = model.get(
+                "max_model_len", getattr(args, "max_model_len", None)
+            )
             # MLA-specific dimensions
             args.kv_lora_rank = model.get("kv_lora_rank", args.kv_lora_rank)
             args.qk_nope_head_dim = model.get("qk_nope_head_dim", args.qk_nope_head_dim)
@@ -701,6 +708,15 @@ def main():
             args.cuda_graphs = yaml_config["cuda_graphs"]
         if "ncu_profile" in yaml_config:
             args.ncu_profile = yaml_config["ncu_profile"]
+        args.sparse_mla_topk_pattern = yaml_config.get(
+            "sparse_mla_topk_pattern", "random"
+        )
+        args.sparse_mla_dense_mha_max_seq_len = yaml_config.get(
+            "sparse_mla_dense_mha_max_seq_len", None
+        )
+        args.sparse_mla_masked_mha_max_seq_len = yaml_config.get(
+            "sparse_mla_masked_mha_max_seq_len", None
+        )
 
         # Parameter sweep configuration
         if "parameter_sweep" in yaml_config:
@@ -842,8 +858,6 @@ def main():
                         num_kv_heads=args.num_kv_heads,
                         block_size=args.block_size,
                         device=args.device,
-                        repeats=args.repeats,
-                        warmup_iters=args.warmup_iters,
                         profile_memory=args.profile_memory,
                         kv_cache_dtype=args.kv_cache_dtype,
                         use_cuda_graphs=args.cuda_graphs,
@@ -1062,6 +1076,105 @@ def main():
                 console.print(
                     f"\n  [yellow]Prefill always faster for batch_size={bs}[/]"
                 )
+
+    # Handle MHA vs MQA comparison mode for sparse MLA
+    elif hasattr(args, "mode") and args.mode == "mha_vs_mqa":
+        console.print("[yellow]Mode: MHA vs MQA comparison for sparse MLA[/]")
+
+        sparse_mla_topk_pattern = getattr(args, "sparse_mla_topk_pattern", "random")
+        dense_mha_max_seq_len = getattr(args, "sparse_mla_dense_mha_max_seq_len", None)
+        masked_mha_max_seq_len = getattr(
+            args, "sparse_mla_masked_mha_max_seq_len", None
+        )
+        variants = [
+            ("dense_mha", False, "dense"),
+            ("masked_mha", False, "masked"),
+            ("mqa", True, "auto"),
+        ]
+        total = 0
+        for spec in args.batch_specs:
+            q_len = max(request.q_len for request in parse_batch_spec(spec))
+            for variant_label, _, _ in variants:
+                if (
+                    variant_label == "dense_mha"
+                    and dense_mha_max_seq_len is not None
+                    and q_len > dense_mha_max_seq_len
+                ) or (
+                    variant_label == "masked_mha"
+                    and masked_mha_max_seq_len is not None
+                    and q_len > masked_mha_max_seq_len
+                ):
+                    continue
+                total += len(backends)
+
+        with tqdm(total=total, desc="Benchmarking") as pbar:
+            for spec in args.batch_specs:
+                q_len = max(request.q_len for request in parse_batch_spec(spec))
+                for backend in backends:
+                    for variant_label, force_mqa, mha_mode in variants:
+                        if (
+                            variant_label == "dense_mha"
+                            and dense_mha_max_seq_len is not None
+                            and q_len > dense_mha_max_seq_len
+                        ) or (
+                            variant_label == "masked_mha"
+                            and masked_mha_max_seq_len is not None
+                            and q_len > masked_mha_max_seq_len
+                        ):
+                            continue
+                        config = BenchmarkConfig(
+                            backend=f"{backend}_{variant_label}",
+                            batch_spec=spec,
+                            num_layers=args.num_layers,
+                            head_dim=args.head_dim,
+                            num_q_heads=args.num_q_heads,
+                            num_kv_heads=args.num_kv_heads,
+                            block_size=args.block_size,
+                            device=args.device,
+                            max_model_len=getattr(args, "max_model_len", None),
+                            profile_memory=args.profile_memory,
+                            sparse_mla_force_mqa=force_mqa,
+                            sparse_mla_mha_mode=mha_mode,
+                            sparse_mla_dense_mha_max_seq_len=dense_mha_max_seq_len,
+                            sparse_mla_masked_mha_max_seq_len=masked_mha_max_seq_len,
+                            sparse_mla_topk_pattern=sparse_mla_topk_pattern,
+                        )
+
+                        # run_mla_benchmark needs the real backend name
+                        from mla_runner import run_mla_benchmark as run_mla
+
+                        try:
+                            result = run_mla(
+                                backend,
+                                config,
+                                sparse_mla_force_mqa=force_mqa,
+                            )
+                        except Exception as e:
+                            result = BenchmarkResult(
+                                config=config,
+                                mean_time=float("inf"),
+                                median_time=float("inf"),
+                                std_time=0,
+                                min_time=float("inf"),
+                                max_time=float("inf"),
+                                error=str(e),
+                            )
+
+                        all_results.append(result)
+
+                        if not result.success:
+                            console.print(
+                                f"[red]Error {backend}_{variant_label} "
+                                f"{spec}: {result.error}[/]"
+                            )
+
+                        pbar.update(1)
+
+        # Display results with variant labels as separate "backends"
+        console.print("\n[bold green]MHA vs MQA Results:[/]")
+        formatter = ResultsFormatter(console)
+        variant_backends = [f"{b}_{v}" for b in backends for v, _, _ in variants]
+        formatter.print_table(all_results, variant_backends)
 
     # Handle model parameter sweep mode
     elif hasattr(args, "model_parameter_sweep") and args.model_parameter_sweep:

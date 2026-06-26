@@ -208,8 +208,9 @@ def flash_attn_varlen_func(
     cp_world_size=1,
     cp_rank=0,
     cp_tot_seqused_k=None,
-    # FA4 only
+    # FA4 sparse attention
     mask_mod=None,
+    block_sparse_tensors=None,
     aux_tensors=None,
     dynamic_causal: "torch.Tensor | None" = None,
 ):
@@ -293,6 +294,8 @@ def flash_attn_varlen_func(
 
     dummy_cu_seqlens_k = torch.empty_like(cu_seqlens_q)
 
+    _has_mask_mod = mask_mod is not None
+
     if fa_version == 2:
         if (
             scheduler_metadata is not None
@@ -339,6 +342,8 @@ def flash_attn_varlen_func(
             None,
         )
     elif fa_version == 3:
+        if _has_mask_mod:
+            raise NotImplementedError("mask_mod requires FA4")
         assert alibi_slopes is None, "Alibi is not supported in FA3"
         if mask_mod is not None:
             raise NotImplementedError("FA3 does not support mask_mod")
@@ -385,6 +390,15 @@ def flash_attn_varlen_func(
         )
     elif fa_version == 4:
         assert alibi_slopes is None, "Alibi is not supported in FA4"
+        if block_sparse_tensors is not None:
+            assert block_sparse_tensors.full_block_cnt is not None, (
+                "FA4 block_sparse_tensors must materialize empty full_block_cnt "
+                "instead of passing None"
+            )
+            assert block_sparse_tensors.full_block_idx is not None, (
+                "FA4 block_sparse_tensors must materialize empty full_block_idx "
+                "instead of passing None"
+            )
 
         from vllm.vllm_flash_attn.cute.interface import _flash_attn_fwd
 
@@ -409,6 +423,7 @@ def flash_attn_varlen_func(
             out=out,
             learnable_sink=s_aux,
             mask_mod=mask_mod,
+            block_sparse_tensors=block_sparse_tensors,
             aux_tensors=aux_tensors,
             output_scale=output_scale,
         )
