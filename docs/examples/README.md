@@ -9,7 +9,7 @@ vLLM's examples are organized into the following categories:
 - **[`features/`](../../examples/features)** – Demonstrations of individual vLLM features: automatic prefix caching, speculative decoding, LoRA, structured outputs, prompt embedding, pause/resume, batch invariance, KV events, data parallelism, and more.
 - **[`reasoning/`](../../examples/reasoning)** – Examples for reasoning with vLLM.
 - **[`tool_calling/`](../../examples/tool_calling)** – Examples for function/tool calling with vLLM.
-- **[`applications/`](../../examples/applications)** – Application examples such as chatbots and RAG (Retrieval-Augmented Generation).
+- **[`applications/`](../../examples/applications)** – Application examples such as simpler api server, chatbots and RAG (Retrieval-Augmented Generation).
 - **[`rl/`](../../examples/rl)** – Reinforcement learning examples.
 - **[`deployment/`](../../examples/deployment)** – Examples for deploying vLLM in production.
 - **[`ray_serving/`](../../examples/ray_serving)** – Scalable serving using Ray.
