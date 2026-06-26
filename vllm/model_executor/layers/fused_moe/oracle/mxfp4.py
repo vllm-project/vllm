@@ -549,10 +549,21 @@ def select_mxfp4_moe_backend(
         )
 
     if current_platform.is_rocm():
-        backend = Mxfp4MoeBackend.TRITON_UNFUSED
+        # ROCm has no native FP4 compute, so activation-quantized MXFP4
+        # (W4A4/W4A8) degrades to weight-only. On gfx1100 the native HIP
+        # kernel handles that faster than the Triton-unfused fallback.
+        from vllm.model_executor.layers.fused_moe.experts.rdna3_mxfp4_moe import (
+            RDNA3Mxfp4Experts,
+        )
+
+        backend = (
+            Mxfp4MoeBackend.RDNA3_MXFP4
+            if RDNA3Mxfp4Experts._supports_current_device()
+            else Mxfp4MoeBackend.TRITON_UNFUSED
+        )
         logger.info_once(_make_log_backend(backend))
         return _return_or_raise(
-            Mxfp4MoeBackend.TRITON_UNFUSED,
+            backend,
             config,
             kMxfp4Static,
             None,
@@ -754,19 +765,24 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         )
 
     elif mxfp4_backend == Mxfp4MoeBackend.RDNA3_MXFP4:
+        # [E, K/8, N] uint32 + [E, K/32, N] uint8. GPT-OSS stores gate/up
+        # interleaved in a fused tensor (de-interleave so the gate_up output is
+        # contiguous [gate || up]); standard checkpoints with separate
+        # gate_proj/up_proj are already [gate_all, up_all] after _load_w13.
+        from vllm.config import get_current_vllm_config
         from vllm.model_executor.layers.fused_moe.experts.rdna3_mxfp4_moe import (
             repack_experts_rdna3,
         )
 
-        # [E, K/8, N] uint32 + [E, K/32, N] uint8; w13 gate/up de-interleaved so
-        # the gate_up output is contiguous [gate || up].
+        model_type = get_current_vllm_config().model_config.hf_config.model_type
+        deint = model_type == "gpt_oss"
         b_q13, b_s13 = repack_experts_rdna3(
-            w13_weight.data, w13_weight_scale.data, deinterleave=True
+            w13_weight.data, w13_weight_scale.data, deinterleave=deint
         )
         b_q2, b_s2 = repack_experts_rdna3(
             w2_weight.data, w2_weight_scale.data, deinterleave=False
         )
-        if w13_bias is not None:
+        if deint and w13_bias is not None:
             w13_bias = torch.cat(
                 [w13_bias.data[:, ::2], w13_bias.data[:, 1::2]], dim=1
             ).contiguous()

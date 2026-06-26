@@ -17,6 +17,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
     apply_moe_activation,
@@ -206,10 +207,14 @@ class RDNA3Mxfp4Experts(mk.FusedMoEExpertsModular):
         else:
             apply_moe_activation(activation, act_out, w1_out)
 
-        # down GEMM; if there is a per-expert bias we must add it before the
-        # weighted reduction, so reduce in Python; otherwise fuse the reduction
-        # (output_topk) and the topk-weight multiply into the kernel epilogue.
-        if w2_bias is not None:
+        # down GEMM. The kernel can fuse the top-k reduction + weight multiply
+        # into its epilogue (output_topk), but that path produces wrong results
+        # under tensor parallelism (verified: correct at TP1, garbage at TP2 --
+        # the per-rank partial down-proj is later all-reduced by the layer).
+        # A per-expert bias must also be added before the weighted reduction.
+        # In both cases write unreduced rows and reduce in Python instead.
+        unfused = w2_bias is not None or get_tensor_model_parallel_world_size() > 1
+        if unfused:
             w2_out = torch.zeros(total, hidden, dtype=dtype, device=device)
             ops.moe_mxfp4_gemm_rdna3(
                 act_out,
@@ -225,7 +230,8 @@ class RDNA3Mxfp4Experts(mk.FusedMoEExpertsModular):
                 False,
                 0,
             )
-            w2_out = w2_out + w2_bias[flat_experts].to(dtype)
+            if w2_bias is not None:
+                w2_out = w2_out + w2_bias[flat_experts].to(dtype)
             if not apply_router_weight_on_input:
                 w2_out = w2_out * topk_weights.reshape(-1, 1).to(dtype)
             output.copy_(w2_out.view(M, top_k, hidden).sum(dim=1))
