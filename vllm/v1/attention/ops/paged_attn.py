@@ -23,12 +23,10 @@ class PagedAttention:
         x = 16 // kv_cache.element_size()
 
         key_cache, value_cache = kv_cache.split(num_kv_heads, dim=1)
-        key_cache = key_cache.reshape(
+        key_cache = key_cache.view(
             kv_cache.shape[0], num_kv_heads, head_size // x, -1, x
         )
-        value_cache = value_cache.reshape(
-            kv_cache.shape[0], num_kv_heads, head_size, -1
-        )
+        value_cache = value_cache.view(kv_cache.shape[0], num_kv_heads, head_size, -1)
         return key_cache, value_cache
 
     @staticmethod
