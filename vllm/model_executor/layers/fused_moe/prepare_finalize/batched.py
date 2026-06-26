@@ -15,6 +15,42 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 
 
+def bucket_tokens_to_batched(
+    a1: torch.Tensor,
+    topk_ids: torch.Tensor,
+    num_experts: int,
+    num_local_experts: int,
+    rank: int,
+    max_num_tokens: int,
+    b_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pack tokens into a per-expert batched buffer [E_local, max_num_tokens, K]
+    for this rank's expert slice, preserving token order.
+
+    Vectorized: builds the [E_local, T] hit mask and per-expert slot offsets
+    in one shot instead of a per-expert loop.
+    Returns (b_a1, tokens_per_expert) where tokens_per_expert has length
+    num_experts with the first num_local_experts entries filled.
+    """
+    hidden_dim = a1.size(1)
+    b_a1 = torch.zeros(
+        (num_local_experts, max_num_tokens, hidden_dim),
+        dtype=b_dtype,
+        device=a1.device,
+    )
+    tokens_per_expert = torch.zeros(num_experts, dtype=torch.int, device=a1.device)
+
+    first_expert = num_local_experts * rank
+    last_expert = first_expert + num_local_experts
+    local_ids = torch.arange(first_expert, last_expert, device=a1.device).view(-1, 1, 1)
+    hits = (topk_ids.unsqueeze(0) == local_ids).any(dim=2)  # [E_local, T]
+    tokens_per_expert[:num_local_experts] = hits.sum(dim=1).to(torch.int32)
+    slots = hits.to(torch.int32).cumsum(dim=1) - 1  # [E_local, T]
+    e_idx, t_idx = hits.nonzero(as_tuple=True)
+    b_a1[e_idx, slots[e_idx, t_idx]] = a1[t_idx].to(b_dtype)
+    return b_a1, tokens_per_expert
+
+
 class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     """
     A reference prepare/finalize class that reorganizes the tokens into
@@ -79,56 +115,38 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             )
             a1.mul_(topk_weights.to(a1.dtype))
 
-        num_tokens, hidden_dim = a1.size()
-        topk = topk_ids.size(1)
-
-        tokens_per_expert = torch.zeros(num_experts, dtype=torch.int, device=a1.device)
-
+        hidden_dim = a1.size(1)
         num_local_experts = self.num_local_experts
-
-        if quant_config.quant_dtype is None:
-            b_type = a1.dtype
-        else:
-            b_type = quant_config.quant_dtype
-
-        b_a1 = torch.zeros(
-            (num_local_experts, self.max_num_tokens, hidden_dim),
-            dtype=b_type,
-            device=a1.device,
-        )
-
-        if quant_config.is_quantized:
-            scale_shape = quant_config.batched_scale_shape(
-                num_local_experts, self.max_num_tokens, hidden_dim
-            )
-
-            b_a1_scale = torch.empty(scale_shape, dtype=torch.float32, device=a1.device)
-        else:
-            assert quant_config.a1_scale is None
-            b_a1_scale = None
-
-        first_expert = num_local_experts * self.rank
-        last_expert = first_expert + num_local_experts
-
         a1_scale = normalize_scales_shape(quant_config.a1_scale)
 
         if quant_config.quant_dtype is None:
-            # Vectorized dispatch for the unquantized path. Equivalent to the
-            # per-expert masked gather below, but it computes the [E, T] hit
-            # mask and per-expert slot offsets in one shot, doing a single
-            # device sync (nonzero) instead of one per local expert. The
-            # per-expert Python loop is launch-bound and dominates latency for
-            # decode (many small/empty experts), so this is a large speedup.
-            local_ids = torch.arange(first_expert, last_expert, device=a1.device).view(
-                -1, 1, 1
+            assert quant_config.a1_scale is None
+            b_a1, tokens_per_expert = bucket_tokens_to_batched(
+                a1,
+                topk_ids,
+                num_experts,
+                num_local_experts,
+                self.rank,
+                self.max_num_tokens,
+                a1.dtype,
             )
-            hits = (topk_ids.unsqueeze(0) == local_ids).any(dim=2)  # [E_local, T]
-            tokens_per_expert[:num_local_experts] = hits.sum(dim=1).to(torch.int32)
-            # slot of each token within its expert batch, preserving token order
-            slots = hits.to(torch.int32).cumsum(dim=1) - 1  # [E_local, T]
-            e_idx, t_idx = hits.nonzero(as_tuple=True)
-            b_a1[e_idx, slots[e_idx, t_idx]] = a1[t_idx].to(b_type)
+            b_a1_scale = None
         else:
+            b_a1 = torch.zeros(
+                (num_local_experts, self.max_num_tokens, hidden_dim),
+                dtype=quant_config.quant_dtype,
+                device=a1.device,
+            )
+            tokens_per_expert = torch.zeros(
+                num_experts, dtype=torch.int, device=a1.device
+            )
+            scale_shape = quant_config.batched_scale_shape(
+                num_local_experts, self.max_num_tokens, hidden_dim
+            )
+            b_a1_scale = torch.empty(scale_shape, dtype=torch.float32, device=a1.device)
+
+            first_expert = num_local_experts * self.rank
+            last_expert = first_expert + num_local_experts
             for expert_id in range(first_expert, last_expert):
                 topks = torch.any(topk_ids == expert_id, dim=1).flatten()
                 rows = torch.count_nonzero(topks.flatten())

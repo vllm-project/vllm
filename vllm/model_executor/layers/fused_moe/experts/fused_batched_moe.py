@@ -496,8 +496,8 @@ def invoke_moe_batched_triton_kernel(
         stride_asm = 0
         stride_ask = 0
 
-    # VLLM_TRITON_MOE_USE_TD: unset=auto, 1=force on, 0=force off.
-    td_override = envs.VLLM_TRITON_MOE_USE_TD
+    # VLLM_TRITON_USE_TD: unset=auto, 1=force on, 0=force off.
+    td_override = envs.VLLM_TRITON_USE_TD
     use_td = current_platform.is_xpu() if td_override is None else td_override
     use_td = (
         use_td

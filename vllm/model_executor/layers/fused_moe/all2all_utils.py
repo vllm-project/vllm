@@ -20,6 +20,7 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    BatchedAgRsPrepareAndFinalize,
     BatchedPrepareAndFinalize,
     make_moe_prepare_and_finalize_naive_dp_ep,
     make_moe_prepare_and_finalize_no_dp_ep,
@@ -328,11 +329,32 @@ def maybe_make_prepare_finalize(
         )
 
     elif moe.use_ag_rs_all2all_kernels and allow_new_interface:
-        prepare_finalize = make_moe_prepare_and_finalize_naive_dp_ep(
-            use_monolithic=use_monolithic,
-            is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
-            num_dispatchers=all2all_manager.world_size,
-        )
+        # XPU opt-in: keep the AgRs cross-rank comm but emit the batched
+        # activation format so the BatchedTritonExperts (moe_mmk TD) kernel
+        # runs under EP. The all-gathered batch is replicated per rank, so the
+        # batched buffer is sized to the global token count.
+        if (
+            current_platform.is_xpu()
+            and envs.VLLM_XPU_MOE_USE_BATCHED_TRITON
+            and not use_monolithic
+        ):
+            prepare_finalize = BatchedAgRsPrepareAndFinalize(
+                max_num_tokens=moe.max_num_tokens * all2all_manager.dp_world_size,
+                num_local_experts=moe.num_local_experts,
+                num_dispatchers=all2all_manager.world_size,
+                rank=moe.moe_parallel_config.ep_rank,
+                is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
+            )
+            logger.info_once(
+                "XPU MoE EP: using BatchedAgRsPrepareAndFinalize "
+                "(batched activation format for moe_mmk TD)."
+            )
+        else:
+            prepare_finalize = make_moe_prepare_and_finalize_naive_dp_ep(
+                use_monolithic=use_monolithic,
+                is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
+                num_dispatchers=all2all_manager.world_size,
+            )
 
     elif moe.use_nixl_ep_kernels:
         assert quant_config is not None

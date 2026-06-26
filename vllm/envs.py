@@ -89,7 +89,6 @@ if TYPE_CHECKING:
     VLLM_BATCH_INVARIANT: bool = False
     VLLM_TRITON_ATTN_USE_TD: bool | None = None
     VLLM_GPU_SYNC_CHECK: Literal["warn", "error"] | None = None
-    VLLM_TRITON_MOE_USE_TD: bool | None = None
     VLLM_XPU_MOE_USE_BATCHED_TRITON: bool = False
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
@@ -594,11 +593,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Unset disables the check. See `torch.cuda.set_sync_debug_mode`.
     "VLLM_GPU_SYNC_CHECK": env_with_choices(
         "VLLM_GPU_SYNC_CHECK", None, ["warn", "error"]
-    ),
-    # TD operand loads in the batched MoE GEMM (moe_mmk).
-    # Unset = auto-on XPU; 1 = force on; 0 = force off.
-    "VLLM_TRITON_MOE_USE_TD": lambda: {"1": True, "0": False}.get(
-        os.getenv("VLLM_TRITON_MOE_USE_TD", "").strip()
     ),
     # Opt-in: route unquantized XPU MoE through BatchedTritonExperts (the
     # moe_mmk TD kernel) using the no-comms reference batched prepare/finalize.
