@@ -128,6 +128,12 @@ pub fn lower_sampling_params(
         prompt_len,
     )?;
     let min_tokens = min_tokens.unwrap_or(0);
+    if min_tokens > max_tokens {
+        return Err(Error::MinTokensExceedsMaxTokens {
+            min_tokens,
+            max_tokens,
+        });
+    }
     let thinking_token_budget = normalize_thinking_token_budget(thinking_token_budget)?;
     let frequency_penalty = frequency_penalty.unwrap_or(0.0);
     let presence_penalty = presence_penalty.unwrap_or(0.0);
@@ -411,6 +417,27 @@ mod tests {
         assert!(matches!(
             lower(Some(-2)),
             Err(Error::InvalidThinkingTokenBudget)
+        ));
+    }
+
+    #[test]
+    fn lower_sampling_params_rejects_min_tokens_above_resolved_max_tokens() {
+        let error = lower_sampling_params_with_limits(
+            SamplingParams {
+                max_tokens: Some(4),
+                min_tokens: Some(5),
+                ..SamplingParams::default()
+            },
+            sample_sampling_limits(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::MinTokensExceedsMaxTokens {
+                min_tokens: 5,
+                max_tokens: 4,
+            }
         ));
     }
 
