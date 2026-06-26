@@ -24,14 +24,13 @@ float8_info = torch.finfo(current_platform.fp8_dtype())
 def has_native_kv_cache_layout(
     key_cache: torch.Tensor,
     value_cache: torch.Tensor,
-    *,
-    require_packed_blocks: bool = False,
 ) -> bool:
-    """Return whether K/V cache views match native ROCm paged attention."""
-    if key_cache.dim() != 5 or value_cache.dim() != 4:
-        return False
-    if not require_packed_blocks:
-        return True
+    """Return whether KV cache blocks can use the native ROCm pairing.
+
+    The native reshape_and_cache writer assumes packed blocks. If cache update
+    needs reshape_and_cache_flash for a stride-padded hybrid layout, decode
+    should use the matching Triton path too.
+    """
     return (
         key_cache.stride(0) == key_cache.shape[1:].numel()
         and value_cache.stride(0) == value_cache.shape[1:].numel()
@@ -364,7 +363,6 @@ def chunked_prefill_paged_decode(
         sinks,
     )
     has_native_layout = has_native_kv_cache_layout(key_cache, value_cache)
-
     # Force Triton for non-standard blocks like Qwen3's 544 and for
     # stride-padded hybrid layouts. The latter use reshape_and_cache_flash
     # during cache update, so keep decode on the matching stride-aware path.

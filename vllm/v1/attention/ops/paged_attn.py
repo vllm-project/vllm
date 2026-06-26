@@ -19,14 +19,13 @@ class PagedAttention:
         num_kv_heads: int,
         head_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        assert kv_cache.dim() == 4
         x = 16 // kv_cache.element_size()
+        num_blocks = kv_cache.shape[1]
 
-        key_cache, value_cache = kv_cache.split(num_kv_heads, dim=1)
-        key_cache = key_cache.view(
-            kv_cache.shape[0], num_kv_heads, head_size // x, -1, x
-        )
-        value_cache = value_cache.view(kv_cache.shape[0], num_kv_heads, head_size, -1)
+        key_cache = kv_cache[0]
+        key_cache = key_cache.view(num_blocks, num_kv_heads, head_size // x, -1, x)
+        value_cache = kv_cache[1]
+        value_cache = value_cache.view(num_blocks, num_kv_heads, head_size, -1)
         return key_cache, value_cache
 
     @staticmethod

@@ -69,7 +69,7 @@ def _fwd_kernel(
     stride_k_cache_bs,
     stride_k_cache_h,
     stride_k_cache_d,
-    stride_k_cache_bl,
+    stride_k_cache_bl: tl.constexpr,
     stride_k_cache_x,
     stride_v_cache_bs,
     stride_v_cache_h,
@@ -472,12 +472,11 @@ def _fwd_kernel_alibi(
             mask=(start_n + offs_n) < cur_batch_ctx_len,
             other=0,
         ).to(tl.int64)
-        internal_offsets = (start_n + offs_n) % block_size
         off_k = (
             bn[None, :] * stride_k_cache_bs
             + cur_kv_head * stride_k_cache_h
             + (offs_d[:, None] // x) * stride_k_cache_d
-            + internal_offsets[None, :] * stride_k_cache_bl
+            + ((start_n + offs_n[None, :]) % block_size) * stride_k_cache_bl
             + (offs_d[:, None] % x) * stride_k_cache_x
         )
         off_v = (
@@ -778,11 +777,11 @@ def context_attention_fwd(
             k_cache.stride(1),
             k_cache.stride(2),
             k_cache.stride(3),
-            k_cache.stride(4),
+            k_cache.stride(4),  # [num_blocks, num_kv_heads, head_size/x, block_size, x]
             v_cache.stride(0),
             v_cache.stride(1),
             v_cache.stride(2),
-            v_cache.stride(3),
+            v_cache.stride(3),  # [num_blocks, num_kv_heads, head_size, block_size]
             num_queries_per_kv=num_queries_per_kv,
             IN_PRECISION=IN_PRECISION,
             BLOCK_M=BLOCK,

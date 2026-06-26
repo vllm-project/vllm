@@ -47,15 +47,11 @@ def make_cos_sin_cache(max_pos, rotary_dim, base, dtype, device):
 
 def gemma_rmsnorm(x, weight, eps):
     """x: [..., 128]; weight: [128]. Returns original dtype."""
-    return gemma_rmsnorm_float(x, weight, eps).to(x.dtype)
-
-
-def gemma_rmsnorm_float(x, weight, eps):
-    """x: [..., 128]; weight: [128]. Returns fp32."""
     xf = x.float()
     var = xf.pow(2).mean(dim=-1, keepdim=True)
     out = xf * torch.rsqrt(var + eps)
-    return out * (1.0 + weight.float())
+    out = out * (1.0 + weight.float())
+    return out.to(x.dtype)
 
 
 def apply_rope_neox_partial(x, positions, cos_sin_cache, rotary_dim):
@@ -65,13 +61,6 @@ def apply_rope_neox_partial(x, positions, cos_sin_cache, rotary_dim):
     cos_sin_cache: [max_pos, rotary_dim] (cos||sin), read as float (matches the
     kernel, which loads the bf16 cache and converts to fp32).
     """
-    return apply_rope_neox_partial_float(x, positions, cos_sin_cache, rotary_dim).to(
-        x.dtype
-    )
-
-
-def apply_rope_neox_partial_float(x, positions, cos_sin_cache, rotary_dim):
-    """NeoX-style RoPE on the leading rotary_dim dims; rest pass through as fp32."""
     half = rotary_dim // 2
     cs = cos_sin_cache[positions].float()  # [num_tokens, rotary_dim]
     cos = cs[..., :half].unsqueeze(1)  # [nt, 1, half]
@@ -82,10 +71,10 @@ def apply_rope_neox_partial_float(x, positions, cos_sin_cache, rotary_dim):
     x2 = rot[..., half:]
     o1 = x1 * cos - x2 * sin
     o2 = x2 * cos + x1 * sin
-    out = x.float().clone()
+    out = x.clone()
     out[..., :half] = o1
     out[..., half:rotary_dim] = o2
-    return out
+    return out.to(x.dtype)
 
 
 def norm_rope_ref(x, weight, positions, cos_sin_cache, eps):
@@ -93,12 +82,6 @@ def norm_rope_ref(x, weight, positions, cos_sin_cache, eps):
     normed = gemma_rmsnorm(x, weight, eps)
     roped = apply_rope_neox_partial(normed, positions, cos_sin_cache, ROTARY_DIM)
     return roped
-
-
-def norm_rope_ref_float(x, weight, positions, cos_sin_cache, eps):
-    """[nt, nheads, 128] -> Gemma norm + neox partial rope, kept in fp32."""
-    normed = gemma_rmsnorm_float(x, weight, eps)
-    return apply_rope_neox_partial_float(normed, positions, cos_sin_cache, ROTARY_DIM)
 
 
 # ── Test 1: dense mode (norm+rope only, no index, no insert) ─────────────────
@@ -188,9 +171,10 @@ def test_sparse_full(num_tokens, block_size, kv_cache_dtype):
     kv_cache_storage_dtype = torch.uint8 if kv_cache_dtype == "fp8" else dtype
     kv_cache = torch.zeros(
         num_blocks,
-        num_kv_heads,
+        2,
         block_size,
-        2 * HEAD_DIM,
+        num_kv_heads,
+        HEAD_DIM,
         dtype=kv_cache_storage_dtype,
         device=device,
     )
@@ -262,27 +246,18 @@ def test_sparse_full(num_tokens, block_size, kv_cache_dtype):
     torch.testing.assert_close(index_k, ik_ref, rtol=1e-2, atol=1e-2)
 
     # ── Cache inserts. ──
-    # Main cache layout is [num_blocks, num_kv_heads, block_size, 2*head_dim];
-    # index cache is [nb, bs, head_dim].
+    # Main cache layout is [num_blocks, 2, block_size, num_kv_heads, head_dim]
+    # (the K/V axis sits *before* block_size); index cache is [nb, bs, head_dim].
     k_ref_h = k_ref.view(num_tokens, num_kv_heads, HEAD_DIM)
     v_ref_h = v_in.view(num_tokens, num_kv_heads, HEAD_DIM)  # v is raw (no norm/rope)
     if kv_cache_dtype == "fp8":
         expected_kv_cache = torch.zeros_like(kv_cache)
-        expected_key_cache, expected_value_cache = expected_kv_cache.transpose(
-            1, 2
-        ).split(HEAD_DIM, dim=-1)
         scale = torch.ones((), device=device)
         ops.reshape_and_cache_flash(
-            norm_rope_ref_float(
-                k_in.view(num_tokens, num_kv_heads, HEAD_DIM),
-                k_w,
-                positions,
-                cos_sin,
-                eps,
-            ),
-            v_in.view(num_tokens, num_kv_heads, HEAD_DIM).float(),
-            expected_key_cache,
-            expected_value_cache,
+            k_out.view(num_tokens, num_kv_heads, HEAD_DIM),
+            v_out.view(num_tokens, num_kv_heads, HEAD_DIM),
+            expected_kv_cache[:, 0],
+            expected_kv_cache[:, 1],
             slot_mapping,
             kv_cache_dtype,
             scale,
@@ -294,14 +269,9 @@ def test_sparse_full(num_tokens, block_size, kv_cache_dtype):
             s = slot_mapping[t].item()
             b, pos = s // block_size, s % block_size
             torch.testing.assert_close(
-                kv_cache[b, :, pos, :HEAD_DIM],
-                k_ref_h[t],
-                rtol=1e-2,
-                atol=1e-2,
+                kv_cache[b, 0, pos], k_ref_h[t], rtol=1e-2, atol=1e-2
             )
-            torch.testing.assert_close(
-                kv_cache[b, :, pos, HEAD_DIM:], v_ref_h[t], rtol=0, atol=0
-            )
+            torch.testing.assert_close(kv_cache[b, 1, pos], v_ref_h[t], rtol=0, atol=0)
 
     expected_index_cache = torch.zeros_like(index_cache).view(-1, HEAD_DIM)
     expected_index_cache[index_slot_mapping] = index_k
