@@ -47,24 +47,25 @@ except Exception:
     _AR_OP = None
 
 
-# Route AR through the opaque op only when DBO is configured (resolved once when
-# the engine config is available; a compile-time constant for that engine).
-_USE_DBO_AR_OP: bool | None = None
+# Route AR through the opaque op only when DBO is configured. Resolved once at
+# worker/model-runner init (while the engine config is in scope) and cached; it
+# must NOT be read from get_current_vllm_config_or_none() at forward/compile
+# time, where the config global is unset and would gate this to False.
+_USE_DBO_AR_OP: bool = False
 
 
-def _use_dbo_all_reduce_op() -> bool:
+def configure_dbo_all_reduce(use_ubatching: bool) -> None:
+    """Set whether TP all-reduce routes through the opaque DBO op.
+
+    Call this during worker/model-runner initialization (config in scope),
+    before model compilation/warmup runs the first forward.
+    """
     global _USE_DBO_AR_OP
-    if _USE_DBO_AR_OP is None and _AR_OP is not None:
-        from vllm.config import get_current_vllm_config_or_none
-
-        cfg = get_current_vllm_config_or_none()
-        if cfg is not None:
-            _USE_DBO_AR_OP = cfg.parallel_config.use_ubatching
-    return bool(_USE_DBO_AR_OP)
+    _USE_DBO_AR_OP = bool(use_ubatching) and _AR_OP is not None
 
 
 def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
-    if _use_dbo_all_reduce_op():
+    if _USE_DBO_AR_OP:
         return _AR_OP(input_)
     return get_tp_group().all_reduce(input_)
 

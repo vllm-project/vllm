@@ -445,6 +445,13 @@ class GPUModelRunner(
         self.device = device
         self.dtype = self.model_config.dtype
 
+        # Resolve the DBO all-reduce routing now, while the engine config is in
+        # scope. The config global is unset at forward/compile time, so this
+        # cannot be deferred to the first tensor_model_parallel_all_reduce call.
+        from vllm.distributed.communication_op import configure_dbo_all_reduce
+
+        configure_dbo_all_reduce(parallel_config.use_ubatching)
+
         self.kv_cache_dtype = kv_cache_dtype_str_to_dtype(
             cache_config.cache_dtype, self.model_config
         )
