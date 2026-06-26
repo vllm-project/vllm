@@ -31,7 +31,7 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.system_utils import set_ulimit
 from vllm.version import __version__ as VLLM_VERSION
 
-logger = init_logger("vllm.entrypoints.api_server")
+logger = init_logger("api_server")
 
 app = FastAPI()
 engine = None
