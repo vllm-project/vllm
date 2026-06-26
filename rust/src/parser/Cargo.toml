@@ -74,5 +74,10 @@ name = "gemma4"
 harness = false
 required-features = ["test-util"]
 
+[[bench]]
+name = "granite4"
+harness = false
+required-features = ["test-util"]
+
 [lints]
 workspace = true
