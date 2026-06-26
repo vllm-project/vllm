@@ -344,7 +344,9 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
         topk = self.topk_indices_buffer.shape[1]
 
         # Pure prefill: cu_seqlens_q == cu_seqlens_k, max_seqlen_q == max_seqlen_k
-        if max_seq_len <= topk:
+        force_dense_mha = getattr(self, "_sparse_mla_force_dense_mha", False)
+        force_masked_mha = getattr(self, "_sparse_mla_force_masked_mha", False)
+        if force_dense_mha or (max_seq_len <= topk and not force_masked_mha):
             attn_out, _ = flash_attn_varlen_func(
                 q=q,
                 k=k,
@@ -386,12 +388,24 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
                 max_seq_len,
                 q.device,
             )
+            # FA4 varlen sparsity validates against q_stage * tile_m.
+            sparse_tile_m = 128 if max_seq_len <= 128 else 256
+            mask_words_per_tile = 128 // 32
+            num_mask_n_blocks = triton.cdiv(max_seq_len, 128)
+            padded_mask_words = num_mask_n_blocks * mask_words_per_tile
+            if dense_mask.shape[2] < padded_mask_words:
+                dense_mask = torch.nn.functional.pad(
+                    dense_mask, (0, padded_mask_words - dense_mask.shape[2])
+                )
 
             block_sparse_tensors = dense_mask_to_block_sparse(
                 dense_mask,
                 max_seq_len,
                 max_seq_len,
-                tile_m=256,
+                seq_lens_q=q_lens,
+                seq_lens_k=q_lens,
+                num_heads=self.num_heads,
+                tile_m=sparse_tile_m,
                 tile_n=128,
             )
 

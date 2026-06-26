@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Sequence
+
 import cutlass
 import cutlass.cute as cute
 import torch
@@ -24,19 +26,24 @@ def dense_mask_mod(
     aux_tensors: list,
 ) -> cute.TensorSSA:
     dense_mask = aux_tensors[0]
-    word_idx = kv_idx[0] >> 5
-    bit_idx = kv_idx[0] & 31
-    word = utils.scalar_to_ssa(dense_mask[batch[0], q_idx[0], word_idx], cutlass.Int32)
-    one = utils.scalar_to_ssa(1, cutlass.Int32)
+    batch_idx = utils.ssa_to_scalar(batch)
+    q_idx = utils.ssa_to_scalar(q_idx)
+    kv_idx = utils.ssa_to_scalar(kv_idx)
+    word_idx = kv_idx >> 5
+    bit_idx = kv_idx & 31
+    word = dense_mask[batch_idx, q_idx, word_idx]
+    one = cutlass.Int32(1)
     bit = (word >> bit_idx) & one
-    zero = utils.scalar_to_ssa(0, cutlass.Int32)
-    return bit != zero
+    return utils.scalar_to_ssa(bit != 0, cutlass.Boolean)
 
 
 def dense_mask_to_block_sparse(
     dense_mask: torch.Tensor,
     max_seqlen_q: int,
     max_seqlen_k: int,
+    seq_lens_q: Sequence[int] | None = None,
+    seq_lens_k: Sequence[int] | None = None,
+    num_heads: int = 1,
     tile_m: int = 128,
     tile_n: int = 128,
 ) -> BlockSparseTensorsTorch:
@@ -65,13 +72,122 @@ def dense_mask_to_block_sparse(
         words_per_tile,
     )
     tile_active = (dense_mask != 0).any(dim=4).any(dim=2)
+    tile_full = (dense_mask == -1).all(dim=4).all(dim=2)
+    tile_partial = tile_active & ~tile_full
 
-    mask_block_cnt = tile_active.sum(dim=2).unsqueeze(1).to(torch.int32)
-    sort_keys = (~tile_active).to(torch.int32)
+    if seq_lens_q is not None:
+        if seq_lens_k is None:
+            seq_lens_k = seq_lens_q
+        assert len(seq_lens_q) == batch_size
+        assert len(seq_lens_k) == batch_size
+
+        num_m_blocks_per_seq = [_ceildiv(seq_len, tile_m) for seq_len in seq_lens_q]
+        num_n_blocks_per_seq = [_ceildiv(seq_len, tile_n) for seq_len in seq_lens_k]
+        if len(set(num_m_blocks_per_seq)) == 1 and len(set(num_n_blocks_per_seq)) == 1:
+            # Varlen FA expects packed 2D metadata, but equal block counts can
+            # be packed by flattening the rectangular batch-major layout.
+            num_m_blocks_b = num_m_blocks_per_seq[0]
+            num_n_blocks_b = num_n_blocks_per_seq[0]
+            partial = tile_partial[:, :num_m_blocks_b, :num_n_blocks_b]
+            full = tile_full[:, :num_m_blocks_b, :num_n_blocks_b]
+
+            mask_block_cnt = partial.sum(dim=2).reshape(1, -1).to(torch.int32)
+            sort_keys = (~partial).to(torch.int32)
+            mask_block_idx = (
+                sort_keys.argsort(dim=2, stable=True).reshape(1, -1).to(torch.int32)
+            )
+            full_block_cnt = full.sum(dim=2).reshape(1, -1).to(torch.int32)
+            sort_keys = (~full).to(torch.int32)
+            full_block_idx = (
+                sort_keys.argsort(dim=2, stable=True).reshape(1, -1).to(torch.int32)
+            )
+            batch_offsets = torch.arange(
+                batch_size + 1, dtype=torch.int32, device=dense_mask.device
+            )
+
+            return BlockSparseTensorsTorch(
+                mask_block_cnt=mask_block_cnt,
+                mask_block_idx=mask_block_idx,
+                full_block_cnt=full_block_cnt,
+                full_block_idx=full_block_idx,
+                cu_total_m_blocks=batch_offsets * num_m_blocks_b,
+                cu_block_idx_offsets=(batch_offsets * num_m_blocks_b * num_n_blocks_b),
+                block_size=(tile_m, tile_n),
+            )
+
+        cu_total_m_blocks = [0]
+        cu_block_idx_offsets = [0]
+        total_m_blocks = sum(num_m_blocks_per_seq)
+        total_block_idx = sum(
+            num_m_blocks * num_n_blocks
+            for num_m_blocks, num_n_blocks in zip(
+                num_m_blocks_per_seq, num_n_blocks_per_seq
+            )
+        )
+        mask_block_cnt = torch.empty(
+            (1, total_m_blocks), dtype=torch.int32, device=dense_mask.device
+        )
+        mask_block_idx = torch.empty(
+            (1, total_block_idx), dtype=torch.int32, device=dense_mask.device
+        )
+        full_block_cnt = torch.empty_like(mask_block_cnt)
+        full_block_idx = torch.empty_like(mask_block_idx)
+
+        # Ragged varlen metadata has different rows widths per request, so each
+        # request must be compacted before concatenating into FA's packed layout.
+        m_block_offset = 0
+        block_idx_offset = 0
+        for b, (num_m_blocks_b, num_n_blocks_b) in enumerate(
+            zip(num_m_blocks_per_seq, num_n_blocks_per_seq)
+        ):
+            partial_b = tile_partial[b, :num_m_blocks_b, :num_n_blocks_b]
+            full_b = tile_full[b, :num_m_blocks_b, :num_n_blocks_b]
+            next_m_block_offset = m_block_offset + num_m_blocks_b
+            next_block_idx_offset = block_idx_offset + num_m_blocks_b * num_n_blocks_b
+
+            mask_block_cnt[0, m_block_offset:next_m_block_offset] = partial_b.sum(
+                dim=1
+            ).to(torch.int32)
+            sort_keys = (~partial_b).to(torch.int32)
+            mask_block_idx[0, block_idx_offset:next_block_idx_offset] = (
+                sort_keys.argsort(dim=1, stable=True).to(torch.int32).flatten()
+            )
+            full_block_cnt[0, m_block_offset:next_m_block_offset] = full_b.sum(
+                dim=1
+            ).to(torch.int32)
+            sort_keys = (~full_b).to(torch.int32)
+            full_block_idx[0, block_idx_offset:next_block_idx_offset] = (
+                sort_keys.argsort(dim=1, stable=True).to(torch.int32).flatten()
+            )
+            cu_total_m_blocks.append(cu_total_m_blocks[-1] + num_m_blocks_b)
+            cu_block_idx_offsets.append(
+                cu_block_idx_offsets[-1] + num_m_blocks_b * num_n_blocks_b
+            )
+            m_block_offset = next_m_block_offset
+            block_idx_offset = next_block_idx_offset
+
+        return BlockSparseTensorsTorch(
+            mask_block_cnt=mask_block_cnt,
+            mask_block_idx=mask_block_idx,
+            full_block_cnt=full_block_cnt,
+            full_block_idx=full_block_idx,
+            cu_total_m_blocks=torch.tensor(
+                cu_total_m_blocks, dtype=torch.int32, device=dense_mask.device
+            ),
+            cu_block_idx_offsets=torch.tensor(
+                cu_block_idx_offsets, dtype=torch.int32, device=dense_mask.device
+            ),
+            block_size=(tile_m, tile_n),
+        )
+
+    mask_block_cnt = tile_partial.sum(dim=2).unsqueeze(1).to(torch.int32)
+    sort_keys = (~tile_partial).to(torch.int32)
     mask_block_idx = sort_keys.argsort(dim=2, stable=True).to(torch.int32)
     mask_block_idx = mask_block_idx.unsqueeze(1)
-    full_block_cnt = torch.zeros_like(mask_block_cnt)
-    full_block_idx = torch.empty_like(mask_block_idx)
+    full_block_cnt = tile_full.sum(dim=2).unsqueeze(1).to(torch.int32)
+    sort_keys = (~tile_full).to(torch.int32)
+    full_block_idx = sort_keys.argsort(dim=2, stable=True).to(torch.int32)
+    full_block_idx = full_block_idx.unsqueeze(1)
 
     return BlockSparseTensorsTorch(
         mask_block_cnt=mask_block_cnt,
