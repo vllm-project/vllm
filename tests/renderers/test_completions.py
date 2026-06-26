@@ -79,6 +79,11 @@ class DummyTokenizer:
 
         return list(range(in_length))
 
+    def __call__(self, text: str, **kwargs):
+        # BaseRenderer._tokenize_prompt calls the tokenizer via __call__ (to
+        # unify the output type), so mirror a real tokenizer's BatchEncoding.
+        return {"input_ids": self.encode(text, **kwargs)}
+
 
 def _build_renderer(
     model_config: MockModelConfig,
