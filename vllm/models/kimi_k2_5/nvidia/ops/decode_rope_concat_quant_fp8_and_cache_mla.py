@@ -30,6 +30,32 @@ def decode_rope_concat_quant_fp8_and_cache_mla(
     kv_cache_dtype: str,
     kv_scale: torch.Tensor,
 ) -> torch.Tensor:
+    """
+    Write the already-RoPE'd latent KV into the paged FP8 cache, and build the
+    FP8 decode query by applying RoPE to the query, concatenating it with the
+    absorbed query, and quantizing.
+
+    All quantization is per-tensor FP8 (e4m3): KV by kv_scale, query by
+    q_scale.
+
+    The underlying kernel grid is linearized and divided into two regions of
+    blocks:
+     - [0, Sp * (kv_cache_block_factor + 1)): KV cache write, with
+       (kv_cache_block_factor + 1) blocks per KV token. Tokens whose slot is
+       negative (padding) are skipped. Each thread writes one element:
+         - split 0: the pe_dim already-RoPE'd K values (k_pe); first pe_dim
+           threads active.
+         - splits 1 .. kv_cache_block_factor: one kv_lora_rank /
+           kv_cache_block_factor chunk of the latent KV (kv_c).
+     - [Sp * (kv_cache_block_factor + 1), end): decode query, with
+       (q_lora_dim // 256 + 1) blocks per (token, head). For each:
+         - block_kind 0 .. q_lora_dim // 256 - 1: quantize one 256-value
+           tile of the absorbed no-RoPE query (ql_nope); each thread handles
+           two values.
+         - the last block_kind: RoPE the pe_dim query (q_pe) and quantize it
+           into the tail of the returned output; only the first pe_dim // 2
+           threads active, each handling one rotary pair.
+    """
     assert kv_cache_dtype in {"fp8", "fp8_e4m3"}
 
     q_lora_dim = ql_nope.shape[2]
@@ -115,31 +141,6 @@ class DecodeRopeConcatQuantFp8AndCacheMLAKernel:
         slot_mapping: cute.Tensor,  # (Sp,)
         kv_scale: cute.Tensor,  # (1,)
     ):
-        """
-        This kernel writes the (already-RoPE'd) latent KV into the paged FP8
-        cache, and builds the FP8 decode query by applying RoPE to the query,
-        concatenating it with the absorbed query, and quantizing.
-
-        All quantization is per-tensor FP8 (e4m3): KV by kv_scale, query by
-        q_scale.
-
-        The grid is linearized and divided into two regions of blocks:
-         - [0, Sp * (kv_cache_block_factor + 1)): KV cache write, with
-           (kv_cache_block_factor + 1) blocks per KV token. Tokens whose slot is
-           negative (padding) are skipped. Each thread writes one element:
-             - split 0: the pe_dim already-RoPE'd K values (k_pe); first pe_dim
-               threads active.
-             - splits 1 .. kv_cache_block_factor: one kv_lora_rank /
-               kv_cache_block_factor chunk of the latent KV (kv_c).
-         - [Sp * (kv_cache_block_factor + 1), end): decode query, with
-           (q_lora_dim // 256 + 1) blocks per (token, head). For each:
-             - block_kind 0 .. q_lora_dim // 256 - 1: quantize one 256-value
-               tile of the absorbed no-RoPE query (ql_nope); each thread handles
-               two values.
-             - the last block_kind: RoPE the pe_dim query (q_pe) and quantize it
-               into the tail of q_out; only the first pe_dim // 2 threads active,
-               each handling one rotary pair.
-        """
         tid, _, _ = cute.arch.thread_idx()
         linear_block, _, _ = cute.arch.block_idx()
 

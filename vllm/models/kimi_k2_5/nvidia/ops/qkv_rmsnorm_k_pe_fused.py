@@ -26,6 +26,18 @@ def qkv_rmsnorm_k_pe_fused(
     eps_q: float,
     eps_kv: float,
 ) -> None:
+    """
+    Perform RMSNorm of the low-rank Q and KV, as well as RoPE on the part of K
+    subject to RoPE. All updates are in place.
+
+    The underlying kernel is divided into three groups of blocks:
+     - [0, Sp): Calculate Q-side RMSNorm. Each block handles
+       3 * lora_dim_kv values.
+     - [Sp, 2*Sp): Calculate KV-side RMSNorm. Each block handles
+       lora_dim_kv values.
+     - [2*Sp, 3*Sp): RoPE on k_pe. Only the first pe_dim // 2 threads are
+       active, each handling one rotary pair.
+    """
     QKVRMSNormKPeFusedKernel.compile(
         lora_dim_q, lora_dim_kv, pe_dim, float(eps_q), float(eps_kv)
     )(data, positions, k_pe, cos_sin_cache, weights_q, weights_kv)
@@ -58,18 +70,6 @@ class QKVRMSNormKPeFusedKernel:
         weights_q: cute.Tensor,  # (2, lora_dim_q // 2)
         weights_kv: cute.Tensor,  # (2, lora_dim_kv // 2)
     ):
-        """
-        This kernel performs RMSNorm of the low-rank Q and KV, as well as
-        RoPE on the part of K subject to RoPE. All updates are in place.
-
-        This is divided into three groups of blocks:
-         - [0, Sp): Calculate Q-side RMSNorm. Each block handles
-           3 * lora_dim_kv values.
-         - [Sp, 2*Sp): Calculate KV-side RMSNorm. Each block handles
-           lora_dim_kv values.
-         - [2*Sp, 3*Sp): RoPE on k_pe. Only the first pe_dim // 2 threads are
-           active, each handling one rotary pair.
-        """
         nwarps = self.lora_dim_kv // 64
         allocator = cutlass.utils.SmemAllocator()
         sdata = allocator.allocate_tensor(
