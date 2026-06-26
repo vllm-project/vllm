@@ -342,12 +342,12 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         buf.low_latency_query_mask_buffer(DeepEPLLAll2AllManager._mask)
         return DeepEPLLAll2AllManager._mask
 
-    def query_fault(self) -> tuple[torch.Tensor, torch.Tensor]:
+    def query_fault(self) -> torch.Tensor:
         current = self.query_active_mask()
         if DeepEPLLAll2AllManager._last_mask is None:
             DeepEPLLAll2AllManager._last_mask = torch.zeros_like(current)
         has_fault = (current != DeepEPLLAll2AllManager._last_mask).any()
-        return has_fault, current
+        return has_fault
 
 
 @dataclass
@@ -545,14 +545,14 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         state.buffer.query_mask_buffer(NixlEPAll2AllManager._mask)
         return NixlEPAll2AllManager._mask[: state.active_ep_size]
 
-    def query_fault(self) -> tuple[torch.Tensor, torch.Tensor]:
+    def query_fault(self) -> torch.Tensor:
         current = self.query_active_mask()
         last = NixlEPAll2AllManager._last_mask
         if last is None or last.shape != current.shape:
             NixlEPAll2AllManager._last_mask = torch.zeros_like(current)
             last = NixlEPAll2AllManager._last_mask
         has_fault = (current != last).any()
-        return has_fault, current
+        return has_fault
 
 
 class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):

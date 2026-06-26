@@ -107,8 +107,8 @@ class All2AllManagerBase:
     def query_active_mask(self) -> torch.Tensor:
         raise NotImplementedError
 
-    def query_fault(self) -> tuple[torch.Tensor, torch.Tensor]:
-        """Returns (has_fault scalar, current_active_mask)."""
+    def query_fault(self) -> torch.Tensor:
+        """Returns has_fault scalar."""
         raise NotImplementedError
 
     def set_num_sms(self, num_sms: int):

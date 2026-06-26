@@ -284,7 +284,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
                 else None
             )
             if check_ep_fault:
-                has_fault, _ = get_ep_all2all_manager().query_fault()
+                has_fault = get_ep_all2all_manager().query_fault()
                 self._has_fault = has_fault.to("cpu", non_blocking=True)
             self.async_copy_ready_event.record()
 
