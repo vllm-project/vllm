@@ -278,3 +278,99 @@ def test_sparse_full(num_tokens, block_size, kv_cache_dtype):
     torch.testing.assert_close(
         index_cache.view(-1, HEAD_DIM), expected_index_cache, rtol=0, atol=0
     )
+
+
+# ── Test 3: fp8 (e4m3) index outputs ─────────────────────────────────────────
+# The fp8 score path stores index_q and the index-K cache as e4m3 while q/k/v +
+# q_out stay bf16. Asserts: (1) q/k/v/q_out are bit-identical to the bf16 run
+# (the index dtype must not perturb the main branch), and (2) the e4m3 index
+# outputs dequantize close to the bf16 reference.
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability() < (8, 9),
+    reason="e4m3 conversion requires CUDA SM89+.",
+)
+@pytest.mark.parametrize("num_tokens", [1, 7, 64, 513])
+@pytest.mark.parametrize("block_size", [16, 64])
+def test_sparse_full_fp8_index(num_tokens, block_size):
+    torch.manual_seed(1)
+    device, dtype, eps = "cuda", torch.bfloat16, 1e-6
+    base, max_pos = 5_000_000.0, 4096
+    num_heads, num_kv_heads, num_idx_heads = 16, 4, 4
+
+    q_w = torch.randn(HEAD_DIM, dtype=dtype, device=device) * 0.1
+    k_w = torch.randn(HEAD_DIM, dtype=dtype, device=device) * 0.1
+    iq_w = torch.randn(HEAD_DIM, dtype=dtype, device=device) * 0.1
+    ik_w = torch.randn(HEAD_DIM, dtype=dtype, device=device) * 0.1
+    cos_sin = make_cos_sin_cache(max_pos, ROTARY_DIM, base, dtype, device)
+    positions = torch.randint(
+        0, max_pos, (num_tokens,), dtype=torch.int64, device=device
+    )
+
+    qsz, kvsz = num_heads * HEAD_DIM, num_kv_heads * HEAD_DIM
+    iqsz, iksz = num_idx_heads * HEAD_DIM, HEAD_DIM
+    qkv0 = torch.randn(
+        num_tokens, qsz + 2 * kvsz + iqsz + iksz, dtype=dtype, device=device
+    )
+
+    num_blocks = (num_tokens + block_size - 1) // block_size + 1
+    slot_mapping = torch.randperm(
+        num_blocks * block_size, dtype=torch.int64, device=device
+    )[:num_tokens]
+    index_slot_mapping = torch.roll(slot_mapping, shifts=1)
+
+    def run(index_dtype):
+        qkv = qkv0.clone()
+        kv_cache = torch.zeros(
+            num_blocks,
+            2,
+            block_size,
+            num_kv_heads,
+            HEAD_DIM,
+            dtype=dtype,
+            device=device,
+        )
+        index_cache = torch.zeros(
+            num_blocks, block_size, HEAD_DIM, dtype=index_dtype, device=device
+        )
+        q_out = torch.empty(num_tokens, qsz, dtype=dtype, device=device)
+        index_q = torch.empty(num_tokens, iqsz, dtype=index_dtype, device=device)
+        ops.fused_minimax_m3_qknorm_rope_kv_insert(
+            qkv,
+            q_w,
+            k_w,
+            cos_sin,
+            positions,
+            num_heads,
+            num_kv_heads,
+            ROTARY_DIM,
+            eps,
+            iq_w,
+            ik_w,
+            num_idx_heads,
+            slot_mapping,
+            index_slot_mapping,
+            kv_cache,
+            index_cache,
+            block_size,
+            q_out,
+            index_q,
+        )
+        return qkv, kv_cache, index_cache, q_out, index_q
+
+    qkv_bf, kvc_bf, idxc_bf, qo_bf, iq_bf = run(torch.bfloat16)
+    qkv_fp, kvc_fp, idxc_fp, qo_fp, iq_fp = run(torch.float8_e4m3fn)
+
+    assert iq_fp.dtype == torch.float8_e4m3fn
+    assert idxc_fp.dtype == torch.float8_e4m3fn
+
+    # (1) The main branch (q/k/v in qkv, q_out, kv cache) must be bit-identical:
+    # the index output dtype must not perturb anything else.
+    torch.testing.assert_close(qo_fp, qo_bf, rtol=0, atol=0)
+    torch.testing.assert_close(qkv_fp, qkv_bf, rtol=0, atol=0)
+    torch.testing.assert_close(kvc_fp, kvc_bf, rtol=0, atol=0)
+
+    # (2) Dequantized e4m3 index outputs match the bf16 reference within fp8 ulp.
+    torch.testing.assert_close(iq_fp.float(), iq_bf.float(), rtol=0.13, atol=0.05)
+    torch.testing.assert_close(idxc_fp.float(), idxc_bf.float(), rtol=0.13, atol=0.05)
