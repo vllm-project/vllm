@@ -23,6 +23,7 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import (
@@ -95,6 +96,7 @@ from vllm.models.minimax_m3.common.sparse_attention import (
 )
 from vllm.models.minimax_m3.common.vision_tower import MiniMaxVLVisionModel
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.kv_cache_interface import (
@@ -102,6 +104,23 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     get_kv_quant_mode,
 )
+
+
+def _fuse_shared_experts_enabled(config: PretrainedConfig) -> bool:
+    """Whether to fuse the shared expert into the routed grouped MoE.
+
+    ROCm only. Opt-in via ``VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS`` (the
+    router-append fusion runs on the triton/flydsl mxfp8 MoE independent of the
+    aiter master switch); requires a shared expert and is disabled under expert
+    parallelism (the shared slot is appended to the routed top-k, which the EP
+    expert-map path does not handle).
+    """
+    return bool(
+        current_platform.is_rocm()
+        and getattr(config, "n_shared_experts", None)
+        and envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
+        and not get_current_vllm_config().parallel_config.enable_expert_parallel
+    )
 
 
 def _sparse_attention_layer_ids(config: PretrainedConfig) -> set[int]:
@@ -294,8 +313,13 @@ class MiniMaxM3MoE(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
+        # Fuse the shared expert into the routed grouped GEMM when opted in via
+        # VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: it becomes routed-expert slot
+        # ``num_local_experts``, reached by every token, eliminating the
+        # separate dense-MLP launches. Not supported under expert parallelism.
+        self.fuse_shared_experts = _fuse_shared_experts_enabled(config)
         self.shared_experts: MiniMaxM3MLP | None = None
-        if self.n_shared_experts:
+        if self.n_shared_experts and not self.fuse_shared_experts:
             self.shared_experts = MiniMaxM3MLP(
                 config=config,
                 intermediate_size=config.intermediate_size * self.n_shared_experts,
@@ -321,6 +345,9 @@ class MiniMaxM3MoE(nn.Module):
             apply_routed_scale_to_output=True,
             router_logits_dtype=self.gate.out_dtype,
             shared_experts=self.shared_experts,
+            n_shared_experts=(
+                self.n_shared_experts if self.fuse_shared_experts else None
+            ),
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
         )
@@ -864,13 +891,18 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         return hidden_states
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        # Checkpoint experts use w1=gate, w2=down, w3=up.
+        # Checkpoint experts use w1=gate, w2=down, w3=up. When fusing the shared
+        # expert, include the appended slot (id == num_local_experts).
+        n_shared = getattr(self.config, "n_shared_experts", 0) or 0
+        num_experts = self.config.num_local_experts + (
+            n_shared if _fuse_shared_experts_enabled(self.config) else 0
+        )
         return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="w1",
             ckpt_down_proj_name="w2",
             ckpt_up_proj_name="w3",
-            num_experts=self.config.num_local_experts,
+            num_experts=num_experts,
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -897,6 +929,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        _fuse_shared = _fuse_shared_experts_enabled(self.config)
         for name, loaded_weight in weights:
             # The MTP module is not modeled yet.
             if "mtp." in name:
@@ -906,6 +939,17 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             # ModelOpt MXFP8 layers expose them as ``weight_scale``.
             if "weight_scale_inv" in name:
                 name = name.replace("weight_scale_inv", "weight_scale")
+
+            # Shared-expert fusion: redirect the checkpoint shared expert into
+            # routed-expert slot ``num_local_experts`` (gate->w1, up->w3,
+            # down->w2) so it loads via the routed expert loader. Runs before the
+            # stacked/dense mappings so shared_experts.gate_proj/up_proj are not
+            # captured by the dense gate_up_proj mapping.
+            if _fuse_shared and ".shared_experts." in name:
+                sid = self.config.num_local_experts
+                name = name.replace(".shared_experts.gate_proj.", f".experts.{sid}.w1.")
+                name = name.replace(".shared_experts.up_proj.", f".experts.{sid}.w3.")
+                name = name.replace(".shared_experts.down_proj.", f".experts.{sid}.w2.")
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
