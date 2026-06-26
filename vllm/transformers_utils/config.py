@@ -896,9 +896,9 @@ def get_sentence_transformer_tokenizer_config(
     encoder_dict = None
 
     for config_file in sentence_transformer_config_files:
-        if (
-            try_get_local_file(model=model, file_name=config_file, revision=revision)
-            is not None
+        if isinstance(
+            try_get_local_file(model=model, file_name=config_file, revision=revision),
+            Path,
         ):
             encoder_dict = get_hf_file_to_dict(config_file, model, revision)
             if encoder_dict:
