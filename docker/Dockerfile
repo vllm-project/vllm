@@ -979,6 +979,16 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 RUN --mount=type=cache,target=/opt/uv/cache \
     uv pip install --system -e tests/vllm_test_utils
 
+# Re-upgrade NCCL after dev requirements (which re-pin torch's older NCCL).
+ARG CUDA_VERSION
+ARG NCCL_VERSION
+RUN --mount=type=cache,target=/opt/uv/cache \
+    CUDA_MAJOR=$(echo $CUDA_VERSION | cut -d. -f1) && \
+    if [ "$CUDA_MAJOR" -ge 13 ]; then \
+        uv pip install --system \
+            "nvidia-nccl-cu${CUDA_MAJOR}==${NCCL_VERSION}" --no-deps; \
+    fi
+
 # enable fast downloads from hf (for testing)
 ENV HF_XET_HIGH_PERFORMANCE 1
 
