@@ -25,6 +25,9 @@ from vllm.model_executor.kernels.linear.mixed_precision.machete import (
 from vllm.model_executor.kernels.linear.mixed_precision.marlin import (
     MarlinLinearKernel,
 )
+from vllm.model_executor.kernels.linear.mixed_precision.mojo_w4a16 import (
+    MojoW4A16LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
     MPLinearKernel,
     MPLinearLayerConfig,
@@ -54,6 +57,7 @@ __all__ = [
     "ExllamaLinearKernel",
     "MacheteLinearKernel",
     "MarlinLinearKernel",
+    "MojoW4A16LinearKernel",
     "RDNA3W4A16LinearKernel",
     "TritonW4A16LinearKernel",
     "XPUW4A8IntLinearKernel",
