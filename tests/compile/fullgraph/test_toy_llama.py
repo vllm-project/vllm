@@ -428,6 +428,13 @@ def test_toy_llama(
     for i in range(1, len(outputs)):
         assert torch.allclose(outputs[0], outputs[i])
 
+    # aot_eager (like eager) must stay Triton-free: it traces through
+    # AOTAutograd with a no-op compiler and never invokes Inductor codegen.
+    if backend in ("eager", "aot_eager"):
+        from torch._inductor import metrics
+
+        assert metrics.generated_kernel_count == 0
+
 
 @torch.inference_mode
 def benchmark():
