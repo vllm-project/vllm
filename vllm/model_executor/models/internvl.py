@@ -20,7 +20,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.awq import AWQConfig
+from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.models.intern_vit import (
     InternVisionModel,
 )
@@ -608,7 +608,7 @@ class InternVLChatModel(
     ):
         # the awq models from OpenGVLab missing `modules_to_not_convert`
         # patch the quant_config to add `modules_to_not_convert` back
-        if isinstance(quant_config, AWQConfig):
+        if isinstance(quant_config, AutoAWQConfig):
             text_config = config.text_config
             llm_quant_config = getattr(text_config, "quantization_config", None)
             if (not quant_config.modules_to_not_convert) and (
@@ -1004,6 +1004,7 @@ class InternVLChatModel(
         max_frames_per_batch: int,
         device: torch.device,
         dtype: torch.dtype,
+        path: str = "default",
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
@@ -1026,6 +1027,7 @@ class InternVLChatModel(
         mm_kwargs: dict[str, Any],
         max_batch_size: int,
         max_frames_per_batch: int,
+        path: str = "default",
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphReplayBuffers,
@@ -1042,6 +1044,7 @@ class InternVLChatModel(
     def encoder_cudagraph_forward(
         self,
         values: dict[str, torch.Tensor],
+        path: str = "default",
     ) -> torch.Tensor:
         # The graph is always captured with pixel_values_flat as the input
         # buffer. During video replay the manager copies video tiles into
@@ -1054,6 +1057,7 @@ class InternVLChatModel(
     def encoder_eager_forward(
         self,
         mm_kwargs: dict[str, Any],
+        path: str = "default",
     ) -> torch.Tensor:
         if self.get_input_modality(mm_kwargs) == "image":
             pixel_values = mm_kwargs["pixel_values_flat"]

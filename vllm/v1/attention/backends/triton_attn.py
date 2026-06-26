@@ -258,6 +258,7 @@ class TritonAttentionBackend(AttentionBackend):
         "fp8",
         "fp8_e4m3",
         "fp8_e5m2",
+        "int4_per_token_head",
         "int8_per_token_head",
         "fp8_per_token_head",
     ]
@@ -301,9 +302,11 @@ class TritonAttentionBackend(AttentionBackend):
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
         if kv_cache_uses_per_token_head_scales(cache_dtype_str):
-            # Pad head_size by sizeof(float32)/sizeof(cache_dtype) so
-            # the per-head scale fits inline.  The backend extracts
-            # data[:head_size] and scale[head_size:] via typed views.
+            # Pad the head dim by sizeof(float32)/sizeof(cache_dtype) so the
+            # per-(token, head) scale fits inline after the quantized data;
+            # the backend extracts data[:head_size] and scale[head_size:] via
+            # typed views (see _ensure_scale_caches).  INT4 packs two values
+            # per byte, so the data occupies only head_size // 2 bytes.
             from vllm.utils.torch_utils import (
                 STR_DTYPE_TO_TORCH_DTYPE,
                 get_dtype_size,
@@ -311,7 +314,11 @@ class TritonAttentionBackend(AttentionBackend):
 
             cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype_str]
             scale_pad = get_dtype_size(torch.float32) // get_dtype_size(cache_dtype)
-            return (num_blocks, 2, block_size, num_kv_heads, head_size + scale_pad)
+            if get_kv_quant_mode(cache_dtype_str) == KVQuantMode.INT4_PER_TOKEN_HEAD:
+                data_head_size = head_size // 2
+            else:
+                data_head_size = head_size
+            return (num_blocks, 2, block_size, num_kv_heads, data_head_size + scale_pad)
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
 
     @staticmethod
@@ -464,6 +471,29 @@ class TritonAttentionImpl(AttentionImpl):
         else:
             self.sliding_window = (sliding_window - 1, 0)
         self.kv_cache_dtype = kv_cache_dtype
+        if current_platform.is_cuda():
+            cap = current_platform.get_device_capability()
+            cap_str = cap.as_version_str() if cap is not None else "unknown"
+            dev = current_platform.get_device_name()
+            if self.kv_cache_dtype.startswith("fp8") and not (
+                current_platform.has_device_capability(89)
+            ):
+                suggested = (
+                    "float16" if (cap is None or cap.to_int() < 80) else "bfloat16"
+                )
+                raise ValueError(
+                    f"FP8 KV cache is not supported by the Triton attention backend "
+                    f"on {dev} (compute capability {cap_str}); native FP8 (fp8e4nv) "
+                    f"requires SM89+. Re-run with --kv-cache-dtype {suggested}."
+                )
+            if self.kv_cache_dtype == "bfloat16" and not (
+                current_platform.has_device_capability(80)
+            ):
+                raise ValueError(
+                    f"bfloat16 KV cache is not supported on {dev} (compute capability "
+                    f"{cap_str}); bfloat16 requires SM80+. Re-run with "
+                    f"--kv-cache-dtype float16."
+                )
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
             logits_soft_cap = 0
@@ -564,18 +594,14 @@ class TritonAttentionImpl(AttentionImpl):
                 layer,
             )
 
-        # Per-token-head quantized KV cache: use separate scale caches.
+        # Per-token-head quantized KV cache: handled by the core unified
+        # kernel, which dequantizes per-(token, head) inline via constexpr
+        # branches (INT8 / FP8) and dispatches to the packed INT4 kernel.
         if self._is_per_token_head_quant:
-            self._ensure_scale_caches(kv_cache)
-            key_cache, value_cache = kv_cache.unbind(1)
-            if key_cache.dtype == torch.uint8:
-                key_cache = key_cache.view(self.fp8_dtype)
-                value_cache = value_cache.view(self.fp8_dtype)
-            q_descale = None
-            k_descale = None
-            v_descale = None
+            key_cache, value_cache = self._pth_key_value_caches(kv_cache)
             k_scale_cache = self._k_scale_cache
             v_scale_cache = self._v_scale_cache
+            q_descale = k_descale = v_descale = None
         # FP8 per-tensor / auto path (original flow).
         else:
             key_cache, value_cache = kv_cache.unbind(1)
@@ -652,6 +678,17 @@ class TritonAttentionImpl(AttentionImpl):
 
         return output
 
+    def _pth_key_value_caches(
+        self, kv_cache: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Per-token-head K/V cache views (ensures scale caches; FP8 retyped)."""
+        self._ensure_scale_caches(kv_cache)
+        key_cache, value_cache = kv_cache.unbind(1)
+        if self._kv_quant_mode == KVQuantMode.FP8_PER_TOKEN_HEAD:
+            key_cache = key_cache.view(self.fp8_dtype)
+            value_cache = value_cache.view(self.fp8_dtype)
+        return key_cache, value_cache
+
     def _forward_encoder_attention(
         self,
         query: torch.Tensor,
@@ -714,7 +751,9 @@ class TritonAttentionImpl(AttentionImpl):
         if self._is_per_token_head_quant:
             self._ensure_scale_caches(kv_cache)
             key_cache, value_cache = kv_cache.unbind(1)
-            if key_cache.dtype == torch.uint8:
+            k_scale_cache = self._k_scale_cache
+            v_scale_cache = self._v_scale_cache
+            if self._kv_quant_mode == KVQuantMode.FP8_PER_TOKEN_HEAD:
                 key_cache = key_cache.view(self.fp8_dtype)
                 value_cache = value_cache.view(self.fp8_dtype)
             triton_reshape_and_cache_flash_per_token_head_quant(
@@ -722,9 +761,10 @@ class TritonAttentionImpl(AttentionImpl):
                 value,
                 key_cache,
                 value_cache,
-                self._k_scale_cache,
-                self._v_scale_cache,
+                k_scale_cache,
+                v_scale_cache,
                 slot_mapping,
+                kv_quant_mode=self._kv_quant_mode,
             )
             return
         # For decoder and cross-attention, use KV cache as before.

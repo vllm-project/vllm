@@ -38,10 +38,14 @@ if TYPE_CHECKING:
     from vllm.tokenizers import TokenizerLike
     from vllm.tool_parsers.abstract_tool_parser import Tool
 
+THINK_START = "<think>"
+THINK_END = "</think>"
 TOOL_CALL_START = "<tool_call>"
 TOOL_CALL_END = "</tool_call>"
 FUNC_PREFIX = "<function="
 FUNC_END = "</function>"
+PARAM_START = "<parameter="
+PARAM_END = "</parameter>"
 
 _PARAM_RE = re.compile(
     r"<\s*parameter\s*=\s*([^>]*)>"
@@ -49,7 +53,7 @@ _PARAM_RE = re.compile(
     r"(?:<\s*/\s*parameter\s*>|(?=<\s*parameter\s*=))",
     re.DOTALL,
 )
-_PARTIAL_PARAM_RE = re.compile(r"<\s*parameter\s*=\s*([^>]+)>([^<]*)$", re.DOTALL)
+_PARTIAL_PARAM_RE = re.compile(r"<\s*parameter\s*=\s*([^>]+)>(.*)$", re.DOTALL)
 
 
 def _qwen3_arg_converter(raw_args: str, partial: bool) -> str:
@@ -67,32 +71,42 @@ def _qwen3_arg_converter(raw_args: str, partial: bool) -> str:
             name = m.group(1)
             value = m.group(2)
             if name:
-                params[name] = value
+                params[name] = value.strip()
 
     return json.dumps(params, ensure_ascii=False)
 
 
 @functools.cache
-def qwen3_config(thinking: bool = True) -> ParserEngineConfig:
+def qwen3_config(
+    thinking: bool = True,
+    *,
+    name: str = "qwen3",
+    think_start: str = THINK_START,
+    think_end: str = THINK_END,
+    tool_start: str = TOOL_CALL_START,
+    tool_end: str = TOOL_CALL_END,
+) -> ParserEngineConfig:
     return ParserEngineConfig(
-        name="qwen3",
+        name=name,
         initial_state=ParserState.REASONING if thinking else ParserState.CONTENT,
         terminals={
             # Reasoning terminals
-            "THINK_START": "<think>",
-            "THINK_END": "</think>",
+            "THINK_START": think_start,
+            "THINK_END": think_end,
             # Tool call terminals
-            "TOOL_START": TOOL_CALL_START,
-            "TOOL_END": TOOL_CALL_END,
+            "TOOL_START": tool_start,
+            "TOOL_END": tool_end,
             "FUNC_PREFIX": FUNC_PREFIX,
             "FUNC_END": FUNC_END,
+            "PARAM_START": PARAM_START,
+            "PARAM_END": PARAM_END,
             "CLOSE_ANGLE": ">",
         },
         token_id_terminals={
-            "THINK_START": "<think>",
-            "THINK_END": "</think>",
-            "TOOL_START": TOOL_CALL_START,
-            "TOOL_END": TOOL_CALL_END,
+            "THINK_START": think_start,
+            "THINK_END": think_end,
+            "TOOL_START": tool_start,
+            "TOOL_END": tool_end,
         },
         transitions={
             # -- Reasoning transitions --
@@ -118,12 +132,16 @@ def qwen3_config(thinking: bool = True) -> ParserEngineConfig:
             # -- Tool call transitions --
             (ParserState.CONTENT, "TOOL_START"): Transition(
                 ParserState.TOOL_PREAMBLE,
-                (EventType.TOOL_CALL_START,),
+                (EventType.REASONING_END, EventType.TOOL_CALL_START),
             ),
             # Fallback: <function= without a preceding <tool_call>
             (ParserState.CONTENT, "FUNC_PREFIX"): Transition(
                 ParserState.TOOL_NAME,
                 (EventType.TOOL_CALL_START,),
+            ),
+            (ParserState.TOOL_PREAMBLE, "TOOL_END"): Transition(
+                ParserState.CONTENT,
+                (EventType.TOOL_CALL_END,),
             ),
             (ParserState.TOOL_PREAMBLE, "FUNC_PREFIX"): Transition(
                 ParserState.TOOL_NAME,
@@ -141,6 +159,14 @@ def qwen3_config(thinking: bool = True) -> ParserEngineConfig:
             (ParserState.TOOL_ARGS, "FUNC_END"): Transition(
                 ParserState.TOOL_BETWEEN,
                 (EventType.TOOL_CALL_END,),
+            ),
+            (ParserState.TOOL_ARGS, "PARAM_START"): Transition(
+                ParserState.TOOL_ARGS,
+                (EventType.ARG_VALUE_CHUNK,),
+            ),
+            (ParserState.TOOL_ARGS, "PARAM_END"): Transition(
+                ParserState.TOOL_ARGS,
+                (EventType.ARG_VALUE_CHUNK,),
             ),
             (ParserState.TOOL_BETWEEN, "TOOL_END"): Transition(
                 ParserState.CONTENT,
@@ -169,7 +195,17 @@ class Qwen3Parser(ParserEngine):
 
     - ``<tool_call>`` as implicit reasoning end
     - Unpaired ``<tool_call>`` token ID detection for ``is_reasoning_end``
+
+    Subclasses that share the grammar but differ only in the four wrapper
+    token strings (reasoning + tool-call) override the class attributes
+    below; everything else is inherited unchanged.
     """
+
+    CONFIG_NAME = "qwen3"
+    THINK_START = THINK_START
+    THINK_END = THINK_END
+    TOOL_START = TOOL_CALL_START
+    TOOL_END = TOOL_CALL_END
 
     def __init__(
         self,
@@ -181,7 +217,14 @@ class Qwen3Parser(ParserEngine):
         self.thinking_enabled = chat_kwargs.get("enable_thinking", True)
         kwargs.setdefault(
             "parser_engine_config",
-            qwen3_config(thinking=self.thinking_enabled),
+            qwen3_config(
+                thinking=self.thinking_enabled,
+                name=self.CONFIG_NAME,
+                think_start=self.THINK_START,
+                think_end=self.THINK_END,
+                tool_start=self.TOOL_START,
+                tool_end=self.TOOL_END,
+            ),
         )
         super().__init__(
             tokenizer,
@@ -189,8 +232,8 @@ class Qwen3Parser(ParserEngine):
             **kwargs,
         )
         vocab = self.vocab
-        self._tool_call_token_id: int | None = vocab.get("<tool_call>")
-        self._tool_call_end_token_id: int | None = vocab.get("</tool_call>")
+        self._tool_call_token_id: int | None = vocab.get(self.TOOL_START)
+        self._tool_call_end_token_id: int | None = vocab.get(self.TOOL_END)
 
     def extract_reasoning(
         self,
@@ -206,8 +249,14 @@ class Qwen3Parser(ParserEngine):
             return True
         tool_call_id = self._tool_call_token_id
         tool_call_end_id = self._tool_call_end_token_id
+        reasoning_start_id = self._reasoning_start_token_id
         if tool_call_id is not None:
             for i in range(len(input_ids) - 1, -1, -1):
+                if (
+                    reasoning_start_id is not None
+                    and input_ids[i] == reasoning_start_id
+                ):
+                    return False
                 if input_ids[i] == tool_call_id:
                     if tool_call_end_id is not None and any(
                         input_ids[j] == tool_call_end_id
