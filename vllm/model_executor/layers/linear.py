@@ -918,7 +918,12 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             if "." in name:
                 # Checkpoint is sharded
                 shard_id_str, _, name = name.partition(".")
-                shard_id = int(shard_id_str)
+                shard_id = (
+                    int(shard_id_str)
+                    if shard_id_str.isdigit()
+                    else tuple(int(i) for i in shard_id_str.split(","))
+                )
+                self.validate_shard_id(shard_id)
                 logger.debug(
                     "Loaded shard %s into %s for layer %s.%s",
                     shard_id,
