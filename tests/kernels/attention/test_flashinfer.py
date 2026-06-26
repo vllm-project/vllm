@@ -168,6 +168,73 @@ def test_flashinfer_backend_accepts_nvfp4_kv_cache() -> None:
     assert invalid_reasons == []
 
 
+def test_flashinfer_impl_caches_nvfp4_slot_mapping_writer(monkeypatch) -> None:
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    def fake_slot_writer(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(
+        flashinfer_backend.flashinfer,
+        "nvfp4_quantize_append_paged_kv_cache_with_slot_mapping",
+        fake_slot_writer,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        flashinfer_backend.current_platform,
+        "is_device_capability_family",
+        lambda family: False,
+    )
+    monkeypatch.setattr(
+        flashinfer_backend,
+        "can_use_trtllm_attention",
+        lambda num_heads, num_kv_heads: False,
+    )
+
+    impl = flashinfer_backend.FlashInferImpl(
+        num_heads=1,
+        head_size=128,
+        scale=1.0,
+        num_kv_heads=1,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="nvfp4",
+    )
+
+    assert impl._nvfp4_slot_writer is fake_slot_writer
+
+
+def test_flashinfer_impl_requires_nvfp4_slot_mapping_writer(monkeypatch) -> None:
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    monkeypatch.delattr(
+        flashinfer_backend.flashinfer,
+        "nvfp4_quantize_append_paged_kv_cache_with_slot_mapping",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        flashinfer_backend.current_platform,
+        "is_device_capability_family",
+        lambda family: False,
+    )
+    monkeypatch.setattr(
+        flashinfer_backend,
+        "can_use_trtllm_attention",
+        lambda num_heads, num_kv_heads: False,
+    )
+
+    with pytest.raises(RuntimeError, match="NVFP4 slot-mapping KV cache update"):
+        flashinfer_backend.FlashInferImpl(
+            num_heads=1,
+            head_size=128,
+            scale=1.0,
+            num_kv_heads=1,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="nvfp4",
+        )
+
+
 def test_fast_decode_plan_importable() -> None:
     """fast_decode_plan must be importable from flashinfer.decode.
 

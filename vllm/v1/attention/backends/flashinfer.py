@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashInfer."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
 from typing import ClassVar
@@ -1345,6 +1346,19 @@ class FlashInferImpl(AttentionImpl):
             current_platform.is_device_capability_family(100)
             or current_platform.is_device_capability_family(120)
         )
+        self._nvfp4_slot_writer: Callable[..., None] | None = None
+        if self.is_kvcache_nvfp4 and not self.use_native_nvfp4_kv_cache_update:
+            nvfp4_slot_writer = getattr(
+                flashinfer,
+                "nvfp4_quantize_append_paged_kv_cache_with_slot_mapping",
+                None,
+            )
+            if nvfp4_slot_writer is None:
+                raise RuntimeError(
+                    "FlashInfer NVFP4 slot-mapping KV cache update is "
+                    "required for pre-SM100 NVFP4 KV cache."
+                )
+            self._nvfp4_slot_writer = nvfp4_slot_writer
         self.fp4_data_dim = head_size // 2 if self.is_kvcache_nvfp4 else 0
         self.logits_soft_cap = logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
@@ -1884,16 +1898,8 @@ class FlashInferImpl(AttentionImpl):
                 nvfp4_kv_data, nvfp4_kv_block_scales = nvfp4_kv_cache_split_views(
                     kv_cache
                 )
-                nvfp4_slot_writer = getattr(
-                    flashinfer,
-                    "nvfp4_quantize_append_paged_kv_cache_with_slot_mapping",
-                    None,
-                )
-                if nvfp4_slot_writer is None:
-                    raise RuntimeError(
-                        "FlashInfer NVFP4 slot-mapping KV cache update is "
-                        "required for pre-SM100 NVFP4 KV cache."
-                    )
+                nvfp4_slot_writer = self._nvfp4_slot_writer
+                assert nvfp4_slot_writer is not None
                 nvfp4_slot_writer(
                     key,
                     value,
