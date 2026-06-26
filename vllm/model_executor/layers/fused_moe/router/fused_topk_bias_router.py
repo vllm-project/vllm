@@ -167,7 +167,7 @@ def fused_topk_bias(
     input_tokens: torch.Tensor | None = None,
     hash_indices_table: torch.Tensor | None = None,
     routed_scaling_factor: float = 1.0,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     # The topk kernel dispatches dtype based on topk_ids (set by
     # indices_type) and assumes input_tokens/hash_indices_table match.
     if indices_type is not None:
@@ -207,7 +207,7 @@ def fused_topk_bias(
             )
             if routed_scaling_factor != 1.0:
                 topk_weights *= routed_scaling_factor
-            return topk_weights, topk_ids, None
+            return topk_weights, topk_ids
         elif scoring_func == "sigmoid":
             topk_weights, topk_ids = vllm_topk_sigmoid(
                 topk_weights,
@@ -219,7 +219,7 @@ def fused_topk_bias(
             )
             if routed_scaling_factor != 1.0:
                 topk_weights *= routed_scaling_factor
-            return topk_weights, topk_ids, None
+            return topk_weights, topk_ids
         elif scoring_func == "sqrtsoftplus":
             topk_weights, topk_ids = vllm_topk_softplus_sqrt(
                 topk_weights,
@@ -232,7 +232,7 @@ def fused_topk_bias(
                 hash_indices_table,
                 routed_scaling_factor,
             )
-            return topk_weights, topk_ids, None
+            return topk_weights, topk_ids
         else:
             raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
@@ -261,7 +261,7 @@ def fused_topk_bias(
             )
             if routed_scaling_factor != 1.0:
                 topk_weights *= routed_scaling_factor
-            return topk_weights, topk_ids, None
+            return topk_weights, topk_ids
 
     if scoring_func == "sqrtsoftplus":
         M = hidden_states.size(0)
@@ -288,7 +288,7 @@ def fused_topk_bias(
             hash_indices_table,
             routed_scaling_factor,
         )
-        return topk_weights, topk_ids, None
+        return topk_weights, topk_ids
 
     n_routed_experts = gating_output.shape[-1]
     if scoring_func == "softmax":
@@ -375,9 +375,9 @@ class FusedTopKBiasRouter(BaseRouter):
         indices_type: torch.dtype | None,
         *,
         input_ids: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute routing using fused top-k with bias."""
-        topk_weights, topk_ids, zero_expert_output = fused_topk_bias(
+        topk_weights, topk_ids = fused_topk_bias(
             hidden_states=hidden_states,
             gating_output=router_logits,
             scoring_func=self.scoring_func,

@@ -149,7 +149,7 @@ class FusedTopKRouter(BaseRouter):
         indices_type: torch.dtype | None,
         *,
         input_ids: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute routing using standard fused top-k."""
         topk_weights, topk_ids, token_expert_indices = fused_topk(
             hidden_states=hidden_states,
@@ -160,4 +160,4 @@ class FusedTopKRouter(BaseRouter):
             scoring_func=self.scoring_func,
         )
 
-        return topk_weights, topk_ids, None
+        return topk_weights, topk_ids

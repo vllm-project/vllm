@@ -39,7 +39,7 @@ class FusedMoERouter(ABC):
         topk_indices_dtype: torch.dtype | None = None,
         *,
         input_ids: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         raise NotImplementedError
 
     def select_experts(
@@ -49,22 +49,22 @@ class FusedMoERouter(ABC):
         topk_indices_dtype: torch.dtype | None = None,
         *,
         input_ids: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Route the input hidden states to the top-k experts based on the
         router logits.
 
         Returns:
-            (topk_weights, topk_ids, zero_expert_output)
-            (tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]):
-            The weights, expert ids, and optional zero expert output.
+            (topk_weights, topk_ids)
+            (tuple[torch.Tensor, torch.Tensor]):
+            The weights and expert ids.
 
             **Compatibility**: When EPLB is not enabled, the returned ids are
             equivalent to global logical ids, so should be compatible with
             plain MoE implementations without redundant experts.
         """
 
-        topk_weights, topk_ids, zero_expert_output = self._select_experts(
+        topk_weights, topk_ids = self._select_experts(
             hidden_states,
             router_logits,
             topk_indices_dtype=topk_indices_dtype,
@@ -78,4 +78,4 @@ class FusedMoERouter(ABC):
                 topk_ids.to(torch.int16)
             )
 
-        return topk_weights, topk_ids, zero_expert_output
+        return topk_weights, topk_ids

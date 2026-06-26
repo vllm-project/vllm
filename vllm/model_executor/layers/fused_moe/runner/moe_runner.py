@@ -563,7 +563,7 @@ class MoERunner(MoERunnerInterface):
             )
         else:
             # Modular kernels: select experts first, then call routed_experts
-            topk_weights, topk_ids, zero_expert_output = self.router.select_experts(
+            topk_weights, topk_ids = self.router.select_experts(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
                 topk_indices_dtype=self._quant_method.topk_indices_dtype,
@@ -582,6 +582,9 @@ class MoERunner(MoERunnerInterface):
             shared_experts_input,
             SharedExpertsOrder.MULTI_STREAM_OVERLAPPED,
         )
+
+        # Get zero_expert_output from router property (if it exists)
+        zero_expert_output = getattr(self.router, "zero_expert_output", None)
 
         return (
             self._shared_experts.output if self._shared_experts is not None else None,

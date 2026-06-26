@@ -331,7 +331,7 @@ class RoutingSimulatorRouter(BaseRouter):
         indices_type: torch.dtype | None,
         *,
         input_ids: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Use routing simulator to compute routing."""
         routing_strategy = envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY
         topk_weights, topk_ids = RoutingSimulator.simulate_routing(
@@ -341,4 +341,4 @@ class RoutingSimulatorRouter(BaseRouter):
             top_k=self.top_k,
             indices_type=indices_type,
         )
-        return topk_weights, topk_ids, None
+        return topk_weights, topk_ids

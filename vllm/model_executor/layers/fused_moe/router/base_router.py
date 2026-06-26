@@ -240,7 +240,7 @@ class BaseRouter(FusedMoERouter):
         indices_type: torch.dtype | None,
         *,
         input_ids: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Compute the actual routing logic.
 
@@ -253,8 +253,7 @@ class BaseRouter(FusedMoERouter):
             indices_type: Desired dtype for expert indices (may be None)
 
         Returns:
-            tuple of (topk_weights, topk_ids, zero_expert_output)
-            zero_expert_output is None for routers that don't produce it.
+            tuple of (topk_weights, topk_ids)
         """
         raise NotImplementedError
 
@@ -265,22 +264,21 @@ class BaseRouter(FusedMoERouter):
         topk_indices_dtype: torch.dtype | None = None,
         *,
         input_ids: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Route the input hidden states to the top-k experts based on the
         router logits.
 
         This method implements the template method pattern:
         1. Validates EPLB state
-        2. Calls _compute_routing() to get topk_weights, topk_ids,
-           and zero_expert_output
+        2. Calls _compute_routing() to get topk_weights and topk_ids
         3. Applies EPLB mapping if enabled
         4. Converts indices dtype if needed
 
         Returns:
-            (topk_weights, topk_ids, zero_expert_output)
-            (tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]):
-            The weights, expert ids, and optional zero expert output.
+            (topk_weights, topk_ids)
+            (tuple[torch.Tensor, torch.Tensor]):
+            The weights and expert ids.
 
             **Compatibility**: When EPLB is not enabled, the returned ids are
             equivalent to global logical ids, so should be compatible with
@@ -290,7 +288,7 @@ class BaseRouter(FusedMoERouter):
         self._validate_eplb_state()
 
         # Step 2: Compute routing (delegated to subclass)
-        topk_weights, topk_ids, zero_expert_output = self._compute_routing(
+        topk_weights, topk_ids = self._compute_routing(
             hidden_states, router_logits, topk_indices_dtype, input_ids=input_ids
         )
 
@@ -304,4 +302,4 @@ class BaseRouter(FusedMoERouter):
         # Step 4: Convert indices dtype
         topk_ids = self._convert_indices_dtype(topk_ids, topk_indices_dtype)
 
-        return topk_weights, topk_ids, zero_expert_output
+        return topk_weights, topk_ids

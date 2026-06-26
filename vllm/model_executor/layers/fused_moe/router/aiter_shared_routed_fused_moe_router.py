@@ -63,7 +63,7 @@ class AiterSharedRoutedFusedMoERouter(BaseRouter):
         indices_type: torch.dtype | None,
         *,
         input_ids: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         assert hidden_states.size(0) == router_logits.size(0), (
             "Number of tokens mismatch"
         )
@@ -135,4 +135,4 @@ class AiterSharedRoutedFusedMoERouter(BaseRouter):
                 shared_expert_weights=shared_weights,
             )
 
-        return topk_weights, topk_ids, None
+        return topk_weights, topk_ids
