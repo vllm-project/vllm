@@ -633,23 +633,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             disable_tp=disable_tp,
         )
 
-    def validate_shard_id(self, loaded_shard_id: int | tuple[int, ...] | None):
+    def validate_shard_id(self, loaded_shard_id: int | None):
         if loaded_shard_id is None:
-            return
-        if isinstance(loaded_shard_id, tuple):
-            for idx in loaded_shard_id:
-                if not (0 <= idx < len(self.output_sizes)):
-                    raise ValueError(
-                        f"Shard id index {idx} should be between 0 and "
-                        f"{len(self.output_sizes) - 1}. Got shard id {loaded_shard_id}."
-                    )
-            if len(loaded_shard_id) > 1 and any(
-                b - a != 1 for a, b in zip(loaded_shard_id[:-1], loaded_shard_id[1:])
-            ):
-                raise ValueError(
-                    "Shard id with multiple indices should be consecutive. "
-                    f"Got shard id {loaded_shard_id}."
-                )
             return
         elif isinstance(loaded_shard_id, int):
             if loaded_shard_id < 0 or loaded_shard_id >= len(self.output_sizes):
@@ -664,7 +649,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         self,
         param: Parameter,
         loaded_weight: torch.Tensor,
-        loaded_shard_id: tuple[int, ...] | int | None = None,
+        loaded_shard_id: int | None = None,
     ):
         self.validate_shard_id(loaded_shard_id)
 
@@ -673,7 +658,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         # Special case for per-tensor scale to load scalar into fused array.
         needs_scalar_to_array = getattr(param, "needs_scalar_to_array", False)
 
-        if loaded_shard_id is None or isinstance(loaded_shard_id, tuple):
+        if loaded_shard_id is None:
             # Loaded weight is already fused on disk (mlp).
             # (e.g., Phi-3's gate_up_proj).
             if output_dim is None:
@@ -686,24 +671,10 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 param_data.copy_(loaded_weight)
                 return
 
-            output_sizes = (
-                self.output_sizes[loaded_shard_id[0] : loaded_shard_id[-1] + 1]
-                if loaded_shard_id is not None
-                else self.output_sizes
-            )
             current_shard_offset = 0
             use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
-            if (
-                use_bitsandbytes_4bit
-                and isinstance(loaded_shard_id, tuple)
-                and self.tp_size > 1
-            ):
-                raise NotImplementedError(
-                    "Shard id with multiple indices is not supported "
-                    "for BNB quantization with TP yet."
-                )
             shard_offsets: list[tuple[int, int, int]] = []
-            for i, output_size in enumerate(output_sizes):
+            for i, output_size in enumerate(self.output_sizes):
                 shard_offsets.append((i, current_shard_offset, output_size))
                 current_shard_offset += output_size
             packed_dim = getattr(param, "packed_dim", None)
@@ -849,41 +820,32 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         self,
         param: BasevLLMParameter,
         loaded_weight: torch.Tensor,
-        loaded_shard_id: tuple[int, ...] | int | None = None,
+        loaded_shard_id: int | None = None,
     ):
         self.validate_shard_id(loaded_shard_id)
-        if loaded_shard_id is None or isinstance(loaded_shard_id, tuple):
+        if loaded_shard_id is None:
             if isinstance(param, PerTensorScaleParameter):
-                if isinstance(loaded_shard_id, tuple):
-                    for idx in loaded_shard_id:
-                        param.load_merged_column_weight(
-                            loaded_weight=loaded_weight, shard_id=idx
-                        )
-                else:
-                    # When weights are already fused on disk (e.g. Phi-3's
-                    # gate_up_proj), there is only a single scale for the
-                    # entire fused matrix. Fill all slots with this scale
-                    # to ensure that any subsequent reduction (like .max())
-                    # works correctly while preserving the parameter shape.
-                    for idx in range(param.data.shape[0]):
-                        param.load_merged_column_weight(
-                            loaded_weight=loaded_weight, shard_id=idx
-                        )
+                # When weights are already fused on disk (e.g. Phi-3's
+                # gate_up_proj), there is only a single scale for the
+                # entire fused matrix. Fill all slots with this scale
+                # to ensure that any subsequent reduction (like .max())
+                # works correctly while preserving the parameter shape.
+                for idx in range(param.data.shape[0]):
+                    param.load_merged_column_weight(
+                        loaded_weight=loaded_weight, shard_id=idx
+                    )
                 return
             elif type(param) in (RowvLLMParameter, BasevLLMParameter):
                 param.load_merged_column_weight(loaded_weight=loaded_weight)
                 return
-            output_sizes = (
-                [self.output_sizes[idx] for idx in loaded_shard_id]
-                if loaded_shard_id
-                else None
-            )
             if isinstance(param, BlockQuantScaleParameter):
                 weight_block_size = getattr(self, "weight_block_size", None)
                 output_sizes = [
                     adjust_block_scale_shard(weight_block_size, size, 0)[0]
-                    for size in (output_sizes or self.output_sizes)
+                    for size in self.output_sizes
                 ]
+            else:
+                output_sizes = None
             # TODO: @dsikka - move to parameter.py
             self._load_fused_module_from_checkpoint(
                 param, loaded_weight, output_sizes=output_sizes

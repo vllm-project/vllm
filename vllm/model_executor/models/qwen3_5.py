@@ -281,8 +281,8 @@ class Qwen3_5Model(Qwen3NextModel):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             # GDN
-            ("in_proj_qkvz", "in_proj_qkv", (0, 1, 2)),
-            ("in_proj_qkvz", "in_proj_z", 3),
+            ("in_proj_qkvz", "in_proj_qkv", 0),
+            ("in_proj_qkvz", "in_proj_z", 1),
             # self attention
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
