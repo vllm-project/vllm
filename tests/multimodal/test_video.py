@@ -17,6 +17,7 @@ from vllm.multimodal.video import (
     Molmo2VideoBackend,
     Qwen2VLVideoBackend,
     Qwen3VLVideoBackend,
+    VideoBackend,
     VideoLoader,
     VideoSourceMetadata,
     VideoTargetMetadata,
@@ -532,6 +533,136 @@ def test_pyav_backend_returns_target_frames_not_keyframes():
             f"Frame mismatch: requested index {want_idx}, "
             f"got marker {marker} (tolerance ±10)"
         )
+
+
+@pytest.mark.parametrize(
+    "loader_key, kwargs",
+    [
+        pytest.param(
+            "opencv",
+            {"num_frames": 32, "fps": 4, "backend": "opencv"},
+            id="opencv",
+        ),
+        pytest.param(
+            "opencv",
+            {"num_frames": 32, "fps": 4, "backend": "pyav"},
+            id="pyav",
+        ),
+        pytest.param(
+            "opencv_dynamic",
+            {"fps": 2, "max_duration": 10, "backend": "opencv"},
+            id="opencv_dynamic",
+        ),
+        pytest.param(
+            "opencv_dynamic",
+            {"fps": 2, "max_duration": 10, "backend": "pyav"},
+            id="pyav_dynamic",
+        ),
+        pytest.param(
+            "qwen3_vl",
+            {"fps": 2, "min_frames": 16, "backend": "opencv"},
+            id="qwen3_vl",
+        ),
+        pytest.param(
+            "qwen2_vl",
+            {"fps": 2, "min_frames": 16, "backend": "opencv"},
+            id="qwen2_vl",
+        ),
+        pytest.param("glm46v", {"backend": "opencv"}, id="glm46v"),
+        pytest.param("glmga", {"fps": 2, "backend": "opencv"}, id="glmga"),
+        pytest.param("openpangu", {"num_frames": 32, "fps": 2}, id="openpangu"),
+        pytest.param(
+            "molmo2",
+            {"num_frames": 32, "frame_sample_mode": "uniform_last_frame"},
+            id="molmo2",
+        ),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_video_loader_explicit_frame_indices_override_sampling(
+    dummy_video_path,
+    monkeypatch: pytest.MonkeyPatch,
+    loader_key: str,
+    kwargs: dict,
+):
+    """Explicit frame_indices must override model/backend sampling defaults."""
+    explicit_frame_indices = [0, 7, 13, 29]
+
+    monkeypatch.setenv("VLLM_VIDEO_LOADER_BACKEND", loader_key)
+    loader = VIDEO_LOADER_REGISTRY.load(loader_key)
+
+    with open(dummy_video_path, "rb") as f:
+        long_video_bytes = f.read()
+
+    frames, metadata = loader.load_bytes(
+        long_video_bytes, frame_indices=explicit_frame_indices, **kwargs
+    )
+
+    assert frames.ndim == 4
+    assert frames.shape[3] == 3  # RGB
+    assert frames.shape[0] == len(explicit_frame_indices)
+    assert metadata["frames_indices"] == explicit_frame_indices
+
+
+@pytest.mark.parametrize(
+    "loader_key, kwargs",
+    [
+        pytest.param("opencv", {"backend": "opencv"}, id="opencv"),
+        pytest.param("opencv", {"backend": "pyav"}, id="pyav"),
+        pytest.param("opencv_dynamic", {"backend": "opencv"}, id="opencv_dynamic"),
+        pytest.param("glmga", {"fps": 2, "backend": "opencv"}, id="glmga"),
+        pytest.param(
+            "molmo2",
+            {"num_frames": 8, "frame_sample_mode": "uniform_last_frame"},
+            id="molmo2",
+        ),
+        pytest.param("openpangu", {"num_frames": 8, "fps": 2}, id="openpangu"),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_video_loader_explicit_frame_indices_skip_sampling_compute(
+    monkeypatch: pytest.MonkeyPatch,
+    loader_key: str,
+    kwargs: dict,
+):
+    """Explicit frame_indices should not call sampling computation."""
+    explicit_frame_indices = [0, 3, 9]
+    video_bytes = create_long_gop_video(num_frames=30, fps=30, width=16, height=16)
+    loader = VIDEO_LOADER_REGISTRY.load(loader_key)
+
+    def fail_compute(*_args: object, **_kwargs: object) -> list[int]:
+        raise AssertionError("compute_frames_index_to_sample should not be called")
+
+    monkeypatch.setattr(
+        type(loader), "compute_frames_index_to_sample", classmethod(fail_compute)
+    )
+
+    frames, metadata = loader.load_bytes(
+        video_bytes, frame_indices=explicit_frame_indices, **kwargs
+    )
+
+    assert frames.shape[0] == len(explicit_frame_indices)
+    assert metadata["frames_indices"] == explicit_frame_indices
+
+
+@pytest.mark.parametrize(
+    "frame_indices, match",
+    [
+        pytest.param((), "list of integers", id="not-list"),
+        pytest.param([], "must not be empty", id="empty"),
+        pytest.param([0, True], "list of integers", id="bool"),
+        pytest.param([-1, 0], "non-negative", id="negative"),
+        pytest.param([0, 10], "less than total frame count", id="out-of-range"),
+        pytest.param([2, 1], "sorted in ascending order", id="unsorted"),
+        pytest.param([1, 1], "must not contain duplicates", id="duplicate"),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_video_loader_explicit_frame_indices_validation(
+    frame_indices: object, match: str
+):
+    with pytest.raises(ValueError, match=match):
+        VideoBackend.validate_frame_indices(frame_indices, total_frames_num=10)
 
 
 @pytest.mark.parametrize(

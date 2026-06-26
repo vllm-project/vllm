@@ -841,6 +841,52 @@ vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
 
 Works with common video formats like MP4 when using OpenCV backends.
 
+#### Explicit Frame Indices for Video Inputs
+
+For server-side video decoding, you can request an exact sorted list of frame
+indices with `media_io_kwargs`. When `frame_indices` is set, it overrides
+`fps` and `num_frames` sampling for the video loader while preserving the
+normal video URL / base64 video request shape.
+
+```bash
+vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
+  --media-io-kwargs '{"video": {"frame_indices": [0, 6, 12, 18]}}'
+```
+
+??? code
+
+    ```python
+    from openai import OpenAI
+
+    client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+
+    response = client.chat.completions.create(
+        model="your-multimodal-model",
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "video_url", "video_url": {"url": video_url}},
+                {"type": "text", "text": "Describe what happens in this video."}
+            ]
+        }],
+        extra_body={
+            "media_io_kwargs": {
+                "video": {
+                    "frame_indices": [0, 6, 12, 18, 24, 30],
+                    "backend": "opencv",
+                }
+            }
+        },
+    )
+
+    print(response.choices[0].message.content)
+    ```
+
+`frame_indices` must be a non-empty, sorted list of unique non-negative
+integers within the video's total frame count. This is useful when client
+logic needs repeatable frame selection but still wants vLLM to decode the
+video bytes.
+
 #### Pre-extracted Frame Sequences with `media_io_kwargs`
 
 When you extract video frames on the client side and send them as `video/jpeg` (base64-concatenated JPEG frames), you can preserve the original video metadata by using `media_io_kwargs` in your request. This enables more accurate video understanding by preserving temporal information that would otherwise be lost during client-side frame extraction.

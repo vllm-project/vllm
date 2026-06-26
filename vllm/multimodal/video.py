@@ -131,6 +131,65 @@ class VideoSourceMetadata(NamedTuple):
 
 
 class VideoLoader:
+    @staticmethod
+    def validate_frame_indices(
+        frame_indices: Any,
+        total_frames_num: int,
+    ) -> list[int] | None:
+        """Validate explicitly requested frame indices.
+
+        OpenCV and PyAV backends decode requested frames in ascending order, so
+        explicit indices use that same contract.
+        """
+        if frame_indices is None:
+            return None
+
+        if not isinstance(frame_indices, list):
+            raise ValueError("frame_indices must be a list of integers")
+
+        if not frame_indices:
+            raise ValueError("frame_indices must not be empty")
+
+        if not all(
+            isinstance(idx, int) and not isinstance(idx, bool) for idx in frame_indices
+        ):
+            raise ValueError("frame_indices must be a list of integers")
+
+        if any(idx < 0 for idx in frame_indices):
+            raise ValueError("frame_indices must be non-negative")
+
+        if any(idx >= total_frames_num for idx in frame_indices):
+            raise ValueError(
+                f"frame_indices must be less than total frame count "
+                f"({total_frames_num})"
+            )
+
+        if frame_indices != sorted(frame_indices):
+            raise ValueError("frame_indices must be sorted in ascending order")
+
+        if len(frame_indices) != len(set(frame_indices)):
+            raise ValueError("frame_indices must not contain duplicates")
+
+        return frame_indices
+
+    @classmethod
+    def _get_frame_indices_to_load(
+        cls,
+        source: VideoSourceMetadata,
+        target: VideoTargetMetadata,
+        **kwargs,
+    ) -> list[int]:
+        """Return explicit frame indices or compute backend sampling indices."""
+        explicit_frame_indices = cls.validate_frame_indices(
+            kwargs.pop("frame_indices", None), source.total_frames_num
+        )
+        if explicit_frame_indices is not None:
+            return explicit_frame_indices
+
+        return cls.compute_frames_index_to_sample(
+            source=source, target=target, **kwargs
+        )
+
     @classmethod
     def compute_frames_index_to_sample(
         cls,
@@ -552,6 +611,8 @@ class VideoBackend(VideoLoader, OpenCVVideoBackendMixin, PyAVVideoBackendMixin):
             frame_recovery: Enable forward-scan recovery for failed frames.
                 Only honored by the OpenCV codec.
             backend: Decoding codec — ``"opencv"`` or ``"pyav"`` .
+            frame_indices: Optional sorted list of explicit frame indices.
+                When set, these indices override ``num_frames`` and ``fps``.
 
         Returns:
             Tuple of ``(frames_array, metadata_dict)``.
@@ -563,7 +624,7 @@ class VideoBackend(VideoLoader, OpenCVVideoBackendMixin, PyAVVideoBackendMixin):
         if backend == "opencv":
             cap = cls.open_video_capture(data)
             source = cls._prepare_source(cls.get_video_metadata(cap))
-            frame_idx = cls.compute_frames_index_to_sample(
+            frame_idx = cls._get_frame_indices_to_load(
                 source=source, target=target, **kwargs
             )
             frames, valid = cls.read_frames(
@@ -578,7 +639,7 @@ class VideoBackend(VideoLoader, OpenCVVideoBackendMixin, PyAVVideoBackendMixin):
             )
             with av.open(BytesIO(data)) as container:
                 source = cls._prepare_source(cls.get_metadata(container))
-                frame_idx = cls.compute_frames_index_to_sample(
+                frame_idx = cls._get_frame_indices_to_load(
                     source=source, target=target, **kwargs
                 )
                 frames, valid = cls.decode_frames(
@@ -1046,6 +1107,10 @@ class GLMGAVideoBackend(VideoBackend):
             backend=backend,
             **kwargs,
         )
+        if kwargs.get("frame_indices") is not None:
+            # Explicit frame counts should not be changed by GLM-GA padding.
+            return frames, metadata
+
         # Ensure even frame count — matches HF's sample_frames even-padding
         # and _preprocess temporal_patch_size divisibility check.
         if frames.shape[0] & 1:
@@ -1299,11 +1364,12 @@ class Molmo2VideoBackend(VideoLoader, OpenCVVideoBackendMixin):
             max_duration=source.duration,
         )
 
-        frame_idx = cls.compute_frames_index_to_sample(
+        frame_idx = cls._get_frame_indices_to_load(
             source=source,
             target=target,
             frame_sample_mode=frame_sample_mode,
             max_fps=max_fps,
+            frame_indices=kwargs.get("frame_indices"),
         )
 
         frames, valid_frame_indices = cls.read_frames(
@@ -1451,9 +1517,10 @@ class OpenCVDynamicOpenPanguVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
             max_duration=max_duration,
         )
 
-        frame_indices_list = cls.compute_frames_index_to_sample(
+        frame_indices_list = cls._get_frame_indices_to_load(
             source=source,
             target=target,
+            frame_indices=kwargs.get("frame_indices"),
         )
 
         frames, valid_frame_indices = cls.read_frames(
