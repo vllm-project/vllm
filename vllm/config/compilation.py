@@ -1326,7 +1326,7 @@ class CompilationConfig:
         kv_cache_config: "KVCacheConfig | None" = None,
         max_num_reqs: int | None = None,
         is_profiling: bool = False,
-        require_tp_aligned_capture_sizes: bool = False,
+        sp_capture_min_tokens: int | None = None,
     ) -> CUDAGraphMode:
         from vllm.v1.attention.backend import AttentionCGSupport
 
@@ -1461,13 +1461,15 @@ class CompilationConfig:
                 "gpu_memory_utilization."
             )
 
-        # DSV4 eager mHC sequence parallelism shards the token dim across the
-        # TP group, so every captured cudagraph size must be a multiple of
-        # tensor_parallel_size (matching the runner's token padding). With
-        # FULL-decode spec decode the sizes are also rounded to
-        # uniform_decode_query_len above; use the lcm so both hold.
+        # DSV4 eager mHC sequence parallelism shards the token dim across the TP
+        # group, so a captured size that engages SP (>= sp_capture_min_tokens)
+        # must be a multiple of tensor_parallel_size (matching the runner's token
+        # padding) for the chunk to be exact. Smaller sizes (e.g. decode) run
+        # plain TP and are left at their natural size. With FULL-decode spec
+        # decode the sizes are also rounded to uniform_decode_query_len above;
+        # use the lcm so both hold.
         if (
-            require_tp_aligned_capture_sizes
+            sp_capture_min_tokens is not None
             and tensor_parallel_size > 1
             and self.cudagraph_capture_sizes
         ):
@@ -1478,16 +1480,15 @@ class CompilationConfig:
                 and uniform_decode_query_len > 1
             ):
                 multiple_of = math.lcm(tensor_parallel_size, uniform_decode_query_len)
-            rounded_sizes = sorted(
-                {
-                    round_up(size, multiple_of)
-                    for size in self.cudagraph_capture_sizes
-                    if round_up(size, multiple_of) <= self.max_cudagraph_capture_size
-                }
-            )
-            if rounded_sizes:
-                self.max_cudagraph_capture_size = rounded_sizes[-1]
-                self.cudagraph_capture_sizes = rounded_sizes
+            aligned_sizes = set()
+            for size in self.cudagraph_capture_sizes:
+                if size >= sp_capture_min_tokens:
+                    size = round_up(size, multiple_of)
+                if size <= self.max_cudagraph_capture_size:
+                    aligned_sizes.add(size)
+            if aligned_sizes:
+                self.cudagraph_capture_sizes = sorted(aligned_sizes)
+                self.max_cudagraph_capture_size = self.cudagraph_capture_sizes[-1]
 
         self.cudagraph_mode = cudagraph_mode
         return cudagraph_mode

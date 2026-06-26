@@ -6949,7 +6949,7 @@ class GPUModelRunner(
             self.kv_cache_config,
             self.max_num_reqs,
             is_profiling=is_profiling,
-            require_tp_aligned_capture_sizes=(self.parallel_config.enable_sp),
+            sp_capture_min_tokens=self.parallel_config.sp_threshold,
         )
         # Trigger cudagraph dispatching keys initialization after
         # resolved cudagraph mode.

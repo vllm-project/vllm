@@ -463,7 +463,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.parallel_config.tensor_parallel_size,
             self.kv_cache_config,
             self.max_num_reqs,
-            require_tp_aligned_capture_sizes=(self.parallel_config.enable_sp),
+            sp_capture_min_tokens=self.parallel_config.sp_threshold,
         )
         self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,
@@ -1145,11 +1145,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         uniform_tok_count = get_uniform_token_count(num_reqs, num_toks, max_query_len)
 
         # DSV4 mHC sequence parallelism shards the token dim across the TP
-        # group, so the forward must run on a multiple of tp_size tokens. Pad
-        # the dispatch token count (captured cudagraph sizes are already
-        # tp-aligned; this covers the eager / non-captured path). The extra
-        # rows are flagged as padding below.
-        if self.parallel_config.enable_sp:
+        # group, so a forward that engages SP (>= sp_threshold tokens) must run
+        # on a multiple of tp_size tokens. Pad the dispatch token count to tp
+        # (covers the eager / non-captured path; captured SP sizes are already
+        # tp-aligned). Sub-threshold forwards run plain TP and are not padded.
+        # The extra rows are flagged as padding below.
+        sp_threshold = self.parallel_config.sp_threshold
+        if sp_threshold is not None and num_toks >= sp_threshold:
             num_toks = round_up(num_toks, self.parallel_config.tensor_parallel_size)
 
         num_active_loras = 0
