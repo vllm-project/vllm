@@ -139,12 +139,11 @@ scheduling_inference = PlacementGroupSchedulingStrategy(
 # start-up latency.
 # Note: Weight transfer APIs (init_weight_transfer_engine, update_weights)
 # are now native to vLLM workers.
-llm_handle = ray.remote(
+llm = ray.remote(
     num_cpus=0,
     num_gpus=0,
     scheduling_strategy=scheduling_inference,
-)(MyLLM)
-llm = llm_handle.remote(
+)(MyLLM).remote(
     model=MODEL_NAME,
     enforce_eager=True,
     tensor_parallel_size=2,
