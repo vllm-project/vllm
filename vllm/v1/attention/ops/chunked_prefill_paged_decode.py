@@ -400,9 +400,30 @@ def chunked_prefill_paged_decode(
         return
 
     if has_native_layout:
-        raise NotImplementedError(
-            "Native ROCm paged attention layout requires the custom ROCm kernel."
+        context_attention_fwd(
+            q=query,
+            k=key,
+            v=value,
+            o=output,
+            kv_cache_dtype=kv_cache_dtype,
+            k_cache=key_cache,
+            v_cache=value_cache,
+            b_loc=block_table,
+            b_start_loc=query_start_loc,
+            b_seq_len=seq_lens,
+            max_seq_len=max_seq_len,
+            max_input_len=max_query_len,
+            k_scale=k_scale,
+            v_scale=v_scale,
+            alibi_slopes=alibi_slopes,
+            sliding_window=sliding_window,
+            sm_scale=sm_scale,
+            skip_decode=False,
+            fp8_out_scale=output_scale,
+            sinks=sinks,
+            causal=causal,
         )
+        return
 
     real_block_size = value_cache.shape[2]
     # The standard model directly uses the original block_size.
