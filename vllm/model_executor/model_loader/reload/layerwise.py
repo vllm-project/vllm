@@ -9,8 +9,10 @@ import torch
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.model_loader.weight_processing import (
+    WeightProcessingFactory,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from .meta import (
@@ -185,7 +187,7 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
         )
 
         # Do not online process attention layers, must wait until finalize
-        if isinstance(layer, (Attention, MLAAttention)):
+        if WeightProcessingFactory.is_registered_module(layer):
             return ret
 
         # Log warnings allocating excessive buffers on device
@@ -238,8 +240,8 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
             info.reset()
             continue
 
-        # Attention/MLA layers are processed after all other layers
-        if isinstance(layer, (Attention, MLAAttention)):
+        # Registered weight-processing layers are processed after all other layers
+        if WeightProcessingFactory.is_registered_module(layer):
             deferred_attn.append((layer, info))
             continue
 
