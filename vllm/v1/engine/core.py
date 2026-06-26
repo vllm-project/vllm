@@ -217,7 +217,6 @@ class EngineCore:
             self.request_block_hasher = get_request_block_hasher(
                 hash_block_size,
                 caching_hash_fn,
-                prompt_only=vllm_config.cache_config.prefix_cache_prompt_only,
             )
 
         self.step_fn = (

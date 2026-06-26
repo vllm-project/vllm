@@ -45,7 +45,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention import Attention, RSWAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
@@ -94,7 +94,7 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerBackend,
 )
-from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec, RSWASpec
+from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
 from .interfaces import (
     MixtureOfExperts,
@@ -113,40 +113,6 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
-
-
-class RSWAAttention(Attention):
-    """Attention subclass that reports RSWASpec as its KV cache spec.
-
-    Drop-in replacement for the standard ``Attention`` layer inside
-    ``DeepseekAttention`` when the model is configured with Reference Sliding
-    Window Attention (R-SWA, ``rswa_window > 0``).  The actual masking logic
-    lives in the attention backend (FlexAttention or FA4 mask_mod); this class
-    only overrides ``get_kv_cache_spec`` so the KV cache manager instantiates
-    ``RSWAManager`` (instead of ``FullAttentionManager``) and can therefore
-    evict "gap" blocks to keep per-request KV memory bounded.
-    """
-
-    def __init__(self, *args, rswa_window: int, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self._rswa_window = rswa_window
-
-    def get_kv_cache_spec(self, vllm_config: "VllmConfig") -> "KVCacheSpec | None":
-        base = super().get_kv_cache_spec(vllm_config)
-        if base is None:
-            return None
-        from vllm.v1.kv_cache_interface import get_kv_quant_mode
-
-        quant_mode = get_kv_quant_mode(self.kv_cache_dtype)
-        return RSWASpec(
-            block_size=base.block_size,
-            num_kv_heads=base.num_kv_heads,
-            head_size=base.head_size,
-            head_size_v=getattr(base, "head_size_v", base.head_size),
-            dtype=base.dtype,
-            kv_quant_mode=quant_mode,
-            rswa_window=self._rswa_window,
-        )
 
 
 class DeepseekAttention(nn.Module):

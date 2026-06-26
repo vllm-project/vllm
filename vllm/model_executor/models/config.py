@@ -63,16 +63,21 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
         CLI argument (priority order):
 
           1. ``--attention-config '{"backend": "FLASH_ATTN"}'``
-             → FA4 + rswa_mask_mod.  Exact token-level R-SWA; full prefix
-               caching safe.  ``flash_attn_version`` is forced to 4 if not
-               already set (R-SWA mask_mod requires FA4; FA3 cannot express it).
-               Raises if FA4 is not available on this device.
+             → FA4 + rswa_mask_mod.  Exact token-level R-SWA.
+               ``flash_attn_version`` is forced to 4 if not already set (R-SWA
+               mask_mod requires FA4; FA3 cannot express it).  Raises if FA4 is
+               not available on this device.
 
           2. ``--attention-config '{"backend": "FLEX_ATTENTION"}'``
-             → FlexAttention R-SWA.  Prefix caching restricted to prompt tokens.
+             → FlexAttention R-SWA via Triton block mask.
 
           3. ``--attention-config '{"backend": "auto"}'`` (or omitted)
              → Auto-detect: FA4 if available (H20/H100 SM90), else FlexAttention.
+
+        Regardless of backend, prefix caching is disabled for this model: R-SWA
+        decode-phase KV is not a pure causal function of the prefix (so decode
+        blocks are not reusable), and single-turn image-led OCR prompts rarely
+        hit the prefix cache.
 
         Example — force FlexAttention even on a machine with FA4::
 
@@ -142,19 +147,19 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
                 "Use FLASH_ATTN (FA4) or FLEX_ATTENTION."
             )
 
-        # Both FA4 and FlexAttention implement R-SWA via a per-request mask that
-        # depends on prefix_len.  A decode-token's attention output differs across
-        # requests that share the same decode sequence but have different prefix
-        # lengths, so decode-token KV blocks cannot be safely reused across
-        # requests.  The prompt/image prefix has a purely causal (prefix-length-
-        # independent) attention pattern and is safe to cache.
+        # R-SWA windows the *generated* tokens, so a decode-token's KV is not a
+        # pure causal function of the prefix and cannot be safely reused across
+        # requests via prefix caching. Only the prompt/image prefix is cacheable,
+        # but OCR is single-turn with image-led prompts that rarely share a
+        # prefix, so prefix caching brings little benefit while complicating the
+        # KV cache manager. Disable it for this model.
         cache_config = vllm_config.cache_config
         if cache_config.enable_prefix_caching:
-            cache_config.prefix_cache_prompt_only = True
+            cache_config.enable_prefix_caching = False
             logger.info(
-                "Unlimited-OCR: restricting prefix caching to prompt tokens "
-                "(R-SWA decode-token blocks are not cacheable across requests "
-                "with different prefix lengths)."
+                "Unlimited-OCR: disabling prefix caching (R-SWA decode KV is not "
+                "cacheable, and single-turn image-led prompts rarely hit the "
+                "prefix cache)."
             )
 
         mm_config = getattr(vllm_config.model_config, "multimodal_config", None)

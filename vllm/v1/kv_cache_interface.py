@@ -461,6 +461,24 @@ class RSWASpec(FullAttentionSpec):
         """
         return cdiv(max_model_len + self.rswa_window, self.block_size) + 2
 
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        """Per-request worst-case KV memory for pool sizing.
+
+        Unlike a pure sliding-window layer, R-SWA keeps the *entire* prompt /
+        image prefix globally visible and only windows the generated tokens, so
+        the held set is ``prefix + min(decode, rswa_window)`` blocks. Because
+        ``prefix`` can be as long as ``max_model_len``, the worst-case bound
+        cannot drop below the full-attention bound; the window only adds a small
+        block-alignment slack. We size from ``max_admission_blocks_per_request``
+        so the startup pool and the runtime admission gate use one bound.
+        """
+        max_model_len = vllm_config.model_config.max_model_len
+        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        max_blocks = self.max_admission_blocks_per_request(
+            max_num_batched_tokens=max_num_batched_tokens, max_model_len=max_model_len
+        )
+        return max_blocks * self.page_size_bytes
+
     @classmethod
     def merge(cls, specs: list[RSWASpec]) -> RSWASpec:
         assert all(isinstance(spec, RSWASpec) for spec in specs), (
