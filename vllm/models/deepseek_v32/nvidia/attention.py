@@ -318,9 +318,6 @@ class DeepseekV32Attention(MLAAttention):
         k_pe: torch.Tensor,
         output: torch.Tensor,
     ) -> None:
-        if self.calculate_kv_scales:
-            self.calc_kv_scales(q, kv_c_normed, k_pe)
-
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
         attn_metadata: MLACommonMetadata
