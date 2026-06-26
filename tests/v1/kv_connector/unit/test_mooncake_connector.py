@@ -33,14 +33,37 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import
 )
 from vllm.utils.network_utils import get_open_port
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+)
 from vllm.v1.request import RequestStatus
 
 from .utils import create_request, create_scheduler, create_vllm_config
 
 
 def _make_test_kv_cache_config() -> KVCacheConfig:
-    return KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
+    return KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                [
+                    "model.layers.0.self_attn",
+                    "model.layers.1.self_attn",
+                    "model.layers.0.mla_attn",
+                    "model.layers.1.eagle_attn",
+                ],
+                FullAttentionSpec(
+                    block_size=16,
+                    num_kv_heads=4,
+                    head_size=64,
+                    dtype=torch.float16,
+                ),
+            )
+        ],
+    )
 
 
 class FakeMooncakeWrapper:

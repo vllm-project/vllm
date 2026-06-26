@@ -50,7 +50,7 @@ from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.v1.attention.backend import AttentionMetadata
-from vllm.v1.attention.backends.utils import get_kv_cache_layout
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -59,6 +59,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 from vllm.v1.request import RequestStatus
+from vllm.v1.worker.block_table import BlockTable
 from vllm.v1.worker.utils import select_common_block_size
 
 logger = init_logger(__name__)
@@ -120,6 +121,7 @@ def _expand_transfer_regions(
     layer_indices: list[int],
     is_kv_layout_blocks_first: bool,
     group_indices: list[int] | None = None,
+    split_kv_regions: list[bool] | None = None,
 ) -> list[TransferRegion]:
     """Expand registered KV tensors into the regions transferred by Mooncake."""
     assert (
@@ -136,11 +138,30 @@ def _expand_transfer_regions(
         "Mooncake transfer regions require matching group metadata lengths, "
         f"got group_indices={len(group_indices)}, layer_names={len(layer_names)}."
     )
+    if split_kv_regions is None:
+        split_kv_regions = [is_kv_layout_blocks_first] * len(layer_names)
+    assert len(split_kv_regions) == len(layer_names), (
+        "Mooncake transfer regions require matching split metadata, "
+        f"got split_kv_regions={len(split_kv_regions)}, "
+        f"layer_names={len(layer_names)}."
+    )
     regions: list[TransferRegion] = []
-    for base_addr, block_len, layer_name, layer_index, group_index in zip(
-        base_addrs, block_lens, layer_names, layer_indices, group_indices
+    for (
+        base_addr,
+        block_len,
+        layer_name,
+        layer_index,
+        group_index,
+        split_kv_region,
+    ) in zip(
+        base_addrs,
+        block_lens,
+        layer_names,
+        layer_indices,
+        group_indices,
+        split_kv_regions,
     ):
-        kv_block_len = block_len // 2 if is_kv_layout_blocks_first else block_len
+        kv_block_len = block_len // 2 if split_kv_region else block_len
         regions.append(
             TransferRegion(
                 layer_name=layer_name,
@@ -151,7 +172,7 @@ def _expand_transfer_regions(
                 group_index=group_index,
             )
         )
-        if is_kv_layout_blocks_first:
+        if split_kv_region:
             regions.append(
                 TransferRegion(
                     layer_name=layer_name,
@@ -607,6 +628,9 @@ class MooncakeConnectorScheduler:
                 for g in kv_cache_config.kv_cache_groups
             )
         )
+        # GDN is represented as a MambaSpec in vLLM. This Mooncake MambaSpec
+        # path is currently tested with GDN; Mamba2 is not validated yet.
+        self._has_mamba = kv_cache_config.has_mamba_layers
 
         # Requests that need to start recv/send.
         # New requests are added by update_state_after_alloc in
@@ -643,6 +667,38 @@ class MooncakeConnectorScheduler:
             for i, blocks in enumerate(block_ids)
         ]
 
+    def _mamba_prefill_token_count(self, num_prompt_tokens: int) -> int:
+        """D-side only. Returns N-1 for Mamba models since the decoder
+        always recomputes the last token and must start from h(N-1)."""
+        if self._has_mamba and num_prompt_tokens > 1:
+            return num_prompt_tokens - 1
+        return num_prompt_tokens
+
+    def _truncate_mamba_request_for_prefill(self, request: "Request") -> None:
+        """P-side only: drop the last prompt token so the prefiller computes
+        h(N-1) instead of h(N). The decoder recomputes the last token to
+        derive h(N) correctly.
+
+        Guarded by ``_p_side_truncated`` to avoid repeated truncation if the
+        request is preempted and rescheduled."""
+        params = request.kv_transfer_params
+        if (
+            params is not None
+            and not params.get("_p_side_truncated")
+            and request.num_prompt_tokens > 1
+        ):
+            if request.prompt_token_ids is not None:
+                request.prompt_token_ids.pop()
+            elif request.prompt_embeds is not None:
+                request.prompt_embeds = request.prompt_embeds[:-1]
+            else:
+                return
+
+            request._all_token_ids.pop()
+            request.num_prompt_tokens -= 1
+            request.max_tokens = 1
+            params["_p_side_truncated"] = True
+
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
     ) -> tuple[int, bool]:
@@ -676,9 +732,14 @@ class MooncakeConnectorScheduler:
             # Remote prefill: get all prompt blocks from remote.
             assert not self.is_kv_producer
             token_ids = request.prompt_token_ids or []
-            count = len(token_ids) - num_computed_tokens
+            count = self._mamba_prefill_token_count(len(token_ids)) - (
+                num_computed_tokens
+            )
             if count > 0:
                 return count, True
+
+        if params.get("do_remote_decode") and self._has_mamba:
+            self._truncate_mamba_request_for_prefill(request)
 
         # No remote prefill for this request.
         return 0, False
@@ -828,7 +889,7 @@ class MooncakeConnectorWorker:
         self,
         vllm_config: VllmConfig,
         engine_id: str,
-        kv_cache_config: "KVCacheConfig | None" = None,
+        kv_cache_config: "KVCacheConfig",
     ):
         if TransferEngine is None:
             logger.error("Mooncake is not available")
@@ -878,7 +939,6 @@ class MooncakeConnectorWorker:
         self.engine_id: EngineId = engine_id
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.num_blocks = 0
         self.block_len_per_layer: list[int] = []
         self.registered_layer_names: list[str] = []
         self.registered_layer_indices: list[int] = []
@@ -943,10 +1003,10 @@ class MooncakeConnectorWorker:
         self.cache_config = vllm_config.cache_config
         self.kv_cache_config = kv_cache_config
         self.use_mla = self.model_config.use_mla
+        self._physical_blocks_per_logical_kv_block = 1
         self._sync_block_size_with_kernel()
 
         self.attn_backends = get_current_attn_backends(vllm_config)
-        self.backend_name = self.attn_backends[0].get_name()
         self.kv_cache_layout = get_kv_cache_layout()
         logger.debug(
             "Detected attention backends %s",
@@ -955,31 +1015,23 @@ class MooncakeConnectorWorker:
         logger.debug("Detected kv cache layout %s", self.kv_cache_layout)
 
         self._tp_size: dict[EngineId, int] = {self.engine_id: self.tp_size}
-        self._layer_specs: dict[str, KVCacheSpec] = {}
-        self._layer_group_indices: dict[str, int] = {}
-        self._has_mamba = False
-        if kv_cache_config is not None:
-            self._layer_specs = {
-                layer: group.kv_cache_spec
-                for group in kv_cache_config.kv_cache_groups
-                for layer in group.layer_names
-            }
-            self._layer_group_indices = {
-                layer: group_index
-                for group_index, group in enumerate(kv_cache_config.kv_cache_groups)
-                for layer in group.layer_names
-            }
-            self._has_mamba = any(
-                isinstance(g.kv_cache_spec, MambaSpec)
-                for g in kv_cache_config.kv_cache_groups
-            )
+        self._layer_specs: dict[str, KVCacheSpec] = {
+            layer: group.kv_cache_spec
+            for group in kv_cache_config.kv_cache_groups
+            for layer in group.layer_names
+        }
+        self._layer_group_indices: dict[str, int] = {
+            layer: group_index
+            for group_index, group in enumerate(kv_cache_config.kv_cache_groups)
+            for layer in group.layer_names
+        }
         self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
             tp_size=self.tp_size,
             block_size=self.block_size,
             engine_id=self.engine_id,
             is_mla=self.use_mla,
-            is_mamba=self._has_mamba,
+            is_mamba=kv_cache_config.has_mamba_layers,
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             attn_backends=self.attn_backends,
         )
@@ -1004,6 +1056,9 @@ class MooncakeConnectorWorker:
                 kernel_block_size,
             )
             assert self.block_size > kernel_block_size
+            self._physical_blocks_per_logical_kv_block = (
+                self.block_size // kernel_block_size
+            )
             self.block_size = kernel_block_size
 
     def __del__(self):
@@ -1319,6 +1374,32 @@ class MooncakeConnectorWorker:
             remote_tp_ranks,
         )
 
+    def _logical_to_kernel_block_ids(
+        self, block_ids: list[list[int]]
+    ) -> list[list[int]]:
+        # For example, if a 544-token logical block is served by 32-token
+        # FA kernel blocks, FA block id k expands to [17k, ..., 17k + 16],
+        # while the matching Mamba/GDN state block remains k. Only attention
+        # groups need logical block ids expanded to kernel block ids; Mamba/GDN
+        # state block ids stay in the logical/page-id space.
+        if self._physical_blocks_per_logical_kv_block == 1:
+            return block_ids
+
+        block_arange = np.arange(self._physical_blocks_per_logical_kv_block).reshape(
+            1, -1
+        )
+        group_specs = self.kv_cache_config.kv_cache_groups
+        return [
+            BlockTable.map_to_kernel_blocks(
+                np.array(group),
+                self._physical_blocks_per_logical_kv_block,
+                block_arange,
+            ).tolist()
+            if not isinstance(group_specs[i].kv_cache_spec, MambaSpec)
+            else group
+            for i, group in enumerate(block_ids)
+        ]
+
     async def _build_transfer_params(
         self,
         ready_reqs: list[tuple[ReqId, SendBlockMeta]],
@@ -1341,13 +1422,6 @@ class MooncakeConnectorWorker:
             ):
                 continue
 
-            # Keep KV-cache group identity.  Hybrid/HMA groups can carry
-            # different semantics (e.g. full-attention KV pages vs GDN/Mamba
-            # inner-state slots), so their block IDs must not be flattened and
-            # reused for every registered region.
-            local_block_ids_by_group: list[list[int]] = []
-            remote_block_ids_by_group: list[list[int]] = []
-            has_block_error = False
             if len(send_meta.local_block_ids) != len(remote_block_ids_per_group):
                 logger.error(
                     "req %s: KV group count mismatch: local=%d, remote=%d",
@@ -1359,22 +1433,51 @@ class MooncakeConnectorWorker:
                 if err_msg is None:
                     err_msg = "KV group count mismatch"
                 continue
-            for local_group, remote_group in zip(
-                send_meta.local_block_ids, remote_block_ids_per_group
+
+            # Keep KV-cache group identity. Hybrid/HMA groups can carry
+            # different semantics (e.g. full-attention KV pages vs GDN/Mamba
+            # inner-state slots), so their block IDs must not be flattened and
+            # reused for every registered region.
+            local_block_ids_by_group: list[list[int]] = []
+            remote_block_ids_by_group: list[list[int]] = []
+            has_block_error = False
+            group_specs = self.kv_cache_config.kv_cache_groups
+            for group_index, (local_group, remote_group) in enumerate(
+                zip(send_meta.local_block_ids, remote_block_ids_per_group)
             ):
+                is_mamba_group = isinstance(
+                    group_specs[group_index].kv_cache_spec,
+                    MambaSpec,
+                )
+                if is_mamba_group:
+                    # Mamba/GDN prefix caching can use null blocks only as
+                    # align-mode placeholders. They do not carry transferable
+                    # state, so skip them on both producer and consumer sides.
+                    local_group = [
+                        block_id
+                        for block_id in local_group
+                        if block_id != NULL_BLOCK_ID
+                    ]
+                    remote_group = [
+                        block_id
+                        for block_id in remote_group
+                        if block_id != NULL_BLOCK_ID
+                    ]
+
                 n_local = len(local_group)
                 n_remote = len(remote_group)
                 if n_local < n_remote:
                     logger.error(
                         "req %s: local blocks(%d) < remote blocks(%d) "
-                        "in a KV cache group",
+                        "in a KV cache group (is_mamba_group=%s)",
                         d_req_id,
                         n_local,
                         n_remote,
+                        is_mamba_group,
                     )
                     has_block_error = True
                     break
-                if n_local > n_remote:
+                elif n_local > n_remote:
                     # Partial prefix cache hit: just read uncomputed blocks.
                     local_group = local_group[-n_remote:] if n_remote > 0 else []
                 local_block_ids_by_group.append(local_group)
@@ -1388,6 +1491,13 @@ class MooncakeConnectorWorker:
 
             if not any(local_block_ids_by_group):
                 continue
+
+            local_block_ids_by_group = self._logical_to_kernel_block_ids(
+                local_block_ids_by_group
+            )
+            remote_block_ids_by_group = self._logical_to_kernel_block_ids(
+                remote_block_ids_by_group
+            )
 
             for local_region, remote_region in zip(local_regions, remote_regions):
                 assert local_region.group_index == remote_region.group_index, (
@@ -1524,15 +1634,14 @@ class MooncakeConnectorWorker:
 
         logger.info("Registering KV_Caches. use_mla: %s", self.use_mla)
 
-        kv_data_ptrs = []
-        kv_data_lens = []
-        seen_base_addresses = []
+        kv_data_ptrs: list[int] = []
+        kv_data_lens: list[int] = []
+        region_base_addresses: list[int] = []
         self.block_len_per_layer = []
         self.registered_layer_names = []
         self.registered_layer_indices = []
         self.registered_group_indices = []
 
-        tensor_size_bytes = None
         for layer_name, cache_or_caches in kv_caches.items():
             layer_index = extract_layer_index(layer_name)
             layer_spec = self._layer_specs.get(layer_name)
@@ -1542,9 +1651,14 @@ class MooncakeConnectorWorker:
                     layer_name,
                 )
                 continue
-            cache_list = self.transfer_topo.get_transfer_cache_regions(
-                cache_or_caches, layer_spec
-            )
+            if isinstance(layer_spec, MambaSpec):
+                conv, _ = cache_or_caches
+                cache_list = [conv]
+            else:
+                cache_list = self.transfer_topo.get_transfer_cache_regions(
+                    cache_or_caches, layer_spec
+                )
+
             logger.debug(
                 "registering layer %s with %d cache tensor(s)",
                 layer_name,
@@ -1554,17 +1668,7 @@ class MooncakeConnectorWorker:
             for cache in cache_list:
                 self._log_debug_cache_registration(layer_name, cache)
                 base_addr = cache.data_ptr()
-                if base_addr in seen_base_addresses:
-                    continue
-
-                seen_base_addresses.append(base_addr)
-
-                if tensor_size_bytes is None:
-                    tensor_size_bytes = cache.nbytes
-                    self.num_blocks = cache.shape[0]
-                assert cache.shape[0] == self.num_blocks, (
-                    "All kv cache tensors must have the same number of blocks"
-                )
+                region_base_addresses.append(base_addr)
 
                 # Use stride-based block length so RDMA reaches the last
                 # block's padding (e.g. DeepseekV4 MLA alignment). stride(0)
@@ -1572,6 +1676,7 @@ class MooncakeConnectorWorker:
                 # blocks in GPU memory, which matches or exceeds the
                 # shape-based size.
                 block_len = cache.stride(0) * cache.element_size()
+                region_len = cache.shape[0] * block_len
 
                 self.block_len_per_layer.append(block_len)
                 self.registered_layer_names.append(layer_name)
@@ -1579,24 +1684,30 @@ class MooncakeConnectorWorker:
                 self.registered_group_indices.append(
                     self._layer_group_indices[layer_name]
                 )
-                kv_data_ptrs.append(base_addr)
-                kv_data_lens.append(self.num_blocks * block_len)
+                # Register shared backing memory once, while keeping duplicate
+                # region metadata above for group-specific address calculation.
+                if base_addr in kv_data_ptrs:
+                    registered_index = kv_data_ptrs.index(base_addr)
+                    kv_data_lens[registered_index] = max(
+                        kv_data_lens[registered_index],
+                        region_len,
+                    )
+                else:
+                    kv_data_ptrs.append(base_addr)
+                    kv_data_lens.append(region_len)
 
-        self.kv_caches_base_addr = seen_base_addresses
-        self.seen_base_addresses = seen_base_addresses
+        self.kv_caches_base_addr = region_base_addresses
+        self.seen_base_addresses = kv_data_ptrs
+
+        if not kv_data_ptrs:
+            raise RuntimeError("No KV cache tensors were registered with Mooncake.")
 
         ret_value = self.engine.batch_register_memory(kv_data_ptrs, kv_data_lens)
         if ret_value != 0:
             raise RuntimeError("Mooncake batch memory registration failed.")
 
-        assert tensor_size_bytes is not None
-        assert self.num_blocks != 0
         self.device_kv_caches = kv_caches
-        logger.debug(
-            "registered num_blocks=%d block_lens=%s",
-            self.num_blocks,
-            self.block_len_per_layer,
-        )
+        logger.debug("registered block_lens=%s", self.block_len_per_layer)
 
         # No need to launch server for D node.
         if self.is_kv_consumer:
@@ -1918,6 +2029,12 @@ class MooncakeConnectorWorker:
                 self._layer_group_indices.get(layer_name, 0)
                 for layer_name in layer_names
             ]
+        split_kv_regions = None
+        if self.transfer_topo.virtually_split_kv_in_blocks:
+            split_kv_regions = [
+                not isinstance(self._layer_specs[layer_name], MambaSpec)
+                for layer_name in layer_names
+            ]
         return _expand_transfer_regions(
             base_addrs=base_addrs,
             block_lens=block_lens,
@@ -1925,6 +2042,7 @@ class MooncakeConnectorWorker:
             layer_indices=layer_indices,
             is_kv_layout_blocks_first=self.transfer_topo.virtually_split_kv_in_blocks,
             group_indices=group_indices,
+            split_kv_regions=split_kv_regions,
         )
 
     def _get_sender_transfer_plan(
