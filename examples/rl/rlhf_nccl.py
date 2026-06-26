@@ -54,8 +54,7 @@ def get_assigned_gpu():
     assigned_gpu = int(ray.get_gpu_ids()[0])
     os.environ.pop("CUDA_VISIBLE_DEVICES", None)
     os.environ.pop("HIP_VISIBLE_DEVICES", None)
-    torch.accelerator.set_device(assigned_gpu)
-    print(f"Training model on GPU {assigned_gpu}")
+    torch.accelerator.set_device_idx(assigned_gpu)
     return assigned_gpu
 
 
