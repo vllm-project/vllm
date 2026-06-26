@@ -1000,6 +1000,16 @@ class OffloadingConnectorScheduler:
                     group_config, group_state, num_offloadable_tokens
                 )
 
+                # Clamp to the number of offload keys we actually have.
+                # num_offloadable_tokens is a forward-looking estimate
+                # (num_computed_tokens + num_scheduled_tokens), but
+                # offload_keys are only generated for tokens whose block
+                # hashes already exist. During decode, a chunk that
+                # completes in the *current* step won't have its hash
+                # yet — so num_chunks can overshoot. Clamping prevents
+                # silently skipping those chunks.
+                num_chunks = min(num_chunks, len(group_state.offload_keys))
+
                 start_chunk_idx = group_state.next_stored_chunk_idx
                 if num_chunks <= start_chunk_idx:
                     continue
