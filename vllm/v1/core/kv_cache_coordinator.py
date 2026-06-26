@@ -414,10 +414,11 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         self.block_size = self.kv_cache_spec.block_size
         self.dcp_world_size = dcp_world_size
         self.pcp_world_size = pcp_world_size
+        # MRv2 PCP stores the FULL KV on every rank, so the coordinator's block
+        # size is inflated only by dcp (which shards the cache), not by pcp.
+        # See single_type_kv_cache_manager.py and kv_cache_utils.py.
         if dcp_world_size > 1:
             self.block_size *= dcp_world_size
-        if pcp_world_size > 1:
-            self.block_size *= pcp_world_size
         # For models using only Mamba, block_size is set to max_model_len when
         # prefix caching is disabled, and hash_block_size validation is skipped.
         assert not enable_caching or (hash_block_size == self.block_size), (

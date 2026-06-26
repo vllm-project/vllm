@@ -613,8 +613,17 @@ def resolve_kv_cache_block_sizes(
     pcp = vllm_config.parallel_config.prefill_context_parallel_size
     groups = kv_cache_config.kv_cache_groups
 
-    if len(groups) <= 1:  # Single group: block_size * dcp * pcp
-        bs = cache_config.block_size * dcp * pcp
+    if len(groups) <= 1:  # Single group: block_size * dcp
+        # MRv2 PCP stores the FULL KV on every rank (the attention backend's
+        # do_kv_cache_update all-gathers + restores the canonical KV onto each
+        # rank, and decode attends to the full sequence). So unlike the
+        # sharded-KV design, the scheduler/hash block granularity is NOT
+        # inflated by pcp -- it stays at block_size * dcp. (See
+        # single_type_kv_cache_manager.py, where the per-manager block_size is
+        # likewise not inflated by pcp.) Inflating it here would generate block
+        # hashes at a coarser granularity than the manager allocates, breaking
+        # the prefix-cache `len(block_hashes) >= num_full_blocks` assertion.
+        bs = cache_config.block_size * dcp
         return bs, bs
 
     if dcp != 1 or pcp != 1:

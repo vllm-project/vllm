@@ -257,6 +257,7 @@ def set_forward_context(
     ubatch_slices: UBatchSlices | None = None,
     slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     skip_compiled: bool = False,
+    additional_forward_kwargs: dict[str, Any] | None = None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -305,6 +306,8 @@ def set_forward_context(
         batch_descriptor=batch_descriptor,
         ubatch_slices=ubatch_slices,
     )
+    if additional_forward_kwargs is not None:
+        additional_kwargs.update(additional_forward_kwargs)
 
     forward_context = create_forward_context(
         attn_metadata,

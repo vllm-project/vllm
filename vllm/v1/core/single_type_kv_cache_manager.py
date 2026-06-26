@@ -66,8 +66,14 @@ class SingleTypeKVCacheManager(ABC):
         self.block_size = kv_cache_spec.block_size
         self.dcp_world_size = dcp_world_size
         self.pcp_world_size = pcp_world_size
-        if dcp_world_size * pcp_world_size > 1:
-            self.block_size *= dcp_world_size * pcp_world_size
+        # MRv2 PCP stores the FULL KV on every rank (the attention backend's
+        # do_kv_cache_update all-gathers + restores the canonical KV onto each
+        # rank, and decode attends to the full sequence). So unlike the
+        # sharded-KV design, the per-rank block size is NOT inflated by pcp --
+        # inflating it under-allocates blocks (cdiv(L, block*pcp)) and the full
+        # KV write overflows, corrupting positions past the per-rank boundary.
+        if dcp_world_size > 1:
+            self.block_size *= dcp_world_size
         self.kv_cache_spec = kv_cache_spec
         self.block_pool = block_pool
         self.enable_caching = enable_caching
@@ -542,8 +548,10 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             [] for _ in range(len(kv_cache_group_ids))
         )
         block_size = kv_cache_spec.block_size
-        if dcp_world_size * pcp_world_size > 1:
-            block_size *= dcp_world_size * pcp_world_size
+        # See __init__: MRv2 PCP stores full KV per rank, so do not inflate the
+        # block size by pcp (only dcp shards the cache).
+        if dcp_world_size > 1:
+            block_size *= dcp_world_size
         max_num_blocks = max_length // block_size
         for block_hash in itertools.islice(block_hashes, max_num_blocks):
             # block_hashes is a chain of block hashes. If a block hash is not
