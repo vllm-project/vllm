@@ -215,8 +215,7 @@ class EngineCore:
             init_none_hash(caching_hash_fn)
 
             self.request_block_hasher = get_request_block_hasher(
-                hash_block_size,
-                caching_hash_fn,
+                hash_block_size, caching_hash_fn
             )
 
         self.step_fn = (
