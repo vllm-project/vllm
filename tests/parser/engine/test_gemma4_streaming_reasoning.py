@@ -57,6 +57,8 @@ def _make_tokenizer(sequence: list[tuple[int, str]]) -> MagicMock:
         return "".join(parts)
 
     tokenizer.decode.side_effect = decode
+    tokenizer.all_special_tokens = list(SPECIAL_TOKEN_MAP.values())
+    tokenizer.all_special_ids = list(SPECIAL_TOKEN_MAP.keys())
     return tokenizer
 
 

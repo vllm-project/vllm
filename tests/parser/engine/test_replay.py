@@ -389,6 +389,62 @@ class TestSkipToolParsingReplay:
         )
 
 
+_DROP_TOKENS = {"<bos>": 99990, "<eos>": 99991}
+
+
+def _inject_drop_tokens(sample):
+    """Insert <bos> at stream start and <eos> between the first two tokens."""
+    new_vocab = {**sample.vocab, **_DROP_TOKENS}
+    tokens = list(sample.tokens)
+    tokens.insert(0, (99990, "<bos>"))
+    if len(tokens) >= 3:
+        tokens.insert(2, (99991, "<eos>"))
+    else:
+        tokens.append((99991, "<eos>"))
+    return dataclasses.replace(sample, vocab=new_vocab, tokens=tokens)
+
+
+class TestDropTokenReplay:
+    """Verify unconfigured special tokens are silently dropped across
+    all parsers and chunk sizes."""
+
+    @pytest.mark.parametrize(
+        "parser_info",
+        _PARSERS,
+        ids=[p.name for p in _PARSERS],
+    )
+    @pytest.mark.parametrize("chunk_size", [1, 3, None])
+    def test_drop_tokens_removed_from_output(self, parser_info, chunk_size):
+        for sample in parser_info.samples:
+            injected = _inject_drop_tokens(sample)
+            tokenizer = make_mock_tokenizer(injected)
+            parser = parser_info.parser_cls(
+                tokenizer,
+                tools=sample.tools,
+            )
+
+            results = replay_streaming(
+                parser,
+                injected.tokens,
+                chunk_size=chunk_size,
+                tools=sample.tools,
+                prompt_token_ids=sample.prompt_token_ids,
+            )
+            output = collect_output(results)
+
+            for drop_text in _DROP_TOKENS:
+                assert drop_text not in output.reasoning, (
+                    f"{drop_text!r} leaked into reasoning "
+                    f"(parser={parser_info.name}, chunk={chunk_size})"
+                )
+                assert drop_text not in output.content, (
+                    f"{drop_text!r} leaked into content "
+                    f"(parser={parser_info.name}, chunk={chunk_size})"
+                )
+
+            assert_parse_output(output, sample)
+
+
 class TestAdapterReferences:
     """Verify make_adapters sets reasoning/tool parser class refs on parser engine
     parser classes so the serving layer finds them and calls adjust_request."""

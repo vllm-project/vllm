@@ -62,6 +62,7 @@ class MockTokenizer:
         "eos_token_id",
         "bos_token_id",
         "pad_token_id",
+        "_all_special_tokens",
     )
 
     def __init__(
@@ -73,6 +74,7 @@ class MockTokenizer:
         self._token_ids = [tid for tid, _ in tokens]
         self._token_decode_map = {tid: text for tid, text in tokens}
         self._special_ids = set(vocab.values())
+        self._all_special_tokens = list(vocab.keys())
         self.eos_token_id = None
         self.bos_token_id = None
         self.pad_token_id = None
@@ -82,6 +84,14 @@ class MockTokenizer:
 
     def get_vocab(self) -> dict[str, int]:
         return self._vocab
+
+    @property
+    def all_special_tokens(self) -> list[str]:
+        return self._all_special_tokens
+
+    @property
+    def all_special_ids(self) -> list[int]:
+        return [self._vocab[t] for t in self._all_special_tokens if t in self._vocab]
 
     def encode(self, text: str, **kwargs) -> list[int]:
         return self._token_ids
