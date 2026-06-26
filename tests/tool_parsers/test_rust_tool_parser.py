@@ -171,7 +171,7 @@ def test_rust_tool_parser_extension_typed_api() -> None:
 
     parser.parse_into(build_tool_call(), output)
     output.append(parser.finish())
-    output = output.coalesce_calls()
+    output = output.coalesce()
 
     assert parser.preserve_special_tokens()
     assert output.normal_text == ""

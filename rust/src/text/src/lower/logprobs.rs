@@ -27,35 +27,26 @@ pub enum LogprobsError {
         max_allowed: usize,
     },
     #[error(
-        "token_id(s) {token_ids:?} in logprob_token_ids contain out-of-vocab token ids. \
-         Vocabulary size: {vocab_size}"
-    )]
-    InvalidTokenIds {
-        token_ids: Vec<u32>,
-        vocab_size: usize,
-    },
-    #[error(
         "when both logprobs and logprob_token_ids are set, logprobs must equal \
          len(logprob_token_ids). Got logprobs={logprobs}, len(logprob_token_ids)={num_token_ids}."
     )]
     TokenIdsMismatch { logprobs: i32, num_token_ids: usize },
 }
 
-/// Validate logprobs-related sampling parameters, returning an error if any
-/// parameter is out of bounds or if the combination of parameters is invalid.
+/// Validate logprobs count sampling parameters.
 pub(super) fn validate_logprobs(
     logprobs: Option<i32>,
     prompt_logprobs: Option<i32>,
     logprob_token_ids: Option<&[u32]>,
     sampling_limits: SamplingLimits,
 ) -> Result<(), LogprobsError> {
-    let vocab_size = sampling_limits.logprobs_vocab_size();
+    let vocab_size = sampling_limits.model_vocab_size;
     let max_logprobs =
         normalize_logprobs_count(sampling_limits.max_logprobs, vocab_size, "max_logprobs")?;
 
     validate_logprobs_count(logprobs, max_logprobs, vocab_size, "logprobs")?;
     validate_logprobs_count(prompt_logprobs, max_logprobs, vocab_size, "prompt_logprobs")?;
-    validate_logprob_token_ids(logprobs, logprob_token_ids, vocab_size)
+    validate_logprob_token_ids(logprobs, logprob_token_ids)
 }
 
 fn validate_logprobs_count(
@@ -80,10 +71,9 @@ fn validate_logprobs_count(
     Ok(())
 }
 
-fn validate_logprob_token_ids(
+pub(super) fn validate_logprob_token_ids(
     logprobs: Option<i32>,
     logprob_token_ids: Option<&[u32]>,
-    vocab_size: usize,
 ) -> Result<(), LogprobsError> {
     let Some(logprob_token_ids) = logprob_token_ids else {
         return Ok(());
@@ -94,18 +84,6 @@ fn validate_logprob_token_ids(
         return Err(LogprobsError::TooManyTokenIds {
             requested: n,
             max_allowed: SamplingLimits::MAX_LOGPROB_TOKEN_IDS,
-        });
-    }
-
-    let invalid_token_ids: Vec<_> = logprob_token_ids
-        .iter()
-        .copied()
-        .filter(|&token_id| token_id as usize >= vocab_size)
-        .collect();
-    if !invalid_token_ids.is_empty() {
-        return Err(LogprobsError::InvalidTokenIds {
-            token_ids: invalid_token_ids,
-            vocab_size,
         });
     }
 

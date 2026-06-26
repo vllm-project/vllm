@@ -71,6 +71,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     MambaSpec,
     MLAAttentionSpec,
+    SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.block_table import BlockTable
@@ -95,7 +96,13 @@ class NixlBaseConnectorWorker:
     ) -> np.ndarray:
         """Compute NIXL descriptor IDs for given block IDs."""
         num_fa_regions = self.num_regions
-        num_ssm_regions = len(self.block_len_per_layer) * 4 if self._has_mamba else 0
+        num_ssm_regions = 0
+        if self._has_mamba:
+            assert self._conv_decomp is not None
+            # NIXL regions per SSM layer = conv sub-projections + 1 SSM temporal
+            # (Mamba2/GDN: 3+1=4; Mamba1: 1+1=2).
+            ssm_regions_per_layer = len(self._conv_decomp.local_conv_offsets) + 1
+            num_ssm_regions = len(self.block_len_per_layer) * ssm_regions_per_layer
 
         num_blocks = dst_num_blocks
         if block_size_ratio is not None:
@@ -278,8 +285,8 @@ class NixlBaseConnectorWorker:
         # ---- Model state (derived from model config) ----
         mamba_ssm_size = (0, 0)
         # Conv state sub-projection decomposition (None when no Mamba).
-        # The 3-read transfer requires DS (dim, state_len) conv layout so
-        # that x/B/C sub-projections are contiguous in memory.
+        # The transfer requires DS (dim, state_len) conv layout so that
+        # conv sub-projections are contiguous in memory.
         self._conv_decomp: MambaConvSplitInfo | None = None
         self._has_mamba = any(
             isinstance(g.kv_cache_spec, MambaSpec)
@@ -840,8 +847,106 @@ class NixlBaseConnectorWorker:
         # Forwarding a real layer name rather than a synthetic key
         self.register_kv_caches({first_layer: kv_cache})
 
+    def _register_packed_kv_cache(
+        self,
+        storage: torch.UntypedStorage,
+    ) -> None:
+        """Register a packed KV cache as a single NIXL region.
+
+        The packed allocation interleaves all layers per block, so each
+        block_stride-byte chunk is one logical block.  We register 1
+        NIXL region and create 1 descriptor per block.
+        """
+        self.transfer_topo = TransferTopology(
+            tp_rank=self.tp_rank,
+            tp_size=self.world_size,
+            block_size=self.block_size,
+            engine_id=self.engine_id,
+            is_mla=self.use_mla,
+            total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
+            attn_backends=self.attn_backends,
+            tensor_shape=None,
+            is_mamba=self._has_mamba,
+        )
+        self.compat_hash = compute_nixl_compatibility_hash(
+            self.vllm_config,
+            self.backend_name,
+            self.transfer_topo.cross_layers_blocks,
+        )
+
+        total_size = storage.nbytes()
+        block_stride = total_size // self.num_blocks
+        base_addr = storage.data_ptr()
+        device_id = storage.device.index
+        assert device_id is not None
+
+        logger.info(
+            "Registering packed KV cache: total_size=%s, block_stride=%s, "
+            "num_blocks=%s, num_regions=1",
+            total_size,
+            block_stride,
+            self.num_blocks,
+        )
+
+        self.device_id = device_id
+        caches_data = [(base_addr, total_size, self.device_id, "")]
+
+        self.block_len_per_layer = [block_stride]
+        self.num_regions = 1
+        self.num_descs = self.num_blocks
+        self.kv_caches_base_addr[self.engine_id][self.tp_rank] = [base_addr]
+
+        descs = self.nixl_wrapper.get_reg_descs(caches_data, self.nixl_memory_type)
+        self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
+        self._registered_descs.append(descs)
+
+        self.dst_num_blocks[self.engine_id] = self.num_blocks
+
+        self.src_xfer_handles_by_block_size[self.block_size], (self.src_blocks_data) = (
+            self.register_local_xfer_handler(self.block_size)
+        )
+
+        agent_metadata = NixlAgentMetadata(
+            engine_id=self.engine_id,
+            agent_metadata=self.nixl_wrapper.get_agent_metadata(),
+            device_id=self.device_id,
+            kv_caches_base_addr=(
+                self.kv_caches_base_addr[self.engine_id][self.tp_rank]
+            ),
+            num_blocks=self.num_blocks,
+            block_lens=self.block_len_per_layer,
+            kv_cache_layout=self.kv_cache_layout,
+            block_size=self.block_size,
+            ssm_sizes=self._mamba_ssm_size,
+            attn_backend_name=self.backend_name,
+            physical_blocks_per_logical_kv_block=(
+                self._physical_blocks_per_logical_kv_block
+            ),
+        )
+        assert self.compat_hash is not None
+        encoder = msgspec.msgpack.Encoder()
+        self.xfer_handshake_metadata = NixlHandshakePayload(
+            compatibility_hash=self.compat_hash,
+            agent_metadata_bytes=encoder.encode(agent_metadata),
+        )
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
+
+        # Detect packed allocation: all tensors are strided views into the
+        # same backing storage (different data_ptr but same storage).
+        # This happens with DSv4-style contiguous per-block packing.
+        if len(kv_caches) > 1 and not self._has_mamba:
+            storage = next(iter(kv_caches.values())).untyped_storage()
+            storage_ptrs = {
+                cache.untyped_storage().data_ptr() for cache in kv_caches.values()
+            }
+            data_ptrs = {cache.data_ptr() for cache in kv_caches.values()}
+            if len(storage_ptrs) == 1 and len(data_ptrs) > 1:
+                self._register_packed_kv_cache(storage)
+                self.device_kv_caches = kv_caches
+                return
+
         self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
             tp_size=self.world_size,
@@ -962,7 +1067,9 @@ class NixlBaseConnectorWorker:
                     )
                 else:
                     self.block_len_per_layer.append(physical_page_size)
-                is_mla_region = isinstance(layer_spec, MLAAttentionSpec)
+                is_mla_region = isinstance(
+                    layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
+                )
                 self._region_is_mla.append(is_mla_region)
 
                 if not is_mla_region:
@@ -1085,8 +1192,8 @@ class NixlBaseConnectorWorker:
         base_addresses: list[int],
         block_size_ratio: int,
     ) -> list[tuple[int, int, int]]:
-        """Build 4 desc regions (x, B, C, ssm) per layer for local mamba
-        blocks, enabling the 3-read transfer with DS conv layout."""
+        """Build desc regions (conv sub-projections + ssm) per layer for
+        local mamba blocks with DS conv layout."""
         assert block_size_ratio == 1, (
             "Mamba 3-read transfer with block_size_ratio != 1 is not tested. "
             f"Got block_size_ratio={block_size_ratio}."
@@ -1126,9 +1233,9 @@ class NixlBaseConnectorWorker:
         tp_ratio: int,
         transfer_info: EngineTransferInfo,
     ) -> list[tuple[int, int, int]]:
-        """Build 4 remote desc regions (proj0, proj1, proj2, ssm) per layer
-        for the 3-read transfer.  For hetero-TP, each D rank reads only its
-        sub-projection slice from the P rank."""
+        """Build remote desc regions (conv sub-projections + ssm) per layer.
+        For hetero-TP, each D rank reads only its sub-projection slice from
+        the P rank."""
         assert self._conv_decomp is not None
         effective_ratio = max(tp_ratio, 1)
         # Mamba conv state is always TP-sharded, even when attention KV
@@ -1596,7 +1703,9 @@ class NixlBaseConnectorWorker:
         # Per-region block_len validation enforcing the P/D invariant.
         # REPLICATE regions (MLA, or a whole-model MLA / replicated-KV transfer)
         # only allow the number of blocks to differ; SPLIT regions scale with
-        # tp_ratio. Mamba uses the ssm_sizes counterpart, so skip block_len here.
+        # the per-rank KV head ratio rather than the raw tp_ratio, because GQA
+        # replication caps per-rank heads at 1 when tp > total_kv_heads
+        # (issue #45330). Mamba uses the ssm_sizes counterpart, so skip here.
         if not self._has_mamba:
             assert len(self.block_len_per_layer) == len(nixl_agent_meta.block_lens), (
                 "Number of KV layers must match between prefill and decode"
@@ -1604,6 +1713,9 @@ class NixlBaseConnectorWorker:
             model_replicated = self.use_mla or self.transfer_topo.is_kv_replicated(
                 remote_engine_id
             )
+            total_kv_heads = self.transfer_topo.total_num_kv_heads
+            local_heads = self.transfer_topo.local_physical_heads
+            remote_heads = max(1, total_kv_heads // remote_tp_size)
             for i, local_len in enumerate(self.block_len_per_layer):
                 replicated = model_replicated or self._is_region_replicated(i)
                 remote_len = nixl_agent_meta.block_lens[i]
@@ -1614,9 +1726,13 @@ class NixlBaseConnectorWorker:
                         f"remote={remote_len}, bsr={block_size_ratio})."
                     )
                 elif tp_ratio > 0:
-                    assert remote_len == (local_len * tp_ratio) // block_size_ratio, (
+                    assert (
+                        remote_len
+                        == (local_len * remote_heads // local_heads) // block_size_ratio
+                    ), (
                         f"SPLIT region {i}: remote P KV block_len {remote_len} "
-                        f"must equal local {local_len} * tp_ratio {tp_ratio} "
+                        f"must equal local {local_len} * remote_heads "
+                        f"{remote_heads} // local_heads {local_heads} "
                         f"// block_size_ratio {block_size_ratio}."
                     )
                 else:
@@ -1624,10 +1740,10 @@ class NixlBaseConnectorWorker:
                         "Different local/remote block sizes are not supported "
                         "when P TP > D TP."
                     )
-                    assert remote_len == local_len // (-tp_ratio), (
-                        f"SPLIT region {i}: remote P KV block_len "
-                        f"{remote_len} must equal local {local_len} "
-                        f"// |tp_ratio| {-tp_ratio}."
+                    assert remote_len == local_len * remote_heads // local_heads, (
+                        f"SPLIT region {i}: remote P KV block_len {remote_len} "
+                        f"must equal local {local_len} * remote_heads "
+                        f"{remote_heads} // local_heads {local_heads}."
                     )
 
         # TP workers that handhshake with same remote have same #blocks.
@@ -1841,6 +1957,8 @@ class NixlBaseConnectorWorker:
         for block_ids in block_ids_for_heterogeneous_attn_post_process:
             self.post_process_device_kv_on_receive_heterogeneous_attn(block_ids)
 
+        self._sync_device_after_mamba_recv(done_recving, failed_recv_reqs)
+
         # Handle timeout to avoid stranding blocks on remote.
         now = time.perf_counter()
         while self._reqs_to_send:
@@ -1861,6 +1979,22 @@ class NixlBaseConnectorWorker:
             done_sending.add(req_id)
 
         return done_sending, done_recving
+
+    def _sync_device_after_mamba_recv(
+        self,
+        done_recving: set[str],
+        failed_recv_reqs: set[str],
+    ) -> None:
+        """Synchronize ROCm direct-GPU Mamba receives before model execution."""
+        if (
+            not current_platform.is_rocm()
+            or not self._has_mamba
+            or self.use_host_buffer
+            or not (done_recving - failed_recv_reqs)
+        ):
+            return
+
+        torch.accelerator.synchronize()
 
     def _get_new_notifs(self) -> set[str]:
         """Get req_ids which got a remote xfer notification.
