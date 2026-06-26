@@ -30,6 +30,8 @@ from vllm.model_executor.models.deepseek_v2 import (
     yarn_get_mscale,
 )
 from vllm.model_executor.models.utils import extract_layer_index
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import is_quantized_kv_cache
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.attention.mla_attention import (
@@ -322,32 +324,46 @@ class DeepseekV32Attention(MLAAttention):
             positions, q[..., self.qk_nope_head_dim :], k_pe
         )
 
-        # Lightning indexer writes the top-k indices into the shared buffer;
-        # self-breaks via its sparse_attn_indexer op under capture. "Shared"
-        # layers (indexer is None) reuse the top-k from the previous indexer
-        # layer already sitting in the buffer.
+        num_tokens = hidden_states.shape[0]
+        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+        q_nope = q_nope.transpose(0, 1)  # (N, B, P)
+        ql_nope = torch.bmm(q_nope, self.W_UK_T).transpose(0, 1)  # (B, N, L)
+
+        # Lightning indexer writes the top-k indices into the shared buffer.
+        # "Shared" layers (indexer is None) reuse the top-k from the previous
+        # indexer layer already sitting in the buffer.
         if self.indexer is not None:
             self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)  # type: ignore[operator]
 
-        output = torch.empty(
-            (hidden_states.shape[0], self.num_local_heads * self.v_head_dim),
+        attn_latent = torch.empty(
+            (num_tokens, self.num_local_heads, self.kv_lora_rank),
             dtype=q.dtype,
             device=q.device,
         )
-        self._attention(q, kv_c_normed, k_pe, output)
+        self._sparse_attend(kv_c_normed, k_pe, ql_nope, q_pe, attn_latent)
+
+        # V up-projection + output projection are metadata-independent GEMMs and
+        # stay captured.
+        output = torch.empty(
+            (num_tokens, self.num_local_heads * self.v_head_dim),
+            dtype=q.dtype,
+            device=q.device,
+        )
+        self._v_up_proj(attn_latent, out=output)
         return self.o_proj(output)[0]
 
     @eager_break_during_capture
-    def _attention(
+    def _sparse_attend(
         self,
-        q: torch.Tensor,
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
-        output: torch.Tensor,
+        ql_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        attn_latent: torch.Tensor,
     ) -> None:
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
-        attn_metadata: MLACommonMetadata
+        attn_metadata: MLACommonMetadata | None
         if isinstance(attn_metadata_raw, dict):
             attn_metadata = attn_metadata_raw[self.layer_name]  # type: ignore[assignment]
         elif isinstance(attn_metadata_raw, list):
@@ -366,11 +382,25 @@ class DeepseekV32Attention(MLAAttention):
             self.kv_cache_dtype,
             self._k_scale,
         )
-        self.forward_impl(
-            q,
-            kv_c_normed,
-            k_pe,
-            self.kv_cache,
+
+        if attn_metadata is None:
+            # Profile / warmup: zero-fill for DP+EP determinism.
+            attn_latent.zero_()
+            return
+
+        num_actual = attn_metadata.num_actual_tokens
+        kv_cache = self.kv_cache
+        if is_quantized_kv_cache(self.kv_cache_dtype) and (
+            self.kv_cache_dtype != "fp8_ds_mla"
+        ):
+            kv_cache = kv_cache.view(current_platform.fp8_dtype())
+
+        attn_out, _ = self.impl.forward_mqa(  # type: ignore[attr-defined]
+            (ql_nope[:num_actual], q_pe[:num_actual]),
+            kv_cache,
             attn_metadata,
-            output=output,
+            self,
+        )
+        attn_latent[:num_actual] = attn_out.view(
+            num_actual, self.num_local_heads, self.kv_lora_rank
         )
