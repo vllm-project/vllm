@@ -210,8 +210,8 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_kv_connector(cls) -> bool:
-        # ROCM_ATTN uses (2, num_blocks, ...) KV cache layout which is
-        # incompatible with KV connectors that require blocks-first layout.
+        # TODO: Re-enable after validating connector transfer semantics for
+        # ROCm's asymmetric native K/V cache views.
         return False
 
     forward_includes_kv_cache_update: bool = False

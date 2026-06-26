@@ -19,37 +19,29 @@ class PagedAttention:
         num_kv_heads: int,
         head_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert kv_cache.dim() == 4
         x = 16 // kv_cache.element_size()
+        block_size = kv_cache.shape[2]
+        block_stride = kv_cache.stride(0)
+        head_stride = kv_cache.stride(1)
+        storage_offset = kv_cache.storage_offset()
 
-        if kv_cache.dim() == 4:
-            block_size = kv_cache.shape[2]
-            block_stride = kv_cache.stride(0)
-            head_stride = kv_cache.stride(1)
-            storage_offset = kv_cache.storage_offset()
-
-            key_cache = kv_cache.as_strided(
-                size=(
-                    kv_cache.shape[0],
-                    num_kv_heads,
-                    head_size // x,
-                    block_size,
-                    x,
-                ),
-                stride=(block_stride, head_stride, block_size * x, x, 1),
-                storage_offset=storage_offset,
-            )
-            value_cache = kv_cache.as_strided(
-                size=(kv_cache.shape[0], num_kv_heads, head_size, block_size),
-                stride=(block_stride, head_stride, block_size, 1),
-                storage_offset=storage_offset + num_kv_heads * head_stride,
-            )
-            return key_cache, value_cache
-
-        num_blocks = kv_cache.shape[1]
-        key_cache = kv_cache[0]
-        key_cache = key_cache.view(num_blocks, num_kv_heads, head_size // x, -1, x)
-        value_cache = kv_cache[1]
-        value_cache = value_cache.view(num_blocks, num_kv_heads, head_size, -1)
+        key_cache = kv_cache.as_strided(
+            size=(
+                kv_cache.shape[0],
+                num_kv_heads,
+                head_size // x,
+                block_size,
+                x,
+            ),
+            stride=(block_stride, head_stride, block_size * x, x, 1),
+            storage_offset=storage_offset,
+        )
+        value_cache = kv_cache.as_strided(
+            size=(kv_cache.shape[0], num_kv_heads, head_size, block_size),
+            stride=(block_stride, head_stride, block_size, 1),
+            storage_offset=storage_offset + num_kv_heads * head_stride,
+        )
         return key_cache, value_cache
 
     @staticmethod

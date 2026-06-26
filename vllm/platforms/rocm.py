@@ -419,8 +419,8 @@ def _get_backend_priorities(
             ]
 
     backends = []
-    # ROCM_ATTN uses (2, num_blocks, ...) KV cache layout which is
-    # incompatible with KV connectors that require blocks-first layout.
+    # Keep ROCM_ATTN disabled for KV connectors until connector transfer
+    # semantics are validated for its asymmetric native K/V cache views.
     if not use_kv_connector:
         backends.append(AttentionBackendEnum.ROCM_ATTN)
     if rocm_aiter_ops.is_mha_enabled():
