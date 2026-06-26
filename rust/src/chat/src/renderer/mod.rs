@@ -11,6 +11,8 @@ pub mod deepseek_v32;
 pub mod deepseek_v4;
 pub mod hf;
 mod selection;
+#[cfg(test)]
+mod test_utils;
 
 pub use deepseek_v4::DeepSeekV4ChatRenderer;
 pub use deepseek_v32::DeepSeekV32ChatRenderer;

@@ -121,10 +121,10 @@ def maybe_create_mm_pruner(
 ) -> MultiModalPruner | None:
     """Create a MultiModalPruner if the model prunes embeddings and uses M-RoPE."""
     if (
-        not rope_state
+        rope_state is None
         or not rope_state.has_delta
-        or not encoder_cache
-        or not model_config.multimodal_config
+        or encoder_cache is None
+        or model_config.multimodal_config is None
         or not model_config.multimodal_config.is_multimodal_pruning_enabled()
         or not supports_multimodal_pruning(model)
     ):
