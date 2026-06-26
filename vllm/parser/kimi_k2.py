@@ -271,11 +271,7 @@ class KimiK2Parser(ParserEngine):
     ) -> tuple[str | None, str | None]:
         if not self.thinking_enabled:
             return None, model_output
-
-        reasoning, content = super().extract_reasoning(model_output, request)
-        if model_output.startswith(THINK_START + THINK_END):
-            reasoning = ""
-        return reasoning, content
+        return super().extract_reasoning(model_output, request)
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
         if not self.thinking_enabled:
