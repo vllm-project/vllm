@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+import gc
+import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -123,6 +125,14 @@ def test_flashinfer_workspace_buffer_growth_resets_registered_wrappers():
         )
         assert wrapper._float_workspace_buffer.numel() == 1024
         assert wrapper.reset_calls >= 1
+
+        wrapper_ref = weakref.ref(wrapper)
+        del wrapper
+        gc.collect()
+
+        builder._workspace_state.set_buffer(torch.empty(2048, dtype=torch.uint8))
+        assert wrapper_ref() is None
+        assert builder._workspace_state.wrappers == []
     finally:
         reset_workspace_manager()
 

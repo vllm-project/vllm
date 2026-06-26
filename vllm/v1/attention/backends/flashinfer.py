@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashInfer."""
 
+import weakref
 from dataclasses import dataclass, field
 from functools import partial
 from typing import ClassVar
@@ -108,11 +109,11 @@ def _is_float8_dtype(dtype: torch.dtype) -> bool:
 @dataclass
 class _FlashInferWorkspaceState:
     buffer: torch.Tensor | None = None
-    wrappers: list[object] = field(default_factory=list)
+    wrappers: list[weakref.ReferenceType[object]] = field(default_factory=list)
 
     def register_wrapper(self, wrapper: object) -> None:
-        if not any(registered is wrapper for registered in self.wrappers):
-            self.wrappers.append(wrapper)
+        if not any(registered is wrapper for registered in self._live_wrappers()):
+            self.wrappers.append(weakref.ref(wrapper))
         self._reset_wrapper(wrapper)
 
     def set_buffer(self, buffer: torch.Tensor) -> None:
@@ -122,8 +123,21 @@ class _FlashInferWorkspaceState:
         self._reset_wrappers()
 
     def _reset_wrappers(self) -> None:
-        for wrapper in self.wrappers:
+        for wrapper in self._live_wrappers():
             self._reset_wrapper(wrapper)
+
+    def _live_wrappers(self) -> list[object]:
+        live_refs: list[weakref.ReferenceType[object]] = []
+        live_wrappers: list[object] = []
+        for wrapper_ref in self.wrappers:
+            wrapper = wrapper_ref()
+            if wrapper is None:
+                continue
+            live_refs.append(wrapper_ref)
+            live_wrappers.append(wrapper)
+        if len(live_refs) != len(self.wrappers):
+            self.wrappers = live_refs
+        return live_wrappers
 
     def _reset_wrapper(self, wrapper: object) -> None:
         if self.buffer is None or not hasattr(wrapper, "reset_workspace_buffer"):
@@ -1064,6 +1078,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         kv_data_type = self.kv_cache_dtype
         backend = self._get_prefill_backend(q_data_type, kv_data_type, use_custom_mask)
         try:
+            # Keep this module lookup aligned with the current plan() calls,
+            # which pass self.head_dim for both QK and VO dimensions.
             module = get_batch_prefill_module(
                 backend,
                 q_data_type,
@@ -1115,7 +1131,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 )
             return int(workspace_size(*args)[0])
         except Exception:
-            logger.debug("Failed to calculate FlashInfer prefill workspace size.")
+            logger.debug(
+                "Failed to calculate FlashInfer prefill workspace size.",
+                exc_info=True,
+            )
             return None
 
     def _get_decode_workspace_size(
@@ -1131,6 +1150,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         kv_data_type = self.kv_cache_dtype
         backend = self._get_tensor_core_decode_backend(q_data_type, kv_data_type)
         try:
+            # Tensor-core decode uses FlashInfer's batch-prefill module template
+            # for workspace sizing, matching the wrapper planning path below.
             module = get_batch_prefill_module(
                 backend,
                 q_data_type,
@@ -1183,7 +1204,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 )
             return int(workspace_size(*args)[0])
         except Exception:
-            logger.debug("Failed to calculate FlashInfer decode workspace size.")
+            logger.debug(
+                "Failed to calculate FlashInfer decode workspace size.",
+                exc_info=True,
+            )
             return None
 
     def _compute_flashinfer_kv_metadata(
