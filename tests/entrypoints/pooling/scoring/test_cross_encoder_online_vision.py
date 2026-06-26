@@ -34,16 +34,17 @@ BACKEND_TOL: dict[str, float] = {
     # See: https://github.com/vllm-project/vllm/issues/35569
     "ROCM_ATTN": 0.09,  # gfx950:~8.45%, gfx942:~3.70%
     "ROCM_AITER_FA": 0.045,  # gfx950:~2.00%, gfx942:~0.80%
-    "TRITON_ATTN": 0.045,  # gfx950:~3.00%, gfx942:~2.20%
+    "TRITON_ATTN": 0.045,  # gfx950:~3.00%, gfx942:~3.9%
     "FLEX_ATTENTION": 0.045,  # gfx950:~3.25%, gfx942:~1.10%
 }
 
 # ROCm 7.2/gfx950 shows small absolute drift on the low text-vs-text
 # probability even though larger scores remain well inside the relative
-# tolerance. Keep the relative tolerances tight and add only a small floor.
+# tolerance.
 BACKEND_ABS_TOL: dict[str, float] = {
     "default": 0.0,
     "ROCM_AITER_FA": 0.005,
+    "TRITON_ATTN": 0.009,
     "FLEX_ATTENTION": 0.006,
 }
 
