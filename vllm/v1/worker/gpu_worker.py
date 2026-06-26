@@ -154,6 +154,7 @@ class Worker(WorkerBase):
 
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
+        self._sleep_saved_draft_params: dict[str, torch.Tensor] = {}
 
         # Weight transfer engine is created in `load_model` once the model
         # is available, since the engine needs a reference to the model.
@@ -198,6 +199,18 @@ class Worker(WorkerBase):
             self._sleep_saved_buffers = {
                 name: buffer.cpu().clone() for name, buffer in model.named_buffers()
             }
+            # Save draft model parameters: level-2 sleep discards all cumem
+            # allocations (offload_tags=tuple()), so drafter GPU memory is lost
+            # and must be restored on wake_up.
+            draft = self.get_draft_model()
+            if draft is not None:
+                self._sleep_saved_draft_params = {
+                    name: param.cpu().clone()
+                    for name, param in draft.named_parameters()
+                    if not param.is_meta
+                }
+            else:
+                self._sleep_saved_draft_params = {}
 
         self._get_sleep_mode_backend().suspend(level)
 
@@ -228,6 +241,13 @@ class Worker(WorkerBase):
                 if name in self._sleep_saved_buffers:
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
+
+        # Restore draft model parameters saved during level-2 sleep.
+        if self._sleep_saved_draft_params:
+            draft = self.get_draft_model()
+            if draft is not None:
+                draft.load_weights(iter(self._sleep_saved_draft_params.items()))
+            self._sleep_saved_draft_params = {}
 
         if tags is None or "kv_cache" in tags:
             self.model_runner.post_kv_cache_wake_up()
@@ -912,6 +932,41 @@ class Worker(WorkerBase):
 
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
+
+    def get_draft_model(self) -> nn.Module | None:
+        """Return the speculative draft model nn.Module, or None.
+
+        Covers both V1 runner (model_runner.drafter) and
+        V2 runner (model_runner.speculator).
+        """
+        drafter = getattr(self.model_runner, "drafter", None)
+        if drafter is None:
+            drafter = getattr(self.model_runner, "speculator", None)
+        if drafter is None:
+            return None
+        if hasattr(drafter, "get_model"):
+            return drafter.get_model()
+        return getattr(drafter, "model", None)
+
+    def update_speculative_model_weights(
+        self,
+        weights: list[tuple[str, torch.Tensor]],
+    ) -> None:
+        """Update draft model weights in-place via the model's load_weights path.
+
+        Args:
+            weights: List of (param_name, tensor) pairs.  param_name must use
+                     the draft model's own naming convention (e.g. unfused
+                     training-side names such as q_proj / gate_proj are
+                     accepted; the model's load_weights handles fused-param
+                     mapping internally).  FSDP prefixes and any
+                     training-framework-specific renames are the caller's
+                     responsibility.
+        """
+        draft_model = self.get_draft_model()
+        if draft_model is None:
+            return
+        draft_model.load_weights(iter(weights))
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_runner.get_supported_tasks()

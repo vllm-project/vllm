@@ -71,6 +71,10 @@ class SpecDecodingLogging:
         self.accepted_tokens_per_pos_lists: list[list[int]] = []
         self.last_log_time = time.monotonic()
 
+    @property
+    def empty(self) -> bool:
+        return not self.num_drafts
+
     def observe(self, spec_decoding_stats: SpecDecodingStats):
         self.num_drafts.append(spec_decoding_stats.num_drafts)
         self.num_draft_tokens.append(spec_decoding_stats.num_draft_tokens)
