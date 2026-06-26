@@ -857,8 +857,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         for req_id, token_ids in draft_tokens.items():
             if not any(
-                token_id < 0 or token_id >= vocab_size
-                for token_id in token_ids
+                token_id < 0 or token_id >= vocab_size for token_id in token_ids
             ):
                 continue
 
@@ -887,9 +886,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return replace(
             scheduler_output,
             num_scheduled_tokens=sanitized_num_scheduled_tokens,
-            total_num_scheduled_tokens=sum(
-                sanitized_num_scheduled_tokens.values()
-            ),
+            total_num_scheduled_tokens=sum(sanitized_num_scheduled_tokens.values()),
             scheduled_spec_decode_tokens=sanitized_spec_tokens,
         )
 
