@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING, NamedTuple
+
+from openai_harmony import HarmonyError
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -102,12 +105,11 @@ class HarmonyParser(DelegatingParser):
 
     def flush(self) -> Segment | None:
         msg = None
-        try:
+        with contextlib.suppress(HarmonyError):
             self._harmony_parser.process_eos()
-            msg = self._poll_completed_message()
-        except Exception:
             # TODO: Consider reraising
-            pass
+
+        msg = self._poll_completed_message()
 
         # Reset to the initial assistant-parser state for the next turn.
         self._parser = None
