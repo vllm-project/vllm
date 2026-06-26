@@ -36,6 +36,16 @@ def test_nixl_side_channel_host_is_not_compile_factor(
     assert "VLLM_NIXL_SIDE_CHANNEL_HOST" not in envs.compile_factors()
 
 
+def test_ci_ensure_latest_hf_revision_is_explicit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.delenv("VLLM_CI_ENSURE_LATEST_HF_REVISION", raising=False)
+    assert environment_variables["VLLM_CI_ENSURE_LATEST_HF_REVISION"]() is False
+
+    monkeypatch.setenv("VLLM_CI_ENSURE_LATEST_HF_REVISION", "1")
+    assert environment_variables["VLLM_CI_ENSURE_LATEST_HF_REVISION"]() is True
+
+
 def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_HOST_IP", "1.1.1.1")
     monkeypatch.setenv("VLLM_PORT", "1234")
