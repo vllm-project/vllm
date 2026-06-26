@@ -148,14 +148,12 @@ class QuarkConfig(QuantizationConfig):
     ) -> "QuantizeMethodBase | None":
         # Check if the layer is skipped for quantization.
         exclude_layers = cast(list[str], self.quant_config.get("exclude"))
-        is_ignored = should_ignore_layer(
+        if should_ignore_layer(
             prefix,
             ignore=exclude_layers,
             fused_mapping=self.packed_modules_mapping,
             check_children=isinstance(layer, RoutedExperts),
-        )
-
-        if is_ignored:
+        ):
             if isinstance(layer, RoutedExperts):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
             if (
