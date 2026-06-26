@@ -5,6 +5,7 @@ import torch
 
 from vllm.model_executor.layers.attention.sparse_mla_mask import (
     dense_mask_to_block_sparse,
+    topk_indices_to_block_sparse,
 )
 
 
@@ -16,6 +17,18 @@ def _pack_dense_mask(dense_mask: torch.Tensor) -> torch.Tensor:
     return (
         dense_mask.reshape(*dense_mask.shape[:-1], -1, 32).to(torch.int32) << shifts
     ).sum(dim=-1, dtype=torch.int32)
+
+
+def _assert_block_sparse_close(actual, expected) -> None:
+    torch.testing.assert_close(actual.mask_block_cnt, expected.mask_block_cnt)
+    torch.testing.assert_close(actual.mask_block_idx, expected.mask_block_idx)
+    torch.testing.assert_close(actual.full_block_cnt, expected.full_block_cnt)
+    torch.testing.assert_close(actual.full_block_idx, expected.full_block_idx)
+    torch.testing.assert_close(actual.cu_total_m_blocks, expected.cu_total_m_blocks)
+    torch.testing.assert_close(
+        actual.cu_block_idx_offsets, expected.cu_block_idx_offsets
+    )
+    assert actual.block_size == expected.block_size
 
 
 def test_dense_mask_to_block_sparse_matches_dense_tiles() -> None:
@@ -170,3 +183,70 @@ def test_dense_mask_to_block_sparse_varlen_equal_blocks_vectorized() -> None:
         sparse.cu_block_idx_offsets,
         torch.tensor([0, 4, 8], dtype=torch.int32),
     )
+
+
+def test_topk_indices_to_block_sparse_matches_dense_varlen() -> None:
+    dense_mask = torch.zeros(2, 5, 130, dtype=torch.bool)
+    dense_mask[0, 0, 3] = True
+    dense_mask[0, 4, 129] = True
+    dense_mask[1, 2, 63] = True
+
+    expected = dense_mask_to_block_sparse(
+        _pack_dense_mask(dense_mask),
+        max_seqlen_q=5,
+        max_seqlen_k=130,
+        seq_lens_q=[5, 3],
+        seq_lens_k=[130, 64],
+        tile_m=4,
+        tile_n=64,
+    )
+    topk_indices = [
+        torch.tensor(
+            [[3, -1], [-1, -1], [-1, -1], [-1, -1], [129, -1]],
+            dtype=torch.int32,
+        ),
+        torch.tensor([[-1, -1], [-1, -1], [63, -1]], dtype=torch.int32),
+    ]
+
+    actual = topk_indices_to_block_sparse(
+        topk_indices,
+        seq_lens_q=[5, 3],
+        seq_lens_k=[130, 64],
+        max_seqlen_q=5,
+        max_seqlen_k=130,
+        tile_m=4,
+        tile_n=64,
+    )
+
+    _assert_block_sparse_close(actual, expected)
+
+
+def test_topk_indices_to_block_sparse_splits_full_and_partial_blocks() -> None:
+    dense_mask = torch.zeros(1, 4, 64, dtype=torch.bool)
+    dense_mask[0, :2, :32] = True
+    dense_mask[0, 2, 40] = True
+
+    expected = dense_mask_to_block_sparse(
+        _pack_dense_mask(dense_mask),
+        max_seqlen_q=4,
+        max_seqlen_k=64,
+        seq_lens_q=[4],
+        seq_lens_k=[64],
+        tile_m=2,
+        tile_n=32,
+    )
+    topk_indices = torch.full((4, 33), -1, dtype=torch.int32)
+    topk_indices[:2, :32] = torch.arange(32, dtype=torch.int32)
+    topk_indices[2, 0] = 40
+
+    actual = topk_indices_to_block_sparse(
+        [topk_indices],
+        seq_lens_q=[4],
+        seq_lens_k=[64],
+        max_seqlen_q=4,
+        max_seqlen_k=64,
+        tile_m=2,
+        tile_n=32,
+    )
+
+    _assert_block_sparse_close(actual, expected)

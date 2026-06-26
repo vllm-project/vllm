@@ -16,6 +16,118 @@ def _ceildiv(a: int, b: int) -> int:
     return (a + b - 1) // b
 
 
+def _tiles_to_varlen_block_sparse(
+    tile_partial: torch.Tensor,
+    tile_full: torch.Tensor,
+    seq_lens_q: Sequence[int],
+    seq_lens_k: Sequence[int],
+    tile_m: int,
+    tile_n: int,
+) -> BlockSparseTensorsTorch:
+    batch_size = tile_partial.shape[0]
+    assert len(seq_lens_q) == batch_size
+    assert len(seq_lens_k) == batch_size
+
+    num_m_blocks_per_seq = [_ceildiv(seq_len, tile_m) for seq_len in seq_lens_q]
+    num_n_blocks_per_seq = [_ceildiv(seq_len, tile_n) for seq_len in seq_lens_k]
+    if len(set(num_m_blocks_per_seq)) == 1 and len(set(num_n_blocks_per_seq)) == 1:
+        # Varlen FA expects packed 2D metadata, but equal block counts can
+        # be packed by flattening the rectangular batch-major layout.
+        num_m_blocks_b = num_m_blocks_per_seq[0]
+        num_n_blocks_b = num_n_blocks_per_seq[0]
+        partial = tile_partial[:, :num_m_blocks_b, :num_n_blocks_b]
+        full = tile_full[:, :num_m_blocks_b, :num_n_blocks_b]
+
+        mask_block_cnt = partial.sum(dim=2).reshape(1, -1).to(torch.int32)
+        sort_keys = (~partial).to(torch.int32)
+        mask_block_idx = (
+            sort_keys.argsort(dim=2, stable=True).reshape(1, -1).to(torch.int32)
+        )
+        full_block_cnt = full.sum(dim=2).reshape(1, -1).to(torch.int32)
+        sort_keys = (~full).to(torch.int32)
+        full_block_idx = (
+            sort_keys.argsort(dim=2, stable=True).reshape(1, -1).to(torch.int32)
+        )
+        batch_offsets = torch.arange(
+            batch_size + 1, dtype=torch.int32, device=tile_partial.device
+        )
+
+        return BlockSparseTensorsTorch(
+            mask_block_cnt=mask_block_cnt,
+            mask_block_idx=mask_block_idx,
+            full_block_cnt=full_block_cnt,
+            full_block_idx=full_block_idx,
+            cu_total_m_blocks=batch_offsets * num_m_blocks_b,
+            cu_block_idx_offsets=batch_offsets * num_m_blocks_b * num_n_blocks_b,
+            block_size=(tile_m, tile_n),
+        )
+
+    cu_total_m_blocks = [0]
+    cu_block_idx_offsets = [0]
+    total_m_blocks = sum(num_m_blocks_per_seq)
+    total_block_idx = sum(
+        num_m_blocks * num_n_blocks
+        for num_m_blocks, num_n_blocks in zip(
+            num_m_blocks_per_seq, num_n_blocks_per_seq
+        )
+    )
+    mask_block_cnt = torch.empty(
+        (1, total_m_blocks), dtype=torch.int32, device=tile_partial.device
+    )
+    mask_block_idx = torch.empty(
+        (1, total_block_idx), dtype=torch.int32, device=tile_partial.device
+    )
+    full_block_cnt = torch.empty_like(mask_block_cnt)
+    full_block_idx = torch.empty_like(mask_block_idx)
+
+    # Ragged varlen metadata has different rows widths per request, so each
+    # request must be compacted before concatenating into FA's packed layout.
+    m_block_offset = 0
+    block_idx_offset = 0
+    for b, (num_m_blocks_b, num_n_blocks_b) in enumerate(
+        zip(num_m_blocks_per_seq, num_n_blocks_per_seq)
+    ):
+        partial_b = tile_partial[b, :num_m_blocks_b, :num_n_blocks_b]
+        full_b = tile_full[b, :num_m_blocks_b, :num_n_blocks_b]
+        next_m_block_offset = m_block_offset + num_m_blocks_b
+        next_block_idx_offset = block_idx_offset + num_m_blocks_b * num_n_blocks_b
+
+        mask_block_cnt[0, m_block_offset:next_m_block_offset] = partial_b.sum(dim=1).to(
+            torch.int32
+        )
+        sort_keys = (~partial_b).to(torch.int32)
+        mask_block_idx[0, block_idx_offset:next_block_idx_offset] = (
+            sort_keys.argsort(dim=1, stable=True).to(torch.int32).flatten()
+        )
+        full_block_cnt[0, m_block_offset:next_m_block_offset] = full_b.sum(dim=1).to(
+            torch.int32
+        )
+        sort_keys = (~full_b).to(torch.int32)
+        full_block_idx[0, block_idx_offset:next_block_idx_offset] = (
+            sort_keys.argsort(dim=1, stable=True).to(torch.int32).flatten()
+        )
+        cu_total_m_blocks.append(cu_total_m_blocks[-1] + num_m_blocks_b)
+        cu_block_idx_offsets.append(
+            cu_block_idx_offsets[-1] + num_m_blocks_b * num_n_blocks_b
+        )
+        m_block_offset = next_m_block_offset
+        block_idx_offset = next_block_idx_offset
+
+    return BlockSparseTensorsTorch(
+        mask_block_cnt=mask_block_cnt,
+        mask_block_idx=mask_block_idx,
+        full_block_cnt=full_block_cnt,
+        full_block_idx=full_block_idx,
+        cu_total_m_blocks=torch.tensor(
+            cu_total_m_blocks, dtype=torch.int32, device=tile_partial.device
+        ),
+        cu_block_idx_offsets=torch.tensor(
+            cu_block_idx_offsets, dtype=torch.int32, device=tile_partial.device
+        ),
+        block_size=(tile_m, tile_n),
+    )
+
+
 @cute.jit
 def dense_mask_mod(
     batch: cute.TensorSSA,
@@ -78,106 +190,13 @@ def dense_mask_to_block_sparse(
     if seq_lens_q is not None:
         if seq_lens_k is None:
             seq_lens_k = seq_lens_q
-        assert len(seq_lens_q) == batch_size
-        assert len(seq_lens_k) == batch_size
-
-        num_m_blocks_per_seq = [_ceildiv(seq_len, tile_m) for seq_len in seq_lens_q]
-        num_n_blocks_per_seq = [_ceildiv(seq_len, tile_n) for seq_len in seq_lens_k]
-        if len(set(num_m_blocks_per_seq)) == 1 and len(set(num_n_blocks_per_seq)) == 1:
-            # Varlen FA expects packed 2D metadata, but equal block counts can
-            # be packed by flattening the rectangular batch-major layout.
-            num_m_blocks_b = num_m_blocks_per_seq[0]
-            num_n_blocks_b = num_n_blocks_per_seq[0]
-            partial = tile_partial[:, :num_m_blocks_b, :num_n_blocks_b]
-            full = tile_full[:, :num_m_blocks_b, :num_n_blocks_b]
-
-            mask_block_cnt = partial.sum(dim=2).reshape(1, -1).to(torch.int32)
-            sort_keys = (~partial).to(torch.int32)
-            mask_block_idx = (
-                sort_keys.argsort(dim=2, stable=True).reshape(1, -1).to(torch.int32)
-            )
-            full_block_cnt = full.sum(dim=2).reshape(1, -1).to(torch.int32)
-            sort_keys = (~full).to(torch.int32)
-            full_block_idx = (
-                sort_keys.argsort(dim=2, stable=True).reshape(1, -1).to(torch.int32)
-            )
-            batch_offsets = torch.arange(
-                batch_size + 1, dtype=torch.int32, device=dense_mask.device
-            )
-
-            return BlockSparseTensorsTorch(
-                mask_block_cnt=mask_block_cnt,
-                mask_block_idx=mask_block_idx,
-                full_block_cnt=full_block_cnt,
-                full_block_idx=full_block_idx,
-                cu_total_m_blocks=batch_offsets * num_m_blocks_b,
-                cu_block_idx_offsets=(batch_offsets * num_m_blocks_b * num_n_blocks_b),
-                block_size=(tile_m, tile_n),
-            )
-
-        cu_total_m_blocks = [0]
-        cu_block_idx_offsets = [0]
-        total_m_blocks = sum(num_m_blocks_per_seq)
-        total_block_idx = sum(
-            num_m_blocks * num_n_blocks
-            for num_m_blocks, num_n_blocks in zip(
-                num_m_blocks_per_seq, num_n_blocks_per_seq
-            )
-        )
-        mask_block_cnt = torch.empty(
-            (1, total_m_blocks), dtype=torch.int32, device=dense_mask.device
-        )
-        mask_block_idx = torch.empty(
-            (1, total_block_idx), dtype=torch.int32, device=dense_mask.device
-        )
-        full_block_cnt = torch.empty_like(mask_block_cnt)
-        full_block_idx = torch.empty_like(mask_block_idx)
-
-        # Ragged varlen metadata has different rows widths per request, so each
-        # request must be compacted before concatenating into FA's packed layout.
-        m_block_offset = 0
-        block_idx_offset = 0
-        for b, (num_m_blocks_b, num_n_blocks_b) in enumerate(
-            zip(num_m_blocks_per_seq, num_n_blocks_per_seq)
-        ):
-            partial_b = tile_partial[b, :num_m_blocks_b, :num_n_blocks_b]
-            full_b = tile_full[b, :num_m_blocks_b, :num_n_blocks_b]
-            next_m_block_offset = m_block_offset + num_m_blocks_b
-            next_block_idx_offset = block_idx_offset + num_m_blocks_b * num_n_blocks_b
-
-            mask_block_cnt[0, m_block_offset:next_m_block_offset] = partial_b.sum(
-                dim=1
-            ).to(torch.int32)
-            sort_keys = (~partial_b).to(torch.int32)
-            mask_block_idx[0, block_idx_offset:next_block_idx_offset] = (
-                sort_keys.argsort(dim=1, stable=True).to(torch.int32).flatten()
-            )
-            full_block_cnt[0, m_block_offset:next_m_block_offset] = full_b.sum(
-                dim=1
-            ).to(torch.int32)
-            sort_keys = (~full_b).to(torch.int32)
-            full_block_idx[0, block_idx_offset:next_block_idx_offset] = (
-                sort_keys.argsort(dim=1, stable=True).to(torch.int32).flatten()
-            )
-            cu_total_m_blocks.append(cu_total_m_blocks[-1] + num_m_blocks_b)
-            cu_block_idx_offsets.append(
-                cu_block_idx_offsets[-1] + num_m_blocks_b * num_n_blocks_b
-            )
-            m_block_offset = next_m_block_offset
-            block_idx_offset = next_block_idx_offset
-
-        return BlockSparseTensorsTorch(
-            mask_block_cnt=mask_block_cnt,
-            mask_block_idx=mask_block_idx,
-            full_block_cnt=full_block_cnt,
-            full_block_idx=full_block_idx,
-            cu_total_m_blocks=torch.tensor(
-                cu_total_m_blocks, dtype=torch.int32, device=dense_mask.device
-            ),
-            cu_block_idx_offsets=torch.tensor(
-                cu_block_idx_offsets, dtype=torch.int32, device=dense_mask.device
-            ),
-            block_size=(tile_m, tile_n),
+        return _tiles_to_varlen_block_sparse(
+            tile_partial,
+            tile_full,
+            seq_lens_q,
+            seq_lens_k,
+            tile_m,
+            tile_n,
         )
 
     mask_block_cnt = tile_partial.sum(dim=2).unsqueeze(1).to(torch.int32)
@@ -195,4 +214,76 @@ def dense_mask_to_block_sparse(
         full_block_cnt=full_block_cnt,
         full_block_idx=full_block_idx,
         block_size=(tile_m, tile_n),
+    )
+
+
+def topk_indices_to_block_sparse(
+    topk_indices_per_req: Sequence[torch.Tensor],
+    seq_lens_q: Sequence[int],
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    seq_lens_k: Sequence[int] | None = None,
+    tile_m: int = 128,
+    tile_n: int = 128,
+) -> BlockSparseTensorsTorch:
+    if seq_lens_k is None:
+        seq_lens_k = seq_lens_q
+    batch_size = len(seq_lens_q)
+    assert len(seq_lens_k) == batch_size
+    assert len(topk_indices_per_req) == batch_size
+
+    device = topk_indices_per_req[0].device
+    num_m_blocks = _ceildiv(max_seqlen_q, tile_m)
+    num_n_blocks = _ceildiv(max_seqlen_k, tile_n)
+    tile_active = torch.zeros(
+        (batch_size, num_m_blocks, num_n_blocks), dtype=torch.bool, device=device
+    )
+    tile_full = torch.zeros_like(tile_active)
+
+    for b, (topk_indices, seq_len_q, seq_len_k) in enumerate(
+        zip(topk_indices_per_req, seq_lens_q, seq_lens_k)
+    ):
+        num_m_blocks_b = _ceildiv(seq_len_q, tile_m)
+        num_n_blocks_b = _ceildiv(seq_len_k, tile_n)
+        if seq_len_q == 0 or seq_len_k == 0:
+            continue
+
+        topk_indices = topk_indices[:seq_len_q]
+        valid = (topk_indices >= 0) & (topk_indices < seq_len_k)
+        n_block_idx = torch.where(valid, topk_indices // tile_n, 0).to(torch.int64)
+        m_block_idx = torch.arange(seq_len_q, device=device) // tile_m
+        flat_block_idx = m_block_idx[:, None] * num_n_blocks_b + n_block_idx
+
+        active = torch.zeros(
+            num_m_blocks_b * num_n_blocks_b, dtype=torch.bool, device=device
+        )
+        active.scatter_(0, flat_block_idx[valid], True)
+        active = active.view(num_m_blocks_b, num_n_blocks_b)
+
+        counts = torch.zeros(
+            (seq_len_q, num_n_blocks_b), dtype=torch.int32, device=device
+        )
+        counts.scatter_add_(1, n_block_idx, valid.to(torch.int32))
+        n_block_starts = torch.arange(num_n_blocks_b, device=device) * tile_n
+        n_block_widths = (seq_len_k - n_block_starts).clamp(0, tile_n)
+        full_per_q = counts == n_block_widths[None, :]
+        padded_full_per_q = torch.ones(
+            (num_m_blocks_b * tile_m, num_n_blocks_b),
+            dtype=torch.bool,
+            device=device,
+        )
+        padded_full_per_q[:seq_len_q] = full_per_q
+        full = padded_full_per_q.view(num_m_blocks_b, tile_m, num_n_blocks_b).all(dim=1)
+
+        tile_active[b, :num_m_blocks_b, :num_n_blocks_b] = active
+        tile_full[b, :num_m_blocks_b, :num_n_blocks_b] = active & full
+
+    tile_partial = tile_active & ~tile_full
+    return _tiles_to_varlen_block_sparse(
+        tile_partial,
+        tile_full,
+        seq_lens_q,
+        seq_lens_k,
+        tile_m,
+        tile_n,
     )
