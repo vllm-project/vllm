@@ -136,6 +136,40 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
             lora_b = lora_b[start_idx:end_idx, :]
         return lora_b
 
+    def slice_lora_magnitude_vector(
+        self, lora_magnitude_vector: torch.Tensor
+    ) -> torch.Tensor:
+        return self.slice_lora_b(lora_magnitude_vector[:, None]).squeeze(1)
+
+    def _set_dora_scale(
+        self,
+        index: int,
+        lora_a: torch.Tensor,
+        lora_b: torch.Tensor,
+        lora_magnitude_vector: torch.Tensor,
+    ) -> None:
+        if self.n_slices != 1:
+            raise NotImplementedError("DoRA is not supported for packed LoRA layers.")
+        if self.tp_size > 1 and self.is_merged_col_linear:
+            raise NotImplementedError(
+                "DoRA is not supported for MergedColumnParallelLinear with TP>1."
+            )
+
+        base_weight = self._get_dora_base_weight()
+        if self.tp_size > 1:
+            lora_b = self.slice_lora_b(lora_b)
+            lora_magnitude_vector = self.slice_lora_magnitude_vector(
+                lora_magnitude_vector
+            )
+
+        dora_scale = self._get_dora_scale(
+            base_weight,
+            lora_a,
+            lora_b,
+            lora_magnitude_vector,
+        )
+        self._store_dora_scale(index, dora_scale)
+
     def forward(
         self, input_: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor | None]:

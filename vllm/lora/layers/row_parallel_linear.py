@@ -39,6 +39,31 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
     def slice_lora_b(self, lora_b: torch.Tensor) -> torch.Tensor:
         return lora_b
 
+    def _set_dora_scale(
+        self,
+        index: int,
+        lora_a: torch.Tensor,
+        lora_b: torch.Tensor,
+        lora_magnitude_vector: torch.Tensor,
+    ) -> None:
+        if self.n_slices != 1:
+            raise NotImplementedError("DoRA is not supported for packed LoRA layers.")
+
+        base_weight = self._get_dora_base_weight()
+        if self.tp_size > 1:
+            lora_a = self.slice_lora_a(lora_a)
+
+        dora_scale = self._get_dora_scale(
+            base_weight,
+            lora_a,
+            lora_b,
+            lora_magnitude_vector,
+            norm_sq_reduce=(
+                tensor_model_parallel_all_reduce if self.tp_size > 1 else None
+            ),
+        )
+        self._store_dora_scale(index, dora_scale)
+
     def forward(
         self, input_: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor | None]:

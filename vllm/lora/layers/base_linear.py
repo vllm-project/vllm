@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 
 import torch
 from transformers import PretrainedConfig
@@ -202,13 +203,14 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         )
 
         self.reset_lora(index)
-        if self.tp_size > 1:
-            lora_a = self.slice_lora_a(lora_a)
-            lora_b = self.slice_lora_b(lora_b)
 
         if lora_magnitude_vector is not None:
             assert isinstance(lora_magnitude_vector, torch.Tensor)
             self._set_dora_scale(index, lora_a, lora_b, lora_magnitude_vector)
+
+        if self.tp_size > 1:
+            lora_a = self.slice_lora_a(lora_a)
+            lora_b = self.slice_lora_b(lora_b)
 
         self.lora_a_stacked[0][index, 0, : lora_a.shape[0], : lora_a.shape[1]].copy_(
             lora_a, non_blocking=True
@@ -236,20 +238,26 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             raise NotImplementedError("DoRA currently only supports TP=1.")
         if self.n_slices != 1:
             raise NotImplementedError("DoRA is not supported for packed LoRA layers.")
-        if not isinstance(self.base_layer.quant_method, UnquantizedLinearMethod):
-            raise NotImplementedError("DoRA is not supported for quantized layers.")
-        if not hasattr(self.base_layer, "weight"):
-            raise NotImplementedError(
-                "DoRA requires access to the unquantized base layer weight."
-            )
 
-        base_weight = self.base_layer.weight
+        base_weight = self._get_dora_base_weight()
         dora_scale = self._get_dora_scale(
             base_weight,
             lora_a,
             lora_b,
             lora_magnitude_vector,
         )
+        self._store_dora_scale(index, dora_scale)
+
+    def _get_dora_base_weight(self) -> torch.Tensor:
+        if not isinstance(self.base_layer.quant_method, UnquantizedLinearMethod):
+            raise NotImplementedError("DoRA is not supported for quantized layers.")
+        if not hasattr(self.base_layer, "weight"):
+            raise NotImplementedError(
+                "DoRA requires access to the unquantized base layer weight."
+            )
+        return self.base_layer.weight
+
+    def _store_dora_scale(self, index: int, dora_scale: torch.Tensor) -> None:
         self.dora_scale_stacked[index, : dora_scale.shape[0]].copy_(
             dora_scale.to(dtype=self.dora_scale_stacked.dtype),
             non_blocking=True,
@@ -263,6 +271,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         lora_a: torch.Tensor,
         lora_b: torch.Tensor,
         lora_magnitude_vector: torch.Tensor,
+        norm_sq_reduce: Callable[[torch.Tensor], torch.Tensor] | None = None,
     ) -> torch.Tensor:
         if base_weight.shape != (lora_b.shape[0], lora_a.shape[1]):
             raise ValueError(
@@ -284,7 +293,10 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         )
         delta_weight = lora_b.float() @ lora_a.float()
         merged_weight = base_weight.float() + delta_weight
-        weight_norm = torch.linalg.vector_norm(merged_weight, dim=1)
+        norm_sq = merged_weight.square().sum(dim=1)
+        if norm_sq_reduce is not None:
+            norm_sq = norm_sq_reduce(norm_sq)
+        weight_norm = torch.sqrt(norm_sq)
         weight_norm = torch.clamp(weight_norm, min=torch.finfo(weight_norm.dtype).eps)
         return lora_magnitude_vector.float() / weight_norm
 
