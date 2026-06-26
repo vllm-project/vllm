@@ -213,9 +213,6 @@ _ON_GFX11 = "gfx11" in _GCN_ARCH
 _ON_GFX1100 = "gfx1100" in _GCN_ARCH
 _ON_GFX1151 = "gfx1151" in _GCN_ARCH
 _ON_GFX12X = any(arch in _GCN_ARCH for arch in ["gfx12"])
-# RDNA family covers consumer GPUs: gfx10 (RDNA2), gfx11 (RDNA3/3.5), gfx12 (RDNA4).
-# Used to gate AITER's Triton-backed kernel paths, which AITER itself bucketizes
-# as RDNA-eligible (see aiter/ops/triton/_triton_kernels/.../utils.py:RDNA_ARCHS).
 _ON_RDNA = _ON_GFX1X or "gfx10" in _GCN_ARCH
 _ON_MI3XX = any(arch in _GCN_ARCH for arch in ["gfx942", "gfx950"])
 _ON_GFX9 = any(arch in _GCN_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])

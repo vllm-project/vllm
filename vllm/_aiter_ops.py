@@ -95,12 +95,9 @@ def is_aiter_found_and_supported() -> bool:
     Does NOT check environment variables - that's handled by rocm_aiter_ops.is_enabled().
 
     This function determines if aiter CAN be used, not if it SHOULD be used.
-
-    Default acceptance is MI3xx (CDNA, gfx942/gfx950), where AITER's full kernel
-    set (CK + ASM + Triton) is upstream-validated. Consumer RDNA (gfx10/11/12)
-    is gated behind VLLM_ROCM_USE_AITER_RDNA=1 because only AITER's Triton-backed
-    paths are RDNA-eligible; per-feature gates below then keep CK/MFMA-bound
-    capabilities CDNA-only.
+    Accepted by default on MI3xx (CDNA); consumer RDNA is gated behind
+    VLLM_ROCM_USE_AITER_RDNA, with per-feature checks below keeping CK / MFMA
+    paths CDNA-only.
 
     Separation of concerns:
     - This function: Can aiter work on this system? (platform + library availability)
@@ -1647,7 +1644,6 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_linear_enabled(cls) -> bool:
-        # AITER's default linear path uses ASM/CK kernels with MFMA; CDNA only.
         from vllm.platforms.rocm import on_mi3xx
 
         return cls._AITER_ENABLED and cls._LINEAR_ENABLED and on_mi3xx()
@@ -1660,8 +1656,6 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_fused_moe_enabled(cls) -> bool:
-        # ck_moe / asm_moe paths require MFMA; CDNA only. RDNA MoE goes through
-        # vLLM's stock Triton fused-MoE path.
         from vllm.platforms.rocm import on_mi3xx
 
         return cls._AITER_ENABLED and cls._FMOE_ENABLED and on_mi3xx()
@@ -1720,7 +1714,6 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_mla_enabled(cls) -> bool:
-        # AITER MLA prefill/decode rely on CK kernels with MFMA; CDNA only.
         from vllm.platforms.rocm import on_mi3xx
 
         return cls._AITER_ENABLED and cls._MLA_ENABLED and on_mi3xx()
@@ -1728,8 +1721,6 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_mha_enabled(cls) -> bool:
-        # AITER MHA (ROCM_AITER_FA backend) is built on CK Flash Attention;
-        # CDNA only. RDNA users get vLLM's Triton FA paths instead.
         from vllm.platforms.rocm import on_mi3xx
 
         return cls._AITER_ENABLED and cls._MHA_ENABLED and on_mi3xx()

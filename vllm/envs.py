@@ -1131,11 +1131,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in ("true", "1")
     ),
-    # Experimental opt-in to allow AITER on consumer RDNA GPUs (gfx10/11/12).
-    # AITER upstream only validates on CDNA (MI200/MI300); when this is set
-    # together with VLLM_ROCM_USE_AITER=1, vLLM unlocks the Triton-backed AITER
-    # paths (unified attention, rotary, Triton GEMM, RMSNorm fusions) on RDNA.
-    # CK / MFMA / HipBMM paths remain CDNA-only inside the per-feature gates.
+    # Experimental: also allow AITER on consumer RDNA GPUs (gfx10/11/12).
+    # Only the Triton-backed AITER paths are unlocked; CK / MFMA paths
+    # stay CDNA-only via per-feature gates in rocm_aiter_ops.
     "VLLM_ROCM_USE_AITER_RDNA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_RDNA", "False").lower() in ("true", "1")
     ),
