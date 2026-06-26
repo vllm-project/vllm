@@ -1155,10 +1155,55 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     or decode_max_query_len > 1
                     or self.sinks is not None
                 ):
-                    assert not rocm_aiter_ops.is_shuffle_kv_cache_enabled(), (
-                        "Shuffle KV cache layout is not supported with sliding "
-                        "window, sinks, or speculative decoding (multi-token decode)."
-                    )
+                    if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
+                        # flash_attn_with_kvcache / unified_attention below read
+                        # the plain KV layout. The shuffled fp8 layout only has a
+                        # decode kernel for the sliding-window case; sinks and
+                        # multi-token (spec decode) over it are still unsupported.
+                        assert (
+                            self.sliding_window[0] != -1
+                            and decode_max_query_len == 1
+                            and self.sinks is None
+                        ), (
+                            "Shuffle KV cache layout is not supported with sinks "
+                            "or speculative decoding (multi-token decode)."
+                        )
+                        from aiter.ops.triton.attention.pa_decode_shuffle import (
+                            paged_attention_decode_shuffle_swa,
+                        )
+
+                        _, _, head_size = query.shape
+                        num_blocks, block_size, num_kv_heads, _ = key_cache.shape
+                        x = 16 // key_cache.element_size()
+                        new_key_cache = key_cache.reshape(
+                            num_blocks, num_kv_heads, head_size // x, block_size, x
+                        )
+                        new_value_cache = value_cache.reshape(
+                            num_blocks, num_kv_heads, block_size // x, head_size, x
+                        )
+                        k_qscale = (
+                            layer._k_scale
+                            if attn_metadata.k_scale is None
+                            else attn_metadata.k_scale
+                        )
+                        v_qscale = (
+                            layer._v_scale
+                            if attn_metadata.v_scale is None
+                            else attn_metadata.v_scale
+                        )
+                        paged_attention_decode_shuffle_swa(
+                            output[:num_decode_tokens],
+                            query[:num_decode_tokens],
+                            new_key_cache,
+                            new_value_cache,
+                            attn_metadata.block_table[:num_decodes],
+                            attn_metadata.seq_lens[:num_decodes],
+                            self.scale,
+                            k_qscale,
+                            v_qscale,
+                            self.sliding_window[0] + 1,
+                        )
+                        return
                     if not attn_metadata.causal:
                         from aiter.ops.triton.attention.mha_v3 import (
                             flash_attn_with_kvcache,
