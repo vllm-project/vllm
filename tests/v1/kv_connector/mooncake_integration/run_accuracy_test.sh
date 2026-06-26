@@ -25,20 +25,17 @@ if [[ -n "$VLLM_SERVE_EXTRA_ARGS" ]]; then
   echo "vLLM serve extra args: $VLLM_SERVE_EXTRA_ARGS"
 fi
 
-# Build the kv-transfer-config for P and D. Mooncake forces an HND KV layout
-# internally and discovers peers via its bootstrap server, so no side-channel
-# or layout env vars are needed (unlike NIXL).
+# Mooncake discovers peers via its bootstrap server, so no side-channel
+# or layout env vars are needed.
 KV_CONFIG_P='{"kv_connector":"MooncakeConnector","kv_role":"kv_producer"}'
 KV_CONFIG_D='{"kv_connector":"MooncakeConnector","kv_role":"kv_consumer"}'
 
 # Models to run
-MODEL_NAMES=${MODEL_NAMES:-}
-if [[ -n "$MODEL_NAMES" ]]; then
-  MODELS=("$MODEL_NAMES")
+MODEL_NAME=${MODEL_NAME:-}
+if [[ -n "$MODEL_NAME" ]]; then
+  MODEL="$MODEL_NAME"
 else
-  MODELS=(
-      "Qwen/Qwen3-0.6B"
-  )
+  MODEL="Qwen/Qwen3-0.6B"
 fi
 
 # Number of prefill and decode instances to create
@@ -213,11 +210,6 @@ run_tests_for_model() {
   sleep 3
 }
 
-# Run tests for each model
-for model in "${MODELS[@]}"; do
-  PREFILL_PORTS=()
-  DECODE_PORTS=()
-  run_tests_for_model "$model"
-done
+run_tests_for_model "$MODEL"
 
 echo "All tests completed!"
