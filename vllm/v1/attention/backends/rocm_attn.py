@@ -484,13 +484,11 @@ class RocmAttentionImpl(AttentionImpl):
         # Get the actual block_size from value_cache
         # value_cache shape: [num_blocks, num_heads, head_size, block_size]
         block_size = value_cache.shape[3]
-        has_native_layout = has_native_kv_cache_layout(key_cache, value_cache)
-        has_packed_blocks = (
-            key_cache.stride(0) == key_cache.shape[1:].numel()
-            and value_cache.stride(0) == value_cache.shape[1:].numel()
+        has_native_packed_layout = has_native_kv_cache_layout(
+            key_cache, value_cache, require_packed_blocks=True
         )
 
-        if block_size in (16, 32) and has_native_layout and has_packed_blocks:
+        if block_size in (16, 32) and has_native_packed_layout:
             # Normal 16, 32 with contiguous blocks: use vLLM native HIP C++ logic.
             PagedAttention.write_to_paged_cache(
                 key,
