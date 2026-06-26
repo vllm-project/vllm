@@ -263,11 +263,20 @@ class DeepseekV32Attention(MLAAttention):
         self.num_local_heads = num_local_heads
         self.qk_head_dim = qk_head_dim
         self.indexer = indexer
+        # Runtime toggle for index_share_for_mtp_iteration: MTP draft step 0
+        # computes the top-k, steps 1+ set this True to reuse it.
+        self.skip_topk = False
         # Whether the paged KV cache must be viewed as fp8 before the attention
         # (per-tensor fp8; the fp8_ds_mla layout is read as uint8).
         self._fp8_kv_needs_view = (
             is_quantized_kv_cache(self.kv_cache_dtype)
             and self.kv_cache_dtype != "fp8_ds_mla"
+        )
+        # Whether the backend takes an fp8-quantized query (FlashInfer sparse)
+        # vs the (ql_nope, q_pe) tuple (FlashMLA sparse).
+        self._use_concat_quant = (
+            is_quantized_kv_cache(self.kv_cache_dtype)
+            and self.impl.supports_quant_query_input
         )
 
         # Remaining MLA projections (registered on this module).
@@ -337,7 +346,7 @@ class DeepseekV32Attention(MLAAttention):
         # Lightning indexer writes the top-k indices into the shared buffer.
         # "Shared" layers (indexer is None) reuse the top-k from the previous
         # indexer layer already sitting in the buffer.
-        if self.indexer is not None:
+        if self.indexer is not None and not self.skip_topk:
             self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)  # type: ignore[operator]
 
         attn_latent = torch.empty(
@@ -398,12 +407,17 @@ class DeepseekV32Attention(MLAAttention):
         if self._fp8_kv_needs_view:
             kv_cache = kv_cache.view(torch.float8_e4m3fn)
 
-        attn_out, _ = self.impl.forward_mqa(  # type: ignore[attr-defined]
-            (ql_nope[:num_actual], q_pe[:num_actual]),
-            kv_cache,
-            attn_metadata,
-            self,
-        )
+        ql_nope = ql_nope[:num_actual]
+        q_pe = q_pe[:num_actual]
+        # FlashInfer sparse takes a single fp8-quantized query; FlashMLA sparse
+        # takes the (ql_nope, q_pe) tuple and concatenates internally.
+        mqa_q: torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+        if self._use_concat_quant:
+            mqa_q = self._decode_concat_quant_fp8_op(ql_nope, q_pe, self._q_scale)
+        else:
+            mqa_q = (ql_nope, q_pe)
+
+        attn_out, _ = self.impl.forward_mqa(mqa_q, kv_cache, attn_metadata, self)  # type: ignore[attr-defined]
         attn_latent[:num_actual] = attn_out.view(
             num_actual, self.num_local_heads, self.kv_lora_rank
         )
