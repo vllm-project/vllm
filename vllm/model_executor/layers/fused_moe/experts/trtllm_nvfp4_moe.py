@@ -66,16 +66,36 @@ class TrtLlmNvFp4ExpertsBase:
         else:
             self.g1_scale_c = self.quant_config.a2_gscale.clone()
 
-        if moe_config.is_act_and_mul and quant_config.gemm1_clamp_limit is not None:
-            device = torch.accelerator.current_device_index()
-            self.gemm1_clamp_limit = torch.full(
+        device = torch.accelerator.current_device_index()
+
+        def _per_expert(val) -> torch.Tensor | None:
+            if val is None:
+                return None
+            return torch.full(
                 (self.local_num_experts,),
-                quant_config.gemm1_clamp_limit,
+                float(val),
                 dtype=torch.float32,
                 device=device,
             )
+
+        clamp = quant_config.gemm1_clamp_limit
+        if clamp is None:
+            clamp = getattr(moe_config, "swiglu_limit", None)
+        alpha = getattr(quant_config, "gemm1_alpha", None)
+        if alpha is None:
+            alpha = getattr(moe_config, "swiglu_alpha", None)
+        beta = getattr(quant_config, "gemm1_beta", None)
+        if beta is None:
+            beta = getattr(moe_config, "swiglu_beta", None)
+
+        if moe_config.is_act_and_mul:
+            self.gemm1_clamp_limit = _per_expert(clamp)
+            self.gemm1_alpha = _per_expert(alpha)
+            self.gemm1_beta = _per_expert(beta)
         else:
             self.gemm1_clamp_limit = None
+            self.gemm1_alpha = None
+            self.gemm1_beta = None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
@@ -115,7 +135,7 @@ class TrtLlmNvFp4ExpertsBase:
         p = current_platform
         return (
             p.is_cuda()
-            and p.is_device_capability_family(100)
+            and (p.is_device_capability_family(100) or p.is_device_capability_family(120))
             and has_flashinfer_trtllm_fused_moe()
         )
 
@@ -143,6 +163,8 @@ class TrtLlmNvFp4ExpertsBase:
             MoEActivation.RELU2_NO_MUL,
             MoEActivation.GELU,
             MoEActivation.GELU_TANH,
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
         ]
 
     @staticmethod
