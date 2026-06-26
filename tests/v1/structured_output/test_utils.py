@@ -19,6 +19,10 @@ def unsupported_string_schemas():
         {"type": "string", "format": "non_existing_format"},
         {"type": "string", "pattern": "^[a-z]+$", "maxLength": 8},
         {"type": "string", "pattern": "^[a-z]+$", "minLength": 2},
+        # format + length: xgrammar compiles the format grammar but drops the
+        # length bound, so uuid with maxLength=5 would produce invalid output.
+        {"type": "string", "format": "uuid", "maxLength": 5},
+        {"type": "string", "format": "email", "minLength": 1, "maxLength": 10},
     ]
 
 
