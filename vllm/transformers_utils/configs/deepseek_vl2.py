@@ -3,6 +3,7 @@
 
 # adapted from https://github.com/deepseek-ai/DeepSeek-VL2/blob/faf18023f24b962b32d9f0a2d89e402a8d383a78/deepseek_vl2/models/modeling_deepseek_vl_v2.py#L115-L268
 
+from huggingface_hub.dataclasses import strict
 from transformers import DeepseekV2Config, PretrainedConfig
 
 
@@ -87,11 +88,13 @@ class MlpProjectorConfig(PretrainedConfig):
         super().__init__(**kwargs)
 
 
+@strict
+class DeepseekVLV2TextConfig(DeepseekV2Config):
+    kv_lora_rank: int | None = None
+
+
 class DeepseekVLV2Config(PretrainedConfig):
     model_type = "deepseek_vl_v2"
-    architectures: list[str] | None = None
-    vision_config: VisionEncoderConfig
-    projector_config: MlpProjectorConfig
 
     tile_tag: str = "2D"
     global_view_pos: str = "head"
@@ -104,19 +107,11 @@ class DeepseekVLV2Config(PretrainedConfig):
         candidate_resolutions: tuple[tuple[int, int]] = ((384, 384),),
         **kwargs,
     ):
-        super().__init__(**kwargs)
+        architectures = kwargs.setdefault("architectures", ["DeepseekVLV2ForCausalLM"])
 
-        if self.architectures is None:
-            self.architectures = ["DeepseekVLV2ForCausalLM"]
-
-        vision_config = kwargs.get("vision_config", {})
-        self.vision_config = VisionEncoderConfig(**vision_config)
-
-        projector_config = kwargs.get("projector_config", {})
-        self.projector_config = MlpProjectorConfig(**projector_config)
-
-        language_config = kwargs.get("language_config", {})
-        self.text_config = DeepseekV2Config(**language_config)
+        self.vision_config = VisionEncoderConfig(**kwargs.pop("vision_config", {}))
+        self.projector_config = MlpProjectorConfig(**kwargs.pop("projector_config", {}))
+        self.text_config = DeepseekVLV2TextConfig(**kwargs.pop("language_config", {}))
 
         self.tile_tag = tile_tag
         self.global_view_pos = global_view_pos
@@ -124,7 +119,8 @@ class DeepseekVLV2Config(PretrainedConfig):
         self.vocab_size = self.text_config.vocab_size
 
         # update model_type for OCR models
-        if "DeepseekOCRForCausalLM" in self.architectures:
-            self.model_type = "deepseek_ocr"
-        elif "DeepseekOCR2ForCausalLM" in self.architectures:
-            self.model_type = "deepseek_ocr2"
+        if "DeepseekOCRForCausalLM" in architectures:
+            kwargs["model_type"] = "deepseek_ocr"
+        elif "DeepseekOCR2ForCausalLM" in architectures:
+            kwargs["model_type"] = "deepseek_ocr2"
+        super().__init__(**kwargs)

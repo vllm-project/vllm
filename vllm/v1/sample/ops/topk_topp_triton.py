@@ -68,8 +68,32 @@ _PERCENTILE_TO_STD_TABLE = [
 
 
 @triton.jit
+def _update_min_larger_stats(data, above_mask, min_larger, num_min_larger, sentinel):
+    """Update running (min, count) of values above a pivot across tiles.
+
+    Tracks the smallest value strictly above a pivot and how many times
+    it occurs.  Called once per tile per pivot; the running state is
+    carried across tiles via `min_larger` / `num_min_larger`.
+
+    Merge rule:
+      - tile min < running min  → replace both
+      - tile min == running min → accumulate count
+      - tile min > running min  → keep running values
+    """
+    tile_min = tl.min(tl.where(above_mask, data, sentinel))
+    tile_eq = above_mask & (tl.abs(data - tile_min) < 1e-9)
+    tile_cnt = tl.sum(tile_eq)
+    is_new = tile_min < min_larger
+    is_same = tl.abs(tile_min - min_larger) < 1e-9
+    num_min_larger = tl.where(is_new, tile_cnt, num_min_larger + tile_cnt * is_same)
+    min_larger = tl.minimum(min_larger, tile_min)
+    return min_larger, num_min_larger
+
+
+@triton.jit
 def _topk_topp_kernel(
     LOGITS,
+    LOGITS_STRIDE_0,
     BUFFER,
     PERCENTILE_TO_STD_TABLE,
     NORMAL_CDF_TO_SIGMA_TABLE,
@@ -87,7 +111,7 @@ def _topk_topp_kernel(
     pid = tl.program_id(0)
     num_programs = tl.num_programs(0)
     for row_id in tl.range(pid, BATCH_SIZE, num_programs):
-        LOGITS_ROW = LOGITS + row_id * VOCAB_SIZE
+        LOGITS_ROW = LOGITS + row_id.to(tl.int64) * LOGITS_STRIDE_0
         BUFFER_ROW = BUFFER + pid * VOCAB_SIZE
 
         final_pivot = -float("inf")
@@ -162,7 +186,7 @@ def _topk_topp_kernel(
                 # max so the search converges to -inf (no masking).
                 min_logit = tl.minimum(min_logit, max_logit)
 
-                # Second passes: Ternary search for pivots
+                # Second passes: Ternary search for pivot
                 num_iters = 0
                 k_pivot = float("inf")
                 k_pivots_num = tl.zeros((), dtype=tl.uint32)
@@ -188,7 +212,10 @@ def _topk_topp_kernel(
                         min_larger_1 = float("inf")
                         num_min_larger_1 = tl.zeros((), dtype=tl.uint32)
 
-                        # First pass: Calculate k_pivots_num and min_larger
+                        # Single fused pass: compute k_pivots_num,
+                        # min_larger, and num_min_larger together to avoid
+                        # a second data scan. See _update_min_larger_stats
+                        # for the tile-level merge logic.
                         for i in range(0, search_iters):
                             offs_n = i * BLOCK_SIZE_TRUNC + tl.arange(
                                 0, BLOCK_SIZE_TRUNC
@@ -198,27 +225,24 @@ def _topk_topp_kernel(
                                 BUFFER_ROW + offs_n, mask=mask_n_2, other=-float("inf")
                             )
 
-                            k_pivots_num_0 += tl.sum(logits_blk2 > k_pivot_0)
-                            k_pivots_num_1 += tl.sum(logits_blk2 > k_pivot_1)
+                            above_0 = logits_blk2 > k_pivot_0
+                            above_1 = logits_blk2 > k_pivot_1
+                            k_pivots_num_0 += tl.sum(above_0)
+                            k_pivots_num_1 += tl.sum(above_1)
 
-                            min_larger_0 = tl.minimum(min_larger_0, tl.min(logits_blk2))
-                            min_larger_1 = tl.minimum(min_larger_1, tl.min(logits_blk2))
-
-                        # Second pass: Calculate num_min_larger
-                        for i in range(0, search_iters):
-                            offs_n = i * BLOCK_SIZE_TRUNC + tl.arange(
-                                0, BLOCK_SIZE_TRUNC
+                            min_larger_0, num_min_larger_0 = _update_min_larger_stats(
+                                logits_blk2,
+                                above_0,
+                                min_larger_0,
+                                num_min_larger_0,
+                                float("inf"),
                             )
-                            mask_n_2 = offs_n < search_range
-                            logits_blk2 = tl.load(
-                                BUFFER_ROW + offs_n, mask=mask_n_2, other=-float("inf")
-                            )
-
-                            num_min_larger_0 += tl.sum(
-                                tl.abs(logits_blk2 - min_larger_0) < 1e-9
-                            )
-                            num_min_larger_1 += tl.sum(
-                                tl.abs(logits_blk2 - min_larger_1) < 1e-9
+                            min_larger_1, num_min_larger_1 = _update_min_larger_stats(
+                                logits_blk2,
+                                above_1,
+                                min_larger_1,
+                                num_min_larger_1,
+                                float("inf"),
                             )
 
                         # Check if any of the pivots satisfy termination condition
@@ -255,6 +279,8 @@ def _topk_topp_kernel(
                         num_iters += 1
                         if num_iters >= 18 or tl.abs(min_range - max_range) < 1e-9:
                             k_pivot = (max_range + min_range) / 2.0
+                            min_larger = min_larger_0
+                            num_min_larger = num_min_larger_0
                             found_pivot = 1
                 else:
                     # If top-k outlier gathering failed, search whole logit space
@@ -262,17 +288,18 @@ def _topk_topp_kernel(
                     min_range = min_logit
                     found_pivot = 0
                     while found_pivot == 0:
-                        k_pivot_0 = (max_range - min_range) * 1.0 / 4.0 + min_range
+                        k_pivot_0 = (max_range - min_range) * 1.0 / 3.0 + min_range
                         k_pivots_num_0 = tl.zeros((), dtype=tl.uint32)
                         min_larger_0 = float("inf")
                         num_min_larger_0 = tl.zeros((), dtype=tl.uint32)
 
-                        k_pivot_1 = (max_range - min_range) * 2.0 / 4.0 + min_range
+                        k_pivot_1 = (max_range - min_range) * 2.0 / 3.0 + min_range
                         k_pivots_num_1 = tl.zeros((), dtype=tl.uint32)
                         min_larger_1 = float("inf")
                         num_min_larger_1 = tl.zeros((), dtype=tl.uint32)
 
-                        # First pass: Calculate k_pivots_num and min_larger
+                        # Single fused pass over full vocab (same approach
+                        # as the buffer path above).
                         for i in range(0, NUM_TILES):
                             offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
                             mask_n = offs_n < VOCAB_SIZE
@@ -280,30 +307,24 @@ def _topk_topp_kernel(
                                 LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
                             )
 
-                            k_pivots_num_0 += tl.sum(logits_blk2 > k_pivot_0)
-                            k_pivots_num_1 += tl.sum(logits_blk2 > k_pivot_1)
+                            above_0 = logits_blk2 > k_pivot_0
+                            above_1 = logits_blk2 > k_pivot_1
+                            k_pivots_num_0 += tl.sum(above_0)
+                            k_pivots_num_1 += tl.sum(above_1)
 
-                            # Exclude -inf from min_larger to avoid
-                            # poisoning the convergence check.
-                            finite_blk2 = tl.where(
-                                logits_blk2 > -float("inf"), logits_blk2, float("inf")
+                            min_larger_0, num_min_larger_0 = _update_min_larger_stats(
+                                logits_blk2,
+                                above_0,
+                                min_larger_0,
+                                num_min_larger_0,
+                                float("inf"),
                             )
-                            min_larger_0 = tl.minimum(min_larger_0, tl.min(finite_blk2))
-                            min_larger_1 = tl.minimum(min_larger_1, tl.min(finite_blk2))
-
-                        # Second pass: Calculate num_min_larger
-                        for i in range(0, NUM_TILES):
-                            offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-                            mask_n = offs_n < VOCAB_SIZE
-                            logits_blk2 = tl.load(
-                                LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf")
-                            )
-
-                            num_min_larger_0 += tl.sum(
-                                tl.abs(logits_blk2 - min_larger_0) < 1e-9
-                            )
-                            num_min_larger_1 += tl.sum(
-                                tl.abs(logits_blk2 - min_larger_1) < 1e-9
+                            min_larger_1, num_min_larger_1 = _update_min_larger_stats(
+                                logits_blk2,
+                                above_1,
+                                min_larger_1,
+                                num_min_larger_1,
+                                float("inf"),
                             )
 
                         # Check if any of the pivots satisfy termination condition
@@ -340,6 +361,8 @@ def _topk_topp_kernel(
                         num_iters += 1
                         if num_iters >= 18 or tl.abs(min_range - max_range) < 1e-9:
                             k_pivot = (max_range + min_range) / 2.0
+                            min_larger = min_larger_0
+                            num_min_larger = num_min_larger_0
                             found_pivot = 1
 
                 duplicate_logit = min_larger
@@ -501,17 +524,15 @@ def _topk_topp_kernel(
                         # Fifth passes: Search for p_pivot
                         found_pivot = 0
                         while found_pivot == 0:
-                            p_pivot_0 = (max_range - min_range) * 1.0 / 3.0 + min_range
+                            p_pivot_0 = (max_range - min_range) * 0.5 + min_range
                             p_pivots_sum_0 = 0.0
                             min_larger_0 = 1.0
                             num_min_larger_0 = tl.zeros((), dtype=tl.uint32)
 
-                            p_pivot_1 = (max_range - min_range) * 2.0 / 3.0 + min_range
-                            p_pivots_sum_1 = 0.0
-                            min_larger_1 = 1.0
-                            num_min_larger_1 = tl.zeros((), dtype=tl.uint32)
-
-                            # First pass: Calculate p_pivots_sum and min_larger
+                            # Single fused pass: compute p_pivots_sum,
+                            # min_larger, and num_min_larger together.
+                            # See _update_min_larger_stats for the
+                            # tile-level merge logic.
                             for i in range(0, search_iters):
                                 offs_n = i * BLOCK_SIZE_TRUNC + tl.arange(
                                     0, BLOCK_SIZE_TRUNC
@@ -521,52 +542,20 @@ def _topk_topp_kernel(
                                     BUFFER_ROW + offs_n, mask=mask_n_2, other=0.0
                                 )
 
-                                p_pivots_sum_0 += tl.sum(
-                                    probs_blk * (probs_blk > p_pivot_0)
-                                )
-                                masked_larger_0 = tl.where(
-                                    probs_blk > p_pivot_0, probs_blk, 1.0
-                                )
-                                min_larger_0 = tl.minimum(
-                                    min_larger_0, tl.min(masked_larger_0)
+                                above_0 = probs_blk > p_pivot_0
+                                p_pivots_sum_0 += tl.sum(probs_blk * above_0)
+
+                                min_larger_0, num_min_larger_0 = (
+                                    _update_min_larger_stats(
+                                        probs_blk,
+                                        above_0,
+                                        min_larger_0,
+                                        num_min_larger_0,
+                                        1.0,
+                                    )
                                 )
 
-                                p_pivots_sum_1 += tl.sum(
-                                    probs_blk * (probs_blk > p_pivot_1)
-                                )
-                                masked_larger_1 = tl.where(
-                                    probs_blk > p_pivot_1, probs_blk, 1.0
-                                )
-                                min_larger_1 = tl.minimum(
-                                    min_larger_1, tl.min(masked_larger_1)
-                                )
-
-                            # Second pass: Calculate num_min_larger
-                            for i in range(0, search_iters):
-                                offs_n = i * BLOCK_SIZE_TRUNC + tl.arange(
-                                    0, BLOCK_SIZE_TRUNC
-                                )
-                                mask_n_2 = offs_n < search_range
-                                probs_blk = tl.load(
-                                    BUFFER_ROW + offs_n, mask=mask_n_2, other=0.0
-                                )
-
-                                num_min_larger_0 += tl.sum(
-                                    tl.abs(probs_blk - min_larger_0) < 1e-9
-                                )
-                                num_min_larger_1 += tl.sum(
-                                    tl.abs(probs_blk - min_larger_1) < 1e-9
-                                )
-
-                            # Check if any of the pivots satisfy termination condition
-                            if p_pivots_sum_1 >= p and (
-                                p_pivots_sum_1 - (min_larger_1 * num_min_larger_1) < p
-                            ):
-                                p_pivot = p_pivot_1
-                                min_larger_prob = min_larger_1
-                                num_min_larger = num_min_larger_1
-                                p_pivots_sum = p_pivots_sum_1
-                                found_pivot = 1
+                            # Check if the pivot satisfies termination condition
                             if p_pivots_sum_0 >= p and (
                                 p_pivots_sum_0 - (min_larger_0 * num_min_larger_0) < p
                             ):
@@ -577,19 +566,17 @@ def _topk_topp_kernel(
                                 found_pivot = 1
 
                             # Update range
-                            if p_pivots_sum_1 > p:
-                                min_range = p_pivot_1
-                            elif p_pivots_sum_0 > p:
+                            if p_pivots_sum_0 > p:
                                 min_range = p_pivot_0
-
-                            if p_pivots_sum_0 < p:
+                            elif p_pivots_sum_0 < p:
                                 max_range = p_pivot_0
-                            elif p_pivots_sum_1 < p:
-                                max_range = p_pivot_1
 
                             num_iters += 1
                             if (max_range - min_range) < 1e-9 or num_iters >= 18:
                                 p_pivot = (max_range + min_range) / 2.0
+                                min_larger_prob = min_larger_0
+                                num_min_larger = num_min_larger_0
+                                p_pivots_sum = p_pivots_sum_0
                                 found_pivot = 1
 
                         duplicate_logit = (
@@ -706,17 +693,15 @@ def _topk_topp_kernel(
 
                     found_pivot = 0
                     while found_pivot == 0:
-                        p_pivot_0 = (max_range - min_range) * 1.0 / 3.0 + min_range
+                        p_pivot_0 = (max_range - min_range) * 0.5 + min_range
                         p_pivots_sum_0 = 0.0
                         min_larger_0 = 1.0
                         num_min_larger_0 = tl.zeros((), dtype=tl.uint32)
 
-                        p_pivot_1 = (max_range - min_range) * 2.0 / 3.0 + min_range
-                        p_pivots_sum_1 = 0.0
-                        min_larger_1 = 1.0
-                        num_min_larger_1 = tl.zeros((), dtype=tl.uint32)
-
-                        # First pass: Calculate p_pivots_sum and min_larger
+                        # Single fused pass: compute p_pivots_sum,
+                        # min_larger, and num_min_larger together.
+                        # See _update_min_larger_stats for the
+                        # tile-level merge logic.
                         for i in range(0, search_iters):
                             offs_n = i * BLOCK_SIZE_TRUNC + tl.arange(
                                 0, BLOCK_SIZE_TRUNC
@@ -726,53 +711,18 @@ def _topk_topp_kernel(
                                 BUFFER_ROW + offs_n, mask=mask_n_2, other=0.0
                             )
 
-                            p_pivots_sum_0 += tl.sum(
-                                probs_blk * (probs_blk > p_pivot_0)
-                            )
-                            masked_larger_0 = tl.where(
-                                probs_blk > p_pivot_0, probs_blk, 1.0
-                            )
-                            min_larger_0 = tl.minimum(
-                                min_larger_0, tl.min(masked_larger_0)
+                            above_0 = probs_blk > p_pivot_0
+                            p_pivots_sum_0 += tl.sum(probs_blk * above_0)
+
+                            min_larger_0, num_min_larger_0 = _update_min_larger_stats(
+                                probs_blk,
+                                above_0,
+                                min_larger_0,
+                                num_min_larger_0,
+                                1.0,
                             )
 
-                            p_pivots_sum_1 += tl.sum(
-                                probs_blk * (probs_blk > p_pivot_1)
-                            )
-                            masked_larger_1 = tl.where(
-                                probs_blk > p_pivot_1, probs_blk, 1.0
-                            )
-                            min_larger_1 = tl.minimum(
-                                min_larger_1, tl.min(masked_larger_1)
-                            )
-
-                        # Second pass: Calculate num_min_larger
-                        for i in range(0, search_iters):
-                            offs_n = i * BLOCK_SIZE_TRUNC + tl.arange(
-                                0, BLOCK_SIZE_TRUNC
-                            )
-                            mask_n_2 = offs_n < search_range
-                            probs_blk = tl.load(
-                                BUFFER_ROW + offs_n, mask=mask_n_2, other=0.0
-                            )
-
-                            num_min_larger_0 += tl.sum(
-                                tl.abs(probs_blk - min_larger_0) < 1e-9
-                            )
-                            num_min_larger_1 += tl.sum(
-                                tl.abs(probs_blk - min_larger_1) < 1e-9
-                            )
-
-                        # Check if any of the pivots satisfy termination condition
-                        if (
-                            p_pivots_sum_1 >= p
-                            and p_pivots_sum_1 - (min_larger_1 * num_min_larger_1) < p
-                        ):
-                            p_pivot = p_pivot_1
-                            min_larger_prob = min_larger_1
-                            num_min_larger = num_min_larger_1
-                            p_pivots_sum = p_pivots_sum_1
-                            found_pivot = 1
+                        # Check if the pivot satisfies termination condition
                         if (
                             p_pivots_sum_0 >= p
                             and p_pivots_sum_0 - (min_larger_0 * num_min_larger_0) < p
@@ -784,19 +734,17 @@ def _topk_topp_kernel(
                             found_pivot = 1
 
                         # Update range
-                        if p_pivots_sum_1 > p:
-                            min_range = p_pivot_1
-                        elif p_pivots_sum_0 > p:
+                        if p_pivots_sum_0 > p:
                             min_range = p_pivot_0
-
-                        if p_pivots_sum_0 < p:
+                        elif p_pivots_sum_0 < p:
                             max_range = p_pivot_0
-                        elif p_pivots_sum_1 < p:
-                            max_range = p_pivot_1
 
                         num_iters += 1
                         if (max_range - min_range) < 1e-9 or num_iters >= 18:
                             p_pivot = (max_range + min_range) / 2.0
+                            min_larger_prob = min_larger_0
+                            num_min_larger = num_min_larger_0
+                            p_pivots_sum = p_pivots_sum_0
                             found_pivot = 1
                 else:
                     # Re-populate the buffer with full softmax probabilities
@@ -813,17 +761,15 @@ def _topk_topp_kernel(
 
                     found_pivot = 0
                     while found_pivot == 0:
-                        p_pivot_0 = (max_range - min_range) * 1.0 / 3.0 + min_range
+                        p_pivot_0 = (max_range - min_range) * 0.5 + min_range
                         p_pivots_sum_0 = 0.0
                         min_larger_0 = 1.0
                         num_min_larger_0 = tl.zeros((), dtype=tl.uint32)
 
-                        p_pivot_1 = (max_range - min_range) * 2.0 / 3.0 + min_range
-                        p_pivots_sum_1 = 0.0
-                        min_larger_1 = 1.0
-                        num_min_larger_1 = tl.zeros((), dtype=tl.uint32)
-
-                        # First pass: Calculate p_pivots_sum and min_larger
+                        # Single fused pass: compute p_pivots_sum,
+                        # min_larger, and num_min_larger together.
+                        # See _update_min_larger_stats for the
+                        # tile-level merge logic.
                         for i in range(0, NUM_TILES):
                             offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
                             mask_n = offs_n < VOCAB_SIZE
@@ -831,51 +777,18 @@ def _topk_topp_kernel(
                                 BUFFER_ROW + offs_n, mask=mask_n, other=0.0
                             )
 
-                            p_pivots_sum_0 += tl.sum(
-                                probs_blk * (probs_blk > p_pivot_0)
-                            )
-                            masked_larger_0 = tl.where(
-                                probs_blk > p_pivot_0, probs_blk, 1.0
-                            )
-                            min_larger_0 = tl.minimum(
-                                min_larger_0, tl.min(masked_larger_0)
+                            above_0 = probs_blk > p_pivot_0
+                            p_pivots_sum_0 += tl.sum(probs_blk * above_0)
+
+                            min_larger_0, num_min_larger_0 = _update_min_larger_stats(
+                                probs_blk,
+                                above_0,
+                                min_larger_0,
+                                num_min_larger_0,
+                                1.0,
                             )
 
-                            p_pivots_sum_1 += tl.sum(
-                                probs_blk * (probs_blk > p_pivot_1)
-                            )
-                            masked_larger_1 = tl.where(
-                                probs_blk > p_pivot_1, probs_blk, 1.0
-                            )
-                            min_larger_1 = tl.minimum(
-                                min_larger_1, tl.min(masked_larger_1)
-                            )
-
-                        # Second pass: Calculate num_min_larger
-                        for i in range(0, NUM_TILES):
-                            offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-                            mask_n = offs_n < VOCAB_SIZE
-                            probs_blk = tl.load(
-                                BUFFER_ROW + offs_n, mask=mask_n, other=0.0
-                            )
-
-                            num_min_larger_0 += tl.sum(
-                                tl.abs(probs_blk - min_larger_0) < 1e-9
-                            )
-                            num_min_larger_1 += tl.sum(
-                                tl.abs(probs_blk - min_larger_1) < 1e-9
-                            )
-
-                        # Check if any of the pivots satisfy termination condition
-                        if (
-                            p_pivots_sum_1 >= p
-                            and p_pivots_sum_1 - (min_larger_1 * num_min_larger_1) < p
-                        ):
-                            p_pivot = p_pivot_1
-                            min_larger_prob = min_larger_1
-                            num_min_larger = num_min_larger_1
-                            p_pivots_sum = p_pivots_sum_1
-                            found_pivot = 1
+                        # Check if the pivot satisfies termination condition
                         if (
                             p_pivots_sum_0 >= p
                             and p_pivots_sum_0 - (min_larger_0 * num_min_larger_0) < p
@@ -887,22 +800,20 @@ def _topk_topp_kernel(
                             found_pivot = 1
 
                         # Update range
-                        if p_pivots_sum_1 > p:
-                            min_range = p_pivot_1
-                        elif p_pivots_sum_0 > p:
+                        if p_pivots_sum_0 > p:
                             min_range = p_pivot_0
-
-                        if p_pivots_sum_0 < p:
+                        elif p_pivots_sum_0 < p:
                             max_range = p_pivot_0
-                        elif p_pivots_sum_1 < p:
-                            max_range = p_pivot_1
 
                         num_iters += 1
                         if (max_range - min_range) < 1e-9 or num_iters >= 18:
                             p_pivot = (max_range + min_range) / 2.0
+                            min_larger_prob = min_larger_0
+                            num_min_larger = num_min_larger_0
+                            p_pivots_sum = p_pivots_sum_0
                             found_pivot = 1
 
-                duplicate_logit = tl.log(min_larger_prob * sum_exp_logits) + max_logit
+                duplicate_logit = tl.log(min_larger_prob * sum_exp_logits) + max_sample
                 num_duplicate_logit = num_min_larger
                 num_keep = num_duplicate_logit - tl.cast(
                     (p_pivots_sum - p) / min_larger_prob, tl.uint32
@@ -933,9 +844,7 @@ def _topk_topp_kernel(
                         tl.abs(logits_blk - duplicate_logit) < 1e-9
                     ) & mask_n
                     duplicate_count = tl.cumsum(duplicate_mask) + num_kept
-                    duplicate_keep_mask = (
-                        duplicate_count <= num_duplicate_logit
-                    ) & duplicate_mask
+                    duplicate_keep_mask = (duplicate_count <= num_keep) & duplicate_mask
                     duplicate_remove_mask = duplicate_mask & ~duplicate_keep_mask
                     num_kept += tl.sum(duplicate_keep_mask)
                     keep_mask = keep_mask & (~duplicate_remove_mask)
@@ -957,25 +866,30 @@ def apply_top_k_top_p_triton(
     to the remaining k values (by probability).
 
     Args:
-        logits: [batch_size, vocab_size] float32 tensor, modified in-place
+        logits: [batch_size, vocab_size] float32 tensor. The returned tensor
+            may alias this input or be a new contiguous tensor for unsupported
+            layouts.
         k: [batch_size] int32 tensor of top-k values per row, or None to disable top-k
         p: [batch_size] float32 tensor of top-p values per row (0 to 1),
             or None to disable top-p
         mask_value: Value for masked positions (default: -inf)
 
     Returns:
-        The logits tensor (modified in-place)
+        The masked logits tensor. It may or may not be modified in-place.
     """
     assert logits.ndim == 2
     assert logits.dtype == torch.float32
-
     batch_size, vocab_size = logits.shape
-
     topk_enabled = k is not None
     topp_enabled = p is not None
 
     if batch_size == 0 or not (topk_enabled or topp_enabled):
         return logits
+
+    # The Triton kernel supports arbitrary row strides, but it still assumes
+    # the vocab dimension is laid out contiguously within each row.
+    if logits.stride(1) != 1:
+        logits = logits.contiguous()
 
     if k is not None:
         assert k.ndim == 1 and k.shape[0] == batch_size
@@ -1014,8 +928,19 @@ def apply_top_k_top_p_triton(
     else:
         normal_cdf_to_sigma_table, percentile_to_std_table = tables
 
+    # Smaller tiles compile and run faster on CPU; GPU benefits from larger tiles.
+    # On XPU, large BLOCK_SIZE causes precision loss in the single-pass pivot
+    # approximation; use smaller tiles for accurate top-p results.
+    if logits.device.type == "cpu":
+        block_size, block_size_trunc = 256, 128
+    elif logits.device.type == "xpu":
+        block_size, block_size_trunc = 4096, 2048
+    else:
+        block_size, block_size_trunc = 8192, 4096
+
     _topk_topp_kernel[(NUM_PROGRAMS,)](
         logits,
+        logits.stride(0),
         buffer,
         percentile_to_std_table,
         normal_cdf_to_sigma_table,
@@ -1024,8 +949,8 @@ def apply_top_k_top_p_triton(
         BATCH_SIZE=batch_size,
         MASK_VALUE=mask_value,
         VOCAB_SIZE=vocab_size,
-        BLOCK_SIZE=8192,
-        BLOCK_SIZE_TRUNC=4096,
+        BLOCK_SIZE=block_size,
+        BLOCK_SIZE_TRUNC=block_size_trunc,
         TOPK_ENABLED=topk_enabled,
         TOPP_ENABLED=topp_enabled,
     )

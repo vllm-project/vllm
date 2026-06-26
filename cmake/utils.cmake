@@ -47,12 +47,17 @@ macro (append_cmake_prefix_path PKG EXPR)
   list(APPEND CMAKE_PREFIX_PATH ${_PREFIX_PATH})
 endmacro()
 
-#
-# Add a target named `hipify${NAME}` that runs the hipify preprocessor on a set
-# of CUDA source files. The names of the corresponding "hipified" sources are
-# stored in `OUT_SRCS`.
-#
+# Resolve hipified output paths for `NAME` into `OUT_SRCS` and register the
+# `.cu` sources with the shared `hipify_all` target. Per-extension hipify
+# targets are unsafe to run in parallel against a shared csrc/ output dir, so
+# accumulation here is paired with a single finalize step.
 function (hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
+  if (TARGET hipify_all)
+    message(FATAL_ERROR
+      "hipify_sources_target(${NAME}) called after vllm_finalize_hipify_target. "
+      "Add the new HIP extension before the finalizer call in CMakeLists.txt.")
+  endif()
+
   #
   # Split into C++ and non-C++ (i.e. CUDA) sources.
   #
@@ -73,17 +78,47 @@ function (hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
     list(APPEND HIP_SRCS "${CMAKE_CURRENT_BINARY_DIR}/${SRC}")
   endforeach()
 
-  set(CSRC_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/csrc)
-  add_custom_target(
-    hipify${NAME}
-    COMMAND ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/cmake/hipify.py -p ${CMAKE_SOURCE_DIR}/csrc -o ${CSRC_BUILD_DIR} ${SRCS}
-    DEPENDS ${CMAKE_SOURCE_DIR}/cmake/hipify.py ${SRCS}
-    BYPRODUCTS ${HIP_SRCS}
-    COMMENT "Running hipify on ${NAME} extension source files.")
+  set_property(GLOBAL APPEND PROPERTY VLLM_HIPIFY_ALL_SRCS ${SRCS})
+  set_property(GLOBAL APPEND PROPERTY VLLM_HIPIFY_ALL_BYPRODUCTS ${HIP_SRCS})
+
+  # Chain hipify targets so they run sequentially. Parallel hipify
+  # invocations race on shutil.copytree, overwriting .hip files
+  # produced by another target back to .cu originals.
+  if (DEFINED _VLLM_LAST_HIPIFY_TARGET)
+    add_dependencies(hipify${NAME} ${_VLLM_LAST_HIPIFY_TARGET})
+  endif()
+  set(_VLLM_LAST_HIPIFY_TARGET "hipify${NAME}" PARENT_SCOPE)
 
   # Swap out original extension sources with hipified sources.
   list(APPEND HIP_SRCS ${CXX_SRCS})
   set(${OUT_SRCS} ${HIP_SRCS} PARENT_SCOPE)
+endfunction()
+
+# Define the single shared `hipify_all` custom target that runs hipify once
+# on the union of every HIP extension's sources. Call after the last HIP
+# `define_extension_target`.
+function (vllm_finalize_hipify_target)
+  if (TARGET hipify_all)
+    return()
+  endif()
+
+  get_property(ALL_SRCS GLOBAL PROPERTY VLLM_HIPIFY_ALL_SRCS)
+  get_property(ALL_BYPRODUCTS GLOBAL PROPERTY VLLM_HIPIFY_ALL_BYPRODUCTS)
+
+  if (NOT ALL_SRCS)
+    return()
+  endif()
+
+  list(REMOVE_DUPLICATES ALL_SRCS)
+  list(REMOVE_DUPLICATES ALL_BYPRODUCTS)
+
+  set(CSRC_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/csrc)
+  add_custom_target(
+    hipify_all
+    COMMAND ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/cmake/hipify.py -p ${CMAKE_SOURCE_DIR}/csrc -o ${CSRC_BUILD_DIR} ${ALL_SRCS}
+    DEPENDS ${CMAKE_SOURCE_DIR}/cmake/hipify.py ${ALL_SRCS}
+    BYPRODUCTS ${ALL_BYPRODUCTS}
+    COMMENT "Running hipify on all extension source files.")
 endfunction()
 
 #
@@ -173,8 +208,10 @@ print(candidates[0] if candidates else '')
 endfunction()
 
 # Macro for converting a `gencode` version number to a cmake version number.
+# Preserves architecture-specific suffixes (a/f) needed for correct
+# __CUDA_ARCH_FAMILY_SPECIFIC__ definition. E.g. "121a" -> "12.1a".
 macro(string_to_ver OUT_VER IN_STR)
-  string(REGEX REPLACE "\([0-9]+\)\([0-9]\)" "\\1.\\2" ${OUT_VER} ${IN_STR})
+  string(REGEX REPLACE "\([0-9]+\)\([0-9][af]?\)" "\\1.\\2" ${OUT_VER} ${IN_STR})
 endmacro()
 
 #
@@ -211,7 +248,7 @@ endmacro()
 function(extract_unique_cuda_archs_ascending OUT_ARCHES CUDA_ARCH_FLAGS)
   set(_CUDA_ARCHES)
   foreach(_ARCH ${CUDA_ARCH_FLAGS})
-    string(REGEX MATCH "arch=compute_\([0-9]+a?\)" _COMPUTE ${_ARCH})
+    string(REGEX MATCH "arch=compute_\([0-9]+[af]?\)" _COMPUTE ${_ARCH})
     if (_COMPUTE)
       set(_COMPUTE ${CMAKE_MATCH_1})
     endif()
@@ -353,8 +390,11 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
   list(REMOVE_DUPLICATES _PTX_ARCHS)
   list(REMOVE_DUPLICATES _SRC_CUDA_ARCHS)
 
-  # If x.0a or x.0f is in SRC_CUDA_ARCHS and x.0 is in CUDA_ARCHS then we should
-  # remove x.0a or x.0f from SRC_CUDA_ARCHS and add x.0a or x.0f to _CUDA_ARCHS
+  # Handle architecture-specific suffixes (a/f) for SRC entries.
+  # First try exact base match (x.y), then cross-suffix match (x.ya / x.yf).
+  # For 'f' (family) suffix: if no exact/cross match, fall back to major-version
+  # match — e.g. SRC="12.0f" matches TGT="12.1a" since SM121 is in the SM12x
+  # family. The output uses TGT's value to preserve the user's compilation flags.
   set(_CUDA_ARCHS)
   foreach(_arch ${_SRC_CUDA_ARCHS})
     if(_arch MATCHES "[af]$")
@@ -362,6 +402,38 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
       string(REGEX REPLACE "[af]$" "" _base "${_arch}")
       if ("${_base}" IN_LIST TGT_CUDA_ARCHS)
         list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_base}")
+        list(APPEND _CUDA_ARCHS "${_arch}")
+      elseif("${_base}a" IN_LIST _TGT_CUDA_ARCHS)
+        list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_base}a")
+        list(APPEND _CUDA_ARCHS "${_base}a")
+      elseif("${_base}f" IN_LIST _TGT_CUDA_ARCHS)
+        list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_base}f")
+        list(APPEND _CUDA_ARCHS "${_base}f")
+      elseif(_arch MATCHES "f$")
+        # Family suffix: match any TGT entry in the same major version family.
+        string(REGEX REPLACE "^([0-9]+)\\..*$" "\\1" _src_major "${_base}")
+        foreach(_tgt ${_TGT_CUDA_ARCHS})
+          string(REGEX REPLACE "[af]$" "" _tgt_base "${_tgt}")
+          string(REGEX REPLACE "^([0-9]+)\\..*$" "\\1" _tgt_major "${_tgt_base}")
+          if(_tgt_major STREQUAL _src_major)
+            list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_tgt}")
+            list(APPEND _CUDA_ARCHS "${_tgt}")
+            break()
+          endif()
+        endforeach()
+      endif()
+    endif()
+  endforeach()
+
+  # Symmetric handling: if TGT has x.ya/f and SRC has x.y (without suffix),
+  # preserve TGT's suffix in the output.
+  set(_tgt_copy ${_TGT_CUDA_ARCHS})
+  foreach(_arch ${_tgt_copy})
+    if(_arch MATCHES "[af]$")
+      string(REGEX REPLACE "[af]$" "" _base "${_arch}")
+      if ("${_base}" IN_LIST _SRC_CUDA_ARCHS)
+        list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_arch}")
+        list(REMOVE_ITEM _SRC_CUDA_ARCHS "${_base}")
         list(APPEND _CUDA_ARCHS "${_arch}")
       endif()
     endif()
@@ -410,6 +482,16 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
   set(_CUDA_ARCHS ${_FINAL_ARCHS})
 
   set(${OUT_CUDA_ARCHS} ${_CUDA_ARCHS} PARENT_SCOPE)
+endfunction()
+
+
+function(cuda_archs_sm90plus OUT_CUDA_ARCHS TGT_CUDA_ARCHS)
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(_archs "9.0a;10.0f;11.0f;12.0f" "${TGT_CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(_archs "9.0a;10.0a;10.1a;10.3a;12.0a;12.1a" "${TGT_CUDA_ARCHS}")
+  endif()
+  set(${OUT_CUDA_ARCHS} ${_archs} PARENT_SCOPE)
 endfunction()
 
 #
@@ -514,7 +596,7 @@ function (define_extension_target MOD_NAME)
 
   if (ARG_LANGUAGE STREQUAL "HIP")
     # Make this target dependent on the hipify preprocessor step.
-    add_dependencies(${MOD_NAME} hipify${MOD_NAME})
+    add_dependencies(${MOD_NAME} hipify_all)
     # Make sure we include the hipified versions of the headers, and avoid conflicts with the ones in the original source folder
     target_include_directories(${MOD_NAME} PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/csrc
       ${ARG_INCLUDE_DIRECTORIES})

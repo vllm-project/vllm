@@ -31,7 +31,10 @@ import torch.nn as nn
 from transformers import PretrainedConfig
 
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    MoERunner,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -198,7 +201,7 @@ class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts):
         self.num_moe_layers = self.config.num_nextn_predict_layers
         self.num_expert_groups = self.config.n_group
 
-        self.moe_layers: list[FusedMoE] = []
+        self.moe_layers: list[MoERunner] = []
         self.moe_mlp_layers: list[Glm4MoE] = []
         example_moe = None
         for layer in self.model.layers.values():
@@ -247,7 +250,7 @@ class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts):
 
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = FusedMoE.make_expert_params_mapping(
+        expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",

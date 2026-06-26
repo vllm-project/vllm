@@ -3,15 +3,36 @@ depends_on:
   - image-build
 steps:
 - label: Model Executor
+  key: model-executor
   timeout_in_minutes: 35
   source_file_dependencies:
   - vllm/engine/arg_utils.py
   - vllm/config/model.py
   - vllm/model_executor
   - tests/model_executor
-  - tests/entrypoints/openai/test_tensorizer_entrypoint.py
+  - tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
   commands:
     - apt-get update && apt-get install -y curl libsodium23
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-    - pytest -v -s model_executor
-    - pytest -v -s entrypoints/openai/test_tensorizer_entrypoint.py
+    # Dump tracebacks of all threads if a test hangs, so a wedged GPU/CUDA
+    # init surfaces a stack instead of silently stalling.
+    - export PYTHONFAULTHANDLER=1
+    # Per-test watchdog: a single hung test (e.g. stuck during engine/CUDA
+    # init) fails fast with a traceback instead of running until the global
+    # build timeout. The `thread` method also handles hangs inside C/CUDA
+    # calls that the signal method cannot interrupt.
+    - pytest -v -s model_executor -m '(not slow_test)' --timeout=900 --timeout-method=thread
+    - pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py --timeout=900 --timeout-method=thread
+  mirror:
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/engine/arg_utils.py
+      - vllm/config/model.py
+      - vllm/model_executor
+      - tests/model_executor
+      - tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py

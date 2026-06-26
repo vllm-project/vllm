@@ -69,7 +69,6 @@ def _bmm_chunk_fwd_kernel(
     out_ptr,
     cu_chunk_seqlens_ptr,
     # Matrix dimensions
-    seqlen,
     chunk_size: tl.constexpr,
     K: tl.constexpr,
     ngroups: tl.constexpr,
@@ -185,13 +184,12 @@ def _bmm_chunk_fwd(a, b, chunk_size, cu_chunk_seqlens, causal=False, output_dtyp
         * triton.cdiv(chunk_size, META["BLOCK_SIZE_N"]),
         nchunks * ngroups,
     )
-    with torch.cuda.device(a.device.index):
+    with torch.accelerator.device_index(a.device.index):
         _bmm_chunk_fwd_kernel[grid](
             a_ptr=a,
             b_ptr=b,
             out_ptr=out,
             cu_chunk_seqlens_ptr=cu_chunk_seqlens,
-            seqlen=seqlen,
             chunk_size=chunk_size,
             K=k,
             ngroups=ngroups,

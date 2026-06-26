@@ -11,15 +11,15 @@ from typing import TYPE_CHECKING, Any, overload
 import torch
 from typing_extensions import TypeVar
 
+from vllm.exceptions import VLLMValidationError
+from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
-from vllm.multimodal.inputs import MultiModalDataDict
 from vllm.multimodal.parse import (
     DictEmbeddingItems,
     EmbeddingItems,
     MultiModalDataItems,
     MultiModalDataParser,
 )
-from vllm.renderers import TokenizeParams
 from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
@@ -32,12 +32,14 @@ if TYPE_CHECKING:
     from transformers.processing_utils import ProcessorMixin
 
     from vllm.config import ModelConfig
+    from vllm.renderers import TokenizeParams
 else:
     PretrainedConfig = object
     BatchFeature = object
     ProcessorMixin = object
 
     ModelConfig = object
+    TokenizeParams = object
 
 logger = init_logger(__name__)
 
@@ -195,7 +197,7 @@ class InputProcessingContext:
 
         tokenizer = self.tokenizer
         if is_mistral_tokenizer(tokenizer):
-            tokenizer = tokenizer.transformers_tokenizer
+            tokenizer = tokenizer.transformers_tokenizer  # type: ignore[union-attr]
 
         merged_kwargs = self.get_merged_mm_kwargs(kwargs)
         merged_kwargs.pop("tokenizer", None)
@@ -262,32 +264,11 @@ class InputProcessingContext:
             requires_kw_only=False,
             allow_var_kwargs=True,
         )
+        allowed_kwargs.setdefault("return_tensors", "pt")
 
         try:
-            output = hf_processor(**data, **allowed_kwargs, return_tensors="pt")
+            output = hf_processor(**data, **allowed_kwargs)
         except Exception as exc:
-            # See https://github.com/huggingface/tokenizers/issues/537
-            if (
-                isinstance(exc, RuntimeError)
-                and exc
-                and exc.args[0] == "Already borrowed"
-                and num_tries < max_tries
-            ):
-                logger.warning(
-                    "Failed to acquire tokenizer in current thread. "
-                    "Retrying (%d/%d)...",
-                    num_tries,
-                    max_tries,
-                )
-                time.sleep(0.5)
-                return self.call_hf_processor(
-                    hf_processor,
-                    data,
-                    kwargs,
-                    num_tries=num_tries + 1,
-                    max_tries=max_tries,
-                )
-
             msg = (
                 f"Failed to apply {type(hf_processor).__name__} "
                 f"on data={data} with kwargs={allowed_kwargs}"
@@ -339,6 +320,8 @@ class BaseProcessingInfo:
 
     def get_default_tok_params(self) -> TokenizeParams:
         """Construct the default parameters for tokenization."""
+        from vllm.renderers import TokenizeParams
+
         model_config = self.ctx.model_config
         encoder_config = model_config.encoder_config or {}
 
@@ -442,7 +425,7 @@ class BaseProcessingInfo:
             if num_items <= supported_limit:
                 msg += " Set `--limit-mm-per-prompt` to increase this limit."
 
-            raise ValueError(msg)
+            raise VLLMValidationError(msg, parameter=modality)
 
     def parse_mm_data(
         self,
@@ -451,8 +434,7 @@ class BaseProcessingInfo:
         validate: bool = True,
     ) -> MultiModalDataItems:
         """
-        Normalize
-        [`MultiModalDataDict`][vllm.multimodal.inputs.MultiModalDataDict]
+        Normalize [`MultiModalDataDict`][vllm.inputs.MultiModalDataDict]
         to [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems]
         before passing them to
         [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].

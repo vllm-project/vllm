@@ -7,8 +7,10 @@ import torch
 from pydantic import ConfigDict, Field, model_validator
 from typing_extensions import Self
 
+from vllm import envs
 from vllm.config.utils import config
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.hashing import safe_hash
 
 if TYPE_CHECKING:
@@ -43,6 +45,10 @@ class LoRAConfig:
     `max_loras`."""
     lora_dtype: torch.dtype | LoRADType = "auto"
     """Data type for LoRA. If auto, will default to base model dtype."""
+    target_modules: list[str] | None = None
+    """Restrict LoRA to specific module suffixes (e.g., ["o_proj", "qkv_proj"]).
+    If None, all supported LoRA modules are used. This allows deployment-time
+    control over which modules have LoRA applied, useful for performance tuning."""
     default_mm_loras: dict[str, str] | None = None
     """Dictionary mapping specific modalities to LoRA model paths; this field
     is only applicable to multimodal models and should be leveraged when a
@@ -65,6 +71,12 @@ class LoRAConfig:
     for variable LoRA usage patterns at the cost of increased startup time and
     memory usage. Only takes effect when cudagraph_specialize_lora is True.
     """
+    enable_mixed_moe_lora_format: bool = False
+    """If True, force the engine to use the universal 2D MoE LoRA wrapper
+    (`FusedMoEWithLoRA`) regardless of the model's `is_3d_moe_weight` flag, so
+    that 2D-format and 3D-format MoE LoRA adapters can be served in the same
+    deployment. Only meaningful forMoE models; ignored otherwise. Default False 
+    keeps the existing model-driven behavior."""
 
     def compute_hash(self) -> str:
         """
@@ -84,6 +96,11 @@ class LoRAConfig:
         factors.append(self.fully_sharded_loras)
         factors.append(self.lora_dtype)
         factors.append(self.enable_tower_connector_lora)
+        factors.append(self.enable_mixed_moe_lora_format)
+        # target_modules affects which modules get LoRA applied
+        factors.append(
+            tuple(sorted(self.target_modules)) if self.target_modules else None
+        )
 
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
@@ -97,7 +114,14 @@ class LoRAConfig:
                 f"max_cpu_loras ({self.max_cpu_loras}) must be >= "
                 f"max_loras ({self.max_loras})."
             )
-
+        if envs.VLLM_LORA_ENABLE_DUAL_STREAM and not current_platform.is_cuda_alike():
+            raise ValueError("Dual CUDA streams are only supported on CUDA platforms.")
+        if envs.VLLM_LORA_ENABLE_DUAL_STREAM and self.fully_sharded_loras:
+            logger.warning_once(
+                "fully_sharded_loras isn't compatible with "
+                "VLLM_LORA_ENABLE_DUAL_STREAM, set VLLM_LORA_ENABLE_DUAL_STREAM=False"
+            )
+            envs.VLLM_LORA_ENABLE_DUAL_STREAM = False
         return self
 
     def verify_with_model_config(self, model_config: ModelConfig):

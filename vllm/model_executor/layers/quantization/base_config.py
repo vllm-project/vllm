@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import nn
+from transformers import PretrainedConfig
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -45,6 +46,20 @@ class QuantizeMethodBase(ABC):
 
         Expects create_weights to have been called before on the layer."""
         raise NotImplementedError
+
+    # Not required functions
+    def tie_weights(self, layer: torch.nn.Module, embed_tokens: torch.nn.Module):
+        """Tie ``layer``'s weight to ``embed_tokens``' weight.
+
+        The default shares the weight tensor, which is the standard behavior for
+        tied word embeddings and matches what ``ParallelLMHead.tie_weights`` did
+        directly before quantization methods became responsible for it.
+        Quantization methods that need special weight handling (e.g. repacked
+        weights) override this.
+
+        Expects create_weights to have been called before on the layer."""
+        layer.weight = embed_tokens.weight
+        return layer
 
     def process_weights_after_loading(self, layer: nn.Module) -> None:
         """Process the weight after loading.
@@ -109,13 +124,22 @@ class QuantizationConfig(ABC):
 
     @classmethod
     def override_quantization_method(
-        cls, hf_quant_cfg, user_quant
+        cls,
+        hf_quant_cfg: dict[str, Any],
+        user_quant: str | None,
+        hf_config: Any = None,
     ) -> QuantizationMethods | None:
         """
         Detects if this quantization method can support a given checkpoint
         format by overriding the user specified quantization method --
         this method should only be overwritten by subclasses in exceptional
-        circumstances
+        circumstances.
+
+        Args:
+            hf_quant_cfg: The checkpoint's quantization config dict.
+            user_quant: The user-specified quantization method string.
+            hf_config: The HuggingFace model config object (e.g. for
+                model_type checks). May be None if not available.
         """
         return None
 
@@ -152,7 +176,13 @@ class QuantizationConfig(ABC):
         """
         raise NotImplementedError
 
-    def get_cache_scale(self, name: str) -> str | None:
+    def get_cache_scale_mapper(self) -> "WeightsMapper | None":
+        """Mapping from checkpoint KV-cache scale names to vLLM scale names.
+
+        Returning a mapper here causes `AutoWeightsLoader` to apply it to the
+        weight stream automatically; individual model `load_weights` methods
+        do not need to know about KV-cache scales.
+        """
         return None
 
     def apply_vllm_mapper(  # noqa: B027
@@ -162,16 +192,30 @@ class QuantizationConfig(ABC):
         Interface for models to update module names referenced in
         quantization configs in order to reflect the vllm model structure
 
-        :param hf_to_vllm_mapper: maps from hf model structure (the assumed
-            structure of the qconfig) to vllm model structure
+        Args:
+            hf_to_vllm_mapper: maps from hf model structure (the assumed
+                structure of the qconfig) to vllm model structure
         """
         # TODO (@kylesayrs): add implementations for all subclasses
         pass
 
-    def maybe_update_config(self, model_name: str):  # noqa: B027
+    def maybe_update_config(  # noqa: B027
+        self,
+        model_name: str,
+        hf_config: PretrainedConfig | None = None,
+        revision: str | None = None,
+    ):
         """
         Interface to update values after config initialization.
+
+        Args:
+            model_name: The name of the model
+            hf_config: The Hugging Face config of the model
+            revision: The revision of the model
+        Returns:
         """
+        # TODO: revision is never passed currently in vllm.py,
+        # but is used in subclasses, should we remove this parameter?
         pass
 
     def is_mxfp4_quant(self, prefix: str, layer: torch.nn.Module) -> bool:

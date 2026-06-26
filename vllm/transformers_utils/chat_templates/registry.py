@@ -13,13 +13,6 @@ CHAT_TEMPLATES_DIR = Path(__file__).parent
 ChatTemplatePath: TypeAlias = Path | Callable[[str], Path | None]
 
 
-def _get_qwen_chat_template_fallback(tokenizer_name_or_path: str) -> Path | None:
-    if tokenizer_name_or_path.endswith("-Chat"):
-        return CHAT_TEMPLATES_DIR / "template_chatml.jinja"
-
-    return CHAT_TEMPLATES_DIR / "template_basic.jinja"
-
-
 def _get_minicpmv_chat_template_fallback(tokenizer_name_or_path: str) -> Path | None:
     # MiniCPM-V-4.5 version uses a dedicated template
     if "4.5" in tokenizer_name_or_path or "4_5" in tokenizer_name_or_path:
@@ -33,13 +26,14 @@ _MODEL_TYPE_TO_CHAT_TEMPLATE_FALLBACK: dict[str, ChatTemplatePath] = {
     "blip-2": CHAT_TEMPLATES_DIR / "template_blip2.jinja",
     "chameleon": CHAT_TEMPLATES_DIR / "template_basic.jinja",
     "clip": CHAT_TEMPLATES_DIR / "template_basic.jinja",
+    "colpali": CHAT_TEMPLATES_DIR / "template_basic.jinja",
     "deepseek_ocr": CHAT_TEMPLATES_DIR / "template_deepseek_ocr.jinja",
     "deepseek_ocr2": CHAT_TEMPLATES_DIR / "template_deepseek_ocr.jinja",
     "deepseek_vl_v2": CHAT_TEMPLATES_DIR / "template_deepseek_vl2.jinja",
     "fuyu": CHAT_TEMPLATES_DIR / "template_fuyu.jinja",
     "minicpmv": _get_minicpmv_chat_template_fallback,
+    "minicpmv4_6": _get_minicpmv_chat_template_fallback,
     "paligemma": CHAT_TEMPLATES_DIR / "template_basic.jinja",
-    "qwen": _get_qwen_chat_template_fallback,
     "siglip": CHAT_TEMPLATES_DIR / "template_basic.jinja",
     "siglip2": CHAT_TEMPLATES_DIR / "template_basic.jinja",
 }

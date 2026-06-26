@@ -7,8 +7,21 @@ from enum import Enum
 import torch
 import torch.nn as nn
 
+from vllm import envs
 from vllm.model_executor.layers.fused_moe.fused_moe import try_get_optimal_moe_config
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import next_power_of_2
+
+_lora_aux_cuda_stream: torch.cuda.Stream | None = None
+
+
+def _get_lora_aux_cuda_stream() -> torch.cuda.Stream | None:
+    if not envs.VLLM_LORA_ENABLE_DUAL_STREAM:
+        return None
+    global _lora_aux_cuda_stream
+    if _lora_aux_cuda_stream is None and current_platform.is_cuda_alike():
+        _lora_aux_cuda_stream = torch.cuda.Stream()
+    return _lora_aux_cuda_stream
 
 
 class LoRAMappingType(Enum):
@@ -32,6 +45,9 @@ class LoRAMapping:
 def _get_lora_device(base_layer: nn.Module) -> torch.device:
     # code borrowed from https://github.com/fmmoret/vllm/blob/fm-support-lora-on-quantized-models/vllm/lora/layers.py#L34
     """Returns the device for where to place the LoRA tensors."""
+    if hasattr(base_layer, "routed_experts"):
+        base_layer = base_layer.routed_experts
+
     # unquantizedLinear
     if hasattr(base_layer, "weight"):
         return base_layer.weight.device
@@ -90,23 +106,32 @@ def try_get_optimal_moe_lora_config(
     top_k: int,
     dtype: str | None,
     M: int,
-    block_shape: list[int] | None = None,
 ) -> dict[str, int | None]:
-    config = try_get_optimal_moe_config(
-        w1_shape, w2_shape, top_k, dtype, M, block_shape
-    ).copy()
+    # LoRA shrink/expand operates on bf16/fp16 adapters regardless of the
+    # base MoE weight's block-wise quantization, so block_shape is omitted
+    # from the config lookup — the non-quantized branch in get_default_config
+    # ignores it anyway.
+    raw_config = try_get_optimal_moe_config(w1_shape, w2_shape, top_k, dtype, M)
+    config: dict[str, int | None] = dict(raw_config)
     if op_type in [
         "fused_moe_lora_w13_shrink",
         "fused_moe_lora_w2_shrink",
     ]:
+        block_size_n = config.get("BLOCK_SIZE_N")
         config["BLOCK_SIZE_N"] = min(
-            config.get("BLOCK_SIZE_N", 64), next_power_of_2(rank)
+            block_size_n if block_size_n is not None else 64,
+            next_power_of_2(rank),
         )
     elif op_type in [
         "fused_moe_lora_w13_expand",
         "fused_moe_lora_w2_expand",
     ]:
+        block_size_k = config.get("BLOCK_SIZE_K")
         config["BLOCK_SIZE_K"] = max(
-            16, min(config.get("BLOCK_SIZE_K", 32), next_power_of_2(rank))
+            16,
+            min(
+                block_size_k if block_size_k is not None else 32,
+                next_power_of_2(rank),
+            ),
         )
     return config

@@ -1,418 +1,352 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable, Sequence
-from http import HTTPStatus
-from typing import Any
+import time
+from typing import cast
 
-from openai_harmony import Message as OpenAIMessage
-
-from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import (
-    ChatTemplateContentFormatOption,
-    ConversationMessage,
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionResponse,
 )
-from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+from vllm.entrypoints.openai.completion.protocol import (
+    CompletionRequest,
+    CompletionResponse,
+)
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
-    ModelCard,
-    ModelList,
-    ModelPermission,
+    UsageInfo,
 )
-from vllm.entrypoints.openai.parser.harmony_utils import (
-    get_developer_message,
-    get_system_message,
-    parse_chat_inputs_to_harmony_messages,
-    render_for_completion,
+from vllm.entrypoints.openai.models.serving import (
+    OpenAIModelRegistry,
+    OpenAIServingModels,
 )
-from vllm.entrypoints.utils import create_error_response
-from vllm.inputs.data import ProcessorInputs, PromptType, SingletonPrompt, TokensPrompt
+from vllm.entrypoints.serve.disagg.mm_serde import encode_mm_kwargs_item
+from vllm.entrypoints.serve.disagg.protocol import (
+    DerenderChatRequest,
+    DerenderCompletionRequest,
+    GenerateRequest,
+    MultiModalFeatures,
+    PlaceholderRangeInfo,
+)
+from vllm.entrypoints.serve.engine.serving import BaseServing
+from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.inputs import (
+    EngineInput,
+    MultiModalHashes,
+    MultiModalInput,
+    MultiModalPlaceholders,
+)
 from vllm.logger import init_logger
-from vllm.parser import ParserManager
-from vllm.renderers import BaseRenderer, merge_kwargs
-from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
-from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers import ToolParser
-from vllm.utils.mistral import is_mistral_tokenizer
-from vllm.utils.mistral import mt as _mt
+from vllm.renderers.inputs.preprocess import (
+    extract_prompt_components,
+    extract_prompt_len,
+)
+from vllm.renderers.online_derenderer import OnlineDerenderer
+from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
 
-class OpenAIServingRender:
+class ServingRender(BaseServing):
     def __init__(
         self,
-        model_config: ModelConfig,
-        renderer: BaseRenderer,
-        io_processor: Any,
-        served_model_names: list[str],
+        models: OpenAIServingModels | OpenAIModelRegistry,
+        online_renderer: "OnlineRenderer",
+        online_derenderer: "OnlineDerenderer",
         *,
-        request_logger: RequestLogger | None,
-        chat_template: str | None,
-        chat_template_content_format: ChatTemplateContentFormatOption,
-        trust_request_chat_template: bool = False,
-        enable_auto_tools: bool = False,
-        exclude_tools_when_tool_choice_none: bool = False,
-        tool_parser: str | None = None,
-        default_chat_template_kwargs: dict[str, Any] | None = None,
-        log_error_stack: bool = False,
+        request_logger: RequestLogger | None = None,
     ) -> None:
-        self.model_config = model_config
-        self.renderer = renderer
-        self.io_processor = io_processor
-        self.served_model_names = served_model_names
-        self.request_logger = request_logger
-        self.chat_template = chat_template
-        self.chat_template_content_format: ChatTemplateContentFormatOption = (
-            chat_template_content_format
+        super().__init__(
+            models=models,
+            model_config=online_renderer.model_config,
+            request_logger=request_logger,
         )
-        self.trust_request_chat_template = trust_request_chat_template
-        self.enable_auto_tools = enable_auto_tools
-        self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
-        self.tool_parser: Callable[[TokenizerLike], ToolParser] | None = (
-            ParserManager.get_tool_parser(
-                tool_parser_name=tool_parser,
-                enable_auto_tools=enable_auto_tools,
-                model_name=model_config.model,
-            )
+
+        self.online_renderer = online_renderer
+        self.online_derenderer = online_derenderer
+
+        self.default_sampling_params = (
+            online_renderer.model_config.get_diff_sampling_param()
         )
-        self.default_chat_template_kwargs: dict[str, Any] = (
-            default_chat_template_kwargs or {}
+        mc = online_renderer.model_config
+        self.override_max_tokens = (
+            self.default_sampling_params.get("max_tokens")
+            if mc.generation_config not in ("auto", "vllm")
+            else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
         )
-        self.log_error_stack = log_error_stack
-        self.use_harmony = model_config.hf_config.model_type == "gpt_oss"
-        self.supports_browsing = False
-        self.supports_code_interpreter = False
 
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
-    ) -> tuple[list[ConversationMessage], list[ProcessorInputs]] | ErrorResponse:
-        """Copied from OpenAIServingChat.render_chat_request.
+    ) -> GenerateRequest | ErrorResponse:
+        """Validate the model and preprocess a chat completion request.
 
-        Differences: engine_client.errored check removed (no engine client).
+        This is the authoritative implementation used directly by the
+        GPU-less render server and delegated to by OpenAIServingChat.
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
             return error_check_ret
 
-        tokenizer = self.renderer.tokenizer
+        if request.use_beam_search:
+            return self.create_error_response(
+                "Beam search is not supported by the render endpoint"
+            )
 
-        tool_parser = self.tool_parser
+        result = await self.online_renderer.render_chat(request, skip_mm_cache=True)
+        if isinstance(result, ErrorResponse):
+            return result
 
-        if is_mistral_tokenizer(tokenizer):
-            # because of issues with pydantic we need to potentially
-            # re-serialize the tool_calls field of the request
-            # for more info: see comment in `maybe_serialize_tool_calls`
-            _mt.maybe_serialize_tool_calls(request)  # type: ignore[arg-type]
-            _mt.truncate_tool_call_ids(request)  # type: ignore[arg-type]
-            _mt.validate_request_params(request)
+        _, engine_inputs = result
 
-        # Check if tool parsing is unavailable (common condition)
-        tool_parsing_unavailable = (
-            tool_parser is None
-            and not is_mistral_tokenizer(tokenizer)
-            and not self.use_harmony
+        if len(engine_inputs) != 1:
+            return self.create_error_response(
+                f"Expected exactly 1 engine prompt, got {len(engine_inputs)}"
+            )
+
+        engine_input = engine_inputs[0]
+
+        prompt_components = extract_prompt_components(self.model_config, engine_input)
+        token_ids = prompt_components.token_ids
+        if not token_ids:
+            return self.create_error_response("No token_ids rendered")
+        token_ids = list(token_ids)
+
+        input_length = extract_prompt_len(self.model_config, engine_input)
+        max_tokens = get_max_tokens(
+            self.model_config.max_model_len,
+            request.max_completion_tokens
+            if request.max_completion_tokens is not None
+            else request.max_tokens,
+            input_length,
+            self.default_sampling_params,
+            self.override_max_tokens,
+            truncate_prompt_tokens=request.truncate_prompt_tokens,
         )
+        params = request.to_sampling_params(max_tokens, self.default_sampling_params)
 
-        # Validate tool_choice when tool parsing is required but unavailable
-        if tool_parsing_unavailable and request.tool_choice not in (
-            None,
-            "none",
-        ):
-            if request.tool_choice == "auto" and not self.enable_auto_tools:
-                # for hf tokenizers, "auto" tools requires
-                # --enable-auto-tool-choice and --tool-call-parser
-                return self.create_error_response(
-                    '"auto" tool choice requires '
-                    "--enable-auto-tool-choice and --tool-call-parser to be set"
-                )
-            elif request.tool_choice != "auto":
-                # "required" or named tool requires tool parser
-                return self.create_error_response(
-                    f'tool_choice="{request.tool_choice}" requires '
-                    "--tool-call-parser to be set"
-                )
+        request_id = f"chatcmpl-{random_uuid()}"
 
-        if request.tools is None or (
-            request.tool_choice == "none" and self.exclude_tools_when_tool_choice_none
-        ):
-            tool_dicts = None
-        else:
-            tool_dicts = [tool.model_dump() for tool in request.tools]
-
-        if not self.use_harmony:
-            # Common case.
-            error_check_ret = self._validate_chat_template(
-                request_chat_template=request.chat_template,
-                chat_template_kwargs=request.chat_template_kwargs,
-                trust_request_chat_template=self.trust_request_chat_template,
-            )
-            if error_check_ret is not None:
-                return error_check_ret
-
-            conversation, engine_prompts = await self._preprocess_chat(
-                request,
-                request.messages,
-                default_template=self.chat_template,
-                default_template_content_format=self.chat_template_content_format,
-                default_template_kwargs=self.default_chat_template_kwargs,
-                tool_dicts=tool_dicts,
-                tool_parser=tool_parser,
-            )
-        else:
-            # For GPT-OSS.
-            should_include_tools = tool_dicts is not None
-            conversation, engine_prompts = self._make_request_with_harmony(
-                request, should_include_tools
-            )
-
-        return conversation, engine_prompts
+        return GenerateRequest(
+            request_id=request_id,
+            token_ids=token_ids,
+            features=self._extract_mm_features(engine_input),
+            sampling_params=params,
+            model=request.model,
+            stream=bool(request.stream),
+            stream_options=(request.stream_options if request.stream else None),
+            cache_salt=request.cache_salt,
+            priority=request.priority,
+            token_offsets=engine_input.get("prompt_token_offsets"),
+        )
 
     async def render_completion_request(
         self,
         request: CompletionRequest,
-    ) -> list[ProcessorInputs] | ErrorResponse:
-        """Copied from OpenAIServingCompletion.render_completion_request.
+    ) -> list[GenerateRequest] | ErrorResponse:
+        """Validate the model and preprocess a completion request.
 
-        Differences: engine_client.errored check removed (no engine client).
+        This is the authoritative implementation used directly by the
+        GPU-less render server and delegated to by OpenAIServingCompletion.
+        """
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            return error_check_ret
+        result = await self.online_renderer.render_completion(
+            request, skip_mm_cache=True
+        )
+        if isinstance(result, ErrorResponse):
+            return result
+        generate_requests: list[GenerateRequest] = []
+        for engine_input in result:
+            prompt_components = extract_prompt_components(
+                self.model_config, engine_input
+            )
+            token_ids = prompt_components.token_ids
+            if not token_ids:
+                return self.create_error_response("No token_ids rendered")
+            token_ids = list(token_ids)
+
+            input_length = extract_prompt_len(self.model_config, engine_input)
+            max_tokens = get_max_tokens(
+                self.model_config.max_model_len,
+                request.max_tokens,
+                input_length,
+                self.default_sampling_params,
+                self.override_max_tokens,
+                truncate_prompt_tokens=request.truncate_prompt_tokens,
+            )
+            params = request.to_sampling_params(
+                max_tokens, self.default_sampling_params
+            )
+
+            request_id = f"cmpl-{random_uuid()}"
+
+            generate_requests.append(
+                GenerateRequest(
+                    request_id=request_id,
+                    token_ids=token_ids,
+                    features=self._extract_mm_features(engine_input),
+                    sampling_params=params,
+                    model=request.model,
+                    stream=bool(request.stream),
+                    stream_options=(request.stream_options if request.stream else None),
+                    cache_salt=request.cache_salt,
+                    priority=request.priority,
+                    token_offsets=engine_input.get("prompt_token_offsets"),
+                )
+            )
+
+        return generate_requests
+
+    async def derender_chat_response(
+        self,
+        request: DerenderChatRequest,
+    ) -> ChatCompletionResponse | ErrorResponse:
+        """Postprocess a GenerateResponse into a ChatCompletionResponse.
+
+        Non-streaming only: expects the complete GenerateResponse with all
+        token IDs present.  Uses ``parser.parse()`` for one-shot extraction.
+
+        When ``request.chat_request`` is provided, the parser splits the
+        output into (reasoning, content, tool_calls).  Otherwise falls
+        back to plain detokenization.
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
 
-        # Return error for unsupported features.
-        if request.suffix is not None:
-            return self.create_error_response("suffix is not currently supported")
-
-        if request.echo and request.prompt_embeds is not None:
-            return self.create_error_response("Echo is unsupported with prompt embeds.")
-
-        if request.prompt_logprobs is not None and request.prompt_embeds is not None:
-            return self.create_error_response(
-                "prompt_logprobs is not compatible with prompt embeds."
+        try:
+            choices = await self.online_derenderer.derender_chat(
+                request.generate_response, request.chat_request
             )
+        except ValueError as exc:
+            return self.create_error_response(str(exc))
 
-        engine_prompts = await self._preprocess_completion(
-            request,
-            prompt_input=request.prompt,
-            prompt_embeds=request.prompt_embeds,
+        prompt_tokens = (
+            request.prompt_tokens if request.prompt_tokens is not None else 0
+        )
+        gen = request.generate_response
+        completion_tokens = sum(len(ch.token_ids) for ch in gen.choices if ch.token_ids)
+        usage = UsageInfo(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
         )
 
-        return engine_prompts
-
-    def _make_request_with_harmony(
-        self,
-        request: ChatCompletionRequest,
-        should_include_tools: bool = True,
-    ):
-        """Copied from OpenAIServingChat._make_request_with_harmony."""
-        messages: list[OpenAIMessage] = []
-
-        # because of issues with pydantic we need to potentially
-        # re-serialize the tool_calls field of the request
-        # for more info: see comment in `maybe_serialize_tool_calls`
-        _mt.maybe_serialize_tool_calls(request)  # type: ignore[arg-type]
-
-        # Add system message.
-        # NOTE: In Chat Completion API, browsing is enabled by default
-        # if the model supports it. TODO: Support browsing.
-        assert not self.supports_browsing
-        assert not self.supports_code_interpreter
-        assert request.reasoning_effort != "none", (
-            "Harmony does not support reasoning_effort='none'"
+        logger.debug(
+            "derender_chat request_id=%s model=%s choices=%d completion_tokens=%d",
+            gen.request_id,
+            request.model,
+            len(choices),
+            completion_tokens,
         )
-        sys_msg = get_system_message(
-            reasoning_effort=request.reasoning_effort,
-            browser_description=None,
-            python_description=None,
-            with_custom_tools=should_include_tools,
-        )
-        messages.append(sys_msg)
-
-        # Add developer message.
-        if request.tools:
-            dev_msg = get_developer_message(
-                tools=request.tools if should_include_tools else None  # type: ignore[arg-type]
-            )
-            messages.append(dev_msg)
-
-        # Add user message.
-        messages.extend(parse_chat_inputs_to_harmony_messages(request.messages))
-
-        # Render prompt token ids.
-        prompt_token_ids = render_for_completion(messages)
-        engine_prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
-
-        # Add cache_salt if provided in the request
-        if request.cache_salt is not None:
-            engine_prompt["cache_salt"] = request.cache_salt
-
-        return messages, [engine_prompt]
-
-    async def show_available_models(self) -> ModelList:
-        """Returns the models served by this render server."""
-        max_model_len = self.model_config.max_model_len
-        return ModelList(
-            data=[
-                ModelCard(
-                    id=name,
-                    max_model_len=max_model_len,
-                    root=self.model_config.model,
-                    permission=[ModelPermission()],
-                )
-                for name in self.served_model_names
-            ]
+        return ChatCompletionResponse(
+            id=gen.request_id,
+            model=request.model,
+            created=int(time.time()),
+            choices=choices,
+            usage=usage,
+            prompt_logprobs=gen.prompt_logprobs,
+            kv_transfer_params=gen.kv_transfer_params,
         )
 
-    def create_error_response(
+    async def derender_completion_response(
         self,
-        message: str | Exception,
-        err_type: str = "BadRequestError",
-        status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
-        param: str | None = None,
-    ) -> ErrorResponse:
-        return create_error_response(message, err_type, status_code, param)
+        request: DerenderCompletionRequest,
+    ) -> CompletionResponse | ErrorResponse:
+        """Postprocess a list of GenerateResponses into a CompletionResponse.
 
-    def _is_model_supported(self, model_name: str) -> bool:
-        """Simplified from OpenAIServing._is_model_supported (no LoRA support)."""
-        return model_name in self.served_model_names
-
-    async def _check_model(
-        self,
-        request: Any,
-    ) -> ErrorResponse | None:
-        """Simplified from OpenAIServing._check_model (no LoRA support)."""
-        if self._is_model_supported(request.model):
-            return None
-        return self.create_error_response(
-            message=f"The model `{request.model}` does not exist.",
-            err_type="NotFoundError",
-            status_code=HTTPStatus.NOT_FOUND,
-            param="model",
-        )
-
-    def _validate_chat_template(
-        self,
-        request_chat_template: str | None,
-        chat_template_kwargs: dict[str, Any] | None,
-        trust_request_chat_template: bool,
-    ) -> ErrorResponse | None:
-        """Copied from OpenAIServing._validate_chat_template."""
-        if not trust_request_chat_template and (
-            request_chat_template is not None
-            or (
-                chat_template_kwargs
-                and chat_template_kwargs.get("chat_template") is not None
-            )
-        ):
-            return self.create_error_response(
-                "Chat template is passed with request, but "
-                "--trust-request-chat-template is not set. "
-                "Refused request with untrusted chat template."
-            )
-        return None
-
-    async def _preprocess_completion(
-        self,
-        request: Any,
-        prompt_input: str | list[str] | list[int] | list[list[int]] | None,
-        prompt_embeds: bytes | list[bytes] | None,
-    ) -> list[ProcessorInputs]:
-        """Copied from OpenAIServing._preprocess_completion."""
-        prompts = list[SingletonPrompt | bytes]()
-        if prompt_embeds is not None:  # embeds take higher priority
-            prompts.extend(prompt_to_seq(prompt_embeds))
-        if prompt_input is not None:
-            prompts.extend(prompt_to_seq(prompt_input))
-        return await self._preprocess_cmpl(request, prompts)
-
-    async def _preprocess_cmpl(
-        self,
-        request: Any,
-        prompts: Sequence[PromptType | bytes],
-    ) -> list[ProcessorInputs]:
-        """Copied from OpenAIServing._preprocess_cmpl."""
-        renderer = self.renderer
-        model_config = self.model_config
-
-        parsed_prompts = [
-            (
-                prompt
-                if isinstance(prompt, bytes)
-                else parse_model_prompt(model_config, prompt)
-            )
-            for prompt in prompts
-        ]
-        tok_params = request.build_tok_params(model_config)
-
-        return await renderer.render_cmpl_async(
-            parsed_prompts,
-            tok_params,
-            prompt_extras={
-                k: v
-                for k in ("mm_processor_kwargs", "cache_salt")
-                if (v := getattr(request, k, None)) is not None
-            },
-        )
-
-    async def _preprocess_chat(
-        self,
-        request: Any,
-        messages: list[Any],
-        default_template: str | None,
-        default_template_content_format: ChatTemplateContentFormatOption,
-        default_template_kwargs: dict[str, Any] | None,
-        tool_dicts: list[dict[str, Any]] | None = None,
-        tool_parser: Callable[[TokenizerLike], ToolParser] | None = None,
-    ) -> tuple[list[ConversationMessage], list[ProcessorInputs]]:
-        """Copied from OpenAIServing._preprocess_chat.
-
-        Differences: isinstance check is ChatCompletionRequest-only
-        (ResponsesRequest not supported here); TODO comment dropped accordingly.
+        Non-streaming only.  Mirrors the multi-prompt completions case: one
+        GenerateResponse per prompt, parallel to the list[GenerateRequest]
+        from /v1/completions/render.
         """
-        renderer = self.renderer
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            return error_check_ret
 
-        default_template_kwargs = merge_kwargs(
-            default_template_kwargs,
-            dict(
-                tools=tool_dicts,
-                tokenize=is_mistral_tokenizer(renderer.tokenizer),
-            ),
+        (
+            choices,
+            total_prompt_tokens,
+            total_completion_tokens,
+        ) = await self.online_derenderer.derender_completion(
+            request.generate_responses, request.prompt_tokens
         )
 
-        tok_params = request.build_tok_params(self.model_config)
-        chat_params = request.build_chat_params(
-            default_template, default_template_content_format
-        ).with_defaults(default_template_kwargs)
+        if not request.generate_responses:
+            return self.create_error_response("generate_responses must not be empty")
 
-        (conversation,), (engine_prompt,) = await renderer.render_chat_async(
-            [messages],
-            chat_params,
-            tok_params,
-            prompt_extras={
-                k: v
-                for k in ("mm_processor_kwargs", "cache_salt")
-                if (v := getattr(request, k, None)) is not None
-            },
+        first = request.generate_responses[0]
+        kv_params = first.kv_transfer_params
+        if any(
+            r.kv_transfer_params != kv_params for r in request.generate_responses[1:]
+        ):
+            logger.warning(
+                "derender_completion: kv_transfer_params differ across responses; "
+                "setting to None on the aggregated response"
+            )
+            kv_params = None
+
+        usage = UsageInfo(
+            prompt_tokens=total_prompt_tokens,
+            completion_tokens=total_completion_tokens,
+            total_tokens=total_prompt_tokens + total_completion_tokens,
         )
 
-        # tool parsing is done only if a tool_parser has been set and if
-        # tool_choice is not "none" (if tool_choice is "none" but a tool_parser
-        # is set, we want to prevent parsing a tool_call hallucinated by the LLM
-        if tool_parser is not None:
-            tool_choice = getattr(request, "tool_choice", "none")
-            if tool_choice != "none":
-                if not isinstance(request, ChatCompletionRequest):
-                    msg = (
-                        "Tool usage is only supported "
-                        " for ChatCompletionRequest, but got "
-                        f"{type(request).__name__}"
-                    )
-                    raise NotImplementedError(msg)
-                tokenizer = renderer.get_tokenizer()
-                request = tool_parser(tokenizer).adjust_request(request=request)  # type: ignore[arg-type]
+        logger.debug(
+            "derender_completion request_id=%s model=%s choices=%d"
+            " completion_tokens=%d",
+            first.request_id,
+            request.model,
+            len(choices),
+            total_completion_tokens,
+        )
+        return CompletionResponse(
+            id=first.request_id,
+            model=request.model,
+            created=int(time.time()),
+            choices=choices,
+            usage=usage,
+            kv_transfer_params=kv_params,
+        )
 
-        return conversation, [engine_prompt]
+    @staticmethod
+    def _extract_mm_features(
+        engine_input: EngineInput,
+    ) -> MultiModalFeatures | None:
+        """Extract multimodal metadata from a rendered engine prompt.
+
+        Returns ``None`` for text-only prompts.
+        """
+        if engine_input.get("type") != "multimodal":
+            return None
+
+        # At this point engine_input is a MultiModalInput TypedDict.
+        mm_engine_input = cast(MultiModalInput, engine_input)
+        mm_hashes: MultiModalHashes = mm_engine_input["mm_hashes"]
+        raw_placeholders: MultiModalPlaceholders = mm_engine_input["mm_placeholders"]
+
+        mm_placeholders = {
+            modality: [
+                PlaceholderRangeInfo(offset=p.offset, length=p.length) for p in ranges
+            ]
+            for modality, ranges in raw_placeholders.items()
+        }
+
+        # Serialize tensor data per modality.
+        kwargs_data: dict[str, list[str | None]] | None = None
+        if raw_mm_kwargs := mm_engine_input.get("mm_kwargs"):
+            kwargs_data = {}
+            for modality, items in raw_mm_kwargs.items():
+                kwargs_data[modality] = [
+                    encode_mm_kwargs_item(item) if item is not None else None
+                    for item in items
+                ]
+
+        return MultiModalFeatures(
+            mm_hashes=mm_hashes,
+            mm_placeholders=mm_placeholders,
+            kwargs_data=kwargs_data,
+        )

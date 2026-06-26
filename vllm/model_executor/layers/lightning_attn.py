@@ -4,7 +4,9 @@
 import torch
 from einops import rearrange
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 
 @triton.jit
@@ -402,13 +404,16 @@ class _attention(torch.autograd.Function):
         v = v.contiguous()
         s = s.contiguous()
 
-        # Check CUDA compute capability
-        capability = torch.cuda.get_device_capability()
-        if capability[0] < 8:
-            raise RuntimeError(
-                "Flash attention currently only supported",
-                "for compute capability >= 80",
-            )
+        # Check CUDA compute capability (Ampere+ required for flash attention
+        # path). Other accelerators (ROCm, XPU) rely on their own Triton
+        # backend support and skip this check.
+        if current_platform.is_cuda():
+            capability = torch.cuda.get_device_capability()
+            if capability[0] < 8:
+                raise RuntimeError(
+                    "Flash attention currently only supported",
+                    "for compute capability >= 80",
+                )
 
         # Get input dimensions
         b, h, n, d = q.shape
@@ -602,6 +607,7 @@ def _linear_attn_decode_kernel(
     cache_h_stride,
     cache_d0_stride,
     cache_d1_stride,
+    pad_slot_id: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     """
@@ -616,8 +622,8 @@ def _linear_attn_decode_kernel(
     # Load slot index for the current batch
     slot_id = tl.load(slot_idx + pid_b).to(tl.int64)
 
-    # Skip if slot_id is -1 (padding)
-    if slot_id == -1:
+    # Skip if slot_id is PAD_SLOT_ID (padding)
+    if slot_id == pad_slot_id:
         return
 
     batch_id = pid_b
@@ -727,6 +733,7 @@ def linear_decode_forward_triton(
         cache_h_stride,
         cache_d0_stride,
         cache_d1_stride,
+        pad_slot_id=PAD_SLOT_ID,
         BLOCK_SIZE=BLOCK_SIZE,
     )
 

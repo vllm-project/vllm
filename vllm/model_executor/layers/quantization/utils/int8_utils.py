@@ -88,6 +88,13 @@ if current_platform.is_rocm():
     def round_int8(x):
         return tl.extra.hip.libdevice.round(x).to(tl.int8)
 
+
+elif current_platform.is_xpu():
+
+    @triton.jit
+    def round_int8(x):
+        return tl.extra.intel.libdevice.round(x).to(tl.int8)
+
 else:
 
     @triton.jit
@@ -228,8 +235,8 @@ def per_token_group_quant_int8(
         device=x.device,
         dtype=torch.float32,
     )
-    # prefer CUDA kernel if available
-    if current_platform.is_cuda():
+    # Prefer native stable kernel on CUDA/ROCm when available.
+    if current_platform.is_cuda_alike():
         torch.ops._C.per_token_group_quant_int8(
             x, x_q, x_s, group_size, eps, float(int8_min), float(int8_max)
         )

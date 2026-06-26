@@ -11,12 +11,12 @@ import torch
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import next_power_of_2
+from vllm.utils.torch_utils import async_tensor_h2d
 
 logger = init_logger(__name__)
-is_batch_invariant = vllm_is_batch_invariant()
+is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 
 _LORA_A_PTR_DICT: dict[tuple[int, ...], tuple[torch.tensor, ...]] = {}
 _LORA_B_PTR_DICT: dict[tuple[int, ...], tuple[torch.tensor, ...]] = {}
@@ -50,7 +50,9 @@ def _get_lora_a_ptr(lora_a_weights: list[torch.Tensor], device: torch.device):
         lora_strides_d1.append(lora_a_weight.stride(1))
         lora_strides_d2.append(lora_a_weight.stride(2))
     if len(lora_a_weights) > 1:
-        lora_ptr_tensor = torch.tensor(tensor_ptrs, device=device, dtype=torch.uint64)
+        lora_ptr_tensor = async_tensor_h2d(
+            tensor_ptrs, dtype=torch.uint64, device=device
+        )
     else:
         lora_ptr_tensor = lora_a_weights[0]
 
@@ -107,10 +109,11 @@ def _get_lora_b_ptr(
         hidden_sizes.append(lora_b_weight.size(1))
 
     if len(lora_weights) > 1:
-        # note these are device tensors
-        lora_ptr_tensor = torch.tensor(tensor_ptrs, device=device, dtype=torch.uint64)
-        slice_start_tensor = torch.tensor(
-            slice_offset_lst, device=device, dtype=torch.uint64
+        lora_ptr_tensor = async_tensor_h2d(
+            tensor_ptrs, dtype=torch.uint64, device=device
+        )
+        slice_start_tensor = async_tensor_h2d(
+            slice_offset_lst, dtype=torch.uint64, device=device
         )
     else:
         slice_start_tensor = slice_offset_lst[0]
@@ -130,10 +133,18 @@ def _get_lora_b_ptr(
         same_stride = True
 
     else:
-        lora_strides_d0_tensor = torch.tensor(lora_strides_d0, device=device)
-        lora_strides_d1_tensor = torch.tensor(lora_strides_d1, device=device)
-        lora_strides_d2_tensor = torch.tensor(lora_strides_d2, device=device)
-        hidden_sizes_tensor = torch.tensor(hidden_sizes, device=device)
+        lora_strides_d0_tensor = async_tensor_h2d(
+            lora_strides_d0, dtype=torch.int64, device=device
+        )
+        lora_strides_d1_tensor = async_tensor_h2d(
+            lora_strides_d1, dtype=torch.int64, device=device
+        )
+        lora_strides_d2_tensor = async_tensor_h2d(
+            lora_strides_d2, dtype=torch.int64, device=device
+        )
+        hidden_sizes_tensor = async_tensor_h2d(
+            hidden_sizes, dtype=torch.int64, device=device
+        )
         same_stride = False
     # MAX_N is the maximum hidden size among all the lora_b weights
     MAX_N = max(hidden_sizes)
@@ -252,7 +263,7 @@ def get_lora_op_configs(
         default = {
             "block_m": 64,
             "block_n": 64 if num_slices > 1 else 128,
-            "block_k": 16,
+            "block_k": 32,
             "num_warps": 4,
             "num_ctas": 1,
             "num_stages": 2,
@@ -322,3 +333,20 @@ def supports_pdl(device: torch.device | None = None) -> bool:
 def supports_tma(device: torch.device | None = None) -> bool:
     # TMA requires compute capability SM90 or above
     return current_platform.is_cuda() and current_platform.has_device_capability(90)
+
+
+def _normalize_lora_config_keys(
+    config: dict[str, int | None],
+) -> dict[str, int | None]:
+    """Normalize Triton config dict keys to uppercase BLOCK_SIZE_* format."""
+    out: dict[str, int | None] = {}
+    for key, val in config.items():
+        if key.islower():
+            if key.startswith("block_"):
+                nk = "BLOCK_SIZE_" + key.split("_")[-1].upper()
+            else:
+                nk = key.upper()
+        else:
+            nk = key
+        out[nk] = val
+    return out

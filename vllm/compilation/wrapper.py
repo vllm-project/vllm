@@ -10,7 +10,6 @@ from types import CodeType
 from typing import Any, ParamSpec, TypeVar
 
 import torch
-import torch._C._dynamo.guards
 
 import vllm.envs as envs
 from vllm.config import CompilationMode, CUDAGraphMode, get_current_vllm_config
@@ -24,65 +23,23 @@ R = TypeVar("R")
 P = ParamSpec("P")
 
 
-def _noop_add_global_state_guard(
-    self: torch._C._dynamo.guards.GuardManager, *args: Any, **kwargs: Any
-) -> None:
-    """No-op to skip the GLOBAL_STATE guard entirely"""
-    pass
-
-
-def _noop_add_torch_function_mode_stack_guard(
-    self: torch._C._dynamo.guards.GuardManager, *args: Any, **kwargs: Any
-) -> None:
-    """No-op to skip the TORCH_FUNCTION_MODE_STACK guard entirely"""
-    pass
-
-
 @contextmanager
 def _compilation_context() -> Generator[None, None, None]:
-    """Context manager for compilation settings and patches.
+    """Context manager for compilation settings.
 
-    This manager:
-    1. Sets higher dynamo cache limits for compilation. (Needed for
-        qwen2_5_vl see test_qwen2_5_vl_evs_functionality).
-        Generally a recompilation can happen whenever we use a new
-        backend instance in torch.compile.
-    2. Patches out add_global_state_guard to skip GLOBAL_STATE guards
-    3. Patches out add_torch_function_mode_stack_guard to skip
-        TORCH_FUNCTION_MODE_STACK guards.
-    4. Restores everything when compilation completes
+    This manager sets higher dynamo cache limits for compilation.
+    (Needed for qwen2_5_vl see test_qwen2_5_vl_evs_functionality).
+    Generally a recompilation can happen whenever we use a new
+    backend instance in torch.compile.
     """
-    # Save original values
-    original_global_state_guard = (
-        torch._C._dynamo.guards.GuardManager.add_global_state_guard
-    )
-    original_torch_function_mode_stack_guard = (
-        torch._C._dynamo.guards.GuardManager.add_torch_function_mode_stack_guard
-    )
     original_cache_size = torch._dynamo.config.cache_size_limit
     original_accumulated_cache = torch._dynamo.config.accumulated_cache_size_limit
 
     try:
-        # Set higher cache limits for compilation
         torch._dynamo.config.cache_size_limit = 2048
         torch._dynamo.config.accumulated_cache_size_limit = 8192
-
-        # Patch guard manager
-        torch._C._dynamo.guards.GuardManager.add_global_state_guard = (
-            _noop_add_global_state_guard
-        )
-        torch._C._dynamo.guards.GuardManager.add_torch_function_mode_stack_guard = (
-            _noop_add_torch_function_mode_stack_guard
-        )
         yield
     finally:
-        # Restore original values
-        torch._C._dynamo.guards.GuardManager.add_global_state_guard = (
-            original_global_state_guard
-        )
-        torch._C._dynamo.guards.GuardManager.add_torch_function_mode_stack_guard = (
-            original_torch_function_mode_stack_guard
-        )
         torch._dynamo.config.cache_size_limit = original_cache_size
         torch._dynamo.config.accumulated_cache_size_limit = original_accumulated_cache
 
@@ -95,12 +52,6 @@ class TorchCompileWithNoGuardsWrapper:
     compilation is triggered. Dynamo should never be traced again after that
     since we drop all guards.
     """
-
-    def check_invariants_and_forward(self, *args: Any, **kwargs: Any) -> Any:
-        assert hasattr(self, "_check_shape_invariants")
-        self._check_shape_invariants(*args, **kwargs)
-
-        return self.forward(*args, **kwargs)
 
     def _call_with_optional_nvtx_range(
         self, callable_fn: Callable[P, R], *args: P.args, **kwargs: P.kwargs
@@ -118,8 +69,14 @@ class TorchCompileWithNoGuardsWrapper:
             return ctx.result
         return callable_fn(*args, **kwargs)
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        compile_prefix: str = "",
+        is_encoder: bool = False,
+    ) -> None:
         self.compiled = False
+        self._compile_prefix = compile_prefix
+        self._is_encoder = is_encoder
 
         vllm_config = get_current_vllm_config()
         self.vllm_config = vllm_config
@@ -130,7 +87,9 @@ class TorchCompileWithNoGuardsWrapper:
         if mode is None:
             raise RuntimeError("Compilation mode cannot be NO_COMPILATION")
 
-        backend = vllm_config.compilation_config.init_backend(vllm_config)
+        backend = vllm_config.compilation_config.init_backend(
+            vllm_config, prefix=compile_prefix, is_encoder=is_encoder
+        )
         options = {}
 
         if isinstance(backend, str) and backend == "inductor":
@@ -150,28 +109,30 @@ class TorchCompileWithNoGuardsWrapper:
                     "compilation_config.dynamic_shapes_config.evaluate_guards "
                     "requires VLLM_USE_BYTECODE_HOOK=0. "
                 )
+                assert ds_type != DynamicShapesType.UNBACKED, (
+                    "UNBACKED dynamic shapes do not add guards"
+                )
 
                 options["guard_filter_fn"] = lambda x: [
                     entry.guard_type == "SHAPE_ENV" for entry in x
                 ]
             else:
-                options["guard_filter_fn"] = lambda x: [False for _ in x]
+                if hasattr(torch.compiler, "skip_all_guards_unsafe"):
+                    # Torch 2.10+ provides skip_all_guards_unsafe
+                    options["guard_filter_fn"] = torch.compiler.skip_all_guards_unsafe
+                else:
+                    # Equivalent fallback for older PyTorch: skip all guards
+                    options["guard_filter_fn"] = lambda x: [False for _ in x]
 
         compiled_ptr: Any = self.forward
         # Validate that unbacked dynamic shapes require VLLM_USE_BYTECODE_HOOK=False
 
-        if ds_type == DynamicShapesType.UNBACKED:
-            # reason is that bytecode does torch._dynamo.eval_frame.
-            # remove_from_cache(self.original_code_object()) to force a new
-            # re-compilation. And if we use
-            # compiled_ptr = self.check_invariants_and_forward
-            # it will reset all entries.
-            assert not envs.VLLM_USE_BYTECODE_HOOK, (
-                "UNBACKED dynamic shapes requires VLLM_USE_BYTECODE_HOOK=0. "
-            )
-            assert not self.evaluate_guards, "UNBACKED dynamic shapes do not add guards"
+        # Apply the constrain_to_fx_strides patch before first compilation.
+        # This covers STOCK_TORCH_COMPILE and DYNAMO_ONCE paths. The VLLM
+        # compile paths call this from their own compile() methods too.
+        from vllm.env_override import _apply_constrain_to_fx_strides_patch
 
-            compiled_ptr = self.check_invariants_and_forward
+        _apply_constrain_to_fx_strides_patch()
 
         aot_context = nullcontext()
         if envs.VLLM_USE_AOT_COMPILE:
@@ -193,7 +154,9 @@ class TorchCompileWithNoGuardsWrapper:
             )
 
         if envs.VLLM_USE_BYTECODE_HOOK and mode != CompilationMode.STOCK_TORCH_COMPILE:
-            torch._dynamo.convert_frame.register_bytecode_hook(self.bytecode_hook)
+            self._bytecode_hook_handle = (
+                torch._dynamo.convert_frame.register_bytecode_hook(self.bytecode_hook)
+            )
             self._compiled_bytecode: CodeType | None = None
 
     def aot_compile(self, *args: Any, **kwargs: Any) -> Any:
@@ -300,6 +263,12 @@ class TorchCompileWithNoGuardsWrapper:
             )
             raise RuntimeError(msg)
 
+    def cleanup(self) -> None:
+        """Remove the bytecode hook registered by this instance."""
+        handle = getattr(self, "_bytecode_hook_handle", None)
+        if handle is not None:
+            handle.remove()
+
     @contextmanager
     def _dispatch_to_compiled_code(self) -> Generator[None, None, None]:
         # noqa: E501
@@ -370,4 +339,8 @@ def reset_compile_wrapper(model: torch.nn.Module) -> None:
     compilation_config.local_cache_dir = ""
 
     model.__class__.forward.__code__ = model.original_code_object()
-    TorchCompileWithNoGuardsWrapper.__init__(model)
+    TorchCompileWithNoGuardsWrapper.__init__(
+        model,
+        compile_prefix=model._compile_prefix,
+        is_encoder=model._is_encoder,
+    )

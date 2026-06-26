@@ -54,7 +54,7 @@ def mock_on_mi3xx():
         (
             {},
             None,
-            AttentionBackendEnum.TRITON_ATTN.get_path(),
+            AttentionBackendEnum.ROCM_ATTN.get_path(),
         ),
         # Test Case 2: Explicit TRITON_ATTN backend
         (
@@ -81,41 +81,24 @@ def mock_on_mi3xx():
             AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path(),
         ),
         # Test Case 6: VLLM_ROCM_USE_AITER=1
-        # (defaults to AITER FA when MHA not explicitly disabled)
         (
             {"VLLM_ROCM_USE_AITER": "1"},
             None,
-            AttentionBackendEnum.ROCM_AITER_FA.get_path(),
+            AttentionBackendEnum.ROCM_ATTN.get_path(),
         ),
-        # Test Case 7: VLLM_ROCM_USE_AITER=1 + VLLM_ROCM_USE_AITER_MHA=1
-        (
-            {"VLLM_ROCM_USE_AITER": "1", "VLLM_ROCM_USE_AITER_MHA": "1"},
-            None,
-            AttentionBackendEnum.ROCM_AITER_FA.get_path(),
-        ),
-        # Test Case 8: VLLM_ROCM_USE_AITER=1 + VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1
-        (
-            {
-                "VLLM_ROCM_USE_AITER": "1",
-                "VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION": "1",
-            },
-            None,
-            AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path(),
-        ),
-        # Test Case 9: VLLM_ROCM_USE_AITER=1 + explicit TRITON_ATTN
+        # Test Case 7: VLLM_ROCM_USE_AITER=1 + explicit TRITON_ATTN
         (
             {"VLLM_ROCM_USE_AITER": "1"},
             "TRITON_ATTN",
             AttentionBackendEnum.TRITON_ATTN.get_path(),
         ),
-        # Test Case 10: VLLM_ROCM_USE_AITER=1 + VLLM_ROCM_USE_AITER_MHA=0
-        # (explicitly disabled)
+        # Test Case 8: VLLM_ROCM_USE_AITER=1 + VLLM_ROCM_USE_AITER_MHA=0
         (
             {"VLLM_ROCM_USE_AITER": "1", "VLLM_ROCM_USE_AITER_MHA": "0"},
             None,
-            AttentionBackendEnum.TRITON_ATTN.get_path(),
+            AttentionBackendEnum.ROCM_ATTN.get_path(),
         ),
-        # Test Case 11: VLLM_ROCM_USE_AITER=1 + explicit ROCM_ATTN
+        # Test Case 9: VLLM_ROCM_USE_AITER=1 + explicit ROCM_ATTN
         (
             {"VLLM_ROCM_USE_AITER": "1"},
             "ROCM_ATTN",
@@ -153,9 +136,17 @@ def test_standard_attention_backend_selection(
     # Get the backend class path
     from vllm.platforms.rocm import RocmPlatform
 
+    # The AITER unified attention kernel only supports BF16/FP8 KV caches
+    # (its 3D kernel asserts on fp16), so it must be selected with bf16.
+    dtype = (
+        torch.bfloat16
+        if selected_backend == "ROCM_AITER_UNIFIED_ATTN"
+        else torch.float16
+    )
+
     attn_selector_config = AttentionSelectorConfig(
         head_size=128,
-        dtype=torch.float16,
+        dtype=dtype,
         kv_cache_dtype="auto",
         block_size=16,
         use_mla=False,

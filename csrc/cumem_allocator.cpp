@@ -9,6 +9,7 @@
 static const char* PYARGS_PARSE = "KKKK";
 #else
   #include <cstdlib>
+  #include <cstdint>
   #include <cerrno>
   #include <climits>
 
@@ -44,6 +45,29 @@ static unsigned long long get_memcreate_chunk_size() {
 static inline unsigned long long my_min(unsigned long long a,
                                         unsigned long long b) {
   return a < b ? a : b;
+}
+
+static CUresult reserve_rocm_address(CUdeviceptr* d_mem, size_t size,
+                                     size_t alignment, CUdeviceptr addr = 0) {
+  CUresult status = cuMemAddressReserve(d_mem, size, alignment, addr, 0);
+  if (status == CUresult(0) || alignment == 0) {
+    return status;
+  }
+
+  // Some ROCm stacks can report OOM while reserving VA with an explicit
+  // alignment even when physical VRAM is free. Let HIP choose the default
+  // alignment, then verify that the returned address still satisfies the
+  // requested alignment before accepting it.
+  status = cuMemAddressReserve(d_mem, size, 0, addr, 0);
+  if (status != CUresult(0)) {
+    return status;
+  }
+  if (((std::uintptr_t)(*d_mem) % alignment) == 0) {
+    return status;
+  }
+
+  (void)cuMemAddressFree(*d_mem, size);
+  return hipErrorNotSupported;
 }
 
 static const char* PYARGS_PARSE = "KKKO";
@@ -109,16 +133,18 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
 
 #ifndef USE_ROCM
   int flag = 0;
-  CUDA_CHECK(cuDeviceGetAttribute(
+  CUresult rdma_result = cuDeviceGetAttribute(
       &flag, CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED,
-      device));
-  if (flag) {  // support GPUDirect RDMA if possible
+      device);
+  if (rdma_result == CUDA_SUCCESS &&
+      flag) {  // support GPUDirect RDMA if possible
     prop.allocFlags.gpuDirectRDMACapable = 1;
   }
   int fab_flag = 0;
-  CUDA_CHECK(cuDeviceGetAttribute(
-      &fab_flag, CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, device));
-  if (fab_flag) {  // support fabric handle if possible
+  CUresult fab_result = cuDeviceGetAttribute(
+      &fab_flag, CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, device);
+  if (fab_result == CUDA_SUCCESS &&
+      fab_flag) {  // support fabric handle if possible
     prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
   }
 #endif
@@ -323,7 +349,7 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
     return nullptr;
   }
 #else
-  CUDA_CHECK(cuMemAddressReserve(&d_mem, alignedSize, granularity, 0, 0));
+  CUDA_CHECK(reserve_rocm_address(&d_mem, alignedSize, granularity));
   if (error_code != 0) {
     return nullptr;
   }
@@ -509,7 +535,14 @@ void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
   Py_DECREF(py_result);
   PyGILState_Release(gstate);
 
-  unmap_and_release(device, size, d_mem, p_memHandle, chunk_sizes, num_chunks);
+  // An empty chunk list means this allocation is asleep: its physical chunks
+  // were already unmapped and released by sleep(), but the virtual address is
+  // still held as a placeholder reservation. Skip unmap/release (freeing the
+  // placeholder address happens below).
+  if (num_chunks > 0) {
+    unmap_and_release(device, size, d_mem, p_memHandle, chunk_sizes,
+                      num_chunks);
+  }
 #else
   // Non-ROCm path: simple integer handle already extracted; drop temporary
   // Python refs while still holding the GIL, then release it.
@@ -522,11 +555,13 @@ void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
   unmap_and_release(device, size, d_mem, p_memHandle);
 #endif
 
-  // free address and the handle
+  // Free the virtual address. On ROCm this also covers an asleep allocation,
+  // whose placeholder reservation made by sleep() is still held here.
   CUDA_CHECK(cuMemAddressFree(d_mem, size));
 #ifndef USE_ROCM
   free(p_memHandle);
 #else
+  // Only awake allocations have per-chunk handles to free.
   for (auto i = 0; i < num_chunks; ++i) {
     free(p_memHandle[i]);
   }
@@ -646,6 +681,29 @@ static PyObject* python_unmap_and_release(PyObject* self, PyObject* args) {
   unmap_and_release(recv_device, recv_size, d_mem_ptr, p_memHandle, chunk_sizes,
                     num_chunks);
 
+  // On ROCm/Linux, physical VRAM is only reclaimed once the virtual address
+  // range is freed; hipMemUnmap + hipMemRelease alone leave the memory
+  // resident (see ROCm#6021). Free the address to release physical memory,
+  // then immediately re-reserve the SAME address as an empty placeholder so
+  // the regular allocator cannot hand it out while we sleep. wake_up remaps
+  // physical chunks into this placeholder.
+  if (error_code == no_error) {
+    CUDA_CHECK(cuMemAddressFree(d_mem_ptr, recv_size));
+    if (error_code == no_error) {
+      CUdeviceptr reserved = 0;
+      CUDA_CHECK(reserve_rocm_address(&reserved, recv_size, /*alignment=*/0,
+                                      d_mem_ptr));
+      if (error_code == no_error && reserved != d_mem_ptr) {
+        (void)cuMemAddressFree(reserved, recv_size);
+        snprintf(error_msg, sizeof(error_msg),
+                 "failed to re-reserve placeholder address on sleep "
+                 "(requested %#llx, got %#llx)",
+                 (unsigned long long)d_mem_ptr, (unsigned long long)reserved);
+        error_code = CUresult(1);
+      }
+    }
+  }
+
   free(p_memHandle);
   free(chunk_sizes);
 #endif
@@ -710,6 +768,7 @@ static PyObject* python_create_and_map(PyObject* self, PyObject* args) {
     chunk_sizes[i] = PyLong_AsUnsignedLongLong(size_py);
   }
 
+  // Address already reserved as a placeholder by sleep(); just remap chunks.
   create_and_map(recv_device, recv_size, d_mem_ptr, p_memHandle, chunk_sizes,
                  num_chunks);
 

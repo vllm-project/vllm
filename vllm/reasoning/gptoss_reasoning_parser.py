@@ -1,22 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
+from typing import TYPE_CHECKING
 
 from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.mcp.tool_server import ToolServer
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
-from vllm.entrypoints.openai.parser.harmony_utils import parse_chat_output
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser
 
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+
 logger = init_logger(__name__)
 
-no_func_reaonsing_tag = {
+no_func_reasoning_tag = {
     "type": "structural_tag",
     "format": {
         "type": "triggered_tags",
@@ -49,10 +50,10 @@ def from_builtin_tool_to_tag(tool: str) -> list[dict]:
     return tag
 
 
-def tag_with_builtin_funcs(no_func_reaonsing_tag, builtin_tool_list: list[str]) -> dict:
+def tag_with_builtin_funcs(no_func_reasoning_tag, builtin_tool_list: list[str]) -> dict:
     import copy
 
-    new_tag = copy.deepcopy(no_func_reaonsing_tag)
+    new_tag = copy.deepcopy(no_func_reasoning_tag)
     new_tag["format"]["triggers"].append("<|channel|>commentary to=")
 
     for tool in builtin_tool_list:
@@ -78,7 +79,7 @@ class GptOssReasoningParser(ReasoningParser):
         self.reasoning_end_token_ids_suffix = self.model_tokenizer.encode("<|message|>")
         # We also need to check for the <|end|> token to avoid false positives from
         # previous messages in multi-turn conversations.
-        self.eom_token_id = self.model_tokenizer.vocab["<|end|>"]
+        self.eom_token_id = self.vocab["<|end|>"]
         self.reasoning_max_num_between_tokens = 20
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
@@ -110,11 +111,30 @@ class GptOssReasoningParser(ReasoningParser):
                         return True
         return False
 
+    def is_reasoning_end_streaming(
+        self, input_ids: Sequence[int], delta_ids: Iterable[int]
+    ) -> bool:
+        # The pattern window covers the end-of-reasoning marker itself.
+        # We add len(delta_ids) so that under speculative decoding (where
+        # a single step can accept many tokens) the entire accepted chunk
+        # is always inside the scan region.
+        delta_ids = tuple(delta_ids)
+        pattern_len = (
+            len(self.reasoning_end_token_ids_prefix)
+            + self.reasoning_max_num_between_tokens
+            + len(self.reasoning_end_token_ids_suffix)
+        )
+        window = pattern_len + len(delta_ids)
+        n = len(input_ids)
+        if n <= window:
+            return self.is_reasoning_end(input_ids)
+        return self.is_reasoning_end(input_ids[n - window :])
+
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
-        _, content, _ = parse_chat_output(input_ids)
-        if content is None:
-            return []
-        return self.model_tokenizer.encode(content)
+        raise NotImplementedError(
+            "GptOssReasoningParser only provides boundary detection. "
+            "Use HarmonyParser for output parsing."
+        )
 
     def extract_reasoning_streaming(
         self,
@@ -125,33 +145,19 @@ class GptOssReasoningParser(ReasoningParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
-        prev_reasoning, prev_content, _ = parse_chat_output(list(previous_token_ids))
-        cur_reasoning, cur_content, _ = parse_chat_output(list(current_token_ids))
-        reasoning_delta = None
-        content_delta = None
-        if cur_reasoning is not None:
-            prev_r = prev_reasoning or ""
-            if cur_reasoning.startswith(prev_r):
-                reasoning_delta = cur_reasoning[len(prev_r) :] or None
-            else:
-                reasoning_delta = cur_reasoning
-        if cur_content is not None:
-            prev_c = prev_content or ""
-            if cur_content.startswith(prev_c):
-                content_delta = cur_content[len(prev_c) :] or None
-            else:
-                content_delta = cur_content
-        if reasoning_delta is None and content_delta is None:
-            return None
-        return DeltaMessage(reasoning=reasoning_delta, content=content_delta)
+        raise NotImplementedError(
+            "GptOssReasoningParser only provides boundary detection. "
+            "Use HarmonyParser for output parsing."
+        )
 
     def extract_reasoning(
         self,
         model_output: str,
-        request: ChatCompletionRequest,
+        request: "ChatCompletionRequest | ResponsesRequest",
     ) -> tuple[str | None, str | None]:
         raise NotImplementedError(
-            "gpt-oss has a special branch for parsing reasoning in non-streaming mode. This method shouldn't be used."  # noqa: E501
+            "GptOssReasoningParser only provides boundary detection. "
+            "Use HarmonyParser for output parsing."
         )
 
     # This function prepares the structural tag to format reasoning output
@@ -160,7 +166,7 @@ class GptOssReasoningParser(ReasoningParser):
     ) -> str | None:
         if original_tag is None:
             if tool_server is None:
-                return json.dumps(no_func_reaonsing_tag)
+                return json.dumps(no_func_reasoning_tag)
             else:
                 builtin_tool_list: list[str] = []
                 if tool_server.has_tool("browser"):
@@ -173,11 +179,11 @@ class GptOssReasoningParser(ReasoningParser):
                 if len(builtin_tool_list) > 0:
                     logger.info("Builtin_tool_list: %s", builtin_tool_list)
                     func_tag = json.dumps(
-                        tag_with_builtin_funcs(no_func_reaonsing_tag, builtin_tool_list)
+                        tag_with_builtin_funcs(no_func_reasoning_tag, builtin_tool_list)
                     )
                 else:
                     logger.info("Builtin_tool_list is empty")
-                    func_tag = json.dumps(no_func_reaonsing_tag)
+                    func_tag = json.dumps(no_func_reasoning_tag)
 
                 return func_tag
         else:
