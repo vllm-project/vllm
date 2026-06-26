@@ -225,9 +225,6 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
                 layer,
             )
 
-        # For decoder and cross-attention, use KV cache as before.
-        # Different head_size for K and V.
-        # (B, H, N, C) -> (B, N, H, C) for kernel compatibility.
         # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         # Fix degenerate strides on size-1 dims (e.g. num_kv_heads=1 with TP).
