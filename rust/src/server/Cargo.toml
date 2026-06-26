@@ -28,6 +28,7 @@ sha2.workspace = true
 socket2.workspace = true
 subtle.workspace = true
 thiserror-ext.workspace = true
+tls-listener.workspace = true
 tokio.workspace = true
 tokio-openssl.workspace = true
 tokio-stream.workspace = true

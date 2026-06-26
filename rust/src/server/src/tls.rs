@@ -1,31 +1,19 @@
-//! TLS termination for the HTTP listener.
+//! OpenSSL server-config construction for TLS termination.
 //!
-//! Builds an OpenSSL [`SslContext`] from the uvicorn-style `ssl_*` arguments and
-//! wraps the unified [`Listener`](crate::listener::Listener) so each accepted
-//! connection completes its TLS handshake lazily, inside the per-connection
-//! serving task. Driving the handshake there (rather than inside `accept()`)
-//! keeps the serial accept loop non-blocking, so one slow or stalled handshake
-//! cannot stall new connections.
+//! Builds an OpenSSL [`SslContext`] from the uvicorn-style `ssl_*` arguments
+//! (certificate chain, private key, mTLS client verifier, optional cipher list).
+//! The `tls-listener` crate drives the handshake on each accepted connection.
 //!
 //! Crypto runs through whichever OpenSSL the binary links (system by default,
 //! vendored when built with that feature).
 
-use std::future::Future;
-use std::io;
 use std::path::Path;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use openssl::ssl::{
-    Ssl, SslAcceptor, SslContext, SslContextBuilder, SslFiletype, SslMethod, SslOptions,
-    SslVerifyMode,
+    SslAcceptor, SslContext, SslContextBuilder, SslFiletype, SslMethod, SslOptions, SslVerifyMode,
 };
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::time::{Sleep, sleep};
-use tokio_openssl::SslStream;
 
 use crate::config::TlsConfig;
 
@@ -109,150 +97,4 @@ fn configure_client_auth(builder: &mut SslContextBuilder, tls: &TlsConfig) -> Re
     }
     builder.set_verify(mode);
     Ok(())
-}
-
-/// A TLS connection whose handshake is driven lazily on the first I/O poll.
-pub(crate) enum MaybeTlsStream<IO> {
-    /// Handshake in flight, bounded by `deadline`.
-    Handshaking {
-        stream: Pin<Box<SslStream<IO>>>,
-        deadline: Pin<Box<Sleep>>,
-    },
-    Streaming(Pin<Box<SslStream<IO>>>),
-    /// Setup failed in the infallible `accept()`; surfaced on first poll.
-    SetupFailed(Option<io::Error>),
-}
-
-impl<IO: AsyncRead + AsyncWrite + Unpin> MaybeTlsStream<IO> {
-    /// Drive the handshake to completion if it has not finished, returning the
-    /// established TLS stream. Returns `Pending` while the handshake is in
-    /// flight and propagates a handshake or setup error as an I/O error.
-    fn poll_established(
-        self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-    ) -> Poll<io::Result<Pin<&mut SslStream<IO>>>> {
-        let this = self.get_mut();
-        // Confine the borrow of the handshaking stream to this match so the enum
-        // can be reassigned afterwards.
-        let handshake = match this {
-            MaybeTlsStream::Streaming(stream) => return Poll::Ready(Ok(stream.as_mut())),
-            MaybeTlsStream::SetupFailed(err) => {
-                let err =
-                    err.take().unwrap_or_else(|| io::Error::other("TLS connection setup failed"));
-                return Poll::Ready(Err(err));
-            }
-            MaybeTlsStream::Handshaking { stream, deadline } => {
-                if deadline.as_mut().poll(cx).is_ready() {
-                    return Poll::Ready(Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "TLS handshake timed out",
-                    )));
-                }
-                stream.as_mut().poll_accept(cx)
-            }
-        };
-        match handshake {
-            Poll::Ready(Ok(())) => {
-                let stream = match std::mem::replace(this, MaybeTlsStream::SetupFailed(None)) {
-                    MaybeTlsStream::Handshaking { stream, .. } => stream,
-                    _ => unreachable!("handshake just completed"),
-                };
-                *this = MaybeTlsStream::Streaming(stream);
-                match this {
-                    MaybeTlsStream::Streaming(stream) => Poll::Ready(Ok(stream.as_mut())),
-                    _ => unreachable!("just set to Streaming"),
-                }
-            }
-            // Stays `Handshaking` on error; re-polling OpenSSL errors, not panics.
-            Poll::Ready(Err(err)) => Poll::Ready(Err(io::Error::other(err))),
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
-impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for MaybeTlsStream<IO> {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        match self.poll_established(cx) {
-            Poll::Ready(Ok(stream)) => stream.poll_read(cx, buf),
-            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
-impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for MaybeTlsStream<IO> {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        match self.poll_established(cx) {
-            Poll::Ready(Ok(stream)) => stream.poll_write(cx, buf),
-            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
-            Poll::Pending => Poll::Pending,
-        }
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
-        match self.poll_established(cx) {
-            Poll::Ready(Ok(stream)) => stream.poll_flush(cx),
-            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
-            Poll::Pending => Poll::Pending,
-        }
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
-        match self.poll_established(cx) {
-            Poll::Ready(Ok(stream)) => stream.poll_shutdown(cx),
-            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
-/// A listener that terminates TLS on an inner axum listener. Generic so it can
-/// wrap the already-tapped listener, keeping `TCP_NODELAY` on the raw TCP.
-pub(crate) struct TlsListener<L> {
-    inner: L,
-    context: Arc<SslContext>,
-    handshake_timeout: Duration,
-}
-
-impl<L> TlsListener<L> {
-    pub(crate) fn new(inner: L, context: Arc<SslContext>, handshake_timeout: Duration) -> Self {
-        Self {
-            inner,
-            context,
-            handshake_timeout,
-        }
-    }
-}
-
-impl<L> axum::serve::Listener for TlsListener<L>
-where
-    L: axum::serve::Listener,
-    L::Io: AsyncRead + AsyncWrite + Unpin,
-{
-    type Io = MaybeTlsStream<L::Io>;
-    type Addr = L::Addr;
-
-    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
-        let (io, addr) = self.inner.accept().await;
-        let io = match Ssl::new(&self.context).and_then(|ssl| SslStream::new(ssl, io)) {
-            Ok(stream) => MaybeTlsStream::Handshaking {
-                stream: Box::pin(stream),
-                deadline: Box::pin(sleep(self.handshake_timeout)),
-            },
-            Err(err) => MaybeTlsStream::SetupFailed(Some(io::Error::other(err))),
-        };
-        (io, addr)
-    }
-
-    fn local_addr(&self) -> io::Result<Self::Addr> {
-        self.inner.local_addr()
-    }
 }

@@ -2,6 +2,7 @@
 //! through the production `serve_listener` path, with a trivial router since TLS
 //! terminates below the app.
 
+use std::pin::Pin;
 use std::time::Duration;
 
 use axum::Router;
@@ -275,9 +276,8 @@ async fn spawn_server_with_timeouts(
     .expect("bind listener");
     let addr = listener.local_addr().expect("local addr");
 
-    let server_config = tls_config.map(|cfg| {
-        std::sync::Arc::new(tls::build_server_config(&cfg).expect("build server config"))
-    });
+    let server_config =
+        tls_config.map(|cfg| tls::build_server_config(&cfg).expect("build server config"));
     let app = Router::new().route("/health", get(|| async { "ok" }));
     let shutdown = CancellationToken::new();
     let server_shutdown = shutdown.clone();
@@ -294,15 +294,15 @@ async fn spawn_server_with_timeouts(
     (addr, shutdown)
 }
 
-/// Issue an HTTPS GET trusting the test CA, optionally presenting a client
-/// identity (`<name>.pem` + `<name>.key`) for mTLS. Hostname verification is
-/// disabled (the IP-SAN match is not under test); chain verification stays on,
-/// so an untrusted server cert is still rejected.
-async fn https_get(
+/// Open a TLS connection trusting the test CA and finish the handshake,
+/// optionally presenting a client identity (`<name>.pem` + `<name>.key`) for
+/// mTLS. Hostname verification is disabled (the IP-SAN match is not under test);
+/// chain verification stays on, so an untrusted server cert is still rejected.
+async fn connect_tls(
     certs: &TestCerts,
     addr: &str,
     identity: Option<&str>,
-) -> std::io::Result<String> {
+) -> std::io::Result<Pin<Box<SslStream<TcpStream>>>> {
     let tcp = TcpStream::connect(addr).await?;
 
     let mut builder = SslConnector::builder(SslMethod::tls_client()).expect("connector builder");
@@ -320,10 +320,18 @@ async fn https_get(
     config.set_verify_hostname(false);
     let ssl = config.into_ssl("127.0.0.1").expect("ssl");
 
-    let stream = SslStream::new(ssl, tcp).expect("client ssl stream");
-    tokio::pin!(stream);
+    let mut stream = Box::pin(SslStream::new(ssl, tcp).expect("client ssl stream"));
     stream.as_mut().connect().await.map_err(std::io::Error::other)?;
+    Ok(stream)
+}
 
+/// Issue an HTTPS GET (with `Connection: close`), optionally with an mTLS identity.
+async fn https_get(
+    certs: &TestCerts,
+    addr: &str,
+    identity: Option<&str>,
+) -> std::io::Result<String> {
+    let mut stream = connect_tls(certs, addr, identity).await?;
     stream
         .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
         .await?;
@@ -564,6 +572,44 @@ async fn keep_alive_timeout_closes_idle_connection() {
     assert!(
         matches!(drained, Ok(Ok(()))),
         "server must close an idle keep-alive connection (got {drained:?})"
+    );
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn keep_alive_timeout_closes_idle_tls_connection() {
+    // The keep-alive idle bound lives in serve_connections, below TLS; assert it
+    // still fires through tls-listener's post-handshake SslStream, not just plaintext.
+    let certs = TestCerts::generate();
+    let timeouts = ConnectionTimeouts {
+        handshake: Duration::from_secs(60),
+        header_read: Duration::from_millis(150),
+        keep_alive_enabled: true,
+    };
+    let (addr, shutdown) = spawn_server_with_timeouts(Some(server_tls(&certs, 0)), timeouts).await;
+
+    let mut stream = connect_tls(&certs, &addr, None).await.expect("handshake");
+    // No `Connection: close`, so the connection stays alive until the idle deadline.
+    stream
+        .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        .await
+        .expect("write request");
+
+    let closed = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut buf = [0u8; 1024];
+        loop {
+            // A clean close_notify (Ok(0)) or an abrupt TLS EOF both mean the
+            // server closed; only the outer timeout (still open) is a failure.
+            match stream.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => continue,
+            }
+        }
+    })
+    .await;
+    assert!(
+        closed.is_ok(),
+        "server must close an idle keep-alive TLS connection at the deadline"
     );
     shutdown.cancel();
 }

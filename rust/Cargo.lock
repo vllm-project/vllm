@@ -4756,6 +4756,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tls-listener"
+version = "0.11.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1461056cc1ef47003f7ee16e4cef3741068d4c7f6b627bfce49b7c00c120a530"
+dependencies = [
+ "axum",
+ "futures-util",
+ "openssl",
+ "pin-project-lite",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-openssl",
+ "tracing",
+]
+
+[[package]]
 name = "tokenizers"
 version = "0.22.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5638,6 +5654,7 @@ dependencies = [
  "subtle",
  "tempfile",
  "thiserror-ext",
+ "tls-listener",
  "tokio",
  "tokio-openssl",
  "tokio-stream",

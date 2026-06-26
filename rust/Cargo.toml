@@ -96,6 +96,7 @@ thiserror = "2.0.16"
 thiserror-ext = "0.3.0"
 tiktoken-rs = "0.9.1"
 time = { version = "0.3.47", features = ["formatting", "local-offset", "macros"] }
+tls-listener = { version = "0.11.2", default-features = false, features = ["openssl", "tokio-net", "axum"] }
 tokenizers = "0.22.0"
 tokio = { version = "1.47.1", features = [
     "macros",

@@ -16,7 +16,10 @@ mod tls_tests;
 mod utils;
 
 use std::future::Future;
+use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
+use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
@@ -33,7 +36,8 @@ use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
-use tokio::net::TcpListener;
+use tls_listener::{AsyncAccept, AsyncListener};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{Instant, sleep_until};
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::either::Either;
@@ -164,8 +168,7 @@ where
         .as_ref()
         .map(tls::build_server_config)
         .transpose()
-        .context("invalid TLS configuration")?
-        .map(Arc::new);
+        .context("invalid TLS configuration")?;
 
     // Also check shutdown during the (potentially long) startup handshake.
     let state = tokio::select! {
@@ -319,27 +322,93 @@ pub(crate) struct ConnectionTimeouts {
     pub(crate) keep_alive_enabled: bool,
 }
 
+/// Wraps a `TcpListener` so each accepted connection gets `TCP_NODELAY` before
+/// the TLS handshake, matching the plaintext path's latency tuning (tls-listener
+/// owns the accept on the TLS path, so the `tap_io` hook does not reach it).
+struct NoDelayListener(TcpListener);
+
+impl AsyncAccept for NoDelayListener {
+    type Connection = TcpStream;
+    type Address = SocketAddr;
+    type Error = std::io::Error;
+
+    fn poll_accept(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> Poll<std::io::Result<(TcpStream, SocketAddr)>> {
+        match self.get_mut().0.poll_accept(cx) {
+            Poll::Ready(Ok((stream, addr))) => {
+                if let Err(err) = stream.set_nodelay(true) {
+                    trace!(error = %err, "failed to enable TCP_NODELAY on accepted HTTPS connection");
+                }
+                Poll::Ready(Ok((stream, addr)))
+            }
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl AsyncListener for NoDelayListener {
+    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.0.local_addr()
+    }
+}
+
 /// Apply `TCP_NODELAY`, optional TLS termination, and per-connection timeouts,
 /// then serve `app`. Shared by [`serve_with_router_extension`] and the TLS tests.
 async fn serve_listener(
     listener: Listener,
-    tls: Option<Arc<openssl::ssl::SslContext>>,
+    tls: Option<openssl::ssl::SslContext>,
     app: Router,
     shutdown: impl Future<Output = ()> + Send + 'static,
     timeouts: ConnectionTimeouts,
 ) -> Result<()> {
-    // Enable TCP_NODELAY on each accepted connection to reduce latency.
-    let listener = listener.tap_io(|io| {
-        if let Either::Left(tcp_stream) = io
-            && let Err(err) = tcp_stream.set_nodelay(true)
-        {
-            trace!(error = %err, "failed to enable TCP_NODELAY on accepted HTTP connection");
-        }
-    });
-
     match tls {
         Some(context) => {
-            let listener = tls::TlsListener::new(listener, context, timeouts.handshake);
+            // tls-listener terminates TLS (handshake + timeout); serve_connections
+            // owns the HTTP keep-alive/idle bound that axum::serve cannot express.
+            // Failed handshakes (incl. timeouts) log at ERROR via tls-listener.
+            match listener {
+                Listener::Tcp(tcp) => {
+                    let listener = tls_listener::builder(context)
+                        .handshake_timeout(timeouts.handshake)
+                        .listen(NoDelayListener(tcp));
+                    serve_connections(
+                        listener,
+                        app,
+                        shutdown,
+                        timeouts.header_read,
+                        timeouts.keep_alive_enabled,
+                    )
+                    .await
+                    .context("HTTPS server failed")
+                }
+                Listener::Unix(unix) => {
+                    let listener = tls_listener::builder(context)
+                        .handshake_timeout(timeouts.handshake)
+                        .listen(unix);
+                    serve_connections(
+                        listener,
+                        app,
+                        shutdown,
+                        timeouts.header_read,
+                        timeouts.keep_alive_enabled,
+                    )
+                    .await
+                    .context("HTTPS server failed")
+                }
+            }
+        }
+        None => {
+            // Enable TCP_NODELAY on each accepted connection to reduce latency.
+            let listener = listener.tap_io(|io| {
+                if let Either::Left(tcp_stream) = io
+                    && let Err(err) = tcp_stream.set_nodelay(true)
+                {
+                    trace!(error = %err, "failed to enable TCP_NODELAY on accepted HTTP connection");
+                }
+            });
             serve_connections(
                 listener,
                 app,
@@ -348,17 +417,8 @@ async fn serve_listener(
                 timeouts.keep_alive_enabled,
             )
             .await
-            .context("HTTPS server failed")
+            .context("HTTP server failed")
         }
-        None => serve_connections(
-            listener,
-            app,
-            shutdown,
-            timeouts.header_read,
-            timeouts.keep_alive_enabled,
-        )
-        .await
-        .context("HTTP server failed"),
     }
 }
 
