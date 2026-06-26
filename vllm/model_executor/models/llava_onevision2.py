@@ -1614,19 +1614,54 @@ class LlavaOnevision2MultiModalProcessor(
                 timestamp_decimals=timestamp_decimals,
             )
 
-            # Merge per-video frame lists into ``images`` (preserving any
-            # caller-supplied images, ordered AFTER the video frames -- vLLM
-            # places video markers before image markers in dummy prompts).
-            flat_frames: list[Image.Image] = [
-                frame for frames in per_video_frames for frame in frames
-            ]
+            # Build the merged ``images`` list the wrapped HF processor will
+            # consume. ``new_prompt`` keeps every image marker in place and
+            # expands each video marker into per-frame ``<|image_pad|>`` blocks,
+            # so the processor assigns the merged image list *positionally* to
+            # the ``<|image_pad|>`` slots in prompt order. The merged list must
+            # therefore follow the *interleaved marker order of the prompt*, not
+            # a fixed "videos first" order -- otherwise frame data is bound to
+            # the wrong placeholder and mixed image+video requests break
+            # alignment (the dummy-profiling prompt emits image markers before
+            # video markers). ``row_is_video`` labels each resulting grid row so
+            # the outputs can be split back into per-modality keys below.
             merged_mm_data = dict(mm_data)
             existing_images = merged_mm_data.pop("images", None)
+            caller_images: list[Image.Image] = []
             if existing_images:
                 if isinstance(existing_images, list):
-                    flat_frames.extend(existing_images)
+                    caller_images.extend(existing_images)
                 else:
-                    flat_frames.append(existing_images)
+                    caller_images.append(existing_images)
+
+            marker_pattern = re.compile(
+                "(?P<image>" + re.escape(_IMAGE_MARKER) + ")"
+                "|(?P<video>" + re.escape(_VIDEO_MARKER) + ")"
+            )
+            flat_frames: list[Image.Image] = []
+            row_is_video: list[bool] = []
+            vid_idx = 0
+            img_idx = 0
+            for marker in marker_pattern.finditer(prompt):
+                if marker.lastgroup == "video":
+                    frames = per_video_frames[vid_idx]
+                    vid_idx += 1
+                    flat_frames.extend(frames)
+                    row_is_video.extend([True] * len(frames))
+                else:
+                    flat_frames.append(caller_images[img_idx])
+                    img_idx += 1
+                    row_is_video.append(False)
+            # Fallback: if the prompt carried no parseable markers (defensive --
+            # should not happen for well-formed inputs), preserve the legacy
+            # "video frames first, then caller images" ordering.
+            if vid_idx == 0 and img_idx == 0:
+                for frames in per_video_frames:
+                    flat_frames.extend(frames)
+                    row_is_video.extend([True] * len(frames))
+                flat_frames.extend(caller_images)
+                row_is_video.extend([False] * len(caller_images))
+
             merged_mm_data.pop("videos", None)
             merged_mm_data["images"] = flat_frames
 
@@ -1643,14 +1678,54 @@ class LlavaOnevision2MultiModalProcessor(
             )
             data = dict(output)
 
-            # Re-tag image-series outputs as video-series so vLLM's
-            # placeholder replacement (driven by <|video_pad|> runs) finds them.
-            if "pixel_values" in data:
-                data["pixel_values_videos"] = data.pop("pixel_values")
-            if "image_grid_thw" in data:
-                data["video_grid_thw"] = data.pop("image_grid_thw")
-            if "patch_positions" in data:
-                data["patch_positions_videos"] = data.pop("patch_positions")
+            # Split the image-series processor outputs back into video rows and
+            # genuine-image rows. The processor emits one ``image_grid_thw`` row
+            # per frame/image (in ``flat_frames`` / prompt order) and one
+            # ``pixel_values`` / ``patch_positions`` patch block per row. Video
+            # rows become video-series keys (found by the ``<|video_pad|>``
+            # replacement); caller-image rows stay under image-series keys.
+            # Without this split a mixed image+video request silently drops the
+            # image modality (``out_mm_kwargs`` would carry only ``video``).
+            grid = data.get("image_grid_thw")
+            has_caller_images = any(not v for v in row_is_video)
+            if grid is not None and has_caller_images:
+                pixel_values = data.pop("pixel_values")
+                patch_positions = data.pop("patch_positions")
+
+                per_row_patches = grid.prod(-1).tolist()
+                row_offsets = [0]
+                for p in per_row_patches:
+                    row_offsets.append(row_offsets[-1] + int(p))
+
+                def _gather_rows(tensor, rows):
+                    if not rows:
+                        return tensor[:0]
+                    return torch.cat(
+                        [tensor[row_offsets[i] : row_offsets[i + 1]] for i in rows],
+                        dim=0,
+                    )
+
+                video_rows = [i for i, v in enumerate(row_is_video) if v]
+                image_rows = [i for i, v in enumerate(row_is_video) if not v]
+
+                data["pixel_values_videos"] = _gather_rows(pixel_values, video_rows)
+                data["patch_positions_videos"] = _gather_rows(
+                    patch_positions, video_rows
+                )
+                data["video_grid_thw"] = grid[video_rows]
+
+                data["pixel_values"] = _gather_rows(pixel_values, image_rows)
+                data["patch_positions"] = _gather_rows(patch_positions, image_rows)
+                data["image_grid_thw"] = grid[image_rows]
+            else:
+                # Video-only (no caller images): re-tag every image-series
+                # output as video-series.
+                if "pixel_values" in data:
+                    data["pixel_values_videos"] = data.pop("pixel_values")
+                if "image_grid_thw" in data:
+                    data["video_grid_thw"] = data.pop("image_grid_thw")
+                if "patch_positions" in data:
+                    data["patch_positions_videos"] = data.pop("patch_positions")
             data["frame_timestamps"] = _pack_timestamps(per_video_timestamps)
             data["video_num_frames"] = torch.tensor(
                 [len(ts) for ts in per_video_timestamps], dtype=torch.long
