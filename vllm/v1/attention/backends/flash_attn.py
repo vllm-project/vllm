@@ -768,9 +768,6 @@ class FlashAttentionImpl(AttentionImpl):
                 layer,
             )
 
-        # KV cache arrives in logical (B, H, N, 2*D) order; transpose to
-        # (B, N, H, 2*D) = (num_blocks, block_size, num_kv_heads, 2*head_size)
-        # which FlashAttention expects, then split K/V on the content dim.
         # (B, H, N, 2*D) -> ((B, N, H, D), (B, N, H, D))
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         # Fix degenerate strides on size-1 dims (e.g. num_kv_heads=1 with TP).
