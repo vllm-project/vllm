@@ -33,7 +33,7 @@ async def health(raw_request: Request) -> Response:
         return Response(status_code=503)
 
 
-@router.get("/health/ready", response_class=Response)
+@router.get("/ready", response_class=Response)
 async def health_ready(raw_request: Request) -> Response:
     """Readiness check — verifies GPU can execute inference."""
     client = engine_client(raw_request)

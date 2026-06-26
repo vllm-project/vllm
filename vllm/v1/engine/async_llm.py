@@ -880,7 +880,14 @@ class AsyncLLM(EngineClient):
         logger.debug("Called check_health_gpu.")
         # First do the basic liveness check.
         await self.check_health()
-        # Then verify GPU can execute a forward pass.
+
+        # Like SGLang's health_generate path, avoid injecting extra GPU work
+        # while real requests are in flight. If the engine is making progress,
+        # the output handler will detect engine death via normal request flow.
+        if self.output_processor.has_unfinished_requests():
+            return
+
+        # When idle, verify GPU can execute a forward pass.
         try:
             await asyncio.wait_for(
                 self.engine_core.execute_dummy_batch_async(),
