@@ -140,6 +140,11 @@ async def test_single_chat_session_image_chat_completions_format(
         model=model_name,
         input=messages,
     )
+    assert response.status == "completed"
+    assert len(response.output) >= 1
+    message = next((out for out in response.output if out.type == "message"), None)
+    assert message is not None
+    assert message.role == "assistant"
     assert len(response.output_text) > 0
 
 
