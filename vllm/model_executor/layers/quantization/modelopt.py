@@ -2456,7 +2456,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             algos = {
                 info["quant_algo"].upper()
                 for key, info in self.quantized_layers.items()
-                if key.startswith(parent_dot) and "." not in key[len(parent_dot) :]
+                if key.startswith(parent_dot) and "." not in key[len(parent_dot):]
             }
             if len(algos) == 1:
                 return algos.pop()
