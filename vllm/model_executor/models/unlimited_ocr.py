@@ -49,12 +49,19 @@ this module (same request-level processor as DeepSeek-OCR) with::
 
 Image processing
 ----------------
-Unlimited-OCR supports up to 32 local crops (vs 6 for DeepSeek-OCR), matching
-the SGLang reference implementation (``dynamic_preprocess max_num=32``).
+Unlimited-OCR supports up to 32 local crops (vs 6 for DeepSeek-OCR), i.e.
+``dynamic_preprocess`` runs with ``max_num=32``.
 
-Multi-image requests automatically fall back to non-crop mode, mirroring
-SGLang's ``_MULTI_IMAGE_ALLOWED`` restriction that excludes "gundam" (crop)
-mode for multi-image input.  DeepSeek-OCR does *not* have this restriction.
+Multi-image requests fall back to non-crop mode: crop ("gundam") mode is only
+used for single-image input. DeepSeek-OCR does *not* have this restriction.
+
+Because that fallback makes the per-image processor output depend on *how many*
+images are in the request, it breaks the assumption behind vLLM's per-item
+multimodal processing cache (``MultiModalProcessorOnlyCache``). We handle this
+the same way ``DeepseekVL2MultiModalProcessor`` does: only the single-image case
+(which always crops) is cached, while multi-image requests bypass the cache and
+are recomputed fresh -- see ``_cached_apply_hf_processor`` below. This keeps the
+processing cache consistent (verified by ``test_processing_correctness``).
 """
 
 import math
@@ -70,6 +77,9 @@ from vllm.multimodal.parse import (
     MultiModalDataItems,
 )
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate
+from vllm.multimodal.processing.context import TimingContext
+from vllm.multimodal.processing.inputs import ProcessorInputs
+from vllm.multimodal.processing.processor import MultiModalProcessingInfo
 from vllm.transformers_utils.processors.deepseek_ocr import (
     BASE_SIZE,
     CROP_MODE,
@@ -97,8 +107,7 @@ _UNLIMITED_OCR_MAX_CROPS = 32
 class UnlimitedOCRProcessingInfo(DeepseekOCRProcessingInfo):
     """ProcessingInfo for Unlimited-OCR: same as DeepSeek-OCR but with
     max_crops=32 instead of 6.  The higher crop count allows tiling very large
-    document pages into up to 32 640×640 patches, matching the SGLang reference
-    implementation (dynamic_preprocess max_num=32).
+    document pages into up to 32 640×640 patches (dynamic_preprocess max_num=32).
     """
 
     def get_hf_config(self):
@@ -129,8 +138,8 @@ class UnlimitedOCRProcessingInfo(DeepseekOCRProcessingInfo):
         patch_size = 16
         downsample_ratio = 4
 
-        # Use the caller-supplied `cropping` flag (multi-image callers pass
-        # cropping=False to match the fallback in tokenize_with_images).
+        # Honour the caller-supplied `cropping` flag: multi-image callers pass
+        # cropping=False to match UnlimitedOCRProcessor.tokenize_with_images.
         if cropping:
             if image_width <= IMAGE_SIZE and image_height <= IMAGE_SIZE:
                 crop_ratio = [1, 1]
@@ -166,11 +175,13 @@ class UnlimitedOCRProcessingInfo(DeepseekOCRProcessingInfo):
 class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
     """Multimodal processor for Unlimited-OCR.
 
-    Overrides ``_get_prompt_updates`` to disable crop mode for multi-image
-    requests, keeping the token count consistent with the guard added to
-    ``UnlimitedOCRProcessor.tokenize_with_images``.
+    Disables crop mode for multi-image requests (to stay consistent with
+    ``UnlimitedOCRProcessor.tokenize_with_images``), and -- since that makes the
+    per-image output depend on the request's image count -- bypasses the
+    per-item processing cache for multi-image requests, exactly like
+    ``DeepseekVL2MultiModalProcessor``.
 
-    DeepSeek-OCR does *not* apply this restriction.
+    DeepSeek-OCR does *not* apply either of these.
     """
 
     def _get_prompt_updates(
@@ -194,7 +205,7 @@ class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
             else:
                 size = images.get_image_size(item_idx)
 
-                # Disable crop mode for multi-image input to match SGLang.
+                # Disable crop mode for multi-image input.
                 # UnlimitedOCRProcessor.tokenize_with_images applies the same
                 # fallback, so both paths must agree on the effective crop flag.
                 effective_cropping = CROP_MODE and len(images) == 1
@@ -213,6 +224,20 @@ class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
                 replacement=get_replacement_unlimited_ocr,
             )
         ]
+
+    def _cached_apply_hf_processor(
+        self,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
+        # The processor logic differs for single-image (crop) vs multi-image
+        # (no crop) requests. The processing cache assumes per-item output is
+        # invariant of how many images are passed per prompt, so we only cache
+        # the single-image case and recompute multi-image requests fresh.
+        if inputs.mm_data_items.get_count("image", strict=False) > 1:
+            return self._apply_hf_processor(inputs, timing_ctx)
+
+        return super()._cached_apply_hf_processor(inputs, timing_ctx)
 
 
 @MULTIMODAL_REGISTRY.register_processor(
