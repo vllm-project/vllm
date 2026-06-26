@@ -299,23 +299,32 @@ class LoRAModelManager:
         """Move LoRA into a GPU buffer to be used in the forward pass."""
         if lora_id in self._active_adapters:
             return False
-        first_free_slot = next(
+        index = next(
             (
-                (i, lora_id)
-                for i, lora_id in enumerate(self.lora_index_to_id)
-                if lora_id is None
+                i
+                for i, active_lora_id in enumerate(self.lora_index_to_id)
+                if active_lora_id is None
             ),
             None,
         )
-        if first_free_slot is None:
+        if index is None:
             raise ValueError("No free lora slots")
-        index, _ = first_free_slot
-        self._active_adapters[lora_id] = None
         lora_model = self._registered_adapters[lora_id]
         logger.debug(
             "Activating LoRA. int id: %d, slot index: %d", lora_model.id, index
         )
+
+        try:
+            self._load_adapter_into_slot(index, lora_model)
+        except Exception:
+            self._reset_lora_slot(index)
+            raise
+
         self.lora_index_to_id[index] = lora_model.id
+        self._active_adapters[lora_id] = None
+        return True
+
+    def _load_adapter_into_slot(self, index: int, lora_model: LoRAModel) -> None:
         for module_name, module in self.modules.items():
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
             if not module_lora:
@@ -331,8 +340,9 @@ class LoRAModelManager:
                 module_lora.lora_b,
                 lora_magnitude_vector=module_lora.lora_magnitude_vector,
             )
-            logger.debug("Successfully loaded LoRA weights for module %s.", module_name)
-        return True
+            logger.debug(
+                "Successfully loaded LoRA weights for module %s.", module_name
+            )
 
     def _reset_lora_slot(self, index: int) -> None:
         for module in self.modules.values():

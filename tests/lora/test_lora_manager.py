@@ -484,6 +484,43 @@ def test_lora_model_manager_deactivate_resets_dora_slot(
 
 
 @pytest.mark.parametrize("device", DEVICES)
+def test_lora_model_manager_activation_failure_resets_dora_slot(
+    default_vllm_config, dist_init, dummy_model, device
+):
+    model = dummy_model
+    model_lora = create_dora(1, model, ["dense1", "lm_head"], device=device)
+    manager = LoRAModelManager(
+        model,
+        2,
+        2,
+        2,
+        LoRAConfig(
+            max_lora_rank=8, max_cpu_loras=2, max_loras=2, lora_dtype=DEFAULT_DTYPE
+        ),
+        device=device,
+    )
+    lora_layer = manager.model.get_submodule("dense1")
+    assert isinstance(lora_layer, ColumnParallelLinearWithLoRA)
+
+    assert manager.add_adapter(model_lora)
+    with pytest.raises(NotImplementedError, match="DoRA is not supported"):
+        manager.activate_adapter(1)
+
+    assert manager.lora_index_to_id == [None, None]
+    assert not lora_layer.dora_enabled_stacked[0]
+    assert not lora_layer._dora_active_slots
+    torch.testing.assert_close(
+        lora_layer.dora_scale_stacked[0],
+        torch.ones_like(lora_layer.dora_scale_stacked[0]),
+    )
+
+    clean_lora = create_lora(2, model, ["dense1"], device=device)
+    assert manager.add_adapter(clean_lora)
+    assert manager.activate_adapter(2)
+    assert manager.lora_index_to_id[0] == 2
+
+
+@pytest.mark.parametrize("device", DEVICES)
 def test_lora_lru_cache_model_manager(
     default_vllm_config, dist_init, dummy_model, device
 ):
