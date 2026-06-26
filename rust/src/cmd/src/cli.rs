@@ -326,19 +326,6 @@ impl SharedRuntimeArgs {
         }
     }
 
-    /// Apply fallback logic for `http_timeout_keep_alive` from env variables.
-    fn apply_env_keep_alive_fallback(&mut self) -> Result<(), String> {
-        if self.http_timeout_keep_alive.is_none()
-            && let Ok(value) = std::env::var("VLLM_HTTP_TIMEOUT_KEEP_ALIVE")
-        {
-            let secs = value
-                .parse::<u64>()
-                .map_err(|e| format!("invalid VLLM_HTTP_TIMEOUT_KEEP_ALIVE {value:?}: {e}"))?;
-            self.http_timeout_keep_alive = Some(secs);
-        }
-        Ok(())
-    }
-
     /// Build the OpenAI-server config for the Python-bootstrap worker contract.
     ///
     /// The resulting config binds the Python-supplied transport addresses and
@@ -500,7 +487,6 @@ fn parse_runtime_args_json(value: &str) -> Result<SharedRuntimeArgs, String> {
     // --args-json is parsed with serde, so clap's env support does not run for
     // the Python-supervised frontend path.
     args.apply_env_api_key_fallback();
-    args.apply_env_keep_alive_fallback()?;
     args.unsupported.check()?;
     Ok(args)
 }

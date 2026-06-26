@@ -11,7 +11,7 @@ path = "src/main.rs"
 [features]
 default = []
 native-tls-vendored = ["dep:native-tls-vendored"]
-vendored = ["native-tls-vendored", "vllm-server/vendored"]
+vendored = ["native-tls-vendored"]
 
 [dependencies]
 anyhow.workspace = true
