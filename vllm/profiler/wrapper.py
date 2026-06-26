@@ -286,6 +286,14 @@ class TorchProfilerWrapper(WorkerProfiler):
                 print(table, file=f)
 
     @override
+    def shutdown(self) -> None:
+        super().shutdown()
+        # Clean up an observer that was registered but never started (cleanup()
+        # is idempotent, so this is safe after a normal stop too).
+        if self.execution_trace_observer is not None:
+            self.execution_trace_observer.cleanup()
+
+    @override
     def _start(self) -> None:
         self.profiler.start()
 
