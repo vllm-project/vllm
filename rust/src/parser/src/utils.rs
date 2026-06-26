@@ -290,8 +290,22 @@ pub fn take_json_object(
     Ok(text.len())
 }
 
-/// Parse a JSON string literal.
-pub fn json_str(input: &mut Partial<&str>) -> ModalResult<String> {
+/// Streaming lexical state for a JSON string literal.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JsonStringScanState {
+    scanned_len: usize,
+    escape: bool,
+}
+
+/// Parse a raw JSON string literal, resuming from the last scanned byte.
+///
+/// The returned length covers the quoted JSON string. This only scans for the
+/// string boundary; callers that need the decoded value should pass the raw
+/// slice to [`decode_json_str`].
+pub fn take_json_string(
+    input: &mut Partial<&str>,
+    state: &mut JsonStringScanState,
+) -> ModalResult<usize> {
     let text = **input;
     if text.is_empty() {
         return incomplete();
@@ -305,35 +319,56 @@ pub fn json_str(input: &mut Partial<&str>) -> ModalResult<String> {
         ));
     }
 
-    let mut escape = false;
-    let mut index = 1;
+    let mut index = if state.scanned_len == 0 {
+        1
+    } else if state.scanned_len <= bytes.len() {
+        state.scanned_len
+    } else {
+        return incomplete();
+    };
+
     while index < bytes.len() {
         let byte = bytes[index];
         index += 1;
 
-        if escape {
-            escape = false;
+        if state.escape {
+            state.escape = false;
             continue;
         }
 
         match byte {
-            b'\\' => escape = true,
+            b'\\' => state.escape = true,
             b'"' => {
-                let raw = &text[..index];
-                let value = serde_json::from_str::<String>(raw).map_err(|_| {
-                    json_scan_error(
-                        "JSON string",
-                        StrContextValue::Description("valid JSON string"),
-                    )
-                })?;
                 input.next_slice(index);
-                return Ok(value);
+                return Ok(index);
             }
             _ => {}
         }
     }
 
+    state.scanned_len = text.len();
     incomplete()
+}
+
+/// Parse a JSON string literal.
+pub fn json_str(input: &mut Partial<&str>) -> ModalResult<String> {
+    let text = **input;
+    let checkpoint = input.checkpoint();
+    let mut state = JsonStringScanState::default();
+    let len = take_json_string(input, &mut state)?;
+    decode_json_str(&text[..len]).inspect_err(|_| {
+        input.reset(&checkpoint);
+    })
+}
+
+/// Decode a complete JSON string literal.
+pub fn decode_json_str(raw: &str) -> ModalResult<String> {
+    serde_json::from_str::<String>(raw).map_err(|_| {
+        json_scan_error(
+            "JSON string",
+            StrContextValue::Description("valid JSON string"),
+        )
+    })
 }
 
 fn json_scan_error(label: &'static str, expected: StrContextValue) -> ErrMode<ContextError> {
@@ -388,8 +423,8 @@ mod tests {
     use winnow::stream::{Offset, Partial, Stream};
 
     use super::{
-        JsonObjectScanState, MarkerScanState, json_str, partial_prefix_len, safe_text_len,
-        safe_text_len_mul, take_json_object, take_until_marker,
+        JsonObjectScanState, JsonStringScanState, MarkerScanState, json_str, partial_prefix_len,
+        safe_text_len, safe_text_len_mul, take_json_object, take_json_string, take_until_marker,
     };
 
     #[test]
@@ -711,6 +746,71 @@ mod tests {
         expect![[r#"
             invalid JSON object argument
             expected nested arrays to close before the top-level object"#]]
+        .assert_eq(&error.to_string());
+    }
+
+    #[test]
+    fn take_json_string_consumes_complete_string() {
+        let mut state = JsonStringScanState::default();
+        let mut input = Partial::new(r#""say_\"hi\u0021" rest"#);
+        let checkpoint = input.checkpoint();
+
+        let len = take_json_string(&mut input, &mut state).unwrap();
+
+        assert_eq!(len, r#""say_\"hi\u0021""#.len());
+        assert_eq!(input.offset_from(&checkpoint), len);
+        assert_eq!(*input, " rest");
+    }
+
+    #[test]
+    fn take_json_string_resumes_after_incomplete_input() {
+        let mut state = JsonStringScanState::default();
+        let mut input = Partial::new(r#""{\"data\":\"partial"#);
+        let checkpoint = input.checkpoint();
+
+        let error = take_json_string(&mut input, &mut state).unwrap_err();
+
+        assert!(matches!(error, ErrMode::Incomplete(_)));
+        assert_eq!(input.offset_from(&checkpoint), 0);
+        assert_eq!(state.scanned_len, r#""{\"data\":\"partial"#.len());
+
+        let mut input = Partial::new(r#""{\"data\":\"partial string\"}" tail"#);
+        let len = take_json_string(&mut input, &mut state).unwrap();
+
+        assert_eq!(len, r#""{\"data\":\"partial string\"}""#.len());
+        assert_eq!(*input, " tail");
+    }
+
+    #[test]
+    fn take_json_string_tracks_escape_across_chunks() {
+        let mut state = JsonStringScanState::default();
+        let mut input = Partial::new(r#""abc\"#);
+
+        let error = take_json_string(&mut input, &mut state).unwrap_err();
+
+        assert!(matches!(error, ErrMode::Incomplete(_)));
+        assert!(state.escape);
+
+        let mut input = Partial::new(r#""abc\"def" tail"#);
+        let len = take_json_string(&mut input, &mut state).unwrap();
+
+        assert_eq!(len, r#""abc\"def""#.len());
+        assert_eq!(*input, " tail");
+    }
+
+    #[test]
+    fn take_json_string_rejects_non_string_start() {
+        let mut state = JsonStringScanState::default();
+        let mut input = Partial::new("42");
+
+        let error = take_json_string(&mut input, &mut state).unwrap_err();
+
+        let ErrMode::Cut(error) = error else {
+            panic!("expected cut error");
+        };
+        expect![[r#"
+            invalid JSON string
+            expected `"`"#]]
         .assert_eq(&error.to_string());
     }
 
