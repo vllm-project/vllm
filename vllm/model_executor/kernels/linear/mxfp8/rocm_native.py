@@ -76,53 +76,68 @@ def _mxfp8_linear_kernel(
 
     o_ptrs = out_ptr + offs_m[:, None] * stride_om + offs_n[None, :] * stride_on
     tl.store(
-        o_ptrs, acc.to(out_ptr.dtype.element_ty), mask=m_mask[:, None] & n_mask[None, :]
+        o_ptrs, acc.to(out_ptr.dtype.element_ty),
+        mask=m_mask[:, None] & n_mask[None, :])
+
+
+
+# Tuned launch tiles for gfx950 (CDNA4) at MiniMax-M3 MTP decode shapes.
+# Each table maps (M_upper_bound, (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages)).
+# Decode path (MTP EAGLE3, num_spec=3, conc=32): verify M≈128, draft M≈32.
+# K=6144 skinny-N projections (qkv/gate_up) favour BLOCK_N=32; wider shapes use
+# BLOCK_N=64/128. Prefill (M≥1024) uses the wide 128×256 tile for efficiency.
+# sentinel None in the last row catches all remaining M.
+_TILES: dict[tuple[int, int], list[tuple[int | None, tuple[int, ...]]]] = {
+    (6144, 2304): [(48,  (16, 32, 256, 2, 2)),   # qkv_proj decode
+                   (80,  (64, 32, 256, 2, 2)),
+                   (112, (32, 32, 512, 2, 2)),
+                   (256, (64, 32, 512, 4, 2))],
+    (6144, 1536): [(48,  (32, 32, 256, 4, 2)),   # mlp gate_up decode
+                   (80,  (32, 32, 256, 2, 2)),
+                   (112, (16, 32, 512, 2, 2)),
+                   (256, (64, 32, 256, 2, 2))],
+}
+_GENERIC_TILES: list[tuple[int | None, tuple[int, ...]]] = [
+    (64,   (32,  64, 256, 4, 2)),
+    (128,  (64,  64, 256, 4, 2)),
+    (1023, (64, 128, 256, 8, 2)),
+    (None, (128, 256, 256, 8, 2)),   # prefill: wide tile for long sequences
+]
+
+
+def _pick_tile(
+    table: list[tuple[int | None, tuple[int, ...]]], M: int
+) -> tuple[int, ...]:
+    return next(cfg for ub, cfg in table if ub is None or M <= ub)
+
+
+def _vllm_dot_scaled_kernel(x_q, x_scale, w, w_scale, out_dtype):
+    M, K = x_q.shape
+    N = w.shape[0]
+    out = torch.empty((M, N), dtype=out_dtype, device=x_q.device)
+
+    table = _TILES.get((K, N), _GENERIC_TILES)
+    BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARPS, NUM_STAGES = _pick_tile(table, M)
+
+    grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
+    _mxfp8_linear_kernel[grid](
+        x_q, x_scale, w, w_scale, out, M, N, K,
+        x_q.stride(0), x_q.stride(1), x_scale.stride(0), x_scale.stride(1),
+        w.stride(0), w.stride(1), w_scale.stride(0), w_scale.stride(1),
+        out.stride(0), out.stride(1),
+        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
+        num_warps=NUM_WARPS, num_stages=NUM_STAGES,
     )
+    return out
 
 
 def _mxfp8_dot_scaled_linear(
-    x: torch.Tensor,  # [M, K] bf16/fp16
-    w: torch.Tensor,  # [N, K] fp8 e4m3
-    w_scale: torch.Tensor,  # [N, K//32] uint8 (E8M0)
+    x: torch.Tensor,
+    w: torch.Tensor,
+    w_scale: torch.Tensor,
 ) -> torch.Tensor:
-    M, K = x.shape
-    N = w.shape[0]
     x_q, x_scale = mxfp8_e4m3_quantize(x)
-    out = torch.empty((M, N), dtype=x.dtype, device=x.device)
-    # Regime-gated launch tiles for gfx950, tuned at MiniMax-M3 shapes:
-    # for example, 8k/1k, 1k/1k
-    if M >= 1024:
-        BLOCK_M, BLOCK_N, num_warps, num_stages = 128, 256, 8, 2
-    else:
-        BLOCK_M, BLOCK_N, num_warps, num_stages = 64, 64, 4, 2
-    BLOCK_K = 128
-    grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
-    _mxfp8_linear_kernel[grid](
-        x_q,
-        x_scale,
-        w,
-        w_scale,
-        out,
-        M,
-        N,
-        K,
-        x_q.stride(0),
-        x_q.stride(1),
-        x_scale.stride(0),
-        x_scale.stride(1),
-        w.stride(0),
-        w.stride(1),
-        w_scale.stride(0),
-        w_scale.stride(1),
-        out.stride(0),
-        out.stride(1),
-        BLOCK_M=BLOCK_M,
-        BLOCK_N=BLOCK_N,
-        BLOCK_K=BLOCK_K,
-        num_warps=num_warps,
-        num_stages=num_stages,
-    )
-    return out
+    return _vllm_dot_scaled_kernel(x_q, x_scale, w, w_scale, x.dtype)
 
 
 class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
@@ -162,8 +177,7 @@ class RocmDotScaledMxfp8LinearKernel(Mxfp8LinearKernel):
         if layer.weight_scale.dtype != MXFP8_SCALE_DTYPE:
             raise ValueError(
                 f"Expected {MXFP8_SCALE_DTYPE} weight_scale, got "
-                f"{layer.weight_scale.dtype}."
-            )
+                f"{layer.weight_scale.dtype}.")
         out_shape = (*x.shape[:-1], layer.weight.shape[0])
         x2d = x.reshape(-1, x.shape[-1])
         if x2d.shape[-1] % 128 == 0:

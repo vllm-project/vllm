@@ -7,8 +7,8 @@ The expert GEMMs consume the FP8 E4M3 weights and their E8M0 block scales
 directly (no dequant-to-BF16), and activations are MXFP8-quantized per token.
 On CDNA4 ``dot_scaled`` maps to the native MX matrix-core ops; on other archs
 Triton upcasts to BF16 (so this stays correct, just not faster) — but the
-oracle only selects this path on gfx950 and routes everything else to the
-BF16 ``Mxfp8EmulationTritonExperts`` fallback.
+kernel selector only picks this path on gfx950 and routes everything else to
+the BF16 ``Mxfp8EmulationTritonExperts`` fallback.
 
 Structure mirrors vLLM's ``fused_moe_kernel``: tokens are sorted by expert
 (``moe_align_block_size``); each program computes a ``[BLOCK_M, BLOCK_N]`` tile
@@ -126,10 +126,10 @@ def _mxfp8_grouped_gemm_kernel(
 
 
 def _grouped_gemm_mxfp8(
-    a_q: torch.Tensor,  # [M, K] fp8 e4m3
-    a_scale: torch.Tensor,  # [M, K//32] uint8 (E8M0)
-    w: torch.Tensor,  # [E, N, K] fp8 e4m3
-    w_scale: torch.Tensor,  # [E, N, K//32] uint8 (E8M0)
+    a_q: torch.Tensor,        # [M, K] fp8 e4m3
+    a_scale: torch.Tensor,    # [M, K//32] uint8 (E8M0)
+    w: torch.Tensor,          # [E, N, K] fp8 e4m3
+    w_scale: torch.Tensor,    # [E, N, K//32] uint8 (E8M0)
     sorted_token_ids: torch.Tensor,
     expert_ids: torch.Tensor,
     num_tokens_post_padded: torch.Tensor,
@@ -140,9 +140,6 @@ def _grouped_gemm_mxfp8(
     a_div: int,
     mul_weight_by: torch.Tensor | None = None,
     expert_map: torch.Tensor | None = None,
-    block_n: int = 128,
-    num_warps: int = 8,
-    num_stages: int = 2,
 ) -> torch.Tensor:
     M_routed = num_valid_tokens
     E, N, K = w.shape
@@ -152,8 +149,34 @@ def _grouped_gemm_mxfp8(
     # written — zero them so the downstream reduction ignores their garbage.
     alloc = torch.zeros if expert_map is not None else torch.empty
     out = alloc((M_routed, N), dtype=out_dtype, device=a_q.device)
-    BLOCK_K = 128
-    grid = (triton.cdiv(sorted_token_ids.shape[0], block_m), triton.cdiv(N, block_n))
+
+    # Tuned launch tiles for gfx950 at MiniMax-M3 MTP decode shapes (conc=32,
+    # T=128 tokens, E=128 experts, top-4 routing, block_m=16).
+    # GEMM1 (gate_up, K=6144->N=1536): BLOCK_N=32 + BLOCK_K=512 + waves=4 wins.
+    # GEMM2 (down, K=768->N=6144): BLOCK_N=64 + BLOCK_K=256 wins.
+    # Prefill (block_m=64) keeps the wider 128x256 tile.
+    WAVES = 2
+    if block_m <= 16 and K == 6144 and N == 1536:       # GEMM1 gate_up (decode)
+        BLOCK_N, BLOCK_K, NUM_WARPS, WAVES = 32, 512, 4, 4
+    elif block_m <= 16 and K == 768 and N == 6144:      # GEMM2 down (decode)
+        BLOCK_N, BLOCK_K, NUM_WARPS, WAVES = 64, 256, 4, 0
+    else:
+        BLOCK_N = 128
+        BLOCK_K = 256
+        NUM_WARPS = 4 if block_m <= 16 else 8
+
+    grid = (triton.cdiv(sorted_token_ids.shape[0], block_m), triton.cdiv(N, BLOCK_N))
+    _launch_kw: dict = dict(
+        A_DIV=a_div,
+        MUL_WEIGHT=mul_weight_by is not None,
+        BLOCK_M=block_m,
+        BLOCK_N=BLOCK_N,
+        BLOCK_K=BLOCK_K,
+        num_warps=NUM_WARPS,
+        num_stages=2,
+    )
+    if WAVES > 0:
+        _launch_kw["waves_per_eu"] = WAVES
     _mxfp8_grouped_gemm_kernel[grid](
         a_q,
         a_scale,
@@ -180,40 +203,19 @@ def _grouped_gemm_mxfp8(
         w_scale.stride(2),
         out.stride(0),
         out.stride(1),
-        A_DIV=a_div,
-        MUL_WEIGHT=mul_weight_by is not None,
-        BLOCK_M=block_m,
-        BLOCK_N=block_n,
-        BLOCK_K=BLOCK_K,
-        num_warps=num_warps,
-        num_stages=num_stages,
+        **_launch_kw,
     )
     return out
 
 
-# Tuned native-MXFP8 launch tiles for gfx950 (CDNA4) at MiniMax-M3 MoE shapes.
-# For example, 8k/1k, 1k/1k cases.
-
-_MXFP8_PREFILL_TILES = dict(block_m=128, block_n=256, num_warps=8, num_stages=2)
-_MXFP8_DECODE_TILES = dict(block_m=64, block_n=64, num_warps=4, num_stages=2)
-_MXFP8_PREFILL_MIN_TOKENS = 1024
-
-
-def _mxfp8_moe_tiles(num_tokens: int) -> dict:
-    """Pick grouped-GEMM launch tiles by regime (token count)."""
-    if num_tokens >= _MXFP8_PREFILL_MIN_TOKENS:
-        return _MXFP8_PREFILL_TILES
-    return _MXFP8_DECODE_TILES
-
-
 def fused_moe_mxfp8_native(
     hidden_states: torch.Tensor,  # [T, H] bf16
-    w13: torch.Tensor,  # [E, 2I, H] fp8
-    w13_scale: torch.Tensor,  # [E, 2I, H//32] uint8
-    w2: torch.Tensor,  # [E, H, I] fp8
-    w2_scale: torch.Tensor,  # [E, H, I//32] uint8
-    topk_weights: torch.Tensor,  # [T, top_k]
-    topk_ids: torch.Tensor,  # [T, top_k] (global expert ids)
+    w13: torch.Tensor,            # [E, 2I, H] fp8
+    w13_scale: torch.Tensor,      # [E, 2I, H//32] uint8
+    w2: torch.Tensor,             # [E, H, I] fp8
+    w2_scale: torch.Tensor,       # [E, H, I//32] uint8
+    topk_weights: torch.Tensor,   # [T, top_k]
+    topk_ids: torch.Tensor,       # [T, top_k] (global expert ids)
     *,
     alpha: float,
     beta: float,
@@ -225,8 +227,11 @@ def fused_moe_mxfp8_native(
     top_k = topk_ids.shape[1]
     M = T * top_k
 
-    tiles = _mxfp8_moe_tiles(T)
-    block_m = tiles["block_m"]
+    # Adaptive block_m: at decode (small M), tokens_per_expert ≈ 1-2 and
+    # block_m=64 wastes >95% of tile rows.  block_m=16 cuts the sorted-id /
+    # grid overhead significantly.  Prefill keeps 64 for compute efficiency.
+    tokens_per_expert = max(1, M // max(1, global_num_experts))
+    block_m = 16 if tokens_per_expert <= 16 else 64
     sorted_ids, expert_ids, num_post = moe_align_block_size(
         topk_ids,
         block_m,
@@ -235,7 +240,7 @@ def fused_moe_mxfp8_native(
         ignore_invalid_experts=expert_map is not None,
     )
 
-    # GEMM1: x (mxfp8) @ w13^T -> [M, 2I]
+    # GEMM1: hidden_states (mxfp8) @ w13^T -> [M, 2I]
     a_q, a_s = mxfp8_e4m3_quantize(hidden_states)
     g1 = _grouped_gemm_mxfp8(
         a_q,
@@ -251,18 +256,10 @@ def fused_moe_mxfp8_native(
         hidden_states.dtype,
         a_div=top_k,
         expert_map=expert_map,
-        block_n=tiles["block_n"],
-        num_warps=tiles["num_warps"],
-        num_stages=tiles["num_stages"],
     )  # [M, 2I]
 
-    # SwiGLU-OAI (split layout: gate=g1[:, :I], up=g1[:, I:]) FUSED with the
-    # GEMM2 MXFP8 activation-quant in one fp32 Triton pass — no bf16 ``act``
-    # round-trip to HBM. Bit-exact vs the unfused swiglu+quant chain on measured
-    # MoE shapes, and ~1.2-1.9x faster on that step in isolation. (Not the #22
-    # ``silu_and_mul_with_clamp`` op: it rounds intermediates to bf16, rel ~3e-3.)
-    # Lazy import: the amd.ops package pulls in the minimax_m3 platform dispatch,
-    # only resolvable after the model module finishes loading.
+    # SwiGLU-OAI activation (split layout: gate=g1[:, :I], up=g1[:, I:])
+    # followed by MXFP8 quantization before GEMM2.
     from vllm.models.minimax_m3.amd.ops import swiglu_oai_quantize_mxfp8
 
     # GEMM2: act (mxfp8) @ w2^T -> [M, H], weighted by topk_weights, then reduce.
@@ -282,9 +279,6 @@ def fused_moe_mxfp8_native(
         a_div=1,
         mul_weight_by=topk_weights.reshape(-1).to(torch.float32),
         expert_map=expert_map,
-        block_n=tiles["block_n"],
-        num_warps=tiles["num_warps"],
-        num_stages=tiles["num_stages"],
     )  # [M, H] == [T*top_k, H]
 
     return g2.view(T, top_k, H).sum(dim=1).to(hidden_states.dtype)
