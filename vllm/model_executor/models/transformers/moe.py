@@ -180,7 +180,6 @@ class MoEMixin(MixtureOfExperts):
             # (ckpt_gate_proj_name, ckpt_down_proj_name, ckpt_up_proj_name)
             ("gate_proj", "down_proj", "up_proj"),  # Most common MoE style
             ("w1", "w2", "w3"),  # Granite, Mixtral, Phi MoE style
-            ("linear", "linear_1", "linear_v"),  # Grok1 style
         ]
         num_experts = self.model_config.get_num_experts()
         num_redundant_experts = self.parallel_config.eplb_config.num_redundant_experts
@@ -238,8 +237,6 @@ class MoEMixin(MixtureOfExperts):
         wrapped_arch = self.config.architectures[0].lower()
         if "gptoss" in wrapped_arch:
             activation = "swigluoai"
-        elif "grok1" in wrapped_arch:
-            activation = "gelu"
 
         # Expert mapping for `AutoWeightsLoader`
         expert_mapping = self.get_expert_mapping()

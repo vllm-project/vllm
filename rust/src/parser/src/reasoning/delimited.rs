@@ -144,20 +144,20 @@ impl DelimitedReasoningParser {
 }
 
 /// Determine the reasoning state implied by the last prompt boundary, if any.
-fn last_reasoning_boundary(
+pub(crate) fn last_reasoning_boundary(
     prompt_token_ids: &[u32],
     start_token_id: u32,
     end_token_id: u32,
     tokenizer: &dyn Tokenizer,
 ) -> Option<bool> {
-    for token_id in prompt_token_ids.iter().rev() {
-        if *token_id == start_token_id {
+    for token_id in prompt_token_ids.iter().rev().copied() {
+        if token_id == start_token_id {
             return Some(true);
         }
-        if *token_id == end_token_id {
+        if token_id == end_token_id {
             return Some(false);
         }
-        if tokenizer.is_special_id(*token_id) {
+        if tokenizer.is_special_id(token_id) {
             return None;
         }
     }
