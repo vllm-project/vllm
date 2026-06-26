@@ -7,13 +7,22 @@ Abstract interfaces and data types for the secondary tiering layer.
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from vllm.v1.kv_offload.base import OffloadKey, ReqContext, RequestOffloadingContext
+from vllm.v1.kv_offload.base import (
+    LookupResult,
+    OffloadingMetricMetadata,
+    OffloadKey,
+    ReqContext,
+    RequestOffloadingContext,
+)
 
 if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+        OffloadingConnectorStats,
+    )
     from vllm.v1.kv_offload.base import OffloadingSpec
 
 # Type alias for job IDs used in async transfer tracking
@@ -71,7 +80,7 @@ class SecondaryTierManager(ABC):
         self.tier_type = tier_type
 
     @abstractmethod
-    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         """
         Check whether a block exists in this secondary tier.
 
@@ -80,9 +89,9 @@ class SecondaryTierManager(ABC):
             req_context: per-request context (e.g. kv_transfer_params).
 
         Returns:
-            True if the block is present and ready,
-            False if not found,
-            or None if the block is being transferred (retry later).
+            HIT if the block is present and ready,
+            MISS if not found,
+            or RETRY if the block is being transferred (retry later).
         """
         pass
 
@@ -188,6 +197,13 @@ class SecondaryTierManager(ABC):
         """
         Called when a request has finished.
 
+        By the time this is called, all per-request calls for this request
+        (submit_store, submit_load, touch) have already been issued, and none
+        will follow. Note this does NOT imply the tier's transfers have
+        completed: jobs already submitted may still be in flight and will
+        report via get_finished_jobs(). This is the right place to release
+        per-request bookkeeping.
+
         Args:
             req_context: per-request context.
         """
@@ -221,3 +237,14 @@ class SecondaryTierManager(ABC):
     def shutdown(self) -> None:
         """Release resources held by this tier (threads, connections, etc.)."""
         return
+
+    @classmethod
+    def build_metric_definitions(
+        cls, extra_config: dict[str, Any]
+    ) -> dict[str, OffloadingMetricMetadata]:
+        """Return Prometheus metric definitions emitted by this tier."""
+        return {}
+
+    def get_stats(self) -> "OffloadingConnectorStats | None":
+        """Return and reset metric observations collected by this tier."""
+        return None

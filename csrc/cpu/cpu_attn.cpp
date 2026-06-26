@@ -11,6 +11,17 @@ static inline cpu_attention::Fp8KVCacheDataType parse_fp8_kv_dtype(
   return cpu_attention::Fp8KVCacheDataType::kAuto;
 }
 
+bool cpu_attn_has_isa(const std::string& isa) {
+  if (isa == "rvv") {
+#if defined(__riscv) && defined(__riscv_v_min_vlen) && __riscv_v_min_vlen == 128
+    return true;
+#else
+    return false;
+#endif
+  }
+  return false;
+}
+
 torch::Tensor get_scheduler_metadata(
     const int64_t num_req, const int64_t num_heads_q,
     const int64_t num_heads_kv, const int64_t head_dim,
