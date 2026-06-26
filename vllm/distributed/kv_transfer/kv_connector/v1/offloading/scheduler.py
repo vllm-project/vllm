@@ -249,7 +249,7 @@ class RequestOffloadState:
     transfer_jobs: set[int] = field(default_factory=set)
     # time.monotonic() of this request's first deferred offload lookup;
     # None once consumed (observed) or while no lookup is pending.
-    first_lookup_time: float | None = None
+    deferred_lookup_start_time: float | None = None
 
     def __post_init__(self) -> None:
         self.group_states = tuple(
@@ -379,11 +379,13 @@ class OffloadingConnectorScheduler:
 
         self._events_tracker = OffloadingEventsTracker(spec.kv_events_config)
 
-    def _observe_lookup_async_delay(self, req_status: RequestOffloadState) -> None:
-        start_time = req_status.first_lookup_time
+    def _maybe_observe_lookup_async_delay(
+        self, req_status: RequestOffloadState
+    ) -> None:
+        start_time = req_status.deferred_lookup_start_time
         if start_time is None:
             return
-        req_status.first_lookup_time = None
+        req_status.deferred_lookup_start_time = None
         self._connector_stats.observe_histogram(
             _ConnectorMetricName.LOOKUP_ASYNC_DELAY,
             time.monotonic() - start_time,
@@ -706,10 +708,10 @@ class OffloadingConnectorScheduler:
                 time.monotonic() - lookup_start,
             )
             if num_hit_tokens is None:
-                if req_status.first_lookup_time is None:
-                    req_status.first_lookup_time = lookup_start
+                if req_status.deferred_lookup_start_time is None:
+                    req_status.deferred_lookup_start_time = lookup_start
             else:
-                self._observe_lookup_async_delay(req_status)
+                self._maybe_observe_lookup_async_delay(req_status)
         req_status.update_num_hit_blocks(num_computed_tokens + (num_hit_tokens or 0))
 
         self._touch(req_status)
@@ -1179,10 +1181,10 @@ class OffloadingConnectorScheduler:
                 del self._req_status[job_status.req_id]
 
     def get_stats(self) -> OffloadingConnectorStats | None:
-        stats: OffloadingConnectorStats | None = (
-            self._connector_stats if not self._connector_stats.is_empty() else None
-        )
-        self._connector_stats = OffloadingConnectorStats()
+        stats: OffloadingConnectorStats | None = None
+        if not self._connector_stats.is_empty():
+            stats = self._connector_stats
+            self._connector_stats = OffloadingConnectorStats()
 
         manager_stats = self.manager.get_stats()
         if manager_stats is not None:
@@ -1220,7 +1222,7 @@ class OffloadingConnectorScheduler:
             return False, None
 
         self.manager.on_request_finished(req_status.req_context)
-        self._observe_lookup_async_delay(req_status)
+        self._maybe_observe_lookup_async_delay(req_status)
         if not req_status.transfer_jobs:
             # No in-flight jobs: no later complete_store()/complete_load() calls
             # need this request's state.
