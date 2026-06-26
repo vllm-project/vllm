@@ -423,6 +423,7 @@ class MoERunner(MoERunnerInterface):
         if (
             shared_output is not None
             and not self.moe_config.is_sequence_parallel
+            and not self.moe_config.skip_final_all_reduce
             and self._fused_output_is_reduced
         ):
             shared_output = tensor_model_parallel_all_reduce(shared_output)
@@ -445,6 +446,7 @@ class MoERunner(MoERunnerInterface):
         # - The MK already reduced the fused output itself.
         if (
             not self.moe_config.is_sequence_parallel
+            and not self.moe_config.skip_final_all_reduce
             and (self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1)
             and not self._fused_output_is_reduced
         ):
