@@ -29,7 +29,6 @@ __global__ void rms_norm_kernel(
   float variance = 0.0f;
   const scalar_t* input_row;
   const scalar_t* weight_row;
-  int64_t weight_row_off = 0;
   if constexpr (NUM_DIMS == 2) {
     // 2D for layernorm normal case [batch_size, hidden]
     input_row = input + blockIdx.x * input_stride_d2;
