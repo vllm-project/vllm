@@ -117,6 +117,7 @@ if TYPE_CHECKING:
     VLLM_USE_OINK_OPS: bool = False
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
     VLLM_ROCM_USE_AITER: bool = False
+    VLLM_ROCM_USE_AITER_RDNA: bool = False
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
@@ -1129,6 +1130,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_ROCM_USE_AITER": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in ("true", "1")
+    ),
+    # Experimental opt-in to allow AITER on consumer RDNA GPUs (gfx10/11/12).
+    # AITER upstream only validates on CDNA (MI200/MI300); when this is set
+    # together with VLLM_ROCM_USE_AITER=1, vLLM unlocks the Triton-backed AITER
+    # paths (unified attention, rotary, Triton GEMM, RMSNorm fusions) on RDNA.
+    # CK / MFMA / HipBMM paths remain CDNA-only inside the per-feature gates.
+    "VLLM_ROCM_USE_AITER_RDNA": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_RDNA", "False").lower() in ("true", "1")
     ),
     # Whether to use aiter paged attention.
     # By default is disabled.
