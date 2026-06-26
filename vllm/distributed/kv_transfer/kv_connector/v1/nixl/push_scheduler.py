@@ -199,7 +199,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         # ReqMeta without a KeyError — the actual remote block IDs are
         # learned by P over the NIXL handshake at WRITE time.
         params["remote_block_ids"] = ()
-        self._reqs_need_recv[request.request_id] = (request, local_block_ids)
+        self._reqs_need_recv[request.request_id] = (request, local_block_ids, 0)
 
         # Mark as processed so a re-entry (e.g. preemption + reschedule)
         # doesn't re-stage the registration.
@@ -239,9 +239,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             # serving layer via abort_immediately. To keep P from
             # stranding the prefill blocks, we still register an empty
             # recv so the worker emits a notif that lets P free them.
-            # Seed remote_block_ids so add_new_req_to_recv won't KeyError.
-            params["remote_block_ids"] = ()
-            self._reqs_need_recv[request.request_id] = (request, [])
+            self._reqs_need_recv[request.request_id] = (request, [], 0)
             params["do_remote_prefill"] = False
             return False, None
 
@@ -288,7 +286,8 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             remote_host=self.side_channel_host,
             remote_port=self.side_channel_port,
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
-            pp_size=self.vllm_config.parallel_config.pipeline_parallel_size,
+            dcp_size=self.vllm_config.parallel_config.decode_context_parallel_size,
+            pcp_size=self.vllm_config.parallel_config.prefill_context_parallel_size,
             remote_num_tokens=remote_num_tokens,
         )
 
