@@ -184,6 +184,7 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
             w2_scale=w2_scale,
             w13_input_scale=w13_input_scale,
             w2_input_scale=w2_input_scale,
+            per_out_ch_quant=False,
         )
 
         replace_parameter(layer, "w13_weight", w13)

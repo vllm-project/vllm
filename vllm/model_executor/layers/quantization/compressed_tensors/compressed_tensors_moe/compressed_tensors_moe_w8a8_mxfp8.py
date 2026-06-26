@@ -124,6 +124,7 @@ class CompressedTensorsW8A8Mxfp8MoEMethod(CompressedTensorsMoEMethod):
             w2_scale=layer.w2_weight_scale,
             w13_input_scale=layer.w13_input_scale,
             w2_input_scale=layer.w2_input_scale,
+            per_out_ch_quant=False,
         )
 
         replace_parameter(layer, "w13_weight", w13)

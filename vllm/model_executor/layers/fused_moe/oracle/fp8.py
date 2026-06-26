@@ -400,6 +400,7 @@ def convert_to_fp8_moe_kernel_format(
     w2_scale: torch.Tensor,
     w13_input_scale: torch.Tensor | None,
     w2_input_scale: torch.Tensor | None,
+    per_out_ch_quant: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     block_quant = hasattr(layer, "weight_block_size")
     if fp8_backend in [Fp8MoeBackend.DEEPGEMM, Fp8MoeBackend.BATCHED_DEEPGEMM]:
@@ -447,7 +448,8 @@ def convert_to_fp8_moe_kernel_format(
             w13_input_scale=w13_input_scale,
             w2_scale=w2_scale,
             w2_input_scale=w2_input_scale,
-            is_trtllm=(fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM),
+            per_out_ch_quant=per_out_ch_quant,
+            is_trtllm=fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM,
         )
     elif fp8_backend == Fp8MoeBackend.XPU:
         from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
@@ -519,6 +521,26 @@ def make_fp8_moe_quant_config(
             gemm1_alpha=gemm1_alpha,
             gemm1_beta=gemm1_beta,
             gemm1_clamp_limit=swiglu_limit,
+        )
+
+    if (
+        fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM
+        and block_shape is None
+        and per_act_token_quant
+        and per_out_ch_quant
+    ):
+        # FlashInfer combines FC1 activation/gate scale tensors after gated
+        # row interleave. vLLM has no separate PTPC intermediate global scale,
+        # so both tensors carry the same dequant scales but remain distinct.
+        return fp8_w8a8_moe_quant_config(
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
+            g1_alphas=w1_scale.clone(),
+            block_shape=block_shape,
+            per_act_token_quant=per_act_token_quant,
+            per_out_ch_quant=per_out_ch_quant,
         )
 
     # Flashinfer CUTLASS per-tensor uses single dq scale

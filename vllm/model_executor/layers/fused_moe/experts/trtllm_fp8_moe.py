@@ -4,6 +4,7 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.config import get_current_vllm_config_or_none
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -22,13 +23,20 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
+    kFp8DynamicTokenSym,
     kFp8Static128BlockSym,
+    kFp8StaticChannelSym,
     kFp8StaticTensorSym,
     kMxfp8Dynamic,
     kMxfp8Static,
 )
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
+from vllm.utils.flashinfer import (
+    flashinfer_trtllm_fp8_per_channel_scale_routed_moe,
+    has_flashinfer_moe,
+    has_flashinfer_trtllm_fp8_per_channel_scale_routed_moe,
+    has_flashinfer_trtllm_fused_moe,
+)
 
 logger = init_logger(__name__)
 
@@ -52,6 +60,12 @@ class TrtLlmFp8ExpertsBase:
         self.hidden_dim = moe_config.hidden_dim
         self.local_num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
+        vllm_config = get_current_vllm_config_or_none()
+        self.max_capture_size = (
+            vllm_config.compilation_config.max_cudagraph_capture_size
+            if vllm_config is not None
+            else 1
+        )
 
         self.moe_config = moe_config
         self.quant_config = quant_config
@@ -65,9 +79,7 @@ class TrtLlmFp8ExpertsBase:
         """Supports only Blackwell-family GPUs."""
         p = current_platform
         return (
-            p.is_cuda()
-            and p.is_device_capability_family(100)
-            and has_flashinfer_trtllm_fused_moe()
+            p.is_cuda() and p.is_device_capability_family(100) and has_flashinfer_moe()
         )
 
     @staticmethod
@@ -77,8 +89,12 @@ class TrtLlmFp8ExpertsBase:
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        """Supports only SiLU and RELU^2 non-gated activation."""
-        return activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
+        """Supports gated SwiGLU variants and RELU^2 non-gated activation."""
+        return activation in [
+            MoEActivation.SILU,
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.RELU2_NO_MUL,
+        ]
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -107,12 +123,17 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        """Supports Fp8 block and MXFP8."""
+        """Supports Fp8 block, MXFP8, and FP8 PTPC."""
         SUPPORTED_W_A = [
             (kFp8Static128BlockSym, kFp8Dynamic128Sym),
             (kMxfp8Static, kMxfp8Dynamic),
         ]
-        return (weight_key, activation_key) in SUPPORTED_W_A
+        scheme = (weight_key, activation_key)
+        if scheme in SUPPORTED_W_A:
+            return has_flashinfer_trtllm_fused_moe()
+        if scheme == (kFp8StaticChannelSym, kFp8DynamicTokenSym):
+            return has_flashinfer_trtllm_fp8_per_channel_scale_routed_moe()
+        return False
 
     def moe_problem_size(
         self,
@@ -153,6 +174,63 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
 
+    def _apply_per_channel_scale(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        a1q_scale: torch.Tensor | None,
+        apply_router_weight_on_input: bool,
+    ) -> None:
+        assert self.w1_scale is not None and self.w2_scale is not None, (
+            "w1_scale and w2_scale must not be None for FlashInfer "
+            "FP8 per-token/per-channel MoE"
+        )
+        assert self.g1_alphas is not None, (
+            "g1_alphas must carry FC1 gate scales for FlashInfer "
+            "FP8 per-token/per-channel MoE"
+        )
+        assert a1q_scale is not None, (
+            "a1q_scale must not be None for FlashInfer FP8 per-token/per-channel MoE"
+        )
+
+        routing_method_type = self.moe_config.routing_method
+        if routing_method_type == RoutingMethodType.Llama4:
+            assert apply_router_weight_on_input
+        else:
+            assert not apply_router_weight_on_input
+        packed_topk_ids = trtllm_moe_pack_topk_ids_weights(topk_ids, topk_weights)
+
+        result = flashinfer_trtllm_fp8_per_channel_scale_routed_moe(
+            topk_ids=packed_topk_ids,
+            routing_bias=None,
+            hidden_states=hidden_states,
+            hidden_states_scale=a1q_scale.contiguous(),
+            gemm1_weights=w1.view(torch.float8_e4m3fn),
+            gemm1_per_channel_weight_scale=self.w1_scale,
+            gemm1_per_channel_gate_weight_scale=self.g1_alphas,
+            gemm2_weights=w2.view(torch.float8_e4m3fn),
+            gemm2_per_channel_weight_scale=self.w2_scale,
+            num_experts=global_num_experts,
+            top_k=self.topk,
+            n_group=None,
+            topk_group=None,
+            intermediate_size=self.intermediate_size_per_partition,
+            local_expert_offset=self.ep_rank * self.local_num_experts,
+            local_num_experts=self.local_num_experts,
+            routed_scaling_factor=None,
+            use_routing_scales_on_input=apply_router_weight_on_input,
+            routing_method_type=int(routing_method_type),
+            activation_type=activation_to_flashinfer_int(activation),
+            tune_max_num_tokens=max(self.max_capture_size, 1),
+        )
+        output.copy_(result)
+
     def apply(
         self,
         output: torch.Tensor,
@@ -171,6 +249,25 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
+        if (
+            self.quant_config.weight_quant_dtype == torch.float8_e4m3fn
+            and self.quant_config.per_act_token_quant
+            and self.quant_config.per_out_ch_quant
+        ):
+            self._apply_per_channel_scale(
+                output=output,
+                hidden_states=hidden_states,
+                w1=w1,
+                w2=w2,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=activation,
+                global_num_experts=global_num_experts,
+                a1q_scale=a1q_scale,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )
+            return
+
         import flashinfer
         from flashinfer.fused_moe import Fp8QuantizationType, WeightLayout
 
@@ -258,7 +355,10 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             (kFp8StaticTensorSym, kFp8StaticTensorSym),
             (kMxfp8Static, kMxfp8Dynamic),
         ]
-        return (weight_key, activation_key) in SUPPORTED_W_A
+        return (
+            weight_key,
+            activation_key,
+        ) in SUPPORTED_W_A and has_flashinfer_trtllm_fused_moe()
 
     @staticmethod
     def _supports_router_logits_dtype(
