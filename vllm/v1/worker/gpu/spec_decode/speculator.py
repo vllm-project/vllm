@@ -8,6 +8,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import (
@@ -22,6 +23,8 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+
+logger = init_logger(__name__)
 
 
 class BaseSpeculator(ABC):
@@ -95,6 +98,9 @@ class DraftModelSpeculator(BaseSpeculator):
         self.vocab_size = self.draft_model_config.get_vocab_size()
         self.dtype = vllm_config.model_config.dtype
         self.use_fp64_gumbel = vllm_config.model_config.use_fp64_gumbel
+        self.use_local_argmax_reduction = (
+            self.speculative_config.use_local_argmax_reduction
+        )
 
         # DP configuration
         self.dp_size = vllm_config.parallel_config.data_parallel_size
@@ -149,6 +155,7 @@ class DraftModelSpeculator(BaseSpeculator):
         )
 
         self.model = self.load_draft_model(target_model, target_attn_layer_names)
+        self._validate_local_argmax_reduction()
 
         all_attn_layers = set[str](
             get_layers_from_vllm_config(
@@ -211,6 +218,31 @@ class DraftModelSpeculator(BaseSpeculator):
         )
         return attn_metadata
 
+    def _validate_local_argmax_reduction(self) -> None:
+        if not self.use_local_argmax_reduction:
+            return
+        if self.speculative_config.draft_sample_method == "probabilistic":
+            raise ValueError(
+                "use_local_argmax_reduction is not compatible with "
+                "draft_sample_method='probabilistic'."
+            )
+        if not hasattr(self.model, "get_top_tokens"):
+            raise ValueError(
+                "use_local_argmax_reduction is enabled but draft model "
+                f"{self.model.__class__.__name__} does not implement "
+                "get_top_tokens()."
+            )
+        logger.info(
+            "Using local argmax reduction for draft token generation "
+            "(communication: O(2*tp_size) vs O(vocab_size))."
+        )
+
+    def _greedy_sample_draft(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if self.use_local_argmax_reduction:
+            return self.model.get_top_tokens(hidden_states)
+        logits = self.model.compute_logits(hidden_states)
+        return logits.argmax(dim=-1)
+
     def sample_draft(
         self,
         hidden_states: torch.Tensor,
@@ -221,8 +253,8 @@ class DraftModelSpeculator(BaseSpeculator):
         draft_step: torch.Tensor,
         draft_logits: torch.Tensor | None,
     ) -> torch.Tensor:
-        logits = self.model.compute_logits(hidden_states)
         if draft_logits is not None:
+            logits = self.model.compute_logits(hidden_states)
             # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
             # used for draft and target sampling.
             return gumbel_sample(
@@ -236,8 +268,7 @@ class DraftModelSpeculator(BaseSpeculator):
                 output_processed_logits_col=draft_step,
                 use_fp64=self.use_fp64_gumbel,
             )
-        else:
-            return logits.argmax(dim=-1)
+        return self._greedy_sample_draft(hidden_states)
 
     def _copy_request_inputs(
         self,
