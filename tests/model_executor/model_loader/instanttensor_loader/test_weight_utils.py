@@ -33,8 +33,6 @@ def test_instanttensor_model_loader():
         hf_safetensors_tensors = {}
 
         for name, tensor in instanttensor_weights_iterator(safetensors, True):
-            # Copy the tensor immediately as it is a reference to the internal
-            # buffer of instanttensor.
             instanttensor_tensors[name] = tensor.to("cpu")
 
         for name, tensor in safetensors_weights_iterator(safetensors, True):
