@@ -28,7 +28,12 @@ from transformers import AutoModel
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed import (
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
+)
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -61,6 +66,15 @@ from .interfaces import (
 )
 
 logger = init_logger(__name__)
+
+# torch.compile(inductor) generates Triton kernels that fail on XPU with
+# "Pointer argument doesn't reference XPU device memory" when inputs come
+# from UVA-backed tensors or in multi-process (TP>1) setups.  Use eager
+# fallback on XPU; other platforms keep the compiled path.
+if current_platform.is_xpu():
+    _diffusion_compile = lambda fn: fn  # noqa: E731
+else:
+    _diffusion_compile = torch.compile(dynamic=True)
 
 
 class DiffusionGemmaSelfConditioning(nn.Module):
@@ -120,7 +134,7 @@ class DiffusionGemmaProcessingInfo(Gemma4ProcessingInfo):
         return super().get_mm_max_tokens_per_item(seq_len, mm_counts)
 
 
-@torch.compile(dynamic=True)
+@_diffusion_compile
 def _softcap_logits(logits: torch.Tensor, cap: float) -> torch.Tensor:
     # fp32 before tanh for numerical stability (matches HF DiffusionGemma).
     # Compiling fuses the cast/div/tanh/mul into one elementwise kernel over
@@ -451,7 +465,7 @@ class DiffusionGemmaForConditionalGeneration(
         raise ValueError(f"Unsupported modality: {modality}")
 
 
-@torch.compile(dynamic=True)
+@_diffusion_compile
 def _compute_num_rejected(
     num_logits: torch.Tensor,
     num_sampled: torch.Tensor,
@@ -463,7 +477,7 @@ def _compute_num_rejected(
     return torch.where(is_denoise, query_lens, num_rejected)
 
 
-@torch.compile(dynamic=True)
+@_diffusion_compile
 def _compiled_sample_step(
     # Logits from the model [num_decode * CL, vocab]
     logits: torch.Tensor,
@@ -628,7 +642,7 @@ def _compiled_sample_step(
     # [.., vocab] probs avoids a giant persistent buffer.
     sc_keep = (is_denoise & ~is_encoder_phase[decode_slots])[:, None, None]
     soft_embeds = torch.matmul(probs.to(embed_weight.dtype), embed_weight) * normalizer
-    sc_embeds[decode_slots] = soft_embeds * sc_keep
+    sc_embeds[decode_slots] = (soft_embeds * sc_keep).to(sc_embeds.dtype)
 
     # Overwrite canvas with argmax for newly converged denoise requests
     newly_converged = (converged & is_denoise).unsqueeze(1)
@@ -714,7 +728,7 @@ class DiffusionGemmaRequestStates:
         # vocab/hidden (~170x) and moves the matmul to denoise time; the result
         # is identical (SC consumes probs @ embed_weight anyway).
         self.self_conditioning_embeds = torch.zeros(
-            max_num_reqs, canvas_length, hidden_size, dtype=torch.float32, device=device
+            max_num_reqs, canvas_length, hidden_size, dtype=torch.bfloat16, device=device
         )
 
     def init_canvas(self, slot_indices_np: np.ndarray) -> None:
@@ -841,6 +855,14 @@ class DiffusionGemmaModelState(ModelState):
             raise ValueError(
                 f"entropy_bound must be a positive float (got {entropy_bound})"
             )
+        # Gather embed_weight across TP ranks so the sampler's
+        # probs @ embed_weight matmul uses the full vocabulary dimension.
+        embed_weight = self.model.model.embed_tokens.weight
+        tp_size = get_tensor_model_parallel_world_size()
+        if tp_size > 1:
+            embed_weight = tensor_model_parallel_all_gather(embed_weight, dim=0)
+            vocab_size = self.model_config.get_vocab_size()
+            embed_weight = embed_weight[:vocab_size].contiguous()
         return DiffusionSampler(
             sampler=sampler,
             diffusion_config=diffusion_config,
@@ -850,7 +872,7 @@ class DiffusionGemmaModelState(ModelState):
             t_max=gen["t_max"],
             entropy_bound=entropy_bound,
             confidence_threshold=gen["confidence_threshold"],
-            embed_weight=self.model.model.embed_tokens.weight,
+            embed_weight=embed_weight,
             normalizer=self.model.model.normalizer,
         ), None
 
