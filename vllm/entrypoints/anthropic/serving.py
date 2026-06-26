@@ -568,6 +568,11 @@ class AnthropicServingMessages(OpenAIServingChat):
 
         tools = []
         for tool in anthropic_request.tools:
+            # Server tools (web_search, computer use, bash, ...) arrive without an
+            # input_schema; vLLM can't run them as function tools, so skip them
+            # rather than emit a malformed function declaration.
+            if tool.input_schema is None:
+                continue
             tools.append(
                 ChatCompletionToolsParam.model_validate(
                     {
