@@ -225,6 +225,12 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
                 logical_to_physical_map,
                 logical_replica_count,
             )
+            fml.router.eplb_state.should_record_tensor = torch.ones(
+                (), dtype=torch.bool, device=device
+            )
+            fml.router.eplb_state.num_unpadded_tokens_tensors = [
+                torch.tensor(0, dtype=torch.int32, device=device)
+            ]
 
         out_after_shuffle = []
         with set_forward_context(

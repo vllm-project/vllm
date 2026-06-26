@@ -61,12 +61,14 @@ def setup_eplb_state(
         global_num_experts, dtype=torch.int64, device="cuda"
     )
     should_record_tensor = torch.ones((), dtype=torch.bool, device="cuda")
+    num_unpadded_tokens_tensors = [torch.tensor(0, dtype=torch.int32, device="cuda")]
 
     return EplbLayerState(
         expert_load_view=expert_load_view,
         logical_to_physical_map=logical_to_physical_map,
         logical_replica_count=logical_replica_count,
         should_record_tensor=should_record_tensor,
+        num_unpadded_tokens_tensors=num_unpadded_tokens_tensors,
     )
 
 
