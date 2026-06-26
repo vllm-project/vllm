@@ -346,6 +346,7 @@ class ParsableContext(ConversationContext):
                 completion.text,
                 self.request,
                 enable_auto_tools=self.enable_auto_tools,
+                model_output_token_ids=completion.token_ids,
             )
             self.response_messages.extend(
                 build_response_output_items(
