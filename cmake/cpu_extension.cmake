@@ -24,8 +24,7 @@ set (ENABLE_NUMA TRUE)
 # Check the compile flags
 #
 if(MACOSX_FOUND)
-    list(APPEND CXX_COMPILE_FLAGS
-        "-DVLLM_CPU_EXTENSION")
+    list(APPEND CXX_COMPILE_FLAGS "-Xclang" "-fopenmp" "-DVLLM_CPU_EXTENSION")
 else()
     list(APPEND CXX_COMPILE_FLAGS
         "-fopenmp"
