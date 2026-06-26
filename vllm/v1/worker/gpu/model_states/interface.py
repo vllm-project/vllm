@@ -93,8 +93,7 @@ class ModelState(ABC):
         raise NotImplementedError
 
     def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor | None:
-        """Pre-allocated inputs_embeds buffer for dummy runs (contents unused).
-        """
+        """Pre-allocated inputs_embeds buffer for dummy runs (contents unused)."""
         return None
 
     def gather_mm_embeddings(
