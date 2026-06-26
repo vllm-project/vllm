@@ -218,8 +218,11 @@ def file_or_path_exists(
     # NB: file_exists will only check for the existence of the config file on
     # hf_hub. This will fail in offline mode.
 
-    # Call HF to check if the file exists
-    return file_exists(str(model), config_name, revision=revision)
+    if cached_filepath is None:
+        # The config file is not cached - check if it exists on hf_hub
+        return file_exists(str(model), config_name, revision=revision)
+    # The config file is known to not exist in cache - we can return False
+    return False
 
 
 def get_model_path(model: str | Path, revision: str | None = None):
