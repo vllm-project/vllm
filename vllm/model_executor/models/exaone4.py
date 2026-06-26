@@ -168,8 +168,6 @@ class Exaone4Attention(nn.Module):
         self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
         is_neox_style = True
-        if quant_config is not None and quant_config.get_name() == "gguf":
-            is_neox_style = False
 
         layer_idx = extract_layer_index(prefix)
         is_sliding = config.layer_types[layer_idx] == "sliding_attention"
@@ -230,7 +228,6 @@ class Exaone4DecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         # Support abacusai/Smaug-72B-v0.1 with attention_bias
-        # Support internlm/internlm-7b with bias
         attention_bias = getattr(config, "attention_bias", False) or getattr(
             config, "bias", False
         )

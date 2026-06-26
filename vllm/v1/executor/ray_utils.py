@@ -93,7 +93,7 @@ try:
         def get_node_ip(self) -> str:
             return get_ip()
 
-        def get_node_and_gpu_ids(self) -> tuple[str, list[int]]:
+        def get_node_and_physical_gpu_ids(self) -> tuple[str, list[int]]:
             node_id = ray.get_runtime_context().get_node_id()
             device_key = vllm.platforms.current_platform.ray_device_key
             if not device_key:
@@ -101,8 +101,10 @@ try:
                     "current platform %s does not support ray.",
                     vllm.platforms.current_platform.device_name,
                 )
-            gpu_ids = ray.get_runtime_context().get_accelerator_ids()[device_key]
-            return node_id, gpu_ids
+            physical_gpu_ids = ray.get_runtime_context().get_accelerator_ids()[
+                device_key
+            ]
+            return node_id, physical_gpu_ids
 
         def setup_device_if_necessary(self):
             # TODO(swang): This is needed right now because Ray CG executes
