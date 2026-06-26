@@ -363,7 +363,7 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
         else:
             from vllm.model_executor.layers.attention.sparse_mla_mask import (
                 dense_mask_mod,
-                topk_indices_to_block_sparse,
+                dense_mask_to_block_sparse,
             )
 
             prefill_query_lens_cpu = attn_metadata.prefill_query_lens_cpu  # type: ignore[attr-defined]
@@ -398,11 +398,12 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
                     dense_mask, (0, padded_mask_words - dense_mask.shape[2])
                 )
 
-            block_sparse_tensors = topk_indices_to_block_sparse(
-                topk_per_req,
-                seq_lens_q=q_lens,
+            block_sparse_tensors = dense_mask_to_block_sparse(
+                dense_mask,
                 max_seqlen_q=max_seq_len,
                 max_seqlen_k=max_seq_len,
+                seq_lens_q=q_lens,
+                seq_lens_k=q_lens,
                 tile_m=sparse_tile_m,
                 tile_n=128,
             )
