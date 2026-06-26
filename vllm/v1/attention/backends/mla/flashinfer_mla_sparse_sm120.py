@@ -81,13 +81,17 @@ class FlashInferMLASparseSM120Impl(SparseMLAAttentionImpl[FlashInferMLASparseMet
             )
         self.kv_scale_format = _kv_scale_format_for_model(model_type)
 
-        # Skip-topk layers are built with indexer=None and get the shared
-        # buffer via mla_args instead (cf. FLASHMLA_SPARSE).
-        self.topk_indices_buffer: torch.Tensor | None = (
-            indexer.topk_indices_buffer
-            if indexer is not None
-            else mla_args.get("topk_indices_buffer")
-        )
+        if indexer is not None:
+            topk_indices_buffer = indexer.topk_indices_buffer
+        else:
+            topk_indices_buffer = mla_args.get("topk_indices_buffer")
+        if topk_indices_buffer is None:
+            raise ValueError(
+                "FLASHINFER_MLA_SPARSE_SM120 requires sparse-MLA top-k "
+                "indices from an indexer or shared topk_indices_buffer "
+                "(model with index_topk in its config)."
+            )
+        self.topk_indices_buffer: torch.Tensor | None = topk_indices_buffer
         from vllm.utils.flashinfer import has_flashinfer_sparse_mla_sm120
 
         if not has_flashinfer_sparse_mla_sm120():
@@ -95,8 +99,6 @@ class FlashInferMLASparseSM120Impl(SparseMLAAttentionImpl[FlashInferMLASparseMet
                 "FLASHINFER_MLA_SPARSE_SM120 requires FlashInfer's "
                 "sparse MLA decode API."
             )
-        assert self.topk_indices_buffer is not None
-
         self.supports_quant_query_input = False
         self._workspace_buffer: torch.Tensor | None = None
 
