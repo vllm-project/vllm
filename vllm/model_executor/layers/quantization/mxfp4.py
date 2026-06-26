@@ -86,13 +86,7 @@ class Mxfp4Config(QuantizationConfig):
             )
             return UnquantizedLinearMethod()
         elif isinstance(layer, RoutedExperts):
-            from vllm.model_executor.layers.quantization.gpt_oss_mxfp4_rdna3 import (
-                maybe_rdna3_gpt_oss_method,
-            )
-
-            return maybe_rdna3_gpt_oss_method(layer) or GptOssMxfp4MoEMethod(
-                layer.moe_config
-            )
+            return GptOssMxfp4MoEMethod(layer.moe_config)
         elif isinstance(layer, Attention):
             logger.debug_once(
                 "MXFP4 attention layer is not implemented. "
