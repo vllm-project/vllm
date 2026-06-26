@@ -45,7 +45,14 @@ def audio_to_pcm16_base64(audio_path: str) -> str:
     return base64.b64encode(pcm16.tobytes()).decode("utf-8")
 
 
-async def realtime_transcribe(audio_path: str, host: str, port: int, model: str):
+async def realtime_transcribe(
+    audio_path: str,
+    host: str,
+    port: int,
+    model: str,
+    language: str | None = None,
+    prompt: str | None = None,
+):
     """
     Connect to the Realtime API and transcribe an audio file.
     """
@@ -60,8 +67,13 @@ async def realtime_transcribe(audio_path: str, host: str, port: int, model: str)
             print(f"Unexpected response: {response}")
             return
 
-        # Validate model
-        await ws.send(json.dumps({"type": "session.update", "model": model}))
+        # Validate model and optionally guide transcription.
+        session_update = {"type": "session.update", "model": model}
+        if language:
+            session_update["language"] = language
+        if prompt:
+            session_update["prompt"] = prompt
+        await ws.send(json.dumps(session_update))
 
         # Signal ready to start
         await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
@@ -115,7 +127,16 @@ def main(args):
         audio_path = str(AudioAsset("mary_had_lamb").get_local_path())
         print(f"No audio path provided, using default: {audio_path}")
 
-    asyncio.run(realtime_transcribe(audio_path, args.host, args.port, args.model))
+    asyncio.run(
+        realtime_transcribe(
+            audio_path,
+            args.host,
+            args.port,
+            args.model,
+            args.language,
+            args.prompt,
+        )
+    )
 
 
 if __name__ == "__main__":
@@ -145,6 +166,18 @@ if __name__ == "__main__":
         type=int,
         default=8000,
         help="vLLM server port (default: 8000)",
+    )
+    parser.add_argument(
+        "--language",
+        type=str,
+        default=None,
+        help="Optional ISO-639-1 language code to guide transcription.",
+    )
+    parser.add_argument(
+        "--prompt",
+        type=str,
+        default=None,
+        help="Optional transcription prompt for terms, names, or domain context.",
     )
     args = parser.parse_args()
     main(args)

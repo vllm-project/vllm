@@ -22,7 +22,9 @@ from .protocol import (
     ErrorEvent,
     InputAudioBufferAppend,
     InputAudioBufferCommit,
+    RealtimeSessionConfig,
     SessionCreated,
+    SessionUpdate,
     TranscriptionDelta,
     TranscriptionDone,
 )
@@ -48,6 +50,7 @@ class RealtimeConnection:
         self.serving = serving
         self.audio_queue: asyncio.Queue[np.ndarray | None] = asyncio.Queue()
         self.generation_task: asyncio.Task | None = None
+        self.session_config = RealtimeSessionConfig()
 
         self._is_connected = False
         self._is_model_validated = False
@@ -93,6 +96,20 @@ class RealtimeConnection:
             param="model",
         )
 
+    def _validate_language(self, language: str | None) -> str | None:
+        """Validate optional language with the model's STT validator."""
+        if language is None:
+            return None
+
+        language = language.strip()
+        if not language:
+            return None
+
+        validate_language = getattr(self.serving.model_cls, "validate_language", None)
+        if validate_language is None:
+            return language
+        return validate_language(language)
+
     async def handle_event(self, event: dict):
         """Route events to handlers.
 
@@ -104,7 +121,8 @@ class RealtimeConnection:
         event_type = event.get("type")
         if event_type == "session.update":
             logger.debug("Session updated: %s", event)
-            model = event.get("model")
+            session_update = SessionUpdate(**event)
+            model = session_update.model
             if model is None:
                 await self.send_error("Missing required field: model", "invalid_event")
                 return
@@ -112,6 +130,17 @@ class RealtimeConnection:
             if err is not None:
                 await self.send_error(err.error.message, "model_not_found")
                 return
+
+            try:
+                language = self._validate_language(session_update.language)
+            except ValueError as e:
+                await self.send_error(sanitize_message(str(e)), "invalid_event")
+                return
+
+            self.session_config = RealtimeSessionConfig(
+                language=language,
+                prompt=session_update.prompt or None,
+            )
             self._is_model_validated = True
         elif event_type == "input_audio_buffer.append":
             append_event = InputAudioBufferAppend(**event)
@@ -180,7 +209,7 @@ class RealtimeConnection:
 
         # Transform to StreamingInput generator
         streaming_input_gen = self.serving.transcribe_realtime(
-            audio_stream, input_stream
+            audio_stream, input_stream, self.session_config
         )
 
         # Start generation task
