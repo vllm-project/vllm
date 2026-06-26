@@ -40,6 +40,11 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponsesRequest,
 )
+from vllm.entrypoints.openai.responses.utils import (
+    extract_instructions_from_messages,
+    has_custom_tools,
+    unflatten_tool_name,
+)
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 
@@ -312,11 +317,13 @@ def _parse_function_call(message: Message, recipient: str) -> list[ResponseOutpu
     output_items = []
     for content in message.content:
         random_id = random_uuid()
+        unflattened_name, namespace = unflatten_tool_name(function_name)
         response_item = ResponseFunctionToolCall(
             arguments=content.text,
             call_id=f"call_{random_id}",
             type="function_call",
-            name=function_name,
+            name=unflattened_name,
+            namespace=namespace,
             id=f"fc_{random_id}",
         )
         output_items.append(response_item)
@@ -485,12 +492,14 @@ def parser_state_to_response_output(
     if current_recipient:
         if is_function_recipient(current_recipient, function_tool_names):
             rid = random_uuid()
+            unflattened_name, namespace = unflatten_tool_name(extract_function_from_recipient(current_recipient))
             return [
                 ResponseFunctionToolCall(
                     arguments=parser.current_content,
                     call_id=f"call_{rid}",
                     type="function_call",
-                    name=extract_function_from_recipient(current_recipient),
+                    name=unflattened_name,
+                    namespace=namespace,
                     id=f"fc_{rid}",
                     status="in_progress",
                 )

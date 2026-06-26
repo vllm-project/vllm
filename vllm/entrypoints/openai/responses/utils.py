@@ -40,6 +40,13 @@ from vllm.utils import random_uuid
 logger = init_logger(__name__)
 
 
+def unflatten_tool_name(function_name: str) -> tuple[str, str | None]:
+    if "__" in function_name:
+        parts = function_name.rsplit("__", 1)
+        if len(parts) == 2:
+            return parts[1], parts[0]
+    return function_name, None
+
 def build_response_output_items(
     reasoning: str | None,
     content: str | None,
@@ -88,7 +95,8 @@ def build_response_output_items(
                     or make_tool_call_id(func_name=tool_call.name, idx=idx),
                     type="function_call",
                     status="completed",
-                    name=tool_call.name,
+                    name=unflatten_tool_name(tool_call.name)[0],
+                    namespace=unflatten_tool_name(tool_call.name)[1],
                     arguments=tool_call.arguments,
                 )
             )

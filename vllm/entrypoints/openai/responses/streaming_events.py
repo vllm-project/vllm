@@ -72,6 +72,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseReasoningPartDoneEvent,
     StreamingResponsesResponse,
 )
+from vllm.entrypoints.openai.responses.utils import unflatten_tool_name
 from vllm.outputs import CompletionOutput
 from vllm.utils import random_uuid
 
@@ -249,8 +250,10 @@ def emit_function_call_delta_events(
         state.is_first_function_call_delta = True
         state.current_item_id = f"fc_{random_uuid()}"
         state.current_call_id = f"call_{random_uuid()}"
+        unflattened_name, namespace = unflatten_tool_name(function_name)
         tool_call_item = ResponseFunctionToolCall(
-            name=function_name,
+            name=unflattened_name,
+            namespace=namespace,
             type="function_call",
             id=state.current_item_id,
             call_id=state.current_call_id,
@@ -476,12 +479,13 @@ def emit_function_call_done_events(
     state: StreamingState,
 ) -> list[StreamingResponsesResponse]:
     """Emit events when a function call completes."""
+    unflattened_name, namespace = unflatten_tool_name(function_name)
     events: list[StreamingResponsesResponse] = []
     events.append(
         ResponseFunctionCallArgumentsDoneEvent(
             type="response.function_call_arguments.done",
             arguments=arguments,
-            name=function_name,
+            name=unflattened_name,
             item_id=state.current_item_id,
             output_index=state.current_output_index,
             sequence_number=-1,
@@ -490,7 +494,8 @@ def emit_function_call_done_events(
     function_call_item = ResponseFunctionToolCall(
         type="function_call",
         arguments=arguments,
-        name=function_name,
+        name=unflattened_name,
+        namespace=namespace,
         id=state.current_item_id,
         output_index=state.current_output_index,
         sequence_number=-1,
@@ -832,6 +837,7 @@ class SimpleStreamingState:
     accumulated_text: str = ""
     tool_call_id: str = ""
     tool_call_name: str = ""
+    tool_call_namespace: str | None = None
     tool_call_index: int | None = None
     has_emitted_tool_call_delta: bool = False
     current_state: _StateType = field(default_factory=lambda: _StateType.NONE)
@@ -1037,7 +1043,9 @@ def emit_simple_tool_call_open(
     state.current_state = _StateType.TOOL_CALL
     state.current_item_id = random_uuid()
     state.tool_call_id = f"call_{random_uuid()}"
-    state.tool_call_name = name
+    unflattened_name, namespace = unflatten_tool_name(name)
+    state.tool_call_name = unflattened_name
+    state.tool_call_namespace = namespace
     state.tool_call_index = index
     state.accumulated_text = ""
     state.has_emitted_tool_call_delta = False
@@ -1050,7 +1058,8 @@ def emit_simple_tool_call_open(
                 type="function_call",
                 id=state.current_item_id,
                 call_id=state.tool_call_id,
-                name=name,
+                name=state.tool_call_name,
+                namespace=state.tool_call_namespace,
                 arguments="",
                 status="in_progress",
             ),
@@ -1098,6 +1107,7 @@ def emit_simple_tool_call_done(
             item=ResponseFunctionToolCall(
                 type="function_call",
                 name=state.tool_call_name,
+                namespace=state.tool_call_namespace,
                 arguments=state.accumulated_text,
                 status="completed",
                 id=state.current_item_id,
