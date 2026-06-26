@@ -26,6 +26,9 @@ _SERVER_STARTUP_TIMEOUT = 120
 _PROCESS_EXIT_TIMEOUT = 15
 _SHUTDOWN_DETECTION_TIMEOUT = 10
 _CHILD_CLEANUP_TIMEOUT = 10
+_INFLIGHT_REQUEST_START_TIMEOUT = 5
+_INFLIGHT_REQUEST_POLL_INTERVAL = 0.1
+_ABORT_CLIENT_TIMEOUT = 3
 
 
 def _get_child_pids(parent_pid: int) -> list[int]:
@@ -71,6 +74,7 @@ class ShutdownState:
     requests_after_sigterm: int = 0
     aborted_requests: int = 0
     connection_errors: int = 0
+    inflight_requests: int = 0
     stop_requesting: bool = False
     errors: list[str] = field(default_factory=list)
 
@@ -86,6 +90,7 @@ async def _concurrent_request_loop(
     async def single_request():
         while not state.stop_requesting:
             try:
+                state.inflight_requests += 1
                 response = await client.completions.create(
                     model=MODEL_NAME,
                     prompt="Write a story: ",
@@ -110,6 +115,8 @@ async def _concurrent_request_loop(
             except Exception as e:
                 state.errors.append(f"Unexpected error: {e}")
                 break
+            finally:
+                state.inflight_requests -= 1
             await asyncio.sleep(0.01)
 
     tasks = [asyncio.create_task(single_request()) for _ in range(concurrency)]
@@ -392,7 +399,7 @@ async def test_abort_timeout_fails_inflight_requests():
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, server_args) as remote_server:
-        client = remote_server.get_async_client()
+        client = remote_server.get_async_client(timeout=_ABORT_CLIENT_TIMEOUT)
         proc = remote_server.proc
         child_pids = _get_child_pids(proc.pid)
 
@@ -403,7 +410,10 @@ async def test_abort_timeout_fails_inflight_requests():
             _concurrent_request_loop(client, state, sigterm_sent, concurrency=10)
         )
 
-        await asyncio.sleep(0.5)
+        deadline = time.time() + _INFLIGHT_REQUEST_START_TIMEOUT
+        while state.inflight_requests == 0 and time.time() < deadline:
+            await asyncio.sleep(_INFLIGHT_REQUEST_POLL_INTERVAL)
+        assert state.inflight_requests > 0
 
         proc.send_signal(signal.SIGTERM)
         sigterm_sent.set()

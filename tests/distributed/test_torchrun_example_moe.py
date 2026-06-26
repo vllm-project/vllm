@@ -5,13 +5,26 @@
 import os
 import random
 
+import torch
 import torch.distributed as dist
 
+import vllm.envs as envs
 from vllm import LLM, SamplingParams
 from vllm.distributed.parallel_state import get_tp_group, get_world_group
 
-# Let PyTorch choose the WORLD backend for the current device type.
-dist.init_process_group()
+# By default, let PyTorch choose the WORLD backend for the current device
+# type (legacy lazy-init path). When VLLM_DISTRIBUTED_USE_SPLIT_GROUP=1,
+# use the explicit eager-init pattern required by `split_group` (mixed
+# cpu:gloo,cuda:nccl backend + device_id binding).
+if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.accelerator.set_device_index(local_rank)
+    dist.init_process_group(
+        backend="cpu:gloo,cuda:nccl",
+        device_id=torch.device(f"cuda:{local_rank}"),
+    )
+else:
+    dist.init_process_group()
 
 # Create prompts
 prompts = [

@@ -20,7 +20,7 @@ from tests.v1.sample.utils import (
 )
 from vllm.config import VllmConfig
 from vllm.platforms import current_platform
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import SamplingParams, validate_thinking_token_budget
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.sample.logits_processor import (
     BatchUpdate,
@@ -145,7 +145,6 @@ def _generate_fake_sampling_metadata(
         vllm_config.scheduler_config.max_num_seqs,
         num_spec,
         device,
-        PIN_MEMORY_AVAILABLE,
     )
     fake_sampling_metadata = SamplingMetadata(
         temperature=torch.full((batch_size,), 0.0),
@@ -880,7 +879,6 @@ def test_maybe_create_thinking_budget_holder_without_reasoning():
             cfg.scheduler_config.max_num_seqs,
             0,
             torch.device("cpu"),
-            False,
         )
         is None
     )
@@ -1194,3 +1192,68 @@ def test_thinking_budget_enforced_without_penalties():
         "Budget exceeded: in_end should be True so that apply_to_logits "
         "forces the end token"
     )
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "expected"),
+    [
+        (None, None),
+        (-1, None),
+        (10, 10),
+        (0, 0),
+    ],
+)
+def test_validate_thinking_token_budget(raw_value, expected):
+    assert validate_thinking_token_budget(raw_value) == expected
+
+
+def test_sampling_params_minus_one_normalizes_to_none():
+    params = SamplingParams(thinking_token_budget=-1)
+    assert params.thinking_token_budget is None
+
+
+@pytest.mark.parametrize("invalid_budget", [-2, 0.6, 10.5, True])
+def test_validate_thinking_token_budget_rejects_invalid(invalid_budget):
+    from vllm.exceptions import VLLMValidationError
+
+    with pytest.raises(VLLMValidationError, match="thinking_token_budget"):
+        validate_thinking_token_budget(invalid_budget)
+
+
+@pytest.mark.parametrize("invalid_budget", [-2, 0.6, 10.5])
+def test_thinking_budget_invalid_budget_rejected(invalid_budget):
+    from vllm.exceptions import VLLMValidationError
+
+    with pytest.raises(VLLMValidationError, match="thinking_token_budget"):
+        SamplingParams(thinking_token_budget=invalid_budget)
+
+
+def test_thinking_budget_long_thinking_section_end_marker_found_at_correct_index():
+    """Test thinking budget enforced for a long thinking run,
+    then a natural end marker."""
+    h = ThinkingBudgetStateHolder(
+        MockReasoningConfig(), 8, 0, torch.device("cpu"), False
+    )
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=[(0, SamplingParams(thinking_token_budget=10_000), None, [])],
+            moved=(),
+        )
+    )
+    start = MockReasoningConfig.reasoning_start_token_ids
+    end = MockReasoningConfig.reasoning_end_token_ids
+
+    out: list[int] = list(start)
+    h.update_state([out], None, None)
+    for tok in range(500):  # 500 filler thinking tokens, one decode step each
+        out.append(tok)
+        h.update_state([out], None, None)
+        assert h._state[0]["end_thinking"] == -1  # not present yet
+    expected_end_idx = len(out)  # marker appended next
+    out.extend(end)
+    h.update_state([out], None, None)
+
+    assert h._state[0]["start_thinking"] == 0
+    assert h._state[0]["end_thinking"] == expected_end_idx

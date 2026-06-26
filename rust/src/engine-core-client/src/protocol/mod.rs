@@ -14,6 +14,7 @@ use crate::error::{Error, Result};
 use crate::protocol::logprobs::MaybeWireLogprobs;
 use crate::protocol::multimodal::MmFeatures;
 use crate::protocol::stats::{PrefillStats, SchedulerStats};
+use crate::protocol::utility::UtilityOutput;
 
 // TODO: This module currently mixes reusable frontend-facing semantic types
 // (for example `FinishReason`, `StopReason`, `RequestOutputKind`, and future
@@ -35,13 +36,31 @@ fn is_false(v: &bool) -> bool {
     !v
 }
 
+fn default_top_p() -> f32 {
+    1.0
+}
+
+fn default_repetition_penalty() -> f32 {
+    1.0
+}
+
+fn default_temperature() -> f32 {
+    1.0
+}
+
+fn default_max_tokens() -> u32 {
+    16
+}
+
 mod classified_outputs;
 pub mod dtype;
 pub mod handshake;
 pub mod logprobs;
+pub mod lora;
 pub mod multimodal;
 pub mod stats;
 pub mod tensor;
+pub mod utility;
 pub use classified_outputs::{
     ClassifiedEngineCoreOutputs, DpControlMessage, RequestBatchOutputs, UtilityCallOutput,
 };
@@ -63,6 +82,24 @@ pub enum EngineCoreRequestType {
 }
 
 impl EngineCoreRequestType {
+    /// Decode the single-byte request type frame used on the engine input
+    /// socket. Returns `None` for unrecognized values.
+    pub fn from_frame(frame: &[u8]) -> Option<Self> {
+        let [value] = frame else {
+            return None;
+        };
+
+        match value {
+            0 => Some(Self::Add),
+            1 => Some(Self::Abort),
+            2 => Some(Self::StartDpWave),
+            3 => Some(Self::Utility),
+            _ => None,
+        }
+    }
+
+    /// Encode the request type as the single-byte frame used on the engine
+    /// input socket.
     pub fn to_frame(self) -> Bytes {
         Bytes::from_static(match self {
             Self::Add => b"\x00",
@@ -133,6 +170,21 @@ pub enum RequestOutputKind {
     FinalOnly = 2,
 }
 
+/// Structured-output backend selected for EngineCore grammar compilation.
+///
+/// Python vLLM stores this in `StructuredOutputsParams._backend` after request
+/// validation. The Rust frontend currently always lowers structured-output
+/// requests to guidance, while ignoring any user-supplied `_backend` value.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StructuredOutputBackend {
+    Xgrammar,
+    #[default]
+    Guidance,
+    Outlines,
+    LmFormatEnforcer,
+}
+
 /// The stop reason associated with a finished output.
 ///
 /// Python models this as the union-typed `stop_reason: int | str | None`
@@ -180,6 +232,17 @@ pub struct StructuredOutputsParams {
     pub whitespace_pattern: Option<String>,
     /// Structural tag configuration (JSON-encoded string).
     pub structural_tag: Option<String>,
+    /// Structured-output backend, mirroring Python's internal `_backend`.
+    ///
+    /// User-supplied values are ignored during deserialization. This matches
+    /// Python's request boundary, where `_backend` is set by validation rather
+    /// than accepted as a request-level backend selector.
+    #[serde(
+        default,
+        rename = "_backend",
+        deserialize_with = "serde_with::rust::deserialize_ignore_any"
+    )]
+    pub backend: StructuredOutputBackend,
 }
 
 /// Engine-core-facing sampling parameters for text generation.
@@ -191,22 +254,35 @@ pub struct StructuredOutputsParams {
 ///
 /// Original Python definition:
 /// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/sampling_params.py#L155-L291>
+// Python's SamplingParams is `omit_defaults=True`, so msgpack drops
+// default-valued keys; default the whole struct. Per-field fns cover the
+// non-zero defaults.
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, DefaultFromSerde)]
+#[serde(default)]
 pub struct EngineCoreSamplingParams {
     /// Controls randomness. Lower values are more deterministic; zero means
     /// greedy sampling.
+    #[serde(default = "default_temperature")]
     pub temperature: f32,
     /// Cumulative probability threshold for nucleus sampling.
+    #[serde(default = "default_top_p")]
     pub top_p: f32,
     /// Maximum number of top tokens to consider. `0` means all tokens.
     pub top_k: u32,
     /// Random seed used by the sampler when present.
     pub seed: Option<i64>,
     /// Maximum number of tokens to generate per output sequence.
+    #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
     /// Minimum number of tokens to generate before EOS or stop-token handling.
     pub min_tokens: u32,
+    /// Maximum number of reasoning ("thinking") tokens to emit before the
+    /// reasoning section is force-closed. `None` means unlimited; the
+    /// user-facing `-1` sentinel is normalized to `None` by the frontend before
+    /// reaching this DTO, so only non-negative values are sent. Enforced
+    /// engine-side (and only when a reasoning parser is configured).
+    pub thinking_token_budget: Option<u64>,
     /// Number of log probabilities to return per generated token.
     ///
     /// `None` disables sample logprobs. `-1` requests the full vocabulary.
@@ -222,6 +298,7 @@ pub struct EngineCoreSamplingParams {
     /// Presence penalty applied by the sampler.
     pub presence_penalty: f32,
     /// Repetition penalty applied by the sampler.
+    #[serde(default = "default_repetition_penalty")]
     pub repetition_penalty: f32,
     /// Token IDs that stop generation.
     pub stop_token_ids: Vec<u32>,
@@ -241,16 +318,13 @@ pub struct EngineCoreSamplingParams {
     pub all_stop_token_ids: BTreeSet<u32>,
     /// Logit biases to apply during sampling.
     /// Keys are token IDs
-    #[serde(default)]
     pub logit_bias: Option<HashMap<u32, f32>>,
     /// Restrict output to these token IDs only.
-    #[serde(default)]
     pub allowed_token_ids: Option<Vec<u32>>,
     /// Tokenized bad words to avoid during generation.
-    #[serde(default, rename = "_bad_words_token_ids")]
+    #[serde(rename = "_bad_words_token_ids")]
     pub bad_words_token_ids: Option<Vec<Vec<u32>>>,
     /// Parameters for configuring structured outputs (guided decoding).
-    #[serde(default)]
     pub structured_outputs: Option<StructuredOutputsParams>,
     /// Specific token IDs for which log probabilities should be returned at
     /// each position.
@@ -258,15 +332,12 @@ pub struct EngineCoreSamplingParams {
     /// When set, the engine returns logprobs for exactly these tokens in
     /// addition to the sampled/scored token. Mutually exclusive with the
     /// `logprobs` count field in practice.
-    #[serde(default)]
     pub logprob_token_ids: Option<Vec<u32>>,
     /// If `Some(true)`, the request will not attempt to read from the prefix
     /// cache; newly computed blocks may still populate the cache. `None`
     /// defers to engine-core defaults.
-    #[serde(default)]
     pub skip_reading_prefix_cache: Option<bool>,
     /// Additional request parameters for custom extensions (from `vllm_xargs`).
-    #[serde(default)]
     pub extra_args: Option<HashMap<String, serde_json::Value>>,
 }
 
@@ -280,6 +351,7 @@ impl EngineCoreSamplingParams {
             seed: None,
             max_tokens: 65536,
             min_tokens: 0,
+            thinking_token_budget: None,
             logprobs: None,
             prompt_logprobs: None,
             min_p: 0.0,
@@ -300,6 +372,16 @@ impl EngineCoreSamplingParams {
     }
 }
 
+/// Extra kwargs consumed by engine-side reasoning parsers.
+///
+/// Original Python construction point:
+/// <https://github.com/vllm-project/vllm/blob/cec2ec11760f9f3beabd4c90451936078bf91533/vllm/entrypoints/openai/chat_completion/serving.py#L367-L369>
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReasoningParserKwargs {
+    /// Effective kwargs visible to the chat template for this request.
+    pub chat_template_kwargs: HashMap<String, serde_json::Value>,
+}
+
 /// Engine-core add-request payload sent from frontend to engine.
 ///
 /// Original Python definition:
@@ -316,7 +398,7 @@ pub struct EngineCoreRequest {
     pub pooling_params: Option<OpaqueValue>,
     pub arrival_time: f64,
     #[serde(default)]
-    pub lora_request: Option<OpaqueValue>,
+    pub lora_request: Option<lora::LoraRequest>,
     #[serde(default)]
     pub cache_salt: Option<String>,
     #[serde(default)]
@@ -349,10 +431,10 @@ pub struct EngineCoreRequest {
     pub external_req_id: Option<String>,
     #[serde(default)]
     pub reasoning_ended: Option<bool>,
-    /// Opaque reasoning-parser kwargs forwarded from the frontend to the
+    /// Reasoning-parser kwargs forwarded from the frontend to the
     /// structured-output backend.
     #[serde(default)]
-    pub reasoning_parser_kwargs: Option<OpaqueValue>,
+    pub reasoning_parser_kwargs: Option<ReasoningParserKwargs>,
     /// If `true`, the request should be added to the scheduler's waiting queue
     /// and immediately aborted, so connector-side cleanup runs via the
     /// standard `request_finished` hook.
@@ -370,51 +452,6 @@ impl EngineCoreRequest {
             });
         }
         Ok(())
-    }
-}
-
-/// Engine-core utility call payload sent from frontend to engine.
-///
-/// Original Python payload shape:
-/// `(client_index, call_id, method_name, args)`
-#[derive(Debug, Clone, PartialEq, Serialize_tuple)]
-pub struct EngineCoreUtilityRequest {
-    pub client_index: u32,
-    pub call_id: i64,
-    pub method_name: String,
-    pub args: OpaqueValue,
-}
-
-impl EngineCoreUtilityRequest {
-    /// Create a new utility request with the given strongly typed arguments,
-    /// encoding them into the expected msgpack value format.
-    pub fn new<T>(
-        client_index: u32,
-        call_id: i64,
-        method_name: impl Into<String>,
-        args: T,
-    ) -> Result<Self>
-    where
-        T: Serialize + std::fmt::Debug,
-    {
-        let args = rmpv::ext::to_value(&args).map_err(|error| Error::Encode {
-            target_type: type_name::<T>(),
-            message: format!(
-                "failed to encode utility args `{args:?}`: {}",
-                error.to_report_string()
-            ),
-        })?;
-        let args = match args {
-            Value::Nil => Value::Array(Vec::new()),
-            other => other,
-        };
-
-        Ok(Self {
-            client_index,
-            call_id,
-            method_name: method_name.into(),
-            args,
-        })
     }
 }
 
@@ -461,70 +498,6 @@ impl EngineCoreOutput {
     /// Returns whether this output is terminal for the request.
     pub fn finished(&self) -> bool {
         self.finish_reason.is_some()
-    }
-}
-
-/// Result of a utility call.
-///
-/// Original Python definition:
-/// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/v1/engine/__init__.py#L174-L183>
-#[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple, DefaultFromSerde)]
-pub struct UtilityOutput {
-    pub call_id: i64,
-    /// Non-`None` implies the call failed and `result` should be ignored.
-    #[serde(default)]
-    pub failure_message: Option<String>,
-    #[serde(default)]
-    pub result: Option<UtilityResultEnvelope>,
-}
-
-/// Python `UtilityResult` wrapper carried inside `UtilityOutput.result`.
-///
-/// Upstream reference:
-/// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/v1/serial_utils.py#L178-L185>
-#[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple)]
-pub struct UtilityResultEnvelope {
-    /// Recursive type information encoded on Python side, serving as the hint
-    /// for deserialization. We don't care it here as in Rust frontend all
-    /// utility calls are strongly-typed.
-    #[serde(default)]
-    type_info: Option<OpaqueValue>,
-    /// The actual utility result.
-    #[serde(default = "default_opaque_value_nil")]
-    result: OpaqueValue,
-}
-
-impl UtilityResultEnvelope {
-    /// Create a utility result envelope without type information.
-    pub fn without_type_info(result: OpaqueValue) -> Self {
-        Self {
-            type_info: None,
-            result,
-        }
-    }
-}
-
-impl UtilityOutput {
-    /// Decode the typed result of a utility call.
-    pub fn into_typed_result<T>(self, method: &str) -> Result<T>
-    where
-        T: serde::de::DeserializeOwned,
-    {
-        if let Some(message) = self.failure_message {
-            return Err(Error::UtilityCallFailed {
-                method: method.to_string(),
-                call_id: self.call_id,
-                message,
-            });
-        }
-
-        let result = self.result.map(|e| e.result).unwrap_or(Value::Nil);
-
-        rmpv::ext::from_value(result).map_err(|error| Error::UtilityResultDecode {
-            method: method.to_string(),
-            call_id: self.call_id,
-            message: error.to_report_string(),
-        })
     }
 }
 
@@ -601,13 +574,6 @@ mod tests {
 
     use super::*;
 
-    fn utility_result_value<T>(value: T) -> UtilityResultEnvelope
-    where
-        T: Serialize,
-    {
-        UtilityResultEnvelope::without_type_info(rmpv::ext::to_value(value).unwrap())
-    }
-
     #[test]
     fn engine_core_request_serializes_as_full_array() {
         let request = EngineCoreRequest {
@@ -674,77 +640,6 @@ mod tests {
     }
 
     #[test]
-    fn utility_request_serializes_as_tuple_payload() {
-        let request = EngineCoreUtilityRequest::new(7, 42, "is_sleeping", ()).unwrap();
-
-        let encoded = encode_msgpack(&request).unwrap();
-        let value = decode_value(&encoded).unwrap();
-        let array = match value {
-            Value::Array(array) => array,
-            other => panic!("expected utility request array, got {other:?}"),
-        };
-
-        assert_eq!(array.len(), 4);
-        assert_eq!(array[0], Value::from(7));
-        assert_eq!(array[1], Value::from(42));
-        assert_eq!(array[2], Value::from("is_sleeping"));
-        assert_eq!(array[3], Value::Array(Vec::new()));
-    }
-
-    #[test]
-    fn utility_output_decodes_typed_result() {
-        let output = UtilityOutput {
-            call_id: 9,
-            failure_message: None,
-            result: Some(utility_result_value(true)),
-        };
-
-        assert!(output.into_typed_result::<bool>("is_sleeping").unwrap());
-    }
-
-    #[test]
-    fn utility_output_reports_failure_message() {
-        let error = UtilityOutput {
-            call_id: 9,
-            failure_message: Some("boom".to_string()),
-            result: None,
-        }
-        .into_typed_result::<bool>("is_sleeping")
-        .unwrap_err();
-
-        assert!(matches!(
-            error,
-            Error::UtilityCallFailed {
-                method,
-                call_id,
-                message
-            } if method == "is_sleeping" && call_id == 9 && message == "boom"
-        ));
-    }
-
-    #[test]
-    fn utility_output_decodes_missing_result_as_unit() {
-        UtilityOutput {
-            call_id: 3,
-            failure_message: None,
-            result: None,
-        }
-        .into_typed_result::<()>("reset_mm_cache")
-        .unwrap();
-    }
-
-    #[test]
-    fn utility_output_decodes_nil_result_as_unit() {
-        UtilityOutput {
-            call_id: 4,
-            failure_message: None,
-            result: Some(UtilityResultEnvelope::without_type_info(Value::Nil)),
-        }
-        .into_typed_result::<()>("sleep")
-        .unwrap();
-    }
-
-    #[test]
     fn decode_msgpack_includes_type_name_and_value_fallback() {
         let error = decode_msgpack::<u64>(
             &rmp_serde::to_vec_named(&BTreeMap::from([("status", "READY")])).unwrap(),
@@ -752,5 +647,73 @@ mod tests {
         .unwrap_err();
 
         expect_test::expect![[r#"messagepack decode failed for u64: wrong msgpack marker FixMap(1); value fallback: {"status": "READY"}"#]].assert_eq(&error.to_report_string());
+    }
+
+    #[test]
+    fn structured_outputs_backend_ignores_deserialized_value() {
+        let params: StructuredOutputsParams = serde_json::from_value(serde_json::json!({
+            "json_object": true,
+            "_backend": "xgrammar",
+        }))
+        .unwrap();
+
+        assert_eq!(params.backend, StructuredOutputBackend::Guidance);
+
+        let value = serde_json::to_value(params).unwrap();
+        assert_eq!(value["_backend"], "guidance");
+    }
+
+    /// A real `sampling_params` is a sparse `omit_defaults` map; absent fields
+    /// must fall back to defaults. `python_compat` can't catch this since Rust
+    /// encodes full maps (see `engine_core_request_serializes_as_full_array`).
+    #[test]
+    fn decodes_sampling_params_with_omitted_defaults() {
+        let sampling_params = Value::Map(vec![
+            (
+                Value::from("stop_token_ids"),
+                Value::Array(vec![Value::from(151643u32)]),
+            ),
+            (Value::from("skip_reading_prefix_cache"), Value::from(false)),
+        ]);
+        let request = Value::Array(vec![
+            Value::from("req-omit-defaults"),
+            Value::Array(vec![
+                Value::from(1u32),
+                Value::from(2u32),
+                Value::from(3u32),
+            ]),
+            Value::Nil,
+            sampling_params,
+            Value::Nil,
+            Value::from(1.0f64),
+        ]);
+
+        let mut bytes = Vec::new();
+        rmpv::encode::write_value(&mut bytes, &request).unwrap();
+
+        let decoded: EngineCoreRequest = decode_msgpack(&bytes)
+            .expect("a real omit_defaults request must decode (regression: missing field)");
+
+        assert_eq!(decoded.request_id, "req-omit-defaults");
+        let sampling = decoded.sampling_params.expect("sampling params present");
+
+        assert_eq!(sampling.stop_token_ids, vec![151643]);
+        assert_eq!(sampling.skip_reading_prefix_cache, Some(false));
+
+        // Omitted fields -> Python defaults.
+        assert_eq!(sampling.temperature, 1.0);
+        assert_eq!(sampling.top_p, 1.0);
+        assert_eq!(sampling.top_k, 0);
+        assert_eq!(sampling.seed, None);
+        assert_eq!(sampling.max_tokens, 16);
+        assert_eq!(sampling.min_tokens, 0);
+        assert_eq!(sampling.min_p, 0.0);
+        assert_eq!(sampling.frequency_penalty, 0.0);
+        assert_eq!(sampling.presence_penalty, 0.0);
+        assert_eq!(sampling.repetition_penalty, 1.0);
+        assert_eq!(sampling.logprobs, None);
+        assert_eq!(sampling.prompt_logprobs, None);
+        assert_eq!(sampling.eos_token_id, None);
+        assert!(sampling.all_stop_token_ids.is_empty());
     }
 }

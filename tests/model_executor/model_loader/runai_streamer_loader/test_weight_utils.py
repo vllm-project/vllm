@@ -6,12 +6,34 @@ import tempfile
 
 import huggingface_hub.constants
 import torch
+from safetensors.torch import save_file
 
 from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf,
     runai_safetensors_weights_iterator,
     safetensors_weights_iterator,
 )
+
+
+def test_runai_safetensors_weights_iterator_clones_reused_buffers(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("RUNAI_STREAMER_MEMORY_LIMIT", "0")
+    weights_file = tmp_path / "model.safetensors"
+    expected_tensors = {
+        "first": torch.tensor([1.0, 2.0]),
+        "second": torch.tensor([3.0, 4.0]),
+    }
+    save_file(expected_tensors, weights_file)
+
+    actual_tensors = dict(
+        runai_safetensors_weights_iterator([str(weights_file)], False)
+    )
+
+    assert actual_tensors.keys() == expected_tensors.keys()
+    assert actual_tensors["first"].data_ptr() != actual_tensors["second"].data_ptr()
+    for name, expected_tensor in expected_tensors.items():
+        assert torch.equal(actual_tensors[name], expected_tensor)
 
 
 def test_runai_model_loader():

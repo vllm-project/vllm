@@ -208,6 +208,12 @@ class RocmAttentionBackend(AttentionBackend):
     def supports_non_causal(cls) -> bool:
         return True
 
+    @classmethod
+    def supports_kv_connector(cls) -> bool:
+        # ROCM_ATTN uses (2, num_blocks, ...) KV cache layout which is
+        # incompatible with KV connectors that require blocks-first layout.
+        return False
+
     forward_includes_kv_cache_update: bool = False
 
     @staticmethod
@@ -415,9 +421,18 @@ class RocmAttentionImpl(AttentionImpl):
         if is_quantized_kv_cache(self.kv_cache_dtype):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
-            assert layer._q_scale_float == 1.0, (
-                "A non 1.0 q_scale is not currently supported."
-            )
+            # chunked_prefill_paged_decode runs attention with a full-precision
+            # query (it does not quantize Q to fp8 and does not consume
+            # q_scale), so q_scale only matters when the query itself is fp8.
+            # For a non-fp8 query, q_scale is not applicable and is ignored
+            # (mirrors TritonAttentionImpl). This avoids spuriously failing on
+            # checkpoints that carry a non-1.0 q_scale while keeping the query
+            # in full precision.
+            if query.dtype == self.fp8_dtype and layer._q_scale_float != 1.0:
+                raise NotImplementedError(
+                    "A non 1.0 q_scale with an fp8 query is not currently "
+                    "supported by RocmAttentionImpl."
+                )
 
         cu_seqlens_q = attn_metadata.query_start_loc
         seqused_k = attn_metadata.seq_lens
