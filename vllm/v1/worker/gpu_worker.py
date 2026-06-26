@@ -51,6 +51,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.multimodal.video import (
+    PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES,
     PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES,
     PYNVVIDEOCODEC_MAX_RETAINED_DECODERS,
     PYNVVIDEOCODEC_VIDEO_BACKEND,
@@ -275,19 +276,47 @@ class Worker(WorkerBase):
 
                 # DP_LOCAL_RANK * TP_PP_WORLD_SIZE + TP_LOCAL_RANK
                 self.local_rank += dp_local_rank * tp_pp_world_size
+
+            # Publish the logical-to-physical mapping for topology queries
+            # such as NIC affinity and P2P checks.
+            assigned_physical_gpu_ids = parallel_config.assigned_physical_gpu_ids
+            if assigned_physical_gpu_ids is not None:
+                from vllm.platforms.interface import set_assigned_physical_gpu_ids
+
+                set_assigned_physical_gpu_ids(assigned_physical_gpu_ids)
+                assert self.local_rank < len(assigned_physical_gpu_ids), (
+                    f"local_rank {self.local_rank} is out of bounds for "
+                    f"assigned_physical_gpu_ids {assigned_physical_gpu_ids}"
+                )
+                # NOTE(patch pr45026): local_world_size is derived from
+                # parallel_config.nnodes, which is only set for the "mp"
+                # multi-node backend. With the "ray"/"external_launcher"
+                # backends nnodes stays 1, so local_world_size collapses to
+                # the full world_size and this check wrongly fires on
+                # cross-node deployments. assigned_physical_gpu_ids is already
+                # per-node and the local_rank bound above fully validates the
+                # mapping for these backends, so skip the check for them.
+                if parallel_config.distributed_executor_backend not in (
+                    "ray",
+                    "external_launcher",
+                ):
+                    assert self.parallel_config.local_world_size <= len(
+                        assigned_physical_gpu_ids
+                    ), (
+                        f"local_world_size ({self.parallel_config.local_world_size})"
+                        " exceeds assigned_physical_gpu_ids count "
+                        f"({len(assigned_physical_gpu_ids)})"
+                    )
+            else:
                 assert self.local_rank < torch.accelerator.device_count(), (
-                    f"DP adjusted local rank {self.local_rank} is out of bounds. "
-                )
-                visible_device_count = (
-                    torch.accelerator.device_count() if torch.cuda.is_available() else 0
-                )
-                assert self.parallel_config.local_world_size <= visible_device_count, (
-                    f"local_world_size ({self.parallel_config.local_world_size}) must "
-                    f"be less than or equal to the number of visible devices "
-                    f"({visible_device_count})."
+                    f"DP adjusted local rank {self.local_rank} is out of "
+                    f"bounds for {torch.accelerator.device_count()} devices."
                 )
 
-            self.device = torch.device(f"cuda:{self.local_rank}")
+            visible_device_index = (
+                current_platform.logical_device_id_to_visible_device_id(self.local_rank)
+            )
+            self.device = torch.device(f"cuda:{visible_device_index}")
             torch.accelerator.set_device_index(self.device)
 
             current_platform.check_if_supports_dtype(self.model_config.dtype)
@@ -532,10 +561,14 @@ class Worker(WorkerBase):
 
     @staticmethod
     def _uses_pynvvideocodec_video_backend(mm_config) -> bool:
-        video_backend = mm_config.media_io_kwargs.get("video", {}).get("video_backend")
+        video_kwargs = mm_config.media_io_kwargs.get("video", {})
+        video_loader_backend = (
+            video_kwargs.get("video_backend") or envs.VLLM_VIDEO_LOADER_BACKEND
+        )
+        codec_backend = video_kwargs.get("backend")
         return (
-            video_backend == PYNVVIDEOCODEC_VIDEO_BACKEND
-            or envs.VLLM_VIDEO_LOADER_BACKEND == PYNVVIDEOCODEC_VIDEO_BACKEND
+            video_loader_backend == PYNVVIDEOCODEC_VIDEO_BACKEND
+            or codec_backend == PYNVVIDEOCODEC_VIDEO_BACKEND
         )
 
     def _reserve_mm_ipc_gpu_memory(self, available_kv_cache_memory_bytes: int) -> int:
@@ -552,9 +585,20 @@ class Worker(WorkerBase):
             return available_kv_cache_memory_bytes
 
         raw_frame_reserved_bytes = int(mm_config.mm_ipc_gpu_memory_gb * GiB_bytes)
-        decoder_reserved_bytes = (
+        # Each api_server_count process runs its OWN decoder surfaces + NVDEC/CUVID
+        # CUDA context on the GPU, outside this (worker) memory pool. Reserve that
+        # per-server footprint x api_server_count so gpu_memory_utilization bounds
+        # TOTAL GPU usage across all API-server processes. Without the multiply,
+        # HW decode overshoots the budget by ~(api_server_count-1) x per-server and
+        # OOMs at high gmu, while SW decode (no per-server GPU allocation) does not.
+        num_api_servers = max(1, getattr(self.parallel_config, "_api_process_count", 1))
+        per_server_decoder_bytes = (
             PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES
             * PYNVVIDEOCODEC_MAX_RETAINED_DECODERS
+            + PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES
+        )
+        decoder_reserved_bytes = (
+            num_api_servers * per_server_decoder_bytes
             if self._uses_pynvvideocodec_video_backend(mm_config)
             else 0
         )
@@ -575,11 +619,14 @@ class Worker(WorkerBase):
             )
         logger.info_once(
             "Reserving %s GiB of GPU memory for frontend multimodal decoding "
-            "(%s GiB raw-frame semaphore budget, %s GiB decoder cache budget); "
+            "(%s GiB raw-frame semaphore budget, %s GiB decoder+CUDA-context "
+            "across %d API server(s) @ %s GiB/server); "
             "KV cache memory reduced to %s GiB.",
             format_gib(reserved_bytes),
             format_gib(raw_frame_reserved_bytes),
             format_gib(decoder_reserved_bytes),
+            num_api_servers,
+            format_gib(per_server_decoder_bytes),
             format_gib(remaining),
         )
         return remaining
@@ -794,11 +841,12 @@ class Worker(WorkerBase):
 
         # All warmup is done — start monitoring for unexpected JIT
         # compilations that would cause latency spikes during inference.
-        from vllm.triton_utils.jit_monitor import (
-            activate as activate_triton_jit_monitor,
-        )
+        from vllm.utils.jit_monitor import activate as activate_jit_monitor
 
-        activate_triton_jit_monitor()
+        activate_jit_monitor(
+            mode=self.observability_config.jit_monitor_mode,
+            verbose=self.observability_config.jit_monitor_verbose,
+        )
 
         # Freeze the worker heap so the GC won't scan static objects
         # (model weights, KV caches, CUDA graphs) during inference.
@@ -1215,6 +1263,14 @@ class Worker(WorkerBase):
         # can be reclaimed when running in-process
         if model_runner := getattr(self, "model_runner", None):
             model_runner.shutdown()
+
+        # Release kept-alive cumem pools while the pluggable allocator wrappers
+        # and callbacks are still alive, so MemPool teardown is not deferred to
+        # interpreter finalization (pytorch/pytorch#145168).
+        from vllm.device_allocator.cumem import CuMemAllocator
+
+        if CuMemAllocator.instance is not None:
+            CuMemAllocator.instance.release_pools()
 
     def elastic_ep_execute(self, execute_method: str, *args, **kwargs):
         return self.elastic_ep_executor.execute(execute_method, *args, **kwargs)

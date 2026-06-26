@@ -42,6 +42,7 @@ from .interfaces_base import VllmModel
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.lora.model_manager import LoRAModelManager
     from vllm.model_executor.models.utils import WeightsMapper
     from vllm.multimodal.inputs import MultiModalFeatureSpec
     from vllm.multimodal.registry import _ProcessorFactories
@@ -420,11 +421,11 @@ class SupportsMultiModalPruning(Protocol):
 
     def recompute_mrope_positions(
         self,
-        input_ids: list[int],
-        multimodal_embeddings: MultiModalEmbeddings,
+        input_ids: list[int] | torch.Tensor,
+        multimodal_embeddings: Sequence[torch.Tensor],
         mrope_positions: torch.LongTensor,
         num_computed_tokens: int,
-    ) -> tuple[MultiModalEmbeddings, Tensor, int]:
+    ) -> tuple[Sequence[torch.Tensor], Tensor, int]:
         """
         Update part of input mrope positions (starting with
         num_computed_tokens index). Original mrope_positions are computed
@@ -434,8 +435,9 @@ class SupportsMultiModalPruning(Protocol):
 
         Args:
             input_ids: (N,) All input tokens of the prompt containing
-                entire sequence.
-            multimodal_embeddings: Tuple of multimodal embeddings that
+                entire sequence. Either a host-side list or an already
+                device-resident tensor.
+            multimodal_embeddings: Sequence of multimodal embeddings that
                 fits into the prefill chunk that is being processed.
             mrope_positions: Existing mrope positions (3, N) for entire
                 sequence
@@ -554,6 +556,7 @@ class SupportsLoRA(Protocol):
     packed_modules_mapping: dict[str, list[str]] = {}
     # Module prefixes to skip during LoRA loading (e.g., ["mtp."] for MTP layers)
     lora_skip_prefixes: ClassVar[list[str]] = []
+    lora_manager: "LoRAModelManager | None"
 
 
 # We can't use runtime_checkable with ClassVar for issubclass checks
@@ -1623,6 +1626,7 @@ class SupportsEncoderCudaGraph(Protocol):
         dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
         clone: bool = False,
         batch_mm_kwargs: dict[str, Any] | None = None,
+        local_output: torch.Tensor | None = None,
     ) -> None:
         """
         Post-process encoder output, directly call scatter_output_slices by default.
@@ -1643,6 +1647,7 @@ class SupportsEncoderCudaGraph(Protocol):
         max_frames_per_batch: int,
         device: torch.device,
         dtype: torch.dtype,
+        path: str = "default",
     ) -> "EncoderCudaGraphCaptureInputs":
         """Create dummy inputs and buffers for CUDA graph capture."""
         ...
@@ -1652,6 +1657,7 @@ class SupportsEncoderCudaGraph(Protocol):
         mm_kwargs: dict[str, Any],
         max_batch_size: int,
         max_frames_per_batch: int,
+        path: str = "default",
     ) -> "EncoderCudaGraphReplayBuffers":
         """Compute buffer values from actual batch inputs for replay."""
         ...
@@ -1659,6 +1665,7 @@ class SupportsEncoderCudaGraph(Protocol):
     def encoder_cudagraph_forward(
         self,
         inputs: dict[str, torch.Tensor],
+        path: str = "default",
     ) -> torch.Tensor:
         """Run the encoder forward pass with precomputed buffers.
 
@@ -1669,6 +1676,7 @@ class SupportsEncoderCudaGraph(Protocol):
     def encoder_eager_forward(
         self,
         mm_kwargs: dict[str, Any],
+        path: str = "default",
     ) -> torch.Tensor:
         """Run the encoder forward pass without precomputed buffers.
 

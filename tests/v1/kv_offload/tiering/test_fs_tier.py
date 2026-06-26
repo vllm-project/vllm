@@ -10,6 +10,7 @@ data integrity throughout the process.
 
 import mmap
 import os
+import threading
 import time
 from unittest.mock import MagicMock
 
@@ -17,11 +18,17 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.v1.kv_offload.base import OffloadKey, ReqContext, make_offload_key
+from vllm.v1.kv_offload.base import (
+    LookupResult,
+    OffloadKey,
+    ReqContext,
+    make_offload_key,
+)
 from vllm.v1.kv_offload.tiering.base import JobMetadata
 from vllm.v1.kv_offload.tiering.fs.manager import (
     FileSystemTierManager,
 )
+from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -164,7 +171,7 @@ def fs_tier(tmp_path):
 def test_lookup_empty_tier(fs_tier):
     tier, _ = fs_tier
     results = lookup_and_wait(tier, [key(1), key(2)])
-    assert results == [False, False]
+    assert results == [LookupResult.MISS, LookupResult.MISS]
 
 
 def test_store_creates_file_and_lookup_succeeds(fs_tier):
@@ -174,7 +181,7 @@ def test_store_creates_file_and_lookup_succeeds(fs_tier):
     results = drain(tier)
     assert len(results) == 1
     assert results[0].success
-    assert lookup_and_wait(tier, [key(1)]) == [True]
+    assert lookup_and_wait(tier, [key(1)]) == [LookupResult.HIT]
     dest = tier.file_mapper.get_file_name(key(1))
     assert os.path.exists(dest), f"Expected file at {dest}"
 
@@ -186,14 +193,20 @@ def test_store_then_load_roundtrip(fs_tier):
     store_results = drain(tier)
     assert all(r.success for r in store_results)
 
-    assert lookup_and_wait(tier, [key(1), key(2)]) == [True, True]
+    assert lookup_and_wait(tier, [key(1), key(2)]) == [
+        LookupResult.HIT,
+        LookupResult.HIT,
+    ]
 
     job_l = make_job(2, [key(1), key(2)], [2, 3], is_promotion=True)
     tier.submit_load(job_l)
     load_results = drain(tier)
     assert all(r.success for r in load_results)
     # Blocks stay on disk after load
-    assert lookup_and_wait(tier, [key(1), key(2)]) == [True, True]
+    assert lookup_and_wait(tier, [key(1), key(2)]) == [
+        LookupResult.HIT,
+        LookupResult.HIT,
+    ]
 
 
 def test_invalid_path_raises_at_construction():
@@ -229,7 +242,10 @@ def test_multiple_jobs_tracked_independently(fs_tier):
     results = drain(tier)
     job_ids = {r.job_id for r in results}
     assert job_ids == {1, 2}
-    assert lookup_and_wait(tier, [key(1), key(2)]) == [True, True]
+    assert lookup_and_wait(tier, [key(1), key(2)]) == [
+        LookupResult.HIT,
+        LookupResult.HIT,
+    ]
 
 
 def test_multi_block_job_partial_failure(fs_tier):
@@ -296,3 +312,23 @@ def test_store_load_data_integrity(fs_tier):
         assert torch.allclose(tensor[bid], expected[i]), (
             f"Block {bid} data mismatch after store+load"
         )
+
+
+def test_wait_idle_blocks_until_tasks_complete():
+    """wait_idle must not return while a task is still in flight."""
+    pool = DualQueueThreadPool(n_read_threads=1, n_write_threads=1)
+    gate = threading.Event()
+    pool.enqueue_store(job_id=1, n_tasks=1, tasks=[lambda: gate.wait(timeout=5.0)])
+
+    waiter = threading.Thread(target=pool.wait_idle)
+    waiter.start()
+    try:
+        waiter.join(timeout=0.2)
+        assert waiter.is_alive(), "wait_idle returned before task completed"
+        gate.set()
+        waiter.join(timeout=5.0)
+        assert not waiter.is_alive(), "wait_idle did not unblock"
+    finally:
+        gate.set()
+        pool.shutdown(wait=True)
+        waiter.join(timeout=5.0)

@@ -90,7 +90,9 @@ def _ref_sparse_prefill_ragged(
     return out.to(torch.bfloat16)
 
 
-def _pack_fp8_ds_mla_cache(kv: torch.Tensor, block_size: int) -> torch.Tensor:
+def _pack_fp8_ds_mla_cache(
+    kv: torch.Tensor, block_size: int, is_extra: bool = False
+) -> torch.Tensor:
     assert kv.shape[-1] == HEAD_DIM
     num_tokens = kv.shape[0]
     num_blocks = (num_tokens + block_size - 1) // block_size
@@ -101,7 +103,9 @@ def _pack_fp8_ds_mla_cache(kv: torch.Tensor, block_size: int) -> torch.Tensor:
     )
     cache_flat = cache.view(torch.uint8).flatten()
     kv_nope_fp8 = (
-        kv[:, :NOPE_HEAD_DIM].to(current_platform.fp8_dtype()).view(torch.uint8)
+        kv[:, :NOPE_HEAD_DIM]
+        .to(torch.float8_e4m3fn if is_extra else current_platform.fp8_dtype())
+        .view(torch.uint8)
     )
     kv_rope_u8 = kv[:, NOPE_HEAD_DIM:].contiguous().view(torch.uint8)
 
@@ -120,7 +124,7 @@ def _pack_fp8_ds_mla_cache(kv: torch.Tensor, block_size: int) -> torch.Tensor:
 
 
 def _read_fp8_ds_mla_cache(
-    cache: torch.Tensor, slot: int, block_size: int
+    cache: torch.Tensor, slot: int, block_size: int, is_extra: bool = False
 ) -> torch.Tensor:
     cache_flat = cache.view(torch.uint8).flatten()
     block_idx = slot // block_size
@@ -129,7 +133,9 @@ def _read_fp8_ds_mla_cache(
     token_base = block_base + pos * 576
 
     nope_u8 = cache_flat[token_base : token_base + NOPE_HEAD_DIM]
-    nope = nope_u8.view(current_platform.fp8_dtype()).to(torch.float32)
+    nope = nope_u8.view(
+        torch.float8_e4m3fn if is_extra else current_platform.fp8_dtype()
+    ).to(torch.float32)
     rope_u8 = cache_flat[
         token_base + NOPE_HEAD_DIM : token_base + NOPE_HEAD_DIM + ROPE_HEAD_DIM * 2
     ]
@@ -157,7 +163,9 @@ def _ref_sparse_decode_ragged(
         ]
         if extra_cache is not None and extra_rows is not None:
             row_kv.extend(
-                _read_fp8_ds_mla_cache(extra_cache, int(slot), block_size)
+                _read_fp8_ds_mla_cache(
+                    extra_cache, int(slot), block_size, is_extra=True
+                )
                 for slot in extra_rows[query_idx]
             )
 
@@ -326,7 +334,7 @@ def test_sparse_attn_decode_ragged_kernel() -> None:
     main_kv = torch.randn(6, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
     extra_kv = torch.randn(5, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
     main_cache = _pack_fp8_ds_mla_cache(main_kv, block_size)
-    extra_cache = _pack_fp8_ds_mla_cache(extra_kv, block_size)
+    extra_cache = _pack_fp8_ds_mla_cache(extra_kv, block_size, is_extra=True)
     main_indices = torch.tensor([0, 2, 4, 1], dtype=torch.int32, device=device)
     main_indptr = torch.tensor([0, 2, 4], dtype=torch.int32, device=device)
     extra_indices = torch.tensor([1, 3, 0], dtype=torch.int32, device=device)
@@ -477,7 +485,7 @@ def test_sparse_attn_decode_split_k_kernel(
         rows = [[1, 3, 0, 5, 2, 4], [3, 0, 6]]
         extra_kv = torch.randn(7, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
         extra_rows = rows
-        extra_cache = _pack_fp8_ds_mla_cache(extra_kv, block_size)
+        extra_cache = _pack_fp8_ds_mla_cache(extra_kv, block_size, is_extra=True)
         extra_indices, extra_indptr = _ragged_from_rows(rows, device)
 
     attn_sink = (
@@ -515,3 +523,218 @@ def test_sparse_attn_decode_split_k_kernel(
     )
 
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+# ---------------------------------------------------------------------------
+# o-projection: fused inverse-RoPE + cached bf16 wo_a (rocm_inv_rope_einsum)
+# ---------------------------------------------------------------------------
+
+
+# Cache rows = max_position_embeddings * scaling_factor.
+_ROTARY_MAX_POS = 1024
+_ROTARY_SCALING_FACTOR = 4.0
+_ROTARY_CACHE_LEN = int(_ROTARY_MAX_POS * _ROTARY_SCALING_FACTOR)
+
+
+def _make_dsv4_rotary(device: torch.device):
+    """The official DSv4 rotary embedding, sized down for unit tests."""
+    from vllm.model_executor.layers.rotary_embedding.deepseek_scaling_rope import (
+        DeepseekV4ScalingRotaryEmbedding,
+    )
+
+    # The model loader constructs layers under a default-device context;
+    # mirror that so the fp32 cos_sin_cache lands on the GPU.
+    with torch.device(device):
+        rotary_emb = DeepseekV4ScalingRotaryEmbedding(
+            head_size=ROPE_HEAD_DIM,
+            rotary_dim=ROPE_HEAD_DIM,
+            max_position_embeddings=_ROTARY_MAX_POS,
+            base=10000,
+            is_neox_style=False,
+            scaling_factor=_ROTARY_SCALING_FACTOR,
+            dtype=torch.bfloat16,
+            mscale=1.0,
+            mscale_all_dim=1.0,
+        )
+    rotary_emb = rotary_emb.to(device)
+    assert rotary_emb.cos_sin_cache.shape == (_ROTARY_CACHE_LEN, ROPE_HEAD_DIM)
+    return rotary_emb
+
+
+def _inv_rope_via_rotary_native(
+    rotary_emb: torch.nn.Module,
+    o: torch.Tensor,
+    positions: torch.Tensor,
+) -> torch.Tensor:
+    """Reference: the official ``forward_native(inverse=True)`` path."""
+    expected, _ = rotary_emb.forward_native(positions, o.clone(), None, inverse=True)
+    return expected.to(torch.bfloat16)
+
+
+class _FakeWoA(torch.nn.Module):
+    """Stand-in for the wo_a linear layer holding the (optionally fp8) weight."""
+
+    def __init__(
+        self, weight: torch.Tensor, weight_scale_inv: torch.Tensor | None = None
+    ) -> None:
+        super().__init__()
+        self.weight = weight
+        if weight_scale_inv is not None:
+            self.weight_scale_inv = weight_scale_inv
+
+
+@pytest.mark.parametrize("num_tokens", [1, 7, 64])
+@pytest.mark.parametrize("num_heads", [1, 8])
+@pytest.mark.parametrize("pos_dtype", [torch.int32, torch.int64])
+@torch.inference_mode()
+def test_fused_inverse_rope_gptj_matches_rotary_native(
+    num_tokens: int, num_heads: int, pos_dtype: torch.dtype, default_vllm_config
+) -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _fused_inverse_rope_gptj
+
+    device = torch.device("cuda")
+    torch.manual_seed(0)
+    rotary_emb = _make_dsv4_rotary(device)
+    o = torch.randn(
+        num_tokens, num_heads, HEAD_DIM, dtype=torch.bfloat16, device=device
+    )
+    positions = torch.randint(
+        0, _ROTARY_CACHE_LEN, (num_tokens,), dtype=pos_dtype, device=device
+    )
+
+    actual = _fused_inverse_rope_gptj(
+        o, positions, rotary_emb.cos_sin_cache, ROPE_HEAD_DIM
+    )
+    expected = _inv_rope_via_rotary_native(rotary_emb, o, positions)
+
+    assert actual.dtype == torch.bfloat16
+    assert actual.shape == o.shape
+    # NoPE lanes are a pure bf16 passthrough -> must be bit-exact.
+    assert torch.equal(actual[..., :NOPE_HEAD_DIM], expected[..., :NOPE_HEAD_DIM])
+    # RoPE lanes: tolerate at most ~1 bf16 ulp from fp32 fma ordering.
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+@torch.inference_mode()
+def test_fused_inverse_rope_gptj_empty(default_vllm_config) -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _fused_inverse_rope_gptj
+
+    device = torch.device("cuda")
+    rotary_emb = _make_dsv4_rotary(device)
+    o = torch.empty(0, 8, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    positions = torch.empty(0, dtype=torch.int32, device=device)
+
+    out = _fused_inverse_rope_gptj(
+        o, positions, rotary_emb.cos_sin_cache, ROPE_HEAD_DIM
+    )
+    assert out.shape == (0, 8, HEAD_DIM)
+    assert out.dtype == torch.bfloat16
+
+
+@torch.inference_mode()
+def test_rocm_inv_rope_einsum_matches_rotary_native(default_vllm_config) -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import rocm_inv_rope_einsum
+
+    device = torch.device("cuda")
+    torch.manual_seed(2)
+    num_tokens, num_heads = 5, 8
+    n_local_groups = num_heads
+    o_lora_rank = 16
+    hidden_dim = num_heads * HEAD_DIM // n_local_groups  # 512
+
+    rotary_emb = _make_dsv4_rotary(device)
+    o = (
+        torch.randn(
+            num_tokens, num_heads, HEAD_DIM, dtype=torch.bfloat16, device=device
+        )
+        * 0.125
+    )
+    positions = torch.randint(
+        0, _ROTARY_CACHE_LEN, (num_tokens,), dtype=torch.int32, device=device
+    )
+    weight = (
+        torch.randn(n_local_groups * o_lora_rank, hidden_dim, device=device) * 0.125
+    ).to(torch.bfloat16)
+    wo_a = _FakeWoA(weight)
+
+    actual = rocm_inv_rope_einsum(
+        rotary_emb, o, positions, ROPE_HEAD_DIM, n_local_groups, o_lora_rank, wo_a
+    )
+
+    o_ref = _inv_rope_via_rotary_native(rotary_emb, o, positions)
+    o_ref = o_ref.view(num_tokens, n_local_groups, -1)
+    wo_a_ref = weight.view(n_local_groups, o_lora_rank, hidden_dim).to(torch.bfloat16)
+    expected = torch.einsum("tgd,grd->tgr", o_ref, wo_a_ref)
+
+    assert actual.shape == (num_tokens, n_local_groups, o_lora_rank)
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+@torch.inference_mode()
+def test_get_cached_wo_a_bf16_plain_caches() -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _get_cached_wo_a_bf16
+
+    device = torch.device("cuda")
+    torch.manual_seed(4)
+    n_local_groups, o_lora_rank, hidden_dim = 2, 4, 8
+    weight = torch.randn(
+        n_local_groups * o_lora_rank, hidden_dim, dtype=torch.bfloat16, device=device
+    )
+    wo_a = _FakeWoA(weight)
+
+    out1 = _get_cached_wo_a_bf16(wo_a, n_local_groups, o_lora_rank, hidden_dim)
+    expected = weight.view(n_local_groups, o_lora_rank, hidden_dim).to(torch.bfloat16)
+    assert out1.shape == (n_local_groups, o_lora_rank, hidden_dim)
+    torch.testing.assert_close(out1, expected, atol=0, rtol=0)
+    assert hasattr(wo_a, "_dsv4_wo_a_bf16")
+
+    # Mutate the source weight: the cached tensor must be returned unchanged
+    # (proving the dequant is not recomputed per call).
+    wo_a.weight.zero_()
+    out2 = _get_cached_wo_a_bf16(wo_a, n_local_groups, o_lora_rank, hidden_dim)
+    assert out2 is out1
+    torch.testing.assert_close(out2, expected, atol=0, rtol=0)
+
+
+@torch.inference_mode()
+def test_get_cached_wo_a_bf16_fp8_blockscale_caches() -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import _get_cached_wo_a_bf16
+
+    device = torch.device("cuda")
+    torch.manual_seed(5)
+    n_local_groups, o_lora_rank, hidden_dim = 2, 4, 8
+    row_block, col_block = 2, 2
+    row_blocks = o_lora_rank // row_block
+    col_blocks = hidden_dim // col_block
+
+    fp8_dtype = current_platform.fp8_dtype()
+    weight_f32 = (
+        torch.randn(
+            n_local_groups, o_lora_rank, hidden_dim, dtype=torch.float32, device=device
+        )
+        * 0.1
+    )
+    weight_fp8 = weight_f32.to(fp8_dtype)
+    scale = (
+        torch.rand(
+            n_local_groups, row_blocks, col_blocks, dtype=torch.float32, device=device
+        )
+        * 0.5
+        + 0.5
+    )
+    wo_a = _FakeWoA(
+        weight_fp8.reshape(n_local_groups * o_lora_rank, hidden_dim),
+        weight_scale_inv=scale.reshape(n_local_groups * row_blocks, col_blocks),
+    )
+
+    out = _get_cached_wo_a_bf16(wo_a, n_local_groups, o_lora_rank, hidden_dim)
+
+    scale_full = scale.repeat_interleave(row_block, dim=-2).repeat_interleave(
+        col_block, dim=-1
+    )
+    expected = (weight_fp8.to(torch.float32) * scale_full).to(torch.bfloat16)
+    assert out.shape == (n_local_groups, o_lora_rank, hidden_dim)
+    torch.testing.assert_close(out, expected, atol=0, rtol=0)
+
+    # Second call returns the same cached object.
+    assert _get_cached_wo_a_bf16(wo_a, n_local_groups, o_lora_rank, hidden_dim) is out
