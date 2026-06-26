@@ -1410,6 +1410,17 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
         max_num_seqs=32,
     ),
+    "DFlashLagunaForCausalLM": _HfExamplesInfo(
+        "poolside/Laguna-XS-2.1",
+        speculative_model="poolside/Laguna-XS-2.1-DFlash",
+        use_original_num_layers=True,
+        max_num_batched_tokens=65536,
+        is_available_online=False,
+    ),
+    # Laguna XS-2.1 private quantized pairs:
+    # - poolside/Laguna-XS-2.1-FP8 + poolside/Laguna-XS-2.1-DFlash-FP8
+    # - poolside/Laguna-XS-2.1-INT4 + poolside/Laguna-XS-2.1-DFlash-INT4
+    # - poolside/Laguna-XS-2.1-NVFP4 + poolside/Laguna-XS-2.1-DFlash-NVFP4
     "DFlashQwen3NextDraftModel": _HfExamplesInfo(
         "Qwen/Qwen3-Coder-Next",
         speculative_model="z-lab/Qwen3-Coder-Next-DFlash",
