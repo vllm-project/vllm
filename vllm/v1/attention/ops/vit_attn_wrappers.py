@@ -12,6 +12,8 @@ latencies by ~7% (see qwen2_5_vl for example usage)
 To use these ops, you must have a recent version of PyTorch installed (>= 2.4.0)
 """
 
+from typing import Any
+
 import einops
 import torch
 import torch.nn.functional as F
@@ -31,9 +33,11 @@ def flash_attn_maxseqlen_wrapper(
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    kwargs = {}
+    kwargs: dict[str, Any] = {}
     if is_rocm_aiter:
         from aiter import flash_attn_varlen_func
+
+        kwargs["window_size"] = (-1, -1)
     else:
         from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
 
@@ -279,6 +283,10 @@ def flashinfer_wrapper(
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
     sequence_lengths: torch.Tensor | None = None,
+    q_scale: torch.Tensor | None = None,
+    k_scale: torch.Tensor | None = None,
+    v_scale: torch.Tensor | None = None,
+    o_data_type: torch.dtype | None = None,
 ) -> torch.Tensor:
     from flashinfer.prefill import cudnn_batch_prefill_with_kv_cache
 
@@ -318,6 +326,10 @@ def flashinfer_wrapper(
         batch_offsets_k=batch_offsets_qko,
         batch_offsets_v=batch_offsets_v,
         batch_offsets_o=batch_offsets_qko,
+        q_scale=q_scale,
+        k_scale=k_scale,
+        v_scale=v_scale,
+        o_data_type=o_data_type,
     )
 
     if is_reshaped:
@@ -335,8 +347,12 @@ def vit_flashinfer_wrapper_fake(
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
     sequence_lengths: torch.Tensor | None = None,
+    q_scale: torch.Tensor | None = None,
+    k_scale: torch.Tensor | None = None,
+    v_scale: torch.Tensor | None = None,
+    o_data_type: torch.dtype | None = None,
 ) -> torch.Tensor:
-    return torch.empty_like(q)
+    return torch.empty_like(q, dtype=o_data_type or q.dtype)
 
 
 direct_register_custom_op(
@@ -355,7 +371,22 @@ def vit_flashinfer_wrapper(
     cu_seqlens: torch.Tensor | None = None,
     max_seqlen: torch.Tensor | None = None,
     sequence_lengths: torch.Tensor | None = None,
+    q_scale: torch.Tensor | None = None,
+    k_scale: torch.Tensor | None = None,
+    v_scale: torch.Tensor | None = None,
+    o_data_type: torch.dtype | None = None,
 ) -> torch.Tensor:
     return torch.ops.vllm.flashinfer_wrapper(
-        q, k, v, scale, workspace_buffer, cu_seqlens, max_seqlen, sequence_lengths
+        q,
+        k,
+        v,
+        scale,
+        workspace_buffer,
+        cu_seqlens,
+        max_seqlen,
+        sequence_lengths,
+        q_scale,
+        k_scale,
+        v_scale,
+        o_data_type,
     )

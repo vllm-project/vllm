@@ -62,6 +62,7 @@ from vllm.v1.attention.backend import AttentionType
 from .adapters import as_embedding_model, as_seq_cls_model
 from .interfaces import (
     EagleModelMixin,
+    LocalArgmaxMixin,
     SupportsEagle,
     SupportsEagle3,
     SupportsLoRA,
@@ -238,9 +239,6 @@ class LlamaAttention(nn.Module):
         quant_config: QuantizationConfig | None,
     ) -> None:
         is_neox_style = True
-        is_gguf = quant_config and quant_config.get_name() == "gguf"
-        if is_gguf and config.model_type == "llama":
-            is_neox_style = False
 
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -267,7 +265,6 @@ class LlamaDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         # Support abacusai/Smaug-72B-v0.1 with attention_bias
-        # Support internlm/internlm-7b with bias
         attention_bias = getattr(config, "attention_bias", False) or getattr(
             config, "bias", False
         )
@@ -337,20 +334,15 @@ class LlamaDecoderLayer(nn.Module):
         return vllm_config.quant_config
 
 
-def llama_model_invariants(
-    input_ids, positions, intermediate_tensors=None, inputs_embeds=None
-):
-    """Shape invariants for Llama model compilation, those are translated to
-    runtime assertions for unbacked dynamic shapes and are compiled away for
-    backed"""
-    if input_ids is not None:
-        torch._check(positions.size()[0] == input_ids.size()[0])
-
-
 @support_torch_compile(
     # TODO[#32068]: Investigate recompilation
     # mark_unbacked_dims={"input_ids": 0},
-    shape_invariants=llama_model_invariants
+    dynamic_arg_dims={
+        "input_ids": {0: "b"},
+        "positions": {0: "b"},
+        "intermediate_tensors": {0: "b"},
+        "inputs_embeds": {0: "b"},
+    },
 )
 class LlamaModel(nn.Module, EagleModelMixin):
     def __init__(
@@ -456,18 +448,6 @@ class LlamaModel(nn.Module, EagleModelMixin):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                # Loading kv cache quantization scales
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = (
-                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
-                )
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
-                continue
             if "scale" in name or "zero_point" in name:
                 # Remapping the name of FP8 kv-scale or zero point.
                 name = maybe_remap_kv_scale_name(name, params_dict)
@@ -504,7 +484,7 @@ class LlamaModel(nn.Module, EagleModelMixin):
 
 
 class LlamaForCausalLM(
-    nn.Module, SupportsLoRA, SupportsPP, SupportsEagle, SupportsEagle3
+    LocalArgmaxMixin, nn.Module, SupportsLoRA, SupportsPP, SupportsEagle, SupportsEagle3
 ):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],

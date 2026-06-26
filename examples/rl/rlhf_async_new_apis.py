@@ -131,16 +131,9 @@ class TrainModel:
         from vllm.model_executor.layers.batch_invariant import (
             init_batch_invariance,
         )
-        from vllm.platforms import current_platform
-        from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
         # need to init all env vars for batch invariance which affect nccl ops
-        attn_backend = (
-            AttentionBackendEnum.TRITON_ATTN
-            if current_platform.is_rocm()
-            else AttentionBackendEnum.FLASH_ATTN
-        )
-        init_batch_invariance(attn_backend)
+        init_batch_invariance()
 
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name, dtype=torch.bfloat16
@@ -314,6 +307,8 @@ gen_futures = [
 
 ray.get(llm.pause_after_n_tokens.remote())
 
+ray.get(llm.start_weight_update.remote(is_checkpoint_format=True))
+
 inference_handle = llm.update_weights.remote(
     WeightTransferUpdateRequest(
         update_info=asdict(
@@ -328,6 +323,8 @@ inference_handle = llm.update_weights.remote(
 )
 train_handle = train_model.broadcast_weights.remote(packed=True)
 ray.get([train_handle, inference_handle])
+
+ray.get(llm.finish_weight_update.remote())
 
 ray.get(llm.resume_generation.remote())
 results = ray.get(gen_futures)

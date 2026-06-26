@@ -74,7 +74,15 @@ class EngineCoreReadyResponse:
 
     max_model_len: int
     num_gpu_blocks: int
+    block_size: int
     dp_stats_address: str | None
+    dtype: str
+    vllm_version: str
+    world_size: int
+    data_parallel_size: int
+    # KV cache capacity (None for encoder-only/attention-free models).
+    kv_cache_size_tokens: int | None = None
+    kv_cache_max_concurrency: float | None = None
 
 
 class EngineCoreRequest(
@@ -93,6 +101,12 @@ class EngineCoreRequest(
     cache_salt: str | None
     data_parallel_rank: int | None
     prompt_embeds: torch.Tensor | None = None
+
+    # Per-position mask for mixed-mode inputs (e.g chat completion with
+    # prompt_embeds content parts). `True` means the position is a real
+    # token ID; `False` means the position uses a pre-computed entry from
+    # `prompt_embeds`. `None` for pure-tokens and pure-embeds requests.
+    prompt_is_token_ids: list[bool] | None = None
 
     # Index of the client, used to ensure outputs are sent back to the same
     # client for this request when scaling out the front-end.
@@ -114,6 +128,13 @@ class EngineCoreRequest(
     external_req_id: str | None = None
 
     reasoning_ended: bool | None = None
+    reasoning_parser_kwargs: dict[str, Any] | None = None
+
+    # If True, the request should be added to the scheduler's waiting queue
+    # and immediately aborted, so connector-side cleanup runs via the standard
+    # request_finished hook. Used to free P-side prefill blocks when a
+    # KV-transfer request is rejected on the D node before engine admission.
+    abort_immediately: bool = False
 
     @property
     def params(self) -> SamplingParams | PoolingParams:
@@ -135,7 +156,7 @@ class EngineCoreEventType(enum.IntEnum):
 class EngineCoreEvent(msgspec.Struct):
     """A timestamped engine core event associated with a request.
 
-    The timestamp is a monotonic timestamps and is used for by the engine
+    The timestamp is a monotonic timestamp and is used by the engine
     frontend to calculate intervals between engine core events. These
     timestamps should not be compared with timestamps from other processes.
     """

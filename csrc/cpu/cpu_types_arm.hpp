@@ -15,6 +15,9 @@ using namespace at::vec;
 
 namespace vec_op {
 
+struct fp8_e4m3_tag {};
+struct fp8_e5m2_tag {};
+
 #define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)         \
   AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__) \
   AT_DISPATCH_CASE(at::ScalarType::Half, __VA_ARGS__)  \
@@ -322,6 +325,9 @@ struct BF16Vec32 : public VectorizedRegWrapper<BF16Vec32, 4, c10::BFloat16> {
     reg.val[2] = vec8_data.reg.val[0];
     reg.val[3] = vec8_data.reg.val[0];
   };
+
+  explicit BF16Vec32(const uint8_t*, fp8_e4m3_tag) : Base() {}
+  explicit BF16Vec32(const uint8_t*, fp8_e5m2_tag) : Base() {}
 };
 
 struct FP32Vec4 : public VectorizedRegWrapper<FP32Vec4, 1, float> {
@@ -480,12 +486,36 @@ struct FP32Vec16 : public VectorizedRegWrapper<FP32Vec16, 4, float> {
 
   explicit FP32Vec16(const BF16Vec8& v) : FP32Vec16(FP32Vec8(v)) {};
 
+  // FP8 stub: dead code on ARM (fp8 KV cache is x86-only), needed for
+  // load_b_pair_vec template to compile on all platforms.
+  explicit FP32Vec16(const BF16Vec32&, int) : Base() {}
+
   explicit FP32Vec16(const FP16Vec16& v) {
     reg.val[0] = Vectorized<float>(vcvt_f32_f16(vget_low_f16(v.reg.val[0])));
     reg.val[1] = Vectorized<float>(vcvt_f32_f16(vget_high_f16(v.reg.val[0])));
     reg.val[2] = Vectorized<float>(vcvt_f32_f16(vget_low_f16(v.reg.val[1])));
     reg.val[3] = Vectorized<float>(vcvt_f32_f16(vget_high_f16(v.reg.val[1])));
   };
+
+  static FORCE_INLINE void load_even_odd(const float* ptr, FP32Vec16& even,
+                                         FP32Vec16& odd) noexcept {
+    const float32x4x2_t x01 = vuzpq_f32(vld1q_f32(ptr), vld1q_f32(ptr + 4));
+    const float32x4x2_t x23 =
+        vuzpq_f32(vld1q_f32(ptr + 8), vld1q_f32(ptr + 12));
+    const float32x4x2_t x45 =
+        vuzpq_f32(vld1q_f32(ptr + 16), vld1q_f32(ptr + 20));
+    const float32x4x2_t x67 =
+        vuzpq_f32(vld1q_f32(ptr + 24), vld1q_f32(ptr + 28));
+
+    even.reg.val[0] = VectorizedT(x01.val[0]);
+    even.reg.val[1] = VectorizedT(x23.val[0]);
+    even.reg.val[2] = VectorizedT(x45.val[0]);
+    even.reg.val[3] = VectorizedT(x67.val[0]);
+    odd.reg.val[0] = VectorizedT(x01.val[1]);
+    odd.reg.val[1] = VectorizedT(x23.val[1]);
+    odd.reg.val[2] = VectorizedT(x45.val[1]);
+    odd.reg.val[3] = VectorizedT(x67.val[1]);
+  }
 
   FORCE_INLINE FP32Vec16 operator+(const FP32Vec16& b) const noexcept {
     FP32Vec16 r(uninit);
@@ -502,6 +532,15 @@ struct FP32Vec16 : public VectorizedRegWrapper<FP32Vec16, 4, float> {
     r.reg.val[1] = reg.val[1] - b.reg.val[1];
     r.reg.val[2] = reg.val[2] - b.reg.val[2];
     r.reg.val[3] = reg.val[3] - b.reg.val[3];
+    return r;
+  }
+
+  FORCE_INLINE FP32Vec16 operator-() const noexcept {
+    FP32Vec16 r(uninit);
+    r.reg.val[0] = reg.val[0].neg();
+    r.reg.val[1] = reg.val[1].neg();
+    r.reg.val[2] = reg.val[2].neg();
+    r.reg.val[3] = reg.val[3].neg();
     return r;
   }
 

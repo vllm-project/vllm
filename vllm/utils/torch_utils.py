@@ -17,6 +17,7 @@ from torch.library import Library, infer_schema
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.utils.platform_utils import is_pin_memory_available
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -38,6 +39,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8_e4m3": torch.uint8,
     "fp8_e5m2": torch.uint8,
     "int8": torch.int8,
+    "int4_per_token_head": torch.uint8,
     "int8_per_token_head": torch.int8,
     "fp8_per_token_head": torch.uint8,
     "fp8_inc": torch.float8_e4m3fn,
@@ -65,6 +67,9 @@ MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
 }
 
 T = TypeVar("T")
+
+
+PIN_MEMORY = is_pin_memory_available()
 
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
@@ -108,6 +113,32 @@ def is_strictly_contiguous(t: torch.Tensor) -> bool:
             return False
         expected_stride *= shape[i]
     return True
+
+
+def canonicalize_singleton_dim_strides(t: torch.Tensor) -> torch.Tensor:
+    """Fix degenerate strides on size=1 dimensions for CUDA TMA compatibility.
+
+    PyTorch allows any stride on a size=1 dim (is_contiguous() is always True
+    there), so a size=1 dim may have stride=1 (2 bytes for bf16) instead of
+    the canonical product(shape[i+1:]).  CUDA TMA on H100+ requires all
+    non-outermost strides to be ≥16-byte aligned; stride=1 triggers
+    cudaErrorIllegalInstruction.  Zero-copy: patches stride metadata only via
+    as_strided; returns t unchanged if all size=1 strides are already canonical.
+    """
+    if 1 not in t.shape:
+        return t
+    strides = list(t.stride())
+    shape = t.shape
+    prev_stride = 1
+    changed = False
+    for i in range(len(shape) - 1, -1, -1):
+        if shape[i] == 1 and strides[i] != prev_stride:
+            strides[i] = prev_stride
+            changed = True
+        prev_stride = strides[i] * shape[i]
+    if not changed:
+        return t
+    return t.as_strided(t.shape, strides)
 
 
 @contextlib.contextmanager
@@ -574,14 +605,24 @@ def create_kv_caches_with_random(
 
 
 def async_tensor_h2d(
-    data: list,
-    dtype: torch.dtype,
-    target_device: str | torch.device,
-    pin_memory: bool,
+    data: list | np.ndarray | torch.Tensor,
+    device: str | torch.device,
+    dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
-    """Asynchronously create a tensor and copy it from host to device."""
-    t = torch.tensor(data, dtype=dtype, pin_memory=pin_memory, device="cpu")
-    return t.to(device=target_device, non_blocking=True)
+    """Copy list/numpy array/tensor async from host to device."""
+    if isinstance(data, np.ndarray):
+        data = torch.from_numpy(data)
+    if isinstance(data, torch.Tensor):
+        t = data.pin_memory() if PIN_MEMORY else data
+    else:
+        t = torch.tensor(data, dtype=dtype, pin_memory=PIN_MEMORY, device="cpu")
+    assert t.is_cpu
+    return t.to(device=device, dtype=dtype, non_blocking=True)
+
+
+def np_to_pinned_tensor(array: np.ndarray) -> torch.Tensor:
+    t = torch.from_numpy(array)
+    return t.pin_memory() if PIN_MEMORY else t
 
 
 def make_ndarray_with_pad(
@@ -880,11 +921,6 @@ def _resolve_layer_name(layer_name: str | LayerName) -> str:
 def _encode_layer_name(layer_name: str) -> str | LayerName:
     """Wrap a str layer name as LayerName when enabled."""
     return LayerName(layer_name) if _USE_LAYERNAME else layer_name
-
-
-# Supports xccl with PyTorch versions >= 2.8.0.dev for XPU platform
-def supports_xccl() -> bool:
-    return torch.distributed.is_xccl_available()
 
 
 # Supports XPU Graph with PyTorch versions >= 2.11.0.dev for XPU platform

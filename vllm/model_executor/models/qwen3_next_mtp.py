@@ -7,11 +7,14 @@ from collections.abc import Iterable
 import torch
 from torch import nn
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -61,13 +64,22 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
             config.hidden_size,
         )
 
+        # Workaround: mtp.fc is stored as BF16 in NVFP4 checkpoints but is
+        # missing from the checkpoint quant exclude list (its `ignore` glob
+        # does not cover `mtp.fc`). Force unquantized to match the weights,
+        # mirroring the Qwen3.5 MTP handling (PR #38832).
+        fc_quant = (
+            None
+            if (quant_config and quant_config.get_name() == "modelopt_fp4")
+            else quant_config
+        )
         self.fc = ColumnParallelLinear(
             self.config.hidden_size * 2,
             self.config.hidden_size,
             gather_output=True,
             bias=False,
             return_bias=False,
-            quant_config=quant_config,
+            quant_config=fc_quant,
             prefix=f"{prefix}.fc",
         )
 
@@ -145,19 +157,31 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
 
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = FusedMoE.make_expert_params_mapping(
+        is_fse = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+        num_experts = self.config.num_experts
+        if is_fse:
+            num_experts += 1
+        expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_experts,
+            num_experts=num_experts,
         )
+        num_routed = self.config.num_experts
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
+
+            # FSE: remap shared_expert weights to the fused expert slot
+            if is_fse and "mlp.shared_expert." in name:
+                name = name.replace(
+                    "mlp.shared_expert.",
+                    f"mlp.experts.{num_routed}.",
+                )
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
@@ -227,7 +251,7 @@ class Qwen3NextMTP(nn.Module, QwenNextMixtureOfExperts):
             "k_proj",
             "v_proj",
         ],
-        "gate_up_proj": ["up_proj", "down_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

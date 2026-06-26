@@ -19,11 +19,17 @@ The score models is designed to compute similarity scores between two input prom
 - Offline APIs:
     - `LLM.score`
 - Online APIs:
-    - [Score API](scoring.md#score-api) (`/score`)
-    - [Rerank API](scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
+    - [Score API](scoring.md#score-api) (`/score`, `/v1/score`)
+    - [Cohere Rerank API](scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
 
 !!! note
     Only when a classification model outputs num_labels equal to 1 can it be used as a scoring model and have its scoring API enabled.
+
+### Score Types
+
+The three supported scoring functions are as illustrated in the figure below.
+
+![Score Types](../../assets/models/pooling_models/score_types.svg)
 
 ## Supported Models
 
@@ -41,6 +47,7 @@ The score models is designed to compute similarity scores between two input prom
 | `GemmaForSequenceClassification` | Gemma-based | `BAAI/bge-reranker-v2-gemma`(see note), etc. | [bge-reranker-v2-gemma.jinja](../../../examples/pooling/score/template/bge-reranker-v2-gemma.jinja) | ✅︎ | ✅︎ |
 | `GteNewForSequenceClassification` | mGTE-TRM (see note) | `Alibaba-NLP/gte-multilingual-reranker-base`, etc. | N/A | | |
 | `LlamaBidirectionalForSequenceClassification`<sup>C</sup> | Llama-based with bidirectional attention | `nvidia/llama-nemotron-rerank-1b-v2`, etc. | [nemotron-rerank.jinja](../../../examples/pooling/score/template/nemotron-rerank.jinja) | ✅︎ | ✅︎ |
+| `ModernBertForSequenceClassification` | ModernBERT-based | `Alibaba-NLP/gte-reranker-modernbert-base`, etc. | N/A | | |
 | `Qwen2ForSequenceClassification`<sup>C</sup> | Qwen2-based | `mixedbread-ai/mxbai-rerank-base-v2`(see note), etc. | [mxbai_rerank_v2.jinja](../../../examples/pooling/score/template/mxbai_rerank_v2.jinja) | ✅︎ | ✅︎ |
 | `Qwen3ForSequenceClassification`<sup>C</sup> | Qwen3-based | `tomaarsen/Qwen3-Reranker-0.6B-seq-cls`, `Qwen/Qwen3-Reranker-0.6B`(see note), etc. | [qwen3_reranker.jinja](../../../examples/pooling/score/template/qwen3_reranker.jinja) | ✅︎ | ✅︎ |
 | `RobertaForSequenceClassification` | RoBERTa-based | `cross-encoder/quora-roberta-base`, etc. | N/A | | |
@@ -96,7 +103,7 @@ The score models is designed to compute similarity scores between two input prom
 \* Feature support is the same as that of the original model.
 
 !!! note
-    Similar to Qwen3-Reranker, you need to use the following `--hf_overrides` to load the official original `Qwen3-VL-Reranker`.
+    Similar to Qwen3-Reranker, you need to use the following `--hf_overrides` to load the official original `Qwen3-VL-Reranker`. `Qwen3-VL` officially uses `qwen_vl_utils` for image preprocessing, while vLLM uses `transformers`' `video_processing_qwen3_vl`, which leads to slightly different results compared to the official Hugging Face repository examples.
 
     ```bash
     vllm serve Qwen/Qwen3-VL-Reranker-2B --hf_overrides '{"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
@@ -129,7 +136,7 @@ The following [pooling parameters][vllm.PoolingParams] are only supported by cro
 
 ### `LLM.score`
 
-The [score][vllm.LLM.score] method outputs similarity scores between sentence pairs.
+The [score][vllm.entrypoints.pooling.offline.PoolingOfflineMixin.score] method outputs similarity scores between sentence pairs.
 
 ```python
 from vllm import LLM
@@ -150,7 +157,7 @@ A code example can be found here: [examples/basic/offline_inference/score.py](..
 
 ### Score API
 
-Our Score API (`/score`) is similar to `LLM.score`, compute similarity scores between two input prompts.
+Our Score API (`/score`, `/v1/score`) is similar to `LLM.score`, compute similarity scores between two input prompts.
 
 #### Parameters
 
@@ -356,7 +363,7 @@ Full example:
 - [examples/pooling/score/vision_score_api_online.py](../../../examples/pooling/score/vision_score_api_online.py)
 - [examples/pooling/score/vision_rerank_api_online.py](../../../examples/pooling/score/vision_rerank_api_online.py)
 
-### Rerank API
+### Cohere Rerank API
 
 `/rerank`, `/v1/rerank`, and `/v2/rerank` APIs are compatible with both [Jina AI's rerank API interface](https://jina.ai/reranker/) and
 [Cohere's rerank API interface](https://docs.cohere.com/v2/reference/rerank) to ensure compatibility with
@@ -433,13 +440,13 @@ More examples can be found here: [examples/pooling/score](../../../examples/pool
 
 ## Supported Features
 
-AS cross-encoder models are a subset of classification models that accept two prompts as input and output num_labels equal to 1, cross-encoder features should be consistent with (sequence) classification. For more information, see [this page](classify.md#supported-features).
+As cross-encoder models are a subset of classification models that accept two prompts as input and output num_labels equal to 1, cross-encoder features should be consistent with (sequence) classification. For more information, see [this page](classify.md#supported-features).
 
 ### Score Template
 
 Score templates are supported for **cross-encoder** models only. If you are using an **embedding** model for scoring, vLLM does not apply a score template.
 
-Some scoring models require a specific prompt format to work correctly. You can specify a custom score template using the `--chat-template` parameter (see [Chat Template](../../serving/openai_compatible_server.md#chat-template)).
+Some scoring models require a specific prompt format to work correctly. You can specify a custom score template using the `--chat-template` parameter (see [Chat Template](../../serving/online_serving/README.md#chat-template)).
 
 Like chat templates, the score template receives a `messages` list. For scoring, each message has a `role` attribute—either `"query"` or `"document"`. For the usual kind of point-wise cross-encoder, you can expect exactly two messages: one query and one document. To access the query and document content, use Jinja's `selectattr` filter:
 

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import dataclasses
 from collections.abc import Mapping, Set
 from itertools import groupby
 
@@ -80,9 +81,11 @@ class DispatchPooler(Pooler):
         pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
         poolers_by_task = self.poolers_by_task
+        cursor = pooling_metadata.pooling_cursor
 
         outputs = list[torch.Tensor | None]()
         offset = 0
+        token_offset = 0
         for task, group in groupby(pooling_metadata.tasks):
             if not (pooler := poolers_by_task.get(task)):
                 raise ValueError(
@@ -91,10 +94,38 @@ class DispatchPooler(Pooler):
                 )
 
             num_items = len(list(group))
-            group_output: PoolerOutput = pooler(
-                hidden_states,
-                pooling_metadata[offset : offset + num_items],
-            )
+            group_metadata = pooling_metadata[offset : offset + num_items]
+            if cursor is None:
+                group_hidden_states = hidden_states
+            else:
+                # Slice out this group's tokens so sub-poolers see only their
+                # portion of the batch. Token offset is computed from the CPU
+                # `num_scheduled_tokens_cpu` to avoid a GPU->CPU sync.
+                group_cursor = group_metadata.pooling_cursor
+                assert group_cursor is not None
+                num_group_tokens = int(group_cursor.num_scheduled_tokens_cpu.sum())
+                group_hidden_states = hidden_states[
+                    token_offset : token_offset + num_group_tokens
+                ]
+                if token_offset:
+                    # Shift first/last indices to be relative to the slice
+                    # so seqwise poolers (which index `hidden_states` directly)
+                    # remain correct.
+                    pooling_cursor = dataclasses.replace(
+                        group_cursor,
+                        first_token_indices_gpu=(
+                            group_cursor.first_token_indices_gpu - token_offset
+                        ),
+                        last_token_indices_gpu=(
+                            group_cursor.last_token_indices_gpu - token_offset
+                        ),
+                    )
+                    group_metadata = dataclasses.replace(
+                        group_metadata, pooling_cursor=pooling_cursor
+                    )
+                token_offset += num_group_tokens
+
+            group_output: PoolerOutput = pooler(group_hidden_states, group_metadata)
 
             outputs.extend(group_output)
             offset += num_items
@@ -132,6 +163,9 @@ class BOSEOSFilter(Pooler):
         self.pooler = pooler
         self.bos_token_id = bos_token_id
         self.eos_token_id = eos_token_id
+
+    def extra_repr(self) -> str:
+        return f"bos_token_id={self.bos_token_id}, eos_token_id={self.eos_token_id}"
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return self.pooler.get_supported_tasks()

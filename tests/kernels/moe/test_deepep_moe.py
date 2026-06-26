@@ -10,6 +10,7 @@ import pytest
 import torch.distributed
 from torch.distributed import ProcessGroup
 
+import vllm.envs as envs
 from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, set_current_vllm_config
@@ -19,11 +20,14 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.fused_batched_moe import BatchedTritonExperts
+from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
+    BatchedTritonExperts,
+)
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
+from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_ep
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -61,7 +65,7 @@ def make_weights(
         return w1, w2, None, None
 
     # per-out-channel weight quantization
-    assert dtype == torch.float8_e4m3fn
+    assert dtype == current_platform.fp8_dtype()
     w1 = torch.empty((e, 2 * n, k), device="cuda", dtype=torch.float16)
     w2 = torch.empty((e, k, n), device="cuda", dtype=torch.float16)
 
@@ -102,9 +106,11 @@ class TestTensors:
     @staticmethod
     def make(config: TestConfig, low_latency_mode: bool) -> "TestTensors":
         # TODO (varun) - check that float16 works ?
-        assert config.dtype in [torch.bfloat16, torch.float8_e4m3fn]
+        assert config.dtype in [torch.bfloat16, current_platform.fp8_dtype()]
         token_dtype = (
-            torch.bfloat16 if config.dtype == torch.float8_e4m3fn else config.dtype
+            torch.bfloat16
+            if config.dtype == current_platform.fp8_dtype()
+            else config.dtype
         )
         rank_tokens = (
             torch.randn((config.m, config.k), device="cuda", dtype=token_dtype) / 10
@@ -183,7 +189,6 @@ def make_modular_kernel(
     mk = FusedMoEKernel(
         prepare_finalize=a2a,
         fused_experts=fused_experts,
-        inplace=False,
     )
     return mk
 
@@ -214,10 +219,10 @@ def deep_ep_moe_impl(
         return expert_map.to(device=device, dtype=torch.int32)
 
     hidden_size = test_tensors.rank_tokens.size(1)
-    is_quantized = w1.dtype == torch.float8_e4m3fn
+    is_quantized = w1.dtype == current_platform.fp8_dtype()
     q_dtype = None
     if is_quantized:
-        q_dtype = torch.float8_e4m3fn
+        q_dtype = current_platform.fp8_dtype()
 
     out_hidden_states = torch.empty_like(test_tensors.rank_tokens)
     total_num_tokens = test_tensors.rank_tokens.size(0)
@@ -316,7 +321,7 @@ def torch_moe_impl(
             .to(a.dtype)
         )
 
-    is_quantized = w1.dtype == torch.float8_e4m3fn
+    is_quantized = w1.dtype == current_platform.fp8_dtype()
     a_dtype = a.dtype
     if is_quantized:
         w1 = w1.to(dtype=torch.float32) * w1_scale
@@ -365,7 +370,7 @@ def _deep_ep_moe(
             "FP8 dispatch interface is available only in low-latency mode"
         )
 
-    is_quantized = w1.dtype == torch.float8_e4m3fn
+    is_quantized = w1.dtype == current_platform.fp8_dtype()
     device_idx = torch.accelerator.current_device_index()
     w1 = w1.to(device=device_idx)
     w2 = w2.to(device=device_idx)
@@ -374,7 +379,13 @@ def _deep_ep_moe(
         w1_scale = w1_scale.to(device=device_idx)
         w2_scale = w2_scale.to(device=device_idx)
 
-    pg = torch.distributed.new_group(list(range(pgi.world_size)))
+    if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
+        pg = torch.distributed.split_group(
+            split_ranks=[list(range(pgi.world_size))],
+            group_desc="deepep_test",
+        )
+    else:
+        pg = torch.distributed.new_group(list(range(pgi.world_size)))
     test_tensors = TestTensors.make(config, low_latency_mode)
 
     with set_current_vllm_config(VllmConfig()):
@@ -433,7 +444,7 @@ MNKs = [
     (222, 1024, 2048),
 ]
 
-DTYPES = [torch.bfloat16, torch.float8_e4m3fn]
+DTYPES = [torch.bfloat16, current_platform.fp8_dtype()]
 
 
 @pytest.mark.parametrize("dtype", DTYPES)
@@ -488,7 +499,7 @@ MNKs = [
     (64, 1024, 2560),
     (222, 1024, 2560),
 ]
-DTYPES = [torch.float8_e4m3fn, torch.bfloat16]
+DTYPES = [current_platform.fp8_dtype(), torch.bfloat16]
 USE_FP8_DISPATCH = [True, False]
 
 

@@ -7,12 +7,11 @@ import torch
 from torch.nn import Module
 
 if TYPE_CHECKING:
-    import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-    from vllm.model_executor.layers.fused_moe import FusedMoE
     from vllm.model_executor.layers.fused_moe.config import (
         FusedMoEQuantConfig,
     )
 
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.oracle.int8 import (
     make_int8_moe_kernel,
     make_int8_moe_quant_config,
@@ -20,6 +19,10 @@ from vllm.model_executor.layers.fused_moe.oracle.int8 import (
 )
 from vllm.model_executor.layers.quantization.online.moe_base import (
     OnlineMoEMethodBase,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kInt8DynamicTokenSym,
+    kInt8StaticChannelSym,
 )
 from vllm.model_executor.utils import replace_parameter
 
@@ -35,8 +38,10 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
         layer: torch.nn.Module,
     ):
         super().__init__(layer.moe_config)
-        self.experts_cls: type[mk.FusedMoEExperts] = select_int8_moe_backend(
+        self.int8_backend, self.experts_cls = select_int8_moe_backend(
             config=self.moe,
+            weight_key=kInt8StaticChannelSym,
+            activation_key=kInt8DynamicTokenSym,
         )
 
     def process_weights_after_loading(self, layer: Module) -> None:
@@ -86,7 +91,7 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
         replace_parameter(layer, "w13_scale", w13_scale)
         replace_parameter(layer, "w2_scale", w2_scale)
 
-    def _setup_kernel(self, layer: "FusedMoE") -> None:
+    def _setup_kernel(self, layer: RoutedExperts) -> None:
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.moe_quant_config is not None
         assert self.experts_cls is not None
@@ -94,16 +99,15 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             experts_cls=self.experts_cls,
-            routing_tables=layer._maybe_init_expert_routing_tables(),
-            shared_experts=layer.shared_experts,
+            routing_tables=layer._expert_routing_tables(),
         )
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> "FusedMoEQuantConfig | None":
-        quant_config = make_int8_moe_quant_config(
+        return make_int8_moe_quant_config(
             w1_scale=layer.w13_scale,
             w2_scale=layer.w2_scale,
+            w1_bias=getattr(layer, "w13_bias", None),
+            w2_bias=getattr(layer, "w2_bias", None),
         )
-        self._maybe_inject_biases(quant_config, layer)
-        return quant_config

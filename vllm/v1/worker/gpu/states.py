@@ -57,11 +57,16 @@ class RequestState:
         self.num_computed_tokens = StagedWriteTensor(
             self.max_num_reqs, dtype=torch.int32, device=device
         )
+        # Optimistic CPU mirror of num_computed_tokens (upper bound on GPU value).
+        self.num_computed_tokens_np = np.zeros(self.max_num_reqs, dtype=np.int32)
 
         # Last sampled tokens.
         self.last_sampled_tokens = torch.zeros(
             self.max_num_reqs, 1, dtype=torch.int64, device=device
         )
+
+        # Max total seq length (prompt_len + max_tokens).
+        self.max_seq_len = np.zeros(self.max_num_reqs, dtype=np.int32)
 
         # Draft tokens.
         self.draft_tokens = torch.zeros(
@@ -85,12 +90,14 @@ class RequestState:
         prompt_len: int,
         all_token_ids: list[int],
         num_computed_tokens: int,
+        max_tokens: int,
     ) -> None:
         assert len(self.free_indices) > 0, "No free indices"
         req_idx = self.free_indices.pop()
         self.req_id_to_index[req_id] = req_idx
         self.index_to_req_id[req_idx] = req_id
 
+        self.max_seq_len[req_idx] = prompt_len + max_tokens
         self.prompt_len.np[req_idx] = prompt_len
         prefill_len = len(all_token_ids)
         assert prefill_len >= prompt_len, (
@@ -100,9 +107,10 @@ class RequestState:
         self.total_len.stage_write_elem(req_idx, prefill_len)
         self.all_token_ids.stage_write(req_idx, 0, all_token_ids)
         self.num_computed_prefill_tokens[req_idx] = num_computed_tokens
+        self.num_computed_tokens_np[req_idx] = num_computed_tokens
         self.num_computed_tokens.stage_write_elem(req_idx, num_computed_tokens)
 
-        if num_computed_tokens > 0 and num_computed_tokens <= prefill_len:
+        if 0 < num_computed_tokens <= prefill_len:
             # For PD disagg or resumed requests: set last_sampled to the last
             # computed token so the first decode step gets the right input_id.
             # For fresh prefill requests (num_computed_tokens == 0) the tensor
@@ -121,17 +129,11 @@ class RequestState:
         self.all_token_ids.apply_write()
         self.num_computed_tokens.apply_write()
 
-    def remove_request(self, req_id: str) -> bool:
+    def remove_request(self, req_id: str) -> int | None:
+        """Return the freed slot index, or None if the request was not found."""
         req_idx = self.req_id_to_index.pop(req_id, None)
         if req_idx is None:
-            # Request not found.
-            return False
+            return None
         self.index_to_req_id.pop(req_idx, None)
         self.free_indices.append(req_idx)
-        return True
-
-    def any_prefills(self, idx_mapping_np: np.ndarray) -> bool:
-        return np.any(
-            self.num_computed_prefill_tokens[idx_mapping_np]
-            < self.prefill_len.np[idx_mapping_np]
-        )
+        return req_idx

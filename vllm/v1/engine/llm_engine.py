@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
+import weakref
 from collections.abc import Callable, Mapping
 from copy import copy
 from typing import Any
@@ -56,7 +57,6 @@ class LLMEngine:
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: list[StatLoggerFactory] | None = None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
-        use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
     ) -> None:
         self.vllm_config = vllm_config
@@ -123,6 +123,14 @@ class LLMEngine:
         if not multiprocess_mode:
             # for v0 compatibility
             self.model_executor = self.engine_core.engine_core.model_executor  # type: ignore
+
+            # Capture the model while reachable so the finalizer can drop the
+            # bytecode hooks pinning it (frees GPU memory on engine deletion).
+            model = self._get_driver_model_for_cleanup()
+            if model is not None:
+                self._finalizer = weakref.finalize(
+                    self, LLMEngine._cleanup_instance_caches, model
+                )
 
         if self.external_launcher_dp:
             # If we use DP in external launcher mode, we reuse the
@@ -351,6 +359,8 @@ class LLMEngine:
         self.engine_core.reset_encoder_cache()
 
     def sleep(self, level: int = 1, mode: PauseMode = "abort"):
+        if level >= 1:
+            self.renderer.clear_mm_cache()
         self.engine_core.sleep(level, mode)
 
         if self.logger_manager is not None:
@@ -417,6 +427,20 @@ class LLMEngine:
 
     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
         return self.collective_rpc("apply_model", args=(func,))
+
+    def _get_driver_model_for_cleanup(self) -> nn.Module | None:
+        driver_worker = getattr(self.model_executor, "driver_worker", None)
+        model_runner = getattr(driver_worker, "model_runner", None)
+        return getattr(model_runner, "model", None)
+
+    @staticmethod
+    def _cleanup_instance_caches(model) -> None:
+        """Remove the bytecode hooks that pin the compiled model."""
+        from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
+
+        for module in model.modules():
+            if isinstance(module, TorchCompileWithNoGuardsWrapper):
+                module.cleanup()
 
     def __del__(self):
         dp_group = getattr(self, "dp_group", None)
