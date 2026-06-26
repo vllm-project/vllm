@@ -467,7 +467,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             elif isinstance(module, RoutedExperts) and hasattr(
                 module.quant_method, "quant_config"
             ):
-                # TODO: support FusedMoE with prequant and 8bit.
+                # TODO: support FusedMoEFactory with prequant and 8bit.
                 if self.pre_quant and self.load_8bit:
                     raise ValueError(
                         "Prequant BitsAndBytes 8bit models with RoutedExperts "

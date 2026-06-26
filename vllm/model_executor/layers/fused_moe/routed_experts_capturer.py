@@ -170,7 +170,7 @@ class RoutedExpertsCapturer:
                 # (trailing rows are SP ceil-div padding). The TP group
                 # is always initialized on real rollout workers, and
                 # every rank in the group reaches this branch in
-                # lockstep (bind is per-FusedMoE layer, SP is a global
+                # lockstep (bind is per-FusedMoEFactory layer, SP is a global
                 # condition), so a bare all_gather here will not
                 # deadlock -- let it raise if the precondition is
                 # violated rather than skip silently.

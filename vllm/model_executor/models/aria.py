@@ -15,7 +15,7 @@ from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
     RoutedExperts,
 )
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
@@ -280,7 +280,7 @@ class AriaTextMoELayer(nn.Module):
             bias=config.mlp_bias,
         )
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             num_experts=config.moe_num_experts,
             top_k=config.moe_topk,
