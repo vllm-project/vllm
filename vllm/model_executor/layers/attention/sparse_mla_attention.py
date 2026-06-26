@@ -191,6 +191,31 @@ def _scatter_topk_kernel(
     tl.atomic_or(mask_row_ptr + word_indices, bits, mask=valid)
 
 
+@triton.jit
+def _scatter_topk_single_req_kernel(
+    mask_ptr,
+    topk_ptr,
+    num_words: tl.constexpr,
+    num_topk: tl.constexpr,
+    topk_stride: tl.constexpr,
+    BLOCK_TOPK: tl.constexpr,
+):
+    row_idx = tl.program_id(0)
+
+    topk_row_ptr = topk_ptr + row_idx * topk_stride
+    offsets = tl.arange(0, BLOCK_TOPK)
+    in_range = offsets < num_topk
+    indices = tl.load(topk_row_ptr + offsets, mask=in_range, other=-1)
+
+    valid = in_range & (indices >= 0)
+    word_indices = indices >> 5
+    bit_indices = indices & 31
+    bits = (1 << bit_indices).to(tl.int32)
+
+    mask_row_ptr = mask_ptr + row_idx * num_words
+    tl.atomic_or(mask_row_ptr + word_indices, bits, mask=valid)
+
+
 def _build_topk_mask(
     topk_indices_per_req: list[torch.Tensor],
     q_lens: list[int],
@@ -205,6 +230,20 @@ def _build_topk_mask(
 
     total_q = sum(q_lens)
     if total_q == 0:
+        return mask
+
+    if B == 1:
+        topk_packed = topk_indices_per_req[0]
+        num_topk = topk_packed.shape[1]
+        BLOCK_TOPK = triton.next_power_of_2(num_topk)
+        _scatter_topk_single_req_kernel[(total_q,)](
+            mask,
+            topk_packed,
+            num_words=num_words,
+            num_topk=num_topk,
+            topk_stride=topk_packed.stride(0),
+            BLOCK_TOPK=BLOCK_TOPK,
+        )
         return mask
 
     topk_packed = torch.cat(topk_indices_per_req, dim=0)

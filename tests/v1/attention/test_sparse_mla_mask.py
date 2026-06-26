@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
 import torch
 
+from vllm.model_executor.layers.attention.sparse_mla_attention import (
+    _build_topk_mask,
+)
 from vllm.model_executor.layers.attention.sparse_mla_mask import (
     dense_mask_to_block_sparse,
 )
@@ -16,6 +20,21 @@ def _pack_dense_mask(dense_mask: torch.Tensor) -> torch.Tensor:
     return (
         dense_mask.reshape(*dense_mask.shape[:-1], -1, 32).to(torch.int32) << shifts
     ).sum(dim=-1, dtype=torch.int32)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_build_topk_mask_single_request_matches_generic_path() -> None:
+    topk = torch.tensor(
+        [[0, 31, 32, 63, -1], [1, 64, 127, -1, -1]],
+        dtype=torch.int32,
+        device="cuda",
+    )
+
+    single_req = _build_topk_mask([topk], [2], 2, 128, topk.device)
+    generic = _build_topk_mask([topk[:1], topk[1:]], [1, 1], 1, 128, topk.device)
+
+    torch.testing.assert_close(single_req[0, 0], generic[0, 0])
+    torch.testing.assert_close(single_req[0, 1], generic[1, 0])
 
 
 def test_dense_mask_to_block_sparse_matches_dense_tiles() -> None:

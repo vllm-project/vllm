@@ -167,15 +167,10 @@ def dense_mask_to_block_sparse(
 
     padded_q = num_m_blocks * tile_m
     padded_words = num_n_blocks * words_per_tile
-    dense_mask = F.pad(
-        dense_mask,
-        (
-            0,
-            padded_words - dense_mask.shape[2],
-            0,
-            padded_q - dense_mask.shape[1],
-        ),
-    )
+    pad_words = padded_words - dense_mask.shape[2]
+    pad_q = padded_q - dense_mask.shape[1]
+    if pad_words or pad_q:
+        dense_mask = F.pad(dense_mask, (0, pad_words, 0, pad_q))
     dense_mask = dense_mask.reshape(
         batch_size,
         num_m_blocks,
