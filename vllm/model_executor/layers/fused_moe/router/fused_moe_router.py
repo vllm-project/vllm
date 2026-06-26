@@ -57,7 +57,7 @@ class FusedMoERouter(ABC):
         Returns:
             (topk_weights, topk_ids)
             (tuple[torch.Tensor, torch.Tensor]):
-            The weights and expert ids.
+            The weights and expert ids computation result.
 
             **Compatibility**: When EPLB is not enabled, the returned ids are
             equivalent to global logical ids, so should be compatible with

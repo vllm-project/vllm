@@ -167,7 +167,7 @@ def fused_topk_bias(
     input_tokens: torch.Tensor | None = None,
     hash_indices_table: torch.Tensor | None = None,
     routed_scaling_factor: float = 1.0,
-) -> tuple[torch.Tensor, torch.Tensor]:
+):
     # The topk kernel dispatches dtype based on topk_ids (set by
     # indices_type) and assumes input_tokens/hash_indices_table match.
     if indices_type is not None:
@@ -221,7 +221,7 @@ def fused_topk_bias(
                 topk_weights *= routed_scaling_factor
             return topk_weights, topk_ids
         elif scoring_func == "sqrtsoftplus":
-            topk_weights, topk_ids = vllm_topk_softplus_sqrt(
+            return vllm_topk_softplus_sqrt(
                 topk_weights,
                 topk_ids,
                 token_expert_indices,
@@ -232,7 +232,6 @@ def fused_topk_bias(
                 hash_indices_table,
                 routed_scaling_factor,
             )
-            return topk_weights, topk_ids
         else:
             raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
@@ -277,7 +276,7 @@ def fused_topk_bias(
         token_expert_indices = torch.empty(
             M, topk, dtype=torch.int32, device=hidden_states.device
         )
-        topk_weights, topk_ids = vllm_topk_softplus_sqrt(
+        return vllm_topk_softplus_sqrt(
             topk_weights,
             topk_ids,
             token_expert_indices,
@@ -288,7 +287,6 @@ def fused_topk_bias(
             hash_indices_table,
             routed_scaling_factor,
         )
-        return topk_weights, topk_ids
 
     n_routed_experts = gating_output.shape[-1]
     if scoring_func == "softmax":
@@ -317,9 +315,8 @@ def fused_topk_bias(
     topk_weights = topk_weights.to(torch.float32)
     if routed_scaling_factor != 1.0:
         topk_weights *= routed_scaling_factor
-    return (
-        topk_weights,
-        topk_indices.to(torch.int32 if indices_type is None else indices_type),
+    return topk_weights, topk_indices.to(
+        torch.int32 if indices_type is None else indices_type
     )
 
 
@@ -349,6 +346,7 @@ class FusedTopKBiasRouter(BaseRouter):
         self.renormalize = renormalize
         self.scoring_func = scoring_func
         self.routed_scaling_factor = routed_scaling_factor
+        self.scoring_func = scoring_func
         self._hash_indices_table = hash_indices_table
         # Fused shared experts: append constant slots (ids immediately after
         # the routed experts, [global, global+n)) routed to by every token at
