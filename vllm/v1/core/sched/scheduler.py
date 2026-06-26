@@ -1547,10 +1547,8 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
-            # A stale in-flight frame force-preempted by reset_prefix_cache is
-            # pending discard (async_tokens_to_discard > 0); applying its
-            # pre-reset rejection count would underflow the resumed request's
-            # placeholder / computed-token counters, so skip the adjustment.
+            # Skip a stale frame still pending discard (async_tokens_to_discard
+            # > 0): its pre-reset rejection count would underflow the counters.
             if (
                 scheduled_spec_token_ids
                 and (generated_token_ids or self.num_sampled_tokens_per_step == 0)
