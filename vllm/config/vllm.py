@@ -1087,6 +1087,7 @@ class VllmConfig:
                     "MiniMaxM3SparseForCausalLM",
                     "MiniMaxM3SparseForConditionalGeneration",
                     "DeepseekV32ForCausalLM",
+                    "DeepseekV32MTPModel",
                     "GlmMoeDsaForCausalLM",
                 )
                 for a in self.model_config.architectures

@@ -14,7 +14,9 @@ if current_platform.is_rocm() or current_platform.is_xpu():
     raise NotImplementedError("deepseek_v32 currently supports NVIDIA SM100 only.")
 
 from .nvidia.model import DeepseekV32ForCausalLM
+from .nvidia.mtp import DeepseekV32MTP
 
 __all__ = [
     "DeepseekV32ForCausalLM",
+    "DeepseekV32MTP",
 ]
