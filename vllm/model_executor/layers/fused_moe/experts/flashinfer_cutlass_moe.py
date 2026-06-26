@@ -94,6 +94,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         # - skip input activation quantization (kernel applies scaling)
         self.use_deepseek_fp8_block_scale = quant_config.is_block_quantized
         self.max_capture_size = moe_config.max_capture_size
+        self.max_num_tokens = moe_config.max_num_tokens
         self.gemm1_clamp_limit: torch.Tensor | None = None
         if quant_config.gemm1_clamp_limit is not None:
             self.gemm1_clamp_limit = torch.tensor(
@@ -398,7 +399,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             use_deepseek_fp8_block_scale=self.use_deepseek_fp8_block_scale,
             use_mxfp8_act_scaling=use_mxfp8_act_scaling,
             use_w4_group_scaling=use_w4_group_scaling,
-            tune_max_num_tokens=max(self.max_capture_size, 1),
+            tune_max_num_tokens=self.max_num_tokens,
         )
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
