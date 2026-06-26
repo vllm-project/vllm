@@ -101,7 +101,7 @@ def _transformers_moe_forward(
     return self._forward_super(hidden_states, topk_weights)
 
 
-def _transformers_moe_forward(
+def _transformers_moe_forward_fake(
     hidden_states: torch.Tensor,
     topk_ids: torch.Tensor,
     topk_weights: torch.Tensor,
@@ -114,7 +114,7 @@ direct_register_custom_op(
     op_name="_transformers_moe_forward",
     op_func=_transformers_moe_forward,
     mutates_args=["hidden_states"],
-    fake_impl=_transformers_moe_forward,
+    fake_impl=_transformers_moe_forward_fake,
     tags=(torch.Tag.needs_fixed_stride_order,),
 )
 
