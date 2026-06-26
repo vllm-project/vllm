@@ -175,16 +175,27 @@ class RDNA3Mxfp4Experts(mk.FusedMoEExpertsModular):
         empty_tw = torch.empty(0, device=device)
         w1_bias = qc.w1_bias
         w2_bias = qc.w2_bias
-        flat_experts = topk_ids.reshape(-1).long() if (
-            w1_bias is not None or w2_bias is not None
-        ) else None
+        flat_experts = (
+            topk_ids.reshape(-1).long()
+            if (w1_bias is not None or w2_bias is not None)
+            else None
+        )
 
         # gate_up GEMM (no reduction); router weight optionally folded in here.
         w1_out = torch.zeros(total, n_gate_up, dtype=dtype, device=device)
         ops.moe_mxfp4_gemm_rdna3(
-            hidden_states, w1_out, w1, qc.w1_scale,
+            hidden_states,
+            w1_out,
+            w1,
+            qc.w1_scale,
             topk_w_f32 if apply_router_weight_on_input else empty_tw,
-            sti, eid, ntp, top_k, block_size_m, apply_router_weight_on_input, 0,
+            sti,
+            eid,
+            ntp,
+            top_k,
+            block_size_m,
+            apply_router_weight_on_input,
+            0,
         )
         if w1_bias is not None:
             w1_out = w1_out + w1_bias[flat_experts].to(dtype)
@@ -201,8 +212,18 @@ class RDNA3Mxfp4Experts(mk.FusedMoEExpertsModular):
         if w2_bias is not None:
             w2_out = torch.zeros(total, hidden, dtype=dtype, device=device)
             ops.moe_mxfp4_gemm_rdna3(
-                act_out, w2_out, w2, qc.w2_scale, empty_tw,
-                sti, eid, ntp, 1, block_size_m, False, 0,
+                act_out,
+                w2_out,
+                w2,
+                qc.w2_scale,
+                empty_tw,
+                sti,
+                eid,
+                ntp,
+                1,
+                block_size_m,
+                False,
+                0,
             )
             w2_out = w2_out + w2_bias[flat_experts].to(dtype)
             if not apply_router_weight_on_input:
@@ -211,10 +232,18 @@ class RDNA3Mxfp4Experts(mk.FusedMoEExpertsModular):
         else:
             output.zero_()
             ops.moe_mxfp4_gemm_rdna3(
-                act_out, output, w2, qc.w2_scale,
+                act_out,
+                output,
+                w2,
+                qc.w2_scale,
                 empty_tw if apply_router_weight_on_input else topk_w_f32,
-                sti, eid, ntp, top_k, block_size_m,
-                not apply_router_weight_on_input, top_k,
+                sti,
+                eid,
+                ntp,
+                top_k,
+                block_size_m,
+                not apply_router_weight_on_input,
+                top_k,
             )
 
     @staticmethod
