@@ -9,8 +9,7 @@ import torch
 
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
-from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
+from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import (
@@ -18,13 +17,147 @@ from vllm.v1.worker.gpu.input_batch import (
     InputBuffers,
     combine_sampled_and_draft_tokens,
     prepare_pos_seq_lens_with_start_pos,
-    prepare_prefill_inputs_with_start_pos,
 )
 from vllm.v1.worker.gpu.states import RequestState
 
 SlotMappingsComputer = Callable[
     [torch.Tensor, torch.Tensor, torch.Tensor, int], torch.Tensor
 ]
+
+
+def allgather_token_tensors(
+    tensors: tuple[torch.Tensor, ...],
+    per_rank_num_tokens: list[int] | None,
+) -> tuple[torch.Tensor, ...]:
+    if per_rank_num_tokens is None:
+        return tensors
+
+    pcp_group = get_pcp_group()
+    padded_num_tokens = max(per_rank_num_tokens)
+    if all(tensor.shape[0] == padded_num_tokens for tensor in tensors):
+        gathered_tensors = tuple(
+            pcp_group.all_gather(tensor, dim=0) for tensor in tensors
+        )
+        if all(num_tokens == padded_num_tokens for num_tokens in per_rank_num_tokens):
+            return gathered_tensors
+        return tuple(
+            torch.cat(
+                [
+                    rank_tensor[:num_tokens]
+                    for rank_tensor, num_tokens in zip(
+                        gathered_tensor.split(padded_num_tokens, dim=0),
+                        per_rank_num_tokens,
+                    )
+                ],
+                dim=0,
+            )
+            for gathered_tensor in gathered_tensors
+        )
+
+    local_num_tokens = per_rank_num_tokens[pcp_group.rank_in_group]
+    local_tensors = [tensor[:local_num_tokens] for tensor in tensors]
+    return tuple(
+        pcp_group.all_gatherv(
+            local_tensors,
+            dim=0,
+            sizes=per_rank_num_tokens,
+        )
+    )
+
+
+def allgather_and_restore_tokens(
+    tensor: torch.Tensor,
+    hidden_restore_idx: torch.Tensor | None,
+    per_rank_num_tokens: list[int] | None,
+) -> torch.Tensor:
+    if hidden_restore_idx is None or per_rank_num_tokens is None:
+        return tensor
+    (gathered_tensor,) = allgather_token_tensors((tensor,), per_rank_num_tokens)
+    return gathered_tensor[hidden_restore_idx]
+
+
+def gather_mla_latent_cache_inputs(
+    kv_c_normed: torch.Tensor,
+    k_pe: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    per_rank_num_tokens: list[int] | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    num_tokens = kv_c_normed.shape[0]
+    k_pe_flat = k_pe.reshape(num_tokens, -1)
+    gathered_kv_c, gathered_k_pe_flat, gathered_slots = allgather_token_tensors(
+        (kv_c_normed, k_pe_flat, slot_mapping[:num_tokens]),
+        per_rank_num_tokens,
+    )
+    gathered_k_pe = gathered_k_pe_flat.view(-1, *k_pe.shape[1:])
+    return gathered_kv_c, gathered_k_pe, gathered_slots
+
+
+def gather_indexer_cache_inputs(
+    k: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    per_rank_num_tokens: list[int] | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    num_tokens = k.shape[0]
+    return allgather_token_tensors((k, slot_mapping[:num_tokens]), per_rank_num_tokens)
+
+
+@triton.jit
+def _prepare_prefill_inputs_with_start_pos_kernel(
+    input_ids_ptr,
+    next_prefill_tokens_ptr,
+    idx_mapping_ptr,
+    query_start_loc_ptr,
+    all_token_ids_ptr,
+    all_token_ids_stride,
+    prefill_lens_ptr,
+    virtual_start_pos_ptr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    batch_idx = tl.program_id(0)
+    req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
+    prefill_len = tl.load(prefill_lens_ptr + req_state_idx)
+    start_pos = tl.load(virtual_start_pos_ptr + batch_idx)
+    if start_pos >= prefill_len:
+        return
+
+    query_start = tl.load(query_start_loc_ptr + batch_idx)
+    query_end = tl.load(query_start_loc_ptr + batch_idx + 1)
+    query_len = query_end - query_start
+
+    request_ptr = all_token_ids_ptr + req_state_idx * all_token_ids_stride
+    for i in range(0, query_len, BLOCK_SIZE):
+        block = i + tl.arange(0, BLOCK_SIZE)
+        mask = block < query_len
+        tokens = tl.load(request_ptr + start_pos + block, mask=mask)
+        tl.store(input_ids_ptr + query_start + block, tokens, mask=mask)
+
+    next_pos = start_pos + query_len
+    if next_pos < prefill_len:
+        next_token = tl.load(request_ptr + next_pos)
+        tl.store(next_prefill_tokens_ptr + req_state_idx, next_token)
+
+
+def _prepare_prefill_inputs_with_start_pos(
+    input_ids: torch.Tensor,
+    next_prefill_tokens: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    all_token_ids: torch.Tensor,
+    prefill_len: torch.Tensor,
+    virtual_start_pos: torch.Tensor,
+) -> None:
+    num_reqs = idx_mapping.shape[0]
+    _prepare_prefill_inputs_with_start_pos_kernel[(num_reqs,)](
+        input_ids,
+        next_prefill_tokens,
+        idx_mapping,
+        query_start_loc,
+        all_token_ids,
+        all_token_ids.stride(0),
+        prefill_len,
+        virtual_start_pos,
+        BLOCK_SIZE=1024,
+    )
 
 
 class PCPManager:
@@ -43,7 +176,6 @@ class PCPManager:
         req_states: RequestState | None = None,
         input_buffers: InputBuffers | None = None,
         compute_slot_mappings: SlotMappingsComputer | None = None,
-        kv_cache_config: KVCacheConfig | None = None,
         dcp_world_size: int = 1,
         dcp_rank: int = 0,
         cp_interleave: int = 1,
@@ -56,16 +188,11 @@ class PCPManager:
         self.cp_interleave = cp_interleave
 
         self._physical_batch: InputBatch | None = None
-        self._physical_slot_mappings_by_layer: dict[str, torch.Tensor] | None = None
         self._req_states = req_states
         self._input_buffers = input_buffers
         self._compute_slot_mappings = compute_slot_mappings
-        self._kv_cache_config = kv_cache_config
         self._hidden_restore_idx: torch.Tensor | None = None
         self._per_rank_num_tokens: list[int] | None = None
-        self._restored_slot_mapping_cache: dict[
-            tuple[int, torch.dtype, int], torch.Tensor
-        ] = {}
 
     @staticmethod
     def validate_config(
@@ -127,9 +254,10 @@ class PCPManager:
             * self.pcp_world_size
         )
 
-    def _local_num_tokens(self) -> int:
-        assert self._per_rank_num_tokens is not None
-        return self._per_rank_num_tokens[self.pcp_rank]
+    def forward_context_kwargs(self) -> dict[str, Any]:
+        return {
+            "pcp_per_rank_num_tokens": self._per_rank_num_tokens,
+        }
 
     @staticmethod
     def _set_padding_mask(
@@ -261,105 +389,6 @@ class PCPManager:
             device=self.device,
         )
 
-    def _allgather_and_restore_tokens(self, tensor: torch.Tensor) -> torch.Tensor:
-        if self._hidden_restore_idx is None or self._per_rank_num_tokens is None:
-            return tensor
-        tensor = tensor[: self._local_num_tokens()]
-        gathered = get_pcp_group().all_gatherv(
-            tensor.contiguous(),
-            dim=0,
-            sizes=self._per_rank_num_tokens,
-        )
-        return gathered[self._hidden_restore_idx]
-
-    def _allgather_and_restore_token_tensors(
-        self,
-        tensors: tuple[torch.Tensor, ...],
-    ) -> tuple[torch.Tensor, ...]:
-        if self._hidden_restore_idx is None or self._per_rank_num_tokens is None:
-            return tensors
-        local_num_tokens = self._local_num_tokens()
-        local_tensors = [tensor[:local_num_tokens].contiguous() for tensor in tensors]
-        gathered_tensors = get_pcp_group().all_gatherv(
-            local_tensors,
-            dim=0,
-            sizes=self._per_rank_num_tokens,
-        )
-        return tuple(
-            gathered[self._hidden_restore_idx] for gathered in gathered_tensors
-        )
-
-    def _get_physical_slot_mapping(self, layer_name: str | None) -> torch.Tensor | None:
-        if layer_name is None or self._physical_slot_mappings_by_layer is None:
-            return None
-        return self._physical_slot_mappings_by_layer.get(layer_name)
-
-    def _get_or_gather_restored_slot_mapping(
-        self,
-        slot_mapping: torch.Tensor,
-    ) -> torch.Tensor:
-        local_num_tokens = self._local_num_tokens()
-        key = (slot_mapping.data_ptr(), slot_mapping.dtype, local_num_tokens)
-        restored_slots = self._restored_slot_mapping_cache.get(key)
-        if restored_slots is None:
-            restored_slots = self._allgather_and_restore_tokens(slot_mapping)
-            self._restored_slot_mapping_cache[key] = restored_slots
-        return restored_slots
-
-    def gather_and_restore_mla_latent_cache_inputs(
-        self,
-        kv_c_normed: torch.Tensor,
-        k_pe: torch.Tensor,
-        slot_mapping: torch.Tensor,
-        layer_name: str | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Gather local virtual MLA latent cache inputs into physical order.
-
-        MLA cache entries are the compressed latent KV vector plus RoPE key
-        embedding. Sparse MLA PCP relies on this narrow gather: ranks exchange
-        only the latent cache update payload, not expanded K/V tensors.
-        """
-        num_tokens = kv_c_normed.shape[0]
-        slot_mapping = slot_mapping[:num_tokens]
-        restored_slots = self._get_physical_slot_mapping(layer_name)
-        k_pe_flat = k_pe.reshape(num_tokens, -1)
-        restored_kv_c, restored_k_pe_flat = self._allgather_and_restore_token_tensors(
-            (kv_c_normed, k_pe_flat)
-        )
-        if restored_slots is None:
-            restored_slots = self._get_or_gather_restored_slot_mapping(slot_mapping)
-        else:
-            restored_slots = restored_slots[: restored_kv_c.shape[0]]
-
-        restored_k_pe = restored_k_pe_flat.view(
-            -1,
-            *k_pe.shape[1:],
-        )
-        return restored_kv_c, restored_k_pe, restored_slots
-
-    def gather_and_restore_indexer_cache_inputs(
-        self,
-        k: torch.Tensor,
-        slot_mapping: torch.Tensor,
-        layer_name: str | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Gather local virtual sparse-indexer K cache inputs.
-
-        Sparse MLA has a separate indexer K cache. PCP should exchange only
-        that latent K payload before cache insertion; indexer Q and row-local
-        top-k work remain local to the virtual batch.
-        """
-        num_tokens = k.shape[0]
-        restored_k = self._allgather_and_restore_tokens(k)
-        restored_slots = self._get_physical_slot_mapping(layer_name)
-        if restored_slots is None:
-            restored_slots = self._get_or_gather_restored_slot_mapping(
-                slot_mapping[:num_tokens]
-            )
-        else:
-            restored_slots = restored_slots[: restored_k.shape[0]]
-        return restored_k, restored_slots
-
     def partition_input_batch(
         self,
         input_batch: InputBatch,
@@ -373,11 +402,8 @@ class PCPManager:
                 "MRV2 PCP does not support request-padded CUDA graphs yet."
             )
 
-        self._physical_slot_mappings_by_layer = None
-
         physical_batch = self._copy_physical_batch(input_batch)
         self._physical_batch = physical_batch
-        self._restored_slot_mapping_cache.clear()
 
         num_scheduled_tokens = physical_batch.num_scheduled_tokens
         num_computed_tokens = physical_batch.num_computed_tokens_np
@@ -446,7 +472,7 @@ class PCPManager:
         virtual_start_pos = async_copy_to_gpu(virtual_start_pos_np, device=self.device)
 
         if np.any(is_prefilling[virtual_to_physical_np]):
-            prepare_prefill_inputs_with_start_pos(
+            _prepare_prefill_inputs_with_start_pos(
                 input_buffers.input_ids,
                 req_states.next_prefill_tokens,
                 idx_mapping,
@@ -579,21 +605,6 @@ class PCPManager:
         num_tokens_padded: int,
     ) -> torch.Tensor:
         assert self._compute_slot_mappings is not None
-        if self.dcp_world_size > 1 and self._physical_slot_mappings_by_layer is None:
-            assert self._physical_batch is not None
-            assert self._kv_cache_config is not None
-            physical_batch = self._physical_batch
-            physical_slot_mappings = self._compute_slot_mappings(
-                physical_batch.idx_mapping,
-                physical_batch.query_start_loc,
-                physical_batch.positions,
-                physical_batch.num_tokens_after_padding,
-            )
-            self._physical_slot_mappings_by_layer = build_slot_mappings_by_layer(
-                physical_slot_mappings.clone(),
-                self._kv_cache_config,
-            )
-
         return self._compute_slot_mappings(
             idx_mapping,
             query_start_loc,
@@ -606,7 +617,11 @@ class PCPManager:
             return hidden_states
         if self.pcp_world_size == 1:
             return hidden_states
-        return self._allgather_and_restore_tokens(hidden_states)
+        return allgather_and_restore_tokens(
+            hidden_states,
+            self._hidden_restore_idx,
+            self._per_rank_num_tokens,
+        )
 
     def restore_for_sampling(
         self,
@@ -614,8 +629,6 @@ class PCPManager:
     ) -> tuple[torch.Tensor, InputBatch]:
         assert self._physical_batch is not None
         physical_batch = self._physical_batch
-        self._physical_slot_mappings_by_layer = None
-        self._restored_slot_mapping_cache.clear()
         return self.restore_hidden_states(hidden_states), physical_batch
 
 
@@ -625,7 +638,7 @@ def get_pcp_forward_context_kwargs(
 ) -> dict[str, Any] | None:
     if manager is None or dummy_run:
         return None
-    return {"pcp_manager": manager}
+    return manager.forward_context_kwargs()
 
 
 def get_pcp_max_num_input_reqs(
@@ -649,7 +662,6 @@ def maybe_build_pcp_manager(
     req_states: RequestState,
     input_buffers: InputBuffers,
     compute_slot_mappings: SlotMappingsComputer,
-    kv_cache_config: KVCacheConfig,
 ) -> PCPManager | None:
     parallel_config = vllm_config.parallel_config
     pcp_size = parallel_config.prefill_context_parallel_size
@@ -669,7 +681,6 @@ def maybe_build_pcp_manager(
         req_states=req_states,
         input_buffers=input_buffers,
         compute_slot_mappings=compute_slot_mappings,
-        kv_cache_config=kv_cache_config,
         dcp_world_size=dcp_size,
         dcp_rank=dcp_rank,
         cp_interleave=parallel_config.cp_kv_cache_interleave_size,

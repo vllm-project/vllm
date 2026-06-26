@@ -239,65 +239,6 @@ def prepare_prefill_inputs(
 
 
 @triton.jit
-def _prepare_prefill_inputs_with_start_pos_kernel(
-    input_ids_ptr,
-    next_prefill_tokens_ptr,
-    idx_mapping_ptr,
-    query_start_loc_ptr,
-    all_token_ids_ptr,
-    all_token_ids_stride,
-    prefill_lens_ptr,
-    virtual_start_pos_ptr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    batch_idx = tl.program_id(0)
-    req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
-    prefill_len = tl.load(prefill_lens_ptr + req_state_idx)
-    start_pos = tl.load(virtual_start_pos_ptr + batch_idx)
-    if start_pos >= prefill_len:
-        return
-
-    query_start = tl.load(query_start_loc_ptr + batch_idx)
-    query_end = tl.load(query_start_loc_ptr + batch_idx + 1)
-    query_len = query_end - query_start
-
-    request_ptr = all_token_ids_ptr + req_state_idx * all_token_ids_stride
-    for i in range(0, query_len, BLOCK_SIZE):
-        block = i + tl.arange(0, BLOCK_SIZE)
-        mask = block < query_len
-        tokens = tl.load(request_ptr + start_pos + block, mask=mask)
-        tl.store(input_ids_ptr + query_start + block, tokens, mask=mask)
-
-    next_pos = start_pos + query_len
-    if next_pos < prefill_len:
-        next_token = tl.load(request_ptr + next_pos)
-        tl.store(next_prefill_tokens_ptr + req_state_idx, next_token)
-
-
-def prepare_prefill_inputs_with_start_pos(
-    input_ids: torch.Tensor,
-    next_prefill_tokens: torch.Tensor,
-    idx_mapping: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    all_token_ids: torch.Tensor,
-    prefill_len: torch.Tensor,
-    virtual_start_pos: torch.Tensor,
-) -> None:
-    num_reqs = idx_mapping.shape[0]
-    _prepare_prefill_inputs_with_start_pos_kernel[(num_reqs,)](
-        input_ids,
-        next_prefill_tokens,
-        idx_mapping,
-        query_start_loc,
-        all_token_ids,
-        all_token_ids.stride(0),
-        prefill_len,
-        virtual_start_pos,
-        BLOCK_SIZE=1024,
-    )
-
-
-@triton.jit
 def _prepare_pos_seq_lens_kernel(
     pos_ptr,
     seq_lens_ptr,

@@ -7,7 +7,13 @@ import pytest
 import torch
 
 from vllm.config import CUDAGraphMode
-from vllm.v1.worker.gpu.pcp_manager import PCPManager
+from vllm.v1.worker.gpu import pcp_manager
+from vllm.v1.worker.gpu.pcp_manager import (
+    PCPManager,
+    allgather_token_tensors,
+    gather_indexer_cache_inputs,
+    gather_mla_latent_cache_inputs,
+)
 
 
 def _manager(rank: int, size: int = 2, dcp_size: int = 1) -> PCPManager:
@@ -17,6 +23,43 @@ def _manager(rank: int, size: int = 2, dcp_size: int = 1) -> PCPManager:
         device=torch.device("cpu"),
         dcp_world_size=dcp_size,
     )
+
+
+def _pcp_per_rank_num_tokens() -> list[int]:
+    return [4, 4]
+
+
+def _patch_fake_pcp_group(
+    monkeypatch,
+    gathered_payloads: list[tuple[torch.Tensor, ...]],
+) -> None:
+    class FakePCPGroup:
+        rank_in_group = 0
+        world_size = 2
+
+        def all_gather(
+            self,
+            tensor: torch.Tensor,
+            dim: int,
+        ) -> torch.Tensor:
+            assert dim == 0
+            gathered_payloads.append((tensor.clone(),))
+            return torch.cat((tensor, tensor + 1000), dim=0)
+
+        def all_gatherv(
+            self,
+            tensors: list[torch.Tensor],
+            dim: int,
+            sizes: list[int],
+        ) -> tuple[torch.Tensor, ...]:
+            assert dim == 0
+            assert sizes == [4, 4]
+            gathered_payloads.append(tuple(tensor.clone() for tensor in tensors))
+            return tuple(
+                torch.cat((tensor, tensor + 1000), dim=0) for tensor in tensors
+            )
+
+    monkeypatch.setattr(pcp_manager, "get_pcp_group", lambda: FakePCPGroup())
 
 
 def test_sparse_mla_pcp_rejects_cuda_graphs() -> None:
@@ -159,46 +202,65 @@ def test_hidden_restore_indices_drop_duplicate_decode_rows() -> None:
     assert manager._hidden_restore_idx.tolist() == [0, 3, 4, 6, 7, 8, 9, 1, 2]
 
 
-def test_mla_cache_gather_exchanges_grouped_latent_payloads() -> None:
-    manager = _manager(rank=0)
+def test_hidden_restore_uses_compacted_padded_allgather(monkeypatch) -> None:
     gathered_payloads: list[tuple[torch.Tensor, ...]] = []
+    _patch_fake_pcp_group(monkeypatch, gathered_payloads)
+    manager = _manager(rank=0)
+    num_scheduled = np.array([5], dtype=np.int32)
+    num_computed = np.array([0], dtype=np.int32)
+    is_prefilling = np.array([True], dtype=np.bool_)
+    query_start_loc = np.array([0, 5], dtype=np.int32)
 
-    def fake_allgather_and_restore_token_tensors(
-        tensors: tuple[torch.Tensor, ...],
-    ) -> tuple[torch.Tensor, ...]:
-        gathered_payloads.append(tuple(tensor.clone() for tensor in tensors))
-        return tuple(torch.flip(tensor, dims=(0,)) for tensor in tensors)
-
-    manager._allgather_and_restore_token_tensors = (  # type: ignore[method-assign]
-        fake_allgather_and_restore_token_tensors
+    manager._build_hidden_restore_idx(
+        num_scheduled,
+        num_computed,
+        is_prefilling,
+        query_start_loc,
     )
-    manager._physical_slot_mappings_by_layer = {
-        "layer": torch.tensor([40, 41, 42, 43], dtype=torch.int64),
-    }
+    restored = manager.restore_hidden_states(torch.tensor([10, 11, 12]))
+
+    assert manager._per_rank_num_tokens == [3, 2]
+    assert manager._hidden_restore_idx is not None
+    assert manager._hidden_restore_idx.tolist() == [1, 2, 3, 4, 0]
+    assert len(gathered_payloads) == 1
+    torch.testing.assert_close(restored, torch.tensor([11, 12, 1010, 1011, 10]))
+
+
+def test_mla_cache_gather_exchanges_grouped_latent_payloads(monkeypatch) -> None:
+    gathered_payloads: list[tuple[torch.Tensor, ...]] = []
+    _patch_fake_pcp_group(monkeypatch, gathered_payloads)
+    per_rank_num_tokens = _pcp_per_rank_num_tokens()
 
     kv_c_normed = torch.arange(12, dtype=torch.float32).view(4, 3)
     k_pe = torch.arange(8, dtype=torch.float32).view(4, 1, 2)
-    slot_mapping = torch.arange(4, dtype=torch.int64)
+    slot_mapping = torch.tensor([40, 41, 42, 43], dtype=torch.int64)
 
-    restored_kv_c, restored_k_pe, restored_slots = (
-        manager.gather_and_restore_mla_latent_cache_inputs(
-            kv_c_normed,
-            k_pe,
-            slot_mapping,
-            "layer",
-        )
+    restored_kv_c, restored_k_pe, restored_slots = gather_mla_latent_cache_inputs(
+        kv_c_normed,
+        k_pe,
+        slot_mapping,
+        per_rank_num_tokens,
     )
 
-    assert len(gathered_payloads) == 1
-    assert len(gathered_payloads[0]) == 2
+    assert len(gathered_payloads) == 3
     torch.testing.assert_close(gathered_payloads[0][0], kv_c_normed)
-    torch.testing.assert_close(gathered_payloads[0][1], k_pe.view(4, 2))
-    torch.testing.assert_close(restored_kv_c, torch.flip(kv_c_normed, dims=(0,)))
-    torch.testing.assert_close(restored_k_pe, torch.flip(k_pe, dims=(0,)))
-    torch.testing.assert_close(restored_slots, torch.tensor([40, 41, 42, 43]))
+    torch.testing.assert_close(gathered_payloads[1][0], k_pe.view(4, 2))
+    torch.testing.assert_close(gathered_payloads[2][0], slot_mapping)
+    torch.testing.assert_close(
+        restored_kv_c,
+        torch.cat((kv_c_normed, kv_c_normed + 1000), dim=0),
+    )
+    torch.testing.assert_close(
+        restored_k_pe,
+        torch.cat((k_pe, k_pe + 1000), dim=0),
+    )
+    torch.testing.assert_close(
+        restored_slots,
+        torch.cat((slot_mapping, slot_mapping + 1000), dim=0),
+    )
 
 
-def test_mla_cache_gather_gate_uses_manager_pcp_world_size(monkeypatch) -> None:
+def test_mla_cache_gather_gate_uses_restore_kwargs(monkeypatch) -> None:
     from vllm.model_executor.layers.attention import mla_attention
 
     class FakeImpl:
@@ -207,26 +269,29 @@ def test_mla_cache_gather_gate_uses_manager_pcp_world_size(monkeypatch) -> None:
     class FakeLayer:
         impl = FakeImpl()
 
-    class FakeManager:
-        pcp_world_size = 2
-
-        def gather_and_restore_mla_latent_cache_inputs(
-            self,
-            kv_c_normed: torch.Tensor,
-            k_pe: torch.Tensor,
-            slot_mapping: torch.Tensor,
-            layer_name: str,
-        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            assert layer_name == "layers.0.self_attn"
-            return kv_c_normed + 10, k_pe + 20, slot_mapping + 30
-
     class FakeForwardContext:
-        additional_kwargs = {"pcp_manager": FakeManager()}
+        additional_kwargs = {
+            "pcp_per_rank_num_tokens": [4, 4],
+        }
+
+    def fake_gather_mla_latent_cache_inputs(
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        per_rank_num_tokens: list[int],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        assert per_rank_num_tokens == [4, 4]
+        return kv_c_normed + 10, k_pe + 20, slot_mapping + 30
 
     monkeypatch.setattr(
         mla_attention,
         "get_forward_context",
         lambda: FakeForwardContext(),
+    )
+    monkeypatch.setattr(
+        mla_attention,
+        "gather_mla_latent_cache_inputs",
+        fake_gather_mla_latent_cache_inputs,
     )
 
     kv_c_normed = torch.arange(4, dtype=torch.float32)
@@ -240,7 +305,6 @@ def test_mla_cache_gather_gate_uses_manager_pcp_world_size(monkeypatch) -> None:
             kv_c_normed,
             k_pe,
             slot_mapping,
-            "layers.0.self_attn",
         )
     )
 
@@ -249,72 +313,79 @@ def test_mla_cache_gather_gate_uses_manager_pcp_world_size(monkeypatch) -> None:
     torch.testing.assert_close(restored_slots, slot_mapping + 30)
 
 
-def test_indexer_cache_gather_exchanges_only_latent_k() -> None:
-    manager = _manager(rank=0)
-    gathered_payloads: list[torch.Tensor] = []
-
-    def fake_allgather_and_restore_tokens(tensor: torch.Tensor) -> torch.Tensor:
-        gathered_payloads.append(tensor.clone())
-        return torch.flip(tensor, dims=(0,))
-
-    manager._allgather_and_restore_tokens = fake_allgather_and_restore_tokens  # type: ignore[method-assign]
-    manager._physical_slot_mappings_by_layer = {
-        "indexer.k_cache": torch.tensor([80, 81, 82, 83], dtype=torch.int64),
-    }
+def test_indexer_cache_gather_exchanges_only_latent_k(monkeypatch) -> None:
+    gathered_payloads: list[tuple[torch.Tensor, ...]] = []
+    _patch_fake_pcp_group(monkeypatch, gathered_payloads)
+    per_rank_num_tokens = _pcp_per_rank_num_tokens()
 
     k = torch.arange(16, dtype=torch.float32).view(4, 4)
-    slot_mapping = torch.arange(4, dtype=torch.int64)
+    slot_mapping = torch.tensor([80, 81, 82, 83], dtype=torch.int64)
 
-    restored_k, restored_slots = manager.gather_and_restore_indexer_cache_inputs(
+    restored_k, restored_slots = gather_indexer_cache_inputs(
         k,
         slot_mapping,
-        "indexer.k_cache",
+        per_rank_num_tokens,
     )
 
-    assert len(gathered_payloads) == 1
-    torch.testing.assert_close(gathered_payloads[0], k)
-    torch.testing.assert_close(restored_k, torch.flip(k, dims=(0,)))
-    torch.testing.assert_close(restored_slots, torch.tensor([80, 81, 82, 83]))
-
-
-def test_restored_slot_mapping_is_cached_for_step() -> None:
-    manager = _manager(rank=0)
-    manager._per_rank_num_tokens = [4, 4]
-    gathered_payloads: list[torch.Tensor] = []
-
-    def fake_allgather_and_restore_tokens(tensor: torch.Tensor) -> torch.Tensor:
-        gathered_payloads.append(tensor.clone())
-        return torch.flip(tensor, dims=(0,))
-
-    def fake_allgather_and_restore_token_tensors(
-        tensors: tuple[torch.Tensor, ...],
-    ) -> tuple[torch.Tensor, ...]:
-        return tuple(torch.flip(tensor, dims=(0,)) for tensor in tensors)
-
-    manager._allgather_and_restore_tokens = fake_allgather_and_restore_tokens  # type: ignore[method-assign]
-    manager._allgather_and_restore_token_tensors = (  # type: ignore[method-assign]
-        fake_allgather_and_restore_token_tensors
+    assert len(gathered_payloads) == 2
+    torch.testing.assert_close(gathered_payloads[0][0], k)
+    torch.testing.assert_close(gathered_payloads[1][0], slot_mapping)
+    torch.testing.assert_close(restored_k, torch.cat((k, k + 1000), dim=0))
+    torch.testing.assert_close(
+        restored_slots,
+        torch.cat((slot_mapping, slot_mapping + 1000), dim=0),
     )
+
+
+def test_slot_mapping_is_gathered_with_cache_payload(monkeypatch) -> None:
+    gathered_payloads: list[tuple[torch.Tensor, ...]] = []
+    _patch_fake_pcp_group(monkeypatch, gathered_payloads)
+    per_rank_num_tokens = _pcp_per_rank_num_tokens()
 
     kv_c_normed = torch.arange(12, dtype=torch.float32).view(4, 3)
     k_pe = torch.arange(8, dtype=torch.float32).view(4, 1, 2)
     k = torch.arange(16, dtype=torch.float32).view(4, 4)
     slot_mapping = torch.arange(4, dtype=torch.int64)
 
-    _, _, mla_slots = manager.gather_and_restore_mla_latent_cache_inputs(
+    _, _, mla_slots = gather_mla_latent_cache_inputs(
         kv_c_normed,
         k_pe,
         slot_mapping,
-        "layer",
+        per_rank_num_tokens,
     )
-    _, indexer_slots = manager.gather_and_restore_indexer_cache_inputs(
+    _, indexer_slots = gather_indexer_cache_inputs(
         k,
         slot_mapping,
-        "indexer.k_cache",
+        per_rank_num_tokens,
     )
 
-    assert len(gathered_payloads) == 2
-    torch.testing.assert_close(gathered_payloads[0], slot_mapping)
-    torch.testing.assert_close(gathered_payloads[1], k)
-    torch.testing.assert_close(mla_slots, torch.flip(slot_mapping, dims=(0,)))
-    torch.testing.assert_close(indexer_slots, torch.flip(slot_mapping, dims=(0,)))
+    assert len(gathered_payloads) == 5
+    torch.testing.assert_close(gathered_payloads[0][0], kv_c_normed)
+    torch.testing.assert_close(gathered_payloads[1][0], k_pe.view(4, 2))
+    torch.testing.assert_close(gathered_payloads[2][0], slot_mapping)
+    torch.testing.assert_close(gathered_payloads[3][0], k)
+    torch.testing.assert_close(gathered_payloads[4][0], slot_mapping)
+    torch.testing.assert_close(
+        mla_slots,
+        torch.cat((slot_mapping, slot_mapping + 1000), dim=0),
+    )
+    torch.testing.assert_close(
+        indexer_slots,
+        torch.cat((slot_mapping, slot_mapping + 1000), dim=0),
+    )
+
+
+def test_padded_allgather_compacts_uneven_rank_tokens(monkeypatch) -> None:
+    gathered_payloads: list[tuple[torch.Tensor, ...]] = []
+    _patch_fake_pcp_group(monkeypatch, gathered_payloads)
+
+    tensor = torch.tensor([0, 1, -1], dtype=torch.int64)
+
+    (gathered_tensor,) = allgather_token_tensors((tensor,), [2, 3])
+
+    assert len(gathered_payloads) == 1
+    torch.testing.assert_close(gathered_payloads[0][0], tensor)
+    torch.testing.assert_close(
+        gathered_tensor,
+        torch.tensor([0, 1, 1000, 1001, 999], dtype=torch.int64),
+    )

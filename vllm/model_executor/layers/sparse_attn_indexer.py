@@ -27,6 +27,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
+from vllm.v1.worker.gpu.pcp_manager import gather_indexer_cache_inputs
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
@@ -81,15 +82,15 @@ def kv_cache_as_quant_view(
 def _maybe_gather_pcp_indexer_cache_inputs(
     k: torch.Tensor,
     slot_mapping: torch.Tensor,
-    layer_name: str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    pcp_manager = get_forward_context().additional_kwargs.get("pcp_manager")
-    if pcp_manager is None:
+    additional_kwargs = get_forward_context().additional_kwargs
+    per_rank_num_tokens = additional_kwargs.get("pcp_per_rank_num_tokens")
+    if per_rank_num_tokens is None:
         return k, slot_mapping
-    return pcp_manager.gather_and_restore_indexer_cache_inputs(
+    return gather_indexer_cache_inputs(
         k,
         slot_mapping,
-        layer_name,
+        per_rank_num_tokens,
     )
 
 
@@ -180,7 +181,6 @@ def sparse_attn_indexer(
         k, slot_mapping_for_cache = _maybe_gather_pcp_indexer_cache_inputs(
             k,
             slot_mapping,
-            k_cache_prefix,
         )
         # scale_fmt can be None, but the function expects str
         assert scale_fmt is not None

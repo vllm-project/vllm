@@ -514,14 +514,11 @@ class OffloadingSpec(ABC):
         )
 
         parallel_config = vllm_config.parallel_config
-        context_parallel_factor = (
-            parallel_config.decode_context_parallel_size
-            * parallel_config.prefill_context_parallel_size
-        )
+        kv_context_parallel_factor = parallel_config.decode_context_parallel_size
 
         # gpu block size per group
         self.gpu_block_size: tuple[int, ...] = tuple(
-            kv_cache_group.kv_cache_spec.block_size * context_parallel_factor
+            kv_cache_group.kv_cache_spec.block_size * kv_context_parallel_factor
             for kv_cache_group in kv_cache_config.kv_cache_groups
         )
 

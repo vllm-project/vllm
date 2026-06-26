@@ -472,7 +472,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states,
             self.input_buffers,
             self.block_tables.compute_slot_mappings,
-            self.kv_cache_config,
         )
         initialize_mamba_ssu_backend(
             self.vllm_config.mamba_config, self.kv_cache_config

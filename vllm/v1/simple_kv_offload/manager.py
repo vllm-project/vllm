@@ -83,8 +83,8 @@ class SimpleCPUOffloadScheduler:
             and vllm_config.kv_events_config.enable_kv_cache_events
         )
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
-        pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
-        self.cp_world_size = dcp_world_size * pcp_world_size
+        # PCP is a virtual-batch execution axis; only DCP shards KV ownership.
+        self.dcp_world_size = dcp_world_size
         self.block_size = scheduler_block_size
         self.hash_block_size = hash_block_size
         assert self.block_size % self.hash_block_size == 0
@@ -129,7 +129,8 @@ class SimpleCPUOffloadScheduler:
             enable_caching=True,
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
-            pcp_world_size=pcp_world_size,
+            # The CPU coordinator manages KV blocks, so PCP is not a CP factor.
+            pcp_world_size=1,
             scheduler_block_size=self.block_size,
             hash_block_size=self.hash_block_size,
         )
@@ -158,7 +159,7 @@ class SimpleCPUOffloadScheduler:
             self._target_free = self._estimate_lazy_target_blocks(
                 kv_cache_config,
                 vllm_config.scheduler_config.max_num_batched_tokens,
-                self.cp_world_size,
+                self.dcp_world_size,
             )
         else:
             self._target_free = 0
@@ -221,14 +222,14 @@ class SimpleCPUOffloadScheduler:
     def _estimate_lazy_target_blocks(
         kv_cache_config: "KVCacheConfig",
         max_num_batched_tokens: int,
-        cp_world_size: int = 1,
+        dcp_world_size: int = 1,
     ) -> int:
         """GPU blocks to keep available (free/offloaded) per step in lazy mode."""
         WATERMARK_RATIO = 1.0  # Reserve larger space to avoid running out of GPU blocks
         target = 0
         for g in kv_cache_config.kv_cache_groups:
             spec = g.kv_cache_spec
-            block_size = spec.block_size * cp_world_size
+            block_size = spec.block_size * dcp_world_size
             if isinstance(spec, MambaSpec):
                 target += 2
             elif isinstance(spec, SlidingWindowSpec):
@@ -373,7 +374,7 @@ class SimpleCPUOffloadScheduler:
 
             # Number of blocks in the computed range for this group.
             g_block_size = (
-                kv_cache_groups[g].kv_cache_spec.block_size * self.cp_world_size
+                kv_cache_groups[g].kv_cache_spec.block_size * self.dcp_world_size
             )
             n_computed_g = cdiv(total_computed_tokens, g_block_size)
 

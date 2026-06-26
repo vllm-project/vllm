@@ -191,7 +191,7 @@ import functools
 from abc import abstractmethod
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import Any, ClassVar, Generic, TypeVar, cast
+from typing import ClassVar, Generic, TypeVar, cast
 
 import torch
 import torch.nn as nn
@@ -278,6 +278,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
 )
+from vllm.v1.worker.gpu.pcp_manager import gather_mla_latent_cache_inputs
 
 logger = init_logger(__name__)
 
@@ -342,14 +343,10 @@ def _maybe_gather_pcp_mla_latent_cache_inputs(
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     layer_slot_mapping: torch.Tensor | None,
-    layer_name: str,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    pcp_manager = get_forward_context().additional_kwargs.get("pcp_manager")
-    if (
-        pcp_manager is None
-        or getattr(pcp_manager, "pcp_world_size", 1) <= 1
-        or attn_metadata is None
-    ):
+    additional_kwargs = get_forward_context().additional_kwargs
+    per_rank_num_tokens = additional_kwargs.get("pcp_per_rank_num_tokens")
+    if per_rank_num_tokens is None or attn_metadata is None:
         return kv_c_normed, k_pe, layer_slot_mapping
     if not getattr(attn_layer.impl, "supports_pcp", False):
         raise NotImplementedError(
@@ -357,11 +354,11 @@ def _maybe_gather_pcp_mla_latent_cache_inputs(
         )
 
     assert layer_slot_mapping is not None
-    return pcp_manager.gather_and_restore_mla_latent_cache_inputs(
+    return gather_mla_latent_cache_inputs(
         kv_c_normed,
         k_pe,
         layer_slot_mapping,
-        layer_name,
+        per_rank_num_tokens,
     )
 
 
@@ -620,7 +617,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     kv_c_normed,
                     k_pe,
                     layer_slot_mapping,
-                    self.layer_name,
                 )
             )
             self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
@@ -660,78 +656,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
             )
             return output
-
-    def _use_pcp_axis_dcp(
-        self,
-        quant_key: Any,
-    ) -> bool:
-        pcp_manager = get_forward_context().additional_kwargs.get("pcp_manager")
-        if pcp_manager is None:
-            return False
-        dcp_world_size = getattr(pcp_manager, "dcp_world_size", 1)
-        if dcp_world_size <= 1:
-            return False
-        if dcp_world_size != getattr(pcp_manager, "pcp_world_size", 1):
-            raise NotImplementedError(
-                "MRV2 MLA PCP+DCP currently supports only the replicated-Q "
-                "layout where decode_context_parallel_size equals "
-                "prefill_context_parallel_size. Full TP x PCP DCP needs the "
-                "gathered-Q/reduce-scatter path."
-            )
-        if quant_key is not None:
-            raise NotImplementedError(
-                "MRV2 MLA PCP+DCP does not support fused output quantization yet."
-            )
-        return True
-
-    def _prepare_mqa_query_for_dcp(
-        self,
-        mqa_q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-        fp8_attention: bool,
-        pcp_axis_dcp: bool,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if self.impl.dcp_world_size <= 1:
-            return mqa_q
-
-        if pcp_axis_dcp:
-            assert not self.dcp_a2a, (
-                "PCP-axis MLA DCP does not support A2A combine yet."
-            )
-            return mqa_q
-
-        assert not fp8_attention, "DCP not support fp8 kvcache now."
-        return get_dcp_group().all_gather(torch.cat(mqa_q, dim=-1), dim=1)
-
-    def _combine_mqa_dcp_output(
-        self,
-        attn_out: torch.Tensor,
-        lse: torch.Tensor | None,
-        pcp_axis_dcp: bool,
-    ) -> torch.Tensor:
-        if self.impl.dcp_world_size <= 1:
-            return attn_out
-
-        assert lse is not None
-        if pcp_axis_dcp:
-            return cp_lse_ag_out_ar(
-                attn_out,
-                lse,
-                get_dcp_group(),
-                is_lse_base_on_e=True,
-            )
-        if self.dcp_a2a:
-            return dcp_a2a_lse_reduce(
-                attn_out,
-                lse,
-                get_dcp_group(),
-                is_lse_base_on_e=True,
-            )
-        return cp_lse_ag_out_rs(
-            attn_out,
-            lse,
-            get_dcp_group(),
-            is_lse_base_on_e=True,
-        )
 
     def forward_impl(
         self,
@@ -794,7 +718,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
 
         num_actual_toks = attn_metadata.num_actual_tokens
-        pcp_axis_dcp = self._use_pcp_axis_dcp(quant_key)
+        use_pcp_dcp = (
+            get_forward_context().additional_kwargs.get("pcp_per_rank_num_tokens")
+            is not None
+            and self.impl.dcp_world_size > 1
+        )
+        if use_pcp_dcp and quant_key is not None:
+            raise NotImplementedError(
+                "MRV2 MLA PCP+DCP does not support fused output quantization yet."
+            )
 
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output
@@ -838,6 +770,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 mha_output = output
                 mha_output_scale = None
 
+            pcp_dcp_kwargs = {"use_pcp_dcp": True} if use_pcp_dcp else {}
             self.impl.forward_mha(  # type: ignore[attr-defined]
                 q[num_mqa_tokens:],
                 k_c_normed[num_mqa_tokens:],
@@ -847,7 +780,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self._k_scale,
                 output=mha_output[num_mqa_tokens:num_actual_toks],
                 output_scale=mha_output_scale,
-                pcp_axis_dcp=pcp_axis_dcp,
+                **pcp_dcp_kwargs,
             )
 
         if num_mqa_tokens > 0:
@@ -913,21 +846,44 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
             else:
                 mqa_q = (mqa_ql_nope, mqa_q_pe)
-            mqa_q = self._prepare_mqa_query_for_dcp(
-                mqa_q,
-                fp8_attention,
-                pcp_axis_dcp,
-            )
+            if self.impl.dcp_world_size > 1:
+                if use_pcp_dcp:
+                    assert not self.dcp_a2a, (
+                        "MRV2 MLA PCP+DCP does not support A2A combine yet."
+                    )
+                else:
+                    assert not fp8_attention, "DCP not support fp8 kvcache now."
+                    if isinstance(mqa_q, tuple):
+                        mqa_q = torch.cat(mqa_q, dim=-1)
+                    mqa_q = get_dcp_group().all_gather(mqa_q, dim=1)
 
             # call decode attn
             if not is_sparse_impl:
                 assert attn_metadata.decode is not None
             attn_out, lse = self.impl.forward_mqa(mqa_q, kv_cache, attn_metadata, self)  # type: ignore[attr-defined]
-            attn_out = self._combine_mqa_dcp_output(
-                attn_out,
-                lse,
-                pcp_axis_dcp,
-            )
+            if self.impl.dcp_world_size > 1:
+                assert lse is not None
+                if use_pcp_dcp:
+                    attn_out = cp_lse_ag_out_ar(
+                        attn_out,
+                        lse,
+                        get_dcp_group(),
+                        is_lse_base_on_e=True,
+                    )
+                elif self.dcp_a2a:
+                    attn_out = dcp_a2a_lse_reduce(
+                        attn_out,
+                        lse,
+                        get_dcp_group(),
+                        is_lse_base_on_e=True,
+                    )
+                else:
+                    attn_out = cp_lse_ag_out_rs(
+                        attn_out,
+                        lse,
+                        get_dcp_group(),
+                        is_lse_base_on_e=True,
+                    )
 
             # v_up projection
             self._v_up_proj(attn_out, out=mqa_output_slice)
@@ -1160,7 +1116,6 @@ def unified_mla_kv_cache_update(
                 kv_c_normed,
                 k_pe,
                 layer_slot_mapping,
-                layer_name,
             )
         )
         attn_layer.impl.do_kv_cache_update(  # type: ignore[attr-defined]
@@ -2642,7 +2597,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         k_scale: torch.Tensor,
         output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
-        pcp_axis_dcp: bool = False,
+        use_pcp_dcp: bool = False,
     ) -> None:
         assert attn_metadata.prefill is not None
         assert self.dcp_world_size != -1
@@ -2687,7 +2642,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             assert prefill_metadata.chunked_context is not None
             suffix_output, suffix_lse = output_prefill
             if self.dcp_world_size > 1:
-                if pcp_axis_dcp:
+                if use_pcp_dcp:
                     context_output, context_lse = (
                         self._dcp_compute_local_prefill_context(
                             q,

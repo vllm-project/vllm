@@ -612,9 +612,10 @@ def resolve_kv_cache_block_sizes(
 
     - ``scheduler_block_size`` is the token-alignment invariant used by the
       scheduler (e.g. for ``num_computed_tokens`` rounding). Single group:
-      ``cache_config.block_size * dcp * pcp``. MLA PCP uses full per-PCP-rank
-      KV caches, so its effective KV PCP factor is 1. Multiple groups: LCM of
-      every group's block size — context parallelism is not supported here.
+      ``cache_config.block_size * dcp``. PCP virtual batching partitions
+      prefill execution but does not shard KV cache ownership. Multiple groups:
+      LCM of every group's block size — context parallelism is not supported
+      here.
     - ``hash_block_size`` is the granularity at which ``Request.block_hashes``
       is computed. Single group: equals scheduler block size. Multiple groups:
       ``cache_config.hash_block_size`` override if set, else the GCD of group
@@ -626,12 +627,10 @@ def resolve_kv_cache_block_sizes(
     cache_config = vllm_config.cache_config
     dcp = vllm_config.parallel_config.decode_context_parallel_size
     pcp = vllm_config.parallel_config.prefill_context_parallel_size
-    if vllm_config.model_config.use_mla:
-        pcp = 1
     groups = kv_cache_config.kv_cache_groups
 
-    if len(groups) <= 1:  # Single group: block_size * dcp * pcp
-        bs = cache_config.block_size * dcp * pcp
+    if len(groups) <= 1:
+        bs = cache_config.block_size * dcp
         return bs, bs
 
     if dcp != 1 or pcp != 1:

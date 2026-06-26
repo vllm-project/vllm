@@ -58,7 +58,7 @@ def get_total_cp_world_size():
     return dcp_world_size * pcp_world_size
 
 
-def get_kv_cache_cp_world_size():
+def get_dcp_world_size():
     try:
         return get_dcp_group().world_size
     except AssertionError:
