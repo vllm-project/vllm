@@ -612,6 +612,31 @@ class Scheduler(SchedulerInterface):
                             num_local_cached_tokens=num_new_local_computed_tokens,
                             num_external_cached_tokens=num_external_computed_tokens,
                         )
+                        # [PD disagg cached_tokens fix] In disaggregated
+                        # prefill, the decode node cannot tell prefix-cache
+                        # hits from freshly computed tokens among the KV it
+                        # received from the prefill node, so cached_tokens is
+                        # wrong. Propagate the prefill node's real prefix-cache
+                        # hit count through kv_transfer_params and use it on the
+                        # decode node.
+                        params = request.kv_transfer_params
+                        if params and params.get("do_remote_decode"):
+                            # Prefill (P) node: record real prefix-cache hits so
+                            # they can be forwarded to the decode node.
+                            params["remote_num_cached_tokens"] = (
+                                num_new_local_computed_tokens
+                            )
+                        elif params and params.get("do_remote_prefill") and (
+                            "remote_num_cached_tokens" in params
+                        ):
+                            # Decode (D) node: override cached_tokens with the
+                            # prefill node's real hit count. Do NOT add D's local
+                            # hit (num_local) -- it is the same prefix and would
+                            # double-count.
+                            request.prefill_stats.num_cached_tokens = (
+                                params["remote_num_cached_tokens"]
+                            )
+
                 else:
                     # KVTransfer: WAITING reqs have num_computed_tokens > 0
                     # after async KV recvs are completed.
