@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import importlib.util
 import os
 
@@ -12,6 +13,8 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+_NCCL_GIN_TYPE_NONE = 0
 
 
 def find_nccl_library() -> str:
@@ -80,3 +83,56 @@ def find_nccl_library_paths() -> list[str] | None:
     except Exception as e:
         logger.debug("Failed to find nccl library path from nvidia.nccl package: %s", e)
     return paths or None
+
+
+def query_nccl_gin_type(
+    group: torch.distributed.ProcessGroup,
+) -> int | None:
+    """Query NCCL GIN (GPU-Initiated Networking) support for a process group.
+
+    Returns the ``ncclGinType_t`` value (0 = NONE, 2 = PROXY, 3 = GDAKI,
+    4 = GPI), or ``None`` if the query could not be performed (e.g. NCCL
+    too old or the PyTorch backend does not expose the comm pointer).
+    """
+    from vllm.distributed.device_communicators.pynccl_wrapper import (
+        NCCLLibrary,
+        ncclCommProperties,
+    )
+
+    try:
+        backend = group._get_backend(torch.device("cuda"))
+        if not hasattr(backend, "_comm_ptr"):
+            logger.debug("PyTorch NCCL backend does not expose _comm_ptr")
+            return None
+        comm_ptr = backend._comm_ptr()
+    except Exception:
+        logger.debug(
+            "Failed to extract NCCL comm pointer from process group", exc_info=True
+        )
+        return None
+
+    try:
+        nccl = NCCLLibrary()
+    except Exception:
+        logger.debug("Failed to load NCCL library", exc_info=True)
+        return None
+
+    query_fn = nccl._funcs.get("ncclCommQueryProperties")
+    if query_fn is None:
+        logger.debug("ncclCommQueryProperties not available (NCCL < 2.29)")
+        return None
+
+    props = ncclCommProperties()
+    ctypes.memset(ctypes.addressof(props), 0, ctypes.sizeof(props))
+
+    try:
+        result = query_fn(ctypes.c_void_p(comm_ptr), ctypes.byref(props))
+    except Exception:
+        logger.debug("ncclCommQueryProperties call failed", exc_info=True)
+        return None
+
+    if result != 0:
+        logger.debug("ncclCommQueryProperties returned error %d", result)
+        return None
+
+    return props.ginType

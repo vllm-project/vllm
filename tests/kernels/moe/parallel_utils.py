@@ -225,6 +225,14 @@ def make_deepep_v2_a2a(
 ):
     import deep_ep
 
+    from vllm.utils.nccl import query_nccl_gin_type
+
+    gin_type = query_nccl_gin_type(pg)
+    if gin_type is not None and gin_type == 0:
+        import pytest
+
+        pytest.skip("NCCL GIN not available (no IBGDA-capable hardware)")
+
     buffer = deep_ep.ElasticBuffer(
         group=pg,
         num_max_tokens_per_rank=v2_args.max_tokens_per_rank,
