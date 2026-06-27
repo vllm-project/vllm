@@ -341,7 +341,7 @@ class LlamaDecoderLayer(nn.Module):
         "inputs_embeds": {0: "b"},
     },
 )
-class LlamaModel(nn.Module, EagleModelMixin, SupportsQuant):
+class LlamaModel(nn.Module, EagleModelMixin):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
             # weight_name: (param_name, shard_id)
@@ -444,8 +444,15 @@ class LlamaModel(nn.Module, EagleModelMixin, SupportsQuant):
 
 
 class LlamaForCausalLM(
-    LocalArgmaxMixin, nn.Module, SupportsLoRA, SupportsPP, SupportsEagle, SupportsEagle3
+    LocalArgmaxMixin,
+    nn.Module,
+    SupportsLoRA,
+    SupportsPP,
+    SupportsEagle,
+    SupportsEagle3,
+    SupportsQuant,
 ):
+    hf_to_vllm_mapper = LlamaModel.hf_to_vllm_mapper
     # LoRA specific attributes
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],

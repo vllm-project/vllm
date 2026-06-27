@@ -247,7 +247,7 @@ class GraniteDecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class GraniteModel(nn.Module, SupportsQuant):
+class GraniteModel(nn.Module):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
             # weight_name: (param_name, shard_id)
@@ -333,7 +333,8 @@ class GraniteModel(nn.Module, SupportsQuant):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
-class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
+    hf_to_vllm_mapper = GraniteModel.hf_to_vllm_mapper
     # LoRA specific attributes
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
