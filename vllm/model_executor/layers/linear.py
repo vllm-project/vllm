@@ -917,30 +917,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
         for name, loaded_weight in weights:
-            if "." in name:
-                # Checkpoint is sharded
-                shard_id_str, _, name = name.partition(".")
-                shard_id = (
-                    int(shard_id_str)
-                    if shard_id_str.isdigit()
-                    else tuple(int(i) for i in shard_id_str.split(","))
-                )
-                self.validate_shard_id(shard_id)
-                logger.debug(
-                    "Loaded shard %s into %s for layer %s.%s",
-                    shard_id,
-                    name,
-                    self.prefix,
-                    name,
-                )
-            else:
-                shard_id = None
-                logger.debug(
-                    "Loaded weight %s.%s with shape %s",
-                    self.prefix,
-                    name,
-                    loaded_weight.shape,
-                )
+            shard_id = getattr(loaded_weight, "shard_id", None)
+            self.validate_shard_id(shard_id)
             # Load into self if name is not an attr of self or its submodules
             param: Parameter
             if "." in name:
@@ -951,6 +929,13 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             if param is None and name == "bias":
                 continue
             param.weight_loader(param, loaded_weight, shard_id)
+            logger.debug(
+                "Loaded shard %s with shape %s into %s.%s",
+                shard_id,
+                loaded_weight.shape,
+                self.prefix,
+                name,
+            )
             yield name
 
 
@@ -1345,26 +1330,8 @@ class QKVParallelLinear(ColumnParallelLinear):
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
         for name, loaded_weight in weights:
-            if "." in name:
-                # Checkpoint is sharded
-                shard_id, _, name = name.partition(".")
-                self.validate_shard_id(shard_id)
-                logger.debug(
-                    "Loaded shard %s into %s for layer %s.%s",
-                    shard_id,
-                    name,
-                    self.prefix,
-                    name,
-                )
-            else:
-                # Checkpoint is fused
-                shard_id = None
-                logger.debug(
-                    "Loaded weight %s.%s with shape %s",
-                    self.prefix,
-                    name,
-                    loaded_weight.shape,
-                )
+            shard_id = getattr(loaded_weight, "shard_id", None)
+            self.validate_shard_id(shard_id)
             # Load into self if name is not an attr of self or its submodules
             param: Parameter
             if "." in name:
@@ -1375,6 +1342,13 @@ class QKVParallelLinear(ColumnParallelLinear):
             if param is None and name == "bias":
                 continue
             param.weight_loader(param, loaded_weight, shard_id)
+            logger.debug(
+                "Loaded shard %s with shape %s into %s.%s",
+                shard_id,
+                loaded_weight.shape,
+                self.prefix,
+                name,
+            )
             yield name
 
 

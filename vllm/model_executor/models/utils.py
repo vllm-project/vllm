@@ -5,7 +5,7 @@ import itertools
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Literal, Protocol, overload
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeAlias, overload
 
 import regex as re
 import torch
@@ -37,6 +37,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+ShardId: TypeAlias = str | int | tuple[int, ...]
+
 
 @dataclass
 class WeightsMapper:
@@ -47,7 +49,7 @@ class WeightsMapper:
     orig_to_new_renamings: list[Any] = field(default_factory=list)
     orig_to_new_regex: Mapping[re.Pattern, str | None] = field(default_factory=dict)
     orig_to_new_substr: Mapping[str, str | None] = field(default_factory=dict)
-    orig_to_new_stacked: Mapping[str, str | None] = field(default_factory=dict)
+    orig_to_new_stacked: Mapping[str, tuple[str, ShardId]] = field(default_factory=dict)
     orig_to_new_prefix: Mapping[str, str | None] = field(default_factory=dict)
     orig_to_new_suffix: Mapping[str, str | None] = field(default_factory=dict)
 
@@ -69,6 +71,17 @@ class WeightsMapper:
         )
 
     def _map_name(self, key: str) -> str | None:
+        """Map a weight name (backward-compatible wrapper that discards shard_id)."""
+        result = self._map_name_with_shard(key)
+        return result[0] if result is not None else None
+
+    def _map_name_with_shard(self, key: str) -> tuple[str, ShardId | None] | None:
+        """Map a weight name and extract any shard_id metadata.
+
+        Returns:
+            (mapped_name, shard_id) if the name should be kept.
+            None if the name should be dropped.
+        """
         # Deprecation warnings
         if key.endswith(".kv_scale"):
             logger.warning_once(
@@ -96,12 +109,11 @@ class WeightsMapper:
 
                 key = key.replace(substr, new_key, 1)
 
-        for substr, new_key in self.orig_to_new_stacked.items():
+        shard_id: ShardId | None = None
+        for substr, (new_key, new_shard_id) in self.orig_to_new_stacked.items():
             if substr in key:
-                if new_key is None:
-                    return None
-
                 key = key.replace(substr, new_key, 1)
+                shard_id = new_shard_id
 
         for prefix, new_key in self.orig_to_new_prefix.items():
             if key.startswith(prefix):
@@ -117,16 +129,19 @@ class WeightsMapper:
 
                 key = new_key.join(key.rsplit(suffix, 1))
 
-        return key
+        return key, shard_id
 
     def apply(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[tuple[str, torch.Tensor]]:
-        return (
-            (out_name, data)
-            for name, data in weights
-            if (out_name := self._map_name(name)) is not None
-        )
+        for name, data in weights:
+            result = self._map_name_with_shard(name)
+            if result is None:
+                continue
+            out_name, shard_id = result
+            if shard_id is not None:
+                data.shard_id = shard_id
+            yield out_name, data
 
     def apply_list(self, values: list[str]) -> list[str]:
         return [
@@ -148,7 +163,7 @@ class WeightsMapper:
         Consumers that reference the checkpoint's *unstacked* module names (LoRA name
         parsing and the quantization config's layer lists) need the constituent names
         (e.g. `q_proj`) to survive rather than being rewritten to the stacked vLLM name
-        (`qkv_proj.q`)."""
+        (`qkv_proj`)."""
         return replace(self, orig_to_new_stacked={})
 
 
