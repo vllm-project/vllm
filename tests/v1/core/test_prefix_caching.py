@@ -1136,6 +1136,84 @@ def test_hybrid_model_mamba_align_with_dynamic_draft_tokens():
     manager.free(req0)
 
 
+def test_mamba_align_external_cache_sync_loading():
+    """Test align-mode MambaManager accounts for the extra block needed when
+    external KV cache is loaded synchronously with new tokens.
+
+    Regression: get_num_blocks_to_allocate() in align mode capped
+    num_new_blocks at 1 + num_speculative_blocks for first prefill, but did
+    not account for the block allocated by allocate_new_computed_blocks() for
+    external cache content. This made the free-capacity check underestimate,
+    so allocate_slots() could over-commit the block pool and crash in
+    allocate_new_blocks() when the extra block was actually requested.
+    """
+    block_size = 16
+    # Full attention needs 3 blocks (2 external + 1 new).
+    # Mamba align needs 2 blocks (1 external + 1 running state).
+    # Total = 5 blocks.
+    num_blocks = 5
+
+    kv_cache_config = _make_hybrid_kv_cache_config(
+        block_size, num_blocks, ["full", "mamba_align"]
+    )
+    manager = KVCacheManager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    hash_fn = sha256
+
+    # 48 tokens = 3 full blocks
+    all_token_ids = [i for i in range(3) for _ in range(block_size)]
+
+    req0 = make_request("0", all_token_ids, block_size, hash_fn)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    assert num_computed_tokens == 0
+
+    # Sync loading: 32 external cached tokens + 16 new tokens to compute.
+    num_external = 2 * block_size
+    num_new = block_size
+
+    # With the fix, the capacity check accounts for the external block in
+    # mamba align mode, so 5 blocks are reported and allocation succeeds.
+    blocks = manager.allocate_slots(
+        req0,
+        num_new,
+        num_new_computed_tokens=num_computed_tokens,
+        new_computed_blocks=computed_blocks,
+        num_external_computed_tokens=num_external,
+    )
+    assert blocks is not None
+
+    manager.free(req0)
+
+    # With one fewer block, allocation must be rejected (returns None) because
+    # the true requirement (5) exceeds the pool (4). Without the fix the check
+    # would report 4 and incorrectly pass, then crash during allocation.
+    num_blocks_tight = 4
+    kv_cache_config_tight = _make_hybrid_kv_cache_config(
+        block_size, num_blocks_tight, ["full", "mamba_align"]
+    )
+    manager_tight = KVCacheManager(
+        kv_cache_config_tight,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    req1 = make_request("1", all_token_ids, block_size, hash_fn)
+    computed_blocks1, num_computed_tokens1 = manager_tight.get_computed_blocks(req1)
+    blocks1 = manager_tight.allocate_slots(
+        req1,
+        num_new,
+        num_new_computed_tokens=num_computed_tokens1,
+        new_computed_blocks=computed_blocks1,
+        num_external_computed_tokens=num_external,
+    )
+    assert blocks1 is None
+
+
 def test_prefill_plp():
     """Test prefill with APC and some prompt logprobs (plp) requests.
 

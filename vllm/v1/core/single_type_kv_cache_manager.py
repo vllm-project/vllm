@@ -1244,6 +1244,19 @@ class MambaManager(SingleTypeKVCacheManager):
                     # First prefill. Allocate 1 block for running state and the
                     # speculative blocks.
                     num_new_blocks = 1 + self.num_speculative_blocks
+                    # When external KV cache is loaded synchronously with new
+                    # tokens, allocate_new_computed_blocks() allocates one
+                    # extra block to hold the external cache content. Account
+                    # for it here so the free-capacity check is accurate.
+                    # (External tokens exist when total_computed_tokens exceeds
+                    # what local prefix-cache hits cover; sync loading when
+                    # num_tokens_main_model exceeds total_computed_tokens.)
+                    if (
+                        total_computed_tokens
+                        > len(new_computed_blocks) * self.block_size
+                        and num_tokens_main_model > total_computed_tokens
+                    ):
+                        num_new_blocks += 1
 
             num_evictable_computed_blocks = self._get_num_evictable_blocks(
                 new_computed_blocks
