@@ -158,12 +158,17 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                     local_block_ids = self.get_sw_clipped_blocks(
                         unhashed_local_block_ids
                     )
-                    dcp_size = params.get("dcp_size", 1)
-                    pcp_size = params.get("pcp_size", 1)
+                    parallel_config = self.vllm_config.parallel_config
+                    dcp_size = parallel_config.decode_context_parallel_size
+                    pcp_size = parallel_config.prefill_context_parallel_size
                     scheduler_block_size = self.block_size * dcp_size * pcp_size
-                    num_hashed_blocks = sum(
-                        block.block_hash is not None and not block.is_null
-                        for block in blocks.blocks[0]
+                    num_hashed_blocks = (
+                        sum(
+                            block.block_hash is not None and not block.is_null
+                            for block in blocks.blocks[0]
+                        )
+                        if blocks.blocks
+                        else 0
                     )
                     local_num_computed_tokens = num_hashed_blocks * scheduler_block_size
 
