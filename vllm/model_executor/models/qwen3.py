@@ -28,7 +28,6 @@ from typing import Any
 
 import torch
 from torch import nn
-from transformers import Qwen3Config
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -82,6 +81,7 @@ class Qwen3Attention(nn.Module):
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
         dual_chunk_attention_config: dict[str, Any] | None = None,
+        reduce_results: bool = True,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -119,7 +119,7 @@ class Qwen3Attention(nn.Module):
             hidden_size,
             bias=False,
             quant_config=quant_config,
-            reduce_results=False,
+            reduce_results=reduce_results,
             prefix=f"{prefix}.o_proj",
         )
 
@@ -176,12 +176,15 @@ class Qwen3Attention(nn.Module):
 class Qwen3DecoderLayer(nn.Module):
     def __init__(
         self,
-        config: Qwen3Config,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig,
         prefix: str = "",
     ) -> None:
         super().__init__()
+
+        config = vllm_config.model_config.hf_config.get_text_config()
+        cache_config = vllm_config.cache_config
+        quant_config = self.get_quant_config(vllm_config)
+
         self.hidden_size = config.hidden_size
         set_default_rope_theta(config, default_theta=1000000)
         dual_chunk_attention_config = getattr(
@@ -211,6 +214,7 @@ class Qwen3DecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
             dual_chunk_attention_config=dual_chunk_attention_config,
+            reduce_results=False,
         )
         self.mlp = Qwen3MLP(
             hidden_size=self.hidden_size,
@@ -227,7 +231,7 @@ class Qwen3DecoderLayer(nn.Module):
         # Qwen3 always defers (o_proj/down_proj run reduce_results=False), so this
         # layer leaves a per-rank PARTIAL sum for the next layer / the final norm.
         self.output_scatter = Scatter.PARTIAL
-        self.residual_stream = ResidualStream(self)
+        self.residual_stream = ResidualStream(self, vllm_config=vllm_config)
 
     def forward(
         self,
@@ -247,6 +251,10 @@ class Qwen3DecoderLayer(nn.Module):
         )
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
+
+    def get_quant_config(self, vllm_config: VllmConfig) -> QuantizationConfig | None:
+        """Get quantization config for this layer. Override in subclasses."""
+        return vllm_config.quant_config
 
 
 ALL_DECODER_LAYER_TYPES = {

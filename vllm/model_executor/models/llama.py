@@ -329,7 +329,7 @@ class LlamaDecoderLayer(nn.Module):
         # Distribution state this layer leaves its output in (read by the model's
         # final norm). Deferred (fused) decoders skip o_proj/down_proj reduce.
         self.output_scatter = Scatter.FULL if reduce_results else Scatter.PARTIAL
-        self.residual_stream = ResidualStream(self)
+        self.residual_stream = ResidualStream(self, vllm_config=vllm_config)
 
     def forward(
         self,

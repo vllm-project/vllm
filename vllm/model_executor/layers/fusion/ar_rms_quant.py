@@ -251,7 +251,6 @@ def fused_ar_rms_norm_quant(
         if consumer_linear is not None
         else None
     )
-
     # Check if fused all-reduce kernel can be used.
     can_fuse_ar = (
         do_allreduce

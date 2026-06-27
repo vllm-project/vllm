@@ -31,7 +31,6 @@ from typing import Any
 
 import torch
 from torch import nn
-from transformers import Qwen2Config
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -242,12 +241,15 @@ class Qwen2Attention(nn.Module):
 class Qwen2DecoderLayer(nn.Module):
     def __init__(
         self,
-        config: Qwen2Config,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig,
         prefix: str = "",
     ) -> None:
         super().__init__()
+
+        config = vllm_config.model_config.hf_config.get_text_config()
+        cache_config = vllm_config.cache_config
+        quant_config = self.get_quant_config(vllm_config)
+
         self.hidden_size = config.hidden_size
         set_default_rope_theta(config, default_theta=1000000)
         dual_chunk_attention_config = getattr(
@@ -314,6 +316,10 @@ class Qwen2DecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
+    def get_quant_config(self, vllm_config: VllmConfig) -> QuantizationConfig | None:
+        """Get quantization config for this layer. Override in subclasses."""
+        return vllm_config.quant_config
+
 
 @support_torch_compile(
     dynamic_arg_dims={
@@ -336,7 +342,6 @@ class Qwen2Model(nn.Module, EagleModelMixin):
         super().__init__()
 
         config = vllm_config.model_config.hf_config.get_text_config()
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
         # TODO (@robertgshaw2): see if this can be moved out
@@ -370,9 +375,7 @@ class Qwen2Model(nn.Module, EagleModelMixin):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: decoder_layer_type(
-                config=config,
-                cache_config=cache_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",
