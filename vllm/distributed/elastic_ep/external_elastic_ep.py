@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import contextlib
 import uuid
 from collections.abc import Sequence
 from threading import Event, Thread
@@ -78,6 +79,10 @@ class ExternalElasticEPScaleUpHandshakeServer:
         self._stop_event.set()
         if self._thread.is_alive():
             self._thread.join(timeout=5)
+        if self._error is not None:
+            raise self._error
+
+    def raise_if_failed(self) -> None:
         if self._error is not None:
             raise self._error
 
@@ -256,6 +261,13 @@ class ExternalElasticEPScaleCoordinator:
         start = loop.time()
         current_epoch_key = self.key("current_epoch")
         previous_epoch = self.active_epoch
+        if store.check([current_epoch_key]):
+            current_epoch = store.get(current_epoch_key).decode()
+            if (
+                store.check([self.key(current_epoch, "completed")])
+                or self._get_error(store, current_epoch) is not None
+            ):
+                previous_epoch = current_epoch
         backoff_step = 0
         while True:
             if store.check([current_epoch_key]):
@@ -358,6 +370,7 @@ class ExternalElasticEPScaleCoordinator:
         epoch: str,
         notification_type: EEPNotificationType,
         source_ranks: Sequence[int],
+        handshake_server: ExternalElasticEPScaleUpHandshakeServer | None = None,
         timeout_s: float = 300,
     ) -> None:
         """Wait for source ranks to publish a specific scale notification.
@@ -371,6 +384,9 @@ class ExternalElasticEPScaleCoordinator:
 
         backoff_step = 0
         while True:
+            if handshake_server is not None:
+                handshake_server.raise_if_failed()
+
             error = self._get_error(control_store, epoch)
             if error is not None:
                 raise RuntimeError(
@@ -456,6 +472,7 @@ class ExternalElasticEPScaleCoordinator:
         bootstrap: ReconfigureDistributedRequest | None = None
         epoch: str | None = None
         reconfig_store: Any | None = None
+        success = False
 
         try:
             if dp_rank == 0:
@@ -517,6 +534,7 @@ class ExternalElasticEPScaleCoordinator:
                     epoch,
                     EEPNotificationType.NEW_CORE_ENGINES_INIT_READY,
                     new_ranks,
+                    handshake_server=handshake_server,
                 )
                 await self._wait_for_notification(
                     control_store,
@@ -524,6 +542,7 @@ class ExternalElasticEPScaleCoordinator:
                     epoch,
                     EEPNotificationType.NEW_CORE_ENGINES_WEIGHTS_INIT_READY,
                     new_ranks,
+                    handshake_server=handshake_server,
                 )
 
             await self._wait_for_local_reconfig_finished(
@@ -540,19 +559,24 @@ class ExternalElasticEPScaleCoordinator:
                 reconfig_store.set(completed_key, b"1")
             if scale_up or dp_rank < bootstrap.new_data_parallel_size:
                 self._update_parallel_config(bootstrap)
+            success = True
         except Exception as e:
             if epoch is not None:
                 error_key = self.key(epoch, "error")
-                control_store.set(
-                    error_key,
-                    str(e).encode(),
-                )
+                error_payload = str(e).encode()
+                with contextlib.suppress(Exception):
+                    control_store.set(error_key, error_payload)
                 if reconfig_store is not None:
-                    reconfig_store.set(error_key, str(e).encode())
+                    with contextlib.suppress(Exception):
+                        reconfig_store.set(error_key, error_payload)
             raise
         finally:
             if handshake_server is not None:
-                handshake_server.stop()
+                if success:
+                    handshake_server.stop()
+                else:
+                    with contextlib.suppress(Exception):
+                        handshake_server.stop()
 
     async def process_engine_core_notification(
         self, notification_data: tuple[str, int]
