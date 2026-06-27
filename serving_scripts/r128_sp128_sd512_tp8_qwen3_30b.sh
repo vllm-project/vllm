@@ -612,13 +612,18 @@ else
   echo "INSTALL_DEPS=${INSTALL_DEPS}; skipping pip install steps and using existing venv."
 fi
 
-RAY_BIN="${VENV_DIR}/bin/ray"
-if [ ! -x "${RAY_BIN}" ]; then
-  echo "Error: ray binary not found at ${RAY_BIN}. Install ray into this venv." >&2
-  exit 1
-fi
+DISTRIBUTED_EXECUTOR_BACKEND="${DISTRIBUTED_EXECUTOR_BACKEND:-mp}"
 
-echo "After venv: python=$(command -v python) ray=${RAY_BIN}"
+RAY_BIN="${VENV_DIR}/bin/ray"
+if [ "${DISTRIBUTED_EXECUTOR_BACKEND}" = "ray" ]; then
+  if [ ! -x "${RAY_BIN}" ]; then
+    echo "Error: ray binary not found at ${RAY_BIN}. Install ray into this venv." >&2
+    exit 1
+  fi
+  echo "After venv: python=$(command -v python) ray=${RAY_BIN}"
+else
+  echo "After venv: python=$(command -v python) distributed_executor_backend=${DISTRIBUTED_EXECUTOR_BACKEND}; Ray startup disabled"
+fi
 
 export VLLM_TARGET_DEVICE=cuda
 export VLLM_USE_DEEP_GEMM="${VLLM_USE_DEEP_GEMM:-0}"
@@ -650,7 +655,7 @@ if [ -z "${RESULT_FILENAME}" ]; then
   RESULT_FILENAME="sharegpt_sp${SP}_sd${SD}_np${NUM_PROMPTS}_rr${REQUEST_RATE}_job${SLURM_JOB_ID}.json"
 fi
 
-export MODEL_ID HOST PORT GPUS_PER_NODE NUM_NODES TP PP EP MAX_MODEL_LEN CPUS_PER_TASK SERVE_SCRIPT
+export MODEL_ID HOST PORT GPUS_PER_NODE NUM_NODES TP PP EP MAX_MODEL_LEN CPUS_PER_TASK SERVE_SCRIPT DISTRIBUTED_EXECUTOR_BACKEND
 export SP SD NUM_PROMPTS REQUEST_RATE BURSTINESS SEED ENDPOINT
 export AUTO_GENERATE_DATASET DATASET_NAME DATASET_SPLIT DATASET_MAX_PER_BUCKET DATASET_MAX_SOURCE_ROWS DATASET_PATH
 export SAVE_RESULT SAVE_DETAILED RESULT_ROOT RESULT_DIR RESULT_FILENAME
@@ -659,7 +664,7 @@ configure_socket_ifnames "${HEAD_NODE_IP}"
 network_debug_snapshot "batch-before-ray"
 
 echo "=== runtime knobs ==="
-echo "MODEL_ID=${MODEL_ID} HOST=${HOST} PORT=${PORT} TP=${TP} PP=${PP} EP=${EP}"
+echo "MODEL_ID=${MODEL_ID} HOST=${HOST} PORT=${PORT} TP=${TP} PP=${PP} EP=${EP} DISTRIBUTED_EXECUTOR_BACKEND=${DISTRIBUTED_EXECUTOR_BACKEND}"
 echo "GPUS_PER_NODE=${GPUS_PER_NODE} NUM_NODES=${NUM_NODES} CPUS_PER_TASK=${CPUS_PER_TASK}"
 echo "MAX_MODEL_LEN=${MAX_MODEL_LEN}"
 echo "VLLM_ENGINE_READY_TIMEOUT_S=${VLLM_ENGINE_READY_TIMEOUT_S}"
@@ -721,6 +726,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
+if [ "${DISTRIBUTED_EXECUTOR_BACKEND}" = "ray" ]; then
 echo "=== Ray head (background srun) ==="
 echo "Starting head node ${HEAD_NODE}..."
 
@@ -971,12 +977,15 @@ ps -ef | egrep 'ray start|gcs_server|raylet|ray::|dashboard|client.server' | gre
 
 echo "=== Ray recent logs before vLLM ==="
 grep -R "Ray runtime started\|ERROR\|Traceback\|Exception" /tmp/ray/session_latest/logs 2>/dev/null | tail -100 || true
+else
+  echo "=== Ray startup skipped (DISTRIBUTED_EXECUTOR_BACKEND=${DISTRIBUTED_EXECUTOR_BACKEND}) ==="
+fi
 
 echo "=== vLLM api_server (background process; no outer nsys wrapper) ==="
 echo "Starting vLLM server on head node WITHOUT outer Nsight wrapper..."
 
 VLLM_TRACE_FLAGS=()
-if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_WORKERS}" = "1" ]; then
+if [ "${DISTRIBUTED_EXECUTOR_BACKEND}" = "ray" ] && [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_WORKERS}" = "1" ]; then
   VLLM_TRACE_FLAGS+=(
     --ray-workers-use-nsight
     --enable-layerwise-nvtx-tracing
@@ -985,16 +994,21 @@ if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_WORKERS}" = "1" ]; then
 fi
 
 echo "API_SERVER_OUTER_NSYS_WRAPPER=0"
-if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_WORKERS}" = "1" ]; then
+if [ "${DISTRIBUTED_EXECUTOR_BACKEND}" = "ray" ] && [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_WORKERS}" = "1" ]; then
   nsight_copy_msg "worker Nsight enabled via --ray-workers-use-nsight"
   nsight_copy_msg "live sidecar copies current-job Slurm tmp plus live /tmp/ray sessions"
   nsight_copy_msg "empty.nsys-rep and zero-byte reports are ignored"
 fi
 
-export RAY_ADDRESS="${HEAD_NODE_IP}:${RAY_PORT}"
+if [ "${DISTRIBUTED_EXECUTOR_BACKEND}" = "ray" ]; then
+  export RAY_ADDRESS="${HEAD_NODE_IP}:${RAY_PORT}"
+  echo "Launching vLLM with RAY_ADDRESS=${RAY_ADDRESS}"
+else
+  unset RAY_ADDRESS
+fi
 export VLLM_HOST_IP="${HEAD_NODE_IP}"
 
-echo "Launching vLLM with RAY_ADDRESS=${RAY_ADDRESS}"
+echo "Launching vLLM with distributed executor backend=${DISTRIBUTED_EXECUTOR_BACKEND}"
 echo "Launching vLLM with VLLM_HOST_IP=${VLLM_HOST_IP}"
 echo "Launching vLLM with VLLM_ENGINE_READY_TIMEOUT_S=${VLLM_ENGINE_READY_TIMEOUT_S}"
 echo "Launching vLLM with GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME}"
@@ -1004,7 +1018,7 @@ python -m vllm.entrypoints.openai.api_server \
   --model "${MODEL_ID}" \
   --host "${HOST}" \
   --port "${PORT}" \
-  --distributed-executor-backend ray \
+  --distributed-executor-backend "${DISTRIBUTED_EXECUTOR_BACKEND}" \
   --tensor-parallel-size "${TP}" \
   --pipeline-parallel-size "${PP}" \
   --max-model-len "${MAX_MODEL_LEN}" \
@@ -1090,6 +1104,7 @@ fi
 echo "NSYS_DIR after server shutdown:"
 ls -la "${NSYS_DIR}/" 2>/dev/null || true
 
+if [ "${DISTRIBUTED_EXECUTOR_BACKEND}" = "ray" ]; then
 echo "Keeping Ray alive so worker Nsight can finalize real reports..."
 wait_for_real_worker_nsys_reports "${WORKER_NSYS_FINALIZE_WAIT_S}" "${WORKER_NSYS_FINALIZE_POLL_S}" || true
 
@@ -1119,6 +1134,9 @@ copy_ray_nsight_from_node "${HEAD_NODE}"
 for WORKER in ${WORKER_NODES}; do
   copy_ray_nsight_from_node "${WORKER}"
 done
+else
+  echo "Skipping Ray worker Nsight finalize/copy for DISTRIBUTED_EXECUTOR_BACKEND=${DISTRIBUTED_EXECUTOR_BACKEND}."
+fi
 
 nsight_copy_msg "=== final Nsight artifact summary ==="
 nsight_copy_msg "API server trace dir, expected empty/no api-server nsys in this variant: ${NSYS_DIR}"
