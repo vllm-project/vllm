@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ast
+import json
 from collections.abc import Sequence
 
 import regex as re
@@ -14,6 +15,8 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
+    FunctionCall,
+    ToolCall,
 )
 from vllm.logger import init_logger
 from vllm.tool_parsers.abstract_tool_parser import (
@@ -92,6 +95,17 @@ class Llama4PythonicToolParser(ToolParser):
             )
 
         if not is_tool_call_pattern:
+            # The model did not emit a pythonic-style tool call. Some Llama-4
+            # checkpoints (e.g. served with the Llama-3.1 JSON chat template)
+            # instead emit JSON tool calls, which previously fell through to
+            # plain content. Try a conservative JSON fallback before giving up.
+            json_tool_calls = self._extract_json_tool_calls(model_output)
+            if json_tool_calls:
+                return ExtractedToolCallInformation(
+                    tools_called=True,
+                    tool_calls=json_tool_calls,
+                    content=None,
+                )
             return ExtractedToolCallInformation(
                 tools_called=False, tool_calls=[], content=model_output
             )
@@ -118,6 +132,133 @@ class Llama4PythonicToolParser(ToolParser):
             return ExtractedToolCallInformation(
                 tools_called=False, tool_calls=[], content=model_output
             )
+
+    @staticmethod
+    def _json_obj_to_tool_call(obj: object) -> ToolCall | None:
+        """Convert a single JSON object into a ToolCall, or None if it does
+        not look like a tool call. A tool call must be a dict with a non-empty
+        string ``name`` and an explicit ``arguments`` or ``parameters`` dict.
+        Requiring the args key keeps ordinary JSON content that merely has a
+        ``name`` field (e.g. ``{"name": "Alice", "age": 30}``) as content."""
+        if not isinstance(obj, dict):
+            return None
+        name = obj.get("name")
+        if not isinstance(name, str) or not name:
+            return None
+        if "arguments" in obj:
+            arguments = obj["arguments"]
+        elif "parameters" in obj:
+            arguments = obj["parameters"]
+        else:
+            return None
+        if not isinstance(arguments, dict):
+            return None
+        return ToolCall(
+            type="function",
+            function=FunctionCall(
+                name=name,
+                arguments=json.dumps(arguments, ensure_ascii=False),
+            ),
+        )
+
+    def _scan_json_tool_calls(
+        self, model_output: str
+    ) -> tuple[list[ToolCall], str]:
+        """Scan ``model_output`` for JSON tool calls.
+
+        Supports a single JSON object, several whitespace/comma separated
+        objects, and a single JSON array of objects, e.g.::
+
+            {"name": "Bash", "parameters": {"command": "echo hi"}}
+            {"name": "a", ...}, {"name": "b", ...}
+            [{"name": "a", ...}, {"name": "b", ...}]
+
+        Returns ``(tool_calls, status)``. ``status`` is ``"ok"`` only when the
+        entire output is cleanly consumed as one or more tool-call objects;
+        anything else (leading/trailing non-JSON text, malformed JSON, or a
+        well-formed object that is not a tool call) yields ``"not_tool"`` so the
+        caller treats the output as plain content.
+        """
+        decoder = json.JSONDecoder()
+        text = model_output.strip()
+        in_array = text.startswith("[")
+        if in_array:
+            text = text[1:]
+
+        tool_calls: list[ToolCall] = []
+        array_closed = False
+        # A comma is only a valid separator immediately after an object, and it
+        # must be followed by another object: ``need_separator`` marks "just
+        # parsed an object", ``pending_object`` marks "a comma still owes us an
+        # object". This rejects leading, doubled and dangling/trailing commas.
+        need_separator = False
+        pending_object = False
+        i = 0
+        length = len(text)
+        while i < length:
+            while i < length and text[i] in " \t\r\n":
+                i += 1
+            if i >= length:
+                break
+            char = text[i]
+            if in_array and char == "]":
+                if pending_object:
+                    return ([], "not_tool")
+                i += 1
+                array_closed = True
+                break
+            if char == ",":
+                if not need_separator:
+                    return ([], "not_tool")
+                need_separator = False
+                pending_object = True
+                i += 1
+                continue
+            if char != "{":
+                return ([], "not_tool")
+            try:
+                obj, end = decoder.raw_decode(text, i)
+            except json.JSONDecodeError:
+                # Malformed or truncated JSON: stay conservative and treat the
+                # whole response as plain content rather than dropping the tail.
+                return ([], "not_tool")
+            i = end
+            tool_call = self._json_obj_to_tool_call(obj)
+            if tool_call is None:
+                return ([], "not_tool")
+            tool_calls.append(tool_call)
+            need_separator = True
+            pending_object = False
+
+        # An array that never closed is truncated/malformed -> plain content.
+        if in_array and not array_closed:
+            return ([], "not_tool")
+        # A dangling comma owed another object -> malformed -> plain content.
+        if pending_object:
+            return ([], "not_tool")
+        # Trailing non-whitespace after the JSON tool calls means this is not a
+        # clean tool-call payload; treat the whole output as content.
+        if text[i:].strip():
+            return ([], "not_tool")
+        if not tool_calls:
+            return ([], "not_tool")
+        return (tool_calls, "ok")
+
+    def _extract_json_tool_calls(self, model_output: str) -> list[ToolCall] | None:
+        """Best-effort extraction of JSON tool calls from a complete response.
+
+        Returns the parsed tool calls, or ``None`` when the output is not a
+        clean JSON tool call (so the caller leaves it as plain content)."""
+        if "{" not in model_output:
+            return None
+        try:
+            tool_calls, status = self._scan_json_tool_calls(model_output)
+        except Exception:
+            logger.exception("Error in extracting JSON tool call from response.")
+            return None
+        if status != "ok":
+            return None
+        return tool_calls or None
 
     def extract_tool_calls_streaming(
         self,
