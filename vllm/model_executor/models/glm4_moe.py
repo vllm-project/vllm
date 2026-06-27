@@ -655,8 +655,6 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA, Glm4MixtureOfExper
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
-        self.expert_weights = []
-
         # Set MoE hyperparameters
         self.num_moe_layers = config.num_hidden_layers - config.first_k_dense_replace
         self.num_expert_groups = config.n_group
