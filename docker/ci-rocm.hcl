@@ -302,11 +302,17 @@ group "test-rocm-ci-with-wheel" {
 }
 
 # Image tags for the ci_base build. ci-bake-rocm.sh rewrites CI_BASE_IMAGE_TAG
-# to the primary tag for this build. Non-nightly builds use a commit-scoped tag
-# and also publish a content tag for reuse. NIGHTLY=1 builds on the stable branch
-# can additionally set CI_BASE_IMAGE_TAG_STABLE to refresh rocm/vllm-dev:ci_base.
+# to the primary tag for this build. Builds always publish a content-scoped tag
+# when the ci_base content hash is available. Builds with BUILDKITE_COMMIT also
+# publish a commit-scoped tag, either as the primary tag or an additional alias.
+# NIGHTLY=1 builds on the stable branch can additionally set
+# CI_BASE_IMAGE_TAG_STABLE to refresh rocm/vllm-dev:ci_base.
 variable "CI_BASE_IMAGE_TAG" {
   default = "rocm/vllm-dev:ci_base"
+}
+
+variable "CI_BASE_IMAGE_TAG_COMMIT" {
+  default = ""
 }
 
 variable "CI_BASE_IMAGE_TAG_CONTENT" {
@@ -357,6 +363,7 @@ target "ci-base-rocm-ci" {
   cache-from = concat(
     compact([
       CI_BASE_IMAGE_TAG != "" ? "type=registry,ref=${CI_BASE_IMAGE_TAG}" : "",
+      CI_BASE_IMAGE_TAG_COMMIT != "" ? "type=registry,ref=${CI_BASE_IMAGE_TAG_COMMIT}" : "",
       CI_BASE_IMAGE_TAG_CONTENT != "" ? "type=registry,ref=${CI_BASE_IMAGE_TAG_CONTENT}" : "",
       CI_BASE_IMAGE_TAG_STABLE != "" ? "type=registry,ref=${CI_BASE_IMAGE_TAG_STABLE}" : "",
     ]),
@@ -365,7 +372,7 @@ target "ci-base-rocm-ci" {
     get_cache_from_rocm_deps(),
   )
   cache-to = ["type=inline"]
-  tags     = compact([CI_BASE_IMAGE_TAG, CI_BASE_IMAGE_TAG_CONTENT, CI_BASE_IMAGE_TAG_STABLE])
+  tags     = compact([CI_BASE_IMAGE_TAG, CI_BASE_IMAGE_TAG_COMMIT, CI_BASE_IMAGE_TAG_CONTENT, CI_BASE_IMAGE_TAG_STABLE])
   output   = ["type=registry"]
 }
 
