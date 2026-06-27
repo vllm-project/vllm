@@ -5046,7 +5046,6 @@ class GPUModelRunner(
             if hasattr(self.drafter, "set_draft_attention_metadata"):
                 self.drafter.set_draft_attention_metadata(
                     self.num_accepted_tokens.gpu[:num_reqs],
-                    self.input_batch.num_prompt_tokens_cpu_tensor[:num_reqs],
                 )
 
             if spec_config.disable_padded_drafter_batch:
@@ -5155,25 +5154,20 @@ class GPUModelRunner(
             else:
                 mm_embed_inputs = None
 
-            if hasattr(self.drafter, "set_spec_decode_metadata"):
-                self.drafter.set_spec_decode_metadata(spec_decode_metadata)
-            try:
-                draft_token_ids = self.drafter.propose(
-                    num_speculative_tokens=num_spec_tokens_to_schedule,
-                    target_token_ids=target_token_ids,
-                    target_positions=target_positions,
-                    target_hidden_states=target_hidden_states,
-                    next_token_ids=next_token_ids,
-                    token_indices_to_sample=token_indices_to_sample,
-                    sampling_metadata=sampling_metadata,
-                    common_attn_metadata=common_attn_metadata,
-                    mm_embed_inputs=mm_embed_inputs,
-                    num_rejected_tokens_gpu=num_rejected_tokens_gpu,
-                    slot_mappings=slot_mappings,
-                )
-            finally:
-                if hasattr(self.drafter, "set_spec_decode_metadata"):
-                    self.drafter.set_spec_decode_metadata(None)
+            draft_token_ids = self.drafter.propose(
+                num_speculative_tokens=num_spec_tokens_to_schedule,
+                target_token_ids=target_token_ids,
+                target_positions=target_positions,
+                target_hidden_states=target_hidden_states,
+                next_token_ids=next_token_ids,
+                token_indices_to_sample=token_indices_to_sample,
+                sampling_metadata=sampling_metadata,
+                common_attn_metadata=common_attn_metadata,
+                mm_embed_inputs=mm_embed_inputs,
+                num_rejected_tokens_gpu=num_rejected_tokens_gpu,
+                slot_mappings=slot_mappings,
+            )
+
             if hasattr(self.drafter, "take_last_draft_probs"):
                 draft_probs = self.drafter.take_last_draft_probs()
                 if draft_probs is not None:

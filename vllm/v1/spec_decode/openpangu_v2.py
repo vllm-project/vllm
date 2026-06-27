@@ -50,10 +50,7 @@ class OpenPanguV2MTPProposer(EagleProposer):
             dtype=torch.int32,
             device=device,
         )
-        self._spec_decode_metadata = None
-
-    def set_spec_decode_metadata(self, spec_decode_metadata) -> None:
-        self._spec_decode_metadata = spec_decode_metadata
+        self.fix_multi_mtp_kvcache = self.use_multi_mtp_heads
 
     def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode) -> None:
         if self.use_multi_mtp_heads:
@@ -112,14 +109,12 @@ class OpenPanguV2MTPProposer(EagleProposer):
     def set_draft_attention_metadata(
         self,
         num_accepted_tokens: torch.Tensor | None,
-        num_prompt_tokens: torch.Tensor | None,
     ) -> None:
         for attn_group in self.draft_attn_groups:
             builder = attn_group.get_metadata_builder()
             if hasattr(builder, "set_draft_attention_metadata"):
                 builder.set_draft_attention_metadata(
                     num_accepted_tokens,
-                    num_prompt_tokens,
                 )
 
     def set_per_group_attn_metadata(
@@ -405,10 +400,7 @@ class OpenPanguV2MTPProposer(EagleProposer):
                     window_size,
                 )
             )
-        self.set_draft_attention_metadata(
-            num_accepted_tokens,
-            self.runner.input_batch.num_prompt_tokens_cpu_tensor[:batch_size],
-        )
+        self.set_draft_attention_metadata(num_accepted_tokens)
 
     def propose_multi_head_mtp(
         self,

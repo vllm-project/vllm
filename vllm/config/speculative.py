@@ -731,8 +731,8 @@ class SpeculativeConfig:
                     ):
                         logger.warning(
                             "Enabling num_speculative_tokens > 1 will run "
-                            "multiple times of forward on same MTP layer, "
-                            "which may result in lower acceptance rate"
+                            "multiple times of forward on same MTP layer"
+                            ",which may result in lower acceptance rate"
                         )
                 elif self.method == "draft_model":
                     pass

@@ -115,15 +115,12 @@ class MomeAttentionMetadataBuilder(AttentionMetadataBuilder[MomeAttentionMetadat
 
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
         self._draft_num_accepted_tokens: torch.Tensor | None = None
-        self._draft_num_prompt_tokens: torch.Tensor | None = None
 
     def set_draft_attention_metadata(
         self,
         num_accepted_tokens: torch.Tensor | None,
-        num_prompt_tokens: torch.Tensor | None,
     ) -> None:
         self._draft_num_accepted_tokens = num_accepted_tokens
-        self._draft_num_prompt_tokens = num_prompt_tokens
 
     def build_for_drafting(
         self,
@@ -137,7 +134,7 @@ class MomeAttentionMetadataBuilder(AttentionMetadataBuilder[MomeAttentionMetadat
         return self._compute_metadata(
             common_attn_metadata,
             num_accepted_tokens=self._draft_num_accepted_tokens,
-            num_prompt_tokens=self._draft_num_prompt_tokens,
+            is_drafting=True,
         )
 
     def build_for_cudagraph_capture(
@@ -235,6 +232,7 @@ class MomeAttentionMetadataBuilder(AttentionMetadataBuilder[MomeAttentionMetadat
         *,
         num_accepted_tokens: torch.Tensor | None = None,
         num_prompt_tokens: torch.Tensor | None = None,
+        is_drafting: bool = False,
         require_uniform: bool = False,
     ) -> MomeAttentionMetadata:
         if num_accepted_tokens is not None:
@@ -271,19 +269,10 @@ class MomeAttentionMetadataBuilder(AttentionMetadataBuilder[MomeAttentionMetadat
             [num_decodes, num_prefills],
             dim=0,
         )
-        if (
-            num_decodes > 0
-            and self.use_spec_decode
-            and num_accepted_tokens is not None
-            and num_prompt_tokens is not None
-        ):
+        if num_decodes > 0 and self.use_spec_decode and num_accepted_tokens is not None:
             block_size = self.kv_cache_spec.block_size
             num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
             num_computed_tokens_d = num_computed_tokens[:num_decodes]
-            num_prompt_tokens = num_prompt_tokens.to(
-                device=num_computed_tokens.device, non_blocking=True
-            )
-            num_prompt_tokens_d = num_prompt_tokens[:num_decodes]
             num_accepted_tokens_d = num_accepted_tokens[:num_decodes]
             prev_num_computed_tokens_d = num_computed_tokens_d - num_accepted_tokens_d
             prev_scheduled_len_d = torch.clamp(
@@ -296,11 +285,22 @@ class MomeAttentionMetadataBuilder(AttentionMetadataBuilder[MomeAttentionMetadat
             spec_block_idx_last_computed_token_d = (
                 cdiv(prev_num_computed_tokens_d + prev_scheduled_len_d, block_size) - 1
             )
-            block_idx_last_computed_token_d = torch.where(
-                num_computed_tokens_d > num_prompt_tokens_d,
-                spec_block_idx_last_computed_token_d,
-                block_idx_last_computed_token_d,
-            )
+            use_spec_block_idx: torch.Tensor | None = None
+            if is_drafting:
+                use_spec_block_idx = num_accepted_tokens_d > 0
+            elif num_prompt_tokens is not None:
+                num_prompt_tokens = num_prompt_tokens.to(
+                    device=num_computed_tokens.device, non_blocking=True
+                )
+                num_prompt_tokens_d = num_prompt_tokens[:num_decodes]
+                use_spec_block_idx = num_computed_tokens_d > num_prompt_tokens_d
+
+            if use_spec_block_idx is not None:
+                block_idx_last_computed_token_d = torch.where(
+                    use_spec_block_idx,
+                    spec_block_idx_last_computed_token_d,
+                    block_idx_last_computed_token_d,
+                )
             block_idx_last_computed_token_d = torch.clamp(
                 block_idx_last_computed_token_d, min=0
             )
