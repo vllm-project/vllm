@@ -1063,6 +1063,7 @@ class OpenAIServingResponses(OpenAIServing):
                 final_output.text,
                 request,
                 enable_auto_tools=self.enable_auto_tools,
+                model_output_token_ids=final_output.token_ids,
             )
             return build_response_output_items(
                 reasoning=reasoning,
