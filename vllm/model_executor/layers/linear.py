@@ -4,9 +4,11 @@
 import itertools
 from abc import abstractmethod
 from collections.abc import Iterable
+from typing import Any
 
 import torch
 from torch.nn.parameter import Parameter
+from typing_extensions import TypeIs
 
 import vllm.envs as envs
 from vllm.distributed import (
@@ -633,31 +635,31 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             disable_tp=disable_tp,
         )
 
-    def validate_shard_id(self, loaded_shard_id: int | tuple[int, ...] | None):
-        if loaded_shard_id is None:
-            return
-        if isinstance(loaded_shard_id, tuple):
-            for idx in loaded_shard_id:
+    def validate_shard_id(self, shard_id: Any) -> TypeIs[int | tuple[int, ...] | None]:
+        if isinstance(shard_id, int):
+            if shard_id < 0 or shard_id >= len(self.output_sizes):
+                raise ValueError(
+                    f"Shard id should be between 0 and {len(self.output_sizes) - 1}. "
+                    f"Got shard id {shard_id}."
+                )
+            return True
+        if shard_id is None:
+            return True
+        if isinstance(shard_id, tuple):
+            for idx in shard_id:
                 if not (0 <= idx < len(self.output_sizes)):
                     raise ValueError(
                         f"Shard id index {idx} should be between 0 and "
-                        f"{len(self.output_sizes) - 1}. Got shard id {loaded_shard_id}."
+                        f"{len(self.output_sizes) - 1}. Got shard id {shard_id}."
                     )
-            if len(loaded_shard_id) > 1 and any(
-                b - a != 1 for a, b in zip(loaded_shard_id[:-1], loaded_shard_id[1:])
+            if len(shard_id) > 1 and any(
+                b - a != 1 for a, b in zip(shard_id[:-1], shard_id[1:])
             ):
                 raise ValueError(
                     "Shard id with multiple indices should be consecutive. "
-                    f"Got shard id {loaded_shard_id}."
+                    f"Got shard id {shard_id}."
                 )
-            return
-        elif isinstance(loaded_shard_id, int):
-            if loaded_shard_id < 0 or loaded_shard_id >= len(self.output_sizes):
-                raise ValueError(
-                    f"Shard id should be between 0 and {len(self.output_sizes) - 1}. "
-                    f"Got shard id {loaded_shard_id}."
-                )
-            return
+            return True
         raise ValueError("This line should not be reached")
 
     def weight_loader(
@@ -1037,17 +1039,13 @@ class QKVParallelLinear(ColumnParallelLinear):
             disable_tp=disable_tp,
         )
 
-    def validate_shard_id(self, loaded_shard_id: str | None):
-        if loaded_shard_id is None:
-            return
-        if isinstance(loaded_shard_id, str):
-            if loaded_shard_id not in ["q", "k", "v"]:
-                raise ValueError(
-                    "Shard id for QKVParallelLinear should be 'q', 'k', or 'v', "
-                    f"got shard id {loaded_shard_id}."
-                )
-            return
-        raise ValueError("This line should not be reached")
+    def validate_shard_id(self, shard_id: Any) -> TypeIs[str | None]:
+        if shard_id in {"q", "k", "v"} or shard_id is None:
+            return True
+        raise ValueError(
+            "Shard id for QKVParallelLinear should be 'q', 'k', or 'v', "
+            f"got shard id {shard_id}."
+        )
 
     def _get_shard_offset_mapping(self, loaded_shard_id: str):
         shard_offset_mapping = {
@@ -1464,15 +1462,14 @@ class MinimaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
             prefix=prefix,
         )
 
-    def validate_shard_id(self, loaded_shard_id: str | None) -> None:
-        if loaded_shard_id is None:
-            return
-        if loaded_shard_id not in ("q", "k", "v", "index_q", "index_k"):
-            raise ValueError(
-                "Shard id for MinimaxM3QKVParallelLinearWithIndexer must be one of "
-                "'q', 'k', 'v', 'index_q', 'index_k'; got "
-                f"{loaded_shard_id}."
-            )
+    def validate_shard_id(self, shard_id: Any) -> TypeIs[str | None]:
+        if shard_id in {"q", "k", "v", "index_q", "index_k"} or shard_id is None:
+            return True
+        raise ValueError(
+            "Shard id for MinimaxM3QKVParallelLinearWithIndexer must be one of "
+            "'q', 'k', 'v', 'index_q', 'index_k'; got "
+            f"{shard_id}."
+        )
 
     def _get_shard_offset_mapping(self, loaded_shard_id: str) -> int | None:
         h = self.head_size
