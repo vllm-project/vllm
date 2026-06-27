@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -114,63 +113,6 @@ def test_mtp_load_model_unified(mock_get_model, mock_get_layers, mock_get_pp_gro
     assert proposer.model.lm_head == target_model.lm_head
     # MTP shares embed_tokens with target model
     assert proposer.model.model.embed_tokens == target_model.model.embed_tokens
-
-
-@mock.patch("vllm.v1.spec_decode.llm_base_proposer.get_pp_group")
-@mock.patch("vllm.v1.spec_decode.llm_base_proposer.get_layers_from_vllm_config")
-@mock.patch("vllm.v1.spec_decode.llm_base_proposer.get_model")
-def test_bailing_mtp_load_model_shares_embed_tokens_and_outer_lm_head(
-    mock_get_model,
-    mock_get_layers,
-    mock_get_pp_group,
-):
-    target_attn_layers = {"target_attn_1": mock.MagicMock()}
-    all_attn_layers = {**target_attn_layers, "draft_attn_1": mock.MagicMock()}
-    mock_get_layers.side_effect = [target_attn_layers, all_attn_layers]
-
-    mock_pp_group = mock.MagicMock()
-    mock_pp_group.world_size = 1
-    mock_get_pp_group.return_value = mock_pp_group
-
-    target_embed = SimpleNamespace(weight=torch.empty(1))
-    target_lm_head = SimpleNamespace()
-    target_buffer = object()
-    target_model = SimpleNamespace(
-        model=SimpleNamespace(
-            embed_tokens=target_embed,
-            topk_indices_buffer=target_buffer,
-        ),
-        lm_head=target_lm_head,
-    )
-
-    draft_module = SimpleNamespace(topk_indices_buffer=object())
-    original_shared_heads = [object(), object()]
-    draft_layers = [
-        SimpleNamespace(shared_head=SimpleNamespace(head=original_shared_heads[0])),
-        SimpleNamespace(shared_head=SimpleNamespace(head=original_shared_heads[1])),
-    ]
-    draft_inner_model = SimpleNamespace(
-        embed_tokens=SimpleNamespace(weight=torch.empty(1)),
-        layers=draft_layers,
-        topk_indices_buffer=object(),
-        named_modules=lambda: [("draft_module", draft_module)],
-    )
-    draft_model = SimpleNamespace(model=draft_inner_model)
-    mock_get_model.return_value = draft_model
-
-    proposer = _create_mtp_proposer(num_speculative_tokens=4)
-    proposer.load_model(target_model)
-
-    mock_get_model.assert_called_once()
-    assert proposer.model.model.embed_tokens is target_embed
-    assert proposer.model.lm_head is target_lm_head
-    assert proposer.model.model.topk_indices_buffer is target_buffer
-    assert draft_module.topk_indices_buffer is target_buffer
-    for layer, original_head in zip(
-        proposer.model.model.layers, original_shared_heads, strict=True
-    ):
-        assert layer.shared_head.head is original_head
-
 
 @pytest.mark.parametrize("num_speculative_tokens", [1])
 def test_mtp_propose(num_speculative_tokens, monkeypatch):

@@ -178,20 +178,6 @@ class BailingLinearAttentionMetadataBuilder(LinearAttentionMetadataBuilder):
                 )
                 state_indices_tensor_d = self.decode_state_indices_tensor[:padded_bs]
                 state_indices_tensor_d[num_decodes:] = PAD_SLOT_ID
-            else:
-                state_indices_tensor_d = torch.where(
-                    is_padded_decode,
-                    torch.full_like(state_indices_tensor_d, PAD_SLOT_ID),
-                    state_indices_tensor_d,
-                )
-                self.decode_legacy_state_indices_tensor[:num_decodes].copy_(
-                    state_indices_tensor_d,
-                    non_blocking=True,
-                )
-                state_indices_tensor_d = self.decode_legacy_state_indices_tensor[
-                    :padded_bs
-                ]
-                state_indices_tensor_d[num_decodes:] = PAD_SLOT_ID
 
             self.decode_legacy_state_indices_tensor[:num_decodes].copy_(
                 torch.where(
@@ -208,6 +194,8 @@ class BailingLinearAttentionMetadataBuilder(LinearAttentionMetadataBuilder):
                 :padded_bs
             ]
             legacy_state_indices_tensor[num_decodes:] = PAD_SLOT_ID
+            if state_indices_tensor_d.dim() == 1:
+                state_indices_tensor_d = legacy_state_indices_tensor
 
             if use_spec_decode and num_accepted_tokens is not None:
                 assert query_start_loc_d is not None

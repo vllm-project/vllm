@@ -65,7 +65,6 @@ class LinearAttentionMetadataBuilder(AttentionMetadataBuilder[LinearAttentionMet
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> LinearAttentionMetadata:
-        del common_prefix_len, fast_build
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
 
@@ -78,8 +77,7 @@ class LinearAttentionMetadataBuilder(AttentionMetadataBuilder[LinearAttentionMet
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
-                common_attn_metadata,
-                decode_threshold=self.reorder_batch_threshold,
+                common_attn_metadata, decode_threshold=self.reorder_batch_threshold
             )
         )
 
