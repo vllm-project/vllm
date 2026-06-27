@@ -661,9 +661,7 @@ class RSWAManager(FullAttentionManager):
         # First block fully after the prefill boundary.
         first_gap_block = cdiv(num_prompt_tokens, bs)
         # Decode window start position; blocks before this are evictable.
-        window_start = max(
-            num_prompt_tokens, total_computed_tokens - self.rswa_window
-        )
+        window_start = max(num_prompt_tokens, total_computed_tokens - self.rswa_window)
         last_gap_block = window_start // bs  # exclusive upper bound
         self._remove_blocks_in_range(request_id, first_gap_block, last_gap_block)
 
