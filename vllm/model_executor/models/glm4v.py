@@ -517,6 +517,9 @@ class GLM4VMultiModalProcessor(BaseMultiModalProcessor[GLM4VProcessingInfo]):
 class GLM4VForCausalLM(
     ChatGLMBaseModel, SupportsMultiModal, SupportsLoRA, SupportsPP, SupportsMRoPE
 ):
+    # NOTE: we must bring this to the surface because GLM4VModel.hf_to_vllm_mapper
+    # contains non-stacking related mappings which LoRA/BnB needs to know about
+    hf_to_vllm_mapper = GLM4VModel.hf_to_vllm_mapper
     packed_modules_mapping = {
         "query_key_value": ["query_key_value"],
         "dense_h_to_4h": ["dense_h_to_4h"],
