@@ -138,10 +138,10 @@ MODEL_SPECS = [
         ModelStartupSpec(
             model="deepseek-ai/DeepSeek-V3.2",
             hf_overrides=_SMALL_MOE_OVERRIDES,
-            cold_artifacts_saved=4,
+            cold_artifacts_saved=9,
             # https://github.com/vllm-project/vllm/issues/38051
-            warm_artifacts_saved=0 if is_torch_equal_or_newer("2.12.0") else 4,
-            warm_artifacts_loaded=4 if is_torch_equal_or_newer("2.12.0") else 0,
+            warm_artifacts_saved=0 if is_torch_equal_or_newer("2.12.0") else 9,
+            warm_artifacts_loaded=9 if is_torch_equal_or_newer("2.12.0") else 0,
         ),
         id="deepseek_v3.2",
     ),
