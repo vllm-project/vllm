@@ -197,6 +197,16 @@ class MultiModalConfig:
     - "direct_rpc": Use msgspec serialization via RPC
     - "torch_shm": Use torch.multiprocessing shared memory for zero-copy IPC
     Defaults to "direct_rpc". """
+    mm_ipc_gpu_memory_gb: float = Field(default=0, ge=0)
+    """Amount of GPU memory (in GiB) sequestered on the engine's device for
+    GPU-side multimodal work in the API-server (frontend) process, such as
+    hardware video decoding.
+
+    This budget is carved out of the engine's KV-cache memory so the headroom
+    physically exists, and frontend GPU decode paths acquire from a blocking
+    byte-counting semaphore of this size before allocating on the device.
+
+    Set to `0` (default) to disable frontend GPU multimodal memory gating."""
 
     @field_validator("limit_per_prompt", mode="before")
     @classmethod
