@@ -423,12 +423,22 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64" AND VLLM_RVV_VLEN AND
         ${VLLM_EXT_SRC})
 endif()
 
+if (ASIMD_FOUND)
+    set(VLLM_EXT_SRC
+        "csrc/cpu/cpu_tanhf_neon.hpp"
+        ${VLLM_EXT_SRC})
+endif()
+
+if (ASIMD_FOUND AND ARM_BF16_FOUND)
+    set(VLLM_EXT_SRC
+        "csrc/cpu/cpu_fused_moe.cpp"
+        ${VLLM_EXT_SRC})
+endif()
+
 if (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND)
     set(VLLM_EXT_SRC
         "csrc/cpu/shm.cpp"
         "csrc/cpu/activation_lut_bf16.cpp"
-        "csrc/cpu/cpu_tanhf_neon.hpp"
-        "csrc/cpu/cpu_fused_moe.cpp"
         ${VLLM_EXT_SRC})
 endif()
 
