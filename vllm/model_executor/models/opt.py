@@ -327,9 +327,10 @@ class OPTModel(nn.Module):
 class OPTForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
-            ".q_proj": ".qkv_proj.q",
-            ".k_proj": ".qkv_proj.k",
-            ".v_proj": ".qkv_proj.v",
+            # weight_name: (param_name, shard_id)
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
         },
         orig_to_new_prefix={
             "decoder.": "model.decoder.",

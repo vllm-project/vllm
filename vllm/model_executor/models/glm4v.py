@@ -379,9 +379,10 @@ class EVA2CLIPModel(nn.Module):
 class GLM4VModel(ChatGLMModel):
     hf_to_vllm_mapper = ChatGLMModel.hf_to_vllm_mapper | WeightsMapper(
         orig_to_new_stacked={
+            # weight_name: (param_name, shard_id)
             # Vision GLU projections
-            "linear_proj.gate_proj": "linear_proj.merged_proj.0",
-            "linear_proj.dense_h_to_4h": "linear_proj.merged_proj.1",
+            "linear_proj.gate_proj": ("linear_proj.merged_proj", 0),
+            "linear_proj.dense_h_to_4h": ("linear_proj.merged_proj", 1),
         }
     )
 

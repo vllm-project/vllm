@@ -377,11 +377,12 @@ class OuroModel(nn.Module):
 class OuroForCausalLM(nn.Module, SupportsLoRA):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
-            ".q_proj": ".qkv_proj.q",
-            ".k_proj": ".qkv_proj.k",
-            ".v_proj": ".qkv_proj.v",
-            ".gate_proj": ".gate_up_proj.0",
-            ".up_proj": ".gate_up_proj.1",
+            # weight_name: (param_name, shard_id)
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+            ".gate_proj": (".gate_up_proj", 0),
+            ".up_proj": (".gate_up_proj", 1),
         }
     )
     packed_modules_mapping = {

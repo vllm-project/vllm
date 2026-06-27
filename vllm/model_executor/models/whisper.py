@@ -776,11 +776,12 @@ class WhisperForConditionalGeneration(
             ".fc2.": ".mlp.fc2.",
         },
         orig_to_new_stacked={
-            ".self_attn.q_proj": ".self_attn.qkv_proj.q",
-            ".self_attn.k_proj": ".self_attn.qkv_proj.k",
-            ".self_attn.v_proj": ".self_attn.qkv_proj.v",
-            ".encoder_attn.k_proj": ".encoder_attn.kv_proj.0",
-            ".encoder_attn.v_proj": ".encoder_attn.kv_proj.1",
+            # weight_name: (param_name, shard_id)
+            ".self_attn.q_proj": (".self_attn.qkv_proj", "q"),
+            ".self_attn.k_proj": (".self_attn.qkv_proj", "k"),
+            ".self_attn.v_proj": (".self_attn.qkv_proj", "v"),
+            ".encoder_attn.k_proj": (".encoder_attn.kv_proj", 0),
+            ".encoder_attn.v_proj": (".encoder_attn.kv_proj", 1),
         },
     )
 

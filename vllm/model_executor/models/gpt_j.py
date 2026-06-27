@@ -239,9 +239,10 @@ class GPTJModel(nn.Module):
 class GPTJForCausalLM(nn.Module, SupportsPP):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
-            ".q_proj": ".qkv_proj.q",
-            ".k_proj": ".qkv_proj.k",
-            ".v_proj": ".qkv_proj.v",
+            # weight_name: (param_name, shard_id)
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
         }
     )
 
