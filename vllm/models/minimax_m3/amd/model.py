@@ -106,14 +106,13 @@ from vllm.v1.kv_cache_interface import (
 )
 
 
-def fse_topk_bias_router_enabled(config: PretrainedConfig) -> bool:
-    """Whether to fuse the shared expert via vLLM's top-k bias router.
+def _fuse_shared_experts_enabled(config: PretrainedConfig) -> bool:
+    """Whether to fuse the shared expert with routed experts.
 
     ROCm only. Opt-in via ``VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS`` (the
-    router-append fusion runs on the vLLM ``fused_topk_bias_router`` for both
-    aiter and non-aiter MoE); requires a shared expert and is disabled under
-    expert parallelism (the shared slot is appended to the routed top-k, which
-    the EP expert-map path does not handle).
+    router-append fusion runs on both aiter and non-aiter MoE);
+    it is disabled under expert parallelism (the shared slot is appended to
+    the routed top-k, which the EP expert-mapping path does not handle).
     """
     from vllm.platforms import current_platform
 
@@ -273,7 +272,7 @@ class MiniMaxM3MLP(nn.Module):
 def _aiter_moe_fused_shared_experts_enabled(config: PretrainedConfig) -> bool:
     """Whether the fused shared expert routes through aiter's grouped top-k MoE.
 
-    A strict sub-case of :func:`fse_topk_bias_router_enabled`: shared-expert
+    A strict sub-case of :func:`_fuse_shared_experts_enabled`: shared-expert
     fusion must already be opted in (``VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS``)
     and allowed (not under expert parallelism). When additionally on gfx950 with
     an active aiter MoE backend, the shared expert is appended inside aiter's
@@ -281,7 +280,7 @@ def _aiter_moe_fused_shared_experts_enabled(config: PretrainedConfig) -> bool:
     vLLM router's torch concat. Otherwise FSE still runs via the vLLM top-k bias
     router.
     """
-    if not fse_topk_bias_router_enabled(config):
+    if not _fuse_shared_experts_enabled(config):
         return False
     from vllm.platforms.rocm import on_gfx950
 
@@ -338,7 +337,7 @@ class MiniMaxM3MoE(nn.Module):
         # MoE call as the last expert slot, so we don't build a separate module.
         # On gfx950 with aiter MoE the append is fused inside aiter's grouped
         # top-k kernel; otherwise it goes through the vLLM top-k bias router.
-        self.fuse_shared_experts = fse_topk_bias_router_enabled(config)
+        self.fuse_shared_experts = _fuse_shared_experts_enabled(config)
         self.use_aiter_moe_fse = _aiter_moe_fused_shared_experts_enabled(config)
 
         self.shared_experts: MiniMaxM3MLP | None = None
@@ -928,7 +927,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         # expert, include the appended slot (id == num_local_experts).
         n_shared = getattr(self.config, "n_shared_experts", 0) or 0
         num_experts = self.config.num_local_experts + (
-            n_shared if fse_topk_bias_router_enabled(self.config) else 0
+            n_shared if _fuse_shared_experts_enabled(self.config) else 0
         )
         return fused_moe_make_expert_params_mapping(
             self,
@@ -960,7 +959,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         # (param_name, weight_name, expert_id, shard_id)
         expert_params_mapping = self.get_expert_mapping()
 
-        _fuse_shared = fse_topk_bias_router_enabled(self.config)
+        _fuse_shared = _fuse_shared_experts_enabled(self.config)
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
