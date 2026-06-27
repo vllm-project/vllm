@@ -48,6 +48,7 @@ from vllm.sequence import IntermediateTensors
 from .openpangu import OpenPanguDecoderLayer
 
 
+@support_torch_compile
 class OpenPanguMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
     def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
         nn.Module.__init__(self)
@@ -76,7 +77,6 @@ class OpenPanguMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
     ) -> torch.Tensor:
         assert inputs_embeds is not None
         # Masking inputs at position 0, as not needed by MTP.
-        inputs_embeds = torch.where(positions.unsqueeze(-1) == 0, 0, inputs_embeds)
         inputs_embeds = self.enorm(inputs_embeds)
         previous_hidden_states = self.hnorm(previous_hidden_states)
 
@@ -101,7 +101,8 @@ class OpenPanguMultiTokenPredictor(DeepSeekMultiTokenPredictor):
         self.layers = torch.nn.ModuleDict(
             {
                 str(idx): OpenPanguMultiTokenPredictorLayer(
-                    vllm_config, f"{prefix}.layers.{idx}"
+                    vllm_config=vllm_config,
+                    prefix=f"{prefix}.layers.{idx}",
                 )
                 for idx in range(
                     self.mtp_start_layer_idx,

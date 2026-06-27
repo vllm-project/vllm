@@ -491,8 +491,7 @@ class StaticSinkMultiHeadLatentAttentionWrapper(PluggableLayer):
                 dim=-1,
             )
             if self.mome_attn is not None:
-                mome_output = self.mome_attn(q_c, state_indice=0)
-                q_c = mome_output + q_c
+                q_c = self.mome_attn(q_c, state_indice=0) + q_c
             q_c = self.q_a_layernorm(q_c)
             q = self.q_b_proj(q_c)[0]
         else:
@@ -1858,6 +1857,7 @@ class OpenPanguModel(nn.Module):
                 hidden_states + residual if residual is not None else hidden_states
             )
 
+        hidden_states = self.norm(hidden_states)
         return hidden_states
 
     def load_attn_mlp_weight(
@@ -2109,7 +2109,7 @@ class OpenPanguModelBase(nn.Module, SupportsPP, SupportsLoRA):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        logits = self.logits_processor(self.lm_head, self.model.norm(hidden_states))
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

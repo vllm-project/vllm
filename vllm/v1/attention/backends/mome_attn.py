@@ -115,11 +115,15 @@ class MomeAttentionMetadataBuilder(AttentionMetadataBuilder[MomeAttentionMetadat
 
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
         self._draft_num_accepted_tokens: torch.Tensor | None = None
+        self._draft_num_prompt_tokens: torch.Tensor | None = None
 
-    def set_draft_num_accepted_tokens(
-        self, num_accepted_tokens: torch.Tensor | None
+    def set_draft_attention_metadata(
+        self,
+        num_accepted_tokens: torch.Tensor | None,
+        num_prompt_tokens: torch.Tensor | None,
     ) -> None:
         self._draft_num_accepted_tokens = num_accepted_tokens
+        self._draft_num_prompt_tokens = num_prompt_tokens
 
     def build_for_drafting(
         self,
@@ -130,10 +134,10 @@ class MomeAttentionMetadataBuilder(AttentionMetadataBuilder[MomeAttentionMetadat
         common_attn_metadata = self._treat_single_token_prefills_as_decodes(
             common_attn_metadata
         )
-        num_accepted_tokens = self._draft_num_accepted_tokens
         return self._compute_metadata(
             common_attn_metadata,
-            num_accepted_tokens=num_accepted_tokens,
+            num_accepted_tokens=self._draft_num_accepted_tokens,
+            num_prompt_tokens=self._draft_num_prompt_tokens,
         )
 
     def build_for_cudagraph_capture(

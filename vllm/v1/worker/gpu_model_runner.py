@@ -557,6 +557,7 @@ class GPUModelRunner(
                 | ExtractHiddenStatesProposer
                 | Gemma4Proposer
                 | Step3p5MTPProposer
+                | OpenPanguV2MTPProposer
             )
             if self.speculative_config.method == "custom_class":
                 self.drafter = create_custom_proposer(  # type: ignore[assignment]
@@ -694,6 +695,7 @@ class GPUModelRunner(
             cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
             reasoning_config=self.vllm_config.reasoning_config,
         )
+        self._maybe_init_multi_mtp_cache()
 
         # Separate cuda stream for overlapping transfer of sampled token ids from
         # GPU to CPU when async scheduling is enabled.
@@ -912,6 +914,23 @@ class GPUModelRunner(
                 self.max_num_reqs, dtype=torch.int32
             )
         self.layerwise_nvtx_hooks_registered = False
+
+    def _maybe_init_multi_mtp_cache(self) -> None:
+        drafter = getattr(self, "drafter", None)
+        if not getattr(drafter, "fix_multi_mtp_kvcache", False):
+            return
+        assert drafter is not None
+        hidden_size = getattr(drafter, "hidden_size", None)
+        if hidden_size is None:
+            hidden_size = self.model_config.get_hidden_size()
+        n_predict = getattr(drafter, "n_predict", self.num_spec_tokens)
+        self.input_batch.init_target_model_hidden_states_cache(
+            n_predict,
+            hidden_size,
+            self.dtype,
+            self.device,
+        )
+        drafter.input_batch = self.input_batch
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
@@ -2781,7 +2800,7 @@ class GPUModelRunner(
         # cu_num_sampled_tokens: [4, 5, 8, 9, 11]
         # _arange_scratch[:11]: [0, 1, 2, 3, 0, 0, 1, 2, 0, 0, 1]
         cu_num_sampled_tokens = self._get_cumsum_and_arange(
-            num_sampled_tokens, self._arange_scratch, cumsum_dtype=np.int32
+            num_sampled_tokens, self._arange_scratch, cumsum_dtype=np.dtype(np.int32)
         )
         # Step 2. [0, 0, 0, 0, 103, 104, 104, 104, 206, 207, 207]
         logits_indices = np.repeat(
@@ -2797,7 +2816,7 @@ class GPUModelRunner(
         # cu_num_draft_tokens: [3, 3, 5, 5, 6]
         # _arange_scratch[:6]: [0, 1, 2, 0, 1, 0]
         cu_num_draft_tokens = self._get_cumsum_and_arange(
-            num_draft_tokens, self._arange_scratch, cumsum_dtype=np.int32
+            num_draft_tokens, self._arange_scratch, cumsum_dtype=np.dtype(np.int32)
         )
         # [0, 0, 0, 5, 5, 9]
         target_logits_indices = np.repeat(
@@ -3688,7 +3707,7 @@ class GPUModelRunner(
                 valid_sampled_token_ids, logprobs_lists = RejectionSampler.parse_output(
                     sampled_token_ids,
                     self.input_batch.vocab_size,
-                    discard_sampled_tokens_req_indices,
+                    discard_sampled_tokens_req_indices.tolist(),
                     logprobs_tensors=logprobs_tensors,
                 )
         else:
@@ -4547,6 +4566,7 @@ class GPUModelRunner(
                             self.requests,
                             self.input_batch,
                             self.discard_request_mask.gpu,
+                            spec_decode_common_attn_metadata,
                         )
                     )
                     self._copy_valid_sampled_token_count(
@@ -5005,6 +5025,7 @@ class GPUModelRunner(
                     self.requests,
                     self.input_batch,
                     self.discard_request_mask.gpu,
+                    common_attn_metadata,
                 )
             )
             self._copy_valid_sampled_token_count(
@@ -5018,16 +5039,14 @@ class GPUModelRunner(
         ):
             assert isinstance(
                 self.drafter,
-                EagleProposer
-                | DFlashProposer
-                | DraftModelProposer
-                | Gemma4Proposer,
+                EagleProposer | DFlashProposer | DraftModelProposer | Gemma4Proposer,
             )
 
             num_reqs = self.input_batch.num_reqs
-            if hasattr(self.drafter, "set_draft_num_accepted_tokens"):
-                self.drafter.set_draft_num_accepted_tokens(
-                    self.num_accepted_tokens.gpu[:num_reqs]
+            if hasattr(self.drafter, "set_draft_attention_metadata"):
+                self.drafter.set_draft_attention_metadata(
+                    self.num_accepted_tokens.gpu[:num_reqs],
+                    self.input_batch.num_prompt_tokens_cpu_tensor[:num_reqs],
                 )
 
             if spec_config.disable_padded_drafter_batch:
@@ -5059,6 +5078,7 @@ class GPUModelRunner(
                         self.requests,
                         self.input_batch,
                         self.discard_request_mask.gpu,
+                        common_attn_metadata,
                     )
                 )
                 self._copy_valid_sampled_token_count(
@@ -5135,19 +5155,25 @@ class GPUModelRunner(
             else:
                 mm_embed_inputs = None
 
-            draft_token_ids = self.drafter.propose(
-                num_speculative_tokens=num_spec_tokens_to_schedule,
-                target_token_ids=target_token_ids,
-                target_positions=target_positions,
-                target_hidden_states=target_hidden_states,
-                next_token_ids=next_token_ids,
-                token_indices_to_sample=token_indices_to_sample,
-                sampling_metadata=sampling_metadata,
-                common_attn_metadata=common_attn_metadata,
-                mm_embed_inputs=mm_embed_inputs,
-                num_rejected_tokens_gpu=num_rejected_tokens_gpu,
-                slot_mappings=slot_mappings,
-            )
+            if hasattr(self.drafter, "set_spec_decode_metadata"):
+                self.drafter.set_spec_decode_metadata(spec_decode_metadata)
+            try:
+                draft_token_ids = self.drafter.propose(
+                    num_speculative_tokens=num_spec_tokens_to_schedule,
+                    target_token_ids=target_token_ids,
+                    target_positions=target_positions,
+                    target_hidden_states=target_hidden_states,
+                    next_token_ids=next_token_ids,
+                    token_indices_to_sample=token_indices_to_sample,
+                    sampling_metadata=sampling_metadata,
+                    common_attn_metadata=common_attn_metadata,
+                    mm_embed_inputs=mm_embed_inputs,
+                    num_rejected_tokens_gpu=num_rejected_tokens_gpu,
+                    slot_mappings=slot_mappings,
+                )
+            finally:
+                if hasattr(self.drafter, "set_spec_decode_metadata"):
+                    self.drafter.set_spec_decode_metadata(None)
             if hasattr(self.drafter, "take_last_draft_probs"):
                 draft_probs = self.drafter.take_last_draft_probs()
                 if draft_probs is not None:
@@ -6898,10 +6924,7 @@ class GPUModelRunner(
         ):
             assert isinstance(
                 self.drafter,
-                EagleProposer
-                | DFlashProposer
-                | DraftModelProposer
-                | Gemma4Proposer,
+                EagleProposer | DFlashProposer | DraftModelProposer | Gemma4Proposer,
             )
             self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
 
@@ -7036,6 +7059,7 @@ class GPUModelRunner(
                 is_pooling_model=self.is_pooling_model,
                 reasoning_config=self.vllm_config.reasoning_config,
             )
+            self._maybe_init_multi_mtp_cache()
 
         assert self._init_block_sizes == block_sizes, (
             f"InputBatch block_sizes {self._init_block_sizes} != "
