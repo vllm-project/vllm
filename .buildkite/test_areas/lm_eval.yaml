@@ -235,8 +235,8 @@ steps:
     - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-spark.txt
 
-- label: "KV Offloading Eval: Nemotron-H-8B (1xH200)"
-  key: kv-offloading-eval-nemotron-h-8b
+- label: "[kv-offload] [ssm] Nemotron-H-8B GSM8K (1xH200)"
+  key: kv-offload-ssm
   timeout_in_minutes: 30
   device: h200_35gb
   optional: true
@@ -246,8 +246,8 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k nemotron-h-8b
 
-- label: "KV Offloading Eval: Gemma-4-E4B-it (1xH200)"
-  key: kv-offloading-eval-gemma-4-e4b-it
+- label: "[kv-offload] [dense] Gemma-4-E4B-it GSM8K (1xH200)"
+  key: kv-offload-dense
   timeout_in_minutes: 30
   device: h200_35gb
   optional: true
@@ -257,8 +257,8 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k gemma-4-e4b-it
 
-- label: "KV Offloading Eval: DeepSeek-V4-Flash (2xH100)"
-  key: kv-offloading-eval-deepseek-v4-flash
+- label: "[kv-offload] [moe] DeepSeek-V4-Flash GSM8K (2xH100)"
+  key: kv-offload-moe
   timeout_in_minutes: 60
   device: h100
   optional: true
