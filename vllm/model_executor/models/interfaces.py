@@ -1061,6 +1061,19 @@ class SupportsRealtime(Protocol):
         session_config: "RealtimeSessionConfig | None" = None,
     ) -> AsyncGenerator["PromptType", None]: ...
 
+    @classmethod
+    def clean_realtime_text(cls, raw_text: str) -> tuple[str, str | None]:
+        """Clean accumulated realtime output and detect language.
+
+        Args:
+            raw_text: Full accumulated raw model text so far.
+
+        Returns:
+            Tuple of ``(clean_text, language_code)``. The default passthrough
+            returns the input unchanged with no detected language.
+        """
+        return raw_text, None
+
 
 @overload
 def supports_realtime(

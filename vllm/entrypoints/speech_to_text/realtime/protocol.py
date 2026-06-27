@@ -62,6 +62,7 @@ class TranscriptionDelta(OpenAIBaseModel):
 
     type: Literal["transcription.delta"] = "transcription.delta"
     delta: str  # Incremental text
+    language: str | None = None  # detected (auto) or forced language, ISO-639-1
 
 
 class TranscriptionDone(OpenAIBaseModel):
@@ -70,6 +71,7 @@ class TranscriptionDone(OpenAIBaseModel):
     type: Literal["transcription.done"] = "transcription.done"
     text: str  # Complete transcription
     usage: UsageInfo | None = None
+    language: str | None = None  # last detected/forced language, ISO-639-1
 
 
 class ErrorEvent(OpenAIBaseModel):

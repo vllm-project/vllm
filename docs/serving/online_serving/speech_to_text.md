@@ -185,9 +185,18 @@ vocabulary.
 | Event | Description |
 | ----- | ----------- |
 | `session.created` | Connection established with session ID and timestamp |
-| `transcription.delta` | Incremental transcription text: `{"type": "transcription.delta", "delta": "text"}` |
-| `transcription.done` | Final transcription with usage stats |
+| `transcription.delta` | Incremental transcription text: `{"type": "transcription.delta", "delta": "text", "language": "en"}` |
+| `transcription.done` | Final transcription with usage stats: `{"type": "transcription.done", "text": "...", "usage": {...}, "language": "en"}` |
 | `error` | Error notification with message and optional code |
+
+The optional `language` field on `transcription.delta` / `transcription.done` is
+an ISO-639-1 code (e.g. `"en"`, `"zh"`) reporting the transcription language. In
+auto-detect mode it reflects the most recently detected segment language, so a
+mid-stream language switch is surfaced here; in forced mode it echoes the
+requested `language`. It is `null` when the model does not report a language.
+Models that emit internal segment scaffolding (e.g. Qwen3-ASR's
+`language <Name><asr_text>` preamble) have it stripped from `delta` and `text`,
+so the transcription stays clean in both auto and forced modes.
 
 #### Example Clients
 
