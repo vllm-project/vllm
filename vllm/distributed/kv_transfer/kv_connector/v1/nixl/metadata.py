@@ -40,9 +40,11 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   2: Add remote_request_id to kv_transfer_params
 #   3: Add physical_blocks_per_logical_kv_block to NixlAgentMetadata
 #   4: Add KV block lease renewal through heartbeats
-#   5: Add DCP/PCP rank metadata for context-parallel KV transfer
+#   5: Add remote_blocks_expiry_time to kv_transfer_params + handshake
+#      clock-sync timestamp
+#   6: Add DCP/PCP rank metadata for context-parallel KV transfer
 #
-NIXL_CONNECTOR_VERSION: int = 5
+NIXL_CONNECTOR_VERSION: int = 6
 
 
 @dataclass
