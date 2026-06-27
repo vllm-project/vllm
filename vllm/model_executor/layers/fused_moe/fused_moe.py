@@ -1076,11 +1076,8 @@ def get_moe_configs(
     return None
 
 
-# moe_wna16_gemm_kernel is only template-instantiated for a handful of
-# BLOCK_SIZE_K // group_size values; see the GROUPS dispatch and the matching
-# TORCH_CHECK in csrc/moe/moe_wna16.cu. The largest instantiated ratio is 8,
-# and the block-size heuristic in get_moe_wna16_block_config can overshoot it
-# (e.g. 512 // 32 = 16), so clamp to at most this many groups per block row.
+# moe_wna16_gemm_kernel is only instantiated for BLOCK_SIZE_K // group_size in
+# {1, 2, 4, 8} (csrc/moe/moe_wna16.cu); clamp the ratio to the largest of these.
 _MOE_WNA16_MAX_GROUPS_PER_BLOCK_ROW = 8
 
 
@@ -1102,8 +1099,6 @@ def _ensure_block_size_k_divisible(
     Returns:
         A valid BLOCK_SIZE_K that divides size_k and is divisible by group_size.
     """
-    # Clamp the group ratio first so the divisor search below stays within the
-    # range the kernel is instantiated for.
     block_size_k = min(block_size_k, group_size * _MOE_WNA16_MAX_GROUPS_PER_BLOCK_ROW)
 
     # Fast path: already valid
@@ -1197,9 +1192,7 @@ def get_moe_wna16_block_config(
             # at the same time.
             block_size_n = 1024
 
-        # Ensure BLOCK_SIZE_K satisfies the moe_wna16 CUDA kernel constraints
-        # (divides size_k, divisible by group_size, ratio clamped to the
-        # instantiated set).
+        # Make BLOCK_SIZE_K satisfy the moe_wna16 CUDA kernel constraints.
         block_size_k = _ensure_block_size_k_divisible(size_k, block_size_k, group_size)
 
         return {"BLOCK_SIZE_N": block_size_n, "BLOCK_SIZE_K": block_size_k}
