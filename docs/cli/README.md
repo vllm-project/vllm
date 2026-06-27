@@ -80,6 +80,9 @@ vllm chat --url http://{vllm-serve-host}:{vllm-serve-port}/v1
 
 # Quick chat with a single prompt
 vllm chat --quick "hi"
+
+# Print TTFT and throughput statistics after each response
+vllm chat --stats
 ```
 
 See [vllm chat](./chat.md) for the full reference of all available arguments.
@@ -97,6 +100,9 @@ vllm complete --url http://{vllm-serve-host}:{vllm-serve-port}/v1
 
 # Quick complete with a single prompt
 vllm complete --quick "The future of AI is"
+
+# Print TTFT and throughput statistics after each response
+vllm complete --stats
 ```
 
 See [vllm complete](./complete.md) for the full reference of all available arguments.
