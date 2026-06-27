@@ -49,7 +49,6 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
         target_embed = (
             getattr(target_inner, "embed_tokens", None)
             or getattr(target_inner, "embedding", None)
-            or getattr(target_inner, "word_embeddings", None)
         )
         # If the target's embedding is LoRA-wrapped, share the underlying base
         # layer. The draft is not part of the LoRA adapter; sharing the wrapper
@@ -76,17 +75,6 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
         if draft_lm_head is not None:
             del eagle_model.lm_head
         eagle_model.lm_head = target_lm_head
-
-        # MTP layers route logits through layer.shared_head.head, not
-        # eagle_model.lm_head, so the per-layer copies need fixing up too.
-        layers = getattr(draft_inner, "layers", None)
-        if layers is not None:
-            items = layers.values() if isinstance(layers, nn.ModuleDict) else layers
-            for layer in items:
-                sh = getattr(layer, "shared_head", None)
-                if sh is not None and hasattr(sh, "head"):
-                    del sh.head
-                    sh.head = target_lm_head
 
     # MTP shares topk_indices_buffer with the target model. We update
     # every module in the draft that holds a buffer reference so that

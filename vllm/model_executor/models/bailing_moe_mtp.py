@@ -185,11 +185,13 @@ class BailingMoeV25MultiTokenPredictor(nn.Module):
         self,
         hidden_states: torch.Tensor,
         spec_step_idx: int = 0,
+        lm_head: nn.Module | None = None,
     ) -> torch.Tensor:
         current_step_idx = spec_step_idx % self.num_mtp_layers
         mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]
+        head = lm_head if lm_head is not None else mtp_layer.shared_head.head
         return self.logits_processor(
-            mtp_layer.shared_head.head,
+            head,
             mtp_layer.shared_head(hidden_states),
         )
 
@@ -204,6 +206,7 @@ class BailingMoeV25MTPModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         self.config = _get_draft_hf_config(vllm_config)
+        self.lm_head: nn.Module | None = None
         self.model = BailingMoeV25MultiTokenPredictor(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
@@ -235,7 +238,7 @@ class BailingMoeV25MTPModel(nn.Module):
         hidden_states: torch.Tensor,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
-        return self.model.compute_logits(hidden_states, spec_step_idx)
+        return self.model.compute_logits(hidden_states, spec_step_idx, self.lm_head)
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return fused_moe_make_expert_params_mapping(
