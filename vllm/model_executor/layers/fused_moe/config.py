@@ -861,6 +861,7 @@ def nvfp4_w4a16_moe_quant_config(
     g2_alphas: torch.Tensor,
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
+    gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for 16-but activations and nvp4 weights.
@@ -872,6 +873,7 @@ def nvfp4_w4a16_moe_quant_config(
         g1_alphas=g1_alphas,
         g2_alphas=g2_alphas,
         weight_dtype="nvfp4",
+        gemm1_clamp_limit=gemm1_clamp_limit,
     )
 
 
@@ -1277,6 +1279,8 @@ class FusedMoEConfig:
     hidden_dim_unpadded: int | None = None
     # Defaults to intermediate_size_per_partition if not specified.
     intermediate_size_per_partition_unpadded: int | None = None
+    # Model specific override
+    intermediate_pad: int | None = None
 
     moe_backend: MoEBackend = "auto"
     max_num_tokens: int = SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS_FOR_BATCHED_DP
