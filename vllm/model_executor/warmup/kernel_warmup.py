@@ -136,6 +136,7 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     if runner.vllm_config.parallel_config.all2all_backend in deepep_a2a_backends:
         # DeepEP dispatch/combine can timeout when only rank 0
         # performs autotune and falls behind other ranks.
+        # Thus we skip persistent cache in this case.
         use_persistent_cache = False
 
     if not use_persistent_cache:
