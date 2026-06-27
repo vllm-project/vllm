@@ -579,6 +579,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 attn_metadata = attn_metadata_raw
             self_kv_cache = self.kv_cache
             slot_mapping = forward_context.slot_mapping
+            if isinstance(slot_mapping, list):
+                # list[dict[str, torch.Tensor]]: used in speculative decoding
+                # where [0] is the base-model (non-speculative) slot mapping dict.
+                slot_mapping = slot_mapping[0]
 
             assert isinstance(slot_mapping, dict), (
                 f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
