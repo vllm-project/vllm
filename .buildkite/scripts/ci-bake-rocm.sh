@@ -392,6 +392,16 @@ should_upload_wheel_artifacts() {
         || "${TARGET}" == *"artifact"* ]]
 }
 
+set_buildkite_metadata() {
+    local key="$1"
+    local value="$2"
+
+    [[ -n "${value}" ]] || return 0
+    if command -v buildkite-agent >/dev/null 2>&1; then
+        buildkite-agent meta-data set "${key}" "${value}" || true
+    fi
+}
+
 get_remote_image_label() {
     local image_ref="$1"
     local label_key="$2"
@@ -699,6 +709,8 @@ configure_ci_base_image_refs() {
 
     if is_ci_base_target; then
         IMAGE_TAG="${primary_tag}"
+        CI_BASE_IMAGE="${primary_tag}"
+        export CI_BASE_IMAGE
         export IMAGE_TAG
 
         echo "ci_base primary image tag: ${CI_BASE_IMAGE_TAG}"
@@ -712,6 +724,10 @@ configure_ci_base_image_refs() {
             echo "ci_base stable alias will not be pushed for this build"
             echo "Set NIGHTLY=1 on ${CI_BASE_STABLE_BRANCH:-main} to refresh ${stable_tag}"
         fi
+        set_buildkite_metadata "rocm-ci-base-image" "${CI_BASE_IMAGE_TAG}"
+        set_buildkite_metadata "rocm-ci-base-image-content" "${content_tag}"
+        set_buildkite_metadata "rocm-ci-base-image-commit" "${CI_BASE_IMAGE_TAG_COMMIT:-}"
+        set_buildkite_metadata "rocm-ci-base-image-stable" "${CI_BASE_IMAGE_TAG_STABLE:-}"
         return 0
     fi
 
