@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import sysconfig
 from collections.abc import Callable
 from pathlib import Path
 from typing import TypeAlias
@@ -9,8 +10,32 @@ from vllm.logger import init_logger
 logger = init_logger(__file__)
 
 CHAT_TEMPLATES_DIR = Path(__file__).parent
+# data_files installs these under sysconfig's data path for pip/uv wheels.
+EXAMPLES_CHAT_TEMPLATES_DIR = (
+    Path(sysconfig.get_path("data")) / "share" / "vllm" / "examples"
+)
 
 ChatTemplatePath: TypeAlias = Path | Callable[[str], Path | None]
+
+
+def get_builtin_chat_template_paths(chat_template: str) -> list[Path]:
+    """Return built-in candidate paths for a path-like chat template."""
+    paths = [CHAT_TEMPLATES_DIR / chat_template]
+
+    template_path = Path(chat_template)
+    if not template_path.is_absolute() and template_path.suffix == ".jinja":
+        try:
+            example_template_path = template_path.relative_to("examples")
+        except ValueError:
+            pass
+        else:
+            if (
+                len(example_template_path.parts) == 1
+                and ".." not in template_path.parts
+            ):
+                paths.append(EXAMPLES_CHAT_TEMPLATES_DIR / example_template_path)
+
+    return paths
 
 
 def _get_minicpmv_chat_template_fallback(tokenizer_name_or_path: str) -> Path | None:
