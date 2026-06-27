@@ -610,6 +610,14 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         """
         return False
 
+    def reserve_workspace_for_cudagraph_capture(self) -> int:
+        """Reserve backend workspace that must not grow after CUDA graph capture.
+
+        Backends that use the global WorkspaceManager can override this to size
+        their worst-case execution workspace before the manager is locked.
+        """
+        return 0
+
     def _init_reorder_batch_threshold(
         self,
         reorder_batch_threshold: int | None = 1,

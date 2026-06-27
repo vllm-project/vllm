@@ -6462,6 +6462,19 @@ class GPUModelRunner(
                 return True
         return False
 
+    def _reserve_attention_workspace_for_cudagraph_capture(self) -> int:
+        if not getattr(self, "attn_groups", None):
+            return 0
+
+        reserved_before = torch.accelerator.memory_reserved(self.device)
+        for attn_group in self._attn_group_iterator():
+            for builder in attn_group.metadata_builders:
+                builder.reserve_workspace_for_cudagraph_capture()
+        torch.accelerator.synchronize()
+        torch.accelerator.empty_cache()
+        reserved_after = torch.accelerator.memory_reserved(self.device)
+        return max(reserved_after - reserved_before, 0)
+
     @torch.inference_mode()
     def profile_cudagraph_memory(self) -> int:
         self.cudagraph_memory_persistent_estimate = 0
@@ -6534,6 +6547,9 @@ class GPUModelRunner(
             with self._freeze_gc(), graph_capture(device=self.device):
                 torch.accelerator.synchronize()
                 torch.accelerator.empty_cache()
+                persistent_memory_estimate += (
+                    self._reserve_attention_workspace_for_cudagraph_capture()
+                )
 
                 if use_separate_profiling:
                     reserved_before = torch.accelerator.memory_reserved(self.device)
@@ -6693,6 +6709,7 @@ class GPUModelRunner(
         with self._freeze_gc(), graph_capture(device=self.device):
             torch.accelerator.synchronize()
             torch.accelerator.empty_cache()
+            self._reserve_attention_workspace_for_cudagraph_capture()
             start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
             for (

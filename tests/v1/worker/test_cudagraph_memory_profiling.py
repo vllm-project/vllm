@@ -137,6 +137,87 @@ def test_flashinfer_workspace_buffer_growth_resets_registered_wrappers():
         reset_workspace_manager()
 
 
+def test_flashinfer_reserves_prefill_tail_workspace(monkeypatch):
+    pytest.importorskip("flashinfer")
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    FlashInferMetadataBuilder = flashinfer_backend.FlashInferMetadataBuilder
+    builder = FlashInferMetadataBuilder.__new__(FlashInferMetadataBuilder)
+    builder._workspace_buffer = None
+    builder._workspace_state = flashinfer_backend._FlashInferWorkspaceState()
+    builder.device = torch.device("cpu")
+    builder.use_dcp = False
+    builder.model_config = SimpleNamespace(max_model_len=1024, dtype=torch.float16)
+    builder.vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(
+            max_num_batched_tokens=8,
+            max_num_seqs=4,
+        )
+    )
+    builder.q_data_type = torch.float16
+    builder.kv_cache_dtype = torch.uint8
+    builder.page_size = 16
+    builder.window_left = -1
+    builder.prefill_fixed_split_size = -1
+    builder.disable_split_kv = False
+
+    class FakeWrapper:
+        pass
+
+    ensured = []
+    observed_query_lens = []
+
+    def fake_workspace_size(**kwargs):
+        qo_indptr = kwargs["qo_indptr_cpu"]
+        query_lens = torch.diff(qo_indptr).tolist()
+        observed_query_lens.extend(query_lens)
+        return 4096 if query_lens == [3] else 0
+
+    monkeypatch.setattr(
+        builder,
+        "_get_prefill_workspace_size_func",
+        lambda **kwargs: ("fa2", object()),
+    )
+    monkeypatch.setattr(builder, "_call_prefill_workspace_size", fake_workspace_size)
+    monkeypatch.setattr(
+        builder, "_get_prefill_wrapper", lambda causal=True: FakeWrapper()
+    )
+    monkeypatch.setattr(
+        builder,
+        "_ensure_flashinfer_wrapper_workspace",
+        lambda wrapper, size: ensured.append(size),
+    )
+
+    reset_workspace_manager()
+    init_workspace_manager(torch.device("cpu"))
+    try:
+        assert builder.reserve_workspace_for_cudagraph_capture() == 4096
+    finally:
+        reset_workspace_manager()
+
+    assert ensured == [4096]
+    assert 3 in observed_query_lens
+    assert 8 in observed_query_lens
+
+
+def test_flashinfer_workspace_query_len_candidates():
+    pytest.importorskip("flashinfer")
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    candidates = (
+        flashinfer_backend.FlashInferMetadataBuilder._get_workspace_query_len_candidates
+    )
+
+    assert candidates(8) == list(range(1, 9))
+
+    large_candidates = candidates(1024)
+    assert 1 in large_candidates
+    assert 256 in large_candidates
+    assert 512 in large_candidates
+    assert 1024 in large_candidates
+    assert 257 not in large_candidates
+
+
 def test_flashinfer_nvfp4_slot_mapping_symbol_available():
     flashinfer = pytest.importorskip("flashinfer")
     assert hasattr(
@@ -191,6 +272,7 @@ def test_separate_profile_accounts_persistent_and_graph_pool(monkeypatch):
     runner._freeze_gc = null_context
     runner._cleanup_profiling_kv_cache = lambda: cleanup_calls.append("cleanup")
     runner.maybe_remove_all_loras = lambda lora_config: None
+    runner._reserve_attention_workspace_for_cudagraph_capture = lambda: 0
     runner._warmup_before_cudagraph_capture = lambda *args, **kwargs: (
         warmup_calls.append(kwargs)
     )
