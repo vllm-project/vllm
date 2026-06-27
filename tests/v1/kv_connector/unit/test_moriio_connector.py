@@ -747,7 +747,9 @@ def test_add_new_req_rejects_untrusted_remote_zmq_address():
                 "transfer_id": "tx-1",
                 "remote_block_ids": [0, 1],
                 "remote_engine_id": "engine-A",
-                "remote_zmq_address": "host:untrusted.example,handshake:1234,notify:2345",
+                "remote_zmq_address": (
+                    "host:untrusted.example,handshake:1234,notify:2345"
+                ),
                 "remote_hosts": ["prefill-a"],
             },
             trusted_remote_hosts={"prefill-a"},
