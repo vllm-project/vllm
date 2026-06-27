@@ -771,10 +771,7 @@ class WhisperForConditionalGeneration(
     }
 
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_substr={
-            ".fc1.": ".mlp.fc1.",
-            ".fc2.": ".mlp.fc2.",
-        },
+        orig_to_new_substr={".fc1.": ".mlp.fc1.", ".fc2.": ".mlp.fc2."},
         orig_to_new_stacked={
             # weight_name: (param_name, shard_id)
             ".self_attn.q_proj": (".self_attn.qkv_proj", "q"),
