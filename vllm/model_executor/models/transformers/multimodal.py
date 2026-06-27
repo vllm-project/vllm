@@ -481,18 +481,6 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         image_grid_thw = kwargs.get("image_grid_thw", [])
         video_grid_thw = kwargs.get("video_grid_thw", [])
 
-        # Recompute `mm_token_type_ids` based on `mm_position`s
-        # Note: mm_features.data["mm_token_type_ids"] is not a reliable source to
-        # compute `mm_token_type_ids` since it might contain stale tensors from previous
-        # prompts in the case of per-image cache hits.
-        # `mm_features.mm_position` on the contrary is re-computed per-request.
-        mm_token_type_ids = torch.zeros((1, len(input_tokens)), dtype=torch.int)
-        modality_str_to_int = {"image": 1, "video": 2, "audio": 3}
-        for f in mm_features:
-            t = modality_str_to_int[f.modality]
-            p = f.mm_position
-            mm_token_type_ids[0, p.offset : p.offset + p.length] = t
-
         image_grid_thw = (torch.stack if image_grid_thw else torch.tensor)(
             image_grid_thw
         )
@@ -500,8 +488,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             video_grid_thw
         )
 
-        # In v4 `get_rope_index` doesn't have wildcard `kwargs`, and
-        # can't accept arbitrary args, even if its value is `None`
+        # `get_rope_index` doesn't always accept arbitrary `kwargs`
         kwargs = {}
         if not hasattr(self, "_get_rope_index_accepts_mm_token_type_ids"):
             import inspect
@@ -513,7 +500,12 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
                 or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
             )
         if self._get_rope_index_accepts_mm_token_type_ids:
-            kwargs["mm_token_type_ids"] = mm_token_type_ids
+            mm_token_type_ids = torch.zeros(len(input_tokens), dtype=torch.int)
+            for feature in mm_features:
+                position = feature.mm_position
+                offset, length = position.offset, position.length
+                mm_token_type_ids[offset : offset + length] = feature.mm_token_type_id
+            kwargs["mm_token_type_ids"] = mm_token_type_ids.unsqueeze(0)
 
         mrope_positions, mrope_position_delta = self.model.get_rope_index(
             input_ids=torch.tensor(input_tokens).unsqueeze(0),
