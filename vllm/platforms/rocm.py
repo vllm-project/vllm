@@ -203,10 +203,7 @@ def _query_gcn_arch_from_kfd_topology() -> str:
                 key, _, value = line.partition(" ")
                 properties[key] = value.strip()
         target_version = int(properties.get("gfx_target_version", "0"))
-        if (
-            int(properties.get("vendor_id", "0")) == 0x1002
-            and target_version > 0
-        ):
+        if int(properties.get("vendor_id", "0")) == 0x1002 and target_version > 0:
             return _gfx_arch_from_kfd_target_version(target_version)
     raise RuntimeError("KFD topology did not return valid GCN arch")
 
