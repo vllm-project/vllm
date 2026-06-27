@@ -878,7 +878,7 @@ class VllmConfig:
                     "pipeline parallelism (PP > 1)."
                 )
 
-            # Incompatible with any KV connector - covers both PD disaggregation
+            # Incompatible with any KV connector — covers both PD disaggregation
             # (kv_producer/kv_consumer: routing captured on P can't reach D) and
             # single-instance KV offload/sharing (kv_both: slot_mapping semantics
             # change when KV blocks live outside local GPU memory, breaking the
@@ -1090,7 +1090,7 @@ class VllmConfig:
             )
             self.compilation_config.mode = CompilationMode.NONE
 
-        # For model classes don't carry @support_torch_compile -
+        # For model classes don't carry @support_torch_compile —
         # the breakable cudagraph is the supported PIECEWISE path. Auto-enable
         # it unless the user has explicitly opted out via the env var.
         if (
