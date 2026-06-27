@@ -9,6 +9,7 @@ import pytest
 import torch
 from packaging import version
 
+from tests.kernels.moe.utils import check_accuracy
 from vllm._aiter_ops import is_aiter_found
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
@@ -513,29 +514,6 @@ def tg_mxfp4_moe(
         do_finalize=True,
     )[0]
     return tg_result
-
-
-def check_accuracy(a, b, atol, rtol, percent):
-    """Allow a mismatch percentage of 1 - percent."""
-    if torch.any(torch.isnan(a)):
-        raise Exception("NaN in reference output")
-    if torch.any(torch.isnan(b)):
-        raise Exception("NaN in actual output")
-    if torch.any(torch.isinf(a)):
-        raise Exception("Inf in reference output")
-    if torch.any(torch.isinf(b)):
-        raise Exception("Inf in actual output")
-    assert a.shape == b.shape, f"Shape mismatch: {a.shape} vs {b.shape}"
-
-    left = torch.abs(a - b)
-    right = atol + rtol * torch.abs(b)
-    count = torch.sum(left > right)
-    mismatch_percent = count / a.numel()
-    if mismatch_percent > 1 - percent:
-        raise Exception(
-            f"Mismatch percentage is {mismatch_percent:.4f} for rtol {rtol} "
-            f"(threshold: {1 - percent:.4f})"
-        )
 
 
 @pytest.mark.parametrize("topk", [1, 4])
