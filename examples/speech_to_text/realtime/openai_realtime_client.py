@@ -111,6 +111,8 @@ async def realtime_transcribe(
                 print(response["delta"], end="", flush=True)
             elif response["type"] == "transcription.done":
                 print(f"\n\nFinal transcription: {response['text']}")
+                if response.get("language"):
+                    print(f"Language: {response['language']}")
                 if response.get("usage"):
                     print(f"Usage: {response['usage']}")
                 break

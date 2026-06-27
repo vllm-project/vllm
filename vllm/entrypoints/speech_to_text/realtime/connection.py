@@ -234,6 +234,8 @@ class RealtimeConnection:
         """
         request_id = f"rt-{self.connection_id}-{uuid4()}"
         full_text = ""
+        sent_clean = ""
+        last_lang: str | None = None
 
         prompt_token_ids_len: int = 0
         completion_tokens_len: int = 0
@@ -264,12 +266,24 @@ class RealtimeConnection:
                     if not prompt_token_ids_len and output.prompt_token_ids:
                         prompt_token_ids_len = len(output.prompt_token_ids)
 
-                    delta = output.outputs[0].text
-                    full_text += delta
+                    full_text += output.outputs[0].text
 
                     # append output to input
                     input_stream.put_nowait(list(output.outputs[0].token_ids))
-                    await self.send(TranscriptionDelta(delta=delta))
+
+                    # Strip the model's internal language preamble from the
+                    # streamed text and surface the language separately.
+                    clean_text, detected = self.serving.model_cls.clean_realtime_text(
+                        full_text
+                    )
+                    lang = detected or self.session_config.language
+                    clean_delta = clean_text[len(sent_clean) :]
+                    sent_clean = clean_text
+                    if clean_delta or lang != last_lang:
+                        await self.send(
+                            TranscriptionDelta(delta=clean_delta, language=lang)
+                        )
+                        last_lang = lang
 
                     completion_tokens_len += len(output.outputs[0].token_ids)
 
@@ -284,7 +298,9 @@ class RealtimeConnection:
             )
 
             # Send final completion event
-            await self.send(TranscriptionDone(text=full_text, usage=usage))
+            await self.send(
+                TranscriptionDone(text=sent_clean, usage=usage, language=last_lang)
+            )
 
             # Clear queue for next utterance
             while not self.audio_queue.empty():

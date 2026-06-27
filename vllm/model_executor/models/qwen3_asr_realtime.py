@@ -17,8 +17,9 @@
 """Inference-only Qwen3-ASR realtime model."""
 
 import asyncio
+import re
 from collections.abc import AsyncGenerator, Mapping
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 import torch
@@ -58,6 +59,9 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _PRE_ALLOCATE_BUFFER_SIZE_IN_S = 60
+
+_REALTIME_PREAMBLE = re.compile(r"language ([^<\n]*?)<asr_text>")
+_LANG_LEAD = "language "
 
 
 class Qwen3ASRRealtimeBuffer:
@@ -187,6 +191,9 @@ class Qwen3ASRRealtimeMultiModalProcessor(Qwen3ASRMultiModalProcessor):
 class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealtime):
     realtime_max_tokens = 64
 
+    _name_to_iso_cache: ClassVar[dict[str, str] | None] = None
+    _known_names_cache: ClassVar[frozenset[str] | None] = None
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
@@ -212,6 +219,68 @@ class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealt
             prompt += f"language {full_lang_name}{_ASR_TEXT_TAG}"
 
         return prompt
+
+    @classmethod
+    def _name_to_iso(cls) -> dict[str, str]:
+        if cls._name_to_iso_cache is None:
+            cls._name_to_iso_cache = {
+                name: code for code, name in cls.supported_languages.items()
+            }
+        return cls._name_to_iso_cache
+
+    @classmethod
+    def _known_names(cls) -> frozenset[str]:
+        if cls._known_names_cache is None:
+            cls._known_names_cache = frozenset(cls.supported_languages.values())
+        return cls._known_names_cache
+
+    @classmethod
+    def _is_pending_preamble(cls, cand: str) -> bool:
+        """Whether ``cand`` is a viable, not-yet-complete language preamble."""
+        if cand and _LANG_LEAD.startswith(cand):
+            return True
+        if cand.startswith(_LANG_LEAD):
+            rest = cand[len(_LANG_LEAD) :]
+            if "<" in rest:
+                name, _, tail = rest.partition("<")
+                return name in cls._known_names() and _ASR_TEXT_TAG.startswith(
+                    "<" + tail
+                )
+            return any(n.startswith(rest) for n in cls._known_names())
+        return False
+
+    @classmethod
+    def _strip_pending_preamble(cls, text: str) -> str:
+        """Withhold a trailing partial preamble at a segment boundary."""
+        boundary = text.rfind("\n") + 1
+        if cls._is_pending_preamble(text[boundary:]):
+            return text[:boundary]
+        return text
+
+    @classmethod
+    def clean_realtime_text(cls, raw_text: str) -> tuple[str, str | None]:
+        """Strip ``language <name><asr_text>`` preambles and detect language.
+
+        Anchored on the ``<asr_text>`` delimiter so the literal word "language"
+        in speech is not mistaken for a preamble. A trailing in-progress
+        preamble at a segment boundary is withheld until it completes (or is
+        disqualified as ordinary speech).
+
+        Args:
+            raw_text: Full accumulated raw model text so far.
+
+        Returns:
+            Tuple of ``(clean_text, language_code)``; ``language_code`` is the
+            most recently detected segment language as an ISO-639-1 code, or
+            ``None`` if no complete preamble has been seen.
+        """
+        lang: str | None = None
+        matches = list(_REALTIME_PREAMBLE.finditer(raw_text))
+        if matches:
+            lang = cls._name_to_iso().get(matches[-1].group(1).strip())
+        clean = _REALTIME_PREAMBLE.sub("", raw_text)
+        clean = cls._strip_pending_preamble(clean)
+        return clean, lang
 
     @classmethod
     async def buffer_realtime_audio(

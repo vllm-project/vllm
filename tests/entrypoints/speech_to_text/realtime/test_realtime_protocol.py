@@ -6,6 +6,8 @@ import pytest
 from vllm.entrypoints.speech_to_text.realtime.protocol import (
     RealtimeSessionConfig,
     SessionUpdate,
+    TranscriptionDelta,
+    TranscriptionDone,
 )
 
 pytestmark = pytest.mark.skip_global_cleanup
@@ -37,3 +39,19 @@ def test_realtime_session_config_defaults_are_noop() -> None:
 
     assert config.language is None
     assert config.prompt is None
+
+
+def test_transcription_delta_carries_optional_language() -> None:
+    assert TranscriptionDelta(delta="hi").language is None
+
+    event = TranscriptionDelta(delta="hi", language="en")
+    assert event.delta == "hi"
+    assert event.language == "en"
+
+
+def test_transcription_done_carries_optional_language() -> None:
+    assert TranscriptionDone(text="hi").language is None
+
+    event = TranscriptionDone(text="hi", language="zh")
+    assert event.text == "hi"
+    assert event.language == "zh"
