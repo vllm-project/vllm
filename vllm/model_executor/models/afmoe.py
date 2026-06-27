@@ -20,6 +20,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
+    MoERunner,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -41,6 +42,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
+    MixtureOfExperts,
     SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
@@ -594,7 +596,9 @@ class AfmoeModel(nn.Module, EagleModelMixin):
         return loaded_params
 
 
-class AfmoeForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
+class AfmoeForCausalLM(
+    nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA, MixtureOfExperts
+):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -634,13 +638,11 @@ class AfmoeForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
-        self.expert_weights = []
-
         # Set MoE hyperparameters
         self.num_moe_layers = config.num_hidden_layers - config.num_dense_layers
         self.num_expert_groups = config.n_group
 
-        self.moe_layers: list[FusedMoE] = []
+        self.moe_layers: list[MoERunner] = []
         example_moe = None
         for layer in self.model.layers:
             if isinstance(layer, PPMissingLayer):
@@ -662,21 +664,24 @@ class AfmoeForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
             self.num_shared_experts = example_moe.n_shared_experts
             self.num_redundant_experts = example_moe.n_redundant_experts
 
-    def set_eplb_state(
+    def update_physical_experts_metadata(
         self,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
     ) -> None:
-        for layer_idx, layer in enumerate(self.moe_layers):
-            # Register the expert weights.
-            self.expert_weights.append(layer.get_expert_weights())
-            layer.set_eplb_state(
-                moe_layer_idx=layer_idx,
-                expert_load_view=expert_load_view,
-                logical_to_physical_map=logical_to_physical_map,
-                logical_replica_count=logical_replica_count,
-            )
+        assert self.num_local_physical_experts == num_local_physical_experts
+        self.num_physical_experts = num_physical_experts
+        self.num_local_physical_experts = num_local_physical_experts
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
+        for layer in self.model.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+            if layer.moe_enabled:
+                moe = layer.mlp
+                moe.n_local_physical_experts = num_local_physical_experts
+                moe.n_physical_experts = num_physical_experts
+                moe.n_redundant_experts = self.num_redundant_experts
+                moe.experts.update_expert_map()
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)

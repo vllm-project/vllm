@@ -20,7 +20,6 @@ except ImportError as e:
     ) from e
 
 
-from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
@@ -90,7 +89,7 @@ MODEL_TO_TAG_STYLE: dict[str, CohereTagStyle] = {
         tools=COMMAND_A_TOOLS_TAG,
     ),
     "Cohere2MoeForCausalLM": CohereTagStyle(
-        json_tags=(COMMAND_A_JSON_TAG,),
+        json_tags=(COMMAND_A_JSON_TAG, COMMAND_A_PLUS_JSON_TAG),
         tools=COMMAND_A_TOOLS_TAG,
     ),
 }
@@ -415,7 +414,9 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
         **kwargs,
     ):
         super().__init__(tokenizer, *args, **kwargs)
+        self.start_token_id = tokenizer.convert_tokens_to_ids("<|START_THINKING|>")
         self.end_token_id = tokenizer.convert_tokens_to_ids("<|END_THINKING|>")
+        self.chatbot_token_id = tokenizer.convert_tokens_to_ids("<|CHATBOT_TOKEN|>")
         self.unary_opts = unary_opts
         self.melody_unary = PyFilter(unary_opts)
         self.melody_streaming = PyFilter(streaming_opts)
@@ -479,16 +480,21 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
         return content_ids
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        return any(tid == self.end_token_id for tid in reversed(input_ids))
+        chatbot = self.chatbot_token_id
+        start = self.start_token_id
+        end = self.end_token_id
+        has_end_token = False
 
-    def prepare_structured_tag(
-        self, original_tag: str | None, tool_server: ToolServer | None
-    ) -> str | None:
-        # Responses API replaces ``structural_tag`` via the reasoning parser.
-        # Default ``ReasoningParser.prepare_structured_tag`` returns None, which
-        # would clear a Cohere tag produced in ``adjust_request`` and break
-        # ``StructuredOutputsParams`` validation. Preserve the existing tag.
-        return original_tag
+        for i in reversed(range(len(input_ids))):
+            tid = input_ids[i]
+            if tid == start:
+                return has_end_token
+            if tid == chatbot:
+                return False
+            if tid == end:
+                has_end_token = True
+
+        return has_end_token
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest

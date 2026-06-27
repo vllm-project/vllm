@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from starlette.datastructures import State
 
     from vllm.engine.protocol import EngineClient
-    from vllm.entrypoints.logger import RequestLogger
+    from vllm.entrypoints.serve.utils.request_logger import RequestLogger
     from vllm.tasks import SupportedTask
 else:
     RequestLogger = object
@@ -65,9 +65,9 @@ async def init_generate_state(
     )
     from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
     from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
-    from vllm.entrypoints.openai.fingerprint import set_default_fingerprint_mode
     from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
     from vllm.entrypoints.serve.disagg.serving import ServingTokens
+    from vllm.entrypoints.serve.utils.fingerprint import set_default_fingerprint_mode
 
     # Applied before any serving class is constructed so that each one picks
     # up the chosen mode on its first cache miss.
@@ -87,7 +87,7 @@ async def init_generate_state(
         tool_server = None
     resolved_chat_template = load_chat_template(args.chat_template)
 
-    # Render endpoints are always backed by OpenAIServingRender so that
+    # Render endpoints are always backed by OnlineRenderer so that
     # /v1/chat/completions/render and /v1/completions/render work on both
     # generate-mode and render-only servers. Created in init_app_state.
 
@@ -95,7 +95,7 @@ async def init_generate_state(
         OpenAIServingResponses(
             engine_client,
             state.openai_serving_models,
-            state.openai_serving_render,
+            state.online_renderer,
             request_logger=request_logger,
             chat_template=resolved_chat_template,
             chat_template_content_format=args.chat_template_content_format,
@@ -116,7 +116,7 @@ async def init_generate_state(
         engine_client=engine_client,
         models=state.openai_serving_models,
         response_role=args.response_role,
-        openai_serving_render=state.openai_serving_render,
+        online_renderer=state.online_renderer,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
@@ -146,7 +146,7 @@ async def init_generate_state(
         OpenAIServingCompletion(
             engine_client,
             state.openai_serving_models,
-            openai_serving_render=state.openai_serving_render,
+            online_renderer=state.online_renderer,
             request_logger=request_logger,
             return_tokens_as_token_ids=args.return_tokens_as_token_ids,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
@@ -160,7 +160,7 @@ async def init_generate_state(
             engine_client,
             state.openai_serving_models,
             args.response_role,
-            openai_serving_render=state.openai_serving_render,
+            online_renderer=state.online_renderer,
             request_logger=request_logger,
             chat_template=resolved_chat_template,
             chat_template_content_format=args.chat_template_content_format,
@@ -179,7 +179,7 @@ async def init_generate_state(
         ServingTokens(
             engine_client,
             state.openai_serving_models,
-            state.openai_serving_render,
+            state.online_renderer,
             request_logger=request_logger,
             return_tokens_as_token_ids=args.return_tokens_as_token_ids,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,

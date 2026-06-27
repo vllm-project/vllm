@@ -17,10 +17,10 @@ from vllm.entrypoints.serve.disagg.protocol import (
     GenerateResponse,
 )
 from vllm.entrypoints.serve.disagg.serving import ServingTokens
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers import renderer_from_config
+from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.async_llm import AsyncLLM
 
@@ -92,10 +92,9 @@ def _build_serving_tokens(engine: AsyncLLM, **kwargs) -> ServingTokens:
         engine_client=engine,
         base_model_paths=BASE_MODEL_PATHS,
     )
-    serving_render = OpenAIServingRender(
+    online_renderer = OnlineRenderer(
         model_config=engine.model_config,
         renderer=engine.renderer,
-        model_registry=models.registry,
         request_logger=None,
         chat_template=None,
         chat_template_content_format="auto",
@@ -103,7 +102,7 @@ def _build_serving_tokens(engine: AsyncLLM, **kwargs) -> ServingTokens:
     serving = ServingTokens(
         engine,
         models,
-        openai_serving_render=serving_render,
+        online_renderer=online_renderer,
         request_logger=None,
         **kwargs,
     )
@@ -111,7 +110,7 @@ def _build_serving_tokens(engine: AsyncLLM, **kwargs) -> ServingTokens:
     async def _fake_preprocess(*args, **kwargs):
         return [{"prompt_token_ids": [1, 2, 3]}]
 
-    serving.openai_serving_render.preprocess_completion = AsyncMock(
+    serving.online_renderer.preprocess_completion = AsyncMock(
         side_effect=_fake_preprocess
     )
     return serving
@@ -199,9 +198,7 @@ async def test_serve_tokens_skips_mm_cache_for_remote_engine_execution():
 
     assert isinstance(response, GenerateResponse)
     assert (
-        serving.openai_serving_render.preprocess_completion.call_args.kwargs[
-            "skip_mm_cache"
-        ]
+        serving.online_renderer.preprocess_completion.call_args.kwargs["skip_mm_cache"]
         is True
     )
 
@@ -512,3 +509,46 @@ async def test_stream_prompt_tokens_details():
     usage_chunk = parsed[-2]
     assert usage_chunk["choices"] == []
     assert usage_chunk["usage"]["prompt_tokens_details"]["cached_tokens"] == 2
+
+
+@pytest.mark.asyncio
+async def test_stream_prompt_tokens_details_zero_cached():
+    """enable_prompt_tokens_details includes cached_tokens=0 in final usage.
+
+    Regression test for https://github.com/vllm-project/vllm/issues/44377:
+    zero cached tokens must not be treated as falsy and omitted.
+    """
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1",
+            token_ids=[10],
+            finish_reason="stop",
+            finished=True,
+            num_cached_tokens=0,
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine, enable_prompt_tokens_details=True)
+
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=10),
+        model=MODEL_NAME,
+        stream=True,
+        stream_options=StreamOptions(include_usage=True),
+    )
+
+    response = await serving.serve_tokens(request)
+    chunks = []
+    async for chunk in response:
+        chunks.append(chunk)
+
+    parsed = _parse_sse_chunks(chunks)
+    # Usage-only chunk (before [DONE])
+    usage_chunk = parsed[-2]
+    assert usage_chunk["choices"] == []
+    # Zero cached tokens must be present, not omitted
+    assert usage_chunk["usage"]["prompt_tokens_details"] is not None
+    assert usage_chunk["usage"]["prompt_tokens_details"]["cached_tokens"] == 0

@@ -41,6 +41,9 @@ class BaseCohereCommandToolParser(ToolParser):
         super().__init__(tokenizer)
         self.melody_streaming = PyFilter(streaming_opts)
         self.melody_unary = PyFilter(unary_opts)
+        # Melody can emit the tool-call id before the function name. Keep it
+        # until the first real name delta so clients receive both together.
+        self._pending_streaming_tool_call_ids: dict[int, str] = {}
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -65,19 +68,37 @@ class BaseCohereCommandToolParser(ToolParser):
         if r.reasoning is not None:
             return DeltaMessage(reasoning=r.reasoning)
         if r.tool_calls:
-            return DeltaMessage(
-                tool_calls=[
-                    DeltaToolCall(
-                        id=tc.id,
-                        index=tc.index,
-                        type="function",
-                        function=DeltaFunctionCall(
-                            name=tc.name, arguments=tc.arguments
-                        ),
+            tool_calls: list[DeltaToolCall] = []
+            for tc in r.tool_calls:
+                if tc.id:
+                    self._pending_streaming_tool_call_ids[tc.index] = tc.id
+                name = tc.name or None
+                arguments = tc.arguments or None
+                # Empty strings are placeholders in Melody's streaming output;
+                # omit them from OpenAI-compatible deltas instead of sending
+                # invalid tool names or empty argument fragments.
+                if name is None and arguments is None:
+                    continue
+
+                function_kwargs = {}
+                if name is not None:
+                    function_kwargs["name"] = name
+                if arguments is not None:
+                    function_kwargs["arguments"] = arguments
+                tool_call_kwargs = {
+                    "index": tc.index,
+                    "function": DeltaFunctionCall(**function_kwargs),
+                }
+                if name is not None:
+                    tool_call_id = tc.id or self._pending_streaming_tool_call_ids.pop(
+                        tc.index, None
                     )
-                    for tc in r.tool_calls
-                ]
-            )
+                    if tool_call_id is not None:
+                        tool_call_kwargs["id"] = tool_call_id
+                    tool_call_kwargs["type"] = "function"
+                tool_calls.append(DeltaToolCall(**tool_call_kwargs))
+            if tool_calls:
+                return DeltaMessage(tool_calls=tool_calls)
         return None
 
     def extract_tool_calls(
