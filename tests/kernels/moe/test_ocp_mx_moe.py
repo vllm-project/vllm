@@ -659,7 +659,6 @@ def test_trtllm_gen_mxfp4_fused_moe(
     check_accuracy(ref_result, tg_result, atol=0, rtol=0.3, percent=0.8)
 
 
-
 @pytest.mark.parametrize("topk", [1, 4])
 @pytest.mark.parametrize("num_experts", [32])
 @pytest.mark.parametrize("num_tokens", [1, 128])
@@ -765,6 +764,7 @@ def test_flashinfer_cutlass_mxfp4_fused_moe(
         interleave_moe_weights_for_sm90_mixed_gemm,
         interleave_moe_scales_for_sm90_mixed_gemm,
     )
+
     w13_q_swapped = interleave_moe_weights_for_sm90_mixed_gemm(
         w13_q_swapped, quant_type="fp4"
     )
