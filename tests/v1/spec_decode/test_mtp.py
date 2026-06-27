@@ -119,7 +119,7 @@ def test_mtp_load_model_unified(mock_get_model, mock_get_layers, mock_get_pp_gro
 @mock.patch("vllm.v1.spec_decode.llm_base_proposer.get_pp_group")
 @mock.patch("vllm.v1.spec_decode.llm_base_proposer.get_layers_from_vllm_config")
 @mock.patch("vllm.v1.spec_decode.llm_base_proposer.get_model")
-def test_bailing_mtp_load_model_shares_word_embeddings_and_shared_heads(
+def test_bailing_mtp_load_model_shares_embed_tokens_and_outer_lm_head(
     mock_get_model,
     mock_get_layers,
     mock_get_pp_group,
@@ -137,16 +137,17 @@ def test_bailing_mtp_load_model_shares_word_embeddings_and_shared_heads(
     target_buffer = object()
     target_model = SimpleNamespace(
         model=SimpleNamespace(
-            word_embeddings=target_embed,
+            embed_tokens=target_embed,
             topk_indices_buffer=target_buffer,
         ),
         lm_head=target_lm_head,
     )
 
     draft_module = SimpleNamespace(topk_indices_buffer=object())
+    original_shared_heads = [object(), object()]
     draft_layers = [
-        SimpleNamespace(shared_head=SimpleNamespace(head=object())),
-        SimpleNamespace(shared_head=SimpleNamespace(head=object())),
+        SimpleNamespace(shared_head=SimpleNamespace(head=original_shared_heads[0])),
+        SimpleNamespace(shared_head=SimpleNamespace(head=original_shared_heads[1])),
     ]
     draft_inner_model = SimpleNamespace(
         embed_tokens=SimpleNamespace(weight=torch.empty(1)),
@@ -165,8 +166,10 @@ def test_bailing_mtp_load_model_shares_word_embeddings_and_shared_heads(
     assert proposer.model.lm_head is target_lm_head
     assert proposer.model.model.topk_indices_buffer is target_buffer
     assert draft_module.topk_indices_buffer is target_buffer
-    for layer in proposer.model.model.layers:
-        assert layer.shared_head.head is target_lm_head
+    for layer, original_head in zip(
+        proposer.model.model.layers, original_shared_heads, strict=True
+    ):
+        assert layer.shared_head.head is original_head
 
 
 @pytest.mark.parametrize("num_speculative_tokens", [1])

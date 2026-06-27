@@ -114,7 +114,6 @@ class BailingLinearAttentionMetadataBuilder(LinearAttentionMetadataBuilder):
         num_accepted_tokens: torch.Tensor | None = None,
         num_decode_draft_tokens_cpu: torch.Tensor | None = None,
     ) -> BailingLinearAttentionMetadata:
-        del common_prefix_len, fast_build, num_decode_draft_tokens_cpu
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
         num_reqs = common_attn_metadata.num_reqs
