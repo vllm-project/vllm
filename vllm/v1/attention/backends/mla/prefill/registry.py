@@ -10,10 +10,13 @@ from collections.abc import Callable
 from enum import Enum, EnumMeta
 from typing import TYPE_CHECKING
 
+from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
+
+logger = init_logger(__name__)
 
 
 class _MLAPrefillBackendEnumMeta(EnumMeta):
@@ -51,6 +54,36 @@ class MLAPrefillBackendEnum(Enum, metaclass=_MLAPrefillBackendEnumMeta):
     # Placeholder for third-party/custom backends - must be registered before use
     # set to None to avoid alias with other backend, whose value is an empty string
     CUSTOM = None
+
+    @classmethod
+    def register(cls, name: str, value: str) -> "MLAPrefillBackendEnum":
+        """Dynamically register a new MLA prefill backend enum member.
+
+        Args:
+            name: The name for the new enum member
+            value: The fully qualified class path string
+
+        Returns:
+            The newly created enum member
+        """
+        if name in cls._member_map_:
+            raise ValueError(
+                f"MLA prefill backend {name} already exists in {cls.__name__}. "
+                f"Use register_mla_prefill_backend("
+                f"{cls.__name__}.{name}, '{value}') to override."
+            )
+        if not name.isidentifier() or hasattr(cls, name):
+            raise ValueError(f"Invalid or reserved backend name: {name}")
+
+        member = object.__new__(cls)
+        member._name_ = name
+        member._value_ = value
+        setattr(cls, name, member)
+        cls._member_map_[name] = member
+        cls._value2member_map_[value] = member
+        cls._member_names_.append(name)
+        logger.info("Registered new MLA prefill backend: %s -> %s", name, value)
+        return member
 
     def get_path(self) -> str:
         """Get the class path for this backend (respects overrides).
@@ -96,13 +129,15 @@ _MLA_PREFILL_OVERRIDES: dict[MLAPrefillBackendEnum, str] = {}
 
 
 def register_mla_prefill_backend(
-    backend: MLAPrefillBackendEnum,
+    backend: MLAPrefillBackendEnum | str,
     class_path: str | None = None,
 ) -> Callable[[type], type]:
     """Register or override an MLA prefill backend implementation.
 
     Args:
-        backend: The MLAPrefillBackendEnum member to register.
+        backend: The MLAPrefillBackendEnum member to register,
+                 or a string name for a new custom backend
+                 (e.g., "CUSTOM_MLA_PREFILL").
         class_path: Optional class path. If not provided and used as
             decorator, will be auto-generated from the class.
 
@@ -120,12 +155,26 @@ def register_mla_prefill_backend(
         class MyCustomPrefillBackend(MLAPrefillBackend):
             ...
 
+        # Register a new custom MLA prefill backend with a dynamic enum name
+        @register_mla_prefill_backend("CUSTOM_MLA_PREFILL")
+        class CustomMLAPrefillBackend(MLAPrefillBackend):
+            ...
+
         # Direct registration
         register_mla_prefill_backend(
             MLAPrefillBackendEnum.CUSTOM,
             "my.module.MyCustomPrefillBackend"
         )
+
+        # Direct registration with string name
+        register_mla_prefill_backend(
+            "CUSTOM_MLA_PREFILL",
+            "custom.attention.mla_prefill.CustomMLAPrefillBackend"
+        )
     """
+    # Handle dynamic enum creation for string backend names
+    if isinstance(backend, str):
+        backend = MLAPrefillBackendEnum.register(backend, class_path or "")
 
     def decorator(cls: type) -> type:
         _MLA_PREFILL_OVERRIDES[backend] = f"{cls.__module__}.{cls.__qualname__}"
