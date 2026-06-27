@@ -14,10 +14,6 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
 
 
 class _TestSpeculator(AutoRegressiveSpeculator):
-    @property
-    def model_returns_tuple(self) -> bool:
-        return False
-
     def load_draft_model(self, target_model, target_attn_layer_names):
         raise NotImplementedError
 

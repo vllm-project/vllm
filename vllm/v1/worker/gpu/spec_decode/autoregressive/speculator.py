@@ -60,16 +60,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         """
         return True
 
-    @property
-    def model_returns_tuple(self) -> bool:
-        """
-        Whether the draft model's forward() returns a tuple.
-
-        True: returns (last_hidden_states, hidden_states) — Eagle, Gemma4 MTP.
-        False: returns a single tensor used for both — standard MTP (DeepSeek).
-        """
-        return True
-
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         # Initialize cudagraph manager for draft prefill (draft position 0).
         self.prefill_cudagraph_manager = PrefillSpeculatorCudaGraphManager(
