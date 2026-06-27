@@ -1076,27 +1076,50 @@ def get_moe_configs(
     return None
 
 
-# moe_wna16_gemm_kernel is only instantiated for BLOCK_SIZE_K // group_size in
-# {1, 2, 4, 8} (csrc/moe/moe_wna16.cu); clamp the ratio to the largest of these.
-_MOE_WNA16_MAX_GROUPS_PER_BLOCK_ROW = 8
-
-
 def _ensure_block_size_k_divisible(
     size_k: int, block_size_k: int, group_size: int
 ) -> int:
-    """Pick a BLOCK_SIZE_K the moe_wna16 CUDA kernel accepts.
+    """Ensure block_size_k is a divisor of size_k and divisible by group_size.
 
-    moe_wna16_gemm_kernel (csrc/moe/moe_wna16.cu) is only instantiated for
-    BLOCK_SIZE_K // group_size in {1, 2, 4, 8} and requires
-    size_k % BLOCK_SIZE_K == 0. Return the largest such ratio (no larger than
-    the one the heuristic asked for) whose block size still divides size_k.
+    This ensures BLOCK_SIZE_K compatibility with MoeWNA16 CUDA kernel which
+    requires size_k % BLOCK_SIZE_K == 0 and BLOCK_SIZE_K % group_size == 0.
+
+    Args:
+        size_k: The size_k dimension that must be divisible by result.
+        block_size_k: Preferred block size (will be adjusted if needed).
+        group_size: The result must be divisible by this.
+
+    Returns:
+        A valid BLOCK_SIZE_K that divides size_k and is divisible by group_size.
     """
-    max_ratio = min(block_size_k // group_size, _MOE_WNA16_MAX_GROUPS_PER_BLOCK_ROW)
-    for ratio in (8, 4, 2, 1):
-        if ratio <= max_ratio and size_k % (ratio * group_size) == 0:
-            return ratio * group_size
-    # group_size divides size_k by construction, so ratio 1 always fits.
-    return group_size
+    # moe_wna16_gemm is only instantiated for block_size_k // group_size in
+    # {1, 2, 4, 8} (csrc/moe/moe_wna16.cu).
+    block_size_k = min(block_size_k, group_size * 8)
+
+    # Fast path: already valid
+    if size_k % block_size_k == 0 and block_size_k % group_size == 0:
+        return block_size_k
+
+    # Find the largest value that:
+    # 1. Divides size_k (size_k % candidate == 0)
+    # 2. Is divisible by group_size (candidate % group_size == 0)
+    # 3. Is <= block_size_k (prefer smaller values close to block_size_k)
+    #
+    # Strategy: Search from min(block_size_k, size_k) down to group_size,
+    # stepping by group_size to ensure divisibility by group_size
+    max_search = min(block_size_k, size_k)
+    start = (max_search // group_size) * group_size
+    for candidate in range(start, group_size - 1, -group_size):
+        if size_k % candidate == 0 and candidate // group_size in (1, 2, 4, 8):
+            return candidate
+
+    # Fallback: if group_size divides size_k, use it
+    # This should always be true with correct group_size configuration
+    if size_k % group_size == 0:
+        return group_size
+
+    # This should not happen with correct group_size, but ensure divisibility
+    return size_k
 
 
 def get_moe_wna16_block_config(
@@ -1164,7 +1187,7 @@ def get_moe_wna16_block_config(
             # at the same time.
             block_size_n = 1024
 
-        # Make BLOCK_SIZE_K satisfy the moe_wna16 CUDA kernel constraints.
+        # Ensure BLOCK_SIZE_K is a divisor of size_k for CUDA kernel compatibility
         block_size_k = _ensure_block_size_k_divisible(size_k, block_size_k, group_size)
 
         return {"BLOCK_SIZE_N": block_size_n, "BLOCK_SIZE_K": block_size_k}
