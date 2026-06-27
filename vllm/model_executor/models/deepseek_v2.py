@@ -1293,10 +1293,13 @@ class DeepseekV2DecoderLayer(nn.Module):
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        hidden_states = self.mlp(
-            hidden_states,
-            already_sequence_parallel=self.use_sequence_parallel_moe,
-        )
+        if self.use_sequence_parallel_moe:
+            hidden_states = self.mlp(
+                hidden_states,
+                already_sequence_parallel=True,
+            )
+        else:
+            hidden_states = self.mlp(hidden_states)
 
         if isinstance(self.mlp, DeepseekV2MLP) and hidden_states.dtype == torch.float16:
             # Fix FP16 overflow
