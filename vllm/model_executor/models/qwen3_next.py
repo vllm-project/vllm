@@ -399,8 +399,6 @@ class Qwen3NextAttention(nn.Module):
         attn_output = self.attn(q, k, v)
         if gate is not None:
             attn_output = attn_output * torch.sigmoid(gate)
-        # Return o_proj output directly so the all-reduce feeds
-        # post_attention_layernorm and the AllReduce+RMSNorm fusion matches.
         output, _ = self.o_proj(attn_output)
         return output
 
