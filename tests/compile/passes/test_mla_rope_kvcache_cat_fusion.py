@@ -272,6 +272,12 @@ def test_mla_rope_kvcache_cat_fusion(
     kv_cache_dtype: str,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    if (
+        attn_backend == AttentionBackendEnum.FLASH_ATTN_MLA
+        and kv_cache_dtype == "fp8"
+    ):
+        pytest.skip("FlashAttnMLA V1 does not support FP8 KV cache yet.")
+
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)
     torch.manual_seed(0)
