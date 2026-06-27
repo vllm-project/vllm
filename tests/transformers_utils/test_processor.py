@@ -103,3 +103,36 @@ def test_get_processor_disable_type_check(monkeypatch):
     # With disable_type_check=True the same bare processor loads fine.
     out = get_processor("dummy-model", trust_remote_code=True, disable_type_check=True)
     assert out is bare
+
+
+def test_get_hf_processor_ignores_injected_disable_type_check(monkeypatch):
+    """A user-supplied ``disable_type_check`` (e.g. via per-request
+    ``mm_processor_kwargs`` on the OpenAI-compatible API) must NOT weaken the
+    ``ProcessorMixin`` type check. Only the trusted, server-side
+    ``get_hf_processor_unchecked`` entry point may skip it."""
+    from types import SimpleNamespace
+
+    from vllm.multimodal.processing import context as context_mod
+
+    captured: dict[str, object] = {}
+
+    def fake_cached(
+        model_config, *, processor_cls, tokenizer, disable_type_check, **kw
+    ):
+        captured["disable_type_check"] = disable_type_check
+        return object()
+
+    monkeypatch.setattr(context_mod, "cached_processor_from_config", fake_cached)
+    monkeypatch.setattr(context_mod, "is_mistral_tokenizer", lambda _t: False)
+
+    mm_config = SimpleNamespace(merge_mm_processor_kwargs=lambda kwargs: dict(kwargs))
+    model_config = SimpleNamespace(get_multimodal_config=lambda: mm_config)
+    ctx = context_mod.InputProcessingContext(model_config=model_config, tokenizer=None)
+
+    # Injected through the public, user-reachable entry point -> ignored.
+    ctx.get_hf_processor(disable_type_check=True)
+    assert captured["disable_type_check"] is False
+
+    # Selected by trusted model code via the dedicated method -> honored.
+    ctx.get_hf_processor_unchecked()
+    assert captured["disable_type_check"] is True

@@ -184,15 +184,48 @@ class InputProcessingContext:
         (`transformers.ProcessorMixin`) of the model,
         additionally checking its type.
 
-        Pass ``disable_type_check=True`` to skip validating the loaded processor
-        against ``typ`` (needed for ``trust_remote_code`` processors that are
-        bare classes not subclassing ``ProcessorMixin``).
-
         Raises:
             TypeError: If the processor is not of the specified type.
         """
-        disable_type_check = bool(kwargs.pop("disable_type_check", False))
+        # ``**kwargs`` here can carry user-controlled ``mm_processor_kwargs``
+        # from the OpenAI-compatible API. ``disable_type_check`` is a
+        # server-side-only control (see ``get_hf_processor_unchecked``); never
+        # let a value injected through that channel weaken the ``ProcessorMixin``
+        # validation, so drop it unconditionally and keep the check enabled.
+        kwargs.pop("disable_type_check", None)
+        return self._get_hf_processor(typ, disable_type_check=False, **kwargs)
 
+    def get_hf_processor_unchecked(
+        self,
+        typ: type[Any] | tuple[type[Any], ...] | None = None,
+        /,
+        **kwargs: object,
+    ) -> Any:
+        """
+        Like `get_hf_processor` but skips the final ``isinstance`` validation
+        against ``typ``.
+
+        Needed for ``trust_remote_code`` processors that are bare classes not
+        subclassing ``ProcessorMixin``. This is an internal, server-side entry
+        point and must only be called from a model's own ``ProcessingInfo``
+        (trusted code). The decision to skip validation is made by *which method
+        a model calls here*, not by any value in ``mm_processor_kwargs``, so an
+        API caller cannot reach this path to bypass type validation.
+        """
+        # Defensive: a user-injected ``disable_type_check`` in mm_processor_kwargs
+        # is meaningless here (the unchecked behaviour is already selected by the
+        # method) and must not reach ``from_pretrained``.
+        kwargs.pop("disable_type_check", None)
+        return self._get_hf_processor(typ, disable_type_check=True, **kwargs)
+
+    def _get_hf_processor(
+        self,
+        typ: type[Any] | tuple[type[Any], ...] | None,
+        /,
+        *,
+        disable_type_check: bool,
+        **kwargs: object,
+    ) -> Any:
         if typ is None:
             from transformers.processing_utils import ProcessorMixin
 

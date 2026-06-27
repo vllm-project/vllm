@@ -1245,12 +1245,19 @@ class LlavaOnevision2ProcessingInfo(BaseProcessingInfo):
 
     def get_hf_processor(self, **kwargs: object):
         # OV2's ``trust_remote_code`` processor is a bare class that does not
-        # subclass ``ProcessorMixin``, so vLLM's ``get_processor`` isinstance
-        # check would reject it. Pass ``disable_type_check=True`` to skip that
-        # check and load the real OV2 processor directly via AutoProcessor.
-        return self.ctx.get_hf_processor(
+        # subclass ``ProcessorMixin``, so the standard type-checked
+        # ``get_hf_processor`` would reject it. Use the dedicated server-side
+        # ``get_hf_processor_unchecked`` entry point to load the real OV2
+        # processor via AutoProcessor without the ``isinstance`` validation.
+        #
+        # The skip is selected here by trusted model code (by *calling* the
+        # unchecked method), NOT by threading a ``disable_type_check`` flag
+        # through ``mm_processor_kwargs`` (which is user-controllable via the
+        # OpenAI-compatible API). Defensively drop any such injected value so it
+        # never reaches the processor loader.
+        kwargs.pop("disable_type_check", None)
+        return self.ctx.get_hf_processor_unchecked(
             use_fast=kwargs.pop("use_fast", True),
-            disable_type_check=True,
             **kwargs,
         )
 
