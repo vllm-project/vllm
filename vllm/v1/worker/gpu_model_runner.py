@@ -7108,6 +7108,7 @@ class GPUModelRunner(
             or kernel_block_sizes != self._init_kernel_block_sizes
             or max_num_blocks != self._init_max_num_blocks
             or slot_mapping_modes != self._init_slot_mapping_modes
+            or max_model_len != self.input_batch.max_model_len
         ):
             self._init_block_sizes = block_sizes
             self._init_kernel_block_sizes = kernel_block_sizes
