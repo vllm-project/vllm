@@ -409,10 +409,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         block_table_max_model_len = self.max_model_len
         if self.is_encoder_decoder:
-            # Cross-attention block tables need to index encoder tokens
-            # (e.g., Whisper ~1500), which can exceed decoder max_model_len.
+            # Cross-attention block tables need to index encoder tokens, which
+            # can exceed the decoder's max_model_len.
             block_table_max_model_len = max(
                 block_table_max_model_len,
+                self.scheduler_config.max_num_encoder_input_tokens,
                 getattr(self.model_config.hf_config, "max_source_positions", 0),
             )
 
