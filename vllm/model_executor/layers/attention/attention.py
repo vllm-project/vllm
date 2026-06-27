@@ -384,6 +384,9 @@ class Attention(nn.Module, AttentionLayerBase):
             if block_n is not None:
                 extra_impl_args.setdefault("block_n", block_n)
 
+        if self.attn_backend.get_name() == "FLASHINFER":
+            extra_impl_args.setdefault("head_size_v", self.head_size_v)
+
         impl_cls = self.attn_backend.get_impl_cls()
         self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an AttentionImpl subclass
             num_heads,

@@ -418,6 +418,7 @@ def nvfp4_kv_cache_full_dim(head_size: int) -> int:
 
 def _nvfp4_split_data_scale(
     kv_side: torch.Tensor,
+    head_size: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Split a single NVFP4 KV-side buffer into data and scale views.
 
@@ -440,8 +441,19 @@ def _nvfp4_split_data_scale(
     num_pages = kv_side.shape[0]
     dim_1, dim_2 = kv_side.shape[1], kv_side.shape[2]
     full_dim = kv_side.shape[3]
-    data_dim = full_dim * 8 // 9
-    scale_dim = full_dim - data_dim
+    if head_size is None:
+        data_dim = full_dim * 8 // 9
+        scale_dim = full_dim - data_dim
+    else:
+        data_dim = head_size // 2
+        scale_dim = head_size // 16
+        expected_full_dim = data_dim + scale_dim
+        if full_dim != expected_full_dim:
+            raise ValueError(
+                "NVFP4 KV side last dimension does not match head size: "
+                f"last_dim={full_dim}, head_size={head_size}, "
+                f"expected={expected_full_dim}"
+            )
 
     data_per_kv = dim_1 * dim_2 * data_dim
     page_bytes = kv_side.stride(0)
@@ -468,11 +480,18 @@ def _nvfp4_split_data_scale(
     return data, scale
 
 
-def nvfp4_kv_cache_split_views(kv_cache: torch.Tensor) -> tuple[tuple, tuple]:
+def nvfp4_kv_cache_split_views(
+    kv_cache: torch.Tensor,
+    head_size: int | None = None,
+    head_size_v: int | None = None,
+) -> tuple[tuple, tuple]:
     """Split an NVFP4 KV cache tensor into data and scale views.
 
-    Accepts either a 5D tensor ``(num_pages, 2, dim_2, dim_3, full_dim)``
-    or a 4D single-side tensor ``(num_pages, dim_2, dim_3, full_dim)``.
+    Accepts a 5D tensor ``(num_pages, 2, dim_2, dim_3, full_dim)`` for
+    same-size K/V sides, a 4D single-side tensor
+    ``(num_pages, dim_2, dim_3, full_dim)``, or a 4D mixed-head tensor
+    ``(num_pages, dim_2, dim_3, k_full_dim + v_full_dim)`` when
+    ``head_size`` and ``head_size_v`` are provided.
 
     Per-page layout: [K_data | K_scale | V_data | V_scale].
     Each KV side is self-contained (data followed by its scale), so the
@@ -482,8 +501,13 @@ def nvfp4_kv_cache_split_views(kv_cache: torch.Tensor) -> tuple[tuple, tuple]:
     HND), so callers get views matching whichever order they passed in.
 
     Args:
-        kv_cache: 5D or 4D uint8 tensor where the last dimension is
+        kv_cache: 5D or 4D uint8 tensor where each side's last dimension is
             ``full_dim = data_dim + scale_dim = 9 * head_size / 16``.
+        head_size: Optional K head dimension. When provided, split offsets are
+            derived from the logical head dimensions instead of inferring from
+            the packed side width.
+        head_size_v: Optional V head dimension. Defaults to ``head_size`` when
+            ``head_size`` is provided.
 
     Returns:
         For 5D input:
@@ -492,11 +516,22 @@ def nvfp4_kv_cache_split_views(kv_cache: torch.Tensor) -> tuple[tuple, tuple]:
             ``(data,), (scale,)``
     """
     if kv_cache.dim() == 4:
-        data, scale = _nvfp4_split_data_scale(kv_cache)
+        if head_size is not None:
+            head_size_v = head_size if head_size_v is None else head_size_v
+            k_full_dim = nvfp4_kv_cache_full_dim(head_size)
+            v_full_dim = nvfp4_kv_cache_full_dim(head_size_v)
+            if kv_cache.shape[-1] == k_full_dim + v_full_dim:
+                k_side = kv_cache[..., :k_full_dim]
+                v_side = kv_cache[..., k_full_dim : k_full_dim + v_full_dim]
+                k_data, k_scale = _nvfp4_split_data_scale(k_side, head_size)
+                v_data, v_scale = _nvfp4_split_data_scale(v_side, head_size_v)
+                return (k_data, v_data), (k_scale, v_scale)
+
+        data, scale = _nvfp4_split_data_scale(kv_cache, head_size)
         return (data,), (scale,)
 
-    k_data, k_scale = _nvfp4_split_data_scale(kv_cache[:, 0])
-    v_data, v_scale = _nvfp4_split_data_scale(kv_cache[:, 1])
+    k_data, k_scale = _nvfp4_split_data_scale(kv_cache[:, 0], head_size)
+    v_data, v_scale = _nvfp4_split_data_scale(kv_cache[:, 1], head_size_v)
     return (k_data, v_data), (k_scale, v_scale)
 
 

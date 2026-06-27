@@ -3,6 +3,7 @@
 
 import torch
 
+from vllm.utils.torch_utils import nvfp4_kv_cache_full_dim
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVQuantMode
 from vllm.v1.worker.gpu.attn_utils import _reshape_kv_cache
 from vllm.v1.worker.utils import AttentionGroup
@@ -34,6 +35,43 @@ class FakeHNDFlashAttentionBackend(FakeFlashAttentionBackend):
     ) -> tuple[int, ...]:
         assert not include_num_layers_dimension
         return (0, 1, 3, 2, 4)
+
+
+class FakeFlashInferNvfp4MixedBackend:
+    @staticmethod
+    def get_name() -> str:
+        return "FLASHINFER"
+
+    @staticmethod
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_dtype_str: str = "auto",
+        head_size_v: int | None = None,
+    ) -> tuple[int, ...]:
+        assert cache_dtype_str == "nvfp4"
+        assert head_size_v == 64
+        return (
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            nvfp4_kv_cache_full_dim(head_size) + nvfp4_kv_cache_full_dim(head_size_v),
+        )
+
+    @staticmethod
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+        head_size: int | None = None,
+        head_size_v: int | None = None,
+        cache_dtype_str: str = "auto",
+    ) -> tuple[int, ...]:
+        assert not include_num_layers_dimension
+        assert head_size == 32
+        assert head_size_v == 64
+        assert cache_dtype_str == "nvfp4"
+        return (0, 1, 2, 3)
 
 
 def test_reshape_padded_flash_attention_kv_cache_strides_by_page():
@@ -127,6 +165,45 @@ def test_reshape_padded_hnd_flash_attention_kv_cache_strides_by_page():
             + 2 * spec.block_size * spec.head_size * 4
         )
         // 4
+    )
+
+
+def test_reshape_flashinfer_nvfp4_mixed_kv_cache_passes_head_size_v():
+    num_blocks = 2
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=32,
+        head_size_v=64,
+        dtype=torch.uint8,
+        kv_quant_mode=KVQuantMode.NVFP4,
+    )
+
+    raw_tensors = {
+        "layer": torch.zeros(spec.page_size_bytes * num_blocks, dtype=torch.int8)
+    }
+    attn_groups = [
+        AttentionGroup(
+            backend=FakeFlashInferNvfp4MixedBackend,
+            layer_names=["layer"],
+            kv_cache_spec=spec,
+            kv_cache_group_id=0,
+        )
+    ]
+
+    kv_cache = _reshape_kv_cache(
+        attn_groups,
+        raw_tensors,
+        "nvfp4",
+        [spec.block_size],
+        {},
+    )["layer"]
+
+    assert kv_cache.shape == (
+        num_blocks,
+        16,
+        1,
+        nvfp4_kv_cache_full_dim(32) + nvfp4_kv_cache_full_dim(64),
     )
 
 

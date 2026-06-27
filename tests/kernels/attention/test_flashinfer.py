@@ -5,7 +5,11 @@
 import pytest
 
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import set_random_seed
+from vllm.utils.torch_utils import (
+    nvfp4_kv_cache_full_dim,
+    nvfp4_kv_cache_split_views,
+    set_random_seed,
+)
 
 try:
     import flashinfer
@@ -166,6 +170,70 @@ def test_flashinfer_backend_accepts_nvfp4_kv_cache() -> None:
     )
 
     assert invalid_reasons == []
+
+
+def test_flashinfer_nvfp4_mixed_head_shape_uses_packed_layout() -> None:
+    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+
+    shape = FlashInferBackend.get_kv_cache_shape(
+        num_blocks=3,
+        block_size=16,
+        num_kv_heads=2,
+        head_size=256,
+        cache_dtype_str="nvfp4",
+        head_size_v=512,
+    )
+
+    assert shape == (
+        3,
+        16,
+        2,
+        nvfp4_kv_cache_full_dim(256) + nvfp4_kv_cache_full_dim(512),
+    )
+
+
+def test_flashinfer_nvfp4_same_head_shape_keeps_stacked_layout() -> None:
+    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+
+    shape = FlashInferBackend.get_kv_cache_shape(
+        num_blocks=3,
+        block_size=16,
+        num_kv_heads=2,
+        head_size=256,
+        cache_dtype_str="nvfp4",
+        head_size_v=256,
+    )
+
+    assert shape == (3, 2, 16, 2, nvfp4_kv_cache_full_dim(256))
+
+
+def test_nvfp4_kv_cache_split_views_mixed_packed_layout() -> None:
+    head_size = 64
+    head_size_v = 128
+    k_full_dim = nvfp4_kv_cache_full_dim(head_size)
+    v_full_dim = nvfp4_kv_cache_full_dim(head_size_v)
+    kv_cache = torch.arange(
+        2 * 4 * 3 * (k_full_dim + v_full_dim), dtype=torch.uint8
+    ).reshape(2, 4, 3, k_full_dim + v_full_dim)
+
+    (k_data, v_data), (k_scales, v_scales) = nvfp4_kv_cache_split_views(
+        kv_cache, head_size, head_size_v
+    )
+
+    assert k_data.shape == (2, 4, 3, head_size // 2)
+    assert k_scales.shape == (2, 4, 3, head_size // 16)
+    assert v_data.shape == (2, 4, 3, head_size_v // 2)
+    assert v_scales.shape == (2, 4, 3, head_size_v // 16)
+
+    assert k_data.storage_offset() == kv_cache.storage_offset()
+    assert k_scales.storage_offset() == kv_cache.storage_offset() + 4 * 3 * (
+        head_size // 2
+    )
+    assert v_data.storage_offset() == kv_cache.storage_offset() + k_full_dim
+    assert (
+        v_scales.storage_offset()
+        == kv_cache.storage_offset() + k_full_dim + 4 * 3 * (head_size_v // 2)
+    )
 
 
 def test_flashinfer_impl_caches_nvfp4_slot_mapping_writer(monkeypatch) -> None:

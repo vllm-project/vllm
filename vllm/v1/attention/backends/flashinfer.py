@@ -77,6 +77,10 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    is_workspace_manager_initialized,
+)
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT = 2048 * 1024 * 1024
 
@@ -95,6 +99,38 @@ def _get_trtllm_gen_workspace_buffer():
             envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE, dtype=torch.uint8, device="cuda"
         )
     return trtllm_gen_workspace_buffer
+
+
+def _is_flash_attn_varlen_func_available() -> bool:
+    try:
+        from vllm.v1.attention.backends.fa_utils import (
+            is_flash_attn_varlen_func_available,
+        )
+    except ImportError:
+        return False
+    return is_flash_attn_varlen_func_available()
+
+
+def _get_flash_attn_version(
+    head_size: int,
+    head_size_v: int,
+    has_sinks: bool,
+) -> int | None:
+    try:
+        from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
+    except ImportError:
+        return None
+    return get_flash_attn_version(
+        head_size=head_size,
+        head_size_v=head_size_v,
+        has_sinks=has_sinks,
+    )
+
+
+def _flash_attn_varlen_func(*args, **kwargs) -> torch.Tensor:
+    from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
+
+    return flash_attn_varlen_func(*args, **kwargs)
 
 
 @triton.jit
@@ -337,6 +373,18 @@ class FlashInferBackend(AttentionBackend):
     ]
 
     @staticmethod
+    def _use_mixed_nvfp4_layout(
+        cache_dtype_str: str,
+        head_size: int,
+        head_size_v: int | None,
+    ) -> bool:
+        return (
+            cache_dtype_str == "nvfp4"
+            and head_size_v is not None
+            and head_size_v != head_size
+        )
+
+    @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         # Page sizes >= 128 only run on the trtllm-gen dynamic kernel (GQA/MQA
         # on Blackwell); advertise them only when usable so selection never
@@ -380,9 +428,18 @@ class FlashInferBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
         cache_dtype_str: str = "auto",
+        head_size_v: int | None = None,
     ) -> tuple[int, ...]:
         if cache_dtype_str == "nvfp4":
             # Packed layout: fp4 data + fp8 block scales in last dim
+            if FlashInferBackend._use_mixed_nvfp4_layout(
+                cache_dtype_str, head_size, head_size_v
+            ):
+                assert head_size_v is not None
+                last_dim = nvfp4_kv_cache_full_dim(head_size) + nvfp4_kv_cache_full_dim(
+                    head_size_v
+                )
+                return (num_blocks, block_size, num_kv_heads, last_dim)
             last_dim = nvfp4_kv_cache_full_dim(head_size)
             return (num_blocks, 2, block_size, num_kv_heads, last_dim)
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
@@ -390,10 +447,30 @@ class FlashInferBackend(AttentionBackend):
     @staticmethod
     def get_kv_cache_stride_order(
         include_num_layers_dimension: bool = False,
+        head_size: int | None = None,
+        head_size_v: int | None = None,
+        cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         # `stride_order` indicates the permutation that gets us from
         # `get_kv_cache_shape` to the actual memory layout we want.
         cache_layout = get_kv_cache_layout()
+        if head_size is not None and FlashInferBackend._use_mixed_nvfp4_layout(
+            cache_dtype_str, head_size, head_size_v
+        ):
+            if cache_layout == "NHD" and include_num_layers_dimension:
+                # (num_blocks, num_layers, block_size,
+                #  num_kv_heads, k_full_dim + v_full_dim)
+                return (1, 0, 2, 3, 4)
+            elif cache_layout == "NHD":
+                return (0, 1, 2, 3)
+            elif cache_layout == "HND" and include_num_layers_dimension:
+                # (num_blocks, num_kv_heads, num_layers,
+                #  block_size, k_full_dim + v_full_dim)
+                return (1, 3, 0, 2, 4)
+            elif cache_layout == "HND":
+                return (0, 2, 1, 3)
+            else:
+                raise ValueError(f"Unknown cache layout format {cache_layout}.")
         if cache_layout == "NHD" and include_num_layers_dimension:
             # (num_blocks, num_layers, 2, block_size, num_kv_heads, head_size)
             return (1, 0, 2, 3, 4, 5)
@@ -466,6 +543,11 @@ class FIPrefill:
     """Metadata for the native FlashInfer prefill pathway (non-TRTLLM)."""
 
     wrapper: BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper
+    block_tables: torch.Tensor | None = None
+    seq_lens: torch.Tensor | None = None
+    seq_lens_cpu: torch.Tensor | None = None
+    query_start_loc: torch.Tensor | None = None
+    query_start_loc_cpu: torch.Tensor | None = None
 
 
 @dataclass
@@ -643,6 +725,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         self.num_kv_heads = self.kv_cache_spec.num_kv_heads
         self.head_dim = self.kv_cache_spec.head_size
+        self.head_dim_v = getattr(self.kv_cache_spec, "head_size_v", self.head_dim)
         self.page_size = self.kv_cache_spec.block_size
 
         if self.kv_cache_spec.kv_quant_mode != KVQuantMode.NONE:
@@ -718,6 +801,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         )  # Extra buffer for mutable paged_kv_indptr.cpu in cuda graph mode
         self.paged_kv_indices = self._make_buffer(max_num_pages)
         self.paged_kv_last_page_len = self._make_buffer(max_num_reqs)
+        self._reserve_nvfp4_fa2_prefill_workspace(can_use_trtllm)
 
     def _make_buffer(
         self, *size: int | torch.SymInt, dtype: torch.dtype = torch.int32
@@ -728,6 +812,40 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             device=self.device,
             pin_memory=self.pin_memory,
             with_numpy=True,
+        )
+
+    def _reserve_nvfp4_fa2_prefill_workspace(self, can_use_trtllm: bool) -> None:
+        if (
+            not self.is_kvcache_nvfp4
+            or can_use_trtllm
+            or self.use_dcp
+            or not is_workspace_manager_initialized()
+            or not _is_flash_attn_varlen_func_available()
+            or not hasattr(flashinfer, "nvfp4_kv_dequantize_paged")
+        ):
+            return
+
+        scheduler_config = self.vllm_config.scheduler_config
+        if (
+            not scheduler_config.enable_chunked_prefill
+            or self.model_config.max_model_len
+            <= scheduler_config.max_num_batched_tokens
+        ):
+            return
+
+        scratch_shape = (
+            self.model_config.max_model_len,
+            self.num_kv_heads,
+            self.head_dim,
+        )
+        scratch_shape_v = (
+            self.model_config.max_model_len,
+            self.num_kv_heads,
+            self.head_dim_v,
+        )
+        current_workspace_manager().get_simultaneous(
+            (scratch_shape, self.model_config.dtype),
+            (scratch_shape_v, self.model_config.dtype),
         )
 
     @override  # type: ignore[misc]
@@ -1244,7 +1362,19 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         fixed_split_size=self.prefill_fixed_split_size,
                         disable_split_kv=self.disable_split_kv,
                     )
-                attn_metadata.prefill = FIPrefill(wrapper=prefill_wrapper)
+                query_start_loc_prefill = (
+                    qo_indptr[prefill_start:] - qo_indptr[prefill_start]
+                )
+                attn_metadata.prefill = FIPrefill(
+                    wrapper=prefill_wrapper,
+                    block_tables=block_table_tensor[prefill_start:],
+                    seq_lens=seq_lens[prefill_start:],
+                    seq_lens_cpu=seq_lens_cpu[prefill_start:]
+                    if seq_lens_cpu is not None
+                    else None,
+                    query_start_loc=query_start_loc_prefill,
+                    query_start_loc_cpu=qo_indptr_prefill_cpu,
+                )
 
         ## DECODE PATHWAY
         if num_decodes > 0:
@@ -1325,9 +1455,11 @@ class FlashInferImpl(AttentionImpl):
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: int | None = None,
         sinks: torch.Tensor | None = None,
+        head_size_v: int | None = None,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
+        self.head_size_v = head_size if head_size_v is None else head_size_v
         self.scale = float(scale)
         self.num_kv_heads = num_kv_heads
         if alibi_slopes is not None:
@@ -1342,11 +1474,16 @@ class FlashInferImpl(AttentionImpl):
         )
         self.kv_cache_dtype = kv_cache_dtype
         self.is_kvcache_nvfp4 = kv_cache_dtype == "nvfp4"
-        self.use_native_nvfp4_kv_cache_update = self.is_kvcache_nvfp4 and (
-            current_platform.is_device_capability_family(100)
-            or current_platform.is_device_capability_family(120)
+        self.use_native_nvfp4_kv_cache_update = (
+            self.is_kvcache_nvfp4
+            and self.head_size_v == self.head_size
+            and (
+                current_platform.is_device_capability_family(100)
+                or current_platform.is_device_capability_family(120)
+            )
         )
         self._nvfp4_slot_writer: Callable[..., None] | None = None
+        self._nvfp4_paged_dequant: Callable[..., None] | None = None
         if self.is_kvcache_nvfp4 and not self.use_native_nvfp4_kv_cache_update:
             nvfp4_slot_writer = getattr(
                 flashinfer,
@@ -1359,6 +1496,9 @@ class FlashInferImpl(AttentionImpl):
                     "required for pre-SM100 NVFP4 KV cache."
                 )
             self._nvfp4_slot_writer = nvfp4_slot_writer
+            self._nvfp4_paged_dequant = getattr(
+                flashinfer, "nvfp4_kv_dequantize_paged", None
+            )
         self.fp4_data_dim = head_size // 2 if self.is_kvcache_nvfp4 else 0
         self.logits_soft_cap = logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
@@ -1382,6 +1522,11 @@ class FlashInferImpl(AttentionImpl):
                     f"{sinks.shape[0]}."
                 )
             self.sinks = sinks
+        self.fa_version = _get_flash_attn_version(
+            head_size=head_size,
+            head_size_v=self.head_size_v,
+            has_sinks=self.sinks is not None,
+        )
 
         self.support_trtllm_attn = can_use_trtllm_attention(num_heads, num_kv_heads)
         vllm_config = get_current_vllm_config_or_none()
@@ -1431,6 +1576,149 @@ class FlashInferImpl(AttentionImpl):
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         if self.sinks is not None and self.sinks.dtype != torch.float32:
             self.sinks = self.sinks.to(torch.float32)
+
+    def _flash_attn_varlen(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        cu_seqlens_q: torch.Tensor,
+        cu_seqlens_k: torch.Tensor,
+        max_seqlen_q: int,
+        max_seqlen_k: int,
+        causal: bool,
+    ) -> torch.Tensor:
+        assert self.fa_version is not None
+        return _flash_attn_varlen_func(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            softmax_scale=self.scale,
+            causal=causal,
+            window_size=list(self.sliding_window),
+            softcap=self.logits_soft_cap or 0.0,
+            alibi_slopes=self.alibi_slopes,
+            fa_version=self.fa_version,
+        )
+
+    def _copy_prefill_output(
+        self,
+        output: torch.Tensor,
+        start: int,
+        attn_out: torch.Tensor,
+    ) -> None:
+        output_slice = output[start : start + attn_out.shape[0]]
+        if output_slice.ndim == 2:
+            output_slice.copy_(attn_out.reshape(attn_out.shape[0], -1))
+        else:
+            output_slice.copy_(attn_out)
+
+    def _run_nvfp4_fa2_prefill(
+        self,
+        layer: torch.nn.Module,
+        prefill_query: torch.Tensor,
+        prefill_key: torch.Tensor,
+        prefill_value: torch.Tensor,
+        output: torch.Tensor,
+        attn_metadata: FlashInferMetadata,
+        nvfp4_kv_data: tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor],
+        nvfp4_kv_block_scales: tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor],
+    ) -> bool:
+        if (
+            not self.is_kvcache_nvfp4
+            or self._nvfp4_paged_dequant is None
+            or self.fa_version is None
+            or not _is_flash_attn_varlen_func_available()
+            or prefill_query.dtype not in (torch.float16, torch.bfloat16)
+            or not isinstance(attn_metadata.causal, bool)
+            or self.dcp_world_size > 1
+            or attn_metadata.use_cascade
+        ):
+            return False
+
+        assert isinstance(attn_metadata.prefill, FIPrefill)
+        prefill = attn_metadata.prefill
+        if (
+            prefill.block_tables is None
+            or prefill.seq_lens is None
+            or prefill.seq_lens_cpu is None
+            or prefill.query_start_loc_cpu is None
+        ):
+            return False
+
+        num_reqs = prefill.query_start_loc_cpu.shape[0] - 1
+        if num_reqs <= 0:
+            return True
+
+        qsl = prefill.query_start_loc_cpu.tolist()
+        seq_lens = prefill.seq_lens_cpu.tolist()
+        device = prefill_query.device
+
+        if not hasattr(self, "_nvfp4_fa2_cu_q"):
+            self._nvfp4_fa2_cu_q = torch.zeros(2, device=device, dtype=torch.int32)
+            self._nvfp4_fa2_cu_k = torch.zeros(2, device=device, dtype=torch.int32)
+
+        for req_idx in range(num_reqs):
+            q_start = int(qsl[req_idx])
+            q_end = int(qsl[req_idx + 1])
+            q_len = q_end - q_start
+            if q_len <= 0:
+                continue
+
+            seq_len = int(seq_lens[req_idx])
+            if seq_len <= 0:
+                continue
+
+            q_seq = prefill_query[q_start:q_end]
+            if q_len == seq_len:
+                k_seq = prefill_key[q_start:q_end]
+                v_seq = prefill_value[q_start:q_end]
+            else:
+                if not is_workspace_manager_initialized():
+                    return False
+                k_buf, v_buf = current_workspace_manager().get_simultaneous(
+                    (
+                        (1, seq_len, self.num_kv_heads, self.head_size),
+                        q_seq.dtype,
+                    ),
+                    (
+                        (1, seq_len, self.num_kv_heads, self.head_size_v),
+                        q_seq.dtype,
+                    ),
+                )
+                self._nvfp4_paged_dequant(
+                    nvfp4_kv_data,
+                    nvfp4_kv_block_scales,
+                    prefill.block_tables[req_idx : req_idx + 1],
+                    prefill.seq_lens[req_idx : req_idx + 1],
+                    layer._k_scale,
+                    layer._v_scale,
+                    k_buf,
+                    v_buf,
+                    kv_layout=get_kv_cache_layout(),
+                )
+                k_seq = k_buf[0, :seq_len]
+                v_seq = v_buf[0, :seq_len]
+
+            self._nvfp4_fa2_cu_q[1:2] = q_len
+            self._nvfp4_fa2_cu_k[1:2] = seq_len
+            attn_out = self._flash_attn_varlen(
+                q=q_seq,
+                k=k_seq,
+                v=v_seq,
+                cu_seqlens_q=self._nvfp4_fa2_cu_q,
+                cu_seqlens_k=self._nvfp4_fa2_cu_k,
+                max_seqlen_q=q_len,
+                max_seqlen_k=seq_len,
+                causal=attn_metadata.causal,
+            )
+            self._copy_prefill_output(output, q_start, attn_out.to(output.dtype))
+
+        return True
 
     def forward(
         self,
@@ -1554,7 +1842,11 @@ class FlashInferImpl(AttentionImpl):
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_prefill_tokens = attn_metadata.num_prefill_tokens
 
-        stride_order = FlashInferBackend.get_kv_cache_stride_order()
+        stride_order = FlashInferBackend.get_kv_cache_stride_order(
+            head_size=self.head_size,
+            head_size_v=self.head_size_v,
+            cache_dtype_str=self.kv_cache_dtype,
+        )
         kv_cache_permute = kv_cache.permute(*stride_order)  # HND and contiguous
         # Fix degenerate strides on any size-1 dimension (e.g. num_kv_heads=1
         # with TP=8).  PyTorch permits non-canonical strides on size-1 dims;
@@ -1578,7 +1870,7 @@ class FlashInferImpl(AttentionImpl):
         nvfp4_kv_block_scales = None
         if self.is_kvcache_nvfp4:
             nvfp4_kv_data, nvfp4_kv_block_scales = nvfp4_kv_cache_split_views(
-                kv_cache_permute
+                kv_cache_permute, self.head_size, self.head_size_v
             )
 
         use_dcp = self.dcp_world_size > 1
@@ -1627,22 +1919,37 @@ class FlashInferImpl(AttentionImpl):
                     assert prefill_wrapper._sm_scale == self.scale
                     assert prefill_wrapper._causal == attn_metadata.causal
 
-                    if self.is_kvcache_nvfp4:
-                        kv_cache_permute = nvfp4_kv_data
-                    kv_cache_sf = (
-                        nvfp4_kv_block_scales if self.is_kvcache_nvfp4 else None
-                    )
-
                     out_prefill = output[num_decode_tokens:]
+                    used_nvfp4_fa2_prefill = False
+                    if self.is_kvcache_nvfp4:
+                        assert nvfp4_kv_data is not None
+                        assert nvfp4_kv_block_scales is not None
+                        used_nvfp4_fa2_prefill = self._run_nvfp4_fa2_prefill(
+                            layer,
+                            prefill_query,
+                            key[num_decode_tokens:],
+                            value[num_decode_tokens:],
+                            out_prefill,
+                            attn_metadata,
+                            nvfp4_kv_data,
+                            nvfp4_kv_block_scales,
+                        )
 
-                    prefill_wrapper.run(
-                        prefill_query,
-                        kv_cache_permute,
-                        k_scale=layer._k_scale_float,
-                        v_scale=layer._v_scale_float,
-                        out=out_prefill,
-                        kv_cache_sf=kv_cache_sf,
-                    )
+                    if not used_nvfp4_fa2_prefill:
+                        if self.is_kvcache_nvfp4:
+                            kv_cache_permute = nvfp4_kv_data
+                        kv_cache_sf = (
+                            nvfp4_kv_block_scales if self.is_kvcache_nvfp4 else None
+                        )
+
+                        prefill_wrapper.run(
+                            prefill_query,
+                            kv_cache_permute,
+                            k_scale=layer._k_scale_float,
+                            v_scale=layer._v_scale_float,
+                            out=out_prefill,
+                            kv_cache_sf=kv_cache_sf,
+                        )
 
             else:
                 assert isinstance(attn_metadata.prefill, TRTLLMPrefill)
@@ -1895,8 +2202,14 @@ class FlashInferImpl(AttentionImpl):
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
             if self.is_kvcache_nvfp4 and not self.use_native_nvfp4_kv_cache_update:
+                stride_order = FlashInferBackend.get_kv_cache_stride_order(
+                    head_size=self.head_size,
+                    head_size_v=self.head_size_v,
+                    cache_dtype_str=self.kv_cache_dtype,
+                )
+                kv_cache_permute = kv_cache.permute(*stride_order)
                 nvfp4_kv_data, nvfp4_kv_block_scales = nvfp4_kv_cache_split_views(
-                    kv_cache
+                    kv_cache_permute, self.head_size, self.head_size_v
                 )
                 nvfp4_slot_writer = self._nvfp4_slot_writer
                 assert nvfp4_slot_writer is not None

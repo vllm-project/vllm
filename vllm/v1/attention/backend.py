@@ -92,6 +92,7 @@ class AttentionBackend(ABC):
         num_kv_heads: int,
         head_size: int,
         cache_dtype_str: str = "auto",
+        head_size_v: int | None = None,
     ) -> tuple[int, ...]:
         raise NotImplementedError
 
@@ -118,6 +119,9 @@ class AttentionBackend(ABC):
     @staticmethod
     def get_kv_cache_stride_order(
         include_num_layers_dimension: bool = False,
+        head_size: int | None = None,
+        head_size_v: int | None = None,
+        cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         """
         Get the physical (memory layout) ordering of the kv cache dimensions.
