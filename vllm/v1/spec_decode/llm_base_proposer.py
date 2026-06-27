@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import dataclasses
 from importlib.util import find_spec
 from typing import Any, cast
 
@@ -475,20 +474,16 @@ class SpecDecodeBaseProposer:
         if sampling_metadata.all_greedy:
             return logits.argmax(dim=-1), None
 
-        # Parallel drafting (e.g. DFlash) samples num_speculative_tokens rows
-        # per request in a single pass, so logits has batch_size * K rows while
-        # the sampling metadata is per-request. The rows are request-major
-        # (K consecutive slots per request), so repeat_interleave the
-        # per-request temperature to match before probabilistic sampling.
-        temperature = sampling_metadata.temperature
-        if temperature is not None and temperature.shape[0] != logits.shape[0]:
-            assert logits.shape[0] % temperature.shape[0] == 0
-            factor = logits.shape[0] // temperature.shape[0]
-            sampling_metadata = dataclasses.replace(
-                sampling_metadata,
-                temperature=temperature.repeat_interleave(factor, dim=0),
-            )
-
+        # Parallel drafting (e.g. DFlash) samples num_speculative_tokens rows per
+        # request in a single pass, so logits has batch_size * K rows while the
+        # sampling metadata stays per-request. Pass the per-request metadata
+        # through unchanged: compute_probs_and_sample_next_token expands
+        # temperature/top_k/top_p AND the seeded per-request generators to
+        # num_tokens internally (request-major, K consecutive slots per request).
+        # Do NOT pre-repeat temperature here — doing so makes that function see
+        # ``temperature.shape[0] == num_tokens`` and skip the K-fold generator
+        # remap, so a seeded request's later draft slots fall back to the default
+        # RNG (or a neighbour's generator), breaking deterministic seeded drafts.
         return compute_probs_and_sample_next_token(
             logits, sampling_metadata, self.use_fp64_gumbel
         )
