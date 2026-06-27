@@ -483,33 +483,14 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
 
         from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
-        # The FlashInfer sparse-MLA decode kernel batches per request with a
-        # query-length dim. For uniform multi-token decode (MTP/spec, where every
-        # request contributes q_len_per_req > 1 tokens) reshape to
-        # (num_reqs, q_len_per_req, ...) so query/block_tables/seq_lens stay
-        # aligned per token; plain single-token decode uses q_len_per_req = 1.
-        if (
-            attn_metadata.num_decode_tokens == num_actual_toks
-            and attn_metadata.num_decodes > 0
-            and attn_metadata.num_decode_tokens % attn_metadata.num_decodes == 0
-        ):
-            q_len_per_req = attn_metadata.num_decode_tokens // attn_metadata.num_decodes
-            query = q.view(
-                attn_metadata.num_decodes,
-                q_len_per_req,
-                q.shape[-2],
-                q.shape[-1],
-            )
-            block_tables = topk_indices_physical.view(
-                attn_metadata.num_decodes,
-                q_len_per_req,
-                topk_indices_physical.shape[-1],
-            )
-            seq_lens_arg = seq_lens.view(attn_metadata.num_decodes, q_len_per_req)
-        else:
-            query = q.unsqueeze(1)
-            block_tables = topk_indices_physical.unsqueeze(1)
-            seq_lens_arg = seq_lens
+        # Single-token sparse decode. trtllm-gen requires the q_len_per_request
+        # dim, but the sparse attention mask is fully per-token (each query token
+        # carries its own top-k index row), so unsqueeze is sufficient and
+        # correct. The MTP/multi-token q_len grouping is a perf-only layout and is
+        # deferred until MTP is validated end-to-end for this backend.
+        query = q.unsqueeze(1)
+        block_tables = topk_indices_physical.unsqueeze(1)
+        seq_lens_arg = seq_lens
 
         kernel_out = trtllm_batch_decode_with_kv_cache_mla(
             query=query,
@@ -548,11 +529,10 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
         num_tokens: int,
         num_heads: int,
     ) -> torch.Tensor:
-        # FlashInfer returns the decode LSE in a layout that follows the query
-        # reshape above: 3D as (num_reqs, q_len_per_req, num_heads) for the
-        # uniform multi-token path, or (num_tokens, num_heads, 1)/(num_tokens, 1,
-        # num_heads) for single-token decode. Collapse all of these to the
-        # (num_tokens, num_heads) the shared DCP reducer expects.
+        # FlashInfer returns the decode LSE either as 2D (num_tokens, num_heads)
+        # or 3D ((num_tokens, num_heads, 1) / (num_tokens, 1, num_heads)).
+        # Collapse all of these to the (num_tokens, num_heads) the shared DCP
+        # reducer expects.
         if lse.dim() == 3:
             if lse.shape[-1] == 1:
                 lse = lse.squeeze(-1)
