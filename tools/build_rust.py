@@ -27,7 +27,7 @@ def rust_extensions(*, optional: bool = False) -> list[RustExtension]:
         ),
         RustExtension(
             target="vllm._rust_tool_parser",
-            path="rust/src/tool-parser/python/Cargo.toml",
+            path="rust/src/parser/python/Cargo.toml",
             features=["pyo3/abi3-py38"],
             binding=Binding.PyO3,
             optional=optional,
