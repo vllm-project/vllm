@@ -1076,13 +1076,23 @@ def get_moe_configs(
     return None
 
 
+# moe_wna16_gemm_kernel is only template-instantiated for a handful of
+# BLOCK_SIZE_K // group_size values; see the GROUPS dispatch and the matching
+# TORCH_CHECK in csrc/moe/moe_wna16.cu. The largest instantiated ratio is 8,
+# and the block-size heuristic in get_moe_wna16_block_config can overshoot it
+# (e.g. 512 // 32 = 16), so clamp to at most this many groups per block row.
+_MOE_WNA16_MAX_GROUPS_PER_BLOCK_ROW = 8
+
+
 def _ensure_block_size_k_divisible(
     size_k: int, block_size_k: int, group_size: int
 ) -> int:
-    """Ensure block_size_k is a divisor of size_k and divisible by group_size.
+    """Adjust block_size_k to a value the moe_wna16 CUDA kernel accepts.
 
-    This ensures BLOCK_SIZE_K compatibility with MoeWNA16 CUDA kernel which
-    requires size_k % BLOCK_SIZE_K == 0 and BLOCK_SIZE_K % group_size == 0.
+    The kernel requires size_k % BLOCK_SIZE_K == 0, BLOCK_SIZE_K % group_size
+    == 0, and BLOCK_SIZE_K // group_size no larger than the instantiated set
+    (at most 8). The heuristic can hand in a larger ratio, so clamp it before
+    searching for a divisor of size_k.
 
     Args:
         size_k: The size_k dimension that must be divisible by result.
@@ -1092,6 +1102,10 @@ def _ensure_block_size_k_divisible(
     Returns:
         A valid BLOCK_SIZE_K that divides size_k and is divisible by group_size.
     """
+    # Clamp the group ratio first so the divisor search below stays within the
+    # range the kernel is instantiated for.
+    block_size_k = min(block_size_k, group_size * _MOE_WNA16_MAX_GROUPS_PER_BLOCK_ROW)
+
     # Fast path: already valid
     if size_k % block_size_k == 0 and block_size_k % group_size == 0:
         return block_size_k
@@ -1183,14 +1197,9 @@ def get_moe_wna16_block_config(
             # at the same time.
             block_size_n = 1024
 
-        # CUDA moe_wna16_gemm only supports BLOCK_SIZE_K // group_size in
-        # {1, 2, 4, 8}; the heuristic above can overshoot (e.g. 512 // 32 = 16).
-        # Clamp to at most 8 groups per block row before enforcing divisibility.
-        max_block_size_k = group_size * 8
-        if block_size_k > max_block_size_k:
-            block_size_k = max_block_size_k
-
-        # Ensure BLOCK_SIZE_K is a divisor of size_k for CUDA kernel compatibility
+        # Ensure BLOCK_SIZE_K satisfies the moe_wna16 CUDA kernel constraints
+        # (divides size_k, divisible by group_size, ratio clamped to the
+        # instantiated set).
         block_size_k = _ensure_block_size_k_divisible(size_k, block_size_k, group_size)
 
         return {"BLOCK_SIZE_N": block_size_n, "BLOCK_SIZE_K": block_size_k}
