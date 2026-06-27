@@ -8,7 +8,6 @@ from importlib.util import find_spec
 import pytest
 import torch
 from packaging import version
-
 from tests.kernels.moe.utils import check_accuracy
 from vllm._aiter_ops import is_aiter_found
 from vllm.platforms import current_platform
@@ -761,8 +760,8 @@ def test_flashinfer_cutlass_mxfp4_fused_moe(
     # SM90 mixed-input GEMM expects weights/scales in an interleaved layout;
     # without it the FP4->BF16 LUT reads bytes from wrong positions for K>128.
     from flashinfer.fused_moe import (
-        interleave_moe_weights_for_sm90_mixed_gemm,
         interleave_moe_scales_for_sm90_mixed_gemm,
+        interleave_moe_weights_for_sm90_mixed_gemm,
     )
 
     w13_q_swapped = interleave_moe_weights_for_sm90_mixed_gemm(
