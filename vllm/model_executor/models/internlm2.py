@@ -247,7 +247,7 @@ class InternLMDecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class InternLM2Model(nn.Module, SupportsQuant):
+class InternLM2Model(nn.Module):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
             # weight_name: (param_name, shard_id)
@@ -321,7 +321,8 @@ class InternLM2Model(nn.Module, SupportsQuant):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
-class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
+class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SupportsQuant):
+    hf_to_vllm_mapper = InternLM2Model.hf_to_vllm_mapper
     packed_modules_mapping = {
         "wqkv": ["wqkv"],
         "gate_up_proj": ["w1", "w3"],
