@@ -227,8 +227,6 @@ class MellumForCausalLM(Qwen3MoeForCausalLM):
             self.model.make_empty_intermediate_tensors
         )
 
-        self.expert_weights = []
-
         self.moe_layers = []
         example_layer = None
         for layer in self.model.layers:
