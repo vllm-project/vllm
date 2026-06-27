@@ -195,19 +195,8 @@ register_experts(
 
 # Disable on blackwell for now
 if has_deep_ep() and not current_platform.has_device_capability(100):
-    from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ht import (
-        DeepEPHTPrepareAndFinalize,
-    )
     from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ll import (
         DeepEPLLPrepareAndFinalize,
-    )
-
-    register_prepare_and_finalize(
-        DeepEPHTPrepareAndFinalize,
-        standard_format,
-        common_float_types,
-        blocked_quantization_support=True,
-        backend="deepep_high_throughput",
     )
 
     register_prepare_and_finalize(

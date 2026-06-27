@@ -186,8 +186,8 @@ class ParallelConfig:
     """All2All backend for MoE expert parallel communication. Available options:
 
     - "allgather_reducescatter": All2all based on allgather and reducescatter
-    - "deepep_high_throughput": Use deepep high-throughput kernels
     - "deepep_low_latency": Use deepep low-latency kernels
+    - "deepep_v2": Use deepep v2 kernels
     - "mori_high_throughput": MoRI EP with InterNodeV1 for multi-node
     - "mori_low_latency": MoRI EP with InterNodeV1LL for multi-node
     - "nixl_ep": Use nixl-ep kernels
@@ -454,6 +454,13 @@ class ParallelConfig:
             )
             self.all2all_backend = "allgather_reducescatter"
 
+        if self.all2all_backend == "deepep_high_throughput":
+            logger.warning(
+                "The 'deepep_high_throughput' all2all backend has been "
+                "removed. Falling back to 'deepep_v2'.",
+            )
+            self.all2all_backend = "deepep_v2"
+
         if self.data_parallel_size_local > self.data_parallel_size:
             raise ValueError(
                 f"data_parallel_size_local ({self.data_parallel_size_local}) "
@@ -644,8 +651,8 @@ class ParallelConfig:
             self.all2all_backend
             in (
                 "allgather_reducescatter",
-                "deepep_high_throughput",
                 "deepep_low_latency",
+                "deepep_v2",
                 "mori_high_throughput",
                 "mori_low_latency",
                 "nixl_ep",

@@ -195,67 +195,6 @@ class DeepEPAll2AllManagerBase(All2AllManagerBase):
             self.handle_cache._cache.clear()
 
 
-class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
-    """
-    All2All communication based on DeepEP High-Throughput kernels.
-    """
-
-    def __init__(self, cpu_group, tcp_store_group=None):
-        super().__init__(cpu_group, tcp_store_group)
-
-    def _make_all2all_kwargs(self) -> dict[Any, Any]:
-        # Defaults for internode and intranode are taken from DeepEP tests.
-        num_nvl_bytes = envs.VLLM_DEEPEP_BUFFER_SIZE_MB * 1024 * 1024
-        num_rdma_bytes = None
-        num_qps_per_rank = None
-
-        if self.internode and not envs.VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE:
-            num_rdma_bytes = envs.VLLM_DEEPEP_BUFFER_SIZE_MB * 1024 * 1024
-            num_qps_per_rank = self.num_sms // 2
-        else:
-            num_rdma_bytes = 0
-            num_qps_per_rank = 1
-
-        assert num_rdma_bytes is not None
-        assert num_qps_per_rank is not None
-        # TODO: remove platform-specific logic
-        # once ROCm DeepEP is updated with the latest APIs.
-        kwargs = dict(
-            group=self.cpu_group,
-            num_nvl_bytes=num_nvl_bytes,
-            num_rdma_bytes=num_rdma_bytes,
-            low_latency_mode=False,
-            num_qps_per_rank=num_qps_per_rank,
-            explicitly_destroy=True,
-        )
-        return kwargs
-
-    def get_handle(self, kwargs):
-        assert len(kwargs) == 0, (
-            "DeepEPHTAll2AllManager expects no arguments. All the required "
-            "args are computed in the Manager itself."
-        )
-
-        import deep_ep  # type: ignore[import-not-found]
-
-        buffer_kwargs = self._make_all2all_kwargs()
-        logger.debug("DeepEP all2all args %s", buffer_kwargs)
-        handle: deep_ep.Buffer = self.handle_cache.get_or_create(
-            buffer_kwargs, deep_ep.Buffer
-        )
-        return handle
-
-    def set_num_sms(self, num_sms: int):
-        import deep_ep  # type: ignore[import-not-found]
-
-        # Right now the buffers are sized for only what the kernels were
-        # created with. So we can only reduce the number of SMS used
-        # but not increase it.
-        if num_sms > self.num_sms:
-            num_sms = self.num_sms
-        deep_ep.Buffer.set_num_sms(num_sms)
-
-
 class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
     """
     All2All communication based on DeepEP Low-Latency kernels.

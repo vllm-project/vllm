@@ -101,7 +101,7 @@ if has_flashinfer_nvlink_one_sided():
     BACKENDS += ["flashinfer_nvlink_one_sided"]
 
 if has_deep_ep():
-    BACKENDS += ["deepep_high_throughput", "deepep_low_latency"]
+    BACKENDS += ["deepep_low_latency"]
 
 if has_nixl_ep():
     BACKENDS += ["nixl_ep"]
@@ -123,7 +123,6 @@ BACKEND_SUPPORTED_QUANTS: dict[str, set[str | None]] = {
     "flashinfer_nvlink_two_sided": {None, "fp8_blocked",                 "modelopt_fp4"}, # noqa: E501
     "flashinfer_nvlink_one_sided": {None,                                "modelopt_fp4"}, # noqa: E501
     "deepep_low_latency":          {None, "fp8_blocked",                 "modelopt_fp4"}, # noqa: E501
-    "deepep_high_throughput":      {None, "fp8_blocked", "modelopt_fp8", "modelopt_fp4"}, # noqa: E501
     "nixl_ep":                     {None, "fp8_blocked", "modelopt_fp8"},
 }
 
@@ -135,7 +134,6 @@ BACKEND_EP_DP_TP_SUPPORT: dict[str, tuple[bool, bool, bool, bool]] = {
     "flashinfer_nvlink_two_sided": (False, True, False, False),
     "flashinfer_nvlink_one_sided": (False, True, False, False),
     "deepep_low_latency":          (True, False, False,  True),
-    "deepep_high_throughput":      (True, False, False,  True),
     "nixl_ep":                     (True, False, False,  True),
 }
 # fmt: on
@@ -228,15 +226,6 @@ def maybe_roundup_layer_hidden_size(
         and all2all backend.
         Original hidden size otherwise.
     """
-    if backend == "deepep_high_throughput":
-        from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ht import (
-            DeepEPHTPrepareAndFinalize,
-        )
-
-        hidden_size = DeepEPHTPrepareAndFinalize.maybe_roundup_layer_hidden_size(
-            hidden_size, act_dtype
-        )
-
     if backend == "deepep_low_latency":
         from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ll import (
             DeepEPLLPrepareAndFinalize,
@@ -438,7 +427,6 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
     # TODO: disable for now
     if config.use_routed_input_transform and config.backend in [
         "deepep_low_latency",
-        "deepep_high_throughput",
     ]:
         return (
             False,
@@ -1733,7 +1721,6 @@ def _parallel_worker(
             # later subtests do not inherit stale communication state.
             if test_config.backend in {
                 "deepep_low_latency",
-                "deepep_high_throughput",
             }:
                 torch.accelerator.synchronize()
                 all2all_manager = get_ep_group().device_communicator.all2all_manager

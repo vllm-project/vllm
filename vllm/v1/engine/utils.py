@@ -592,8 +592,7 @@ class CoreEngineActorManager:
 
         all2all_backend = vllm_config.parallel_config.all2all_backend
         if pack_strategy == "fill" and (
-            all2all_backend == "deepep_high_throughput"
-            or all2all_backend == "deepep_low_latency"
+            all2all_backend == "deepep_low_latency" or all2all_backend == "deepep_v2"
         ):
             raise ValueError(
                 "DeepEP kernels require EP ranks [0,7] (same for [8,15], ...) "

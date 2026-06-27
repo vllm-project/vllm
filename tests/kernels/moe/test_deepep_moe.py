@@ -15,7 +15,6 @@ from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import TritonExperts
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
@@ -36,14 +35,11 @@ from ...utils import multi_gpu_test
 from .parallel_utils import ProcessGroupInfo, parallel_launch
 
 if has_deep_ep():
-    from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ht import (
-        DeepEPHTPrepareAndFinalize,
-    )
     from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ll import (
         DeepEPLLPrepareAndFinalize,
     )
 
-    from .parallel_utils import DeepEPHTArgs, DeepEPLLArgs, make_deepep_a2a
+    from .parallel_utils import DeepEPLLArgs, make_deepep_ll_a2a
 
 requires_deep_ep = pytest.mark.skipif(
     not has_deep_ep(),
@@ -133,7 +129,6 @@ class TestTensors:
 def make_modular_kernel(
     pg: ProcessGroup,
     pgi: ProcessGroupInfo,
-    low_latency_mode: bool,
     hidden_size: int,
     dp_size: int,
     num_experts: int,
@@ -142,49 +137,32 @@ def make_modular_kernel(
     use_fp8_dispatch: bool,
     quant_config: FusedMoEQuantConfig,
 ) -> FusedMoEKernel:
-    ht_args: DeepEPHTArgs | None = None
-    ll_args: DeepEPLLArgs | None = None
+    ll_args = DeepEPLLArgs(
+        max_tokens_per_rank=MAX_TOKENS_PER_RANK,
+        hidden_size=hidden_size,
+        num_experts=num_experts,
+        use_fp8_dispatch=use_fp8_dispatch,
+    )
 
-    if low_latency_mode:
-        ll_args = DeepEPLLArgs(
-            max_tokens_per_rank=MAX_TOKENS_PER_RANK,
-            hidden_size=hidden_size,
-            num_experts=num_experts,
-            use_fp8_dispatch=use_fp8_dispatch,
-        )
-    else:
-        assert not use_fp8_dispatch, (
-            "FP8 Dispatch is valid only for low-latency kernels"
-        )
-        ht_args = DeepEPHTArgs(num_local_experts=num_local_experts)
-
-    a2a: DeepEPHTPrepareAndFinalize | DeepEPLLPrepareAndFinalize = make_deepep_a2a(
+    a2a = make_deepep_ll_a2a(
         pg=pg,
         pgi=pgi,
-        dp_size=dp_size,
+        deepep_ll_args=ll_args,
         q_dtype=q_dtype,
         block_shape=None,
-        deepep_ht_args=ht_args,
-        deepep_ll_args=ll_args,
     )
 
     num_dispatchers = pgi.world_size // dp_size
 
     moe_config = make_dummy_moe_config()
 
-    if low_latency_mode:
-        assert not quant_config.per_act_token_quant, "not supported in ll mode"
-        fused_experts = BatchedTritonExperts(
-            max_num_tokens=MAX_TOKENS_PER_RANK,
-            num_dispatchers=num_dispatchers,
-            moe_config=moe_config,
-            quant_config=quant_config,
-        )
-    else:
-        fused_experts = TritonExperts(
-            moe_config=moe_config,
-            quant_config=quant_config,
-        )
+    assert not quant_config.per_act_token_quant, "not supported in ll mode"
+    fused_experts = BatchedTritonExperts(
+        max_num_tokens=MAX_TOKENS_PER_RANK,
+        num_dispatchers=num_dispatchers,
+        moe_config=moe_config,
+        quant_config=quant_config,
+    )
 
     mk = FusedMoEKernel(
         prepare_finalize=a2a,
@@ -196,7 +174,6 @@ def make_modular_kernel(
 def deep_ep_moe_impl(
     pg: ProcessGroup,
     pgi: ProcessGroupInfo,
-    low_latency_mode: bool,
     dp_size: int,
     test_tensors: TestTensors,
     w1: torch.Tensor,
@@ -251,7 +228,6 @@ def deep_ep_moe_impl(
         mk: FusedMoEKernel = make_modular_kernel(
             pg,
             pgi,
-            low_latency_mode,
             hidden_size,
             dp_size,
             num_experts,
@@ -276,14 +252,9 @@ def deep_ep_moe_impl(
         if not skip_result_store:
             out_hidden_states[chunk_start:chunk_end, :].copy_(out, non_blocking=True)
 
-    max_num_tokens_per_dp = (
-        MAX_TOKENS_PER_RANK if low_latency_mode else total_num_tokens
-    )
-
-    for chunk_start_ in range(0, total_num_tokens, max_num_tokens_per_dp):
+    for chunk_start_ in range(0, total_num_tokens, MAX_TOKENS_PER_RANK):
         chunk_start = chunk_start_
-        chunk_end = min(chunk_start + max_num_tokens_per_dp, total_num_tokens)
-        # clamp start and end
+        chunk_end = min(chunk_start + MAX_TOKENS_PER_RANK, total_num_tokens)
         chunk_start = min(chunk_start, total_num_tokens - 1)
         chunk_end = min(chunk_end, total_num_tokens)
 
@@ -352,7 +323,6 @@ def torch_moe_impl(
 
 def _deep_ep_moe(
     pgi: ProcessGroupInfo,
-    low_latency_mode: bool,
     dp_size: int,
     config: TestConfig,
     w1: torch.Tensor,
@@ -364,11 +334,6 @@ def _deep_ep_moe(
 ):
     device = torch.device(f"cuda:{pgi.local_rank}")
     init_workspace_manager(device)
-
-    if not low_latency_mode:
-        assert not use_fp8_dispatch, (
-            "FP8 dispatch interface is available only in low-latency mode"
-        )
 
     is_quantized = w1.dtype == current_platform.fp8_dtype()
     device_idx = torch.accelerator.current_device_index()
@@ -386,7 +351,7 @@ def _deep_ep_moe(
         )
     else:
         pg = torch.distributed.new_group(list(range(pgi.world_size)))
-    test_tensors = TestTensors.make(config, low_latency_mode)
+    test_tensors = TestTensors.make(config, True)
 
     with set_current_vllm_config(VllmConfig()):
         # Reference
@@ -414,7 +379,6 @@ def _deep_ep_moe(
         deepep_combined = deep_ep_moe_impl(
             pg,
             pgi,
-            low_latency_mode,
             dp_size,
             test_tensors,
             w1_ep,
@@ -431,62 +395,6 @@ def _deep_ep_moe(
         deepep_combined,
         atol=6e-2,
         rtol=6e-2,
-    )
-
-
-MNKs = [
-    (1, 128, 128),
-    (2, 128, 512),
-    (3, 1024, 2048),
-    (32, 128, 1024),
-    (45, 512, 2048),
-    (64, 1024, 1024),
-    (222, 1024, 2048),
-]
-
-DTYPES = [torch.bfloat16, current_platform.fp8_dtype()]
-
-
-@pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("m,n,k", MNKs)
-@pytest.mark.parametrize("num_experts", [32])
-@pytest.mark.parametrize("topk", [6])
-@pytest.mark.parametrize("world_dp_size", [(2, 1)])
-@pytest.mark.parametrize("per_act_token_quant", [False, True])
-@multi_gpu_test(num_gpus=2)
-@requires_deep_ep
-def test_deep_ep_moe(
-    dtype: torch.dtype,
-    m: int,
-    n: int,
-    k: int,
-    num_experts: int,
-    topk: int,
-    world_dp_size: tuple[int, int],
-    per_act_token_quant: bool,
-    workspace_init,
-):
-    low_latency_mode = False
-    use_fp8_dispatch = False
-
-    set_random_seed(7)
-    world_size, dp_size = world_dp_size
-    config = TestConfig(dtype=dtype, topk=topk, m=m, k=k, n=n, num_experts=num_experts)
-
-    w1, w2, w1_scale, w2_scale = make_weights(num_experts, n, k, dtype)
-
-    parallel_launch(
-        world_size,
-        _deep_ep_moe,
-        low_latency_mode,
-        dp_size,
-        config,
-        w1,
-        w2,
-        w1_scale,
-        w2_scale,
-        use_fp8_dispatch,
-        per_act_token_quant,
     )
 
 
@@ -522,9 +430,7 @@ def test_low_latency_deep_ep_moe(
     use_fp8_dispatch: bool,
     workspace_init,
 ):
-    low_latency_mode = True
-
-    if low_latency_mode and k not in DeepEPLLPrepareAndFinalize.SUPPORTED_HIDDEN_SIZES:
+    if k not in DeepEPLLPrepareAndFinalize.SUPPORTED_HIDDEN_SIZES:
         pytest.skip(
             f"Skipping test as hidden size {k} is not in list of supported "
             f"hidden sizes {DeepEPLLPrepareAndFinalize.SUPPORTED_HIDDEN_SIZES}"
@@ -539,7 +445,6 @@ def test_low_latency_deep_ep_moe(
     parallel_launch(
         world_size,
         _deep_ep_moe,
-        low_latency_mode,
         dp_size,
         config,
         w1,

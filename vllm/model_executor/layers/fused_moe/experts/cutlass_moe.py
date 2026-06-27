@@ -415,7 +415,7 @@ class CutlassExpertsFp8(CutlassExpertsFp8Base):
         # the expert map for identifying experts.
         return not (
             moe_parallel_config.use_fi_nvl_two_sided_kernels
-            or moe_parallel_config.use_deepep_ht_kernels
+            or moe_parallel_config.use_deepep_v2_kernels
             or moe_parallel_config.use_fi_nvl_one_sided_kernels
         )
 

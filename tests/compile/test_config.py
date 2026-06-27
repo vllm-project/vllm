@@ -289,32 +289,6 @@ def test_splitting_ops_dynamic():
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
 
 
-def test_moe_splitting_ops_deepep_ht_inductor_partition():
-    # Inductor partition case: user-provided splitting_ops should be
-    # preserved and MoE ops should be appended for DeepEP HT with dp>1.
-    config = VllmConfig(
-        parallel_config=ParallelConfig(
-            all2all_backend="deepep_high_throughput",
-            data_parallel_size=8,
-        ),
-        compilation_config=CompilationConfig(
-            mode=CompilationMode.VLLM_COMPILE,
-            use_inductor_graph_partition=True,
-            splitting_ops=[
-                "vllm::unified_attention_with_output",
-                "vllm::moe_forward",
-                "vllm::moe_forward_shared",
-            ],
-        ),
-    )
-    splitting_ops = config.compilation_config.splitting_ops
-    assert splitting_ops == [
-        "vllm::unified_attention_with_output",
-        "vllm::moe_forward",
-        "vllm::moe_forward_shared",
-    ]
-
-
 def test_should_split():
     import torch
 

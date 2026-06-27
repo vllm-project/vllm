@@ -23,7 +23,7 @@ __all__ = [
     "MoEPrepareAndFinalizeNoDPEPMonolithic",
     "MoEPrepareAndFinalizeNoDPEPModular",
     "make_moe_prepare_and_finalize_no_dp_ep",
-    # deepep_ht, deepep_ll, and flashinfer_a2a are not
+    # deepep_ll, deepep_v2, and flashinfer_a2a are not
     # imported here as they have optional dependencies (deep_ep, flashinfer).
     # Import them directly from their modules as needed.
 ]

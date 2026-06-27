@@ -1428,14 +1428,14 @@ class VllmConfig:
             a2a_backend = self.parallel_config.all2all_backend
             assert a2a_backend in [
                 "deepep_low_latency",
-                "deepep_high_throughput",
+                "deepep_v2",
                 "nixl_ep",
             ], (
                 "Microbatching currently only supports the deepep_low_latency, "
-                "deepep_high_throughput, and nixl_ep all2all backends. "
+                "deepep_v2, and nixl_ep all2all backends. "
                 f"{a2a_backend} is not supported. To fix use "
                 "--all2all-backend=deepep_low_latency, "
-                "--all2all-backend=deepep_high_throughput, or "
+                "--all2all-backend=deepep_v2, or "
                 "--all2all-backend=nixl_ep and install the matching kernels."
             )
 

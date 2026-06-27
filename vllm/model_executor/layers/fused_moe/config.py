@@ -1041,13 +1041,6 @@ class FusedMoEParallelConfig:
         return self.dp_size > 1 and self.use_ep
 
     @property
-    def use_deepep_ht_kernels(self):
-        return (
-            self.use_all2all_kernels
-            and self.all2all_backend == "deepep_high_throughput"
-        )
-
-    @property
     def use_deepep_ll_kernels(self):
         return self.use_all2all_kernels and self.all2all_backend == "deepep_low_latency"
 
@@ -1392,10 +1385,6 @@ class FusedMoEConfig:
     @property
     def use_ep(self):
         return self.moe_parallel_config.use_ep
-
-    @property
-    def use_deepep_ht_kernels(self):
-        return self.moe_parallel_config.use_deepep_ht_kernels
 
     @property
     def use_deepep_ll_kernels(self):

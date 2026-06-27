@@ -41,7 +41,6 @@ MAX_NUM_SEQS = 64  # Increased from 16 to trigger decode DBO
 # DeepEP backends to test
 DEEPEP_BACKENDS = [
     "deepep_low_latency",
-    "deepep_high_throughput",
 ]
 
 

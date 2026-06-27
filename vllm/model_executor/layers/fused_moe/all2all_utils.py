@@ -40,7 +40,6 @@ logger = init_logger(__name__)
 
 if current_platform.is_cuda_alike():
     if has_deep_ep():
-        from .prepare_finalize.deepep_ht import DeepEPHTPrepareAndFinalize
         from .prepare_finalize.deepep_ll import (
             DEEPEP_QUANT_BLOCK_SHAPE,
             DeepEPLLPrepareAndFinalize,
@@ -91,11 +90,6 @@ def maybe_roundup_layer_hidden_size(
         and all2all backend.
         Original hidden size otherwise.
     """
-    if moe_parallel_config.use_deepep_ht_kernels:
-        hidden_size = DeepEPHTPrepareAndFinalize.maybe_roundup_layer_hidden_size(
-            hidden_size, act_dtype
-        )
-
     if moe_parallel_config.use_deepep_ll_kernels:
         hidden_size = DeepEPLLPrepareAndFinalize.maybe_roundup_layer_hidden_size(
             hidden_size
@@ -159,19 +153,7 @@ def maybe_make_prepare_finalize(
 
     prepare_finalize: FusedMoEPrepareAndFinalize | None = None
 
-    if moe.use_deepep_ht_kernels:
-        assert moe.dp_size == all2all_manager.dp_world_size
-
-        all_to_all_args: dict[str, Any] = dict()
-        handle = all2all_manager.get_handle(all_to_all_args)
-        prepare_finalize = DeepEPHTPrepareAndFinalize(
-            handle,
-            num_dispatchers=all2all_manager.world_size,
-            dp_size=all2all_manager.dp_world_size,
-            rank_expert_offset=all2all_manager.rank * moe.num_local_experts,
-        )
-
-    elif moe.use_deepep_ll_kernels:
+    if moe.use_deepep_ll_kernels:
         assert quant_config is not None
         global_to_physical = physical_to_global = local_expert_global_ids = None
         if routing_tables is not None:

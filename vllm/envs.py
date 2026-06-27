@@ -240,7 +240,6 @@ if TYPE_CHECKING:
     VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
     VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME: str = "VLLM_OBJECT_STORAGE_SHM_BUFFER"
     VLLM_DEEPEP_BUFFER_SIZE_MB: int = 1024
-    VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE: bool = False
     VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL: bool = False
     VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE: bool = True
     VLLM_DEEPEP_V2_PREFER_OVERLAP: bool = False
@@ -1748,12 +1747,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # The size in MB of the buffers (NVL and RDMA) used by DeepEP
     "VLLM_DEEPEP_BUFFER_SIZE_MB": lambda: int(
         os.getenv("VLLM_DEEPEP_BUFFER_SIZE_MB", "1024")
-    ),
-    # Force DeepEP to use intranode kernel for inter-node communication in
-    # high throughput mode. This is useful archive higher prefill throughput
-    # on system supports multi-node nvlink (e.g GB200).
-    "VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE": lambda: bool(
-        int(os.getenv("VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE", "0"))
     ),
     # Allow DeepEP to use MNNVL (multi-node nvlink) for internode_ll kernel,
     # turn this for better latency on GB200 like system

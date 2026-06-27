@@ -240,10 +240,7 @@ class Config:
 
     def needs_deep_ep(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
-        return (
-            info.backend == "deepep_high_throughput"
-            or info.backend == "deepep_low_latency"
-        )
+        return info.backend == "deepep_low_latency"
 
     def needs_deep_ep_v2(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
