@@ -886,7 +886,6 @@ class NemotronHForCausalLM(
 
         # Set MoE hyperparameters
         if self.model.has_moe:
-            self.expert_weights = []
             self.num_expert_groups = config.n_group
 
             self.moe_layers = []
