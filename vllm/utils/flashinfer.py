@@ -228,6 +228,30 @@ def has_flashinfer_trtllm_sparse_mla_dsv4() -> bool:
     return True
 
 
+@functools.cache
+def is_dsv4_sm120_fi_prefill_active() -> bool:
+    """Return ``True`` iff the DeepSeek-V4 FlashInfer SM120 sparse-MLA backend
+    (which owns the packed-prefill path) is the selected attention backend.
+
+    Mirrors the ``_select_dsv4_attn_cls`` gate (deepseek_v4/nvidia/model.py): that
+    backend is chosen only when SM120 decode is opted in, the device is SM12x, and
+    the FI SM120 sparse-MLA kernel (PR3395, flashinfer >= 0.6.13) is importable.
+    The shared ``DeepseekSparseSWAMetadataBuilder`` reads this to gate the
+    prefill-SWA index kernel that ONLY the packed path consumes -- launching it on
+    the default FlashMLA/Triton path faults (``cudaErrorLaunchFailure``). So this
+    must reflect "the packed prefill backend is active", not merely "the kernel is
+    importable".
+    """
+    import vllm.envs as envs
+    from vllm.platforms import current_platform
+
+    return bool(
+        envs.VLLM_DEEPSEEK_V4_FLASHINFER_SM120_DECODE
+        and current_platform.is_device_capability_family(120)
+        and has_flashinfer_trtllm_sparse_mla_dsv4()
+    )
+
+
 def has_flashinfer_sparse_mla_sm120() -> bool:
     """Return ``True`` if FlashInfer sparse MLA decode support is available."""
     if not has_flashinfer():

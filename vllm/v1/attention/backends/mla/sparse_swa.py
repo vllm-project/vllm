@@ -10,6 +10,7 @@ from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.flashinfer import is_dsv4_sm120_fi_prefill_active
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -427,13 +428,18 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         # Prefill SWA indices (paged coords; `token_offset` lets the kernel read at
         # absolute prefill positions while writing from index 0) are consumed ONLY by
         # the FlashInfer SM120 sparse-MLA fork path. The stock FlashMLA/Triton prefill
-        # self-computes and never reads them, so gate the launch behind
-        # VLLM_DEEPSEEK_V4_FLASHINFER_SM120_PREFILL (default off). Running it
-        # unconditionally faulted `_compute_swa_indices_and_lens_kernel` over 32k
-        # prefill rows (unclamped block_table address arithmetic on masked-off lanes
-        # -> cudaErrorLaunchFailure under concurrent load).
+        # self-computes and never reads them, so gate the launch behind both the
+        # backend-active check AND VLLM_DEEPSEEK_V4_FLASHINFER_SM120_PREFILL. This
+        # builder is SHARED across DSv4 backends, so the env flag alone is not enough
+        # now that PREFILL defaults on: without the backend-active gate the default
+        # FlashMLA path would launch this kernel and fault. Running it unconditionally
+        # faulted `_compute_swa_indices_and_lens_kernel` over 32k prefill rows
+        # (unclamped block_table address arithmetic on masked-off lanes ->
+        # cudaErrorLaunchFailure under concurrent load).
         want_prefill_swa = (
-            num_prefill_tokens > 0 and envs.VLLM_DEEPSEEK_V4_FLASHINFER_SM120_PREFILL
+            num_prefill_tokens > 0
+            and is_dsv4_sm120_fi_prefill_active()
+            and envs.VLLM_DEEPSEEK_V4_FLASHINFER_SM120_PREFILL
         )
         if want_prefill_swa:
             prefill_swa_indices = self.prefill_swa_indices[:num_prefill_tokens]

@@ -185,7 +185,12 @@ if TYPE_CHECKING:
     VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL_WARMUP: bool = True
     VLLM_DEEPSEEK_V4_INDEXED_D512_CHUNKED_PREFILL: bool = True
     VLLM_DEEPSEEK_V4_FLASHINFER_SM120_DECODE: bool = False
-    VLLM_DEEPSEEK_V4_FLASHINFER_SM120_PREFILL: bool = False
+    # Default ON: when the SM120 FlashInfer sparse-MLA backend is active (DECODE
+    # opted in + SM12x + kernel present), the packed prefill runner is used by
+    # default. Set =0 to force the FlashMLA indexed-D512 (Triton split/merge)
+    # prefill path. No effect unless that backend is active (see
+    # is_dsv4_sm120_fi_prefill_active).
+    VLLM_DEEPSEEK_V4_FLASHINFER_SM120_PREFILL: bool = True
     VLLM_TRITON_MLA_SPARSE: bool | None = None
     VLLM_TRITON_MLA_SPARSE_TOPK_CHUNK_SIZE: int = 512
     VLLM_TRITON_MLA_SPARSE_QUERY_CHUNK_SIZE: int = 256
@@ -1485,7 +1490,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_DEEPSEEK_V4_FLASHINFER_SM120_DECODE", "0"))
     ),
     "VLLM_DEEPSEEK_V4_FLASHINFER_SM120_PREFILL": lambda: bool(
-        int(os.getenv("VLLM_DEEPSEEK_V4_FLASHINFER_SM120_PREFILL", "0"))
+        int(os.getenv("VLLM_DEEPSEEK_V4_FLASHINFER_SM120_PREFILL", "1"))
     ),
     # Experimental sparse MLA fallback controls.
     # ``VLLM_TRITON_MLA_SPARSE`` unset means auto-select where FlashMLA sparse
