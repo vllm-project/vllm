@@ -105,6 +105,7 @@ Batch invariance has been tested and verified on the following models:
 - **Qwen3 (MoE)**: `Qwen/Qwen3-30B-A3B`, `Qwen/Qwen3-Next-80B-A3B-Instruct`, `Qwen/Qwen3-30B-A3B-Thinking-2507-FP8`
 - **Qwen2.5**: `Qwen/Qwen2.5-0.5B-Instruct`, `Qwen/Qwen2.5-1.5B-Instruct`, `Qwen/Qwen2.5-3B-Instruct`, `Qwen/Qwen2.5-7B-Instruct`, `Qwen/Qwen2.5-14B-Instruct`, `Qwen/Qwen2.5-32B-Instruct`
 - **Llama 3**: Llama3.1 and 3.2 series, `meta-llama/Llama-3.2-3B-Instruct` for example
+- **Phi**: `microsoft/Phi-4-mini-instruct`
 - **GPT-OSS**: `openai/gpt-oss-20b`, `openai/gpt-oss-120b`
 - **Mistral**: `mistralai/Mistral-7B-v0.3`
 
