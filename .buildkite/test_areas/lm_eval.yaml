@@ -65,6 +65,18 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell.txt
 
+- label: LM Eval Small Models (2xL4)
+  key: lm-eval-small-models-tp
+  timeout_in_minutes: 10
+  num_devices: 2
+  optional: true
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  autorun_on_main: true
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small-tp.txt
+
 - label: LM Eval Large Models EP (2xB200)
   key: lm-eval-large-models-ep-2xb200
   timeout_in_minutes: 120
