@@ -87,6 +87,10 @@ class DeepseekV4FlashMLABackend(AttentionBackend):
         return True
 
     @classmethod
+    def supports_sink(cls) -> bool:
+        return True
+
+    @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
         return capability.major in [9, 10]
 

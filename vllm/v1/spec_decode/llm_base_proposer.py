@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import dataclasses
 from importlib.util import find_spec
 from typing import Any, cast
 
@@ -24,6 +25,7 @@ from vllm.model_executor.models.deepseek_eagle3 import Eagle3DeepseekV2ForCausal
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
+from vllm.model_executor.models.qwen3_eagle3 import Eagle3Qwen3ForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
@@ -422,6 +424,21 @@ class SpecDecodeBaseProposer:
             return logits.argmax(dim=-1), None
         if sampling_metadata.all_greedy:
             return logits.argmax(dim=-1), None
+
+        # Parallel drafting (e.g. DFlash) samples num_speculative_tokens rows
+        # per request in a single pass, so logits has batch_size * K rows while
+        # the sampling metadata is per-request. The rows are request-major
+        # (K consecutive slots per request), so repeat_interleave the
+        # per-request temperature to match before probabilistic sampling.
+        temperature = sampling_metadata.temperature
+        if temperature is not None and temperature.shape[0] != logits.shape[0]:
+            assert logits.shape[0] % temperature.shape[0] == 0
+            factor = logits.shape[0] // temperature.shape[0]
+            sampling_metadata = dataclasses.replace(
+                sampling_metadata,
+                temperature=temperature.repeat_interleave(factor, dim=0),
+            )
+
         return compute_probs_and_sample_next_token(
             logits, sampling_metadata, self.use_fp64_gumbel
         )
@@ -473,6 +490,7 @@ class SpecDecodeBaseProposer:
                     Eagle3LlamaForCausalLM,
                     Eagle3DeepseekV2ForCausalLM,
                     DFlashQwen3ForCausalLM,
+                    Eagle3Qwen3ForCausalLM,
                 ),
             )
             target_hidden_states = self.model.combine_hidden_states(

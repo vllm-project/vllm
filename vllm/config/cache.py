@@ -34,6 +34,7 @@ CacheDType = Literal[
     "oscar_k3v4_nc",
     "oscar_3bit_nc",
     "oscar_int2",
+    "int4_per_token_head",
     "int8_per_token_head",
     "fp8_per_token_head",
     "nvfp4",
