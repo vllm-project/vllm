@@ -243,6 +243,7 @@ def emit_function_call_delta_events(
     delta: str,
     function_name: str,
     state: StreamingState,
+    tools: list[Any] | None = None,
 ) -> list[StreamingResponsesResponse]:
     """Emit events for function call argument deltas."""
     events: list[StreamingResponsesResponse] = []
@@ -250,7 +251,7 @@ def emit_function_call_delta_events(
         state.is_first_function_call_delta = True
         state.current_item_id = f"fc_{random_uuid()}"
         state.current_call_id = f"call_{random_uuid()}"
-        unflattened_name, namespace = unflatten_tool_name(function_name)
+        unflattened_name, namespace = unflatten_tool_name(function_name, tools)
         tool_call_item = ResponseFunctionToolCall(
             name=unflattened_name,
             namespace=namespace,
@@ -477,9 +478,10 @@ def emit_function_call_done_events(
     function_name: str,
     arguments: str,
     state: StreamingState,
+    tools: list[Any] | None = None,
 ) -> list[StreamingResponsesResponse]:
     """Emit events when a function call completes."""
-    unflattened_name, namespace = unflatten_tool_name(function_name)
+    unflattened_name, namespace = unflatten_tool_name(function_name, tools)
     events: list[StreamingResponsesResponse] = []
     events.append(
         ResponseFunctionCallArgumentsDoneEvent(
@@ -588,7 +590,7 @@ def emit_content_delta_events(
         fn_names = ctx.function_tool_names
         if is_function_recipient(recipient, fn_names):
             function_name = extract_function_from_recipient(recipient)
-            return emit_function_call_delta_events(delta, function_name, state)
+            return emit_function_call_delta_events(delta, function_name, state, ctx.request.tools)
         elif recipient == "python":
             return emit_code_interpreter_delta_events(delta, state)
         elif recipient.startswith("mcp.") or is_mcp_tool_by_namespace(
@@ -603,6 +605,7 @@ def emit_previous_item_done_events(
     previous_item: HarmonyMessage,
     state: StreamingState,
     function_tool_names: frozenset[str] | None = None,
+    tools: list[Any] | None = None,
 ) -> list[StreamingResponsesResponse]:
     """Emit done events for the previous item when expecting a new start.
 
@@ -614,7 +617,7 @@ def emit_previous_item_done_events(
         # Deal with tool call
         if is_function_recipient(previous_item.recipient, function_tool_names):
             function_name = extract_function_from_recipient(previous_item.recipient)
-            return emit_function_call_done_events(function_name, text, state)
+            return emit_function_call_done_events(function_name, text, state, tools)
         elif previous_item.recipient == "python":
             return emit_code_interpreter_completion_events(previous_item, state)
         elif (
@@ -1039,11 +1042,12 @@ def emit_simple_tool_call_open(
     state: SimpleStreamingState,
     name: str,
     index: int | None,
+    tools: list[Any] | None = None,
 ) -> list[StreamingResponsesResponse]:
     state.current_state = _StateType.TOOL_CALL
     state.current_item_id = random_uuid()
     state.tool_call_id = f"call_{random_uuid()}"
-    unflattened_name, namespace = unflatten_tool_name(name)
+    unflattened_name, namespace = unflatten_tool_name(name, tools)
     state.tool_call_name = unflattened_name
     state.tool_call_namespace = namespace
     state.tool_call_index = index
@@ -1193,8 +1197,9 @@ class SimpleStreamingEventProcessor:
         ),
     }
 
-    def __init__(self, state: SimpleStreamingState | None = None) -> None:
+    def __init__(self, state: SimpleStreamingState | None = None, tools: list[Any] | None = None) -> None:
         self.state = state or SimpleStreamingState()
+        self.tools = tools
 
     def resolve_target_state(
         self, delta_message: DeltaMessage
@@ -1252,7 +1257,7 @@ class SimpleStreamingEventProcessor:
         if target_state == _StateType.TOOL_CALL:
             assert tool_call is not None
             return handlers.open_fn(
-                self.state, tool_call.function.name, tool_call.index
+                self.state, tool_call.function.name, tool_call.index, self.tools
             )
         return handlers.open_fn(self.state)
 

@@ -1069,6 +1069,7 @@ class OpenAIServingResponses(OpenAIServing):
                 content=content,
                 tool_calls=tool_calls,
                 logprobs=logprobs,
+                tools=request.tools,
             )
 
         # Fallback when no parser is configured
@@ -1099,9 +1100,9 @@ class OpenAIServingResponses(OpenAIServing):
         num_init_messages = context.num_init_messages
         fn_names = context.function_tool_names
         for msg in context.messages[num_init_messages:]:
-            output_items.extend(harmony_to_response_output(msg, fn_names))
+            output_items.extend(harmony_to_response_output(msg, fn_names, tools=context.request.tools))
         # Handle the generation stopped in the middle (if any).
-        last_items = parser_state_to_response_output(context.parser, fn_names)
+        last_items = parser_state_to_response_output(context.parser, fn_names, tools=context.request.tools)
         if last_items:
             output_items.extend(last_items)
         return output_items
@@ -1350,7 +1351,7 @@ class OpenAIServingResponses(OpenAIServing):
             [StreamingResponsesResponse], StreamingResponsesResponse
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
-        processor = SimpleStreamingEventProcessor()
+        processor = SimpleStreamingEventProcessor(tools=request.tools)
 
         def _get_logprobs(
             output: CompletionOutput,
@@ -1431,7 +1432,7 @@ class OpenAIServingResponses(OpenAIServing):
                 if len(ctx.parser.messages) > 0:
                     previous_item = ctx.parser.messages[-1]
                     for event in emit_previous_item_done_events(
-                        previous_item, state, ctx.function_tool_names
+                        previous_item, state, ctx.function_tool_names, tools=ctx.request.tools
                     ):
                         yield _increment_sequence_number_and_return(event)
                 state.reset_for_new_item()

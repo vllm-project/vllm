@@ -40,11 +40,20 @@ from vllm.utils import random_uuid
 logger = init_logger(__name__)
 
 
-def unflatten_tool_name(function_name: str) -> tuple[str, str | None]:
-    if "__" in function_name:
-        parts = function_name.rsplit("__", 1)
-        if len(parts) == 2:
-            return parts[1], parts[0]
+def unflatten_tool_name(
+    function_name: str,
+    tools: list[Any] | None = None,
+) -> tuple[str, str | None]:
+    if tools is not None:
+        for tool in tools:
+            tool_type = tool.get("type") if isinstance(tool, dict) else getattr(tool, "type", None)
+            if tool_type == "namespace":
+                namespace_name = tool.get("name") if isinstance(tool, dict) else getattr(tool, "name", "")
+                namespace_tools = tool.get("tools") if isinstance(tool, dict) else getattr(tool, "tools", [])
+                for subtool in namespace_tools:
+                    sub_name = subtool.get("name") if isinstance(subtool, dict) else getattr(subtool, "name", "")
+                    if function_name == f"{namespace_name}__{sub_name}":
+                        return sub_name, namespace_name
     return function_name, None
 
 def build_response_output_items(
@@ -52,6 +61,7 @@ def build_response_output_items(
     content: str | None,
     tool_calls: list[FunctionCall] | None,
     logprobs: list[Logprob] | None = None,
+    tools: list[Any] | None = None,
 ) -> list[ResponseOutputItem]:
     outputs: list[ResponseOutputItem] = []
 
@@ -95,8 +105,8 @@ def build_response_output_items(
                     or make_tool_call_id(func_name=tool_call.name, idx=idx),
                     type="function_call",
                     status="completed",
-                    name=unflatten_tool_name(tool_call.name)[0],
-                    namespace=unflatten_tool_name(tool_call.name)[1],
+                    name=unflatten_tool_name(tool_call.name, tools)[0],
+                    namespace=unflatten_tool_name(tool_call.name, tools)[1],
                     arguments=tool_call.arguments,
                 )
             )
