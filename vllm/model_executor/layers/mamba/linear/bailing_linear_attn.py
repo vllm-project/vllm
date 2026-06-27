@@ -33,9 +33,7 @@ from vllm.model_executor.layers.mamba.linear.base import LinearAttention
 from vllm.model_executor.layers.mamba.linear.minimax_linear_attn import (
     MiniMaxText01LinearAttention,
     MiniMaxText01LinearKernel,
-    clear_linear_attention_cache_for_new_sequences,
     linear_attention_decode,
-    linear_attention_prefill_and_mix,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
@@ -58,6 +56,91 @@ def _build_rope_parameters(config: PretrainedConfig) -> dict | None:
         rope_parameters.update(rope_scaling)
 
     return rope_parameters or None
+
+
+def clear_linear_attention_cache_for_new_sequences(
+    kv_cache: torch.Tensor,
+    state_indices_tensor: torch.Tensor,
+    attn_metadata: LinearAttentionMetadata,
+) -> None:
+    num_prefills = getattr(attn_metadata, "num_prefills", 0)
+    if num_prefills <= 0:
+        return
+
+    num_decodes = getattr(attn_metadata, "num_decodes", 0)
+    prefill_state_indices = getattr(attn_metadata, "state_indices_tensor_p", None)
+    for prefill_idx in range(num_prefills):
+        if num_decodes + prefill_idx + 1 >= len(attn_metadata.query_start_loc):
+            break
+        q_start = attn_metadata.query_start_loc[num_decodes + prefill_idx]
+        q_end = attn_metadata.query_start_loc[num_decodes + prefill_idx + 1]
+        query_len = q_end - q_start
+        context_len = attn_metadata.seq_lens[num_decodes + prefill_idx] - query_len
+        if context_len == 0:
+            if prefill_state_indices is not None:
+                block_to_clear = prefill_state_indices[prefill_idx]
+            else:
+                block_to_clear = state_indices_tensor[num_decodes + prefill_idx]
+            kv_cache[block_to_clear, ...] = 0
+
+
+def linear_attention_prefill_and_mix(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    kv_cache: torch.Tensor,
+    state_indices_tensor: torch.Tensor,
+    attn_metadata: LinearAttentionMetadata,
+    slope_rate: torch.Tensor,
+    block_size: int,
+    decode_fn,
+    prefix_fn,
+    layer_idx: int | None = None,
+) -> torch.Tensor:
+    hidden = []
+    req_offset = getattr(attn_metadata, "num_decodes", 0)
+    prefill_state_indices = getattr(attn_metadata, "state_indices_tensor_p", None)
+    for _prefill_idx in range(getattr(attn_metadata, "num_prefills", 0)):
+        if req_offset + _prefill_idx + 1 >= len(attn_metadata.query_start_loc):
+            break
+        if prefill_state_indices is not None and _prefill_idx >= len(
+            prefill_state_indices
+        ):
+            break
+        if prefill_state_indices is None and _prefill_idx >= len(state_indices_tensor):
+            break
+        _start = attn_metadata.query_start_loc[req_offset + _prefill_idx]
+        _end = attn_metadata.query_start_loc[req_offset + _prefill_idx + 1]
+        if prefill_state_indices is not None:
+            slot_id = prefill_state_indices[_prefill_idx]
+        else:
+            slot_id = state_indices_tensor[req_offset + _prefill_idx]
+        qs = q[_start:_end].transpose(0, 1).contiguous()
+        ks = k[_start:_end].transpose(0, 1).contiguous()
+        vs = v[_start:_end].transpose(0, 1).contiguous()
+        slice_layer_cache = kv_cache[slot_id, ...]
+        out_slice = prefix_fn(
+            qs,
+            ks,
+            vs,
+            slice_layer_cache,
+            slope_rate,
+            block_size,
+            layer_idx=layer_idx,
+        )
+        hidden.append(out_slice.contiguous())
+
+    if attn_metadata.num_decode_tokens > 0:
+        hidden_decode = decode_fn(
+            q, k, v, kv_cache, state_indices_tensor, attn_metadata
+        )
+        hidden.insert(0, hidden_decode)
+
+    if not hidden:
+        return torch.empty((0, q.size(1) * q.size(2)), device=q.device, dtype=q.dtype)
+
+    hidden = torch.concat(hidden, dim=0).contiguous()
+    return hidden
 
 
 class BailingGroupRMSNormGate(RMSNormGated):

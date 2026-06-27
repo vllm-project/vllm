@@ -32,20 +32,16 @@ def clear_linear_attention_cache_for_new_sequences(
     if num_prefills <= 0:
         return
 
-    num_decodes = getattr(attn_metadata, "num_decodes", 0)
-    prefill_state_indices = getattr(attn_metadata, "state_indices_tensor_p", None)
+    num_decode_tokens = getattr(attn_metadata, "num_decode_tokens", 0)
     for prefill_idx in range(num_prefills):
-        if num_decodes + prefill_idx + 1 >= len(attn_metadata.query_start_loc):
-            break
-        q_start = attn_metadata.query_start_loc[num_decodes + prefill_idx]
-        q_end = attn_metadata.query_start_loc[num_decodes + prefill_idx + 1]
+        q_start = attn_metadata.query_start_loc[num_decode_tokens + prefill_idx]
+        q_end = attn_metadata.query_start_loc[num_decode_tokens + prefill_idx + 1]
         query_len = q_end - q_start
-        context_len = attn_metadata.seq_lens[num_decodes + prefill_idx] - query_len
+        context_len = (
+            attn_metadata.seq_lens[num_decode_tokens + prefill_idx] - query_len
+        )
         if context_len == 0:
-            if prefill_state_indices is not None:
-                block_to_clear = prefill_state_indices[prefill_idx]
-            else:
-                block_to_clear = state_indices_tensor[num_decodes + prefill_idx]
+            block_to_clear = state_indices_tensor[num_decode_tokens + prefill_idx]
             kv_cache[block_to_clear, ...] = 0
 
 
@@ -85,23 +81,15 @@ def linear_attention_prefill_and_mix(
     layer_idx: int | None = None,
 ) -> torch.Tensor:
     hidden = []
-    req_offset = getattr(attn_metadata, "num_decodes", 0)
-    prefill_state_indices = getattr(attn_metadata, "state_indices_tensor_p", None)
     for _prefill_idx in range(getattr(attn_metadata, "num_prefills", 0)):
-        if req_offset + _prefill_idx + 1 >= len(attn_metadata.query_start_loc):
+        if _prefill_idx >= len(attn_metadata.query_start_loc):
             break
-        if prefill_state_indices is not None and _prefill_idx >= len(
-            prefill_state_indices
-        ):
+        if _prefill_idx >= len(state_indices_tensor):
             break
-        if prefill_state_indices is None and _prefill_idx >= len(state_indices_tensor):
-            break
-        _start = attn_metadata.query_start_loc[req_offset + _prefill_idx]
-        _end = attn_metadata.query_start_loc[req_offset + _prefill_idx + 1]
-        if prefill_state_indices is not None:
-            slot_id = prefill_state_indices[_prefill_idx]
-        else:
-            slot_id = state_indices_tensor[req_offset + _prefill_idx]
+        offset = attn_metadata.num_decode_tokens
+        _start = attn_metadata.query_start_loc[offset + _prefill_idx]
+        _end = attn_metadata.query_start_loc[offset + _prefill_idx + 1]
+        slot_id = state_indices_tensor[offset + _prefill_idx]
         qs = q[_start:_end].transpose(0, 1).contiguous()
         ks = k[_start:_end].transpose(0, 1).contiguous()
         vs = v[_start:_end].transpose(0, 1).contiguous()
@@ -124,7 +112,7 @@ def linear_attention_prefill_and_mix(
         hidden.insert(0, hidden_decode)
 
     if not hidden:
-        return torch.empty((0, q.size(1) * q.size(2)), device=q.device, dtype=q.dtype)
+        return torch.empty((0, q.size(-1)), device=q.device, dtype=q.dtype)
 
     hidden = torch.concat(hidden, dim=0).contiguous()
     return hidden
