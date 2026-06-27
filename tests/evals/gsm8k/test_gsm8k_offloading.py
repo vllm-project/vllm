@@ -1,19 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-GSM8K correctness test with OffloadingConnector (CPU KV offloading).
+GSM8K correctness test for CPU KV offloading connectors.
 
 Regression guard for stride computation bugs in the offloading worker
 (e.g. https://github.com/vllm-project/vllm/pull/46888) and silent KV
 cache data corruption during CPU offloading.
 
-Covers three architecture families:
+Covers both KV offloading connectors (OffloadingConnector and
+SimpleCPUOffloadConnector) across three architecture families:
   - Hybrid SSM (NemotronH: attention + Mamba layers)
   - Dense transformer (Gemma 4)
   - MoE (DeepSeek-V4-Flash)
 
 Usage:
-    pytest -s -v tests/evals/gsm8k/test_gsm8k_offloading.py
+    pytest -s -v evals/gsm8k/test_gsm8k_offloading.py
 """
 
 import json
@@ -33,24 +34,38 @@ NUM_QUESTIONS = 200
 NUM_FEWSHOT = 5
 
 
-def _kv_transfer_config(cpu_gib: int = 4) -> str:
-    return json.dumps(
-        {
-            "kv_connector": "OffloadingConnector",
-            "kv_role": "kv_both",
-            "kv_connector_extra_config": {
-                "spec_name": "CPUOffloadingSpec",
-                "cpu_bytes_to_use": cpu_gib << 30,
-                "eviction_policy": "lru",
-            },
-        }
-    )
+def _kv_transfer_config(connector: str, cpu_gib: int = 4) -> str:
+    if connector == "OffloadingConnector":
+        return json.dumps(
+            {
+                "kv_connector": "OffloadingConnector",
+                "kv_role": "kv_both",
+                "kv_connector_extra_config": {
+                    "spec_name": "CPUOffloadingSpec",
+                    "cpu_bytes_to_use": cpu_gib << 30,
+                    "eviction_policy": "lru",
+                },
+            }
+        )
+    elif connector == "SimpleCPUOffloadConnector":
+        return json.dumps(
+            {
+                "kv_connector": "SimpleCPUOffloadConnector",
+                "kv_role": "kv_both",
+                "kv_connector_extra_config": {
+                    "cpu_bytes_to_use": cpu_gib << 30,
+                },
+            }
+        )
+    else:
+        raise ValueError(f"Unknown connector: {connector}")
 
 
 @dataclass
 class OffloadingModelConfig:
     id: str
     model: str
+    connector: str
     accuracy_threshold: float
     tolerance: float = 0.05
     extra_server_args: list[str] = field(default_factory=list)
@@ -59,21 +74,25 @@ class OffloadingModelConfig:
 
 
 MODELS = [
+    # ── OffloadingConnector ──────────────────────────────────────────
     OffloadingModelConfig(
-        id="nemotron-h-8b",
+        id="offloading-nemotron-h-8b",
         model="nvidia/Nemotron-H-8B-Base-8K",
+        connector="OffloadingConnector",
         # Baseline ~0.49 on 200 questions (measured on GB200).
         accuracy_threshold=0.45,
     ),
     OffloadingModelConfig(
-        id="gemma-4-e4b-it",
+        id="offloading-gemma-4-e4b-it",
         model="google/gemma-4-E4B-it",
+        connector="OffloadingConnector",
         # Baseline ~0.64 on 200 questions (measured on GB200).
         accuracy_threshold=0.55,
     ),
     OffloadingModelConfig(
-        id="deepseek-v4-flash",
+        id="offloading-deepseek-v4-flash",
         model="deepseek-ai/DeepSeek-V4-Flash",
+        connector="OffloadingConnector",
         # Baseline ~0.97 on 200 questions (measured on GB200).
         accuracy_threshold=0.90,
         extra_server_args=[
@@ -88,6 +107,19 @@ MODELS = [
         cpu_offload_gib=16,
         startup_timeout=1200,
     ),
+    # ── SimpleCPUOffloadConnector ────────────────────────────────────
+    OffloadingModelConfig(
+        id="simple-nemotron-h-8b",
+        model="nvidia/Nemotron-H-8B-Base-8K",
+        connector="SimpleCPUOffloadConnector",
+        accuracy_threshold=0.45,
+    ),
+    OffloadingModelConfig(
+        id="simple-gemma-4-e4b-it",
+        model="google/gemma-4-E4B-it",
+        connector="SimpleCPUOffloadConnector",
+        accuracy_threshold=0.55,
+    ),
 ]
 
 
@@ -100,7 +132,7 @@ def test_gsm8k_offloading_correctness(cfg: OffloadingModelConfig):
         "--enable-prefix-caching",
         "--no-disable-hybrid-kv-cache-manager",
         "--kv-transfer-config",
-        _kv_transfer_config(cfg.cpu_offload_gib),
+        _kv_transfer_config(cfg.connector, cfg.cpu_offload_gib),
         "--trust-remote-code",
         "--disable-uvicorn-access-log",
         *cfg.extra_server_args,
@@ -123,7 +155,7 @@ def test_gsm8k_offloading_correctness(cfg: OffloadingModelConfig):
         )
 
         print(
-            f"GSM8K + Offloading ({cfg.id}): "
+            f"GSM8K + {cfg.connector} ({cfg.id}): "
             f"accuracy={results['accuracy']:.4f}, "
             f"invalid_rate={results['invalid_rate']:.3f}, "
             f"latency={results['latency']:.1f}s"
