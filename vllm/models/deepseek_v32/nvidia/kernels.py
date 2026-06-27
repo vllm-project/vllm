@@ -28,45 +28,6 @@ def _rms_norm(x, w, eps, HIDDEN_SIZE: tl.constexpr):
 
 
 @triton.jit
-def _layer_norm(x, w, b, eps, mask, HIDDEN_SIZE: tl.constexpr):
-    x = x.to(tl.float32)
-    mean = tl.sum(x, axis=0) / HIDDEN_SIZE
-    diff = tl.where(mask, x - mean, 0.0)
-    var = tl.sum(diff * diff, axis=0) / HIDDEN_SIZE
-    rstd = tl.rsqrt(var + eps)
-
-    w = w.to(tl.float32)
-    b = b.to(tl.float32)
-    return (x - mean) * rstd * w + b
-
-
-@triton.jit
-def _rope(
-    base_ptr,
-    head_stride,
-    cos,
-    sin,
-    NUM_HEADS: tl.constexpr,
-    HALF_ROT_DIM: tl.constexpr,
-    START_OFFSET: tl.constexpr,
-    INTERLEAVED: tl.constexpr,
-):
-    head_offset = tl.arange(0, NUM_HEADS)
-    dim_offset = tl.arange(0, HALF_ROT_DIM)
-    base_ptr = base_ptr + head_offset[:, None] * head_stride + START_OFFSET
-    if INTERLEAVED:
-        x1 = tl.load(base_ptr + dim_offset * 2).to(tl.float32)
-        x2 = tl.load(base_ptr + dim_offset * 2 + 1).to(tl.float32)
-        tl.store(base_ptr + dim_offset * 2, x1 * cos - x2 * sin)
-        tl.store(base_ptr + dim_offset * 2 + 1, x2 * cos + x1 * sin)
-    else:
-        x1 = tl.load(base_ptr + dim_offset).to(tl.float32)
-        x2 = tl.load(base_ptr + dim_offset + HALF_ROT_DIM).to(tl.float32)
-        tl.store(base_ptr + dim_offset, x1 * cos - x2 * sin)
-        tl.store(base_ptr + dim_offset + HALF_ROT_DIM, x2 * cos + x1 * sin)
-
-
-@triton.jit
 def _get_cos_sin(
     cos_sin_cache_ptr,
     cos_sin_cache_stride,
@@ -158,8 +119,6 @@ def _fused_norm_rope_kernel(
     index_k_rope_cos_sin_cache_ptr,
     index_k_rope_cos_sin_cache_stride,
     INDEX_K_HALF_ROT_DIM: tl.constexpr,
-    # Index K fp32 scratch buffer for layernorm → RoPE handoff
-    index_k_normed_ptr,
     # Cache params (shared by indexer K and MLA)
     slot_mapping_ptr,
     # Index K FP8 cache
@@ -276,33 +235,32 @@ def _fused_norm_rope_kernel(
         # Fused: Index K LayerNorm + RoPE + FP8 quant + cache write.
         # Eliminates the separate indexer_k_quant_and_cache kernel launch.
 
-        # 1. LayerNorm → fp32 temp buffer
         index_k_block = tl.arange(0, INDEX_K_BLOCK_SIZE)
         index_k_mask = index_k_block < INDEX_K_DIM
         index_k = tl.load(
             index_k_ptr + tok_idx * index_k_stride + index_k_block,
             mask=index_k_mask,
             other=0.0,
-        )
-        index_k_w = tl.load(index_k_layer_norm_w_ptr + index_k_block, mask=index_k_mask)
+        ).to(tl.float32)
+        index_k_w = tl.load(
+            index_k_layer_norm_w_ptr + index_k_block, mask=index_k_mask
+        ).to(tl.float32)
         index_k_b = tl.load(
             index_k_layer_norm_bias_ptr + index_k_block, mask=index_k_mask
-        )
-        normed = _layer_norm(
-            index_k,
-            index_k_w,
-            index_k_b,
-            index_k_layer_norm_eps,
-            index_k_mask,
-            INDEX_K_DIM,
-        )
-        # Write to a fp32 scratch buffer so RoPE can read the two
-        # halves without Triton pointer-aliasing issues.
-        scratch = index_k_normed_ptr + tok_idx * INDEX_K_DIM
-        tl.store(scratch + index_k_block, normed, mask=index_k_mask)
+        ).to(tl.float32)
+
+        # 1. LayerNorm. Keep (mean, rstd) so the RoPE rotation partner can be
+        #    re-normalized in registers below, avoiding a global scratch buffer.
+        mean = tl.sum(index_k, axis=0) / INDEX_K_DIM
+        diff = tl.where(index_k_mask, index_k - mean, 0.0)
+        var = tl.sum(diff * diff, axis=0) / INDEX_K_DIM
+        rstd = tl.rsqrt(var + index_k_layer_norm_eps)
+        normed = (index_k - mean) * rstd * index_k_w + index_k_b
 
         # 2. RoPE on the rotation region. Supports both interleaved (adjacent
-        #    pairs, e.g. GLM-5.2) and NeoX (split-half, e.g. DeepSeek-V3.2).
+        #    pairs, e.g. GLM-5.2) and NeoX (split-half, e.g. DeepSeek-V3.2). The
+        #    rotation partner is gathered from the read-only inputs and
+        #    re-normalized with the same (mean, rstd) — no scratch, no atomics.
         pos = tl.load(pos_ptr + tok_idx)
         in_rope = index_k_block < 2 * INDEX_K_HALF_ROT_DIM
         if INDEX_ROPE_INTERLEAVE:
@@ -332,14 +290,23 @@ def _fused_norm_rope_kernel(
             mask=in_rope,
             other=0.0,
         ).to(tl.float32)
-        full = tl.load(scratch + index_k_block, mask=index_k_mask)
-        # Atomic read for the partner: tl.atomic_add(ptr, 0) returns the
-        # current value with guaranteed store visibility, avoiding the
-        # Triton compiler's aliasing issue with different offset expressions.
-        zeros = tl.zeros([INDEX_K_BLOCK_SIZE], dtype=tl.float32)
-        partner = tl.atomic_add(scratch + partner_offs, zeros, mask=index_k_mask)
-        roped = full * cos_full + sign * partner * sin_full
-        result = tl.where(in_rope, roped, full)
+        # normed[partner_offs] == (raw_partner - mean) * rstd * w_partner +
+        # b_partner: gather the raw partner and its norm affine (read-only
+        # loads), then apply the same per-token mean/rstd.
+        raw_partner = tl.load(
+            index_k_ptr + tok_idx * index_k_stride + partner_offs,
+            mask=index_k_mask,
+            other=0.0,
+        ).to(tl.float32)
+        w_partner = tl.load(
+            index_k_layer_norm_w_ptr + partner_offs, mask=index_k_mask
+        ).to(tl.float32)
+        b_partner = tl.load(
+            index_k_layer_norm_bias_ptr + partner_offs, mask=index_k_mask
+        ).to(tl.float32)
+        normed_partner = (raw_partner - mean) * rstd * w_partner + b_partner
+        roped = normed * cos_full + sign * normed_partner * sin_full
+        result = tl.where(in_rope, roped, normed)
 
         # 3. FP8 quantize + cache write from registers.
         #    No need to write back to index_k_ptr — the only consumer
@@ -446,14 +413,6 @@ def fused_norm_rope(
         mla_entry_stride = 0
         mla_k_scale = torch.ones(1, dtype=torch.float32, device=device)
 
-    # fp32 scratch buffer for layernorm output → RoPE handoff (indexer only).
-    if has_indexer:
-        index_k_normed = torch.empty(
-            num_tokens, index_k_dim, dtype=torch.float32, device=device
-        )
-    else:
-        index_k_normed = _dummy((1, 1), torch.float32, device)
-
     if q_c_out is None:
         q_c_out = torch.empty_like(q_c)
     _fused_norm_rope_kernel[(4, num_tokens)](
@@ -490,7 +449,6 @@ def fused_norm_rope(
         index_k_rope_cos_sin_cache,
         index_k_rope_cos_sin_cache.stride(0),
         index_k_rope_cos_sin_cache.shape[-1] // 2,
-        index_k_normed,
         # Cache params
         slot_mapping,
         indexer_k_cache,
@@ -642,39 +600,50 @@ def _fused_q_kernel(
                 )
         return
     elif pid == 1:
-        # Index Q RoPE
+        # Index Q RoPE + fp8 quant, all in registers. The roped bf16 index_q is
+        # never consumed (only the fp8 below is), so we avoid an in-place
+        # store-then-reload round-trip.
         if not HAS_INDEXER:
             return
         if head_idx >= NUM_INDEX_Q_HEADS:
             return
 
         pos = tl.load(pos_ptr + tok_idx)
-        cos, sin = _get_cos_sin(
-            index_q_cos_sin_ptr,
-            index_q_cos_sin_stride,
-            pos,
-            INDEX_Q_HALF_ROT_DIM,
-        )
-        _rope(
-            index_q_ptr + tok_idx * index_q_stride0 + head_idx * index_q_stride1,
-            0,
-            cos,
-            sin,
-            1,
-            INDEX_Q_HALF_ROT_DIM,
-            0,
-            INDEX_ROPE_INTERLEAVE,
-        )
-
-        # Index Q Quantize
         index_q_block = tl.arange(0, INDEX_Q_HEAD_DIM)
-        index_q = tl.load(
-            index_q_ptr
-            + tok_idx * index_q_stride0
-            + head_idx * index_q_stride1
-            + index_q_block
-        )
+        iq_base = index_q_ptr + tok_idx * index_q_stride0 + head_idx * index_q_stride1
+        index_q = tl.load(iq_base + index_q_block).to(tl.float32)
 
+        # RoPE in registers (interleaved for GLM-5.2, NeoX for DeepSeek-V3.2),
+        # gathering the rotation partner from the read-only input.
+        in_rope = index_q_block < 2 * INDEX_Q_HALF_ROT_DIM
+        if INDEX_ROPE_INTERLEAVE:
+            cos_idx = index_q_block // 2
+            partner_offs = tl.where(in_rope, index_q_block ^ 1, index_q_block)
+            sign = tl.where(index_q_block % 2 == 0, -1.0, 1.0)
+        else:
+            cos_idx = index_q_block % INDEX_Q_HALF_ROT_DIM
+            partner_offs = tl.where(
+                in_rope, index_q_block ^ INDEX_Q_HALF_ROT_DIM, index_q_block
+            )
+            sign = tl.where(index_q_block < INDEX_Q_HALF_ROT_DIM, -1.0, 1.0)
+        cos_full = tl.load(
+            index_q_cos_sin_ptr + pos * index_q_cos_sin_stride + cos_idx,
+            mask=in_rope,
+            other=1.0,
+        ).to(tl.float32)
+        sin_full = tl.load(
+            index_q_cos_sin_ptr
+            + pos * index_q_cos_sin_stride
+            + INDEX_Q_HALF_ROT_DIM
+            + cos_idx,
+            mask=in_rope,
+            other=0.0,
+        ).to(tl.float32)
+        partner = tl.load(iq_base + partner_offs).to(tl.float32)
+        roped = index_q * cos_full + sign * partner * sin_full
+        index_q = tl.where(in_rope, roped, index_q)
+
+        # Index Q Quantize (from registers)
         index_q_fp8, index_q_scale = _fp8_ue8m0_quantize(index_q)
         tl.store(
             index_q_fp8_ptr
@@ -783,7 +752,10 @@ def fused_q(
         index_weights_out.stride(0),
         HAS_INDEXER=has_indexer,
         INDEX_ROPE_INTERLEAVE=index_rope_interleave,
-        num_warps=1,  # TODO: Tune this
+        # num_warps=1 is optimal here: each program is a single 128-element
+        # rope+quant, so the kernel is program-count/occupancy bound, not
+        # per-program compute bound (swept 1/2/4/8 — 1 wins or ties everywhere).
+        num_warps=1,
     )
     return index_q_fp8, index_weights_out, mqa_q_fp8
 

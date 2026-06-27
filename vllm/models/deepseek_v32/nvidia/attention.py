@@ -470,6 +470,7 @@ class DeepseekV32Attention(MLAAttention):
                 self.topk_indices_buffer,
                 True,  # skip_k_cache_insert
                 False,  # use_fp4_cache
+                True,  # skip_topk_buffer_clear (fused_norm_rope already did it)
             )
 
         num_actual = attn_metadata.num_actual_tokens
