@@ -486,7 +486,6 @@ class GPUModelRunner(
 
         self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
         self.is_mm_prefix_lm = self.model_config.is_mm_prefix_lm
-        self.rswa_window = self.model_config.rswa_window
 
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
@@ -744,14 +743,6 @@ class GPUModelRunner(
         self.num_scheduled_tokens = self._make_buffer(
             self.max_num_reqs, dtype=torch.int32
         )
-        # R-SWA: per-request prompt lengths, kept as a persistent CUDA-graph-
-        # safe buffer (same device address across steps so captured graphs read
-        # the live values on every replay).
-        self.rswa_prefix_lens_gpu: torch.Tensor | None = None
-        if self.rswa_window is not None:
-            self.rswa_prefix_lens_gpu = torch.zeros(
-                self.max_num_reqs, dtype=torch.int32, device=self.device
-            )
 
         self.encoder_seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
         if self.dcp_world_size > 1:
@@ -2344,23 +2335,12 @@ class GPUModelRunner(
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 req_doc_ranges[req_idx] = image_doc_ranges
 
-        # Reference Sliding Window Attention (R-SWA): the prompt/image tokens
-        # form a globally-visible prefix while generated tokens use a sliding
-        # window. Pass the per-request prompt length so the attention mask can
-        # keep the prefix globally visible.
-        #
-        # IMPORTANT: we must write into the pre-allocated persistent GPU buffer
-        # (self.rswa_prefix_lens_gpu) rather than creating a new tensor with
-        # `.to(device)`.  CUDA graphs capture the *address* of aux_tensors[0]
-        # at recording time; allocating a fresh tensor on every step would leave
-        # the graph reading stale capture-time zeros on every replay.
+        # Reference Sliding Window Attention (R-SWA): pass per-request prompt
+        # lengths so the attention backend can keep the prefix globally visible.
+        # The backend owns the persistent CUDA-graph-safe GPU buffer.
         rswa_prefix_lens = None
-        if self.rswa_window is not None:
-            assert self.rswa_prefix_lens_gpu is not None
-            self.rswa_prefix_lens_gpu[:num_reqs_padded].copy_(
-                num_prompt_tokens_cpu, non_blocking=True
-            )
-            rswa_prefix_lens = self.rswa_prefix_lens_gpu[:num_reqs_padded]
+        if self.model_config.rswa_window is not None:
+            rswa_prefix_lens = num_prompt_tokens_cpu
 
         cm_base = CommonAttentionMetadata(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
@@ -2380,7 +2360,6 @@ class GPUModelRunner(
             positions=self.positions[:num_tokens_padded],
             mm_req_doc_ranges=req_doc_ranges,
             rswa_prefix_lens=rswa_prefix_lens,
-            rswa_window=self.rswa_window,
         )
 
         if self.dcp_world_size > 1:

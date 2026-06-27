@@ -15,7 +15,6 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
-    RSWAManager,
     SingleTypeKVCacheManager,
     get_manager_for_kv_cache_spec,
 )
@@ -330,7 +329,10 @@ class KVCacheCoordinator(ABC):
         ]
 
     def remove_skipped_blocks(
-        self, request_id: str, total_computed_tokens: int
+        self,
+        request_id: str,
+        total_computed_tokens: int,
+        num_prompt_tokens: int | None = None,
     ) -> None:
         """
         Remove the blocks that are no longer needed from `blocks` and replace
@@ -340,29 +342,14 @@ class KVCacheCoordinator(ABC):
             request_id: The request ID.
             total_computed_tokens: The total number of computed tokens, including
                 local computed tokens and external computed tokens.
+            num_prompt_tokens: Optional prompt length. R-SWA managers use this to
+                free gap blocks between the prefill tail and decode window; other
+                manager types ignore it.
         """
         for manager in self.single_type_managers:
-            manager.remove_skipped_blocks(request_id, total_computed_tokens)
-
-    def remove_gap_blocks(
-        self,
-        request_id: str,
-        prefix_len: int,
-        total_computed_tokens: int,
-    ) -> None:
-        """Free R-SWA gap blocks (between prefill tail and decode window).
-
-        Only RSWAManager instances perform actual eviction; other manager types
-        are silently skipped.
-
-        Args:
-            request_id: The request ID.
-            prefix_len: Number of prompt tokens (the R-SWA evict floor).
-            total_computed_tokens: Tokens whose KV has been written so far.
-        """
-        for manager in self.single_type_managers:
-            if isinstance(manager, RSWAManager):
-                manager.remove_gap_blocks(request_id, prefix_len, total_computed_tokens)
+            manager.remove_skipped_blocks(
+                request_id, total_computed_tokens, num_prompt_tokens
+            )
 
     def get_blocks(self, request_id: str) -> tuple[list[KVCacheBlock], ...]:
         """

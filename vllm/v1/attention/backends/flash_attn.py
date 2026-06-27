@@ -396,6 +396,19 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         # populated on first build() call.
         self.aot_sliding_window: tuple[int, int] | None = None
 
+        # R-SWA: persistent CUDA-graph-safe buffers owned by this builder.
+        self.rswa_window: int | None = self.model_config.rswa_window
+        self.persistent_rswa_prefix_lens: torch.Tensor | None = None
+        self.persistent_rswa_window_tensor: torch.Tensor | None = None
+        if self.rswa_window is not None:
+            max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+            self.persistent_rswa_prefix_lens = torch.zeros(
+                max_num_reqs, dtype=torch.int32, device=self.device
+            )
+            self.persistent_rswa_window_tensor = torch.tensor(
+                [self.rswa_window], dtype=torch.int32, device=self.device
+            )
+
     def build(
         self,
         common_prefix_len: int,
@@ -599,18 +612,21 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 mm_ranges, num_reqs, seq_lens.device
             )
 
-        # R-SWA: pass prefix lengths and window size through to forward().
-        # rswa_window_tensor is pre-allocated here (outside the compiled region)
-        # so that forward() never creates a CPU→CUDA copy during CUDA graph
-        # capture (which would raise RuntimeError on pinned-memory).
-        if common_attn_metadata.rswa_prefix_lens is not None:
-            attn_metadata.rswa_prefix_lens = common_attn_metadata.rswa_prefix_lens
-            attn_metadata.rswa_window = common_attn_metadata.rswa_window
-            attn_metadata.rswa_window_tensor = torch.tensor(
-                [common_attn_metadata.rswa_window],
-                dtype=torch.int32,
-                device=common_attn_metadata.rswa_prefix_lens.device,
-            )
+        # R-SWA: copy prefix lengths into persistent buffers (outside the
+        # compiled region) so forward() never allocates during CUDA graph
+        # capture.  rswa_window is a static model config scalar read here.
+        if (
+            self.rswa_window is not None
+            and common_attn_metadata.rswa_prefix_lens is not None
+        ):
+            assert self.persistent_rswa_prefix_lens is not None
+            assert self.persistent_rswa_window_tensor is not None
+            src = common_attn_metadata.rswa_prefix_lens
+            rswa_prefix_lens = self.persistent_rswa_prefix_lens[:num_reqs]
+            rswa_prefix_lens.copy_(src[:num_reqs], non_blocking=True)
+            attn_metadata.rswa_prefix_lens = rswa_prefix_lens
+            attn_metadata.rswa_window = self.rswa_window
+            attn_metadata.rswa_window_tensor = self.persistent_rswa_window_tensor
 
         return attn_metadata
 

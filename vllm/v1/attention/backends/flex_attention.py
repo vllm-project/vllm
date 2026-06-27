@@ -912,9 +912,12 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         )
         # Persistent buffer for R-SWA per-request prefix lengths so the device
         # address stays stable across steps (required for CUDA graph replay).
-        self.persistent_rswa_prefix_lens = torch.empty(
-            max_num_seqs, dtype=torch.int32, device=device
-        )
+        self.rswa_window: int | None = self.model_config.rswa_window
+        self.persistent_rswa_prefix_lens: torch.Tensor | None = None
+        if self.rswa_window is not None:
+            self.persistent_rswa_prefix_lens = torch.empty(
+                max_num_seqs, dtype=torch.int32, device=device
+            )
         self.persistent_doc_ids = torch.empty(
             max_num_batched_tokens, dtype=torch.int32, device=device
         )
@@ -1058,7 +1061,7 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
                 device=self.device,
             )
 
-        use_rswa = common_attn_metadata.rswa_window is not None
+        use_rswa = self.rswa_window is not None
         q_block_size = 1 if use_rswa else self.q_block_size
         persistent_kv_indices = (
             self.persistent_rswa_kv_indices if use_rswa else self.persistent_kv_indices
@@ -1077,7 +1080,8 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         offset_tensor = copy_to_persistent(self.persistent_offset_tensor, offset_tensor)
 
         rswa_prefix_lens = common_attn_metadata.rswa_prefix_lens
-        if rswa_prefix_lens is not None:
+        if use_rswa and rswa_prefix_lens is not None:
+            assert self.persistent_rswa_prefix_lens is not None
             rswa_prefix_lens = copy_to_persistent(
                 self.persistent_rswa_prefix_lens, rswa_prefix_lens
             )
@@ -1131,7 +1135,7 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             persistent_doc_ids=self.persistent_doc_ids,
             mm_prefix_range=common_attn_metadata.mm_req_doc_ranges,
             rswa_prefix_lens=rswa_prefix_lens,
-            rswa_window=common_attn_metadata.rswa_window,
+            rswa_window=self.rswa_window,
         )
 
         # Pre-build block_mask so it is ready before CUDA graph capture.
