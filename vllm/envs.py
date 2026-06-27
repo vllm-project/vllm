@@ -116,7 +116,7 @@ if TYPE_CHECKING:
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE: bool = True
     VLLM_RWKV7_WKV_MODE: str = "fp16"
-    VLLM_RWKV7_EMB_DEVICE: str = "cpu"
+    VLLM_RWKV7_EMB_DEVICE: str = "gpu"
     VLLM_RWKV7_RKV_MODE: str = "off"
     VLLM_RWKV7_CMIX_SPARSE: str = "no-fc"
     VLLM_RWKV7_LOW_RANK_WEIGHT: str = "both"
@@ -1130,7 +1130,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # RWKV7 Albatross/faster3a compatibility knobs.
     "VLLM_RWKV7_WKV_MODE": lambda: os.getenv("VLLM_RWKV7_WKV_MODE", "fp16"),
-    "VLLM_RWKV7_EMB_DEVICE": lambda: os.getenv("VLLM_RWKV7_EMB_DEVICE", "cpu"),
+    "VLLM_RWKV7_EMB_DEVICE": lambda: os.getenv("VLLM_RWKV7_EMB_DEVICE", "gpu"),
     "VLLM_RWKV7_RKV_MODE": lambda: os.getenv("VLLM_RWKV7_RKV_MODE", "off"),
     "VLLM_RWKV7_CMIX_SPARSE": lambda: os.getenv("VLLM_RWKV7_CMIX_SPARSE", "no-fc"),
     "VLLM_RWKV7_LOW_RANK_WEIGHT": lambda: os.getenv(

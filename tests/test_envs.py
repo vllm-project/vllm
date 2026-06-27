@@ -54,6 +54,11 @@ def test_rwkv7_wkv_mode_defaults_to_fp16() -> None:
         assert envs.environment_variables["VLLM_RWKV7_WKV_MODE"]() == "fp16"
 
 
+def test_rwkv7_emb_device_defaults_to_gpu() -> None:
+    with patch.dict(os.environ, {}, clear=True):
+        assert envs.environment_variables["VLLM_RWKV7_EMB_DEVICE"]() == "gpu"
+
+
 def test_rwkv7_model_is_not_a_registered_runtime_environment_variable() -> None:
     assert "VLLM_RWKV7_MODEL" not in environment_variables
     assert not hasattr(envs, "VLLM_RWKV7_MODEL")
