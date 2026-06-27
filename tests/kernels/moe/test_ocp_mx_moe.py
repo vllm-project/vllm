@@ -8,6 +8,7 @@ from importlib.util import find_spec
 import pytest
 import torch
 from packaging import version
+
 from tests.kernels.moe.utils import check_accuracy
 from vllm._aiter_ops import is_aiter_found
 from vllm.platforms import current_platform
