@@ -1266,6 +1266,7 @@ ROCM_BACKEND_CONFIGS = {
 }
 
 
+@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("backend_name", list(ROCM_BACKEND_CONFIGS.keys()))
 @pytest.mark.parametrize("topk", [4])
 @pytest.mark.parametrize("num_experts", [8])
