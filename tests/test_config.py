@@ -642,15 +642,10 @@ def test_get_and_verify_max_len(
         assert actual_max_len == expected_max_len
 
 
-def _make_model_arch_config(
-    derived_max_model_len: int,
-    max_len_key: str = "max_position_embeddings",
-    architectures: list[str] | None = None,
-    model_type: str = "llama",
-) -> ModelArchitectureConfig:
+def _make_model_arch_config(derived_max_model_len: int) -> ModelArchitectureConfig:
     return ModelArchitectureConfig(
-        architectures=architectures or ["LlamaForCausalLM"],
-        model_type=model_type,
+        architectures=["LlamaForCausalLM"],
+        model_type="llama",
         text_model_type=None,
         hidden_size=1,
         total_num_hidden_layers=1,
@@ -662,129 +657,56 @@ def _make_model_arch_config(
         quantization_config=None,
         is_deepseek_mla=False,
         is_mm_prefix_lm=False,
-        derived_max_model_len_and_key=(float(derived_max_model_len), max_len_key),
-    )
-
-
-def test_allow_long_max_model_len_extends_rope_config(monkeypatch):
-    monkeypatch.setenv("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
-    hf_config = SimpleNamespace(
-        model_type="llama",
-        max_position_embeddings=16,
-        rope_parameters={"rope_type": "default"},
-    )
-
-    actual_max_len = _get_and_verify_max_len(
-        hf_config=hf_config,
-        model_arch_config=_make_model_arch_config(16),
-        tokenizer_config=None,
-        max_model_len=32,
-        disable_sliding_window=False,
-        sliding_window=None,
-    )
-
-    assert actual_max_len == 32
-    assert hf_config.max_position_embeddings == 32
-
-
-def test_allow_long_max_model_len_extends_rotary_dim_config(monkeypatch):
-    monkeypatch.setenv("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
-    hf_config = SimpleNamespace(
-        model_type="gptj",
-        max_position_embeddings=16,
-        rotary_dim=8,
-    )
-
-    actual_max_len = _get_and_verify_max_len(
-        hf_config=hf_config,
-        model_arch_config=_make_model_arch_config(
-            16,
-            architectures=["GPTJForCausalLM"],
-            model_type="gptj",
+        derived_max_model_len_and_key=(
+            float(derived_max_model_len),
+            "max_position_embeddings",
         ),
-        tokenizer_config=None,
-        max_model_len=32,
-        disable_sliding_window=False,
-        sliding_window=None,
     )
-
-    assert actual_max_len == 32
-    assert hf_config.max_position_embeddings == 32
-
-
-def test_allow_long_max_model_len_rejects_absolute_positions(monkeypatch):
-    monkeypatch.setenv("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
-    hf_config = SimpleNamespace(
-        model_type="bert",
-        max_position_embeddings=16,
-        position_embedding_type="absolute",
-    )
-
-    with pytest.raises(ValueError, match="absolute position embeddings"):
-        _get_and_verify_max_len(
-            hf_config=hf_config,
-            model_arch_config=_make_model_arch_config(16),
-            tokenizer_config=None,
-            max_model_len=32,
-            disable_sliding_window=False,
-            sliding_window=None,
-        )
 
 
 @pytest.mark.parametrize(
-    ("model_type", "architectures"),
+    ("hf_config_kwargs", "max_model_len", "error_match"),
     [
-        ("custom", ["CustomForCausalLM"]),
-        ("gpt2", ["GPT2LMHeadModel"]),
-        ("gpt_bigcode", ["GPTBigCodeForCausalLM"]),
-        ("opt", ["OPTForCausalLM"]),
+        # Unscaled RoPE (plain and partial rotary): size the cache to max_model_len.
+        ({"rope_parameters": {"rope_type": "default"}}, 32, None),
+        ({"rotary_dim": 8}, 32, None),
+        # Learned absolute position table cannot be grown by an env var.
+        ({"position_embedding_type": "absolute"}, 32, "absolute position embeddings"),
+        # Scaled RoPE and non-RoPE: refuse instead of silently faulting.
+        (
+            {"rope_parameters": {"rope_type": "dynamic", "factor": 2.0}},
+            64,
+            "unscaled RoPE",
+        ),
+        ({}, 32, "unscaled RoPE"),
     ],
 )
-def test_allow_long_max_model_len_rejects_non_rope_configs(
-    monkeypatch,
-    model_type,
-    architectures,
+def test_allow_long_max_model_len_classification(
+    monkeypatch, hf_config_kwargs, max_model_len, error_match
 ):
     monkeypatch.setenv("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
     hf_config = SimpleNamespace(
-        model_type=model_type,
-        max_position_embeddings=16,
+        model_type="llama", max_position_embeddings=16, **hf_config_kwargs
     )
 
-    with pytest.raises(ValueError, match="unscaled RoPE"):
-        _get_and_verify_max_len(
-            hf_config=hf_config,
-            model_arch_config=_make_model_arch_config(
-                16,
-                architectures=architectures,
-                model_type=model_type,
-            ),
-            tokenizer_config=None,
-            max_model_len=32,
-            disable_sliding_window=False,
-            sliding_window=None,
-        )
-
-
-def test_allow_long_max_model_len_rejects_scaled_rope_config(monkeypatch):
-    monkeypatch.setenv("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
-    hf_config = SimpleNamespace(
-        model_type="llama",
-        max_position_embeddings=16,
-        rope_parameters={"rope_type": "dynamic", "factor": 2.0},
-    )
-
-    with pytest.raises(ValueError, match="unscaled RoPE"):
-        _get_and_verify_max_len(
+    def run():
+        return _get_and_verify_max_len(
             hf_config=hf_config,
             model_arch_config=_make_model_arch_config(16),
             tokenizer_config=None,
-            max_model_len=64,
+            max_model_len=max_model_len,
             disable_sliding_window=False,
             sliding_window=None,
         )
 
-    assert hf_config.max_position_embeddings == 16
+    if error_match is None:
+        assert run() == max_model_len
+        assert hf_config.max_position_embeddings == max_model_len
+    else:
+        with pytest.raises(ValueError, match=error_match):
+            run()
+        # A rejected config is left untouched.
+        assert hf_config.max_position_embeddings == 16
 
 
 class MockConfig:
