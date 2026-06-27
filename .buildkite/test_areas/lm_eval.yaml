@@ -235,8 +235,8 @@ steps:
     - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-spark.txt
 
-- label: "[kv-offload] [ssm] Nemotron-H-8B GSM8K (1xH200)"
-  key: kv-offload-ssm
+- label: "[kv-offload] [small] GSM8K (1xH200)"
+  key: kv-offload-small
   timeout_in_minutes: 30
   device: h200_35gb
   optional: true
@@ -244,21 +244,10 @@ steps:
   - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
   - tests/evals/gsm8k/test_gsm8k_offloading.py
   commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k nemotron-h-8b
+  - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "nemotron-h-8b or gemma-4-e4b-it"
 
-- label: "[kv-offload] [dense] Gemma-4-E4B-it GSM8K (1xH200)"
-  key: kv-offload-dense
-  timeout_in_minutes: 30
-  device: h200_35gb
-  optional: true
-  source_file_dependencies:
-  - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
-  - tests/evals/gsm8k/test_gsm8k_offloading.py
-  commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k gemma-4-e4b-it
-
-- label: "[kv-offload] [moe] DeepSeek-V4-Flash GSM8K (2xH100)"
-  key: kv-offload-moe
+- label: "[kv-offload] [large] GSM8K (2xH100)"
+  key: kv-offload-large
   timeout_in_minutes: 60
   device: h100
   optional: true
