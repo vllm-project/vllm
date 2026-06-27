@@ -44,6 +44,7 @@ class TestResponsesRequestSamplingParams:
             model="test-model",
             input="test input",
             repetition_penalty=1.2,
+            penalty_decay=0.95,
             seed=42,
             stop=["END", "STOP"],
             ignore_eos=True,
@@ -53,6 +54,7 @@ class TestResponsesRequestSamplingParams:
         sampling_params = request.to_sampling_params(default_max_tokens=1000)
 
         assert sampling_params.repetition_penalty == 1.2
+        assert sampling_params.penalty_decay == 0.95
         assert sampling_params.seed == 42
         assert sampling_params.stop == ["END", "STOP"]
         assert sampling_params.ignore_eos is True

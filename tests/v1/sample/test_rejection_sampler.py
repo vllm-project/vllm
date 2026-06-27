@@ -99,14 +99,19 @@ def create_sampling_metadata(
         assert output_token_ids
         assert len(output_token_ids) > 0
 
+        num_penalty_reqs = len(output_token_ids)
         frequency_penalties = torch.tensor(frequency_penalties, device=DEVICE_TYPE)
         presence_penalties = torch.tensor(presence_penalties, device=DEVICE_TYPE)
         repetition_penalties = torch.tensor(repetition_penalties, device=DEVICE_TYPE)
+        penalty_decays = torch.full(
+            (num_penalty_reqs,), 0.996, dtype=torch.float32, device=DEVICE_TYPE
+        )
     else:
         no_penalties = True
         frequency_penalties = torch.tensor([])
         presence_penalties = torch.tensor([])
         repetition_penalties = torch.tensor([])
+        penalty_decays = torch.tensor([])
 
     return SamplingMetadata(
         temperature=temperature,
@@ -121,6 +126,7 @@ def create_sampling_metadata(
         frequency_penalties=frequency_penalties,
         presence_penalties=presence_penalties,
         repetition_penalties=repetition_penalties,
+        penalty_decays=penalty_decays,
         output_token_ids=[] if output_token_ids is None else output_token_ids,
         spec_token_ids=[] if spec_token_ids is None else spec_token_ids,
         allowed_token_ids_mask=allowed_token_ids_mask,

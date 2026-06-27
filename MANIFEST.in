@@ -8,3 +8,4 @@ include tools/build_rust.py
 
 recursive-include cmake *
 recursive-include csrc *
+recursive-include vllm/v1/sample/ops/rapid_sampling *.cpp *.cu

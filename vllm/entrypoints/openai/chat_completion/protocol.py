@@ -38,6 +38,7 @@ from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.sampling_params import (
+    RAPID_PENALTY_DECAY_DEFAULT,
     BeamSearchParams,
     RepetitionDetectionParams,
     RequestOutputKind,
@@ -247,6 +248,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     top_k: int | None = None
     min_p: float | None = None
     repetition_penalty: float | None = None
+    penalty_decay: float | None = None
     length_penalty: float = 1.0
     stop_token_ids: list[int] | None = []
     include_stop_str_in_output: bool = False
@@ -549,6 +551,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         "top_p": 1.0,
         "top_k": 0,
         "min_p": 0.0,
+        "penalty_decay": RAPID_PENALTY_DECAY_DEFAULT,
     }
 
     def to_beam_search_params(
@@ -579,6 +582,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
             repetition_penalty = default_sampling_params.get(
                 "repetition_penalty",
                 self._DEFAULT_SAMPLING_PARAMS["repetition_penalty"],
+            )
+        if (penalty_decay := self.penalty_decay) is None:
+            penalty_decay = default_sampling_params.get(
+                "penalty_decay",
+                self._DEFAULT_SAMPLING_PARAMS["penalty_decay"],
             )
         if (temperature := self.temperature) is None:
             temperature = default_sampling_params.get(
@@ -642,6 +650,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             presence_penalty=self.presence_penalty,
             frequency_penalty=self.frequency_penalty,
             repetition_penalty=repetition_penalty,
+            penalty_decay=penalty_decay,
             temperature=temperature,
             top_p=top_p,
             top_k=top_k,
@@ -987,6 +996,7 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     top_k: int | None = None
     min_p: float | None = 0.0
     repetition_penalty: float | None = 1.0
+    penalty_decay: float | None = RAPID_PENALTY_DECAY_DEFAULT
     length_penalty: float | None = 1.0
     early_stopping: bool = False
     structured_outputs: StructuredOutputsParams | None = None

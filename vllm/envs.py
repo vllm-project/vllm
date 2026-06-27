@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     VLLM_LOG_STATS_INTERVAL: float = 10.0
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_USE_FLASHINFER_SAMPLER: bool = True
+    VLLM_USE_RAPID_SAMPLER: bool = True
     VLLM_PP_LAYER_PARTITION: str | None = None
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
@@ -811,6 +812,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_FLASHINFER_SAMPLER": lambda: (
         bool(int(os.environ["VLLM_USE_FLASHINFER_SAMPLER"]))
         if "VLLM_USE_FLASHINFER_SAMPLER" in os.environ
+        else True
+    ),
+    # Whether to use the rapid-sampling CUDA top-k / top-p sampler. Enabled
+    # by default for RWKV inference; set to 0 to opt out.
+    "VLLM_USE_RAPID_SAMPLER": lambda: (
+        bool(int(os.environ["VLLM_USE_RAPID_SAMPLER"]))
+        if "VLLM_USE_RAPID_SAMPLER" in os.environ
         else True
     ),
     # Pipeline stage partition strategy

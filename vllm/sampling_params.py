@@ -26,6 +26,7 @@ logger = init_logger(__name__)
 
 _SAMPLING_EPS = 1e-5
 _MAX_TEMP = 1e-2
+RAPID_PENALTY_DECAY_DEFAULT = 0.996
 
 MAX_LOGPROB_TOKEN_IDS = 128
 """Upper bound on `SamplingParams.logprob_token_ids` list length. Must match
@@ -233,6 +234,8 @@ class SamplingParams(
     """Penalizes new tokens based on whether they appear in the prompt and the
     generated text so far. Values > 1 encourage the model to use new tokens,
     while values < 1 encourage the model to repeat tokens."""
+    penalty_decay: float = RAPID_PENALTY_DECAY_DEFAULT
+    """Decay factor for rapid-sampling's per-token penalty state."""
     temperature: float = 1.0
     """Controls the randomness of the sampling. Lower values make the model
     more deterministic, while higher values make the model more random. Zero
@@ -358,6 +361,7 @@ class SamplingParams(
         presence_penalty: float | None = 0.0,
         frequency_penalty: float | None = 0.0,
         repetition_penalty: float | None = 1.0,
+        penalty_decay: float | None = RAPID_PENALTY_DECAY_DEFAULT,
         temperature: float | None = 1.0,
         top_p: float | None = 1.0,
         top_k: int = 0,
@@ -399,6 +403,9 @@ class SamplingParams(
             repetition_penalty=1.0
             if repetition_penalty is None
             else repetition_penalty,
+            penalty_decay=RAPID_PENALTY_DECAY_DEFAULT
+            if penalty_decay is None
+            else penalty_decay,
             temperature=1.0 if temperature is None else temperature,
             top_p=1.0 if top_p is None else top_p,
             top_k=top_k,
@@ -513,6 +520,28 @@ class SamplingParams(
             raise ValueError(
                 "repetition_penalty must be greater than zero, got "
                 f"{self.repetition_penalty}."
+            )
+        if not math.isfinite(self.penalty_decay):
+            raise VLLMValidationError(
+                f"penalty_decay must be a finite number, got {self.penalty_decay}.",
+                parameter="penalty_decay",
+                value=self.penalty_decay,
+            )
+        if not 0.0 <= self.penalty_decay <= 1.0:
+            raise VLLMValidationError(
+                f"penalty_decay must be in [0, 1], got {self.penalty_decay}.",
+                parameter="penalty_decay",
+                value=self.penalty_decay,
+            )
+        if (
+            self.penalty_decay != RAPID_PENALTY_DECAY_DEFAULT
+            and not envs.VLLM_USE_RAPID_SAMPLER
+        ):
+            raise VLLMValidationError(
+                "penalty_decay is only supported when rapid-sampling is enabled. "
+                "Set VLLM_USE_RAPID_SAMPLER=1 to use it.",
+                parameter="penalty_decay",
+                value=self.penalty_decay,
             )
         if not math.isfinite(self.temperature):
             raise VLLMValidationError(
@@ -1014,6 +1043,7 @@ class SamplingParams(
             f"presence_penalty={self.presence_penalty}, "
             f"frequency_penalty={self.frequency_penalty}, "
             f"repetition_penalty={self.repetition_penalty}, "
+            f"penalty_decay={self.penalty_decay}, "
             f"temperature={self.temperature}, "
             f"top_p={self.top_p}, "
             f"top_k={self.top_k}, "

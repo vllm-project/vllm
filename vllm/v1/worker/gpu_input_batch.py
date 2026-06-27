@@ -236,6 +236,15 @@ class InputBatch:
         self.repetition_penalties_cpu = self.repetition_penalties_cpu_tensor.numpy()
         self.repetition_penalties_reqs: set[str] = set()
 
+        # Rapid-sampling penalty decay related data structures
+        self.penalty_decays = torch.empty(
+            (max_num_reqs,), dtype=torch.float, device=device
+        )
+        self.penalty_decays_cpu_tensor = torch.empty(
+            (max_num_reqs,), dtype=torch.float, device="cpu", pin_memory=PIN_MEMORY
+        )
+        self.penalty_decays_cpu = self.penalty_decays_cpu_tensor.numpy()
+
         # Speculative decoding
         self.num_accepted_tokens_cpu_tensor = torch.ones(
             (max_num_reqs,), dtype=torch.int32, device="cpu", pin_memory=PIN_MEMORY
@@ -407,6 +416,7 @@ class InputBatch:
             )
             if sampling_params.repetition_penalty != 1.0:
                 self.repetition_penalties_reqs.add(req_id)
+            self.penalty_decays_cpu[req_index] = sampling_params.penalty_decay
 
             # NOTE(woosuk): self.generators should not include the requests that
             # do not have their own generator.
@@ -659,6 +669,10 @@ class InputBatch:
             self.repetition_penalties_cpu[i2],
             self.repetition_penalties_cpu[i1],
         )
+        self.penalty_decays_cpu[i1], self.penalty_decays_cpu[i2] = (
+            self.penalty_decays_cpu[i2],
+            self.penalty_decays_cpu[i1],
+        )
         self.num_accepted_tokens_cpu[i1], self.num_accepted_tokens_cpu[i2] = (
             self.num_accepted_tokens_cpu[i2],
             self.num_accepted_tokens_cpu[i1],
@@ -784,6 +798,9 @@ class InputBatch:
             self.repetition_penalties_cpu[empty_index] = self.repetition_penalties_cpu[
                 last_req_index
             ]
+            self.penalty_decays_cpu[empty_index] = self.penalty_decays_cpu[
+                last_req_index
+            ]
             self.num_accepted_tokens_cpu[empty_index] = self.num_accepted_tokens_cpu[
                 last_req_index
             ]
@@ -857,6 +874,7 @@ class InputBatch:
                 self.repetition_penalties,
                 num_reqs,
             )
+        copy_slice(self.penalty_decays_cpu_tensor, self.penalty_decays, num_reqs)
 
         needs_prompt_token_ids = (
             not self.no_penalties
@@ -925,6 +943,7 @@ class InputBatch:
             frequency_penalties=self.frequency_penalties[:num_reqs],
             presence_penalties=self.presence_penalties[:num_reqs],
             repetition_penalties=self.repetition_penalties[:num_reqs],
+            penalty_decays=self.penalty_decays[:num_reqs],
             output_token_ids=output_token_ids,
             spec_token_ids=self.spec_token_ids,
             no_penalties=self.no_penalties,
