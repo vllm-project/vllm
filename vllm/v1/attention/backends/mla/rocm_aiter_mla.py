@@ -828,6 +828,9 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             attn_metadata.fp8_prefill_reduce_final_map,
             attn_metadata.fp8_prefill_reduce_partial_map,
             tile_q,
+            # num_kv_splits added by ROCm/aiter#3391; 0 selects the kernel
+            # default max(cu_num, 0) == cu_num, matching pre-#3391 behavior.
+            0,
             out_3d,
             final_lse,
         )
