@@ -1052,6 +1052,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "LlavaOnevision2ForConditionalGeneration": _HfExamplesInfo(
         "lmms-lab-encoder/LLaVA-OneVision-2-8B-Instruct",
         trust_remote_code=True,
+        # torch.compile backend init hangs during construction on the FA3
+        # attention path (H200); model construction + forward are validated
+        # eager, so skip compile for the init/schema harness tests.
+        enforce_eager=True,
     ),
     "LlavaOnevisionForConditionalGeneration": _HfExamplesInfo(
         "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
