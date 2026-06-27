@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 from typing_extensions import override
 
 from vllm.logger import init_logger
-from vllm.v1.kv_offload.base import OffloadKey, ReqContext
+from vllm.v1.kv_offload.base import LookupResult, OffloadKey, ReqContext
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
 from vllm.v1.kv_offload.tiering.base import (
@@ -137,8 +137,11 @@ class FileSystemTierManager(SecondaryTierManager):
         return RequestOffloadingContext()
 
     @override
-    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
-        return self._lookup_manager.lookup(key, req_context)
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
+        result = self._lookup_manager.lookup(key, req_context)
+        if result is None:
+            return LookupResult.RETRY
+        return LookupResult.HIT if result else LookupResult.MISS
 
     @override
     def submit_store(self, job_metadata: JobMetadata) -> None:
@@ -179,6 +182,10 @@ class FileSystemTierManager(SecondaryTierManager):
         )
 
     @override
+    def drain_jobs(self) -> None:
+        """Block until all in-flight transfers in the threadpool finish."""
+        self._pool.wait_idle()
+
     def on_request_finished(self, req_context: ReqContext) -> None:
         self._lookup_manager.cleanup(req_context.req_id)
 

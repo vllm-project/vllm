@@ -15,6 +15,9 @@ vllm/third_party/flashmla/flash_mla_interface.py
 # DeepGEMM vendored package built from source
 vllm/third_party/deep_gemm/
 
+# fmha_sm100 vendored package built from source
+vllm/third_party/fmha_sm100/
+
 # triton jit
 .triton
 
@@ -196,7 +199,9 @@ cython_debug/
 .vscode/
 
 # Claude
-.claude/
+.claude/*
+!.claude/skills/
+!.claude/skills/**
 
 # Codex
 .codex/

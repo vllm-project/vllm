@@ -115,6 +115,7 @@ pub(super) fn prepare_chat_request(
             seed: request.seed,
             max_tokens: request.max_completion_tokens,
             min_tokens: request.min_tokens,
+            thinking_token_budget: request.thinking_token_budget,
             logprobs: request.logprobs.then_some(top_logprobs),
             prompt_logprobs,
             min_p: request.min_p,
@@ -142,6 +143,7 @@ pub(super) fn prepare_chat_request(
         },
         tools: convert_tools(request.tools)?,
         tool_choice: convert_tool_choice(request.tool_choice.as_ref())?,
+        parallel_tool_calls: request.parallel_tool_calls.unwrap_or(true),
         decode_options: vllm_text::output::TextDecodeOptions {
             skip_special_tokens: request.skip_special_tokens,
             include_stop_str_in_output: request.include_stop_str_in_output,
@@ -359,6 +361,13 @@ fn convert_tool_choice(tool_choice: Option<&ToolChoice>) -> Result<ChatToolChoic
     match tool_choice {
         None | Some(ToolChoice::Value(ToolChoiceValue::Auto)) => Ok(ChatToolChoice::Auto),
         Some(ToolChoice::Value(ToolChoiceValue::None)) => Ok(ChatToolChoice::None),
+        Some(ToolChoice::Value(ToolChoiceValue::Required)) => Ok(ChatToolChoice::Required),
+        Some(ToolChoice::Function {
+            tool_type,
+            function,
+        }) if tool_type == "function" => Ok(ChatToolChoice::Function {
+            name: function.name.clone(),
+        }),
         _ => bail_invalid_request!("tool_choice={:?} is not supported yet.", tool_choice),
     }
 }
@@ -410,6 +419,33 @@ mod tests {
             stream: true,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn prepare_chat_request_maps_parallel_tool_calls() {
+        let mut request = base_request();
+        request.parallel_tool_calls = Some(false);
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert!(!prepared.chat_request.parallel_tool_calls);
+    }
+
+    #[test]
+    fn prepare_chat_request_defaults_parallel_tool_calls_to_true() {
+        let prepared = prepare_chat_request(
+            base_request(),
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert!(prepared.chat_request.parallel_tool_calls);
     }
 
     #[test]
@@ -583,6 +619,31 @@ mod tests {
             ..VllmSamplingParams::default()
         };
         assert_eq!(prepared.chat_request.sampling_params, expected);
+    }
+
+    #[test]
+    fn prepare_chat_request_passes_through_thinking_token_budget() {
+        let prepare = |budget: Option<i64>| {
+            prepare_chat_request(
+                ChatCompletionRequest {
+                    thinking_token_budget: budget,
+                    ..base_request()
+                },
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+            )
+            .expect("request is valid")
+            .chat_request
+            .sampling_params
+            .thinking_token_budget
+        };
+
+        // The convert layer forwards the raw value verbatim (including the `-1`
+        // "unlimited" sentinel); normalization/validation happens during
+        // lowering (see `vllm_text::lower`).
+        assert_eq!(prepare(Some(64)), Some(64));
+        assert_eq!(prepare(Some(-1)), Some(-1));
+        assert_eq!(prepare(None), None);
     }
 
     #[test]
@@ -906,6 +967,74 @@ mod tests {
             }]
         );
         assert_eq!(prepared.chat_request.tool_choice, ChatToolChoice::None);
+    }
+
+    #[test]
+    fn prepare_chat_request_lowers_required_tool_choice() {
+        let request = ChatCompletionRequest {
+            tools: Some(vec![Tool {
+                tool_type: "function".to_string(),
+                function: Function {
+                    name: "get_weather".to_string(),
+                    description: Some("Get weather".to_string()),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    }),
+                    strict: None,
+                },
+            }]),
+            tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Required)),
+            ..base_request()
+        };
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(prepared.chat_request.tool_choice, ChatToolChoice::Required);
+    }
+
+    #[test]
+    fn prepare_chat_request_lowers_named_function_tool_choice() {
+        let request = ChatCompletionRequest {
+            tools: Some(vec![Tool {
+                tool_type: "function".to_string(),
+                function: Function {
+                    name: "get_weather".to_string(),
+                    description: Some("Get weather".to_string()),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    }),
+                    strict: None,
+                },
+            }]),
+            tool_choice: Some(ToolChoice::Function {
+                tool_type: "function".to_string(),
+                function: crate::routes::openai::utils::types::FunctionChoice {
+                    name: "get_weather".to_string(),
+                },
+            }),
+            ..base_request()
+        };
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(
+            prepared.chat_request.tool_choice,
+            ChatToolChoice::Function {
+                name: "get_weather".to_string(),
+            }
+        );
     }
 
     #[test]

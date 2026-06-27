@@ -261,7 +261,10 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # Explicitly set the list to avoid issues with torch 2.2
 # See https://github.com/pytorch/pytorch/pull/123243
 # From versions.json: .torch.cuda_arch_list
-ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0+PTX'
+# Do not add +PTX here: vLLM filters torch's top-level PTX flag when it
+# converts global gencode flags into per-kernel arch lists. If a specific
+# kernel needs PTX, add +PTX to that kernel's CMake arch list instead.
+ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 #################### BUILD BASE IMAGE ####################
 
@@ -308,9 +311,10 @@ ENV CARGO_BUILD_JOBS=4
 # Build the release artifacts. Cache cargo registry/git, but not target/,
 # because stale target metadata can outlive source updates across BuildKit
 # cache reuse.
-RUN --mount=type=cache,target=/root/.cargo/registry \
-    --mount=type=cache,target=/root/.cargo/git \
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,target=/root/.cargo/git,sharing=locked \
     bash build_rust.sh
+
 #################### RUST BUILD IMAGE ####################
 
 #################### CSRC BUILD IMAGE ####################
@@ -548,8 +552,16 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     fi && \
     python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
 
+# Record the wheel checksum so downstream stages can bust their layer cache
+# when the wheel changes, without copying the wheel itself into the image.
+RUN sha256sum dist/*.whl > dist/wheel.sha256
+
 # Copy extension wheels from extensions-build stage for later use
 COPY --from=extensions-build /tmp/ep_kernels_workspace/dist /tmp/ep_kernels_workspace/dist
+
+# Record the EP kernels wheel checksum for the same cache-busting purpose.
+RUN sha256sum /tmp/ep_kernels_workspace/dist/*.whl \
+    > /tmp/ep_kernels_workspace/dist/wheels.sha256
 
 # Check the size of the wheel if RUN_WHEEL_CHECK is true
 COPY .buildkite/check-wheel-size.py check-wheel-size.py
@@ -838,6 +850,11 @@ ARG PYTORCH_NIGHTLY
 # Install vLLM wheel first, so that torch etc will be installed.
 # Check whether to install torch nightly instead of release for this build.
 COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
+# Copy only the wheel checksum (a few bytes) so a wheel change invalidates this
+# install layer. The wheel itself is bind-mounted below and never enters the
+# image. Without this the bind mount is not part of the layer cache key, so a
+# warm BuildKit agent can skip the install and ship a stale wheel.
+COPY --from=build /workspace/dist/wheel.sha256 /tmp/vllm-wheel.sha256
 RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/opt/uv/cache \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
@@ -860,7 +877,10 @@ uv pip list
 # Pytorch now installs NVSHMEM, setting LD_LIBRARY_PATH
 ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 
-# Install EP kernels wheels (DeepEP) that have been built in the `build` stage
+# Install EP kernels wheels (DeepEP) that have been built in the `build` stage.
+# As with the vLLM wheel above, copy only the checksum to bust the layer cache
+# and bind-mount the wheel for the actual install to keep it out of the image.
+COPY --from=build /tmp/ep_kernels_workspace/dist/wheels.sha256 /tmp/ep-kernels-wheels.sha256
 RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
     --mount=type=cache,target=/opt/uv/cache \
     uv pip install --system ep_kernels/dist/*.whl --verbose \
@@ -878,13 +898,6 @@ RUN --mount=type=cache,target=/opt/uv/cache \
                 "nvidia-cutlass-dsl-libs-cu13==${CUTLASS_DSL_VERSION}"; \
         fi; \
     fi
-
-# Download FlashInfer precompiled cubins AFTER all pip installs are done.
-# This must run after the vLLM wheel and EP kernels installs above, because
-# those can reinstall/touch flashinfer packages. Downloading cubins earlier
-# (in the flashinfer-jit-cache layer) causes ~2.5 GB of layer duplication
-# when a later pip install overwrites flashinfer package files.
-RUN flashinfer show-config && flashinfer download-cubin
 
 # CUDA image changed from /usr/local/nvidia to /usr/local/cuda in 12.8 but will
 # return to /usr/local/nvidia in 13.0 to allow container providers to mount drivers
@@ -994,7 +1007,8 @@ ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 ENV UV_HTTP_TIMEOUT=500
 
 # install kv_connectors if requested
-ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0+PTX'
+# Do not add +PTX here; see the main TORCH_CUDA_ARCH_LIST comment above.
+ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 RUN --mount=type=cache,target=/opt/uv/cache \
     --mount=type=bind,source=requirements/kv_connectors.txt,target=/tmp/kv_connectors.txt,ro \
