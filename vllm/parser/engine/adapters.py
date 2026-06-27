@@ -112,13 +112,11 @@ class ParserEngineReasoningAdapter(ReasoningParser):
 
     @property
     def thinking_enabled(self) -> bool:
-        """Whether reasoning/thinking output is enabled for this request.
+        """Whether thinking is enabled for this request.
 
-        Mirrors the wrapped parser engine, which derives this from the
-        request's ``chat_template_kwargs`` (e.g. ``enable_thinking``). Used by
-        structural-tag construction to decide whether the grammar must model a
-        reasoning prefix. Defaults to ``True`` when the engine does not expose
-        it.
+        Delegates to the wrapped parser engine, which derives it from the
+        request's ``chat_template_kwargs``. Defaults to ``True`` to match
+        xgrammar's default.
         """
         return bool(getattr(self._parser_engine, "thinking_enabled", True))
 
