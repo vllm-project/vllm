@@ -1253,6 +1253,8 @@ _WORLD: GroupCoordinator | None = None
 _INNER_DP_WORLD: GroupCoordinator | None = None
 _NODE_COUNT: int | None = None
 
+_AFD: ProcessGroup | None = None
+
 
 def get_world_group() -> GroupCoordinator:
     assert _WORLD is not None, "world group is not initialized"
@@ -2072,6 +2074,75 @@ def destroy_distributed_environment():
     _NODE_COUNT = None
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
+
+
+def init_afd_process_group(
+    backend: str | Backend = None,
+    init_method: str | None = None,
+    timeout: timedelta | None = None,
+    world_size: int = -1,
+    rank: int = -1,
+    store: Store | None = None,
+    group_name: str = None,
+    pg_options: Any | None = None,
+):
+    """Initialize a separate process group for AFD (Attention-FFN
+    Disaggregation) communication.
+
+    This creates an independent process group with its own rendezvous,
+    allowing attention and FFN nodes to communicate even if they are not
+    in the same initial world group.
+    """
+    from torch.distributed.distributed_c10d import (
+        PrefixStore,
+        _new_process_group_helper,
+        default_pg_timeout,
+        rendezvous,
+    )
+
+    assert (store is None) or (init_method is None), (
+        "Cannot specify both init_method and store."
+    )
+
+    if store is not None:
+        assert world_size > 0, "world_size must be positive if using store"
+        assert rank >= 0, "rank must be non-negative if using store"
+    elif init_method is None:
+        init_method = "env://"
+
+    if backend:
+        backend = Backend(backend)
+    else:
+        backend = Backend("undefined")
+
+    if timeout is None:
+        timeout = default_pg_timeout
+
+    if store is None:
+        rendezvous_iterator = rendezvous(
+            init_method, rank, world_size, timeout=timeout
+        )
+        store, rank, world_size = next(rendezvous_iterator)
+        store.set_timeout(timeout)
+        store = PrefixStore(group_name, store)
+
+    pg_options_param_name = (
+        "backend_options" if str(torch.__version__) >= "2.6" else "pg_options"
+    )
+    pg, _ = _new_process_group_helper(
+        world_size,
+        rank,
+        [],
+        backend,
+        store,
+        group_name=group_name,
+        **{pg_options_param_name: pg_options},
+        timeout=timeout,
+    )
+    global _AFD
+    _world.pg_group_ranks[pg] = {i: i for i in range(world_size)}
+    _AFD = pg
+    return pg
 
 
 def cleanup_dist_env_and_memory(shutdown_ray: bool = False):

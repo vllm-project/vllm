@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from vllm.config.afd import AFDConfig
 from vllm.config.attention import AttentionConfig
 from vllm.config.cache import CacheConfig
 from vllm.config.compilation import (

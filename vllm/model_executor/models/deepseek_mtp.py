@@ -213,6 +213,7 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
         self.model = DeepSeekMultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        self.afd_config = vllm_config.afd_config
         # Set MoE hyperparameters
         self.set_moe_parameters()
 
