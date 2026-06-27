@@ -29,36 +29,34 @@ from torch import Tensor
 from transformers.models.whisper.tokenization_whisper import LANGUAGES
 from typing_extensions import Self, TypeIs
 
-from vllm.config import ModelConfig, SpeechToTextConfig, SpeechToTextParams
-from vllm.inputs import PromptType, TokensPrompt
 from vllm.logger import init_logger
-from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.tasks import ScoreType
 from vllm.utils.collection_utils import common_prefix
 from vllm.utils.func_utils import supports_kw
 
-from .interfaces_base import VllmModel
-
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import (
+        ModelConfig,
+        SpeechToTextConfig,
+        SpeechToTextParams,
+        VllmConfig,
+    )
+    from vllm.inputs import PromptType, TokensPrompt
     from vllm.lora.model_manager import LoRAModelManager
+    from vllm.model_executor.layers.fused_moe import MoERunner
+    from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
+    from vllm.model_executor.models.interfaces_base import VllmModel
     from vllm.model_executor.models.utils import WeightsMapper
     from vllm.multimodal.inputs import MultiModalFeatureSpec
     from vllm.multimodal.registry import _ProcessorFactories
     from vllm.sequence import IntermediateTensors
+    from vllm.tasks import ScoreType
     from vllm.v1.worker.encoder_cudagraph_defs import (
         EncoderCudaGraphCaptureInputs,
         EncoderCudaGraphConfig,
         EncoderCudaGraphReplayBuffers,
         EncoderItemSpec,
     )
-else:
-    VllmConfig = object
-    WeightsMapper = object
-    MultiModalFeatureSpec = object
-    _ProcessorFactories = object
-    IntermediateTensors = object
 
 logger = init_logger(__name__)
 
@@ -89,7 +87,7 @@ def _require_is_multimodal(is_multimodal: Tensor | None) -> Tensor:
 
 
 # Cache results of `SupportsMultiModal.get_language_model`
-_language_model_by_module = dict[nn.Module, VllmModel]()
+_language_model_by_module = dict[nn.Module, "VllmModel"]()
 
 
 @runtime_checkable
@@ -123,7 +121,7 @@ class SupportsMultiModal(Protocol):
     in their raw form and not input embeddings.
     """
 
-    _processor_factory: ClassVar[_ProcessorFactories]
+    _processor_factory: ClassVar["_ProcessorFactories"]
     """
     Set internally by `MultiModalRegistry.register_processor`.
     """
@@ -175,7 +173,7 @@ class SupportsMultiModal(Protocol):
             self._has_oov_mm_tokens,
         )
 
-    def get_language_model(self) -> VllmModel:
+    def get_language_model(self) -> "VllmModel":
         """
         Returns the underlying language model used for text generation.
 
@@ -216,7 +214,7 @@ class SupportsMultiModal(Protocol):
     @contextmanager
     def _mark_language_model(
         self,
-        vllm_config: VllmConfig,
+        vllm_config: "VllmConfig",
         *,
         targets: type[nn.Module] | tuple[type[nn.Module], ...] | None = None,
     ):
@@ -251,7 +249,7 @@ class SupportsMultiModal(Protocol):
     @contextmanager
     def _mark_tower_model(
         self,
-        vllm_config: VllmConfig,
+        vllm_config: "VllmConfig",
         modalities: set[str] | str,
         *,
         targets: type[nn.Module] | tuple[type[nn.Module], ...] | None = None,
@@ -295,7 +293,7 @@ class SupportsMultiModal(Protocol):
     @contextmanager
     def _mark_composite_model(
         self,
-        vllm_config: VllmConfig,
+        vllm_config: "VllmConfig",
         *,
         language_targets: type[nn.Module] | tuple[type[nn.Module], ...],
         tower_targets: dict[str, type[nn.Module] | tuple[type[nn.Module], ...]],
@@ -513,7 +511,7 @@ class SupportsScoreTemplate(Protocol):
         ...
 
     @classmethod
-    def post_process_tokens(cls, prompt: TokensPrompt) -> None:
+    def post_process_tokens(cls, prompt: "TokensPrompt") -> None:
         """
         Perform architecture-specific manipulations on the input tokens.
         """
@@ -633,7 +631,7 @@ class SupportsPP(Protocol):
         batch_size: int,
         dtype: torch.dtype,
         device: torch.device,
-    ) -> IntermediateTensors:
+    ) -> "IntermediateTensors":
         """Called when PP rank > 0 for profiling purposes."""
         ...
 
@@ -642,8 +640,8 @@ class SupportsPP(Protocol):
         input_ids: Tensor | None,
         positions: Tensor,
         *,
-        intermediate_tensors: IntermediateTensors | None,
-    ) -> IntermediateTensors | None:
+        intermediate_tensors: "IntermediateTensors | None",
+    ) -> "IntermediateTensors | None":
         """
         Accept [`IntermediateTensors`][vllm.sequence.IntermediateTensors] when
         PP rank > 0.
@@ -665,15 +663,15 @@ class _SupportsPPType(Protocol):
         batch_size: int,
         dtype: torch.dtype,
         device: torch.device,
-    ) -> IntermediateTensors: ...
+    ) -> "IntermediateTensors": ...
 
     def forward(
         self,
         input_ids: Tensor | None,
         positions: Tensor,
         *,
-        intermediate_tensors: IntermediateTensors | None,
-    ) -> Tensor | IntermediateTensors: ...
+        intermediate_tensors: "IntermediateTensors | None",
+    ) -> "Tensor | IntermediateTensors": ...
 
 
 @overload
@@ -803,7 +801,7 @@ class IsHybrid(Protocol):
     @classmethod
     def get_mamba_state_shape_from_config(
         cls,
-        vllm_config: VllmConfig,
+        vllm_config: "VllmConfig",
     ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         """Calculate shapes for Mamba's convolutional and state caches.
 
@@ -818,7 +816,7 @@ class IsHybrid(Protocol):
         ...
 
     @classmethod
-    def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, ...]:
+    def get_mamba_state_copy_func(cls) -> tuple["MambaStateCopyFunc", ...]:
         """Calculate copy-function callables for each Mamba state.
 
         Returns:
@@ -883,7 +881,7 @@ class MixtureOfExperts(Protocol):
     num_redundant_experts: int
     """Number of redundant experts in this model."""
 
-    moe_layers: Iterable[nn.Module]
+    moe_layers: Iterable["MoERunner"]
     """List of MoE layers in this model."""
 
     def set_eplb_state(
@@ -908,6 +906,7 @@ class MixtureOfExperts(Protocol):
             logical_to_physical_map: Mapping from logical to physical experts.
             logical_replica_count: Count of replicas for each logical expert.
         """
+        self.expert_weights = []
         for layer_idx, layer in enumerate(self.moe_layers):
             # Register the expert weights.
             self.expert_weights.append(layer.get_expert_weights())
@@ -982,7 +981,7 @@ def supports_mamba_prefix_caching(
 class SupportsCrossEncoding(Protocol):
     """The interface required for all models that support cross encoding."""
 
-    score_type: ClassVar[ScoreType] = "cross-encoder"
+    score_type: ClassVar["ScoreType"] = "cross-encoder"
 
 
 @runtime_checkable
@@ -994,13 +993,13 @@ class SupportsLateInteraction(Protocol):
     MaxSim (max over document tokens, sum over query tokens).
     """
 
-    score_type: ClassVar[ScoreType] = "late-interaction"
+    score_type: ClassVar["ScoreType"] = "late-interaction"
 
 
 class SupportsQuant:
     """The interface required for all models that support quantization."""
 
-    hf_to_vllm_mapper: ClassVar[WeightsMapper | None] = None
+    hf_to_vllm_mapper: ClassVar["WeightsMapper | None"] = None
     packed_modules_mapping: ClassVar[dict[str, list[str]] | None] = None
     quant_config: QuantizationConfig | None = None
 
@@ -1054,8 +1053,8 @@ class SupportsRealtime(Protocol):
         cls,
         audio_stream: AsyncGenerator[np.ndarray, None],
         input_stream: asyncio.Queue[list[int]],
-        model_config: ModelConfig,
-    ) -> AsyncGenerator[PromptType, None]: ...
+        model_config: "ModelConfig",
+    ) -> AsyncGenerator["PromptType", None]: ...
 
 
 @overload
@@ -1124,8 +1123,8 @@ class SupportsTranscription(Protocol):
     @classmethod
     def get_generation_prompt(
         cls,
-        stt_params: SpeechToTextParams,
-    ) -> PromptType:
+        stt_params: "SpeechToTextParams",
+    ) -> "PromptType":
         """Get the prompt for the ASR model.
         The model has control over the construction, as long as it
         returns a valid PromptType."""
@@ -1163,8 +1162,8 @@ class SupportsTranscription(Protocol):
 
     @classmethod
     def get_speech_to_text_config(
-        cls, model_config: ModelConfig, task_type: Literal["transcribe", "translate"]
-    ) -> SpeechToTextConfig:
+        cls, model_config: "ModelConfig", task_type: Literal["transcribe", "translate"]
+    ) -> "SpeechToTextConfig":
         """Get the speech to text config for the ASR model."""
         ...
 
@@ -1172,8 +1171,8 @@ class SupportsTranscription(Protocol):
     def get_num_audio_tokens(
         cls,
         audio_duration_s: float,
-        stt_config: SpeechToTextConfig,
-        model_config: ModelConfig,
+        stt_config: "SpeechToTextConfig",
+        model_config: "ModelConfig",
     ) -> int | None:
         """
         Map from audio duration to number of audio tokens produced by the ASR
@@ -1202,8 +1201,8 @@ class SupportsTranscription(Protocol):
     def get_language_detection_prompt(
         cls,
         audio: np.ndarray,
-        stt_config: SpeechToTextConfig,
-    ) -> PromptType:
+        stt_config: "SpeechToTextConfig",
+    ) -> "PromptType":
         """Return a prompt that triggers language detection.
 
         Only needs to be implemented when

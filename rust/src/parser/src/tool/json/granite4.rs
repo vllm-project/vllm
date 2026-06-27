@@ -9,7 +9,8 @@ use super::{
     tool_call_header_event,
 };
 use crate::tool::utils::{
-    JsonObjectScanState, json_str, parse_buffered_event, safe_text_len, take_json_object,
+    JsonObjectScanState, JsonStringScanState, decode_json_str, parse_buffered_event, safe_text_len,
+    take_json_object, take_json_string,
 };
 use crate::tool::{Result, Tool, ToolCallDelta, ToolParser, ToolParserOutput};
 
@@ -22,12 +23,18 @@ enum Granite4Mode {
     Header,
     /// Parsing the arguments value:
     /// `None` until the first byte decides object vs string;
-    /// `Some` while streaming an object value.
+    /// `Some` while streaming the selected value shape.
     Args {
-        json_scan: Option<JsonObjectScanState>,
+        args_scan: Option<Granite4ArgsScan>,
     },
     /// Arguments done; consume the object's closing `}` and `</tool_call>`.
     Close,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Granite4ArgsScan {
+    Object(JsonObjectScanState),
+    String(JsonStringScanState),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -92,7 +99,7 @@ impl Granite4ToolParser {
                 let tool_index = self.emitted_tool_count;
                 self.emitted_tool_count += 1;
                 self.active_tool_index = Some(tool_index);
-                self.mode = Granite4Mode::Args { json_scan: None };
+                self.mode = Granite4Mode::Args { args_scan: None };
                 output.push_call(ToolCallDelta {
                     tool_index,
                     name: Some(function_name),
@@ -187,7 +194,7 @@ fn parse_next_granite4_event(
     match mode {
         Granite4Mode::Text => text_event(input),
         Granite4Mode::Header => header_event(input),
-        Granite4Mode::Args { json_scan } => args_event(input, json_scan),
+        Granite4Mode::Args { args_scan } => args_event(input, args_scan),
         Granite4Mode::Close => close_event(input),
     }
 }
@@ -237,14 +244,19 @@ fn header_event(input: &mut JsonToolInput<'_>) -> ModalResult<Granite4Event> {
 /// once seen whole and unescaped.
 fn args_event(
     input: &mut JsonToolInput<'_>,
-    json_scan: &mut Option<JsonObjectScanState>,
+    args_scan: &mut Option<Granite4ArgsScan>,
 ) -> ModalResult<Granite4Event> {
-    if let Some(scan) = json_scan {
-        let len = take_json_object(input, scan)?;
-        return Ok(Granite4Event::ObjectArgsDelta {
-            len,
-            complete: scan.complete(),
-        });
+    if let Some(scan) = args_scan {
+        return match scan {
+            Granite4ArgsScan::Object(scan) => {
+                let len = take_json_object(input, scan)?;
+                Ok(Granite4Event::ObjectArgsDelta {
+                    len,
+                    complete: scan.complete(),
+                })
+            }
+            Granite4ArgsScan::String(scan) => string_args_event(input, scan),
+        };
     }
 
     match peek(any).parse_next(input)? {
@@ -252,18 +264,33 @@ fn args_event(
             let mut scan = JsonObjectScanState::default();
             let len = take_json_object(input, &mut scan)?;
             let complete = scan.complete();
-            *json_scan = Some(scan);
+            *args_scan = Some(Granite4ArgsScan::Object(scan));
             Ok(Granite4Event::ObjectArgsDelta { len, complete })
         }
-        '"' => Ok(Granite4Event::StringArgs {
-            decoded: json_str(input)?,
-        }),
+        '"' => {
+            *args_scan = Some(Granite4ArgsScan::String(JsonStringScanState::default()));
+            let Some(Granite4ArgsScan::String(scan)) = args_scan else {
+                unreachable!("Granite4 string scan state was just initialized")
+            };
+            string_args_event(input, scan)
+        }
         _ => {
             let mut error = ContextError::new();
             error.push(StrContext::Label("Granite4 arguments"));
             Err(ErrMode::Cut(error))
         }
     }
+}
+
+fn string_args_event(
+    input: &mut JsonToolInput<'_>,
+    scan: &mut JsonStringScanState,
+) -> ModalResult<Granite4Event> {
+    let text = **input;
+    let len = take_json_string(input, scan)?;
+    Ok(Granite4Event::StringArgs {
+        decoded: decode_json_str(&text[..len])?,
+    })
 }
 
 /// Parse the tool-call object's closing `}` and the `</tool_call>` end marker.
@@ -418,6 +445,22 @@ mod tests {
         assert_eq!(output.calls().len(), 1);
         assert_eq!(output.calls()[0].name.as_deref(), Some("f"));
         assert_eq!(output.calls()[0].arguments, r#"{"a":1}"#);
+    }
+
+    #[test]
+    fn granite4_long_string_args_stream_without_reparse() {
+        let arguments = format!(r#"{{"data":"{}"}}"#, "x".repeat(64 * 1024));
+        let encoded_arguments = serde_json::to_string(&arguments).unwrap();
+        let input =
+            format!(r#"<tool_call>{{"name":"f","arguments":{encoded_arguments}}}</tool_call>"#);
+        let chunks = split_by_chars(&input, 7);
+        let mut parser = Granite4ToolParser::new(&test_tools());
+
+        let output = collect_stream(&mut parser, &chunks);
+
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(output.calls()[0].name.as_deref(), Some("f"));
+        assert_eq!(output.calls()[0].arguments, arguments);
     }
 
     #[test]
