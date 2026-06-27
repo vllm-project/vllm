@@ -1218,20 +1218,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.supports_mm_inputs and self.is_first_pp_rank:
             # Run MM encoder (if needed) and get multimodal embeddings.
             # Only first PP rank prepares multimodal embeddings.
-            # NOTE(woosuk): We must call get_mm_embeddings even during dummy runs
-            # to obtain inputs_embeds, because the compiled model expects this input.
-            if self.lora_config is not None:
-                set_active_mm_loras(
-                    model=self.model,
-                    lora_manager=self.lora_manager,
-                    encoder_cache=self.encoder_cache,
-                    req_id_to_index=self.req_states.req_id_to_index,
-                    lora_state=self.lora_state,
-                    scheduled_encoder_inputs=scheduler_output.scheduled_encoder_inputs,
+            if dummy_run:
+                # Obtain mm embeddings of correct shape for compiled model.
+                inputs_embeds = self.model_state.dummy_inputs_embeds(
+                    input_batch.num_tokens_after_padding
                 )
-            inputs_embeds = self.model_state.get_mm_embeddings(
-                scheduler_output.scheduled_encoder_inputs, input_batch, self.req_states
-            )
+            else:
+                scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
+                if self.lora_config is not None:
+                    set_active_mm_loras(
+                        model=self.model,
+                        lora_manager=self.lora_manager,
+                        encoder_cache=self.encoder_cache,
+                        req_id_to_index=self.req_states.req_id_to_index,
+                        lora_state=self.lora_state,
+                        scheduled_encoder_inputs=scheduled_encoder_inputs,
+                    )
+                inputs_embeds = self.model_state.get_mm_embeddings(
+                    scheduled_encoder_inputs, input_batch, self.req_states
+                )
             if inputs_embeds is not None and not self.model.requires_raw_input_tokens:
                 input_ids = None
 

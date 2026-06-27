@@ -57,6 +57,10 @@ class DefaultModelState(ModelState):
         if self.rope_state is not None:
             self.rope_state.apply_staged_writes()
 
+    def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor:
+        """Pre-allocated inputs_embeds buffer for dummy runs (contents unused)."""
+        return self.encoder_runner.inputs_embeds[:num_tokens]
+
     def get_mm_embeddings(
         self,
         scheduled_encoder_inputs: dict[str, list[int]],
