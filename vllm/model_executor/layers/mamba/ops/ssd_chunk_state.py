@@ -12,8 +12,14 @@ import vllm.envs as envs
 from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.triton_utils.allocation import set_triton_allocator
 
 from .mamba_ssm import softplus
+
+# Devices whose Triton scratch allocator has already been configured for the
+# TD store path. The allocator is a global singleton, so set it once per device
+# at first use rather than on every forward pass
+_TD_ALLOCATOR_DEVICES: set[torch.device] = set()
 
 
 @triton.jit
@@ -340,6 +346,7 @@ def _chunk_cumsum_fwd(
     dt_bias=None,
     dt_softplus=False,
     dt_limit=(0.0, float("inf")),
+    use_td=None,
 ):
     seqlen, nheads = dt.shape
     assert A.shape == (nheads,)
@@ -354,17 +361,16 @@ def _chunk_cumsum_fwd(
     )
     grid_chunk_cs = lambda META: (nchunks, triton.cdiv(nheads, META["BLOCK_SIZE_H"]))
 
-    # Tri-state TD toggle (VLLM_TRITON_USE_TD): unset -> auto (on for XPU).
-    td_override = envs.VLLM_TRITON_USE_TD
-    use_td = current_platform.is_xpu() if td_override is None else td_override
+    # TD toggle. Callers (e.g. tests) may force it explicitly; otherwise fall
+    # back to the tri-state env VLLM_TRITON_USE_TD (unset -> auto on XPU).
+    if use_td is None:
+        td_override = envs.VLLM_TRITON_USE_TD
+        use_td = current_platform.is_xpu() if td_override is None else td_override
     # TD store of dt_out needs the chunk-size (last) dim contiguous.
     use_td = use_td and dt_out.stride(2) == 1
-    if use_td:
-        triton.set_allocator(
-            lambda size, alignment, stream: torch.empty(
-                size, device=dt.device, dtype=torch.int8
-            )
-        )
+    if use_td and dt.device not in _TD_ALLOCATOR_DEVICES:
+        set_triton_allocator(dt.device)
+        _TD_ALLOCATOR_DEVICES.add(dt.device)
 
     with torch.accelerator.device_index(dt.device.index):
         _chunk_cumsum_fwd_kernel[grid_chunk_cs](

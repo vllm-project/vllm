@@ -580,15 +580,10 @@ def test_mamba_chunk_scan_cont_batch_prefill_chunking(chunk_size, seqlens):
         )
 
 
-# ---------------------------------------------------------------------------
-# Targeted tests for the _chunk_cumsum_fwd Triton tensor-descriptor (TD) store
-# path (VLLM_TRITON_USE_TD). These go beyond the pipeline-level tests above by
-# directly exercising the kernel wrapper and comparing both store paths against
-# a pure-torch golden reference. They deliberately stress the cases the TD
-# shape-bounds masking replaces: a non-power-of-2 head count (partial head
-# tile), a partial last chunk (limit < chunk_size), single head, non-power-of-2
-# chunk size, missing dt_bias, and a finite dt_limit clamp.
-# ---------------------------------------------------------------------------
+# Tests for the _chunk_cumsum_fwd TD store path, selected via the use_td kwarg.
+# Both store paths are compared against a pure-torch reference across the cases
+# the TD shape-bounds masking covers: non-power-of-2 head count, partial last
+# chunk, single head, non-power-of-2 chunk size, missing dt_bias, and dt_limit clamp.
 
 
 def _chunk_cumsum_reference(
@@ -625,15 +620,14 @@ def _chunk_cumsum_reference(
     return dA_cumsum, dt_out
 
 
-def _chunk_cumsum_both_paths(
-    dt, A, chunk_size, dt_bias, dt_softplus, dt_limit, monkeypatch
-):
-    """Run _chunk_cumsum_fwd with TD off and on; return both plus a torch ref."""
+def _chunk_cumsum_both_paths(dt, A, chunk_size, dt_bias, dt_softplus, dt_limit):
+    """Run _chunk_cumsum_fwd with TD off and on; return both plus a torch ref.
+    The store path is selected via the explicit use_td kwarg.
+    """
     cu_seqlens = torch.tensor((0, dt.shape[0]), device=DEVICE).cumsum(0).to(torch.int32)
     cu_chunk_seqlens, _, _ = compute_varlen_chunk_metadata(cu_seqlens, chunk_size)
     results = {}
-    for flag in ("0", "1"):
-        monkeypatch.setenv("VLLM_TRITON_USE_TD", flag)
+    for flag, use_td in (("0", False), ("1", True)):
         dA, dt_out = _chunk_cumsum_fwd(
             dt,
             A,
@@ -642,6 +636,7 @@ def _chunk_cumsum_both_paths(
             dt_bias=dt_bias,
             dt_softplus=dt_softplus,
             dt_limit=dt_limit,
+            use_td=use_td,
         )
         results[flag] = (dA.clone(), dt_out.clone())
     ref = _chunk_cumsum_reference(
@@ -672,7 +667,7 @@ def _assert_chunk_cumsum(results, ref, itype):
 @pytest.mark.parametrize("itype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("nheads", [17, 128])
 @pytest.mark.parametrize("dt_softplus", [True, False])
-def test_chunk_cumsum_td_matches_reference(nheads, dt_softplus, itype, monkeypatch):
+def test_chunk_cumsum_td_matches_reference(nheads, dt_softplus, itype):
     set_random_seed(0)
     chunk_size = 256
     # multiple chunks with a partial last chunk (limit < chunk_size)
@@ -683,7 +678,7 @@ def test_chunk_cumsum_td_matches_reference(nheads, dt_softplus, itype, monkeypat
     dt_limit = (0.0, float("inf"))
 
     results, ref = _chunk_cumsum_both_paths(
-        dt, A, chunk_size, dt_bias, dt_softplus, dt_limit, monkeypatch
+        dt, A, chunk_size, dt_bias, dt_softplus, dt_limit
     )
     _assert_chunk_cumsum(results, ref, itype)
 
@@ -697,7 +692,7 @@ def test_chunk_cumsum_td_matches_reference(nheads, dt_softplus, itype, monkeypat
         (17, 256, True, (0.01, 0.5)),  # finite dt_limit clamp
     ],
 )
-def test_chunk_cumsum_td_options(nheads, chunk_size, dt_bias_on, dt_limit, monkeypatch):
+def test_chunk_cumsum_td_options(nheads, chunk_size, dt_bias_on, dt_limit):
     set_random_seed(0)
     itype = torch.float32
     seqlen = 3 * chunk_size - 7  # partial last chunk
@@ -707,7 +702,5 @@ def test_chunk_cumsum_td_options(nheads, chunk_size, dt_bias_on, dt_limit, monke
         torch.randn(nheads, dtype=torch.float32, device=DEVICE) if dt_bias_on else None
     )
 
-    results, ref = _chunk_cumsum_both_paths(
-        dt, A, chunk_size, dt_bias, True, dt_limit, monkeypatch
-    )
+    results, ref = _chunk_cumsum_both_paths(dt, A, chunk_size, dt_bias, True, dt_limit)
     _assert_chunk_cumsum(results, ref, itype)
