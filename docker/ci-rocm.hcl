@@ -311,11 +311,13 @@ variable "CI_BASE_IMAGE_TAG" {
   default = "rocm/vllm-dev:ci_base"
 }
 
-variable "CI_BASE_IMAGE_TAG_COMMIT" {
+# Supplemental tags only. ci-bake-rocm.sh leaves these empty when the same ref
+# is already the primary CI_BASE_IMAGE_TAG.
+variable "CI_BASE_IMAGE_TAG_COMMIT_EXTRA" {
   default = ""
 }
 
-variable "CI_BASE_IMAGE_TAG_CONTENT" {
+variable "CI_BASE_IMAGE_TAG_CONTENT_EXTRA" {
   default = ""
 }
 
@@ -363,8 +365,8 @@ target "ci-base-rocm-ci" {
   cache-from = concat(
     compact([
       CI_BASE_IMAGE_TAG != "" ? "type=registry,ref=${CI_BASE_IMAGE_TAG}" : "",
-      CI_BASE_IMAGE_TAG_COMMIT != "" ? "type=registry,ref=${CI_BASE_IMAGE_TAG_COMMIT}" : "",
-      CI_BASE_IMAGE_TAG_CONTENT != "" ? "type=registry,ref=${CI_BASE_IMAGE_TAG_CONTENT}" : "",
+      CI_BASE_IMAGE_TAG_COMMIT_EXTRA != "" ? "type=registry,ref=${CI_BASE_IMAGE_TAG_COMMIT_EXTRA}" : "",
+      CI_BASE_IMAGE_TAG_CONTENT_EXTRA != "" ? "type=registry,ref=${CI_BASE_IMAGE_TAG_CONTENT_EXTRA}" : "",
       CI_BASE_IMAGE_TAG_STABLE != "" ? "type=registry,ref=${CI_BASE_IMAGE_TAG_STABLE}" : "",
     ]),
     # Import upstream dependency caches so RIXL/ROCShmem/DeepEP stages
@@ -372,7 +374,7 @@ target "ci-base-rocm-ci" {
     get_cache_from_rocm_deps(),
   )
   cache-to = ["type=inline"]
-  tags     = compact([CI_BASE_IMAGE_TAG, CI_BASE_IMAGE_TAG_COMMIT, CI_BASE_IMAGE_TAG_CONTENT, CI_BASE_IMAGE_TAG_STABLE])
+  tags     = compact([CI_BASE_IMAGE_TAG, CI_BASE_IMAGE_TAG_COMMIT_EXTRA, CI_BASE_IMAGE_TAG_CONTENT_EXTRA, CI_BASE_IMAGE_TAG_STABLE])
   output   = ["type=registry"]
 }
 

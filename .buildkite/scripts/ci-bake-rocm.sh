@@ -704,6 +704,8 @@ configure_ci_base_image_refs() {
     fi
     CI_BASE_IMAGE_TAG_COMMIT_REF="${commit_tag}"
 
+    # *_REF is the logical tag recorded in metadata. *_EXTRA is only passed to
+    # bake when that tag is not already the primary tag, avoiding duplicates.
     if should_push_stable_ci_base_tag; then
         primary_tag="${content_tag}"
         CI_BASE_IMAGE_TAG_STABLE="${stable_tag}"
@@ -713,18 +715,18 @@ configure_ci_base_image_refs() {
     fi
     CI_BASE_IMAGE_TAG="${primary_tag}"
     if [[ "${primary_tag}" == "${content_tag}" ]]; then
-        CI_BASE_IMAGE_TAG_CONTENT=""
+        CI_BASE_IMAGE_TAG_CONTENT_EXTRA=""
     else
-        CI_BASE_IMAGE_TAG_CONTENT="${content_tag}"
+        CI_BASE_IMAGE_TAG_CONTENT_EXTRA="${content_tag}"
     fi
     if [[ -n "${commit_tag}" && "${commit_tag}" != "${primary_tag}" ]]; then
-        CI_BASE_IMAGE_TAG_COMMIT="${commit_tag}"
+        CI_BASE_IMAGE_TAG_COMMIT_EXTRA="${commit_tag}"
     else
-        CI_BASE_IMAGE_TAG_COMMIT=""
+        CI_BASE_IMAGE_TAG_COMMIT_EXTRA=""
     fi
     export CI_BASE_IMAGE_TAG
-    export CI_BASE_IMAGE_TAG_COMMIT
-    export CI_BASE_IMAGE_TAG_CONTENT
+    export CI_BASE_IMAGE_TAG_COMMIT_EXTRA
+    export CI_BASE_IMAGE_TAG_CONTENT_EXTRA
     export CI_BASE_IMAGE_TAG_CONTENT_REF
     export CI_BASE_IMAGE_TAG_COMMIT_REF
     export CI_BASE_IMAGE_TAG_STABLE
@@ -764,8 +766,8 @@ ci_base_candidate_refs() {
     printf '%s\n' \
         "${IMAGE_TAG:-}" \
         "${CI_BASE_IMAGE_TAG:-}" \
-        "${CI_BASE_IMAGE_TAG_COMMIT:-}" \
-        "${CI_BASE_IMAGE_TAG_CONTENT:-}" \
+        "${CI_BASE_IMAGE_TAG_COMMIT_EXTRA:-}" \
+        "${CI_BASE_IMAGE_TAG_CONTENT_EXTRA:-}" \
         "${CI_BASE_IMAGE_TAG_STABLE:-}" \
         | awk 'NF && !seen[$0]++'
 }
@@ -1075,8 +1077,8 @@ ci_base_metadata_pairs() {
     metadata_pair "vllm.ci_base.dockerfile" "${dockerfile}"
     metadata_pair "vllm.ci_base.dockerfile_stages" "${stages}"
     metadata_pair "vllm.ci_base.image.primary" "${CI_BASE_IMAGE_TAG:-}"
-    metadata_pair "vllm.ci_base.image.content" "${CI_BASE_IMAGE_TAG_CONTENT_REF:-${CI_BASE_IMAGE_TAG_CONTENT:-}}"
-    metadata_pair "vllm.ci_base.image.commit" "${CI_BASE_IMAGE_TAG_COMMIT_REF:-${CI_BASE_IMAGE_TAG_COMMIT:-}}"
+    metadata_pair "vllm.ci_base.image.content" "${CI_BASE_IMAGE_TAG_CONTENT_REF:-${CI_BASE_IMAGE_TAG_CONTENT_EXTRA:-}}"
+    metadata_pair "vllm.ci_base.image.commit" "${CI_BASE_IMAGE_TAG_COMMIT_REF:-${CI_BASE_IMAGE_TAG_COMMIT_EXTRA:-}}"
     metadata_pair "vllm.ci_base.image.stable" "${CI_BASE_IMAGE_TAG_STABLE:-}"
     metadata_pair "vllm.ci_base.git_commit" "${BUILDKITE_COMMIT:-}"
     metadata_pair "vllm.ci_base.git_branch" "${git_branch}"
