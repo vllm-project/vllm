@@ -43,6 +43,26 @@ else:
         return False
 
 
+MOE_MODEL_CONFIGS = {
+    "nvidia/Qwen3-30B-A3B-NVFP4": {
+        "shards": ["model-00001-of-00004.safetensors"],
+        "expert_prefix": "model.layers.9.mlp.experts.",
+        # Position of the expert index in the dot-split key.
+        "expert_idx_pos": 5,
+    }
+}
+
+
+@pytest.fixture(scope="module")
+def loaded_model_files():
+    return {
+        model_id: huggingface_hub.snapshot_download(
+            repo_id=model_id, allow_patterns=config["shards"]
+        )
+        for model_id, config in MOE_MODEL_CONFIGS.items()
+    }
+
+
 class Nvfp4QuantizationEmulationTritonExpertsReference(TritonExperts):
     """
     Extension of TritonExperts to support emulated NVFP4 MoE experts.
@@ -193,17 +213,15 @@ def test_nvfp4_emulation_support_check_rejects_bias_and_lora(
     not current_platform.is_cuda_alike(),
     reason="Triton NVFP4 kernel requires CUDA.",
 )
-def test_triton_dequantize_nvfp4(monkeypatch) -> None:
+def test_triton_dequantize_nvfp4(monkeypatch, loaded_model_files) -> None:
     """Test the Triton dequantization kernel against the CPU reference
     using real NVFP4 weights from a checkpoint.
 
     Tests both 2D (attention projection) and 3D (stacked MoE experts).
     """
-    checkpoint_path = huggingface_hub.snapshot_download(
-        "nvidia/Qwen3-30B-A3B-NVFP4",
-        allow_patterns=["model-00001-of-00004.safetensors"],
-    )
-    shard_path = f"{checkpoint_path}/model-00001-of-00004.safetensors"
+    checkpoint_path = loaded_model_files["nvidia/Qwen3-30B-A3B-NVFP4"]
+    shards = cast(list[str], MOE_MODEL_CONFIGS["nvidia/Qwen3-30B-A3B-NVFP4"]["shards"])
+    shard_path = f"{checkpoint_path}/{shards[0]}"
     block_size = 16
 
     with safe_open(shard_path, framework="pt", device="cpu") as f:
@@ -481,25 +499,8 @@ def test_triton_nvfp4_quant_dequant(
     print(f"    speedup:   {speedup:.2f}x")
 
 
-MOE_MODEL_CONFIGS = {
-    "nvidia/Qwen3-30B-A3B-NVFP4": {
-        "shards": ["model-00001-of-00004.safetensors"],
-        "expert_prefix": "model.layers.9.mlp.experts.",
-        # Position of the expert index in the dot-split key.
-        "expert_idx_pos": 5,
-    },
-    "nvidia/Kimi-K2.6-NVFP4": {
-        "shards": [
-            "model-00001-of-00060.safetensors",
-            "model-00002-of-00060.safetensors",
-        ],
-        "expert_prefix": "language_model.model.layers.1.mlp.experts.",
-        "expert_idx_pos": 6,
-    },
-}
-
-
 def _load_nvfp4_moe_weights(
+    model_files: dict[str, str],
     model_id: str,
     tensor_parallel_size: int,
     max_experts: int | None = None,
@@ -518,10 +519,8 @@ def _load_nvfp4_moe_weights(
     """
     cfg = MOE_MODEL_CONFIGS[model_id]
     shards = cast(list[str], cfg["shards"])
-    checkpoint_path = huggingface_hub.snapshot_download(
-        model_id,
-        allow_patterns=shards,
-    )
+    checkpoint_path = model_files[model_id]
+
     expert_prefix = cfg["expert_prefix"]
     idx_pos = cast(int, cfg["expert_idx_pos"])
 
@@ -636,6 +635,7 @@ def _load_nvfp4_moe_weights(
     [pytest.param(val, id=f"tensor_parallel_size:{val}") for val in [1, 2, 4, 8]],
 )
 def test_nvfp4_moe_correctness(
+    loaded_model_files,
     num_tokens: int,
     top_k: int,
     model_id: str,
@@ -660,6 +660,7 @@ def test_nvfp4_moe_correctness(
         hidden_dim,
         intermediate_size,
     ) = _load_nvfp4_moe_weights(
+        loaded_model_files,
         model_id,
         tensor_parallel_size,
         max_experts=num_test_experts,
