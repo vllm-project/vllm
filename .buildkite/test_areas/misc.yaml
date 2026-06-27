@@ -232,7 +232,8 @@ steps:
       - vllm/multimodal
       - examples/
       - vllm/platforms/rocm.py
-      depends_on: image-build-amd
+      depends_on:
+      - image-build-amd
 
 - label: Metrics, Tracing (2 GPUs)
   key: metrics-tracing-2-gpus
