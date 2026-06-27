@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from functools import lru_cache
 from typing import (
     Annotated,
     Any,
@@ -37,7 +38,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image
-from transformers import BatchFeature
+from transformers import AutoProcessor, BatchFeature
 from transformers.models.qwen2_vl import Qwen2VLImageProcessor
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 
@@ -102,9 +103,35 @@ from vllm.multimodal.video import (
     VideoTargetMetadata,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.processor import _merge_mm_kwargs
+from vllm.transformers_utils.utils import convert_model_repo_to_path
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 logger = init_logger(__name__)
+
+
+@lru_cache
+def _load_ov2_processor(
+    model: str,
+    revision: str | None,
+    trust_remote_code: bool,
+    **kwargs: Any,
+):
+    # Custom processor loader for OV2. Its ``trust_remote_code`` processor is a
+    # bare class that does not subclass ``ProcessorMixin``, so the shared,
+    # type-checked ``get_hf_processor`` / ``get_processor`` path rejects it. We
+    # load it directly via ``AutoProcessor`` here (mirroring what
+    # ``get_processor`` does for the AutoProcessor branch, minus the trailing
+    # ``isinstance`` validation). Keeping the load in model code means no shared
+    # loader carries a ``disable_type_check`` flag that an API caller could reach
+    # through per-request ``mm_processor_kwargs``.
+    return AutoProcessor.from_pretrained(
+        convert_model_repo_to_path(model),
+        revision=revision or "main",
+        trust_remote_code=trust_remote_code,
+        **kwargs,
+    )
+
 
 # Upper bound on frames used when profiling the worst-case video item, mirroring
 # Qwen2-VL. The real frame count is decided by the HF VideoProcessor at apply
@@ -1259,20 +1286,23 @@ class LlavaOnevision2ProcessingInfo(BaseProcessingInfo):
 
     def get_hf_processor(self, **kwargs: object):
         # OV2's ``trust_remote_code`` processor is a bare class that does not
-        # subclass ``ProcessorMixin``, so the standard type-checked
-        # ``get_hf_processor`` would reject it. Use the dedicated server-side
-        # ``get_hf_processor_unchecked`` entry point to load the real OV2
-        # processor via AutoProcessor without the ``isinstance`` validation.
-        #
-        # The skip is selected here by trusted model code (by *calling* the
-        # unchecked method), NOT by threading a ``disable_type_check`` flag
-        # through ``mm_processor_kwargs`` (which is user-controllable via the
-        # OpenAI-compatible API). Defensively drop any such injected value so it
-        # never reaches the processor loader.
-        kwargs.pop("disable_type_check", None)
-        return self.ctx.get_hf_processor_unchecked(
-            use_fast=kwargs.pop("use_fast", True),
-            **kwargs,
+        # subclass ``ProcessorMixin``, so the shared ``get_hf_processor`` (which
+        # enforces an ``isinstance`` check) cannot load it. Load it directly via
+        # ``AutoProcessor`` here -- the same pattern other ``trust_remote_code``
+        # models use (e.g. Whisper, Qwen3-ASR). Keeping the load in model code
+        # means no shared loader carries a ``disable_type_check`` flag that an
+        # API caller could reach through per-request ``mm_processor_kwargs``.
+        model_config = self.ctx.model_config
+        # ``_merge_mm_kwargs`` applies ``get_allowed_kwarg_only_overrides`` so a
+        # caller's ``mm_processor_kwargs`` can only set known processor args
+        # (and wraps values as hashable for the lru_cache below).
+        merged = _merge_mm_kwargs(model_config, AutoProcessor, **kwargs)
+        merged.setdefault("use_fast", True)
+        return _load_ov2_processor(
+            model_config.model,
+            model_config.revision,
+            model_config.trust_remote_code,
+            **merged,
         )
 
     def get_image_processor(self, **kwargs: object) -> Qwen2VLImageProcessor:

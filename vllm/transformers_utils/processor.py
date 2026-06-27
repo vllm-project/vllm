@@ -201,15 +201,9 @@ def get_processor(
     revision: str | None = None,
     trust_remote_code: bool = False,
     processor_cls: type[_P] | tuple[type[_P], ...] = ProcessorMixin,
-    disable_type_check: bool = False,
     **kwargs: Any,
 ) -> _P:
-    """Load a processor for the given model name via HuggingFace.
-
-    Set ``disable_type_check=True`` to skip the final ``isinstance`` validation
-    against ``processor_cls``. This is needed for ``trust_remote_code``
-    processors that are bare classes not subclassing ``ProcessorMixin``.
-    """
+    """Load a processor for the given model name via HuggingFace."""
     if revision is None:
         revision = "main"
     try:
@@ -261,7 +255,7 @@ def get_processor(
         else:
             raise e
 
-    if not disable_type_check and not isinstance(processor, processor_cls):
+    if not isinstance(processor, processor_cls):
         raise TypeError(
             "Invalid type of HuggingFace processor. "
             f"Expected type: {processor_cls}, but "
@@ -346,7 +340,6 @@ def cached_get_processor_without_dynamic_kwargs(
     revision: str | None = None,
     trust_remote_code: bool = False,
     processor_cls: type[_P] | tuple[type[_P], ...] = ProcessorMixin,
-    disable_type_check: bool = False,
     **kwargs: Any,
 ) -> _P:
     # Step 1: use default kwargs to get a temporary processor instance
@@ -355,7 +348,6 @@ def cached_get_processor_without_dynamic_kwargs(
         revision=revision,
         trust_remote_code=trust_remote_code,
         processor_cls=processor_cls,  # type: ignore[arg-type]
-        disable_type_check=disable_type_check,
     )
 
     # Step 2: use temporary processor collect dynamic keys
@@ -372,7 +364,6 @@ def cached_get_processor_without_dynamic_kwargs(
         revision=revision,
         trust_remote_code=trust_remote_code,
         processor_cls=processor_cls,  # type: ignore[arg-type]
-        disable_type_check=disable_type_check,
         **filtered_kwargs,
     )
 
@@ -382,7 +373,6 @@ def cached_get_processor_without_dynamic_kwargs(
 def cached_processor_from_config(
     model_config: "ModelConfig",
     processor_cls: type[_P] | tuple[type[_P], ...] = ProcessorMixin,
-    disable_type_check: bool = False,
     **kwargs: Any,
 ) -> _P:
     return cached_get_processor_without_dynamic_kwargs(
@@ -390,7 +380,6 @@ def cached_processor_from_config(
         revision=model_config.revision,
         trust_remote_code=model_config.trust_remote_code,
         processor_cls=processor_cls,  # type: ignore[arg-type]
-        disable_type_check=disable_type_check,
         **_merge_mm_kwargs(model_config, processor_cls, **kwargs),
     )
 
