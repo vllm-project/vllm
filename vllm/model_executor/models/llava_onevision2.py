@@ -186,6 +186,17 @@ def _validate_video_source(path: str, model_config) -> None:
             # explicit file:// URLs; here we additionally require the bare path
             # to be absolute, because resolving a *relative* path against an
             # ambiguous CWD before the confinement check is brittle and unsafe.
+            #
+            # Deliberately NOT percent-decoded (unlike the file:// branch): the
+            # codec backend consumes this exact string with
+            # ``cv2.VideoCapture(path)`` / ``Path(path)``
+            # (codec_video_processing_llava_onevision2.py), which open it as a
+            # literal filename with no URL semantics. ``%2e%2e`` therefore stays
+            # the literal characters "%2e%2e" downstream and never collapses to
+            # ``..``, so decoding it *here* would create a validate-vs-open
+            # differential (and could reject legitimate names containing ``%``).
+            # The file:// branch decodes because url2pathname defines its
+            # on-disk path; bare paths have no such URL layer.
             local = Path(str(path))
             if not local.is_absolute():
                 raise ValueError(
