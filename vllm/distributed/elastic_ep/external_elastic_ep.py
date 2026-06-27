@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-import contextlib
+import uuid
 from collections.abc import Sequence
 from threading import Event, Thread
 from typing import TYPE_CHECKING, Any
@@ -161,6 +161,7 @@ class ExternalElasticEPScaleCoordinator:
         # server while other ranks are still polling it.
         self.control_store_ref: Any | None = None
         self.reconfig_store_ref: Any | None = None
+        self.active_epoch: str | None = None
 
     @staticmethod
     def key(*parts: str | int) -> str:
@@ -237,70 +238,50 @@ class ExternalElasticEPScaleCoordinator:
         self.reconfig_store_ref = getattr(self.client, "_coord_store", None)
         return ip, coord_store_port
 
-    def _get_error(self, store: Any) -> str | None:
-        error_key = self.key("error")
+    def _get_error(self, store: Any, epoch: str) -> str | None:
+        error_key = self.key(epoch, "error")
         if not store.check([error_key]):
             return None
         return store.get(error_key).decode()
-
-    def _cleanup_reconfig_keys(
-        self,
-        store: Any,
-        max_data_parallel_size: int,
-    ) -> None:
-        keys = [
-            self.key("bootstrap"),
-            self.key("prepared"),
-            self.key("completed"),
-            self.key("error"),
-        ]
-        for rank in range(max_data_parallel_size):
-            keys.append(self.key("old_rank_finished", rank))
-            keys.append(self.key("shutdown_complete", rank))
-            for notification_type in (
-                EEPNotificationType.NEW_CORE_ENGINES_INIT_READY,
-                EEPNotificationType.NEW_CORE_ENGINES_WEIGHTS_INIT_READY,
-            ):
-                keys.append(self.key("notifications", notification_type.value, rank))
-
-        for key in keys:
-            with contextlib.suppress(Exception):
-                store.delete_key(key)
 
     async def _wait_for_bootstrap(
         self,
         store: Any,
         requested_new_dp_size: int,
         timeout_s: float = 300,
-    ) -> ReconfigureDistributedRequest:
+    ) -> tuple[str, ReconfigureDistributedRequest]:
         """Wait for rank 0 to publish matching scale bootstrap metadata.
         Non-zero ranks poll the old control store until prepared or errored."""
         loop = asyncio.get_running_loop()
         start = loop.time()
-        bootstrap_key = self.key("bootstrap")
-        prepared_key = self.key("prepared")
-        completed_key = self.key("completed")
+        current_epoch_key = self.key("current_epoch")
+        previous_epoch = self.active_epoch
         backoff_step = 0
         while True:
-            error = self._get_error(store)
-            if error is not None:
-                raise RuntimeError(error)
+            if store.check([current_epoch_key]):
+                epoch = store.get(current_epoch_key).decode()
+                if epoch != previous_epoch:
+                    error = self._get_error(store, epoch)
+                    if error is not None:
+                        raise RuntimeError(error)
 
-            if store.check([bootstrap_key]):
-                bootstrap = msgspec.msgpack.decode(
-                    store.get(bootstrap_key),
-                    type=ReconfigureDistributedRequest,
-                )
-                completed = store.check([completed_key])
-                if bootstrap.new_data_parallel_size != requested_new_dp_size:
-                    if store.check([prepared_key]) and not completed:
-                        raise RuntimeError(
-                            "A different external Elastic EP scaling operation is "
-                            f"already in progress for target dp size "
-                            f"{bootstrap.new_data_parallel_size}."
+                    bootstrap_key = self.key(epoch, "bootstrap")
+                    if store.check([bootstrap_key]):
+                        bootstrap = msgspec.msgpack.decode(
+                            store.get(bootstrap_key),
+                            type=ReconfigureDistributedRequest,
                         )
-                elif store.check([prepared_key]):
-                    return bootstrap
+                        prepared_key = self.key(epoch, "prepared")
+                        completed = store.check([self.key(epoch, "completed")])
+                        if bootstrap.new_data_parallel_size != requested_new_dp_size:
+                            if store.check([prepared_key]) and not completed:
+                                raise RuntimeError(
+                                    "A different external Elastic EP scaling "
+                                    "operation is already in progress for target "
+                                    f"dp size {bootstrap.new_data_parallel_size}."
+                                )
+                        elif store.check([prepared_key]):
+                            return epoch, bootstrap
 
             now = loop.time()
             if now - start > timeout_s:
@@ -315,21 +296,20 @@ class ExternalElasticEPScaleCoordinator:
         store: Any,
         cur_data_parallel_size: int,
         new_data_parallel_size: int,
-    ) -> ReconfigureDistributedRequest:
-        current_error = self._get_error(store)
-        if (
-            current_error is None
-            and store.check([self.key("prepared")])
-            and not (store.check([self.key("completed")]))
-        ):
-            raise RuntimeError(
-                "Another external Elastic EP scaling operation is already active."
-            )
+    ) -> tuple[str, ReconfigureDistributedRequest]:
+        current_epoch_key = self.key("current_epoch")
+        if store.check([current_epoch_key]):
+            current_epoch = store.get(current_epoch_key).decode()
+            current_error = self._get_error(store, current_epoch)
+            if current_error is None and not store.check(
+                [self.key(current_epoch, "completed")]
+            ):
+                raise RuntimeError(
+                    "Another external Elastic EP scaling operation is already active."
+                )
 
-        self._cleanup_reconfig_keys(
-            store, max(cur_data_parallel_size, new_data_parallel_size)
-        )
         ip, coord_store_port = self._setup_reconfig_bootstrap()
+        epoch = uuid.uuid4().hex
         parallel_config = self.client.vllm_config.parallel_config
         bootstrap = ReconfigureDistributedRequest(
             new_data_parallel_size=new_data_parallel_size,
@@ -343,9 +323,10 @@ class ExternalElasticEPScaleCoordinator:
             coord_store_port=coord_store_port,
         )
 
-        bootstrap_key = self.key("bootstrap")
+        bootstrap_key = self.key(epoch, "bootstrap")
+        store.set(current_epoch_key, epoch.encode())
         store.set(bootstrap_key, msgspec.msgpack.encode(bootstrap))
-        return bootstrap
+        return epoch, bootstrap
 
     def _start_scale_up_handshake_server(
         self,
@@ -374,6 +355,7 @@ class ExternalElasticEPScaleCoordinator:
         self,
         control_store: Any,
         reconfig_store: Any,
+        epoch: str,
         notification_type: EEPNotificationType,
         source_ranks: Sequence[int],
         timeout_s: float = 300,
@@ -384,17 +366,16 @@ class ExternalElasticEPScaleCoordinator:
         start = loop.time()
 
         def is_ready(rank: int) -> bool:
-            key = self.key("notifications", notification_type.value, rank)
+            key = self.key(epoch, "notifications", notification_type.value, rank)
             return reconfig_store.check([key])
 
         backoff_step = 0
         while True:
-            error = self._get_error(control_store)
+            error = self._get_error(control_store, epoch)
             if error is not None:
                 raise RuntimeError(
-                    error
-                    or "External Elastic EP scaling failed while waiting for "
-                    f"{notification_type.value}."
+                    f"External Elastic EP scaling failed while waiting for "
+                    f"{notification_type.value}: {error}"
                 )
 
             ready_count = sum(1 for rank in source_ranks if is_ready(rank))
@@ -417,6 +398,7 @@ class ExternalElasticEPScaleCoordinator:
         self,
         control_store: Any,
         reconfig_store: Any,
+        epoch: str,
         bootstrap: ReconfigureDistributedRequest,
         dp_rank: int,
         scale_up: bool,
@@ -424,13 +406,13 @@ class ExternalElasticEPScaleCoordinator:
     ) -> None:
         """Wait until this rank's EngineCore finishes the scale transition."""
         if not scale_up and dp_rank >= bootstrap.new_data_parallel_size:
-            wait_key = self.key("shutdown_complete", dp_rank)
+            wait_key = self.key(epoch, "shutdown_complete", dp_rank)
             timeout_msg = (
                 "Timed out waiting for local external Elastic EP scale-down "
                 "shutdown to finish."
             )
         else:
-            wait_key = self.key("old_rank_finished", dp_rank)
+            wait_key = self.key(epoch, "old_rank_finished", dp_rank)
             timeout_msg = (
                 "Timed out waiting for local external Elastic EP "
                 "reconfiguration to finish."
@@ -440,7 +422,7 @@ class ExternalElasticEPScaleCoordinator:
         start = loop.time()
         backoff_step = 0
         while True:
-            error = self._get_error(control_store)
+            error = self._get_error(control_store, epoch)
             if error is not None:
                 raise RuntimeError(
                     error or "External Elastic EP scaling failed on another rank."
@@ -472,10 +454,12 @@ class ExternalElasticEPScaleCoordinator:
         )
         handshake_server: ExternalElasticEPScaleUpHandshakeServer | None = None
         bootstrap: ReconfigureDistributedRequest | None = None
+        epoch: str | None = None
+        reconfig_store: Any | None = None
 
         try:
             if dp_rank == 0:
-                bootstrap = self._prepare_reconfig_bootstrap(
+                epoch, bootstrap = self._prepare_reconfig_bootstrap(
                     control_store,
                     cur_data_parallel_size,
                     new_data_parallel_size,
@@ -484,17 +468,21 @@ class ExternalElasticEPScaleCoordinator:
                     handshake_server = self._start_scale_up_handshake_server(
                         bootstrap, cur_data_parallel_size
                     )
-                control_store.set(self.key("prepared"), b"1")
+                control_store.set(self.key(epoch, "prepared"), b"1")
             else:
-                bootstrap = await self._wait_for_bootstrap(
+                epoch, bootstrap = await self._wait_for_bootstrap(
                     control_store, new_data_parallel_size
                 )
 
+            assert epoch is not None
+            assert bootstrap is not None
+            self.active_epoch = epoch
             self.active_reconfig_store = (
                 bootstrap.new_data_parallel_master_ip,
                 bootstrap.coord_store_port,
             )
             reconfig_store = self._get_reconfig_store()
+            reconfig_store.set(self.key("current_epoch"), epoch.encode())
 
             reconfig_rank = (
                 ReconfigureRankType.SHUTDOWN_CURRENT_RANK
@@ -526,12 +514,14 @@ class ExternalElasticEPScaleCoordinator:
                 await self._wait_for_notification(
                     control_store,
                     reconfig_store,
+                    epoch,
                     EEPNotificationType.NEW_CORE_ENGINES_INIT_READY,
                     new_ranks,
                 )
                 await self._wait_for_notification(
                     control_store,
                     reconfig_store,
+                    epoch,
                     EEPNotificationType.NEW_CORE_ENGINES_WEIGHTS_INIT_READY,
                     new_ranks,
                 )
@@ -539,25 +529,30 @@ class ExternalElasticEPScaleCoordinator:
             await self._wait_for_local_reconfig_finished(
                 control_store,
                 reconfig_store,
+                epoch,
                 bootstrap,
                 dp_rank,
                 scale_up,
             )
             if dp_rank == 0:
-                control_store.set(self.key("completed"), b"1")
+                completed_key = self.key(epoch, "completed")
+                control_store.set(completed_key, b"1")
+                reconfig_store.set(completed_key, b"1")
             if scale_up or dp_rank < bootstrap.new_data_parallel_size:
                 self._update_parallel_config(bootstrap)
         except Exception as e:
-            if bootstrap is not None:
+            if epoch is not None:
+                error_key = self.key(epoch, "error")
                 control_store.set(
-                    self.key("error"),
+                    error_key,
                     str(e).encode(),
                 )
+                if reconfig_store is not None:
+                    reconfig_store.set(error_key, str(e).encode())
             raise
         finally:
             if handshake_server is not None:
-                with contextlib.suppress(Exception):
-                    handshake_server.stop()
+                handshake_server.stop()
 
     async def process_engine_core_notification(
         self, notification_data: tuple[str, int]
@@ -581,17 +576,28 @@ class ExternalElasticEPScaleCoordinator:
             )
             return
 
+        epoch = self.active_epoch
         reconfig_store = self._get_reconfig_store()
+        if epoch is None:
+            current_epoch_key = self.key("current_epoch")
+            if not reconfig_store.check([current_epoch_key]):
+                logger.warning(
+                    "Ignoring external Elastic EP notification %s because "
+                    "active epoch metadata is not available yet.",
+                    notification_type.value,
+                )
+                return
+            epoch = reconfig_store.get(current_epoch_key).decode()
 
         if notification_type in (
             EEPNotificationType.NEW_CORE_ENGINES_INIT_READY,
             EEPNotificationType.NEW_CORE_ENGINES_WEIGHTS_INIT_READY,
         ):
-            key = self.key("notifications", notification_type.value, dp_rank)
+            key = self.key(epoch, "notifications", notification_type.value, dp_rank)
             reconfig_store.set(key, b"1")
         elif notification_type == EEPNotificationType.RECONFIGURE_FINISHED:
-            key = self.key("old_rank_finished", dp_rank)
+            key = self.key(epoch, "old_rank_finished", dp_rank)
             reconfig_store.set(key, b"1")
         elif notification_type == EEPNotificationType.SHUTDOWN_COMPLETE:
-            key = self.key("shutdown_complete", dp_rank)
+            key = self.key(epoch, "shutdown_complete", dp_rank)
             reconfig_store.set(key, b"1")
