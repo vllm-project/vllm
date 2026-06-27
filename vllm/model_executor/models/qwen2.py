@@ -319,7 +319,7 @@ class Qwen2DecoderLayer(nn.Module):
         "inputs_embeds": {0: "b"},
     }
 )
-class Qwen2Model(nn.Module, EagleModelMixin, SupportsQuant):
+class Qwen2Model(nn.Module, EagleModelMixin):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_stacked={
             # weight_name: (param_name, shard_id)
@@ -439,8 +439,9 @@ class Qwen2Model(nn.Module, EagleModelMixin, SupportsQuant):
 
 
 class Qwen2ForCausalLM(
-    nn.Module, SupportsLoRA, SupportsPP, SupportsEagle, SupportsEagle3
+    nn.Module, SupportsLoRA, SupportsPP, SupportsEagle, SupportsEagle3, SupportsQuant
 ):
+    hf_to_vllm_mapper = Qwen2Model.hf_to_vllm_mapper
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
