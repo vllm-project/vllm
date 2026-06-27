@@ -235,7 +235,8 @@ def validate_moriio_trusted_host(
     if not trusted_host_list:
         raise ValueError(
             f"MoRIIO {source} host {remote_host!r} is not trusted; configure "
-            "kv_connector_extra_config['node_hosts'] with trusted peer hosts"
+            "kv_connector_extra_config['trusted_remote_hosts'] with trusted peer "
+            "hosts"
         )
     if remote_host not in set(trusted_host_list):
         raise ValueError(
