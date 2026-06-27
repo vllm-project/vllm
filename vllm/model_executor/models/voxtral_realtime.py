@@ -7,13 +7,11 @@ from collections.abc import AsyncGenerator, Iterable, Iterator, Mapping
 
 import numpy as np
 import torch
-from mistral_common.audio import Audio
-from mistral_common.protocol.instruct.chunk import RawAudio
 from mistral_common.protocol.transcription.request import (
     StreamingMode,
     TranscriptionRequest,
 )
-from mistral_common.tokens.tokenizers.audio import AudioConfig
+from mistral_common.tokens.tokenizers.audio import Audio, AudioConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
@@ -477,7 +475,7 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
 
         req = TranscriptionRequest(
             model=model_config.model,
-            audio=RawAudio.from_audio(audio),
+            audio=audio.to_base64(audio.format),
             language=language,
             streaming=StreamingMode.OFFLINE,
         )
