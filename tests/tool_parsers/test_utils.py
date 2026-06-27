@@ -5,9 +5,14 @@ import json
 
 import pytest
 
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionToolsParam,
+    FunctionDefinition,
+)
 from vllm.tool_parsers.utils import (
     coerce_to_schema_type,
     extract_types_from_schema,
+    find_tool_properties,
 )
 
 
@@ -279,3 +284,82 @@ class TestExtractTypesFromSchema:
         }
         result = set(extract_types_from_schema(schema))
         assert result == {"integer", "null", "string"}
+
+
+def _make_tool(name: str, parameters: dict) -> ChatCompletionToolsParam:
+    return ChatCompletionToolsParam(
+        type="function",
+        function=FunctionDefinition(
+            name=name,
+            parameters=parameters,
+        ),
+    )
+
+
+class TestFindToolPropertiesRefResolution:
+    """find_tool_properties must resolve $ref/$defs so that callers see
+    concrete type information instead of opaque $ref pointers."""
+
+    PARAMS_WITH_DEFS: dict = {
+        "type": "object",
+        "$defs": {
+            "PeriodSpec": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string"},
+                },
+                "required": ["kind"],
+            },
+        },
+        "properties": {
+            "period": {"$ref": "#/$defs/PeriodSpec"},
+            "name": {"type": "string"},
+        },
+        "required": ["period"],
+    }
+
+    def test_ref_resolved_to_object_type(self):
+        tools = [_make_tool("sales", self.PARAMS_WITH_DEFS)]
+        props = find_tool_properties(tools, "sales")
+        assert "type" in props["period"]
+        assert props["period"]["type"] == "object"
+
+    def test_non_ref_property_unchanged(self):
+        tools = [_make_tool("sales", self.PARAMS_WITH_DEFS)]
+        props = find_tool_properties(tools, "sales")
+        assert props["name"] == {"type": "string"}
+
+    def test_extract_types_sees_resolved_type(self):
+        tools = [_make_tool("sales", self.PARAMS_WITH_DEFS)]
+        props = find_tool_properties(tools, "sales")
+        types = extract_types_from_schema(props["period"])
+        assert "object" in types
+        assert "string" not in types
+
+    def test_ref_inside_anyof_resolved(self):
+        params = {
+            "type": "object",
+            "$defs": {
+                "Foo": {"type": "object", "properties": {"x": {"type": "integer"}}},
+            },
+            "properties": {
+                "bar": {
+                    "anyOf": [
+                        {"$ref": "#/$defs/Foo"},
+                        {"type": "null"},
+                    ]
+                },
+            },
+        }
+        tools = [_make_tool("fn", params)]
+        props = find_tool_properties(tools, "fn")
+        types = set(extract_types_from_schema(props["bar"]))
+        assert types == {"object", "null"}
+
+    def test_coercion_works_after_ref_resolution(self):
+        tools = [_make_tool("sales", self.PARAMS_WITH_DEFS)]
+        props = find_tool_properties(tools, "sales")
+        types = extract_types_from_schema(props["period"])
+        result = coerce_to_schema_type('{"kind": "week"}', types)
+        assert result == {"kind": "week"}
+        assert isinstance(result, dict)

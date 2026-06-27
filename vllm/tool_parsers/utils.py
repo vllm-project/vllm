@@ -181,11 +181,48 @@ def _extract_tool_info(
         raise TypeError(f"Unsupported tool type: {type(tool)}")
 
 
+def _resolve_refs(schema: Any, defs: dict[str, Any]) -> Any:
+    """Recursively resolve ``$ref`` pointers against *defs*.
+
+    Only handles the ``#/$defs/<name>`` form produced by Pydantic v2.
+    """
+    if not isinstance(schema, dict):
+        return schema
+
+    if "$ref" in schema:
+        ref_path = schema["$ref"]
+        if isinstance(ref_path, str) and ref_path.startswith("#/$defs/"):
+            def_name = ref_path[len("#/$defs/") :]
+            if def_name in defs:
+                resolved = dict(defs[def_name])
+                for k, v in schema.items():
+                    if k != "$ref":
+                        resolved.setdefault(k, v)
+                return _resolve_refs(resolved, defs)
+        return schema
+
+    result: dict[str, Any] = {}
+    for key, value in schema.items():
+        if key in ("anyOf", "oneOf", "allOf") and isinstance(value, list):
+            result[key] = [_resolve_refs(item, defs) for item in value]
+        elif key == "properties" and isinstance(value, dict):
+            result[key] = {k: _resolve_refs(v, defs) for k, v in value.items()}
+        elif key == "items" and isinstance(value, dict):
+            result[key] = _resolve_refs(value, defs)
+        else:
+            result[key] = value
+    return result
+
+
 def find_tool_properties(
     tools: list[Tool] | None,
     tool_name: str,
 ) -> dict[str, Any]:
-    """Find a tool by name and return its properties dict, or {}."""
+    """Find a tool by name and return its properties dict, or {}.
+
+    Any ``$ref`` pointers that reference ``$defs`` in the same parameter
+    schema are resolved inline so callers always see concrete types.
+    """
     if not tools:
         return {}
     for tool in tools:
@@ -193,7 +230,12 @@ def find_tool_properties(
             continue
         name, params = _extract_tool_info(tool)
         if name == tool_name:
-            return (params or {}).get("properties", {})
+            params = params or {}
+            properties = params.get("properties", {})
+            defs = params.get("$defs", {})
+            if defs:
+                return {k: _resolve_refs(v, defs) for k, v in properties.items()}
+            return properties
     return {}
 
 
