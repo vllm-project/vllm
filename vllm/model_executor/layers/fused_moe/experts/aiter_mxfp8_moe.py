@@ -116,7 +116,7 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
-        from aiter import ActivationType, QuantType, dtypes
+        from aiter import ActivationType, QuantType
         from aiter.ops.flydsl.moe_common import GateMode
 
         from vllm._aiter_ops import rocm_aiter_ops
@@ -128,10 +128,6 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
 
         limit = self.quant_config.gemm1_clamp_limit
         swiglu_limit = 0.0 if limit is None else float(limit)
-
-        assert self.w1_scale_val is not None and self.w2_scale_val is not None
-        w1_scale = self.w1_scale_val.view(dtypes.fp8_e8m0)
-        w2_scale = self.w2_scale_val.view(dtypes.fp8_e8m0)
 
         # Under EP, aiter expects ``expert_mask`` as a 0/1 *local-expert* mask
         # over global ids with a trailing fake-expert sentinel slot
@@ -159,8 +155,8 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
             activation_method=ActivationType.Swiglu.value,
             quant_method=QuantType.per_1x32.value,
             doweight_stage1=apply_router_weight_on_input,
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
+            w1_scale=self.w1_scale_val,
+            w2_scale=self.w2_scale_val,
             a1_scale=None,
             a2_scale=None,
             gate_mode=GateMode.INTERLEAVE.value,
