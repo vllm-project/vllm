@@ -419,8 +419,8 @@ class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
         self,
         quant_config: FusedMoEQuantConfig,
         moe_config: FusedMoEConfig,
-        backend: UnquantizedMoeBackend,
         experts_cls: type[mk.FusedMoEExperts],
+        backend: UnquantizedMoeBackend,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEKernel:
         return make_unquantized_moe_kernel(
