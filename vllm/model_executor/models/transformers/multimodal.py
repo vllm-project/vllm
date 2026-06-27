@@ -206,9 +206,8 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             )
 
         # For gemma3 we check `token_type_ids` as the key
-        mm_token_type_ids = processed_data.get(
-            "mm_token_type_ids", processed_data.pop("token_type_ids", None)
-        )
+        mm_token_type_ids = processed_data.pop("token_type_ids", None)
+        mm_token_type_ids = processed_data.pop("mm_token_type_ids", mm_token_type_ids)
 
         # We can infer vLLM style placeholder from token type ids, if we split
         # it for each input `mm_data`.
@@ -377,7 +376,6 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             return None
 
         num_image_patches = kwargs.pop("num_image_patches")
-        kwargs.pop("mm_token_type_ids", None)  # used only in `model.get_rope_index`
 
         if pixel_values is not None:
             # ROCm: Force math SDP backend for vision encoder to avoid accuracy issues
