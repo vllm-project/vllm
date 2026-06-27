@@ -6,18 +6,18 @@ from typing import Any
 import torch
 import torch.distributed
 
+from vllm.utils.torch_utils import direct_register_custom_op
+
 from .parallel_state import get_tp_group
 
 
 def _all_reduce_with_dbo_yields(input_: torch.Tensor) -> torch.Tensor:
-    try:
-        from vllm.v1.worker.ubatching import (
-            dbo_enabled,
-            dbo_yield_and_switch_from_comm_to_compute,
-            dbo_yield_and_switch_from_compute_to_comm,
-        )
-    except Exception:
-        return get_tp_group().all_reduce(input_)
+    from vllm.v1.worker.ubatching import (
+        dbo_enabled,
+        dbo_yield_and_switch_from_comm_to_compute,
+        dbo_yield_and_switch_from_compute_to_comm,
+    )
+
     if not dbo_enabled():
         return get_tp_group().all_reduce(input_)
     dbo_yield_and_switch_from_compute_to_comm()
@@ -27,24 +27,17 @@ def _all_reduce_with_dbo_yields(input_: torch.Tensor) -> torch.Tensor:
 
 
 # Opaque custom op so torch.compile can't fold the runtime dbo_enabled() check.
-try:
-    from vllm.utils.torch_utils import direct_register_custom_op
+def _ar_op_fake(input_: torch.Tensor) -> torch.Tensor:
+    return torch.empty_like(input_)
 
-    def _ar_op_impl(input_: torch.Tensor) -> torch.Tensor:
-        return _all_reduce_with_dbo_yields(input_)
 
-    def _ar_op_fake(input_: torch.Tensor) -> torch.Tensor:
-        return torch.empty_like(input_)
-
-    direct_register_custom_op(
-        op_name="vllm_dbo_all_reduce",
-        op_func=_ar_op_impl,
-        mutates_args=[],
-        fake_impl=_ar_op_fake,
-    )
-    _AR_OP = torch.ops.vllm.vllm_dbo_all_reduce.default
-except Exception:
-    _AR_OP = None
+direct_register_custom_op(
+    op_name="vllm_dbo_all_reduce",
+    op_func=_all_reduce_with_dbo_yields,
+    mutates_args=[],
+    fake_impl=_ar_op_fake,
+)
+_AR_OP = torch.ops.vllm.vllm_dbo_all_reduce.default
 
 
 # Route AR through the opaque op only when DBO is configured. Resolved once at
