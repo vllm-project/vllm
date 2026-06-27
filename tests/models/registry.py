@@ -1052,9 +1052,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "LlavaOnevision2ForConditionalGeneration": _HfExamplesInfo(
         "lmms-lab-encoder/LLaVA-OneVision-2-8B-Instruct",
         trust_remote_code=True,
-        # torch.compile backend init hangs during construction on the FA3
-        # attention path (H200); model construction + forward are validated
-        # eager, so skip compile for the init/schema harness tests.
+        # Keep the init/schema harness eager (these tests never run forward).
+        # NOTE: a separate H200-only hang exists in the core FA3 attention
+        # construction (after `FlashAttentionImpl.__init__` logs the FA3
+        # version, while building the Qwen3 backbone). enforce_eager does NOT
+        # gate that path, so this flag is hygiene, not the fix -- tracked with
+        # the maintainer.
         enforce_eager=True,
     ),
     "LlavaOnevisionForConditionalGeneration": _HfExamplesInfo(
