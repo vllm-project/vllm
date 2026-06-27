@@ -39,8 +39,9 @@ RAY_HEAD_START_SLEEP_S="${RAY_HEAD_START_SLEEP_S:-60}"
 RAY_WORKER_START_SLEEP_S="${RAY_WORKER_START_SLEEP_S:-45}"
 
 WORKER_NSYS_LIVE_COPY_INTERVAL="${WORKER_NSYS_LIVE_COPY_INTERVAL:-2}"
-WORKER_NSYS_FINALIZE_WAIT_S="${WORKER_NSYS_FINALIZE_WAIT_S:-180}"
+WORKER_NSYS_FINALIZE_WAIT_S="${WORKER_NSYS_FINALIZE_WAIT_S:-600}"
 WORKER_NSYS_FINALIZE_POLL_S="${WORKER_NSYS_FINALIZE_POLL_S:-5}"
+WORKER_NSYS_FLUSH_WAIT_S="${WORKER_NSYS_FLUSH_WAIT_S:-600}"
 MIN_WORKER_NSYS_REP_BYTES="${MIN_WORKER_NSYS_REP_BYTES:-1024}"
 
 # Benchmark/workload knobs owned by this host Slurm file.
@@ -1124,8 +1125,8 @@ for pid in ${WORKER_RAY_PIDS}; do
 done
 WORKER_RAY_PIDS=""
 
-echo "Waiting briefly for Ray/Nsight files to flush..."
-sleep 10
+echo "Waiting up to ${WORKER_NSYS_FLUSH_WAIT_S}s for Ray/Nsight files to flush..."
+sleep "${WORKER_NSYS_FLUSH_WAIT_S}"
 
 echo "Running fallback Ray worker Nsight copy..."
 mkdir -p "${TRACE_RUN_DIR}/ray_worker_nsight"
