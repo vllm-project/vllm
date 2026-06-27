@@ -178,6 +178,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "xlam_tool_parser",
         "xLAMToolParser",
     ),
+    "zaya_xml": (
+        "zaya_tool_parser",
+        "ZayaXMLToolParser",
+    ),
     "gigachat3": (
         "gigachat3_tool_parser",
         "GigaChat3ToolParser",

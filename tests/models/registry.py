@@ -563,6 +563,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "CofeAI/FLM-2-52B-Instruct-2407", trust_remote_code=True
     ),
     "Zamba2ForCausalLM": _HfExamplesInfo("Zyphra/Zamba2-7B-instruct"),
+    "ZayaForCausalLM": _HfExamplesInfo("Zyphra/ZAYA1-8B",trust_remote_code=True,),
     "MiMoForCausalLM": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL", trust_remote_code=True),
     "MiMoV2FlashForCausalLM": _HfExamplesInfo(
         "XiaomiMiMo/MiMo-V2-Flash", trust_remote_code=True
