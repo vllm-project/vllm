@@ -120,12 +120,33 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     Without autotuning, FlashInfer will rely on heuristics, which may
     be significantly slower.
 
-    Tuning is performed on every rank so distributed kernels stay aligned
-    during the dummy run. Rank 0's resulting cache is broadcast to every rank
-    so all ranks dispatch the same kernel tactic.
+    Tuning is performed only on rank 0. The resulting cache is broadcast
+    to every rank so all ranks dispatch the same kernel tactic.
     """
     import vllm.utils.flashinfer as fi_utils
     from vllm.distributed.parallel_state import get_world_group
+
+    use_persistent_cache = True
+
+    deepep_a2a_backends = {
+        "deepep_high_throughput",
+        "deepep_low_latency",
+        "deepep_v2",
+    }
+    if runner.vllm_config.parallel_config.all2all_backend in deepep_a2a_backends:
+        # DeepEP dispatch/combine can timeout when only rank 0
+        # performs autotune and falls behind other ranks.
+        use_persistent_cache = False
+
+    if not use_persistent_cache:
+        with torch.inference_mode(), fi_utils.autotune():
+            runner._dummy_run(
+                num_tokens=runner.scheduler_config.max_num_batched_tokens,
+                skip_eplb=True,
+                is_profile=True,
+            )
+        get_world_group().barrier()
+        return
 
     world = get_world_group()
     is_leader = world.rank_in_group == 0
@@ -133,7 +154,6 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     cache_path = resolve_flashinfer_autotune_file(runner)
     if is_leader:
         logger.info("Using FlashInfer autotune cache file: %s", cache_path)
-    rank_cache = str(cache_path) if is_leader else None
 
     # We skip EPLB here since we don't want to record dummy metrics.
     # When autotuning with number of tokens m, flashinfer will autotune
@@ -145,8 +165,12 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
         is_profile=True,
     )
 
-    with torch.inference_mode(), fi_utils.autotune(tune_mode=True, cache=rank_cache):
-        runner._dummy_run(**dummy_run_kwargs)
+    with torch.inference_mode():
+        if is_leader:
+            with fi_utils.autotune(tune_mode=True, cache=str(cache_path)):
+                runner._dummy_run(**dummy_run_kwargs)
+        else:
+            runner._dummy_run(**dummy_run_kwargs)
 
     # Broadcast autotune cache from rank 0 to all other ranks so every
     # rank loads the same set of chosen tactics.
