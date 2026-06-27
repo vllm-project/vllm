@@ -179,6 +179,20 @@ def _validate_video_source(path: str, model_config) -> None:
         # including the netloc so file://host/path is handled identically.
         if scheme == "file":
             local = Path(url2pathname((parsed.netloc or "") + (parsed.path or "")))
+            # A file:// URL with a netloc (e.g. ``file://host/path``) makes
+            # ``url2pathname`` yield a *relative* path ("host/path"). That would
+            # resolve against the CWD and could slip past the confinement check
+            # below while the raw ``file://`` string handed to the codec backend
+            # still names something else -- a validate-vs-open differential.
+            # MediaConnector._load_file_url is immune because it opens the very
+            # Path it validates; our codec path forwards the original string, so
+            # we additionally require the resolved path to be absolute (matching
+            # the bare-path branch invariant).
+            if not local.is_absolute():
+                raise ValueError(
+                    f"file:// video path {str(path)!r} resolved to a relative "
+                    f"path; only absolute file:// paths are supported."
+                )
         else:
             # Bare local path (scheme==""): only the codec backend produces
             # these, and they bypass MediaConnector by design (path-survival,
