@@ -460,23 +460,39 @@ def _deepseek_v4_indexed_d512_split_prefill_warmup(runner: "GPUModelRunner") -> 
         window_size = max(1, int(layer.window_size))
         device = layer.attn_sink.device
 
-        # Upper bound on the per-chunk combined_topk a real request can reach:
-        # the runtime sizes its prefill workspace from the same expression, so a
-        # request cannot exceed it. The split path is gated to <= 1152.
-        topk_bound = DeepseekV4FlashMLAAttention._prefill_workspace_topk_bound(layer)
-        max_reachable_topk = sparse_prefill_combined_topk_size(topk_bound, window_size)
-        # Non-silent gap: if combined_topk can exceed the split ceiling, the
-        # request routes onto the chunked path whose kernels we do not pre-warm.
-        # DSv4-Flash caps at 640 so this never fires for it; warn for variants.
-        if max_reachable_topk > _INDEXED_D512_SPLIT_PREFILL_MAX_TOPK:
+        # The width fed to the split kernels at runtime is the per-request
+        # combined_topk (combined_indices.shape[-1]), and it is NOT bounded by the
+        # static `topk_bound + window_size`. For the C4 indexer layers
+        # (compress_ratio=4) that expression IS the width (~640 for DSv4-Flash:
+        # indexer top-k 512 + window 128). But the C128A layer (compress_ratio=128)
+        # uses a context-dependent `effective_topk` (_c128a_effective_topk_width):
+        # a 128-aligned ceiling of `max_pos // compress_ratio` that GROWS with the
+        # request's context length up to the split ceiling. So a long-context
+        # request sweeps widths 768/896/1024/1152, not just <=640 (observed: all 8
+        # widths 256..1152 launched on a 60k-token / mnbt=512 request). The old
+        # `min(ceiling, topk_bound+window)` cap (640) therefore left 768..1152 to
+        # JIT on the first long request (PR #23 / lennytinkeredapps,
+        # max_model_len=1M + mnbt=512). Warm the WHOLE split range so no split-path
+        # width can JIT in production; the runtime workspace already accommodates
+        # the full range (a 60k request at width 1152 runs correctly). The extra
+        # widths cost a few seconds of one-time startup compile — the warmup's
+        # purpose.
+        c4_static_combined_topk = sparse_prefill_combined_topk_size(
+            DeepseekV4FlashMLAAttention._prefill_workspace_topk_bound(layer),
+            window_size,
+        )
+        # Variants whose static C4 width alone already exceeds the split ceiling
+        # never use the split path (they route to the chunked path, which is not
+        # pre-warmed here); the C128A layer can also exceed it at extreme context.
+        if c4_static_combined_topk > _INDEXED_D512_SPLIT_PREFILL_MAX_TOPK:
             logger.warning(
-                "DeepSeek V4 D512 prefill: combined_topk can reach %d (> %d); the "
-                "chunked-prefill kernels are NOT pre-warmed and may JIT on the "
-                "first very-long prefill. Only the split path is warmed.",
-                max_reachable_topk,
+                "DeepSeek V4 D512 prefill: static C4 combined_topk is %d (> %d); "
+                "this config routes to the chunked-prefill path, whose kernels are "
+                "NOT pre-warmed and may JIT on the first long prefill.",
+                c4_static_combined_topk,
                 _INDEXED_D512_SPLIT_PREFILL_MAX_TOPK,
             )
-        max_topk = min(_INDEXED_D512_SPLIT_PREFILL_MAX_TOPK, max_reachable_topk)
+        max_topk = _INDEXED_D512_SPLIT_PREFILL_MAX_TOPK
         topk_widths = list(
             range(_INDEXED_D512_SPLIT_PREFILL_MIN_TOPK, max_topk + 1, 128)
         )
