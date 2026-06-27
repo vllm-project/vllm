@@ -40,6 +40,7 @@ causes unexpected behavior.
 """
 
 import asyncio
+import os
 import uuid
 from dataclasses import asdict
 
@@ -68,6 +69,19 @@ MODEL_NAME_V1 = "Qwen/Qwen3-1.7B-Base"
 MODEL_NAME_V2 = "Qwen/Qwen3-1.7B"
 PAUSE_TOKEN_THRESHOLD = 10
 ATTN_BACKEND = "TRITON_ATTN" if current_platform.is_rocm() else "FLASH_ATTN"
+
+
+def get_assigned_gpu():
+    # Workaround for a runtime bug in RCCL.
+    # See https://github.com/ROCm/rocm-systems/issues/5756
+    if not current_platform.is_rocm():
+        return 0
+    assigned_gpu = int(ray.get_gpu_ids()[0])
+    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+    os.environ.pop("HIP_VISIBLE_DEVICES", None)
+    os.environ.pop("ROCR_VISIBLE_DEVICES", None)
+    torch.accelerator.set_device_index(assigned_gpu)
+    return assigned_gpu
 
 
 class MyLLM(vllm.AsyncLLMEngine):
@@ -132,12 +146,16 @@ class TrainModel:
             init_batch_invariance,
         )
 
+        # Pin to the assigned physical GPU before any HIP/CUDA context is
+        # created (see get_assigned_gpu for the ROCm RCCL workaround).
+        self.assigned_gpu = get_assigned_gpu()
+
         # need to init all env vars for batch invariance which affect nccl ops
         init_batch_invariance()
 
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name, dtype=torch.bfloat16
-        ).to("cuda:0")
+        ).to(f"cuda:{self.assigned_gpu}")
         self.port = get_open_port()
         self.master_address = get_ip()
 
@@ -179,7 +197,7 @@ class TrainModel:
     @torch.inference_mode()
     def generate(self, token_ids: list[int], max_new_tokens: int) -> list[int]:
         """Greedy-decode max_new_tokens from the given context."""
-        input_ids = torch.tensor([token_ids], device="cuda:0")
+        input_ids = torch.tensor([token_ids], device=f"cuda:{self.assigned_gpu}")
         output = self.model.generate(
             input_ids,
             max_new_tokens=max_new_tokens,
