@@ -47,6 +47,38 @@ def _wait_if_needed(work: Any) -> None:
     raise RuntimeError(f"Unexpected torchcomms work object: {type(work)}")
 
 
+def _setup_torchcomms_rank_env(
+    *,
+    group_rank: int,
+    group_world_size: int,
+) -> tuple[int, int]:
+    local_rank = int(os.environ.get("LOCAL_RANK", group_rank))
+    local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", group_world_size))
+
+    os.environ["RANK"] = str(group_rank)
+    os.environ["WORLD_SIZE"] = str(group_world_size)
+    os.environ["LOCAL_RANK"] = str(local_rank)
+    os.environ["LOCAL_WORLD_SIZE"] = str(local_world_size)
+
+    os.environ["TORCHCOMM_RANK"] = str(group_rank)
+    os.environ["TORCHCOMM_SIZE"] = str(group_world_size)
+
+    return local_rank, local_world_size
+
+
+def _setup_backend_specific_env(
+    *,
+    backend: str,
+    local_rank: int,
+    local_world_size: int,
+) -> None:
+    if backend == "xccl":
+        os.environ.setdefault("CCL_PROCESS_LAUNCHER", "none")
+        os.environ["CCL_LOCAL_RANK"] = str(local_rank)
+        os.environ["CCL_LOCAL_SIZE"] = str(local_world_size)
+        os.environ.setdefault("CCL_ATL_TRANSPORT", "ofi")
+
+
 class TorchCommsCommunicator(DeviceCommunicatorBase):
     """vLLM device communicator backed directly by torchcomms."""
 
@@ -81,31 +113,41 @@ class TorchCommsCommunicator(DeviceCommunicatorBase):
             )
             return
 
-        local_rank = int(os.environ.get("LOCAL_RANK", self.group_rank))
-        local_size = int(os.environ.get("LOCAL_WORLD_SIZE", self.group_world_size))
+        local_rank, local_world_size = _setup_torchcomms_rank_env(
+            group_rank=self.group_rank,
+            group_world_size=self.group_world_size,
+        )
 
-        os.environ["TORCHCOMM_RANK"] = str(self.group_rank)
-        os.environ["TORCHCOMM_SIZE"] = str(self.group_world_size)
-
-        os.environ.setdefault("CCL_PROCESS_LAUNCHER", "none")
-        os.environ["CCL_LOCAL_RANK"] = str(local_rank)
-        os.environ["CCL_LOCAL_SIZE"] = str(local_size)
-
-        os.environ.setdefault("CCL_ATL_TRANSPORT", "ofi")
+        _setup_backend_specific_env(
+            backend=self.backend,
+            local_rank=local_rank,
+            local_world_size=local_world_size,
+        )
 
         logger.info(
             "[torchcomms] env before new_comm: "
-            "TORCHCOMM_RANK=%s TORCHCOMM_SIZE=%s "
-            "CCL_PROCESS_LAUNCHER=%s CCL_LOCAL_RANK=%s CCL_LOCAL_SIZE=%s "
-            "CCL_ATL_TRANSPORT=%s CCL_LOG_LEVEL=%s",
+            "backend=%s TORCHCOMM_RANK=%s TORCHCOMM_SIZE=%s "
+            "RANK=%s WORLD_SIZE=%s LOCAL_RANK=%s LOCAL_WORLD_SIZE=%s",
+            self.backend,
             os.environ.get("TORCHCOMM_RANK"),
             os.environ.get("TORCHCOMM_SIZE"),
-            os.environ.get("CCL_PROCESS_LAUNCHER"),
-            os.environ.get("CCL_LOCAL_RANK"),
-            os.environ.get("CCL_LOCAL_SIZE"),
-            os.environ.get("CCL_ATL_TRANSPORT"),
-            os.environ.get("CCL_LOG_LEVEL"),
+            os.environ.get("RANK"),
+            os.environ.get("WORLD_SIZE"),
+            os.environ.get("LOCAL_RANK"),
+            os.environ.get("LOCAL_WORLD_SIZE"),
         )
+
+        if self.backend == "xccl":
+            logger.info(
+                "[torchcomms] xccl env before new_comm: "
+                "CCL_PROCESS_LAUNCHER=%s CCL_LOCAL_RANK=%s CCL_LOCAL_SIZE=%s "
+                "CCL_ATL_TRANSPORT=%s CCL_LOG_LEVEL=%s",
+                os.environ.get("CCL_PROCESS_LAUNCHER"),
+                os.environ.get("CCL_LOCAL_RANK"),
+                os.environ.get("CCL_LOCAL_SIZE"),
+                os.environ.get("CCL_ATL_TRANSPORT"),
+                os.environ.get("CCL_LOG_LEVEL"),
+            )
 
         comm_name = f"{unique_name or 'vllm'}_torchcomms"
 
@@ -117,33 +159,26 @@ class TorchCommsCommunicator(DeviceCommunicatorBase):
             os.environ.get("MASTER_ADDR", "127.0.0.1"),
         )
         torchcomm_port = os.environ.get("TORCHCOMM_MASTER_PORT")
-        if torchcomm_port is None:
-            torchcomm_port = os.environ.get("TORCHCOMM_PORT")
 
         if torchcomm_port is None:
             raise RuntimeError(
-                "TORCHCOMM_MASTER_PORT/TORCHCOMM_PORT is not set. "
-                "TorchComms needs a separate rendezvous port from MASTER_PORT."
+                "TORCHCOMM_MASTER_PORT is not set. TorchComms needs a separate "
+                "rendezvous port from MASTER_PORT to avoid port collisions."
             )
 
-        # torchcomms.new_comm appears to read MASTER_ADDR/MASTER_PORT.
-        # Temporarily point those to the TorchComms rendezvous port so it
-        # does not collide with vLLM/torch.distributed's main MASTER_PORT.
         os.environ["MASTER_ADDR"] = torchcomm_addr
         os.environ["MASTER_PORT"] = str(torchcomm_port)
 
         logger.info(
             "[torchcomms] using rendezvous MASTER_ADDR=%s MASTER_PORT=%s "
             "original_MASTER_ADDR=%s original_MASTER_PORT=%s "
-            "TORCHCOMM_MASTER_ADDR=%s TORCHCOMM_MASTER_PORT=%s "
-            "TORCHCOMM_PORT=%s name=%s",
+            "TORCHCOMM_MASTER_ADDR=%s TORCHCOMM_MASTER_PORT=%s name=%s",
             os.environ.get("MASTER_ADDR"),
             os.environ.get("MASTER_PORT"),
             orig_master_addr,
             orig_master_port,
             os.environ.get("TORCHCOMM_MASTER_ADDR"),
             os.environ.get("TORCHCOMM_MASTER_PORT"),
-            os.environ.get("TORCHCOMM_PORT"),
             comm_name,
         )
 
@@ -165,11 +200,17 @@ class TorchCommsCommunicator(DeviceCommunicatorBase):
                 self.group_world_size,
             )
             raise
+
         finally:
             if orig_master_addr is not None:
                 os.environ["MASTER_ADDR"] = orig_master_addr
+            else:
+                os.environ.pop("MASTER_ADDR", None)
+
             if orig_master_port is not None:
                 os.environ["MASTER_PORT"] = orig_master_port
+            else:
+                os.environ.pop("MASTER_PORT", None)
 
         logger.info(
             "[torchcomms] initialized backend=%s device=%s group_rank=%s "

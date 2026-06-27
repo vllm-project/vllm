@@ -482,7 +482,7 @@ class GroupCoordinator:
             device_comm_qualname = current_platform.get_device_communicator_cls()
 
             logger.info(
-                "[torchcomms verify] selected device communicator class: %s",
+                "[verify] selected device communicator class: %s",
                 device_comm_qualname,
             )
 
@@ -496,7 +496,7 @@ class GroupCoordinator:
             )
 
             logger.info(
-                "[torchcomms verify] initialized device communicator: %s",
+                "[verify] initialized device communicator: %s",
                 type(self.device_communicator).__name__,
             )
 
