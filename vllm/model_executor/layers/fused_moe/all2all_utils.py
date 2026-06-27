@@ -33,6 +33,7 @@ from vllm.utils.import_utils import (
     has_deep_ep,
     has_deep_ep_v2,
     has_mori,
+    has_nccl_ep,
     has_nixl_ep,
 )
 
@@ -49,6 +50,13 @@ if current_platform.is_cuda_alike():
         from .prepare_finalize.deepep_v2 import DeepEPV2PrepareAndFinalize
     if has_mori():
         from .prepare_finalize.mori import MoriPrepareAndFinalize
+    if has_nccl_ep():
+        from .prepare_finalize.nccl_ep import (
+            NcclEPStandardPrepareAndFinalize,
+        )
+        from .prepare_finalize.nccl_ep_batched import (
+            NcclEPBatchedPrepareAndFinalize,
+        )
     if has_nixl_ep():
         from .prepare_finalize.nixl_ep import (
             NIXL_EP_QUANT_BLOCK_SHAPE,
@@ -234,6 +242,74 @@ def maybe_make_prepare_finalize(
             use_fp8_dispatch=use_fp8_dispatch,
             use_cudagraph=use_cudagraph,
         )
+
+    elif moe.use_nccl_ep_kernels:
+        if moe.moe_parallel_config.use_batched_activation_format:
+            assert quant_config is not None
+            global_to_physical = physical_to_global = (
+                local_expert_global_ids
+            ) = None
+            if routing_tables is not None:
+                (
+                    global_to_physical,
+                    physical_to_global,
+                    local_expert_global_ids,
+                ) = routing_tables
+            num_local_experts = (
+                moe.num_experts // all2all_manager.world_size
+            )
+            all_to_all_args = dict(
+                algorithm="batched",
+                num_experts=moe.num_experts,
+                max_dispatch_tokens_per_rank=moe.max_num_tokens,
+                hidden=moe.hidden_dim,
+                dtype_bytes=moe.in_dtype.itemsize,
+            )
+            handle = all2all_manager.get_handle(all_to_all_args)
+
+            use_fp8_dispatch = (
+                quant_config.quant_dtype == current_platform.fp8_dtype()
+                and quant_config.is_block_quantized
+            )
+
+            prepare_finalize = NcclEPBatchedPrepareAndFinalize(
+                handle,
+                max_tokens_per_rank=moe.max_num_tokens,
+                num_dispatchers=all2all_manager.world_size,
+                num_experts=moe.num_experts,
+                num_local_experts=num_local_experts,
+                use_fp8_dispatch=use_fp8_dispatch,
+                global_to_physical=global_to_physical,
+                physical_to_global=physical_to_global,
+                local_expert_global_ids=local_expert_global_ids,
+            )
+        else:
+            assert moe.dp_size == all2all_manager.dp_world_size
+            use_fp8_dispatch = (
+                quant_config is not None
+                and quant_config.quant_dtype == current_platform.fp8_dtype()
+                and quant_config.is_block_quantized
+            )
+            all_to_all_args = dict(
+                algorithm="standard",
+                num_experts=moe.num_experts,
+                max_dispatch_tokens_per_rank=moe.max_num_tokens,
+                hidden=moe.hidden_dim,
+                dtype_bytes=moe.in_dtype.itemsize,
+            )
+            handle = all2all_manager.get_handle(all_to_all_args)
+
+            prepare_finalize = NcclEPStandardPrepareAndFinalize(
+                handle,
+                num_dispatchers=all2all_manager.world_size,
+                dp_size=all2all_manager.dp_world_size,
+                rank_expert_offset=(
+                    all2all_manager.rank * moe.num_local_experts
+                ),
+                num_experts=moe.num_experts,
+                num_topk=moe.experts_per_token,
+                use_fp8_dispatch=use_fp8_dispatch,
+            )
 
     elif moe.use_mori_kernels:
         assert quant_config is not None
