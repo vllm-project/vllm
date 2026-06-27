@@ -1067,14 +1067,21 @@ class SamplingParams(
         )
 
     @staticmethod
-    def for_sampler_warmup() -> "SamplingParams":
+    def for_sampler_warmup(
+        *, use_rapid_sampler: bool | None = None
+    ) -> "SamplingParams":
         """Set parameters to exercise all sampler logic."""
+        use_rapid_sampler = (
+            envs.VLLM_USE_RAPID_SAMPLER
+            if use_rapid_sampler is None
+            else use_rapid_sampler
+        )
         return SamplingParams(
             temperature=0.9,
             top_p=0.9,
             top_k=50,
-            min_p=0.1,
-            frequency_penalty=0.5,
+            min_p=0.0 if use_rapid_sampler else 0.1,
+            frequency_penalty=0.0 if use_rapid_sampler else 0.5,
             presence_penalty=0.5,
             repetition_penalty=1.2,
             min_tokens=2,

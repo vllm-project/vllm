@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm import PoolingParams, SamplingParams
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
@@ -207,7 +208,9 @@ def warmup_kernels(
         sampling_params = None
         pooling_params = PoolingParams()
     else:
-        sampling_params = SamplingParams.for_sampler_warmup()
+        sampling_params = SamplingParams.for_sampler_warmup(
+            use_rapid_sampler=envs.VLLM_USE_RAPID_SAMPLER
+        )
         pooling_params = None
 
     # Assign distinct block IDs per request per group. 0 null block, start from 1.

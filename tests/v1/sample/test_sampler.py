@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from tests.v1.sample.utils import create_allowed_token_ids
+from vllm import SamplingParams
 from vllm.platforms import current_platform
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import make_tensor_with_pad
@@ -23,6 +24,22 @@ DEVICES = [
     for i in range(1 if current_platform.device_count() == 1 else 2)
 ]
 MAX_NUM_PROMPT_TOKENS = 64
+
+
+def test_sampler_warmup_params_for_rapid_sampler() -> None:
+    sampling_params = SamplingParams.for_sampler_warmup(use_rapid_sampler=True)
+
+    assert sampling_params.frequency_penalty == 0.0
+    assert sampling_params.min_p == 0.0
+    assert sampling_params.presence_penalty == 0.5
+    assert sampling_params.repetition_penalty == 1.2
+
+
+def test_sampler_warmup_params_for_native_sampler() -> None:
+    sampling_params = SamplingParams.for_sampler_warmup(use_rapid_sampler=False)
+
+    assert sampling_params.frequency_penalty == 0.5
+    assert sampling_params.min_p == 0.1
 
 
 def _create_fake_logits(batch_size: int, vocab_size: int) -> torch.Tensor:
