@@ -59,7 +59,9 @@ class Fp8MoeBackend(Enum):
     # MXFP8 MoE via a Triton ``dot_scaled`` kernel that lowers to CDNA4
     # (gfx950) native MX matrix-core ops. Weights stay in MXFP8 (no load-time
     # format conversion); the FP8 values + E8M0 scales are consumed directly.
-    NATIVE_MXFP8 = "NATIVE_MXFP8"
+    TRITON_MXFP8 = "TRITON_MXFP8"
+    # MXFP8 MoE via AITER (FlyDSL two-stage grouped GEMM) on gfx950.
+    AITER_MXFP8 = "AITER_MXFP8"
 
 
 def _get_priority_backends(
@@ -423,6 +425,10 @@ def convert_to_fp8_moe_kernel_format(
         )
     elif fp8_backend == Fp8MoeBackend.AITER:
         w13, w2 = rocm_aiter_ops.shuffle_weights(w13, w2)
+    elif fp8_backend == Fp8MoeBackend.AITER_MXFP8:
+        w13, w2, w13_scale, w2_scale = rocm_aiter_ops.shuffle_mxfp8_moe_weights(
+            w13, w2, w13_scale, w2_scale
+        )
     elif fp8_backend == Fp8MoeBackend.MARLIN:
         weight_block_size = getattr(layer, "weight_block_size", None)
         if weight_block_size == [1, 32]:
@@ -484,7 +490,7 @@ def convert_to_fp8_moe_kernel_format(
             # EMULATION dequantizes weights at runtime; NATIVE_MXFP8 consumes
             # the MXFP8 weights as-is — neither needs a load-time layout change.
             Fp8MoeBackend.EMULATION,
-            Fp8MoeBackend.NATIVE_MXFP8,
+            Fp8MoeBackend.TRITON_MXFP8,
         ]:
             raise ValueError(f"Unsupported FP8 MoE backend: {fp8_backend.value}")
 
