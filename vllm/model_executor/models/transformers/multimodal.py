@@ -55,6 +55,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+_MODALITY_TO_TOKEN_TYPE_ID = {"image": 1, "video": 2, "audio": 3}
+
 
 class MultiModalProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self):
@@ -502,7 +504,8 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             for feature in mm_features:
                 position = feature.mm_position
                 offset, length = position.offset, position.length
-                mm_token_type_ids[offset : offset + length] = feature.mm_token_type_id
+                mm_token_type_id = _MODALITY_TO_TOKEN_TYPE_ID[feature.modality]
+                mm_token_type_ids[offset : offset + length] = mm_token_type_id
             kwargs["mm_token_type_ids"] = mm_token_type_ids.unsqueeze(0)
 
         mrope_positions, mrope_position_delta = self.model.get_rope_index(

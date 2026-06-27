@@ -344,11 +344,6 @@ class MultiModalFeatureSpec:
 
         return dict(kwargs)
 
-    @property
-    def mm_token_type_id(self) -> int:
-        """The token type ID for the modality of this feature."""
-        return {"image": 1, "video": 2, "audio": 3}.get(self.modality, 0)
-
 
 @dataclass
 class MultiModalFieldElem:
