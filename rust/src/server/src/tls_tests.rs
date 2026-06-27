@@ -32,12 +32,12 @@ use crate::{ConnectionTimeouts, serve_listener, tls};
 
 /// A throwaway CA + server/client/untrusted/chain cert set as PEM files in a
 /// temp dir; dropping it deletes them.
-struct TestCerts {
+pub(crate) struct TestCerts {
     dir: TempDir,
 }
 
 impl TestCerts {
-    fn generate() -> Self {
+    pub(crate) fn generate() -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
 
         let (ca, ca_key) = build_ca();
@@ -82,7 +82,7 @@ impl TestCerts {
     }
 
     /// Absolute path to a fixture by name; the file need not exist.
-    fn path(&self, name: &str) -> String {
+    pub(crate) fn path(&self, name: &str) -> String {
         self.dir.path().join(name).to_str().expect("utf-8 path").to_string()
     }
 }
@@ -227,7 +227,7 @@ fn build_intermediate(ca: &X509, ca_key: &PKey<Private>) -> (X509, PKey<Private>
     (builder.build(), key)
 }
 
-fn server_tls(certs: &TestCerts, cert_reqs: i32) -> TlsConfig {
+pub(crate) fn server_tls(certs: &TestCerts, cert_reqs: i32) -> TlsConfig {
     TlsConfig {
         cert_file: Some(certs.path("server.pem")),
         key_file: Some(certs.path("server.key")),

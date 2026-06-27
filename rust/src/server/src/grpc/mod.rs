@@ -2,13 +2,19 @@
 
 mod convert;
 
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use futures::{Stream, StreamExt as _};
 use thiserror_ext::AsReport as _;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio_openssl::SslStream;
 use tokio_stream::wrappers::ReceiverStream;
+use tonic::transport::server::{Connected, TcpConnectInfo};
 use tonic::{Request, Response, Status};
 use tracing::info;
 use vllm_text::{DecodedTextEvent, TextOutputStreamExt as _};
@@ -25,6 +31,58 @@ pub use pb::generate_server::GenerateServer;
 
 #[cfg(test)]
 mod tests;
+
+/// Newtype over `tokio-openssl`'s `SslStream` so we can implement tonic's
+/// [`Connected`] on it (the orphan rule blocks doing so on the foreign type).
+pub(crate) struct GrpcTlsStream {
+    inner: SslStream<TcpStream>,
+    remote_addr: SocketAddr,
+}
+
+impl GrpcTlsStream {
+    pub(crate) fn new(inner: SslStream<TcpStream>, remote_addr: SocketAddr) -> Self {
+        Self { inner, remote_addr }
+    }
+}
+
+impl AsyncRead for GrpcTlsStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for GrpcTlsStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+impl Connected for GrpcTlsStream {
+    type ConnectInfo = TcpConnectInfo;
+
+    fn connect_info(&self) -> TcpConnectInfo {
+        TcpConnectInfo {
+            local_addr: None,
+            remote_addr: Some(self.remote_addr),
+        }
+    }
+}
 
 /// gRPC Generate service implementation backed by the shared application state.
 pub struct GenerateServiceImpl {

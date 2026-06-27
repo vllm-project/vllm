@@ -31,6 +31,7 @@ pub use config::{
     ApiServerOptions, Config, CoordinatorMode, CorsConfig, DEFAULT_KEEP_ALIVE_TIMEOUT,
     HttpListenerMode, TlsConfig,
 };
+use futures::{FutureExt as _, StreamExt as _};
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
@@ -55,6 +56,13 @@ use crate::listener::Listener;
 use crate::routes::build_router;
 use crate::server_info::ServerInfoSnapshot;
 use crate::state::AppState;
+
+/// How often the server PINGs an idle gRPC connection to reap a dead peer;
+/// tonic enables no keepalive by default. 2h matches the gRPC-core default.
+const GRPC_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(7200);
+/// How long the server waits for a keepalive PING reply before dropping the gRPC
+/// connection. 20s matches the gRPC-core default.
+const GRPC_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Resolve the public model names accepted by the frontend.
 fn effective_served_model_names(model: &str, served_model_name: &[String]) -> Vec<String> {
@@ -191,12 +199,21 @@ where
             .await
             .with_context(|| format!("failed to bind gRPC listener on {grpc_host}:{grpc_port}"))?;
         let addr = grpc_listener.local_addr()?;
+        // gRPC reuses the HTTP TLS config (same SslContext) plus ALPN h2.
+        let grpc_tls = config
+            .tls
+            .as_ref()
+            .map(tls::build_grpc_server_config)
+            .transpose()
+            .context("invalid gRPC TLS configuration")?;
         let svc = grpc::GenerateServer::new(grpc::GenerateServiceImpl::new(state.clone()));
         let svc = TonicServer::builder()
+            .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
+            .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
             .layer(middleware::request_runtime_layer(state.clone()))
             .add_service(svc);
-        info!(%addr, "starting gRPC server");
-        Some((grpc_listener, svc))
+        info!(%addr, tls = grpc_tls.is_some(), "starting gRPC server");
+        Some((grpc_listener, svc, grpc_tls))
     } else {
         None
     };
@@ -275,16 +292,24 @@ where
         let server_shutdown = server_shutdown.clone();
         let force_shutdown = force_shutdown.clone();
         async move {
-            let Some((grpc_listener, svc)) = grpc_setup else {
+            let Some((grpc_listener, svc, grpc_tls)) = grpc_setup else {
                 // No gRPC configured: just wait for shutdown so we do not race the
                 // join! by resolving early and tripping the cancellation token.
                 shutdown.cancelled().await;
                 return Ok(());
             };
-            let server = svc.serve_with_incoming_shutdown(
-                TcpListenerStream::new(grpc_listener),
-                shutdown.cancelled_owned(),
-            );
+            // Box to unify the TLS and plaintext arms' different stream types.
+            let server = match grpc_tls {
+                Some(context) => {
+                    let incoming =
+                        grpc_tls_incoming(grpc_listener, context, tls::TLS_HANDSHAKE_TIMEOUT);
+                    svc.serve_with_incoming_shutdown(incoming, shutdown.cancelled_owned()).boxed()
+                }
+                None => {
+                    let incoming = TcpListenerStream::new(grpc_listener);
+                    svc.serve_with_incoming_shutdown(incoming, shutdown.cancelled_owned()).boxed()
+                }
+            };
 
             let result = tokio::select! {
                 result = server => {
@@ -353,6 +378,22 @@ impl AsyncListener for NoDelayListener {
     fn local_addr(&self) -> std::io::Result<SocketAddr> {
         self.0.local_addr()
     }
+}
+
+/// Wrap the gRPC `TcpListener` so each accepted connection completes a TLS
+/// handshake (bounded by `handshake_timeout`) before tonic serves it.
+fn grpc_tls_incoming(
+    listener: TcpListener,
+    context: openssl::ssl::SslContext,
+    handshake_timeout: Duration,
+) -> impl futures::Stream<Item = std::io::Result<grpc::GrpcTlsStream>> {
+    tls_listener::builder(context)
+        .handshake_timeout(handshake_timeout)
+        .listen(NoDelayListener(listener))
+        .map(|res| {
+            res.map(|(inner, remote_addr)| grpc::GrpcTlsStream::new(inner, remote_addr))
+                .map_err(std::io::Error::other)
+        })
 }
 
 /// Apply `TCP_NODELAY`, optional TLS termination, and per-connection timeouts,

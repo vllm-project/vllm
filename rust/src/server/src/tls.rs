@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use openssl::ssl::{
-    SslAcceptor, SslContext, SslContextBuilder, SslFiletype, SslMethod, SslOptions, SslVerifyMode,
+    AlpnError, SslAcceptor, SslAcceptorBuilder, SslContext, SslContextBuilder, SslFiletype,
+    SslMethod, SslOptions, SslVerifyMode, select_next_proto,
 };
 
 use crate::config::TlsConfig;
@@ -20,7 +21,10 @@ use crate::config::TlsConfig;
 /// Time a client has to complete the TLS handshake before the connection is dropped.
 pub(crate) const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Build an OpenSSL [`SslContext`] from validated [`TlsConfig`]: the full
+/// ALPN wire bytes for HTTP/2 (length-prefixed).
+const ALPN_H2: &[u8] = b"\x02h2";
+
+/// Build the shared OpenSSL acceptor from validated [`TlsConfig`]: the full
 /// certificate chain, the private key (`key_file`, or the certificate file when
 /// unset), the mTLS client verifier, and an optional cipher list.
 ///
@@ -28,7 +32,7 @@ pub(crate) const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 /// TLS 1.2 floor, server cipher preference, no compression), a slightly
 /// stricter subset of the Python frontend's default suites; `--ssl-ciphers`
 /// overrides it.
-pub(crate) fn build_server_config(tls: &TlsConfig) -> Result<SslContext> {
+fn build_server_builder(tls: &TlsConfig) -> Result<SslAcceptorBuilder> {
     let cert_file = tls.cert_file.as_deref().context("--ssl-certfile is required to enable TLS")?;
 
     let mut builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls_server())
@@ -61,6 +65,21 @@ pub(crate) fn build_server_config(tls: &TlsConfig) -> Result<SslContext> {
             .with_context(|| format!("invalid --ssl-ciphers {ciphers:?}"))?;
     }
 
+    Ok(builder)
+}
+
+/// Build the HTTP [`SslContext`] (HTTP/1.1; no ALPN, matching uvicorn).
+pub(crate) fn build_server_config(tls: &TlsConfig) -> Result<SslContext> {
+    Ok(build_server_builder(tls)?.build().into_context())
+}
+
+/// Build the gRPC [`SslContext`]: identical to [`build_server_config`] but
+/// negotiates ALPN `h2`, which HTTP/2 over TLS requires.
+pub(crate) fn build_grpc_server_config(tls: &TlsConfig) -> Result<SslContext> {
+    let mut builder = build_server_builder(tls)?;
+    builder.set_alpn_select_callback(|_ssl, client| {
+        select_next_proto(ALPN_H2, client).ok_or(AlpnError::NOACK)
+    });
     Ok(builder.build().into_context())
 }
 
