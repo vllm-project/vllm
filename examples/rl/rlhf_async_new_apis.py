@@ -190,12 +190,15 @@ class TrainModel:
 
 
 # Build platform-specific env vars for Ray
-ray_env_vars = {
-    # Prevent Ray from setting CUDA_VISIBLE_DEVICES
-    "RAY_EXPERIMENTAL_NOSET_CUDA_ENV_VAR": "1",
-}
+ray_env_vars = {}
 
 if current_platform.is_rocm():
+    # Workaround for an RCCL bug: the weight-transfer NCCL group fails to
+    # initialize (P2P/IPC to the peer GPU) when Ray masks GPUs via
+    # ROCR_VISIBLE_DEVICES. Tell Ray to leave GPU visibility untouched so
+    # every actor can see all GPUs.
+    # https://github.com/ROCm/rocm-systems/issues/5756
+    ray_env_vars["RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES"] = "1"
     # For ROCm, BATCH_INVARIANT vllm is not supported
     ray_env_vars["VLLM_ROCM_USE_SKINNY_GEMM"] = "0"
 else:
