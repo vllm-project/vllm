@@ -171,7 +171,10 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         # we use the max but all should be the same due to uniform length requirement
         max_query_len = query_lens_cpu.max().item()
-        num_q_tokens_per_head_k = max_query_len * self.num_q_heads // 1
+        num_q_heads = self.num_q_heads
+        if self.dcp_world_size > 1:
+            num_q_heads *= self.dcp_world_size
+        num_q_tokens_per_head_k = max_query_len * num_q_heads // 1
         scheduler_metadata, _ = get_mla_metadata(
             seq_lens_device,
             num_q_tokens_per_head_k,

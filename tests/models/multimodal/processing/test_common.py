@@ -432,6 +432,12 @@ def test_processing_correctness(
         )
     if model_id == "CohereLabs/cohere-transcribe-03-2026":
         pytest.skip("Fix later")
+    if model_id.startswith("OpenMOSS-Team/MOSS-Audio-"):
+        pytest.skip(
+            "MOSS-Audio uses a custom processor that dynamically expands "
+            "audio placeholders from processed audio lengths. Its vLLM "
+            "processor paths are covered by test_moss_audio.py."
+        )
 
     _test_processing_correctness(
         model_id,

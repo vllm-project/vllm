@@ -1,6 +1,6 @@
 use super::types::ChatCompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
-use crate::routes::openai::utils::types::{ChatMessage, Tool, ToolChoice, ToolChoiceValue};
+use crate::routes::openai::utils::types::{ChatMessage, Tool};
 
 /// Enforce the minimal compatibility contract for the Rust OpenAI server.
 pub(super) fn validate_request_compat(
@@ -55,30 +55,6 @@ pub(super) fn validate_request_compat(
         } = message
         {
             validate_function_tools(tools, "messages[].tools")?;
-        }
-    }
-
-    if let Some(tool_choice) = &request.tool_choice {
-        match tool_choice {
-            ToolChoice::Value(ToolChoiceValue::Auto | ToolChoiceValue::None) => {}
-            ToolChoice::Value(ToolChoiceValue::Required) => {
-                bail_invalid_request!(
-                    param = "tool_choice",
-                    "tool_choice=required is not supported yet."
-                );
-            }
-            ToolChoice::Function { .. } => {
-                bail_invalid_request!(
-                    param = "tool_choice",
-                    "Named function tool_choice is not supported yet."
-                );
-            }
-            ToolChoice::AllowedTools { .. } => {
-                bail_invalid_request!(
-                    param = "tool_choice",
-                    "allowed_tools tool_choice is not supported yet."
-                );
-            }
         }
     }
 
@@ -159,8 +135,7 @@ mod tests {
     use crate::routes::openai::chat_completions::types::ChatCompletionRequest;
     use crate::routes::openai::utils::structured_outputs::ResponseFormat;
     use crate::routes::openai::utils::types::{
-        ChatMessage, Function, FunctionChoice, MessageContent, StringOrArray, Tool, ToolChoice,
-        ToolChoiceValue, ToolReference,
+        ChatMessage, Function, MessageContent, StringOrArray, Tool, ToolChoice, ToolChoiceValue,
     };
 
     fn served(names: &[&str]) -> Vec<String> {
@@ -356,39 +331,5 @@ mod tests {
 
         validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
             .expect("tool_choice=none is ok");
-    }
-
-    #[test]
-    fn validate_request_compat_rejects_required_and_named_tool_choices() {
-        let required = ChatCompletionRequest {
-            tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Required)),
-            ..base_request()
-        };
-        assert!(validate_request_compat(&required, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
-
-        let named = ChatCompletionRequest {
-            tool_choice: Some(ToolChoice::Function {
-                tool_type: "function".to_string(),
-                function: FunctionChoice {
-                    name: "tool".to_string(),
-                },
-            }),
-            ..base_request()
-        };
-        assert!(validate_request_compat(&named, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
-
-        let allowed_tools = ChatCompletionRequest {
-            tool_choice: Some(ToolChoice::AllowedTools {
-                tool_type: "allowed_tools".to_string(),
-                mode: "auto".to_string(),
-                tools: vec![ToolReference::Function {
-                    name: "tool".to_string(),
-                }],
-            }),
-            ..base_request()
-        };
-        assert!(
-            validate_request_compat(&allowed_tools, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err()
-        );
     }
 }

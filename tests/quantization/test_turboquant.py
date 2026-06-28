@@ -6,6 +6,7 @@ Run: .venv/bin/python -m pytest tests/quantization/test_turboquant.py -v
 """
 
 import math
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -274,6 +275,129 @@ class TestHybridAttentionIndices:
 
         mc = self._fake_model_config()
         assert _get_full_attention_layer_indices(mc) == []
+
+
+class TestTurboQuantWorkspaceReservation:
+    @staticmethod
+    def _fake_vllm_config(
+        *,
+        max_num_seqs: int = 16,
+        max_num_batched_tokens: int = 4096,
+        enable_chunked_prefill: bool = True,
+        max_model_len: int = 8192,
+        dtype: torch.dtype = torch.float16,
+        max_num_kv_splits: int = 4,
+    ):
+        return SimpleNamespace(
+            scheduler_config=SimpleNamespace(
+                max_num_seqs=max_num_seqs,
+                max_num_batched_tokens=max_num_batched_tokens,
+                enable_chunked_prefill=enable_chunked_prefill,
+            ),
+            model_config=SimpleNamespace(
+                max_model_len=max_model_len,
+                dtype=dtype,
+                get_num_attention_heads=lambda parallel_config: 8,
+            ),
+            parallel_config=SimpleNamespace(
+                tensor_parallel_size=2,
+                decode_context_parallel_size=1,
+            ),
+            attention_config=SimpleNamespace(
+                tq_max_kv_splits_for_cuda_graph=max_num_kv_splits
+            ),
+        )
+
+    @staticmethod
+    def _fake_kv_cache_spec():
+        from vllm.v1.kv_cache_interface import TQFullAttentionSpec
+
+        return TQFullAttentionSpec(
+            block_size=32,
+            num_kv_heads=4,
+            head_size=128,
+            head_size_v=128,
+            dtype=torch.uint8,
+            tq_slot_size=102,
+        )
+
+    def test_metadata_builder_reserves_decode_and_continuation_prefill_workspace(
+        self, monkeypatch
+    ):
+        from vllm.v1.attention.backends import turboquant_attn
+
+        calls = []
+
+        class FakeWorkspaceManager:
+            def get_simultaneous(self, *shapes_and_dtypes):
+                calls.append(shapes_and_dtypes)
+
+        monkeypatch.setattr(
+            turboquant_attn,
+            "current_workspace_manager",
+            lambda: FakeWorkspaceManager(),
+        )
+        monkeypatch.setattr(
+            turboquant_attn,
+            "is_workspace_manager_initialized",
+            lambda: True,
+        )
+
+        turboquant_attn.TurboQuantMetadataBuilder(
+            kv_cache_spec=self._fake_kv_cache_spec(),
+            layer_names=["layers.0.self_attn.attn"],
+            vllm_config=self._fake_vllm_config(),
+            device=torch.device("cuda"),
+        )
+
+        assert calls == [
+            (
+                ((16, 8, 4, 129), torch.float32),
+                ((16, 8, 128), torch.float16),
+                ((16, 8), torch.float32),
+            ),
+            (
+                ((1, 4, 8192, 128), torch.float16),
+                ((1, 4, 8192, 128), torch.float16),
+            ),
+        ]
+
+    def test_metadata_builder_skips_continuation_prefill_when_disabled(
+        self, monkeypatch
+    ):
+        from vllm.v1.attention.backends import turboquant_attn
+
+        calls = []
+
+        class FakeWorkspaceManager:
+            def get_simultaneous(self, *shapes_and_dtypes):
+                calls.append(shapes_and_dtypes)
+
+        monkeypatch.setattr(
+            turboquant_attn,
+            "current_workspace_manager",
+            lambda: FakeWorkspaceManager(),
+        )
+        monkeypatch.setattr(
+            turboquant_attn,
+            "is_workspace_manager_initialized",
+            lambda: True,
+        )
+
+        turboquant_attn.TurboQuantMetadataBuilder(
+            kv_cache_spec=self._fake_kv_cache_spec(),
+            layer_names=["layers.0.self_attn.attn"],
+            vllm_config=self._fake_vllm_config(enable_chunked_prefill=False),
+            device=torch.device("cuda"),
+        )
+
+        assert calls == [
+            (
+                ((16, 8, 4, 129), torch.float32),
+                ((16, 8, 128), torch.float16),
+                ((16, 8), torch.float32),
+            )
+        ]
 
 
 # ============================================================================
