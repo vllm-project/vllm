@@ -17,6 +17,36 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 
+@pytest.fixture
+def default_vllm_config(monkeypatch):
+    """Enable the AITER triton rope on ROCm for fp16-consistent numerics.
+
+    The fused CUDA kernel runs native fp16 while forward_native upcasts to
+    fp32, so on ROCm we route through the AITER triton rope (+rotary_embedding)
+    to match. Its env gates are cached at import, hence refresh_env_variables().
+    """
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
+
+    is_rocm = current_platform.is_rocm()
+    if is_rocm:
+        config = VllmConfig(
+            compilation_config=CompilationConfig(custom_ops=["+rotary_embedding"])
+        )
+    else:
+        config = VllmConfig()
+    try:
+        with monkeypatch.context() as m, set_current_vllm_config(config):
+            if is_rocm:
+                m.setenv("VLLM_ROCM_USE_AITER", "1")
+                m.setenv("VLLM_ROCM_USE_AITER_TRITON_ROPE", "1")
+                rocm_aiter_ops.refresh_env_variables()
+            yield config
+    finally:
+        if is_rocm:
+            rocm_aiter_ops.refresh_env_variables()
+
+
 @pytest.mark.parametrize("dtype", [torch.half, torch.bfloat16, torch.float])
 @pytest.mark.parametrize("is_neox_style", [False, True])
 @pytest.mark.parametrize("seq_len", [11, 42])
@@ -151,6 +181,10 @@ def test_concat_and_cache_mla_rope_fused(
         kv_cache_scale,
     )
 
+    # ROCm neox-style Triton FMA diverges slightly from the fused kernel, so
+    # relax the affected tolerance: rtol for fp8 (one e4m3 ULP ~12.5%) and atol
+    # otherwise (bounded ~6e-4). Other paths use the CUDA defaults.
+    rocm_neox = current_platform.is_rocm() and is_neox_style
     if kv_cache_dtype == "fp8":
         result_temp = torch.empty_like(kv_cache, dtype=torch.float16)
         ops.convert_fp8(
@@ -163,7 +197,11 @@ def test_concat_and_cache_mla_rope_fused(
         ops.convert_fp8(
             expected_temp, ref_kv_cache, kv_cache_scale.item(), kv_dtype=kv_cache_dtype
         )
-        torch.testing.assert_close(result_temp, expected_temp, atol=0.001, rtol=0.1)
+        torch.testing.assert_close(
+            result_temp, expected_temp, atol=0.001, rtol=0.15 if rocm_neox else 0.1
+        )
+    elif rocm_neox:
+        torch.testing.assert_close(kv_cache, ref_kv_cache, atol=1e-3, rtol=1e-3)
     else:
         torch.testing.assert_close(kv_cache, ref_kv_cache)
 
