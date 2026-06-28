@@ -714,6 +714,41 @@ class LMCacheConnectorV1Impl:
             getattr(self.lmcache_engine, "metadata", None),
         )
 
+    def shutdown(self):
+        """Shutdown the LMCache connector and release all resources."""
+        logger.info("Shutting down LMCacheConnectorV1Impl")
+
+        # Stop auxiliary services first (they may hold references to engine),
+        # then close network resources.
+        components_to_shutdown = [
+            ("api_server", ["stop", "shutdown"], "Error stopping API server"),
+            ("plugin_launcher", ["stop", "shutdown"], "Error stopping plugin launcher"),
+            ("offload_server", ["close", "shutdown"], "Error closing offload server"),
+            ("lookup_server", ["close", "shutdown"], "Error closing lookup server"),
+            ("lookup_client", ["close", "shutdown"], "Error closing lookup client"),
+        ]
+        for attr_name, methods, error_msg in components_to_shutdown:
+            if component := getattr(self, attr_name, None):
+                try:
+                    for method_name in methods:
+                        if hasattr(component, method_name):
+                            getattr(component, method_name)()
+                            break
+                except Exception:
+                    logger.exception(error_msg)
+
+        # Destroy singleton builders (frees GPU buffers)
+        try:
+            if getattr(self, "enable_blending", False):
+                LMCBlenderBuilder.destroy(ENGINE_NAME)
+        except Exception:
+            logger.exception("Error destroying LMCBlenderBuilder")
+
+        try:
+            LMCacheEngineBuilder.destroy(ENGINE_NAME)
+        except Exception:
+            logger.exception("Error destroying LMCacheEngine")
+
     def get_inference_info(self) -> dict:
         """Get inference information including vLLM config and related details.
 

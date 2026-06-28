@@ -339,6 +339,13 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         """
         return self._lmcache_engine.request_finished(request, block_ids)
 
+    def shutdown(self):
+        """
+        Shutdown the connector and release all resources.
+        """
+        if hasattr(self._lmcache_engine, "shutdown"):
+            self._lmcache_engine.shutdown()
+
     def take_events(self) -> Iterable["KVCacheEvent"]:
         """
         Take the KV cache events from the connector.
