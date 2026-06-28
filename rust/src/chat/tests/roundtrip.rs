@@ -37,6 +37,8 @@ struct RoundtripCase {
     /// JSON formatting expected after this model's template has materialized
     /// tool-call arguments.
     json_fmt: JsonFmt,
+    /// Whether the template renders tool-call argument object keys in sorted order.
+    sort_json_keys: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -81,6 +83,7 @@ impl RoundtripCase {
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: spaced_json_fmt(),
+            sort_json_keys: false,
         }
     }
 
@@ -93,6 +96,7 @@ impl RoundtripCase {
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
         }
     }
 
@@ -105,6 +109,7 @@ impl RoundtripCase {
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
         }
     }
 
@@ -117,6 +122,7 @@ impl RoundtripCase {
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Toggleable { default: false },
             json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
         }
     }
 
@@ -129,6 +135,20 @@ impl RoundtripCase {
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
+        }
+    }
+
+    /// Gemma4 channel reasoning with custom function-call arguments.
+    fn gemma4() -> Self {
+        Self {
+            model_id: "google/gemma-4-E4B-it",
+            assistant_stop_suffix: "<|tool_response>",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Always { value: true },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: true,
         }
     }
 
@@ -142,6 +162,7 @@ impl RoundtripCase {
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: spaced_json_fmt(),
+            sort_json_keys: false,
         }
     }
 
@@ -154,6 +175,7 @@ impl RoundtripCase {
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
         }
     }
 
@@ -166,6 +188,7 @@ impl RoundtripCase {
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
         }
     }
 }
@@ -195,8 +218,8 @@ roundtrip_tests! {
     seed_oss => [reasoning_and_content],
     step3p5 => [reasoning_and_content],
 
-    // Note: Kimi K2.5 strips the reasoning content in history.
-    kimi_k25 => [tool_call_mix],
+    gemma4 => [tool_call_mix], // Gemma4 strips reasoning in history if there's no tool call
+    kimi_k25 => [tool_call_mix], // Kimi K2.5 strips reasoning in history
 }
 
 /// Run the fixed reasoning+content fixture for one model/parser case.
@@ -347,12 +370,36 @@ fn spaced_json_fmt() -> JsonFmt {
 /// Pass in a raw JSON string instead of a structured value to ensure the exact precision and
 /// formatting of numbers are preserved.
 fn expected_arguments(case: &RoundtripCase, raw_json: &str) -> Result<String> {
-    let value: serde_json::Value =
+    let mut value: serde_json::Value =
         serde_json::from_str(raw_json).context("invalid expected tool-call arguments")?;
+    if case.sort_json_keys {
+        sort_json_value(&mut value);
+    }
 
     case.json_fmt
         .format_to_string(&value)
         .context("failed to format expected tool-call arguments")
+}
+
+/// Sort JSON object keys recursively to match templates that render mappings with `dictsort`.
+fn sort_json_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for value in map.values_mut() {
+                sort_json_value(value);
+            }
+
+            let mut entries = std::mem::take(map).into_iter().collect::<Vec<_>>();
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            map.extend(entries);
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                sort_json_value(value);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Load the real model chat/text backend for one roundtrip case.

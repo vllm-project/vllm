@@ -68,7 +68,6 @@ steps:
     - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
   mirror:
     amd:
-      soft_fail: true
       device: mi325_1
       depends_on:
       - image-build-amd
@@ -110,6 +109,17 @@ steps:
   - vllm/v1/core/
   commands:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
+  mirror:
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/multimodal/
+      - vllm/inputs/
+      - vllm/v1/core/
+      - vllm/platforms/rocm.py
+      - vllm/model_executor/model_loader/
 
 - label: Multi-Modal Models (Extended Generation 1)
   key: multi-modal-models-extended-generation-1
