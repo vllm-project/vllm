@@ -168,5 +168,6 @@ class DefaultModelState(ModelState):
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
             positions=input_batch.positions,
             for_cudagraph_capture=for_capture,
+            rswa_prefix_lens=input_batch.rswa_prefix_lens,
         )
         return attn_metadata
