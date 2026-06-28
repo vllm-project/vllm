@@ -1009,7 +1009,7 @@ class HF3FSKVConnector(KVConnectorBase_V1):
     ) -> str:
         """Compute prefix hash for token block."""
         combined_string = f"{previous_hash}_{token_ids}"
-        return hashlib.md5(combined_string.encode()).hexdigest()
+        return hashlib.sha256(combined_string.encode()).hexdigest()
 
     def _align_to_block_size(self, num_tokens: int) -> int:
         """Align token count to block size."""
