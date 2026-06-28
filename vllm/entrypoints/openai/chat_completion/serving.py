@@ -188,6 +188,18 @@ class OpenAIServingChat(OpenAIServing):
             )
         )
 
+    def _handle_harmony_parser_error(
+        self, e: HarmonyParserError, request_id: str
+    ) -> tuple[str, str]:
+        """Handle HarmonyParserError consistently across streaming/non-streaming.
+
+        Returns (finish_reason, stop_reason) tuple for use in responses.
+        Parser errors are treated as non-retryable model issues, not server errors.
+        Error details are already logged at parser level with full context.
+        """
+        # Exception message already includes detailed context from parser
+        return ("stop", str(e))
+
     def _effective_chat_template_kwargs(
         self, request: ChatCompletionRequest
     ) -> dict[str, Any]:
@@ -587,6 +599,7 @@ class OpenAIServingChat(OpenAIServing):
 
                     delta_message: DeltaMessage | None
                     parser_finish_reason: str | None = None
+                    parser_stop_reason: str | None = None
 
                     if parser is not None:
                         try:
@@ -612,17 +625,9 @@ class OpenAIServingChat(OpenAIServing):
                                     ):
                                         delta_message = None
                         except HarmonyParserError as e:
-                            # Harmony parser encountered an error (e.g., unexpected
-                            # token sequence). Log the error and set finish_reason
-                            # to "error" so we can terminate the stream gracefully.
-                            logger.error(
-                                "Request %s: Harmony parser failed: %s",
-                                request_id,
-                                str(e),
+                            parser_finish_reason, parser_stop_reason = (
+                                self._handle_harmony_parser_error(e, request_id)
                             )
-                            parser_finish_reason = "error"
-                            # Return any content that was successfully parsed
-                            # before the error occurred
                             delta_message = DeltaMessage()
 
                     # handle streaming just a content delta (no parsers)
@@ -684,7 +689,7 @@ class OpenAIServingChat(OpenAIServing):
                             delta=delta_message,
                             logprobs=logprobs,
                             finish_reason=parser_finish_reason,
-                            stop_reason=None,
+                            stop_reason=parser_stop_reason,
                             token_ids=(
                                 as_list(output.token_ids)
                                 if request.return_token_ids
@@ -898,18 +903,13 @@ class OpenAIServingChat(OpenAIServing):
                     if not request.include_reasoning:
                         reasoning = None
                 except HarmonyParserError as e:
-                    # Harmony parser encountered an error. Log and return
-                    # an error response with status 500.
-                    logger.error(
-                        "Request %s: Harmony parser failed: %s",
-                        request_id,
-                        str(e),
+                    # Parser error - treat as model output issue, set stop_reason
+                    output.finish_reason, output.stop_reason = (
+                        self._handle_harmony_parser_error(e, request_id)
                     )
-                    return self.create_error_response(
-                        f"Parser error: {str(e)}",
-                        err_type="InternalServerError",
-                        status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-                    )
+                    reasoning = None
+                    content = output.text
+                    tool_calls = []
             else:
                 reasoning = None
                 content = output.text

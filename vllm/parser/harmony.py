@@ -296,12 +296,12 @@ class HarmonyParser(DelegatingParser):
                     "token_id: %d, position: %d/%d, "
                     "current_channel: %s, current_recipient: %s",
                     str(e),
-                    self.state,
+                    self._harmony_parser.state,
                     token_id,
                     i,
                     len(token_ids),
-                    self.current_channel,
-                    self.current_recipient,
+                    self._harmony_parser.current_channel,
+                    self._harmony_parser.current_recipient,
                 )
                 # Wrap in HarmonyParserError to provide a stable exception
                 # type that the serving layer can catch
@@ -309,8 +309,8 @@ class HarmonyParser(DelegatingParser):
                     f"Harmony parser failed at token {i}/{len(token_ids)}: {e}"
                 ) from e
 
-            channel = self.current_channel
-            recipient = self.current_recipient
+            channel = self._harmony_parser.current_channel
+            recipient = self._harmony_parser.current_recipient
             delta = self._harmony_parser.last_content_delta or ""
             completed_message = self._poll_completed_message()
 
