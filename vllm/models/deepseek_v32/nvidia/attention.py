@@ -392,7 +392,7 @@ class DeepseekV32Attention(MLAAttention):
             has_indexer = True
             indexer_k_norm_w = self.indexer.k_norm.weight
             indexer_k_norm_bias = self.indexer.k_norm.bias
-            indexer_k_norm_eps = self.indexer.k_norm.variance_epsilon
+            indexer_k_norm_eps = self.indexer.k_norm.eps
             indexer_k_rope_cos_sin_cache = self.indexer_rope_emb.cos_sin_cache
             indexer_k_cache = self.indexer.k_cache.kv_cache
             indexer_softmax_scale = self.indexer.softmax_scale
