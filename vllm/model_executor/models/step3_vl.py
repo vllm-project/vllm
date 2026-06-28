@@ -589,6 +589,31 @@ class Step3VLForConditionalGeneration(
         h2 = (h1 - 1) // 2 + 1
         return h2 * h2
 
+    @property
+    def img_output_tokens(self) -> int:
+        return self._compute_spatial_tokens(
+            self.config.vision_config.image_size,
+            self.config.vision_config.patch_size,
+            self.config.understand_projector_stride,
+        )
+
+    @property
+    def patch_output_tokens(self) -> int:
+        return self._compute_spatial_tokens(
+            504,
+            self.config.vision_config.patch_size,
+            self.config.understand_projector_stride,
+        )
+
+    def _batched_encoder_forward(
+        self,
+        pixel_values: torch.Tensor,
+    ) -> torch.Tensor:
+        image_features = self._process_image_features(
+            self._get_vision_model_output(pixel_values)
+        )
+        return image_features.reshape(-1, image_features.shape[-1])
+
     def _parse_and_validate_image_input(
         self, **kwargs: object
     ) -> Step3VLImageInputs | None:
@@ -695,6 +720,8 @@ class Step3VLForConditionalGeneration(
             is_multimodal=is_multimodal,
         )
 
+    # -- SupportsEncoderCudaGraph protocol methods --
+
     def get_encoder_cudagraph_config(self):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphConfig,
@@ -707,18 +734,16 @@ class Step3VLForConditionalGeneration(
                 "patch_pixel_values",
             ],
             out_hidden_size=self.config.hidden_size,
+            enable_dual_path_graph=True,
+            global_token_per_image=self.img_output_tokens,
+            local_token_per_patch=self.patch_output_tokens,
         )
 
     def get_encoder_cudagraph_budget_range(
         self,
         vllm_config: "VllmConfig",
     ) -> tuple[int, int]:
-        # An image without patches
-        min_budget = self._compute_spatial_tokens(
-            self.config.vision_config.image_size,
-            self.config.vision_config.patch_size,
-            self.config.understand_projector_stride,
-        )
+        min_budget = self.img_output_tokens
         max_budget = min(
             vllm_config.scheduler_config.max_num_batched_tokens,
             self.model_config.max_model_len,
@@ -732,22 +757,6 @@ class Step3VLForConditionalGeneration(
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
 
         num_patches = mm_kwargs.get("num_patches")
-        img_output_tokens = self._compute_spatial_tokens(
-            self.config.vision_config.image_size,
-            self.config.vision_config.patch_size,
-            self.config.understand_projector_stride,
-        )
-
-        # NOTE: 504 is the hard coded size for each patch after processing
-        # by the vision model, which is determined by the current architecture
-        # of the vision model and may need to be updated if the architecture changes.
-        # The number of tokens for each patch is calculated based on this
-        # size and the patch size.
-        patch_output_tokens = self._compute_spatial_tokens(
-            504,
-            self.config.vision_config.patch_size,
-            self.config.understand_projector_stride,
-        )
 
         img_grid = (
             self.config.vision_config.image_size // self.config.vision_config.patch_size
@@ -759,7 +768,11 @@ class Step3VLForConditionalGeneration(
         return [
             EncoderItemSpec(
                 input_size=(total_image_pixel + num_patch * total_patch_pixel),
-                output_tokens=(img_output_tokens + num_patch * patch_output_tokens),
+                output_tokens=(
+                    self.img_output_tokens + num_patch * self.patch_output_tokens
+                ),
+                global_output_tokens=self.img_output_tokens,
+                local_output_tokens=num_patch * self.patch_output_tokens,
             )
             for num_patch in num_patches
         ]
@@ -810,46 +823,30 @@ class Step3VLForConditionalGeneration(
             EncoderCudaGraphCaptureInputs,
         )
 
-        # For pixel_value, the max input size is max_batch_size
-        img_output_tokens = self._compute_spatial_tokens(
-            self.config.vision_config.image_size,
-            self.config.vision_config.patch_size,
-            self.config.understand_projector_stride,
-        )
-        patch_output_tokens = self._compute_spatial_tokens(
-            504,
-            self.config.vision_config.patch_size,
-            self.config.understand_projector_stride,
-        )
-        dummy_pixel_values = torch.randn(
-            max_batch_size,
-            3,
-            self.config.vision_config.image_size,
-            self.config.vision_config.image_size,
-            device=device,
-            dtype=dtype,
-        )
-        # max_num_patches is the max total patches across the whole batch.
-        # token_budget = max_batch_size * img_out + max_num_patches * patch_out
-        max_num_patches = max(
-            0,
-            (token_budget - max_batch_size * img_output_tokens) // patch_output_tokens,
-        )
-        dummy_patch_pixel_values = torch.randn(
-            max_num_patches,
-            3,
-            504,
-            504,
-            device=device,
-            dtype=dtype,
-        )
-        # num_patches is NOT in values -- the per-item merge is done
-        # CPU-side by finalize_encoder_cudagraph_output using the actual
-        # batch's num_patches from mm_kwargs.
-        values = {
-            "pixel_values": dummy_pixel_values,
-            "patch_pixel_values": dummy_patch_pixel_values,
-        }
+        assert path in ("global", "local")
+        if path == "global":
+            max_num_images = token_budget // self.img_output_tokens
+            max_batch_size = min(max_batch_size, max_num_images)
+            dummy_pixel_values = torch.randn(
+                max_batch_size,
+                3,
+                self.config.vision_config.image_size,
+                self.config.vision_config.image_size,
+                device=device,
+                dtype=dtype,
+            )
+            values = {"pixel_values": dummy_pixel_values}
+        else:
+            max_num_patches = token_budget // self.patch_output_tokens
+            dummy_patch_pixel_values = torch.randn(
+                max_num_patches,
+                3,
+                504,
+                504,
+                device=device,
+                dtype=dtype,
+            )
+            values = {"patch_pixel_values": dummy_patch_pixel_values}
 
         return EncoderCudaGraphCaptureInputs(
             values=values,
@@ -860,42 +857,22 @@ class Step3VLForConditionalGeneration(
         values: dict[str, torch.Tensor],
         path: str = "default",
     ) -> torch.Tensor:
-        # Graph captures only the compute (vision model + conv projector).
-        # Per-item merge happens CPU-side in finalize_encoder_cudagraph_output
-        # using actual num_patches from the batch data.
-        pixel_values = values["pixel_values"]
-        patch_pixel_values = values["patch_pixel_values"]
-
-        image_features = self._process_image_features(
-            self._get_vision_model_output(pixel_values)
-        )
-
-        has_patches = len(patch_pixel_values) > 0
-        if has_patches:
-            patch_features = self._process_image_features(
-                self._get_vision_model_output(patch_pixel_values)
-            )
-
-        # Deterministic single cat: [all_img_flat, all_patch_flat]
-        img_flat = image_features.reshape(-1, image_features.shape[-1])
-        if has_patches:
-            patch_flat = patch_features.reshape(-1, patch_features.shape[-1])
-            return torch.cat([img_flat, patch_flat], dim=0)
-        return img_flat
+        assert path in ("global", "local")
+        if path == "global":
+            return self._batched_encoder_forward(values["pixel_values"])
+        else:
+            return self._batched_encoder_forward(values["patch_pixel_values"])
 
     def encoder_eager_forward(
         self,
         mm_kwargs: dict[str, Any],
         path: str = "default",
     ) -> torch.Tensor:
-        image_input = Step3VLImagePixelInputs(
-            type="pixel_values",
-            pixel_values=mm_kwargs["pixel_values"],
-            patch_pixel_values=mm_kwargs["patch_pixel_values"],
-            num_patches=mm_kwargs["num_patches"],
-        )
-        vision_embeddings = self._process_image_input(image_input)
-        return torch.cat(vision_embeddings, dim=0)
+        assert path in ("global", "local")
+        if path == "global":
+            return self._batched_encoder_forward(mm_kwargs["pixel_values"])
+        else:
+            return self._batched_encoder_forward(mm_kwargs["patch_pixel_values"])
 
     def postprocess_encoder_output(
         self,
@@ -907,38 +884,24 @@ class Step3VLForConditionalGeneration(
         batch_mm_kwargs: dict[str, Any] | None = None,
         local_output: torch.Tensor | None = None,
     ):
-        """CPU-side per-item merge after graph replay.
+        """CPU-side per-item merge after dual-path graph replay.
 
-        The graph output is ``[all_img_flat, all_patch_flat]``.
-        This method splits the flat output into image and patch features,
-        then reassembles per-item embeddings using the *actual* batch
-        ``num_patches`` from ``batch_mm_kwargs`` (not the capture-time values).
+        ``output`` contains global-image features and ``local_output``
+        contains local-patch features (or ``None`` when there are no patches).
         """
         num_patches = batch_mm_kwargs["num_patches"]
         hidden = output.shape[-1]
         bsz = len(indices)
 
-        img_out = self._compute_spatial_tokens(
-            self.config.vision_config.image_size,
-            self.config.vision_config.patch_size,
-            self.config.understand_projector_stride,
-        )
-        patch_out = self._compute_spatial_tokens(
-            504,
-            self.config.vision_config.patch_size,
-            self.config.understand_projector_stride,
-        )
-
-        # Valid portion: bsz images, actual_total_patches patches
         actual_np = [int(np) for np in num_patches]
         total_patches = sum(actual_np)
-        img_tokens = bsz * img_out
-        patch_tokens = total_patches * patch_out
+        img_tokens = bsz * self.img_output_tokens
+        patch_tokens = total_patches * self.patch_output_tokens
 
-        img_part = output[:img_tokens].reshape(bsz, img_out, hidden)
+        global_part = output[:img_tokens].reshape(bsz, self.img_output_tokens, hidden)
         if total_patches > 0:
-            patch_part = output[img_tokens : img_tokens + patch_tokens].reshape(
-                -1, patch_out, hidden
+            patch_part = local_output[:patch_tokens].reshape(
+                -1, self.patch_output_tokens, hidden
             )
         else:
             patch_part = None
@@ -951,7 +914,7 @@ class Step3VLForConditionalGeneration(
             if patch_part is not None and np > 0:
                 parts.append(patch_part[cur_patch : cur_patch + np].reshape(-1, hidden))
                 cur_patch += np
-            parts.append(img_part[i].reshape(-1, hidden))
+            parts.append(global_part[i].reshape(-1, hidden))
             merged[idx] = torch.cat(parts, dim=0) if len(parts) > 1 else parts[0]
 
         out = [merged[i] for i in indices]
@@ -969,14 +932,13 @@ class Step3VLForConditionalGeneration(
             EncoderCudaGraphReplayBuffers,
         )
 
-        # Only patch_pixel_values lives in the values dict; num_patches is
-        # processed CPU-side by finalize_encoder_cudagraph_output.
-        return EncoderCudaGraphReplayBuffers(
-            values={
-                "pixel_values": mm_kwargs["pixel_values"],
-                "patch_pixel_values": mm_kwargs["patch_pixel_values"],
-            },
-        )
+        assert path in ("global", "local")
+        if path == "global":
+            values = {"pixel_values": mm_kwargs["pixel_values"]}
+        else:
+            values = {"patch_pixel_values": mm_kwargs["patch_pixel_values"]}
+
+        return EncoderCudaGraphReplayBuffers(values=values)
 
     def forward(
         self,
