@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Example Python client for `vllm.entrypoints.api_server`
+"""Example Python client for `examples/applications/api_server/server.py`
 Start the demo server:
-    python -m vllm.entrypoints.api_server --model <model_name>
+    python examples/applications/api_server/server.py --model <model_name>
 
 NOTE: The API server is used only for demonstration and simple performance
 benchmarks. It is not intended for production use.
