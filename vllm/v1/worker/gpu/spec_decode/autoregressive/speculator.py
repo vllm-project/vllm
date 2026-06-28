@@ -360,7 +360,10 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             self.current_draft_step,
             self.draft_logits,
         )
-        self.hidden_states[:num_reqs] = hidden_states[last_token_indices]
+        if last_hidden_states is hidden_states:
+            self.hidden_states[:num_reqs] = sample_hidden_states
+        else:
+            self.hidden_states[:num_reqs] = hidden_states[last_token_indices]
         self.input_buffers.positions[:num_reqs] = positions
 
     def _multi_step_decode(
