@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from types import SimpleNamespace
+
 import pytest
 
 from vllm.platforms import current_platform
@@ -255,6 +257,65 @@ def test_nvfp4_kv_cache_split_views_rejects_non_inferable_dim() -> None:
 
     with pytest.raises(ValueError, match="last dimension cannot be inferred"):
         nvfp4_kv_cache_split_views(kv_side)
+
+
+@pytest.mark.parametrize(
+    ("head_dim", "head_dim_v", "expected_calls"),
+    [
+        (128, 128, 1),
+        (256, 512, 0),
+    ],
+)
+def test_flashinfer_nvfp4_fa2_prefill_reservation_requires_matching_head_dims(
+    monkeypatch, head_dim: int, head_dim_v: int, expected_calls: int
+) -> None:
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    FlashInferMetadataBuilder = flashinfer_backend.FlashInferMetadataBuilder
+    builder = FlashInferMetadataBuilder.__new__(FlashInferMetadataBuilder)
+    builder.is_kvcache_nvfp4 = True
+    builder.head_dim = head_dim
+    builder.head_dim_v = head_dim_v
+    builder.use_dcp = False
+    builder.model_config = SimpleNamespace(max_model_len=1024, dtype=torch.float16)
+    builder.vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(
+            enable_chunked_prefill=True,
+            max_num_batched_tokens=8,
+        )
+    )
+    builder.num_kv_heads = 2
+
+    calls = []
+
+    class FakeWorkspaceManager:
+        def get_simultaneous(self, *specs):
+            calls.append(specs)
+
+    monkeypatch.setattr(
+        flashinfer_backend, "_is_flash_attn_varlen_func_available", lambda: True
+    )
+    monkeypatch.setattr(
+        flashinfer_backend.flashinfer,
+        "nvfp4_kv_dequantize_paged",
+        object(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        flashinfer_backend, "is_workspace_manager_initialized", lambda: True
+    )
+    monkeypatch.setattr(
+        flashinfer_backend, "current_workspace_manager", FakeWorkspaceManager
+    )
+
+    builder._reserve_nvfp4_fa2_prefill_workspace(can_use_trtllm=False)
+
+    assert len(calls) == expected_calls
+    if expected_calls:
+        assert calls[0] == (
+            ((1024, 2, head_dim), torch.float16),
+            ((1024, 2, head_dim_v), torch.float16),
+        )
 
 
 def test_flashinfer_impl_caches_nvfp4_slot_mapping_writer(monkeypatch) -> None:
