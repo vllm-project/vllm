@@ -15,6 +15,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
     RequestOffloadState,
 )
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -982,6 +984,28 @@ def test_fence_at_update_state_after_alloc(request_runner):
         expected_flushed=(0,),
     )
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
+
+
+def test_update_state_after_alloc_records_zero_token_allocations():
+    scheduler = object.__new__(OffloadingConnectorScheduler)
+    scheduler._current_batch_allocated_block_ids = set()
+    blocks = KVCacheBlocks(
+        (
+            (
+                KVCacheBlock(block_id=7),
+                KVCacheBlock(block_id=0),
+            ),
+            (KVCacheBlock(block_id=11),),
+        )
+    )
+
+    scheduler.update_state_after_alloc(
+        SimpleNamespace(request_id="req-0"),
+        blocks,
+        num_external_tokens=0,
+    )
+
+    assert scheduler._current_batch_allocated_block_ids == {7, 11}
 
 
 def test_fence_at_build_store_jobs(request_runner):
