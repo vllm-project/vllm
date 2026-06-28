@@ -1,4 +1,5 @@
-//! `POST /tokenize` and `POST /detokenize` (root paths, matching Python).
+//! `POST /tokenize`, `POST /detokenize`, and `GET /tokenizer_info`
+//! (root paths, matching Python).
 //!
 //! Encode/decode runs entirely in-process via [`DynTokenizer`]; the inference
 //! engine is not involved.
@@ -9,7 +10,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use thiserror_ext::AsReport as _;
 
@@ -122,6 +123,13 @@ pub async fn detokenize(
     match tokenizer.decode(&body.tokens, /* skip_special_tokens = */ false) {
         Ok(prompt) => Json(DetokenizeResponse { prompt }).into_response(),
         Err(e) => server_error!("detokenize failed: {}", e.to_report_string()).into_response(),
+    }
+}
+
+pub async fn tokenizer_info(State(state): State<Arc<AppState>>) -> Response {
+    match state.tokenizer_info() {
+        Some(snapshot) => Json(snapshot.clone()).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 

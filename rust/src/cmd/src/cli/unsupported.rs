@@ -454,16 +454,6 @@ pub struct ServerUnsupportedArgs {
     )]
     pub enable_force_include_usage: Option<Unsupported>,
 
-    /// Enable the `/tokenizer_info` endpoint. May expose chat
-    /// templates and other tokenizer configuration.
-    #[arg(
-        long,
-        visible_alias = "no-enable-tokenizer-info-endpoint",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_tokenizer_info_endpoint: Option<Unsupported>,
-
     /// If set to True, log model outputs (generations).
     /// Requires `--enable-log-requests`. As with `--enable-log-requests`,
     /// information is only logged at INFO level at maximum.

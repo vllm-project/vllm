@@ -77,6 +77,7 @@ pub struct LoadModelBackendsOptions {
 pub struct LoadedModelBackends {
     pub text_backend: DynTextBackend,
     pub chat_backend: DynChatBackend,
+    pub tokenizer_config_snapshot: Option<Value>,
 }
 
 /// Load text and chat backends for the given model id.
