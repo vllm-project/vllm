@@ -96,6 +96,9 @@ class InputBatch:
     # Whether any requests in batch use structured output.
     has_structured_output_reqs: bool
 
+    # [num_reqs_after_padding] per-request prompt length for R-SWA (optional).
+    rswa_prefix_lens: torch.Tensor | None = None
+
     @classmethod
     def make_dummy(
         cls,
