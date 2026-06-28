@@ -136,9 +136,17 @@ def test_standard_attention_backend_selection(
     # Get the backend class path
     from vllm.platforms.rocm import RocmPlatform
 
+    # The AITER unified attention kernel only supports BF16/FP8 KV caches
+    # (its 3D kernel asserts on fp16), so it must be selected with bf16.
+    dtype = (
+        torch.bfloat16
+        if selected_backend == "ROCM_AITER_UNIFIED_ATTN"
+        else torch.float16
+    )
+
     attn_selector_config = AttentionSelectorConfig(
         head_size=128,
-        dtype=torch.float16,
+        dtype=dtype,
         kv_cache_dtype="auto",
         block_size=16,
         use_mla=False,
