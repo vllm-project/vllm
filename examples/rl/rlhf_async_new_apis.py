@@ -194,7 +194,7 @@ ray_env_vars = {}
 
 if current_platform.is_rocm():
     # Workaround for RCCL bug. See https://github.com/ROCm/rocm-systems/issues/5756
-    ray_env_vars["RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES"] = "1"
+    ray_env_vars["RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES"] = "1"
     # For ROCm, BATCH_INVARIANT vllm is not supported
     ray_env_vars["VLLM_ROCM_USE_SKINNY_GEMM"] = "0"
 else:
