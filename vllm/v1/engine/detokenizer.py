@@ -83,14 +83,19 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
 
         # Number of chars to hold back when stop strings are to be excluded
         # from streamed output.
-        if self.stop and not self.include_stop_str_in_output:
-            self.stop_buffer_length = max(len(s) for s in self.stop) - 1
+        if self.stop:
+            self._max_stop_len = max(len(s) for s in self.stop)
+            self.stop_buffer_length = (
+                0 if self.include_stop_str_in_output else self._max_stop_len - 1
+            )
         else:
+            self._max_stop_len = 0
             self.stop_buffer_length = 0
         self._last_output_text_offset: int = 0
 
         # Generation data
-        self.output_text = ""
+        self.output_text: list[str] = []
+        self._output_text_len: int = 0
 
     def update(self, new_token_ids: list[int], stop_terminated: bool) -> str | None:
         """
@@ -113,13 +118,15 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
             skipped_stop_token_id = None
 
         # 1) Detokenize the new token ids incrementally.
-        stop_check_offset = len(self.output_text)
+        stop_check_offset = self._output_text_len
         for new_token_id in new_token_ids:
             self.token_ids.append(new_token_id)
-            self.output_text += self.decode_next(new_token_id)
+            chunk = self.decode_next(new_token_id)
+            self.output_text.append(chunk)
+            self._output_text_len += len(chunk)
             # Support min_tokens, see https://github.com/vllm-project/vllm/pull/22014
             if self.min_tokens and self.num_output_tokens() <= self.min_tokens:
-                stop_check_offset = len(self.output_text)
+                stop_check_offset = self._output_text_len
 
         if skipped_stop_token_id is not None:
             # Cleanup after skipping detokenization.
@@ -128,18 +135,56 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         # 2) Evaluate stop strings.
         stop_string = None
         if self.stop and self.num_output_tokens() > self.min_tokens:
+            new_char_count = self._output_text_len - stop_check_offset
+            # Only join a suffix large enough to contain any possible match.
+            suffix, suffix_start = self._get_output_suffix(
+                new_char_count + self._max_stop_len - 1
+            )
             stop = check_stop_strings(
-                output_text=self.output_text,
-                new_char_count=len(self.output_text) - stop_check_offset,
+                output_text=suffix,
+                new_char_count=new_char_count,
                 stop=self.stop,
                 include_in_output=self.include_stop_str_in_output,
             )
             if stop is not None:
                 stop_string, truncate_to = stop
                 if truncate_to != -1:
-                    self.output_text = self.output_text[:truncate_to]
+                    self._truncate_output_text(suffix_start + truncate_to)
 
         return stop_string
+
+    def _get_output_suffix(self, min_chars: int) -> tuple[str, int]:
+        """Return (suffix, suffix_start) covering at least min_chars from end.
+
+        Walks backwards through output_text chunks to avoid joining the full
+        list when only a small suffix is needed.
+        """
+        if min_chars >= self._output_text_len:
+            return "".join(self.output_text), 0
+        chunks: list[str] = []
+        collected = 0
+        for chunk in reversed(self.output_text):
+            chunks.append(chunk)
+            collected += len(chunk)
+            if collected >= min_chars:
+                break
+        return "".join(reversed(chunks)), self._output_text_len - collected
+
+    def _truncate_output_text(self, truncate_to: int) -> None:
+        """Truncate output_text list in-place to truncate_to characters."""
+        new_chunks: list[str] = []
+        remaining = truncate_to
+        for chunk in self.output_text:
+            if remaining <= 0:
+                break
+            if len(chunk) <= remaining:
+                new_chunks.append(chunk)
+                remaining -= len(chunk)
+            else:
+                new_chunks.append(chunk[:remaining])
+                break
+        self.output_text = new_chunks
+        self._output_text_len = truncate_to
 
     @abstractmethod
     def decode_next(self, next_token_id: int) -> str:
@@ -152,16 +197,23 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         # We return the full output text if the sequence is finished.
         buffer_length = 0 if finished else self.stop_buffer_length
         if not delta:
+            output_text = "".join(self.output_text)
             if not buffer_length:
-                return self.output_text
-            return self.output_text[:-buffer_length]
+                return output_text
+            return output_text[:-buffer_length]
 
-        length = len(self.output_text) - buffer_length
+        length = self._output_text_len - buffer_length
         last_offset = self._last_output_text_offset
-        if last_offset < length:
-            self._last_output_text_offset = length
-            return self.output_text[last_offset:length]
-        return ""
+        if last_offset >= length:
+            return ""
+        self._last_output_text_offset = length
+        # Extract only [last_offset, length) without joining the full list.
+        # suffix covers [suffix_start, _output_text_len), guaranteed
+        # suffix_start <= last_offset.
+        suffix, suffix_start = self._get_output_suffix(
+            self._output_text_len - last_offset
+        )
+        return suffix[last_offset - suffix_start : length - suffix_start]
 
 
 class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
