@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_block_argmax, tl_rand64
+from vllm.triton_utils import tl, tldevice, triton
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_block_argmax, tl_rand32
 
 
 @triton.jit
@@ -243,7 +243,7 @@ def _rejection_kernel(
 
                 if SYNTHETIC_MODE:
                     pos = tl.load(pos_ptr + logit_idx)
-                    u = tl_rand64(seed, pos, includes_zero=False)
+                    u = tl_rand32(seed, pos, includes_zero=False)
                     rate = tl.load(synthetic_conditional_rates_ptr + i)
                     # -1 is used for padded draft token ids that should be rejected.
                     accepted &= (u < rate) & (draft_sampled >= 0)
@@ -272,7 +272,7 @@ def _rejection_kernel(
                 )
                 target_log_prob = target_logit - target_lse
                 pos = tl.load(pos_ptr + logit_idx)
-                u = tl_rand64(seed, pos, includes_zero=False)
+                u = tl_rand32(seed, pos, includes_zero=False)
                 if HAS_DRAFT_LOGITS:
                     draft_logit = tl.load(
                         draft_logits_ptr
@@ -387,14 +387,16 @@ def _resample_kernel(
         draft_lse = tl.load(draft_rejected_logsumexp_ptr + req_idx)
         target_log_probs = target_logits - target_lse
         draft_log_probs = draft_logits - draft_lse
-        # Compute the residual: max(p(x) - q(x), 0)
-        # Equivalent log form: log(max(exp(log_p(x)) - exp(log_q(x)), 0))
+        # Compute the residual:
+        #   r(x) = max(p(x) - q(x), 0)
+        # Gumbel sampling needs logits, so we compute it in log space:
+        #   log(r(x)) = log(max(exp(log_p(x)) - exp(log_q(x)), 0))
         # The more numerically stable form is:
-        # log(max(exp(a) - exp(b), 0)) = a + log(max(1 - exp(b - a), 0))
+        #   log(max(exp(a) - exp(b), 0)) = a + log(max(1 - exp(b - a), 0))
         ratio = tl.exp(draft_log_probs - target_log_probs)
         residual_logits = tl.where(
             ratio < 1.0,
-            target_log_probs + tl.log(1 - ratio),
+            target_log_probs + tldevice.log1p(-ratio),
             float("-inf"),
         ).to(tl.float32)
     else:
