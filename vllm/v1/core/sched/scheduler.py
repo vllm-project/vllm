@@ -638,12 +638,13 @@ class Scheduler(SchedulerInterface):
             step_skipped_waiting = create_request_queue(self.policy)
 
             # Async KV loads have allocated GPU slots and should count against
-            # the active request cap until the transfer completes.
-            num_remote_kv_loading_reqs = sum(
-                1
-                for req in self.skipped_waiting
-                if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
-            )
+            # active request/token caps until the transfer completes.
+            num_remote_kv_loading_reqs = 0
+            num_remote_kv_loading_tokens = 0
+            for req in self.skipped_waiting:
+                if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+                    num_remote_kv_loading_reqs += 1
+                    num_remote_kv_loading_tokens += req.num_computed_tokens
             while (self.waiting or self.skipped_waiting) and token_budget > 0:
                 request_queue = self._select_waiting_queue_for_scheduling()
                 assert request_queue is not None
@@ -652,6 +653,9 @@ class Scheduler(SchedulerInterface):
                 request_id = request.request_id
                 was_waiting_for_remote_kvs = (
                     request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+                )
+                remote_kv_loading_tokens = (
+                    request.num_computed_tokens if was_waiting_for_remote_kvs else 0
                 )
 
                 # try to promote blocked statuses while traversing skipped queue.
@@ -669,6 +673,7 @@ class Scheduler(SchedulerInterface):
 
                 if was_waiting_for_remote_kvs:
                     num_remote_kv_loading_reqs -= 1
+                    num_remote_kv_loading_tokens -= remote_kv_loading_tokens
 
                 if (
                     not was_waiting_for_remote_kvs
@@ -680,11 +685,15 @@ class Scheduler(SchedulerInterface):
                     if (
                         self.policy == SchedulingPolicy.PRIORITY
                         and num_remote_kv_loading_reqs > 0
+                    ) or any(
+                        self.kv_cache_manager.get_blocks(r.request_id) is not self.kv_cache_manager.empty_kv_cache_blocks
+                        for r in (list(self.skipped_waiting) + list(self.waiting))
                     ):
                         request_queue.pop_request()
                         step_skipped_waiting.prepend_request(request)
                         continue
                     break
+
 
                 # Check that adding the request still respects the max_loras
                 # constraint.
@@ -773,6 +782,30 @@ class Scheduler(SchedulerInterface):
                             continue
 
                         num_external_computed_tokens = ext_tokens
+
+                        if load_kv_async:
+                            async_load_token_budget = min(
+                                token_budget,
+                                max(
+                                    0,
+                                    self.max_num_scheduled_tokens
+                                    - num_remote_kv_loading_tokens,
+                                ),
+                            )
+                            async_load_token_budget = (
+                                async_load_token_budget
+                                // self.block_size
+                                * self.block_size
+                            )
+                            if num_external_computed_tokens > async_load_token_budget:
+                                num_external_computed_tokens = async_load_token_budget
+
+                            if num_external_computed_tokens == 0:
+                                # The external prefix is too large for the remaining
+                                # per-step token budget. Fall back to normal compute;
+                                # this keeps the request preemptable and avoids
+                                # reserving unbounded KV for an async load.
+                                load_kv_async = False
 
                         connector_prefix_cache_queries = (
                             request.num_tokens - num_new_local_computed_tokens
@@ -939,14 +972,31 @@ class Scheduler(SchedulerInterface):
                     has_scheduled_reqs=bool(self.running),
                 )
 
+
                 if new_blocks is None:
                     # The request cannot be scheduled.
+
 
                     # NOTE: we need to untouch the request from the encode cache
                     # manager
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
+
+                    # If we have other requests in skipped_waiting or waiting
+                    # that already have blocks allocated on the GPU, continue
+                    # to allow them to run and release their resources.
+                    # This prevents permanent scheduler deadlock when the head
+                    # of the queue is blocked but subsequent requests hold
+                    # blocks.
+                    if any(
+                        self.kv_cache_manager.get_blocks(r.request_id) is not self.kv_cache_manager.empty_kv_cache_blocks
+                        for r in (list(self.skipped_waiting) + list(self.waiting))
+                    ):
+                        request_queue.pop_request()
+                        step_skipped_waiting.prepend_request(request)
+                        continue
                     break
+
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
@@ -974,6 +1024,8 @@ class Scheduler(SchedulerInterface):
                     # into the WAITING_FOR_REMOTE_KV state.
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                     num_remote_kv_loading_reqs += 1
+                    num_remote_kv_loading_tokens += num_external_computed_tokens
+                    token_budget -= num_external_computed_tokens
                     step_skipped_waiting.prepend_request(request)
                     # Set num_computed_tokens even though KVs are not yet loaded.
                     # request.num_computed_tokens will not be used anywhere until
