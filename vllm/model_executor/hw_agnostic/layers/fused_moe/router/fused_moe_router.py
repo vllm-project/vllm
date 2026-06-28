@@ -73,8 +73,8 @@ class FusedMoERouter(ABC):
             input_ids=input_ids,
         )
 
-        # Write routing data for non-monolithic path (Triton, etc.)
-        # (set by bind_routing_capture_to_model during capturer init)
+        # Capture routing for replay (set by bind_routing_capture_to_model
+        # during capturer init).
         if self._routing_replay_out is not None:
             self._routing_replay_out[: topk_ids.shape[0]].copy_(
                 topk_ids.to(torch.int16)

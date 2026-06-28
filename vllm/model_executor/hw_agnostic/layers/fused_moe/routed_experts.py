@@ -166,15 +166,10 @@ class RoutedExperts(PluggableLayer):
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
-    # TODO(bnell): Temporary hack. Get rid of this.
     def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
+        # Used by FusedMoEWithLoRA to swap the underlying quant method to
+        # FusedMoEModularMethod after construction.
         self.quant_method = quant_method
-
-    # TODO(bnell): Hack for elastic_ep. Get rid of this
-    def _set_moe_config(self, new_moe_config: FusedMoEConfig):
-        self.moe_config = new_moe_config
-        self.global_num_experts = new_moe_config.num_experts
-        # local experts?
 
     def _get_quant_method(
         self,
@@ -285,23 +280,6 @@ class RoutedExperts(PluggableLayer):
         # If we are in the row parallel case (down_proj)
         elif shard_id == "w2":
             param_data[expert_id] = loaded_weight
-
-    def _load_combined_w13_weight_scale(
-        self,
-        shard_dim: int,
-        loaded_weight: torch.Tensor,
-        param: torch.Tensor,
-        tp_rank: int,
-    ):
-        """
-        Load w13 weight scales assuming that w1 weight scales and w3 weight
-        scales are stored in the same loaded_weight tensor.
-        """
-        shard_size = param.shape[shard_dim]
-        loaded_weight = loaded_weight.narrow(
-            shard_dim, shard_size * tp_rank, shard_size
-        )
-        param.copy_(loaded_weight)
 
     def _load_model_weight_or_group_weight_scale(
         self,
@@ -519,25 +497,6 @@ class RoutedExperts(PluggableLayer):
         # Input scales can be loaded directly and should be equal.
         param_data[expert_id] = loaded_weight
 
-    def _load_g_idx(
-        self,
-        shard_id: str,
-        expert_data: torch.Tensor,
-        shard_dim: int,
-        loaded_weight: torch.Tensor,
-        tp_rank: int,
-    ):
-        if shard_id == "w2":
-            self._load_w2(
-                shard_dim=shard_dim,
-                loaded_weight=loaded_weight,
-                expert_data=expert_data,
-                tp_rank=tp_rank,
-            )
-        else:
-            assert shard_id in ("w1", "w3")
-            expert_data.copy_(loaded_weight)
-
     @overload
     def weight_loader(
         self,
@@ -569,16 +528,9 @@ class RoutedExperts(PluggableLayer):
         expert_id: int,
         return_success: bool = False,
     ) -> bool | None:
-        quant_method_name = self.quant_method.__class__.__name__
-        global_expert_id = expert_id
-        expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
+        expert_id = self._map_global_expert_id_to_local_expert_id(expert_id)
 
-        use_global_sf = (
-            getattr(self.quant_method, "use_global_sf", False)
-            and "input_scale" in weight_name
-        )
-
-        if expert_id == -1 and not use_global_sf:
+        if expert_id == -1:
             # Failed to load this param since it's not local to this rank
             return False if return_success else None
         # Hereafter, `expert_id` is local physical id
@@ -594,41 +546,6 @@ class RoutedExperts(PluggableLayer):
         # dimension intermediate_size_per_partition is used.
         SHARD_ID_TO_SHARDED_DIM = {"w1": 0, "w2": 1, "w3": 0}
 
-        # Case for BitsAndBytes
-        use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
-        if use_bitsandbytes_4bit:
-            shard_dim = 0
-
-            expert_data = param.data[expert_id]
-            if shard_id == "w2":
-                # BnB params are stored as flat packed tensors (e.g.
-                # (packed_size, 1)), not in the logical weight layout.
-                # Narrowing packed data for hidden-dim padding is not
-                # meaningful, so require an exact shape match.
-                if expert_data.shape != loaded_weight.shape:
-                    raise ValueError(
-                        "BitsAndBytes quantization with padded hidden_size "
-                        "is not supported. "
-                        f"Parameter shape {tuple(expert_data.shape)} != "
-                        f"checkpoint shape {tuple(loaded_weight.shape)}"
-                    )
-                expert_data.copy_(loaded_weight)
-            elif shard_id in ("w1", "w3"):
-                # BnB stores weights as flat packed tensors. _load_w13 is
-                # still used to split w1/w3 along shard_dim;
-                # _narrow_expert_data_for_padding is a no-op since packed
-                # sizes already match (any mismatch fails in copy_()).
-                full_load = True
-                self._load_w13(
-                    shard_id=shard_id,
-                    shard_dim=shard_dim,
-                    loaded_weight=loaded_weight,
-                    expert_data=expert_data,
-                    tp_rank=self.moe_config.tp_rank,
-                    load_full=full_load,
-                )
-            return True if return_success else None
-
         shard_dim = SHARD_ID_TO_SHARDED_DIM[shard_id]
         if is_transposed:
             shard_dim = int(not shard_dim)
@@ -641,112 +558,12 @@ class RoutedExperts(PluggableLayer):
 
         # Case input scale: input_scale loading is only supported for fp8
         if "input_scale" in weight_name:
-            # this is needed for compressed-tensors only
             loaded_weight = loaded_weight.to(param.data.device)
-
-            # ModelOpt NVFP4 stores w13 input scales as two logical shards.
-            # The generic assignment below would broadcast w1/w3 into the
-            # whole expert row, so the second shard would overwrite the first.
-            if (
-                "ModelOpt" in quant_method_name
-                and param.data.ndim == 2
-                and shard_id in ("w1", "w3")
-            ):
-                scale_expert_id = global_expert_id if use_global_sf else expert_id
-                scale_shard_id = 0 if shard_id == "w1" else 1
-                param.data[scale_expert_id][scale_shard_id] = loaded_weight.reshape(())
-                return True if return_success else None
-
-            if (
-                "compressed" in quant_method_name.lower()
-                and param.data[expert_id] != 1
-                and (param.data[expert_id] - loaded_weight).abs() > 1e-5
-            ):
-                raise ValueError(
-                    "input_scales of w1 and w3 of a layer "
-                    f"must be equal. But got {param.data[expert_id]} "
-                    f"vs. {loaded_weight}"
-                )
-
             self._load_single_value(
                 param=param,
                 loaded_weight=loaded_weight,
-                expert_id=global_expert_id if use_global_sf else expert_id,
+                expert_id=expert_id,
             )
-            return True if return_success else None
-
-        # Case g_idx
-        if "g_idx" in weight_name:
-            self._load_g_idx(
-                shard_dim=0,
-                shard_id=shard_id,
-                loaded_weight=loaded_weight,
-                expert_data=expert_data,
-                tp_rank=self.moe_config.tp_rank,
-            )
-            return True if return_success else None
-
-        # TODO @dsikka: ModelOpt should follow the proper MoE loading pattern
-        if "ModelOpt" in quant_method_name:
-            # Determine per-tensor weight scale patterns based on variant
-            # Use the dedicated method instead of brittle string matching
-            uses_weight_scale_2 = self.quant_method.uses_weight_scale_2_pattern()
-            quant_method = getattr(param, "quant_method", None)
-
-            # Call _load_per_tensor_weight_scale() to load per-tensor (scalar)
-            # weights scales.
-            # Input scales are always per-tensor.
-            # Weight scales: FP4 uses "weight_scale_2" and FP8 uses
-            # "weight_scale" for per-tensor scales.
-            # NOTE: ModelOpt MXFP8 MoE uses block scales in weight_scale
-            # tensors (quant_method=BLOCK), so those must not be treated
-            # as per-tensor scalars here.
-            is_block_weight_scale = (
-                "weight_scale" in weight_name
-                and quant_method == FusedMoeWeightScaleSupported.BLOCK.value
-            )
-            is_per_tensor = (
-                "weight_scale_2" in weight_name
-                if uses_weight_scale_2
-                else "weight_scale" in weight_name
-            ) or "input_scale" in weight_name
-            is_per_tensor = is_per_tensor and not is_block_weight_scale
-            if is_per_tensor:
-                self._load_per_tensor_weight_scale(
-                    shard_id=shard_id,
-                    param=param,
-                    loaded_weight=loaded_weight,
-                    expert_id=expert_id,
-                )
-                return True if return_success else None
-
-            # If the weight is w13_weight_scale and w13_weight_scales are
-            # combined into single loaded_weight, call
-            # _load_combined_w13_weight_scale() to load it.
-            # This is checked by comparing the hidden_out dims of the
-            # loaded_weight and the param.
-            if "w13_weight_scale" in weight_name:
-                loaded_weight_hidden_out = loaded_weight.shape[-2]
-                param_hidden_out = param.data.shape[-2] * self.moe_config.tp_size
-                if loaded_weight_hidden_out == param_hidden_out:
-                    self._load_combined_w13_weight_scale(
-                        shard_dim=shard_dim,
-                        loaded_weight=loaded_weight,
-                        param=expert_data,
-                        tp_rank=self.moe_config.tp_rank,
-                    )
-                    return True if return_success else None
-
-            # For other weights, call _load_model_weight_or_group_weight_scale()
-            # to load it.
-            if "weight" in weight_name:
-                self._load_model_weight_or_group_weight_scale(
-                    shard_id=shard_id,
-                    shard_dim=shard_dim,
-                    loaded_weight=loaded_weight,
-                    expert_data=expert_data,
-                    tp_rank=self.moe_config.tp_rank,
-                )
             return True if return_success else None
 
         # Case weight scales, zero_points and offset, weight/input global scales
@@ -754,8 +571,6 @@ class RoutedExperts(PluggableLayer):
             # load the weight scales and zp based on the quantization scheme
             # supported weight scales/zp can be found in
             # FusedMoeWeightScaleSupported
-            # TODO @dsikka: once hardened, refactor to use vLLM Parameters
-            # specific to each case
             quant_method = getattr(param, "quant_method", None)
             if quant_method == FusedMoeWeightScaleSupported.CHANNEL.value:
                 self._load_per_channel_weight_scale(
@@ -789,14 +604,6 @@ class RoutedExperts(PluggableLayer):
                 raise ValueError(
                     f"quant method must be one of {WEIGHT_SCALE_SUPPORTED}"
                 )
-            return True if return_success else None
-
-        # Case weight_shape
-        if "weight_shape" in weight_name:
-            # only required by compressed-tensors
-            self._load_single_value(
-                param=param, loaded_weight=loaded_weight, expert_id=expert_id
-            )
             return True if return_success else None
 
         # Case model weights
@@ -1012,7 +819,7 @@ class RoutedExperts(PluggableLayer):
     # Execution
     #
 
-    def forward_modular(
+    def forward(
         self,
         x: torch.Tensor,
         topk_weights: torch.Tensor,
@@ -1020,26 +827,18 @@ class RoutedExperts(PluggableLayer):
         shared_experts: "SharedExperts | None" = None,
         shared_experts_input: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """
-        Execute routed experts using the quantization method's apply function.
-
-        This is called by the runner after router selection (for modular kernels)
-        quant_method.apply() which accesses the weights on this RoutedExperts
-        instance.
+        """Run routed experts via the quant method's modular kernel.
 
         Args:
             x: Input tensor after any transforms
-            topk_weights: Routing weights from router (for modular kernels)
-            topk_ids: Selected expert IDs from router (for modular kernels)
+            topk_weights: Routing weights from the router
+            topk_ids: Selected expert IDs from the router
             shared_experts: The shared experts (if any)
             shared_experts_input: Input for shared experts (if any)
 
         Returns:
             Output tensor from routed experts
         """
-        assert not self.quant_method.is_monolithic
-
-        # Modular kernels use pre-computed routing
         return self.quant_method.apply(
             layer=self,
             x=x,
@@ -1048,45 +847,6 @@ class RoutedExperts(PluggableLayer):
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
         )
-
-    def forward_monolithic(
-        self,
-        x: torch.Tensor,
-        router_logits: torch.Tensor | None = None,
-        input_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """
-        Execute routed experts using the quantization method's apply function.
-
-        This is called by the runner after router selection (for modular kernels)
-        or with router logits (for monolithic kernels). It delegates to
-        quant_method.apply() which accesses the weights on this RoutedExperts
-        instance.
-
-        Args:
-            x: Input tensor after any transforms
-            router_logits: Router logits (for monolithic kernels)
-            input_ids: input ids for DeepSeek V4
-
-        Returns:
-            Output tensor from routed experts
-        """
-        assert self.quant_method.is_monolithic
-
-        # Monolithic kernels handle routing internally
-        return self.quant_method.apply_monolithic(
-            layer=self,
-            x=x,
-            router_logits=router_logits,
-            input_ids=input_ids,
-        )
-
-    def forward(
-        self,
-        *args,
-        **kwargs,
-    ) -> torch.Tensor:
-        raise AssertionError("Call forward_modular or forward_monolithic instead.")
 
 
 # Mark the RoutedExperts weight_loader as supporting MoE-specific parameters

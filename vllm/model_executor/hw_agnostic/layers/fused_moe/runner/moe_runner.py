@@ -51,41 +51,33 @@ from vllm.utils.torch_utils import (
 
 logger = init_logger(__name__)
 
-# Settings the hw-agnostic MoE pipeline accepts. Anything outside these
-# either fails loudly here or hits a deleted code path; we surface the
-# rejection at construction time so the user sees the right CLI flag.
-_SUPPORTED_MOE_BACKENDS = frozenset({"auto", "triton"})
-_SUPPORTED_ALL2ALL_BACKENDS = frozenset(
-    # 'naive' and 'pplx' are aliased to 'allgather_reducescatter' in
-    # ParallelConfig._validate_parallel_config, but accept them here for
-    # users following older docs.
-    {"allgather_reducescatter", "naive", "pplx"}
-)
+# Settings the hw-agnostic MoE pipeline accepts. Anything outside these hits a
+# deleted code path; reject at construction time so the user sees the right CLI
+# flag instead of an opaque error later.
 
 
 def _validate_supported_settings(vllm_config) -> None:
     pc = vllm_config.parallel_config
     kc = vllm_config.kernel_config
-    if kc.moe_backend not in _SUPPORTED_MOE_BACKENDS:
+    if kc.moe_backend not in ("auto", "triton"):
         raise ValueError(
-            f"hw-agnostic FusedMoE only supports moe_backend in "
-            f"{sorted(_SUPPORTED_MOE_BACKENDS)}; got {kc.moe_backend!r}."
+            f"hw-agnostic FusedMoE requires --moe-backend triton (or auto); "
+            f"got {kc.moe_backend!r}."
         )
-    if pc.all2all_backend not in _SUPPORTED_ALL2ALL_BACKENDS:
+    # ParallelConfig._validate_parallel_config rewrites 'naive'/'pplx' to
+    # 'allgather_reducescatter' before we get here, so a single check suffices.
+    if pc.all2all_backend != "allgather_reducescatter":
         raise ValueError(
-            f"hw-agnostic FusedMoE only supports all2all_backend in "
-            f"{sorted(_SUPPORTED_ALL2ALL_BACKENDS)}; got {pc.all2all_backend!r}. "
-            "Use --all2all-backend allgather_reducescatter."
+            f"hw-agnostic FusedMoE requires --all2all-backend "
+            f"allgather_reducescatter; got {pc.all2all_backend!r}."
         )
     if pc.expert_placement_strategy != "linear":
         raise ValueError(
-            f"hw-agnostic FusedMoE only supports expert_placement_strategy="
-            f"'linear'; got {pc.expert_placement_strategy!r}."
+            f"hw-agnostic FusedMoE requires --expert-placement-strategy linear; "
+            f"got {pc.expert_placement_strategy!r}."
         )
     if getattr(pc, "enable_dbo", False):
-        raise ValueError(
-            "DBO (--enable-dbo) is not supported on the hw-agnostic FusedMoE path."
-        )
+        raise ValueError("--enable-dbo is not supported on the hw-agnostic path.")
 
 
 def register_layer_for_moe_forward_op(
@@ -257,25 +249,9 @@ def _unpack(
 
 class MoERunner(MoERunnerInterface):
     """
-    Standard MoE runner implementation for executing Mixture of Experts layers.
-
-    This is the primary concrete implementation of MoE execution logic, providing
-    comprehensive support for standard MoE operations. It handles:
-    - Expert routing and token dispatching using various routing strategies
-    - Shared experts computation with optional parallel execution using CUDA streams
-    - Tensor model parallel and expert parallel operations
-    - Multiple quantization methods and optimized kernel selection
-    - Both monolithic and decomposed expert execution paths
-    - Integration with various parallel execution modes (TP, EP, DP)
-
-    The runner orchestrates the complete MoE forward pass including routing tokens
-    to experts, executing expert computations in parallel, and combining results.
-    It supports advanced features like overlapped execution of shared experts,
-    optimized kernels for different parallel configurations, and seamless
-    integration with vLLM's distributed execution framework.
-
-    Eventually, this class may be split into more specialized implementations
-    for different configurations (e.g., with/without shared experts, gates, etc.).
+    Standard MoE runner: routes tokens to experts via the router, runs the
+    modular fused MoE kernel, and optionally overlaps shared experts on a
+    separate CUDA stream. Supports TP, EP and DP.
     """
 
     def __init__(
@@ -343,16 +319,10 @@ class MoERunner(MoERunnerInterface):
     def is_internal_router(self) -> bool:
         return self.gate is not None
 
-    # TODO(bnell): Temporary hack. Get rid of this.
     def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
+        # Used by FusedMoEWithLoRA after construction; delegates to the
+        # RoutedExperts wrapper.
         self.routed_experts._replace_quant_method(quant_method)
-
-    # TODO(bnell): Hack for elastic_ep. Get rid of this
-    def _set_moe_config(self, new_moe_config: FusedMoEConfig):
-        self.moe_config = new_moe_config
-        self.routed_experts._set_moe_config(new_moe_config)
-        if self._shared_experts is not None:
-            self._shared_experts._set_moe_config(new_moe_config)
 
     def _maybe_fuse_gate_weights(self):
         """Fuse router and shared expert gate weights on first call.
@@ -576,29 +546,20 @@ class MoERunner(MoERunnerInterface):
             shared_experts_input, SharedExpertsOrder.NO_OVERLAP
         )
 
-        if self.routed_experts.quant_method.is_monolithic:
-            # Monolithic kernels: pass router_logits to routed_experts
-            fused_out = self.routed_experts.forward_monolithic(
-                x=hidden_states,
-                router_logits=router_logits,
-                input_ids=input_ids,
-            )
-        else:
-            # Modular kernels: select experts first, then call routed_experts
-            topk_weights, topk_ids = self.router.select_experts(
-                hidden_states=hidden_states,
-                router_logits=router_logits,
-                topk_indices_dtype=self._quant_method.topk_indices_dtype,
-                input_ids=input_ids,
-            )
+        topk_weights, topk_ids = self.router.select_experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            topk_indices_dtype=self._quant_method.topk_indices_dtype,
+            input_ids=input_ids,
+        )
 
-            fused_out = self.routed_experts.forward_modular(
-                x=hidden_states,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                shared_experts=self._shared_experts,
-                shared_experts_input=shared_experts_input,
-            )
+        fused_out = self.routed_experts(
+            x=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            shared_experts=self._shared_experts,
+            shared_experts_input=shared_experts_input,
+        )
 
         self._maybe_apply_shared_experts(
             shared_experts_input,
@@ -804,7 +765,6 @@ class MoERunner(MoERunnerInterface):
 
         Returns a single tensor of combined fused and shared output (if present).
         """
-        # TODO(bnell): this can be removed after MK migration is complete.
         self.routed_experts._ensure_moe_quant_config_init()
 
         # Sync aux and main stream for shared expert multi-stream overlap.
@@ -821,9 +781,6 @@ class MoERunner(MoERunnerInterface):
                 router_logits, _ = self.gate(hidden_states)
 
         with self._sequence_parallel_context():
-            # TODO(bnell): parts of the dispatch/combine steps will go away once
-            # #32567 lands and the remaining kernels are made MKs.  The PCP
-            # code will probably remain
             hidden_states, router_logits = self._maybe_dispatch(
                 hidden_states,
                 router_logits,
@@ -860,10 +817,6 @@ class MoERunner(MoERunnerInterface):
     #
     # Attributes still needed by models
     #
-
-    @property
-    def is_monolithic(self) -> bool:
-        return self.routed_experts.quant_method.is_monolithic
 
     @property
     def activation(self) -> MoEActivation:

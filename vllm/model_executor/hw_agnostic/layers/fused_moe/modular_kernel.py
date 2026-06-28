@@ -44,40 +44,18 @@ from vllm.v1.worker.workspace import current_workspace_manager
 logger = init_logger(__name__)
 
 #
-# This file defines a set of base classes used to make MoE kernels more modular.
-# The goal is to be able to utilize different communication mechanisms with
-# any fused MoE kernel without needing to have combinatoric implementations.
+# Modular MoE kernel building blocks. The fused MoE forward is broken into:
 #
-# The fused moe kernels are broken down into the following components:
+#   [Router] → [Quantize-Dispatch] → [Permute-Experts-Unpermute] → [Combine]
 #
-# [Router] → [Quantize-Dispatch] → [Permute-Experts-Unpermute] → [Combine]
-#
-# Each component will be independent of (but may inform) the others except for
-# [Quantize-Dispatch] and `[Combine] (see below). The components can then be
-# mixed and matched with so that DP+EP can be supported easily for multiple
-# MoE kernel implementations.
-#
-# The following main classes are defined:
-# * FusedMoEPrepareAndFinalizeModular - an abstract base class for preparation of MoE
-#   inputs (e.g. quantization, distribution) and finalization of Moe outputs.
-#   The prepare method must take care of any needed quantization and the
-#   finalize method, informed by the FusedMoEExpertsModular method,
-#   may apply weights and/or do the final reduction of the output.
-# * FusedMoEExpertsModular - an abstract base class for the main fused
-#   MoE operation, i.e matmul + act_mul + optionally quant + matmul.
-#   Some FusedMoEExpertsModular implementations may choose to do
-#   the weight application and/or reduction. The class communicates this
-#   to [Finalize] via a TopKWeightAndReduce object.
-# * FusedMoEModularKernel - an interface class that combines a
-#   FusedMoEPrepareAndFinalizeModular and a FusedMoEExpertsModular to
-#   provide the standard fused MoE kernel interface.
-# * TopKWeightAndReduce - A TopKWeightAndReduce implementation chosen
-#   by the FusedMoEExpertsModular implementation that is passed
-#   on to [Finalize].
-#
-# [Quantize-Prepare] and [Finalize] functionality are bundled into a single
-# class `FusedMoEPrepareAndFinalizeModular` since they could use collective
-# communication mechanisms that need to be consistent.
+# Components are mixed and matched so DP+EP can be supported across different
+# experts kernels without combinatoric implementations:
+#   * FusedMoEPrepareAndFinalize - handles [Quantize-Dispatch] and [Combine]
+#     together (they may share a collective transport).
+#   * FusedMoEExperts - the [Permute-Experts-Unpermute] step. May also handle
+#     weight application / reduction, signalled to [Finalize] via a
+#     TopKWeightAndReduce object.
+#   * FusedMoEKernel - composes a prepare/finalize and an experts impl.
 #
 
 
@@ -157,20 +135,6 @@ PrepareResultType = tuple[
     torch.Tensor | None,
 ]
 
-#
-# PrepareResultType is a tuple of:
-# - quantized + dispatched a.
-# - quantized + dispatched a1_scales.
-# - dispatched router logits.
-#
-# See `prepare_monolithic` method below.
-#
-PrepareMonolithicResultType = tuple[
-    torch.Tensor,
-    torch.Tensor | None,
-    torch.Tensor,
-]
-
 ReceiverType = Callable[[], PrepareResultType]
 
 ################################################################################
@@ -182,18 +146,12 @@ class FusedMoEPrepareAndFinalize(ABC):
     """
     An abstract base class for the [Quantize-Prepare] and [Finalize] steps
     described above.
-
-    There are two variants of this class:
-    * FusedMoEPrepareAndFinalizeModular - this operates on topk ids and weights
-    * FusedMoEPrepareAndFinalizeMonolithic - the operates on router_logits
     """
 
     def post_init_setup(self, fused_experts: "FusedMoEExperts"):
         """
-        Initialize FusedMoEPrepareAndFinalizeModular settings that depend on
-        FusedMoEExpertsModular experts object.
-        The FusedMoEPrepareAndFinalizeModular implementations that have such
-        dependencies may choose to override this function.
+        Initialize settings that depend on the FusedMoEExperts object.
+        Implementations with such dependencies may override this.
         """
         return
 
@@ -254,11 +212,14 @@ class FusedMoEPrepareAndFinalize(ABC):
         return
 
 
-# TODO: pass FusedMoEParallelConfig in as ctor parameter?
 class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
     """
-    An abstract base class for the [Quantize-Prepare] and [Finalize] steps
-    described above for the Modular case.
+    Abstract base for [Quantize-Prepare] + [Finalize] in the modular pipeline.
+
+    Concrete subclasses in this tree: ``MoEPrepareAndFinalizeNoDPEPModular``
+    (dp_size == 1; expert_map masks remote experts) and
+    ``MoEPrepareAndFinalizeNaiveDPEPModular`` (dp_size > 1; AllGather /
+    ReduceScatter transport via ``torch.distributed``).
     """
 
     @abstractmethod
@@ -285,7 +246,7 @@ class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
           activations, before quantization + dispatching.
         - quant_config: Quantization info provided by the fused experts.
         - defer_input_quant: Runtime parameter indicating whether or not to
-          defer input quantization to the FusedMoEExpertsModular
+          defer input quantization to the experts kernel
           in cases where the compute kernel expects unquantized inputs
 
         Returns a tuple of:
@@ -325,7 +286,7 @@ class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
         - apply_router_weight_on_input: When True, apply the weights to the
           activations, before quantization + dispatching.
         - defer_input_quant: Runtime parameter indicating whether or not to
-          defer input quantization to the FusedMoEExpertsModular
+          defer input quantization to the experts kernel
           in cases where the compute kernel expects unquantized inputs
 
         Returns a callback or a hook callback pair that when invoked waits for
@@ -419,56 +380,11 @@ class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
         raise NotImplementedError
 
 
-class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalize):
-    """
-    An abstract base class for the [Quantize-Prepare] and [Finalize] steps
-    described above for the monolithic case.
-    """
-
-    @abstractmethod
-    def prepare(
-        self,
-        a1: torch.Tensor,
-        router_logits: torch.Tensor,
-        quant_config: FusedMoEQuantConfig,
-        defer_input_quant: bool = False,
-    ) -> PrepareMonolithicResultType:
-        """
-        Optional method for subclasses compatible with monolithic
-        FusedMoEExpertsModular kernels.
-
-        Perform any quantization (and/or) dispatching needed for this kernel.
-        - a1: The (unquantized) input to the MoE layer.
-        - quant_config: Quantization info provided by the fused experts.
-        - defer_input_quant: Runtime parameter indicating whether or not to
-            defer input quantization to the FusedMoEExpertsModular
-
-        Returns a tuple of:
-        - quantized + dispatched a.
-        - Optional quantized + dispatched a1_scales.
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def finalize(self, fused_expert_output: torch.Tensor) -> torch.Tensor:
-        """
-        Optional method for subclasses compatible with monolithic
-        FusedMoEExpertsModular kernels.
-
-        Perform any combine plus apply weights and perform a reduction on the
-        fused experts output.
-        - fused_expert_output: The unweighted, unreduced output of the fused
-          experts, it will have (M, topk, K) shape.
-        """
-        raise NotImplementedError
-
-
 ################################################################################
 # Experts
 ################################################################################
 
 
-# TODO: add supported activations method (return string)
 class FusedMoEExperts(ABC):
     def __init__(
         self,
@@ -503,10 +419,6 @@ class FusedMoEExperts(ABC):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:  # noqa: B027
         pass
-
-    @staticmethod
-    def is_monolithic() -> bool:
-        raise NotImplementedError("Implemented by subclasses.")
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -634,9 +546,6 @@ class FusedMoEExperts(ABC):
     ) -> bool:
         """
         Whether the kernel supports a routing method (e.g. GroupedTopK).
-
-        Can be overridden by monolithic kernels that execute the router
-        in addition to the experts if certain routers are not supported.
         """
         return True
 
@@ -647,9 +556,6 @@ class FusedMoEExperts(ABC):
     ) -> bool:
         """
         Whether a kernel supports a particular dtype for router logits input.
-
-        Can be overridden by monolithic kernels that execute the router
-        in addition to the experts if certain dtypes are not supported.
         """
         return True
 
@@ -765,10 +671,6 @@ class FusedMoEExpertsModular(FusedMoEExperts):
     An abstract base class for the [Permute-Experts-Unpermute] step described
         above.
     """
-
-    @staticmethod
-    def is_monolithic() -> bool:
-        return False
 
     def moe_problem_size(
         self,
@@ -955,67 +857,6 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         raise NotImplementedError
 
 
-class FusedMoEExpertsMonolithic(FusedMoEExperts):
-    """
-    An abstract base class for the [Permute-Experts-Unpermute] step described
-        above, but with the monolithic interface (accepts router logits
-        rather than topk ids and weights).
-    """
-
-    @staticmethod
-    def _supports_routing_method(
-        routing_method: RoutingMethodType,
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-    ) -> bool:
-        """
-        Whether the kernel supports a routing method (e.g. GroupedTopK).
-
-        Monolithic kernels should explicitly opt-in to support.
-        """
-        raise NotImplementedError
-
-    @staticmethod
-    def _supports_router_logits_dtype(
-        router_logits_dtype: torch.dtype | None,
-        routing_method: RoutingMethodType,
-    ) -> bool:
-        """
-        Whether the kernel supports a dtype for router logits.
-
-        Modular kernels should opt-in to support.
-        """
-        raise NotImplementedError
-
-    @staticmethod
-    def is_monolithic() -> bool:
-        return True
-
-    def apply(
-        self,
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        router_logits: torch.Tensor,
-        activation: MoEActivation,
-        global_num_experts: int,
-        expert_map: torch.Tensor | None,
-        a1q_scale: torch.Tensor | None,
-        apply_router_weight_on_input: bool,
-        # grouped topk + fused topk bias parameters
-        num_expert_group: int | None = None,
-        e_score_correction_bias: torch.Tensor | None = None,
-        routed_scaling_factor: float | None = None,
-        topk_group: int | None = None,
-    ) -> torch.Tensor:
-        """
-        Same as apply(), except uses router_logits as opposed
-        to the topk_ids and topk_weights. This is useful for kernels
-        with fused router and fused_experts (e.g. FLASHINFER_TRTLLM).
-        """
-        raise NotImplementedError
-
-
 ################################################################################
 # Kernel
 ################################################################################
@@ -1151,9 +992,7 @@ class FusedMoEKernelModularImpl:
             topk_ids = torch.where(is_padding[:n].unsqueeze(1), -1, topk_ids)
 
         if not self.prepare_finalize.supports_async():
-            # We shouldn't be running an a2a kernel that doesn't
-            # support async prepare/finalize
-            # TODO(lucas): enable in follow-up
+            # DBO requires async prepare/finalize from the a2a kernel.
             assert not dbo_enabled()
 
             (
@@ -1186,9 +1025,8 @@ class FusedMoEKernelModularImpl:
                 defer_input_quant=self.fused_experts.expects_unquantized_inputs,
             )
 
-            # TODO(lucas): refactor this in the alternative schedules followup
-            # currently unpack if we have hook + receiver pair or just
-            # receiver (see finalize_async docstring)
+            # Unpack hook + receiver pair, or a bare receiver
+            # (see finalize_async docstring).
             hook, receiver = (
                 prepare_ret if isinstance(prepare_ret, tuple) else (None, prepare_ret)
             )
@@ -1328,9 +1166,8 @@ class FusedMoEKernelModularImpl:
             )
             self._maybe_apply_shared_experts(shared_experts, shared_experts_input)
 
-            # TODO(lucas): refactor this in the alternative schedules followup
-            # currently unpack if we have hook + receiver pair or just
-            # receiver (see finalize_async docstring)
+            # Unpack hook + receiver pair, or a bare receiver
+            # (see finalize_async docstring).
             hook, receiver = (
                 finalize_ret
                 if isinstance(finalize_ret, tuple)
@@ -1448,119 +1285,30 @@ class FusedMoEKernelModularImpl:
 
 
 @final
-class FusedMoEKernelMonolithicImpl:
-    def __init__(
-        self,
-        prepare_finalize: FusedMoEPrepareAndFinalizeMonolithic,
-        fused_experts: FusedMoEExpertsMonolithic,
-    ):
-        self.prepare_finalize = prepare_finalize
-        self.fused_experts = fused_experts
-
-    def apply(
-        self,
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        router_logits: torch.Tensor,
-        activation: MoEActivation,
-        global_num_experts: int,
-        expert_map: torch.Tensor | None,
-        apply_router_weight_on_input: bool,
-        # grouped topk + fused topk bias parameters
-        num_expert_group: int | None = None,
-        e_score_correction_bias: torch.Tensor | None = None,
-        routed_scaling_factor: float | None = None,
-        topk_group: int | None = None,
-    ) -> torch.Tensor:
-        """
-        Same as forward(), except uses router_logits as opposed
-        to the topk_ids and topk_weights. This is used for kernels
-        that have fused router + experts (e.g. FLASHINFER_TRTLLM).
-        """
-
-        a1q, a1q_scale, router_logits = self.prepare_finalize.prepare(
-            hidden_states,
-            router_logits=router_logits,
-            quant_config=self.fused_experts.quant_config,
-            defer_input_quant=self.fused_experts.expects_unquantized_inputs,
-        )
-
-        fused_out = self.fused_experts.apply(
-            hidden_states=a1q,
-            w1=w1,
-            w2=w2,
-            router_logits=router_logits,
-            activation=activation,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-            a1q_scale=a1q_scale,
-            # grouped topk + fused topk bias parameters
-            num_expert_group=num_expert_group,
-            e_score_correction_bias=e_score_correction_bias,
-            routed_scaling_factor=routed_scaling_factor,
-            topk_group=topk_group,
-        )
-
-        output = self.prepare_finalize.finalize(fused_out)
-
-        return output
-
-
-@final
 class FusedMoEKernel:
     def __init__(
         self,
-        prepare_finalize: FusedMoEPrepareAndFinalize,
-        fused_experts: FusedMoEExperts,
+        prepare_finalize: FusedMoEPrepareAndFinalizeModular,
+        fused_experts: FusedMoEExpertsModular,
     ):
         super().__init__()
-
-        # Initialize the implementation (monolithic or modular).
-        self.impl: FusedMoEKernelModularImpl | FusedMoEKernelMonolithicImpl
-        if isinstance(
-            prepare_finalize, FusedMoEPrepareAndFinalizeModular
-        ) and isinstance(fused_experts, FusedMoEExpertsModular):
-            self.impl = FusedMoEKernelModularImpl(
-                prepare_finalize,
-                fused_experts,
-            )
-
-        elif isinstance(
-            prepare_finalize, FusedMoEPrepareAndFinalizeMonolithic
-        ) and isinstance(fused_experts, FusedMoEExpertsMonolithic):
-            self.impl = FusedMoEKernelMonolithicImpl(
-                prepare_finalize,
-                fused_experts,
-            )
-
-        else:
-            raise ValueError(
-                "prepare_finalize and fused_experts must both be either monolithic "
-                f"or non-monolithic but got {prepare_finalize.__class__.__name__} "
-                f"and {fused_experts.__class__.__name__}"
-            )
-
-        self._post_init_setup()
+        self.impl = FusedMoEKernelModularImpl(prepare_finalize, fused_experts)
+        self.prepare_finalize.post_init_setup(fused_experts)
+        assert (
+            self.prepare_finalize.activation_format
+            == self.fused_experts.activation_format()
+        )
 
     @property
     def can_overlap_shared_experts(self) -> bool:
-        if isinstance(self.impl, FusedMoEKernelModularImpl):
-            return self.impl.prepare_finalize.supports_async()
-        else:
-            return False
+        return self.impl.prepare_finalize.supports_async()
 
     @property
-    def is_monolithic(self) -> bool:
-        return isinstance(self.impl, FusedMoEKernelMonolithicImpl)
-
-    @property
-    def prepare_finalize(self) -> FusedMoEPrepareAndFinalize:
+    def prepare_finalize(self) -> FusedMoEPrepareAndFinalizeModular:
         return self.impl.prepare_finalize
 
     @property
-    def fused_experts(self) -> FusedMoEExperts:
+    def fused_experts(self) -> FusedMoEExpertsModular:
         return self.impl.fused_experts
 
     @property
@@ -1570,55 +1318,12 @@ class FusedMoEKernel:
     def supports_lora(self) -> bool:
         return self.fused_experts.supports_lora()
 
-    def _post_init_setup(self):
-        """
-        Resolve any leftover setup dependencies between self.prepare_finalize
-        and self.fused_experts here.
-        """
-        self.prepare_finalize.post_init_setup(self.impl.fused_experts)
-        assert (
-            self.prepare_finalize.activation_format
-            == self.fused_experts.activation_format()
-        )
-
     def output_is_reduced(self) -> bool:
         """
         Indicates whether or not the output of fused MoE kernel
         is reduced across all ranks.
         """
         return self.prepare_finalize.output_is_reduced()
-
-    def apply_monolithic(
-        self,
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        router_logits: torch.Tensor,
-        activation: MoEActivation,
-        global_num_experts: int,
-        expert_map: torch.Tensor | None,
-        apply_router_weight_on_input: bool,
-        # grouped topk + fused topk bias parameters
-        num_expert_group: int | None = None,
-        e_score_correction_bias: torch.Tensor | None = None,
-        routed_scaling_factor: float | None = None,
-        topk_group: int | None = None,
-    ) -> torch.Tensor:
-        assert isinstance(self.impl, FusedMoEKernelMonolithicImpl)
-        return self.impl.apply(
-            hidden_states=hidden_states,
-            w1=w1,
-            w2=w2,
-            router_logits=router_logits,
-            activation=activation,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-            num_expert_group=num_expert_group,
-            e_score_correction_bias=e_score_correction_bias,
-            routed_scaling_factor=routed_scaling_factor,
-            topk_group=topk_group,
-        )
 
     def apply(
         self,
@@ -1634,7 +1339,6 @@ class FusedMoEKernel:
         shared_experts: SharedExperts | None = None,
         shared_experts_input: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        assert isinstance(self.impl, FusedMoEKernelModularImpl)
         return self.impl.apply(
             hidden_states=hidden_states,
             w1=w1,

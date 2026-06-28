@@ -15,7 +15,7 @@ from vllm.model_executor.hw_agnostic.layers.fused_moe.config import (
     FusedMoEConfig,
 )
 from vllm.model_executor.hw_agnostic.layers.fused_moe.modular_kernel import (
-    FusedMoEPrepareAndFinalize,
+    FusedMoEPrepareAndFinalizeModular,
 )
 from vllm.model_executor.hw_agnostic.layers.fused_moe.prepare_finalize import (  # noqa: E501
     make_moe_prepare_and_finalize_naive_dp_ep,
@@ -37,9 +37,7 @@ def maybe_roundup_layer_hidden_size(
 
 def maybe_make_prepare_finalize(
     moe: FusedMoEConfig,
-    *,
-    use_monolithic: bool = False,
-) -> FusedMoEPrepareAndFinalize:
+) -> FusedMoEPrepareAndFinalizeModular:
     """Pick the vendored P/F for this deployment.
 
     - ``dp_size > 1``: AllGather/ReduceScatter naive DP/EP P/F. Covers both
@@ -54,6 +52,5 @@ def maybe_make_prepare_finalize(
         return make_moe_prepare_and_finalize_naive_dp_ep(
             is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
             num_dispatchers=all2all_manager.world_size,
-            use_monolithic=use_monolithic,
         )
-    return make_moe_prepare_and_finalize_no_dp_ep(use_monolithic)
+    return make_moe_prepare_and_finalize_no_dp_ep()

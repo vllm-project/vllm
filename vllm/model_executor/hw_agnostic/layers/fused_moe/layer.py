@@ -80,7 +80,6 @@ def determine_expert_counts(
     return num_experts + num_redundant_experts, num_experts
 
 
-# TODO: rename this
 def FusedMoE(
     num_experts: int,  # Global number of experts
     top_k: int,
@@ -237,8 +236,6 @@ def FusedMoE(
         enable_eplb=eplb_state is not None,
     )
 
-    # TODO(bnell): we should not have to create a router if the kernel is
-    # monolithic.
     if router is None:
         router = create_fused_moe_router(
             top_k=top_k,
@@ -267,14 +264,12 @@ def FusedMoE(
     if params_dtype is None:
         params_dtype = torch.get_default_dtype()
 
-    # FIXME (varun): We should have a better way of inferring the activation
-    # datatype. This works for now as the tensor datatype entering the MoE
-    # operation is typically unquantized (i.e. float16/bfloat16).
+    # Infer activation dtype from the model config; tensors entering the MoE
+    # are typically unquantized (float16/bfloat16). Fall back to params_dtype
+    # for tests that do not set model_config.
     if vllm_config.model_config is not None:
         moe_in_dtype = vllm_config.model_config.dtype
     else:
-        # TODO (bnell): This is a hack to get test_mixtral_moe to work
-        # since model_config is not set in the pytest test.
         moe_in_dtype = params_dtype
 
     moe_config = FusedMoEConfig(

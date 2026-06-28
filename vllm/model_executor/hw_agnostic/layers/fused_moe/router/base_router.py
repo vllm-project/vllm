@@ -99,9 +99,13 @@ class BaseRouter(FusedMoERouter):
     """
     Base router class that provides common functionality for all router implementations.
 
-    This class implements the template method pattern where select_experts() handles
-    common pre-processing and post-processing, delegating the actual routing logic
-    to the abstract _compute_routing() method.
+    Concrete subclasses in this tree: ``FusedTopKRouter`` (unbiased) and
+    ``FusedTopKBiasRouter`` (grouped-topk + score-correction bias, used by
+    DeepSeek V4).
+
+    Implements the template method pattern: ``select_experts`` handles common
+    pre- and post-processing and delegates the actual routing logic to the
+    abstract ``_compute_routing`` method.
     """
 
     def __init__(

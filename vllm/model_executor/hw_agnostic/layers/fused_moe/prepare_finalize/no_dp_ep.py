@@ -64,7 +64,6 @@ class MoEPrepareAndFinalizeNoDPEPModular(mk.FusedMoEPrepareAndFinalizeModular):
     ) -> mk.PrepareResultType:
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)
-            # TODO: this only works for topK=1, will need to update for topK>1
             assert topk == 1, (
                 "apply_router_weight_on_input is only implemented for topk=1"
             )
@@ -94,45 +93,5 @@ class MoEPrepareAndFinalizeNoDPEPModular(mk.FusedMoEPrepareAndFinalizeModular):
         )
 
 
-class MoEPrepareAndFinalizeNoDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMonolithic):
-    @property
-    def activation_format(self) -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
-
-    def max_num_tokens_per_rank(self) -> int | None:
-        return None
-
-    def topk_indices_dtype(self) -> torch.dtype | None:
-        return None
-
-    def num_dispatchers(self) -> int:
-        return 1
-
-    def output_is_reduced(self) -> bool:
-        return False
-
-    def prepare(
-        self,
-        a1: torch.Tensor,
-        router_logits: torch.Tensor,
-        quant_config: FusedMoEQuantConfig,
-        defer_input_quant: bool = False,
-    ) -> mk.PrepareMonolithicResultType:
-        a1q, a1q_scale = _quantize_input(a1, quant_config, defer_input_quant)
-        return a1q, a1q_scale, router_logits
-
-    def finalize(
-        self,
-        fused_expert_output: torch.Tensor,
-    ) -> torch.Tensor:
-        return fused_expert_output
-
-
-def make_moe_prepare_and_finalize_no_dp_ep(
-    use_monolithic: bool,
-) -> MoEPrepareAndFinalizeNoDPEPModular | MoEPrepareAndFinalizeNoDPEPMonolithic:
-    return (
-        MoEPrepareAndFinalizeNoDPEPMonolithic()
-        if use_monolithic
-        else MoEPrepareAndFinalizeNoDPEPModular()
-    )
+def make_moe_prepare_and_finalize_no_dp_ep() -> MoEPrepareAndFinalizeNoDPEPModular:
+    return MoEPrepareAndFinalizeNoDPEPModular()

@@ -19,9 +19,11 @@ from vllm.model_executor.hw_agnostic.layers.fused_moe.runner.shared_experts impo
 class MoERunnerInterface(PluggableLayer, ABC):
     """ABC for MoE runner implementations.
 
-    Defines the surface the FusedMoE custom op (registered locally as
-    ``torch.ops.vllm_dsv4.moe_forward``) and the model-loader framework
-    expect to find on every MoE layer.
+    Only one concrete subclass lives in this tree (`MoERunner`). The ABC is
+    retained because `vllm.utils.is_moe_layer` discovers MoE modules by
+    walking class bases and matching the name "MoERunnerInterface"; removing
+    it would hide hw-agnostic MoE layers from elastic-EP and device
+    communicators.
     """
 
     def __init__(self):
@@ -64,11 +66,6 @@ class MoERunnerInterface(PluggableLayer, ABC):
     @property
     @abstractmethod
     def layer_id(self):
-        raise NotImplementedError
-
-    @property
-    @abstractmethod
-    def is_monolithic(self) -> bool:
         raise NotImplementedError
 
     @property

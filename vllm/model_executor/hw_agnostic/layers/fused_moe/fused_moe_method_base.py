@@ -35,9 +35,10 @@ logger = init_logger(__name__)
 class FusedMoEMethodBase(QuantizeMethodBase):
     """ABC for hw-agnostic FusedMoE quant methods.
 
+    Concrete subclasses in this tree: ``UnquantizedFusedMoEMethod`` and
+    ``Fp8MoEMethod`` (offline + ``Fp8OnlineMoEMethod`` online variant).
     Subclasses build their modular kernel in
-    ``process_weights_after_loading`` and expose ``apply`` (modular) or
-    ``apply_monolithic`` (router fused inside the kernel) accordingly.
+    ``process_weights_after_loading`` and expose ``apply``.
     """
 
     def __init__(self, moe: FusedMoEConfig):
@@ -68,11 +69,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         **extra_weight_attrs,
     ):
         raise NotImplementedError
-
-    def uses_weight_scale_2_pattern(self) -> bool:
-        """Whether weight scales follow the ``weight_scale_2`` checkpoint key
-        pattern (set by FP4 variants — overridden by subclasses)."""
-        return False
 
     def maybe_roundup_sizes(
         self,
@@ -134,14 +130,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     def method_name(self) -> str:
         return self.__class__.__name__
 
-    @property
-    def is_monolithic(self) -> bool:
-        if self.moe_kernel is None:
-            if hasattr(self, "experts_cls"):
-                return self.experts_cls.is_monolithic()
-            return False
-        return self.moe_kernel.is_monolithic
-
     def apply(
         self,
         layer: "RoutedExperts",
@@ -152,14 +140,4 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
         """Modular MoE forward (router runs first; pre-computed topk in)."""
-        raise NotImplementedError
-
-    def apply_monolithic(
-        self,
-        layer: "RoutedExperts",
-        x: torch.Tensor,
-        router_logits: torch.Tensor,
-        input_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Monolithic MoE forward (router fused inside the kernel)."""
         raise NotImplementedError

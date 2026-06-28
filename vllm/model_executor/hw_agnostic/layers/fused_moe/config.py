@@ -49,7 +49,6 @@ def _get_config_dtype_str(
     use_fp8_w8a8: bool = False,
     use_fp8_w8a16: bool = False,
     use_int8_w8a16: bool = False,
-    use_int4_w4a16: bool = False,
 ) -> str | None:
     """
     Return a string used to construct the filename that contains the
@@ -62,8 +61,6 @@ def _get_config_dtype_str(
         return "fp8_w8a16"
     if use_int8_w8a16:
         return "int8_w8a16"
-    if use_int4_w4a16:
-        return "int4_w4a16"
     if dtype == torch.float:
         # float32 MoE reuses the fp16/bfloat16 tuning configs.
         return "float32"
@@ -84,8 +81,7 @@ def _quant_flags_to_group_shape(
     if block_shape is not None:
         assert not per_act_token_quant
         assert not per_out_ch_quant
-        # TODO(bnell): this is not quite right for activations since first
-        # dim should be 1.
+        # Note: a_shape's first dim should arguably be 1, not block_shape[0].
         a_shape = GroupShape(row=block_shape[0], col=block_shape[1])
         w_shape = GroupShape(row=block_shape[0], col=block_shape[1])
     else:
@@ -184,7 +180,6 @@ class FusedMoEQuantDesc:
 
     # The quantized type of this parameters.  None means unquantized or
     # already quantized.
-    # TODO (bnell): use scalar_type instead of Union.
     dtype: torch.dtype | str | None = None
 
     # A field that describes the quantization group shape, from quant_utils.py.
@@ -197,7 +192,6 @@ class FusedMoEQuantDesc:
     shape: GroupShape | None = None
 
     # Quantization scales.
-    # TODO(bnell): maybe put PrecisionConfigs in subclass of QuantDesc?
     scale: Union[torch.Tensor, "PrecisionConfig", None] = None
 
     # Per-channel scales for W4A8 FP8 (the previous FP4 ``gscale`` use is
@@ -211,8 +205,6 @@ class FusedMoEQuantDesc:
     bias: torch.Tensor | None = None
 
 
-# TODO(bnell): have subclasses for specific moe methods?
-# e.g. for specific arguments bias, precision, etc.
 @dataclass
 class FusedMoEQuantConfig:
     """Quantization parameters for a single FusedMoEMethodBase.
@@ -224,7 +216,6 @@ class FusedMoEQuantConfig:
     only, weights need no GroupShape (they are already quantized).
     """
 
-    # TODO(bnell) make sure a1_scales/a2_scales don't interfere with chunking
     _a1: FusedMoEQuantDesc
     _a2: FusedMoEQuantDesc
     _w1: FusedMoEQuantDesc
@@ -357,10 +348,6 @@ class FusedMoEQuantConfig:
     def use_fp8_w8a16(self) -> bool:
         return self._a1.dtype is None and self._w1.dtype == current_platform.fp8_dtype()
 
-    @property
-    def use_int4_w4a16(self) -> bool:
-        return self._a1.dtype is None and self._w1.dtype == "int4"
-
     def config_name(self, dtype: torch.dtype) -> str | None:
         """
         Return a string used to construct the filename that contains the
@@ -371,7 +358,6 @@ class FusedMoEQuantConfig:
             use_fp8_w8a8=self.use_fp8_w8a8,
             use_fp8_w8a16=self.use_fp8_w8a16,
             use_int8_w8a16=self.use_int8_w8a16,
-            use_int4_w4a16=self.use_int4_w4a16,
             dtype=dtype,
         )
 
@@ -530,25 +516,6 @@ def int8_w8a8_moe_quant_config(
         per_act_token_quant=per_act_token_quant,
         per_out_ch_quant=False,
         block_shape=None,
-    )
-
-
-def int4_w4a16_moe_quant_config(
-    w1_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-    w1_zp: torch.Tensor | None = None,
-    w2_zp: torch.Tensor | None = None,
-    w1_bias: torch.Tensor | None = None,
-    w2_bias: torch.Tensor | None = None,
-    block_shape: list[int] | None = None,
-) -> FusedMoEQuantConfig:
-    """Quant config for 16-bit float activations and INT4 weights."""
-    group_shape = GroupShape(*block_shape) if block_shape is not None else None
-    return FusedMoEQuantConfig(
-        _a1=FusedMoEQuantDesc(shape=group_shape),
-        _a2=FusedMoEQuantDesc(shape=group_shape),
-        _w1=FusedMoEQuantDesc("int4", group_shape, w1_scale, None, w1_zp, w1_bias),
-        _w2=FusedMoEQuantDesc("int4", group_shape, w2_scale, None, w2_zp, w2_bias),
     )
 
 

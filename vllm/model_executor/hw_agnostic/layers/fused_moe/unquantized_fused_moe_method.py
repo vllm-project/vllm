@@ -16,6 +16,9 @@ from vllm.model_executor.hw_agnostic.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     biased_moe_quant_config,
 )
+from vllm.model_executor.hw_agnostic.layers.fused_moe.experts.triton_moe import (
+    TritonExperts,
+)
 from vllm.model_executor.hw_agnostic.layers.fused_moe.fused_moe_method_base import (  # noqa: E501
     FusedMoEMethodBase,
 )
@@ -35,19 +38,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def _resolve_triton_experts_cls():
-    """Lazy-import the vendored Triton experts class.
-
-    Local import keeps module load free of triton_kernels side effects
-    (the kernel module touches the autotuner registry).
-    """
-    from vllm.model_executor.hw_agnostic.layers.fused_moe.experts.triton_moe import (
-        TritonExperts,
-    )
-
-    return TritonExperts
-
-
 # --8<-- [start:unquantized_fused_moe]
 @CustomOp.register("unquantized_fused_moe")
 class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
@@ -57,7 +47,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
-        self.experts_cls = _resolve_triton_experts_cls()
+        self.experts_cls = TritonExperts
 
     @property
     def supports_eplb(self) -> bool:

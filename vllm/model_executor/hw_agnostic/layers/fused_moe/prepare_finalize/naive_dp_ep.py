@@ -178,94 +178,11 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
         )
 
 
-class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMonolithic):
-    """
-    Naive Prepare/Finalize for Dp/Ep case for Modular Kernels.
-
-    Uses Torch AR/RS or AR for dispatch/combine operations, applied
-    to the router logits (the MoE kernel runs the router internally).
-    """
-
-    def __init__(
-        self,
-        is_sequence_parallel: bool = False,
-        num_dispatchers: int = 1,
-    ) -> None:
-        super().__init__()
-        self.is_sequence_parallel = is_sequence_parallel
-        self._num_dispatchers = num_dispatchers
-
-    @property
-    def activation_format(self) -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.Standard
-
-    def max_num_tokens_per_rank(self) -> int | None:
-        return None
-
-    def topk_indices_dtype(self) -> torch.dtype | None:
-        return None
-
-    def num_dispatchers(self) -> int:
-        return self._num_dispatchers
-
-    def output_is_reduced(self) -> bool:
-        return False
-
-    def prepare(
-        self,
-        a1: torch.Tensor,
-        router_logits: torch.Tensor,
-        quant_config: FusedMoEQuantConfig,
-        defer_input_quant: bool = False,
-    ) -> mk.PrepareMonolithicResultType:
-        """Quantize and Dispatch Router Logits."""
-
-        a1q, scales, a1q_scale_orig = _quantize_and_setup_dispatch(
-            a1, quant_config, defer_input_quant
-        )
-
-        res = get_ep_group().dispatch_router_logits(
-            a1q,
-            router_logits,
-            is_sequence_parallel=self.is_sequence_parallel,
-            extra_tensors=scales,
-        )
-
-        if scales is None:
-            assert len(res) == 2
-            a1q, router_logits = res
-            a1q_scale = a1q_scale_orig
-        else:
-            assert len(res) == 3
-            a1q, router_logits, gathered_scales = res
-            assert len(gathered_scales) == 1
-            a1q_scale = gathered_scales[0]
-
-        return a1q, a1q_scale, router_logits
-
-    def finalize(
-        self,
-        fused_expert_output: torch.Tensor,
-    ) -> torch.Tensor:
-        out = get_ep_group().combine(
-            fused_expert_output, is_sequence_parallel=self.is_sequence_parallel
-        )
-        return out
-
-
 def make_moe_prepare_and_finalize_naive_dp_ep(
-    use_monolithic: bool,
     is_sequence_parallel: bool = False,
     num_dispatchers: int = 1,
-) -> MoEPrepareAndFinalizeNaiveDPEPModular | MoEPrepareAndFinalizeNaiveDPEPMonolithic:
-    return (
-        MoEPrepareAndFinalizeNaiveDPEPMonolithic(
-            is_sequence_parallel=is_sequence_parallel,
-            num_dispatchers=num_dispatchers,
-        )
-        if use_monolithic
-        else MoEPrepareAndFinalizeNaiveDPEPModular(
-            is_sequence_parallel=is_sequence_parallel,
-            num_dispatchers=num_dispatchers,
-        )
+) -> MoEPrepareAndFinalizeNaiveDPEPModular:
+    return MoEPrepareAndFinalizeNaiveDPEPModular(
+        is_sequence_parallel=is_sequence_parallel,
+        num_dispatchers=num_dispatchers,
     )
