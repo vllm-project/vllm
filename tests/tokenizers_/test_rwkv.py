@@ -52,7 +52,7 @@ def test_rwkv_chat_template_renders_basic_dialogue_from_training_template():
         "User: Hello\nworld\n\n"
         "Assistant: Hi\nthere\n\n"
         "User: Continue\nplease\n\n"
-        "Assistant:"
+        "Assistant: <think"
     )
 
 
@@ -141,6 +141,12 @@ def test_rwkv_chat_template_renders_tools_and_tool_outputs_from_training_templat
         "  ]\n"
         "}\n"
         "```\n"
+        "To call one of these tools, write exactly this format:\n"
+        "**Tool Call:**\n"
+        "```json\n"
+        '{"name": "tool_name", "arguments": {"key": "value"}}\n'
+        "```\n"
+        "Do not invent tool call IDs or write tool outputs yourself.\n"
         "### User\n"
         "Weather in Paris?\n"
         "Use Celsius.\n"
@@ -162,4 +168,5 @@ def test_rwkv_chat_template_renders_tools_and_tool_outputs_from_training_templat
         "}\n"
         "```\n"
         "### Assistant\n"
+        "<think"
     )

@@ -19,6 +19,7 @@ from vllm.entrypoints.openai.models.serving import (
     OpenAIModelRegistry,
     OpenAIServingModels,
 )
+from vllm.entrypoints.openai.rwkv_defaults import apply_rwkv_default_sampling_params
 from vllm.entrypoints.serve.disagg.mm_serde import encode_mm_kwargs_item
 from vllm.entrypoints.serve.disagg.protocol import (
     DerenderChatRequest,
@@ -70,6 +71,7 @@ class ServingRender(BaseServing):
             online_renderer.model_config.get_diff_sampling_param()
         )
         mc = online_renderer.model_config
+        apply_rwkv_default_sampling_params(self.default_sampling_params, mc)
         self.override_max_tokens = (
             self.default_sampling_params.get("max_tokens")
             if mc.generation_config not in ("auto", "vllm")

@@ -403,8 +403,15 @@ class ResponsesRequest(OpenAIBaseModel):
                 )
 
         stop = self.stop if self.stop else []
+        if not stop and "stop" not in self.model_fields_set:
+            stop = default_sampling_params.get("stop", stop)
         if isinstance(stop, str):
             stop = [stop]
+        elif isinstance(stop, list):
+            stop = list(stop)
+        stop_token_ids = default_sampling_params.get("stop_token_ids")
+        if isinstance(stop_token_ids, list):
+            stop_token_ids = list(stop_token_ids)
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
@@ -423,6 +430,7 @@ class ResponsesRequest(OpenAIBaseModel):
             penalty_decay=penalty_decay,
             seed=self.seed,
             ignore_eos=self.ignore_eos,
+            stop_token_ids=stop_token_ids,
             output_kind=(
                 RequestOutputKind.DELTA if self.stream else RequestOutputKind.FINAL_ONLY
             ),

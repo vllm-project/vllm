@@ -324,6 +324,17 @@ class RWKVTokenizer(TokenizerLike):
             rendered.append("```json")
             rendered.append(cls._json_text(parameters))
             rendered.append("```")
+        if rendered:
+            rendered.extend(
+                [
+                    "To call one of these tools, write exactly this format:",
+                    "**Tool Call:**",
+                    "```json",
+                    '{"name": "tool_name", "arguments": {"key": "value"}}',
+                    "```",
+                    "Do not invent tool call IDs or write tool outputs yourself.",
+                ]
+            )
         return rendered
 
     @classmethod
@@ -383,9 +394,9 @@ class RWKVTokenizer(TokenizerLike):
 
         if add_generation_prompt:
             lines.append("### Assistant")
+            lines.append("<think")
 
-        rendered = "\n".join(lines)
-        return rendered + "\n" if add_generation_prompt else rendered
+        return "\n".join(lines)
 
     @classmethod
     def _render_basic_chat(
@@ -409,7 +420,7 @@ class RWKVTokenizer(TokenizerLike):
             rendered.append(f"{label}: {content}" if content else f"{label}:")
 
         if add_generation_prompt:
-            rendered.append("Assistant:")
+            rendered.append("Assistant: <think")
 
         return "\n\n".join(rendered)
 

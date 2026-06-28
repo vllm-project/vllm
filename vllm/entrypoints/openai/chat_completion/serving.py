@@ -47,7 +47,10 @@ from vllm.entrypoints.openai.engine.serving import (
     format_token_id_placeholder,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.openai.rwkv_defaults import resolve_rwkv_tool_parser
+from vllm.entrypoints.openai.rwkv_defaults import (
+    apply_rwkv_default_sampling_params,
+    resolve_rwkv_tool_parser,
+)
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
@@ -168,6 +171,9 @@ class OpenAIServingChat(OpenAIServing):
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
+        apply_rwkv_default_sampling_params(
+            self.default_sampling_params, self.model_config
+        )
         mc = self.model_config
         self.override_max_tokens = (
             self.default_sampling_params.get("max_tokens")

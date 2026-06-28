@@ -167,7 +167,7 @@ with `--tokenizer-mode rwkv`, vLLM selects `--tool-call-parser rwkv`
 automatically when no parser is specified:
 
 ```bash
-VLLM_RWKV7_WKV_MODE=fp32io16 VLLM_RWKV7_EMB_DEVICE=cpu \
+VLLM_RWKV7_WKV_MODE=fp16 VLLM_RWKV7_EMB_DEVICE=gpu \
 vllm serve /path/to/rwkv7-g1g-7.2b-20260523-ctx8192.pth \
     --enable-auto-tool-choice
 ```
