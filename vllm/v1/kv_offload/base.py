@@ -75,9 +75,9 @@ class RequestOffloadingContext:
     policy: OffloadPolicy = OffloadPolicy.BLOCK_LEVEL
 
 
-class LoadStoreSpec(ABC):  # noqa: B024
+class LoadStoreSpec:
     """
-    Abstract metadata that encapsulates information allowing a worker
+    Metadata that encapsulates information allowing a worker
     to load, and optionally also to store, blocks of KV data.
     """
 

@@ -1123,6 +1123,49 @@ def test_connector_emits_stored_from_complete_store(
     assert all(e.medium == MEDIUM_CPU for e in stored)
 
 
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_connector_skips_stored_when_medium_none(
+    request_runner, async_scheduling: bool
+):
+    """A manager that reports medium()==None emits no Stored events and captures
+    no per-store metadata, even with self-describing events enabled, so the
+    tracker does not accumulate uncleaned metadata."""
+    gpu_block_size = 4
+    block_size_factor = 3
+    offloaded_block_size = gpu_block_size * block_size_factor
+    runner = request_runner(
+        block_size_factor=block_size_factor,
+        block_size=gpu_block_size,
+        num_gpu_blocks=100,
+        async_scheduling=async_scheduling,
+    )
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.manager.complete_store.side_effect = lambda keys, req_context: list(keys)
+    runner.manager.medium.return_value = None
+    runner.manager.take_events.return_value = []
+
+    cs = runner.connector_scheduler
+    captured: list = []
+    original_take_events = cs.take_events
+
+    def _spy():
+        for event in original_take_events():
+            captured.append(event)
+            yield event
+
+    cs.take_events = _spy
+
+    runner.run(decoded_tokens=[0, 0], expected_stored=(0, 1, 2))
+    assert runner.manager.complete_store.call_count == 1
+
+    assert not [e for e in captured if isinstance(e, BlockStored)]
+    # record_store was gated off, so no metadata was captured (no leak).
+    assert cs._events_tracker._pending_event_metadata == {}
+
+
 def test_take_events_orders_removed_before_stored(request_runner):
     """take_events drains the manager's events (eviction Removed) before the
     Stored events queued by complete_store, preserving the Removed-before-Stored

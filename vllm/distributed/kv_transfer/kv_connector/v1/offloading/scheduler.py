@@ -374,13 +374,19 @@ class OffloadingConnectorScheduler:
         self._block_id_to_pending_jobs: dict[int, set[int]] = {}
 
         self._events_tracker = OffloadingEventsTracker(spec.kv_events_config)
-        # Whether to emit Stored KV events on store completion. The medium is
-        # taken from the manager (manager.medium()); the per-event metadata, if
-        # any, was snapshotted by the tracker at prepare_store time.
         self._emit_kv_events = spec.kv_events_config.enable_kv_cache_events
         # Stored events produced by complete_store this step, drained (after the
         # manager's eviction Removed events) in take_events().
         self._pending_store_events: list[OffloadingEvent] = []
+
+    @property
+    def _emit_stored_events(self) -> bool:
+        """Whether to capture metadata and emit a Stored event for this
+        manager: KV events are enabled and the manager reports a wire medium.
+        Used as a single gate for both record_store (prepare_store) and the
+        Stored emission (complete_store) so a manager that reports no medium
+        never leaves uncleaned tracker metadata behind."""
+        return self._emit_kv_events and self.manager.medium() is not None
 
     def _generate_job_id(self) -> int:
         job_id = self._job_counter
@@ -942,6 +948,7 @@ class OffloadingConnectorScheduler:
             self._touch(req_status)
 
             keys_to_store = set(store_output.keys_to_store)
+            emit_stored_events = self._emit_stored_events
 
             group_sizes: list[int] = []
             block_indices: list[int] = []
@@ -967,9 +974,13 @@ class OffloadingConnectorScheduler:
 
                     offloaded_block_idx = start_block_idx + idx
 
-                    self._events_tracker.record_store(
-                        req, group_config, offloaded_block_idx, offload_key
-                    )
+                    # Capture metadata only when a Stored event will actually be
+                    # emitted (same gate as complete_store); otherwise the
+                    # snapshot is never consumed and leaks.
+                    if emit_stored_events:
+                        self._events_tracker.record_store(
+                            req, group_config, offloaded_block_idx, offload_key
+                        )
 
                     gpu_block_idx = offloaded_block_idx * block_size_factor
                     for i in range(block_size_factor):
@@ -1143,16 +1154,14 @@ class OffloadingConnectorScheduler:
                 stored_keys = self.manager.complete_store(
                     job_status.keys, req_status.req_context
                 )
-                if self._emit_kv_events and stored_keys:
-                    medium = self.manager.medium()
-                    if medium is not None:
-                        self._pending_store_events.append(
-                            OffloadingEvent(
-                                keys=list(stored_keys),
-                                medium=medium,
-                                removed=False,
-                            )
+                if self._emit_stored_events and stored_keys:
+                    self._pending_store_events.append(
+                        OffloadingEvent(
+                            keys=list(stored_keys),
+                            medium=self.manager.medium(),
+                            removed=False,
                         )
+                    )
             else:
                 self.manager.complete_load(job_status.keys, req_status.req_context)
                 if self._blocks_being_loaded:
@@ -1240,6 +1249,10 @@ class OffloadingConnectorScheduler:
         Yields:
             ``BlockStored`` or ``BlockRemoved`` events corresponding to
             the underlying :class:`OffloadingEvent` stream.
+
+        The core scheduler drains this after each completion update, so a
+        Stored queued by complete_store is published in the same step and never
+        lingers into a later one.
         """
         # Drain the manager's events (eviction Removed) before the Stored events
         # this step's complete_store produced, preserving the Removed-before-

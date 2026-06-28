@@ -229,8 +229,6 @@ class TieringOffloadingManager(OffloadingManager):
                 else:
                     # primary→secondary transfer completed.
                     # Decrement ref_cnt on primary blocks.
-                    # NOTE: secondary-tier Stored presence events are a
-                    # follow-up (opt-in per tier); none are emitted here.
                     self.primary_tier.complete_read(
                         job_metadata.keys, job_metadata.req_context
                     )
@@ -565,8 +563,7 @@ class TieringOffloadingManager(OffloadingManager):
     @override
     def medium(self) -> str | None:
         # The parent store is GPU->primary(CPU); the connector emits that
-        # Stored event using this medium. Secondary-tier Stored events are a
-        # follow-up (opt-in per tier) and are not emitted here.
+        # Stored event using this medium.
         return self.primary_tier.medium()
 
     @override
@@ -644,18 +641,14 @@ class TieringOffloadingManager(OffloadingManager):
     def take_events(self) -> Iterable[OffloadingEvent]:
         """Yield offloading events collected since the last call.
 
-        Primary-tier (CPU) events are yielded before secondary-tier presence
-        events, so consumers observe the primary placement before the
-        additional secondary-tier placement.
-
         Yields:
             New OffloadingEvents collected since the last call.
         """
-        yield from self.primary_tier.take_events()
-
         if self.events is not None:
             yield from self.events
             self.events.clear()
+
+        yield from self.primary_tier.take_events()
 
     @override
     def reset_cache(self) -> None:
