@@ -250,6 +250,13 @@ def test_nvfp4_kv_cache_split_views_rejects_incompatible_strides() -> None:
         nvfp4_kv_cache_split_views(kv_side, head_size)
 
 
+def test_nvfp4_kv_cache_split_views_rejects_non_inferable_dim() -> None:
+    kv_side = torch.empty((2, 4, 3, 10), dtype=torch.uint8)
+
+    with pytest.raises(ValueError, match="last dimension cannot be inferred"):
+        nvfp4_kv_cache_split_views(kv_side)
+
+
 def test_flashinfer_impl_caches_nvfp4_slot_mapping_writer(monkeypatch) -> None:
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
 

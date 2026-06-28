@@ -1503,6 +1503,12 @@ class FlashInferImpl(AttentionImpl):
             self._nvfp4_paged_dequant = getattr(
                 flashinfer, "nvfp4_kv_dequantize_paged", None
             )
+            if self._nvfp4_paged_dequant is None:
+                logger.warning_once(
+                    "FlashInfer NVFP4 paged dequantization is unavailable; "
+                    "falling back to the native FlashInfer prefill path, which "
+                    "can be slower for long-context NVFP4 KV cache."
+                )
         self.fp4_data_dim = head_size // 2 if self.is_kvcache_nvfp4 else 0
         self.logits_soft_cap = logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name

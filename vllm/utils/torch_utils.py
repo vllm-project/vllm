@@ -442,6 +442,11 @@ def _nvfp4_split_data_scale(
     dim_1, dim_2 = kv_side.shape[1], kv_side.shape[2]
     full_dim = kv_side.shape[3]
     if head_size is None:
+        if full_dim % 9 != 0:
+            raise ValueError(
+                "NVFP4 KV side last dimension cannot be inferred from "
+                f"packed width: last_dim={full_dim}"
+            )
         data_dim = full_dim * 8 // 9
         scale_dim = full_dim - data_dim
     else:
