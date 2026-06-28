@@ -245,6 +245,7 @@ def _run_deepseek_v4_mtp_spec_decode_warmup_kernels(
     vocab_size: int,
     block_size: int,
     max_model_len: int,
+    hidden_size: int,
 ) -> None:
     from vllm.v1.sample.logits_processor import LogitsProcessors
     from vllm.v1.sample.metadata import SamplingMetadata
@@ -360,6 +361,55 @@ def _run_deepseek_v4_mtp_spec_decode_warmup_kernels(
         bonus_token_ids=bonus_token_ids,
         sampling_metadata=sampling_metadata,
     )
+
+    # rejection_greedy_sample_kernel: the metadata above is all_random=True, so
+    # rejection_sample skips its greedy branch and that kernel stays JIT-cold. Run
+    # a second pass with greedy metadata (fresh instance, not a mutation) so the
+    # greedy kernel compiles here instead of on the first greedy request.
+    try:
+        import dataclasses
+
+        greedy_metadata = dataclasses.replace(
+            sampling_metadata,
+            all_greedy=True,
+            all_random=False,
+            temperature=torch.zeros(num_reqs, dtype=torch.float32, device=device),
+        )
+        rejection_sample(
+            draft_token_ids=draft_token_ids,
+            num_draft_tokens=[num_spec_tokens] * num_reqs,
+            max_spec_len=num_spec_tokens,
+            cu_num_draft_tokens=cu_num_draft_tokens,
+            draft_probs=draft_probs,
+            target_logits=target_logits,
+            bonus_token_ids=bonus_token_ids,
+            sampling_metadata=greedy_metadata,
+        )
+    except Exception as exc:  # noqa: BLE001 - warmup must never break startup
+        logger.warning(
+            "DeepSeek V4 MTP greedy rejection-sample warmup skipped: %s", exc
+        )
+
+    # _mtp_shared_head_rmsnorm_kernel: the MTP shared-head RMSNorm is not driven by
+    # any dummy run, so it JITs on the first MTP step. Direct-launch it (its only
+    # compile key is hidden_size, so one call covers the model).
+    try:
+        from vllm.models.deepseek_v4.common.ops.fused_mtp_input_rmsnorm import (
+            mtp_shared_head_rmsnorm,
+        )
+
+        hs = torch.randn(
+            num_reqs * num_sampled_tokens,
+            hidden_size,
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        norm_w = torch.ones(hidden_size, dtype=torch.bfloat16, device=device)
+        mtp_shared_head_rmsnorm(hs, norm_w, 1e-6)
+    except Exception as exc:  # noqa: BLE001 - warmup must never break startup
+        logger.warning(
+            "DeepSeek V4 MTP shared-head RMSNorm warmup skipped: %s", exc
+        )
 
 
 def _deepseek_v4_indexed_d512_split_prefill_warmup(runner: "GPUModelRunner") -> None:
@@ -669,6 +719,7 @@ def _deepseek_v4_sparse_mla_attention_warmup(worker: "Worker") -> None:
                 vocab_size=vocab_size,
                 block_size=block_size,
                 max_model_len=runner.max_model_len,
+                hidden_size=runner.model_config.get_hidden_size(),
             )
         torch.accelerator.synchronize()
 
