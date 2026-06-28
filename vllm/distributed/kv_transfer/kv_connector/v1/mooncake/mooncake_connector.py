@@ -667,7 +667,7 @@ class MooncakeConnectorScheduler:
             for i, blocks in enumerate(block_ids)
         ]
 
-    def _mamba_prefill_token_count(self, num_prompt_tokens: int) -> int:
+    def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
         """D-side only. Returns N-1 for Mamba models since the decoder
         always recomputes the last token and must start from h(N-1)."""
         if self._has_mamba and num_prompt_tokens > 1:
@@ -732,7 +732,7 @@ class MooncakeConnectorScheduler:
             # Remote prefill: get all prompt blocks from remote.
             assert not self.is_kv_producer
             token_ids = request.prompt_token_ids or []
-            count = self._mamba_prefill_token_count(len(token_ids)) - (
+            count = self._get_remote_prefill_token_count(len(token_ids)) - (
                 num_computed_tokens
             )
             if count > 0:
