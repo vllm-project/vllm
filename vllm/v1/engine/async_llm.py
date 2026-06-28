@@ -651,6 +651,10 @@ class AsyncLLM(EngineClient):
         self._logger_ref = [self.logger_manager]
         logger_ref = self._logger_ref
         renderer = self.renderer
+        # P0 multi-modal sender ("shadow") cache, captured once; None for text-only.
+        mm_processor_cache = (
+            renderer.mm_processor_cache if renderer is not None else None
+        )
         chunk_size = envs.VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
 
         async def output_handler():
@@ -677,6 +681,16 @@ class AsyncLLM(EngineClient):
                         )
                         # NOTE: RequestOutputs are pushed to their queues.
                         assert not processed_outputs.request_outputs
+
+                        # 2b) Recover from P0/P1 cache drift: the engine flags hashes
+                        # it couldn't find (mm_cache_miss_hashes); drop them from the
+                        # P0 shadow so the client's retry resends the data and
+                        # repopulates P1. Hot-path no-op (field is None otherwise).
+                        if mm_processor_cache is not None:
+                            for eco in outputs_slice:
+                                if eco.mm_cache_miss_hashes:
+                                    for mm_hash in eco.mm_cache_miss_hashes:
+                                        mm_processor_cache.invalidate(mm_hash)
 
                         # Allow other asyncio tasks to run between chunks
                         if end < num_outputs:
