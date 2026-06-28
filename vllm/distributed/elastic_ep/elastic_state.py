@@ -468,7 +468,12 @@ class ElasticEPScalingState:
             self.new_parallel_config.stateless_init_dp_group(return_store=True)
         )
         self.model_executor.collective_rpc(
-            "elastic_ep_execute", args=("create_standby_groups", self.reconfig_request)
+            "elastic_ep_execute",
+            args=(
+                "create_standby_groups",
+                self.reconfig_request,
+                self.new_parallel_config.use_all2all,
+            ),
         )
         if self.old_dp_group.rank() == 0:
             logger.info("[Elastic EP] Created standby communication groups")
