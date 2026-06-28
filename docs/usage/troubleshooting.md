@@ -35,6 +35,8 @@ You can check if this is happening by trying the old defaults with `--generation
 If other strategies don't solve the problem, it's likely that the vLLM instance is stuck somewhere. You can use the following environment variables to help debug the issue:
 
 - `export VLLM_LOGGING_LEVEL=DEBUG` to turn on more logging.
+- `export VLLM_LOGGING_FILE_DIR=/tmp/vllm_logs` to write per-process log files
+  with rank and PID in the file name and rank in each log line.
 - `export VLLM_LOG_STATS_INTERVAL=1.` to get log statistics more frequently for tracking running queue, waiting queue and cache hit states.
 - `export CUDA_LAUNCH_BLOCKING=1` to identify which CUDA kernel is causing the problem.
 - `export NCCL_DEBUG=TRACE` to turn on more logging for NCCL.

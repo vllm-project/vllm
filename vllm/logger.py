@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Logging configuration for vLLM."""
 
+import copy
 import datetime
 import json
 import logging
 import os
+import socket
 import sys
 from collections.abc import Generator, Hashable
 from contextlib import contextmanager
@@ -13,14 +15,21 @@ from functools import lru_cache, partial
 from logging import Logger
 from logging.config import dictConfig
 from os import path
+from pathlib import Path
 from types import MethodType
 from typing import Any, Literal, cast
+
+import regex as re
 
 import vllm.envs as envs
 from vllm.logging_utils import ColoredFormatter, NewLineFormatter
 
 _FORMAT = (
     f"{envs.VLLM_LOGGING_PREFIX}%(levelname)s %(asctime)s "
+    "[%(fileinfo)s:%(lineno)d] %(message)s"
+)
+_FILE_FORMAT = (
+    f"{envs.VLLM_LOGGING_PREFIX}%(levelname)s %(asctime)s [%(rank_info)s] "
     "[%(fileinfo)s:%(lineno)d] %(message)s"
 )
 _DATE_FORMAT = "%m-%d %H:%M:%S"
@@ -153,6 +162,82 @@ _METHODS_TO_PATCH = {
 }
 
 
+class _RankInfoFilter(logging.Filter):
+    def __init__(self, rank_info: str):
+        super().__init__()
+        self._rank_info = rank_info
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.rank_info = self._rank_info
+        return True
+
+
+def _get_rank_info() -> str:
+    for key in ("RANK", "OMPI_COMM_WORLD_RANK", "PMI_RANK", "SLURM_PROCID"):
+        if value := os.getenv(key):
+            return f"rank{value}"
+    for key in ("LOCAL_RANK", "OMPI_COMM_WORLD_LOCAL_RANK", "SLURM_LOCALID"):
+        if value := os.getenv(key):
+            return f"local_rank{value}"
+    return "rank0"
+
+
+def _sanitize_for_filename(component: str) -> str:
+    sanitized = re.sub(r"[^a-zA-Z0-9_.-]+", "_", component).strip("._-")
+    return sanitized or "rank0"
+
+
+def _add_vllm_file_handler(logging_config: dict[str, dict[str, Any] | Any]) -> None:
+    if not envs.VLLM_LOGGING_FILE_DIR:
+        return
+
+    log_dir = Path(envs.VLLM_LOGGING_FILE_DIR)
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise RuntimeError(
+            f"Could not create VLLM_LOGGING_FILE_DIR directory '{log_dir}': {exc}"
+        ) from exc
+
+    if not log_dir.is_dir():
+        raise RuntimeError(
+            f"VLLM_LOGGING_FILE_DIR must point to a directory, got: '{log_dir}'"
+        )
+
+    rank_info = _get_rank_info()
+    host_info = _sanitize_for_filename(socket.gethostname())
+    file_rank_info = _sanitize_for_filename(rank_info)
+    file_path = log_dir / f"vllm_{host_info}_{file_rank_info}_pid{os.getpid()}.log"
+
+    formatters = logging_config.setdefault("formatters", {})
+    formatters["vllm_file"] = {
+        "class": "vllm.logging_utils.NewLineFormatter",
+        "datefmt": _DATE_FORMAT,
+        "format": _FILE_FORMAT,
+    }
+
+    filters = logging_config.setdefault("filters", {})
+    filters["vllm_rank_info"] = {
+        "()": _RankInfoFilter,
+        "rank_info": rank_info,
+    }
+
+    handlers = logging_config.setdefault("handlers", {})
+    handlers["vllm_file"] = {
+        "class": "logging.FileHandler",
+        "formatter": "vllm_file",
+        "level": envs.VLLM_LOGGING_LEVEL,
+        "filename": str(file_path),
+        "encoding": "utf-8",
+        "filters": ["vllm_rank_info"],
+    }
+
+    logger_dict = logging_config.setdefault("loggers", {}).setdefault("vllm", {})
+    logger_handlers = logger_dict.setdefault("handlers", [])
+    if "vllm_file" not in logger_handlers:
+        cast(list[str], logger_handlers).append("vllm_file")
+
+
 def _configure_vllm_root_logger() -> None:
     logging_config: dict[str, dict[str, Any] | Any] = {}
 
@@ -165,7 +250,7 @@ def _configure_vllm_root_logger() -> None:
         )
 
     if envs.VLLM_CONFIGURE_LOGGING:
-        logging_config = DEFAULT_LOGGING_CONFIG
+        logging_config = copy.deepcopy(DEFAULT_LOGGING_CONFIG)
 
         vllm_handler = logging_config["handlers"]["vllm"]
         # Refresh these values in case env vars have changed.
@@ -191,6 +276,9 @@ def _configure_vllm_root_logger() -> None:
                 type(custom_config).__name__,
             )
         logging_config = custom_config
+
+    if envs.VLLM_CONFIGURE_LOGGING and envs.VLLM_LOGGING_FILE_DIR:
+        _add_vllm_file_handler(logging_config)
 
     for formatter in logging_config.get("formatters", {}).values():
         # This provides backwards compatibility after #10134.
