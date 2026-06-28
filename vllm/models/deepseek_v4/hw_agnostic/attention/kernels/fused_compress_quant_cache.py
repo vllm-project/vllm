@@ -1,14 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Fused compress + RoPE + FP8/MXFP4 quant + cache insert kernels."""
+"""Fused compress + RoPE + FP8 quant + cache insert kernels."""
 
 from typing import Any
 
 import torch
 
-from vllm.models.deepseek_v4.hw_agnostic.attention.kernels.fused_indexer_q import (
-    _fp32x2_to_fp4x2,
-)
 from vllm.triton_utils import tl, triton
 
 
@@ -29,24 +26,20 @@ def compress_norm_rope_store_triton(
     rope_head_dim: int,
     compress_ratio: int,
     overlap: bool,
-    use_fp4_cache: bool,
     rms_norm_weight: torch.Tensor,
     rms_norm_eps: float,
     quant_block: int,
     token_stride: int,
     scale_dim: int,
 ) -> None:
-    """Shared triton launcher for the fused compress+norm+RoPE+insert path.
+    """Launch the fused compress+norm+RoPE+insert path.
 
-    Picks one of the three kernels in this module based on ``head_dim`` and
-    ``use_fp4_cache``. Identical launch signature for all three.
+    Picks the sparse-attn (head=512) or indexer (head=128) kernel based on
+    ``head_dim``. Identical launch signature for both.
     """
     if head_dim == 512:
         kernel = _fused_kv_compress_norm_rope_insert_sparse_attn
         num_warps = 4
-    elif use_fp4_cache:
-        kernel = _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn
-        num_warps = 1
     else:
         kernel = _fused_kv_compress_norm_rope_insert_indexer_attn
         num_warps = 1
@@ -455,196 +448,3 @@ def _fused_kv_compress_norm_rope_insert_indexer_attn(
     # Single float32 scale
     scale_val = tl.exp2(exponent)
     tl.store(scale_ptr.to(tl.pointer_type(tl.float32)), scale_val)
-
-
-# =============================================================================
-# Indexer path (head=128, MXFP4: 2 nibbles/byte + ue8m0 per 32-elem block)
-# =============================================================================
-@triton.jit
-def _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn(
-    # ── state cache (compressor internal state) ──
-    state_cache_ptr,
-    state_cache_stride0,
-    state_cache_stride1,
-    # ── metadata ──
-    token_to_req_indices_ptr,
-    positions_ptr,
-    slot_mapping_ptr,
-    block_table_ptr,
-    block_table_stride,
-    block_size,
-    # ── RMSNorm ──
-    rms_norm_weight_ptr,
-    rms_norm_eps,
-    # ── RoPE ──
-    cos_sin_cache_ptr,
-    cos_sin_stride,
-    # ── KV cache output ──
-    k_cache_ptr,
-    kv_slot_mapping_ptr,
-    kv_cache_block_size,
-    # ── constexprs ──
-    HEAD_SIZE: tl.constexpr,
-    TRITON_BLOCK_SIZE: tl.constexpr,
-    STATE_WIDTH: tl.constexpr,
-    COMPRESS_RATIO: tl.constexpr,
-    OVERLAP: tl.constexpr,
-    ROPE_HEAD_DIM: tl.constexpr,
-    FP8_MAX: tl.constexpr,  # unused for MXFP4 (kept for signature parity)
-    QUANT_BLOCK: tl.constexpr,  # 32 for MXFP4
-    TOKEN_STRIDE: tl.constexpr,  # HEAD_SIZE // 2 = 64 packed bytes/token
-    SCALE_DIM: tl.constexpr,  # HEAD_SIZE // QUANT_BLOCK = 4 ue8m0 bytes/token
-    KV_BLOCK_STRIDE: tl.constexpr,
-):
-    """Fused compress → RMSNorm → RoPE → MXFP4 quant → store.
-
-    One program per token; early-exits for non-boundary positions.
-
-    Cache block layout (``block_size`` tokens per cache block):
-      [0, bs*TOKEN_STRIDE):        packed MXFP4 nibbles (2 values/byte)
-      [bs*TOKEN_STRIDE, +bs*SCALE_DIM): ue8m0 scale bytes (one per 32-elem block)
-
-    MXFP4 format:
-      - E2M1 4-bit values packed two per byte (low nibble first, then high).
-      - Per-32-element block scale = 2^ceil(log2(amax / 6.0)), stored ue8m0
-        (byte = exponent + 127).
-      - Max representable magnitude = 6.0.
-    """
-    token_idx = tl.program_id(0)
-
-    slot_id = tl.load(slot_mapping_ptr + token_idx)
-    if slot_id < 0:
-        return
-
-    position = tl.load(positions_ptr + token_idx)
-    if (position + 1) % COMPRESS_RATIO != 0:
-        return
-
-    req_idx = tl.load(token_to_req_indices_ptr + token_idx)
-
-    # ── Gather state cache entries ────────────────────────────────────
-    start = position - (1 + OVERLAP) * COMPRESS_RATIO + 1
-    tokens = tl.arange(0, (1 + OVERLAP) * COMPRESS_RATIO)
-    pos = start + tokens
-    mask_pos = pos >= 0
-
-    block_indices = pos // block_size
-    block_numbers = tl.load(
-        block_table_ptr + req_idx * block_table_stride + block_indices,
-        mask=mask_pos,
-        other=0,
-    )
-    block_offsets = pos % block_size
-    head_offset = (tokens >= COMPRESS_RATIO).to(tl.int32) * HEAD_SIZE
-
-    block = tl.arange(0, TRITON_BLOCK_SIZE)
-    mask = block < HEAD_SIZE
-    block_numbers_i64 = block_numbers.to(tl.int64)
-
-    row_base = (
-        state_cache_ptr
-        + block_numbers_i64 * state_cache_stride0
-        + block_offsets * state_cache_stride1
-        + head_offset
-    )
-
-    combined_mask = mask_pos[:, None] & mask[None, :]
-
-    score = tl.load(
-        row_base[:, None] + STATE_WIDTH + block[None, :],
-        mask=combined_mask,
-        other=float("-inf"),
-    )
-    score = tl.softmax(score, dim=0)
-
-    kv = tl.load(
-        row_base[:, None] + block[None, :],
-        mask=combined_mask,
-        other=0.0,
-    )
-
-    compressed_kv = tl.sum(kv * score, axis=0)  # [TRITON_BLOCK_SIZE] fp32
-
-    # ── RMSNorm (fp32 throughout) ──────────────────────────────────────
-    rms_w = tl.load(rms_norm_weight_ptr + block, mask=mask, other=0.0)
-    variance = tl.sum(compressed_kv * compressed_kv, axis=0) / HEAD_SIZE
-    rrms = tl.rsqrt(variance + rms_norm_eps)
-    normed = compressed_kv * rrms * rms_w
-
-    # ── KV cache pointers (segregated: values first, then scales) ────
-    kv_slot_idx = tl.load(kv_slot_mapping_ptr + token_idx)
-    if kv_slot_idx < 0:
-        return
-    kv_block_idx = kv_slot_idx // kv_cache_block_size
-    kv_pos_in_block = kv_slot_idx % kv_cache_block_size
-
-    cache_block_ptr = k_cache_ptr + kv_block_idx.to(tl.int64) * KV_BLOCK_STRIDE
-    val_ptr = cache_block_ptr + kv_pos_in_block * TOKEN_STRIDE
-    scale_ptr = (
-        cache_block_ptr
-        + kv_cache_block_size * TOKEN_STRIDE
-        + kv_pos_in_block * SCALE_DIM
-    )
-
-    NOPE_HEAD_DIM: tl.constexpr = HEAD_SIZE - ROPE_HEAD_DIM
-    HALF_ROPE: tl.constexpr = ROPE_HEAD_DIM // 2
-
-    # ── Register-based GPT-J forward RoPE in fp32 ─────────────────────
-    # We keep the even/odd halves (no tl.interleave afterwards) because the
-    # MXFP4 per-block absmax / pack naturally operates on (even, odd) pairs.
-    NUM_PAIRS: tl.constexpr = TRITON_BLOCK_SIZE // 2
-    NOPE_PAIRS: tl.constexpr = NOPE_HEAD_DIM // 2
-
-    normed_2d = tl.reshape(normed, (NUM_PAIRS, 2))
-    even, odd = tl.split(normed_2d)  # each [NUM_PAIRS] fp32
-
-    pair_idx = tl.arange(0, NUM_PAIRS)
-    rope_pair_local = pair_idx - NOPE_PAIRS
-    is_rope_pair = rope_pair_local >= 0
-    cs_idx = tl.maximum(rope_pair_local, 0)
-
-    compressed_pos = (position // COMPRESS_RATIO) * COMPRESS_RATIO
-    cache_base = cos_sin_cache_ptr + compressed_pos * cos_sin_stride
-    cos_v = tl.load(cache_base + cs_idx, mask=is_rope_pair, other=1.0)
-    sin_v = tl.load(cache_base + HALF_ROPE + cs_idx, mask=is_rope_pair, other=0.0)
-
-    new_even = even * cos_v - odd * sin_v
-    new_odd = odd * cos_v + even * sin_v
-
-    # bf16 roundtrip for parity with reference / Q-side kernel numerics.
-    new_even = new_even.to(tl.bfloat16).to(tl.float32)
-    new_odd = new_odd.to(tl.bfloat16).to(tl.float32)
-
-    # ── MXFP4 quant: tile even/odd halves into (N_BLOCKS, HALF_BLOCK) ──
-    # Each MXFP4 block of QUANT_BLOCK elements = HALF_BLOCK consecutive pairs,
-    # so (N_BLOCKS, HALF_BLOCK) rows of even/odd each land exactly one block.
-    N_QUANT_BLOCKS: tl.constexpr = HEAD_SIZE // QUANT_BLOCK
-    HALF_BLOCK: tl.constexpr = QUANT_BLOCK // 2
-    tl.static_assert(TRITON_BLOCK_SIZE == HEAD_SIZE)
-    tl.static_assert(HEAD_SIZE % QUANT_BLOCK == 0)
-    tl.static_assert(TOKEN_STRIDE == HEAD_SIZE // 2)
-    tl.static_assert(SCALE_DIM == N_QUANT_BLOCKS)
-
-    even_2d = tl.reshape(new_even, (N_QUANT_BLOCKS, HALF_BLOCK))
-    odd_2d = tl.reshape(new_odd, (N_QUANT_BLOCKS, HALF_BLOCK))
-
-    amax = tl.maximum(
-        tl.max(tl.abs(even_2d), axis=1),
-        tl.max(tl.abs(odd_2d), axis=1),
-    )
-    amax = tl.maximum(amax, 6.0 * (2**-126))
-
-    # ue8m0 block scale: 2^ceil(log2(amax / 6.0)), stored as (exp + 127) byte.
-    log2_ratio = tl.ceil(tl.log2(amax * (1.0 / 6.0)))
-    log2_ratio = tl.minimum(tl.maximum(log2_ratio, -127.0), 127.0)
-    inv_scale = tl.exp2(-log2_ratio)
-    ue8m0 = (log2_ratio + 127.0).to(tl.uint8)  # [N_QUANT_BLOCKS]
-
-    inv_scale_col = tl.reshape(inv_scale, (N_QUANT_BLOCKS, 1))
-    packed = _fp32x2_to_fp4x2(
-        even_2d * inv_scale_col, odd_2d * inv_scale_col
-    )  # (N_BLOCKS, HALF_BLOCK) uint8
-    packed_flat = tl.reshape(packed, (TOKEN_STRIDE,))
-
-    tl.store(val_ptr + tl.arange(0, TOKEN_STRIDE), packed_flat)
-    tl.store(scale_ptr + tl.arange(0, SCALE_DIM), ue8m0)

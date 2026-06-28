@@ -161,9 +161,7 @@ CHECK_IMPORTS = {
             "subtree. The agnostic path keeps its own implementation; "
             "do not couple the two."
         ),
-        applies_to=re.compile(
-            r"^vllm/model_executor/layers/sparse_attn_indexer\.py$"
-        ),
+        applies_to=re.compile(r"^vllm/model_executor/layers/sparse_attn_indexer\.py$"),
     ),
 }
 
@@ -524,8 +522,7 @@ def test_regex():
             True,
         ),
         (
-            "from vllm.models.deepseek_v4.hw_agnostic.attention.sparse_mla "
-            "import X",
+            "from vllm.models.deepseek_v4.hw_agnostic.attention.sparse_mla import X",
             True,
         ),
         ("import vllm.model_executor.hw_agnostic", True),

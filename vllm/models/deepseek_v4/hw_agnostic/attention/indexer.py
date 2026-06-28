@@ -1,13 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek V3.2 indexer metadata builder for the hw_agnostic path.
-
-Strips the upstream V3.2 builder's DeepGEMM scheduling apparatus, the
-flatten path (the ``_prepare_uniform_decode_kernel`` + variable-decode
-expansion), and the ``schedule_metadata`` field. The hw_agnostic
-indexer dispatch goes through pure Triton + pure PyTorch kernels and
-accepts any ``next_n``.
-"""
+"""DSv4 indexer metadata builder. Triton + PyTorch kernels; accepts any
+``next_n``."""
 
 from dataclasses import dataclass
 
@@ -70,14 +64,11 @@ class DeepseekV4IndexerDecodeMetadata:
 
 @dataclass
 class DeepseekV4IndexerMetadata:
-    seq_lens: torch.Tensor
-    max_seq_len: int
     slot_mapping: torch.Tensor
 
     num_decodes: int
     num_decode_tokens: int
     num_prefills: int
-    num_prefill_tokens: int
 
     decode: DeepseekV4IndexerDecodeMetadata | None = None
     prefill: DeepseekV4IndexerPrefillMetadata | None = None
@@ -85,8 +76,9 @@ class DeepseekV4IndexerMetadata:
 
 def get_max_prefill_buffer_size(vllm_config: VllmConfig) -> int:
     max_model_len = vllm_config.model_config.max_model_len
-    # 40 = (576 * 2 // 132) * 5: indexer prefill (132 B) fits inside the
-    # FlashMLA-sparse workspace (576 * 2 B, 5 * max_model_len entries).
+    # Caps total compressed-token count per prefill chunk; sized to fit the
+    # indexer K-gather workspace (132 B/token) within a 40 * max_model_len
+    # token budget.
     return max_model_len * 40
 
 
@@ -392,9 +384,7 @@ class DeepseekV4IndexerMetadataBuilder(AttentionMetadataBuilder):
         ``split_decodes_and_prefills(require_uniform=True)`` partitions any
         non-uniform query into the prefill side, so the surviving decode
         batch is uniform by construction (``min_decode_len ==
-        max_decode_len``). The upstream code keeps this dynamic only because
-        the flatten path could absorb non-uniform decodes; we do not have
-        that path.
+        max_decode_len``).
         """
         if next_n > 1:
             assert self.decode_seq_lens_buffer.dim() == 1
@@ -555,13 +545,10 @@ class DeepseekV4IndexerMetadataBuilder(AttentionMetadataBuilder):
             )
 
         return DeepseekV4IndexerMetadata(
-            seq_lens=common_attn_metadata.seq_lens,
-            max_seq_len=common_attn_metadata.max_seq_len,
             slot_mapping=compressed_slot_mapping,
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
             num_prefills=num_prefills,
-            num_prefill_tokens=num_prefill_tokens,
             prefill=prefill_metadata,
             decode=decode_metadata,
         )

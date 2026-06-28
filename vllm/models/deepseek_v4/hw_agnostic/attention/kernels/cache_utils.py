@@ -415,11 +415,10 @@ def _compute_global_topk_indices_and_lens_kernel(
     tl.store(topk_lens_ptr + token_idx, tl.where(is_valid_token, count, 0))
 
 
-# FlashMLA sparse prefill asserts `params.topk % B_TOPK == 0` (see
-# flashmla/csrc/sm100/prefill/sparse/fwd/head{64,128}/phase1.cuh). B_TOPK is
-# 64 for the h_q=64 kernel and 128 for h_q=128; pad to 128 to satisfy both.
-# The extra slots stay as -1 sentinels and `combined_lens` caps the valid
-# range via `topk_length`, so padding is a no-op at kernel level.
+# Pad topk to 128 so OOT sparse-prefill backends keying off h_q in {64, 128}
+# see a divisible row width. The agnostic Triton kernel ignores the padding:
+# extra slots stay as -1 sentinels and ``combined_lens`` caps the valid range
+# via ``topk_length``.
 _SPARSE_PREFILL_TOPK_ALIGNMENT = 128
 
 

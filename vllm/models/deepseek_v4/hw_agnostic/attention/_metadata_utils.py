@@ -3,10 +3,10 @@
 """Local copies of small platform-agnostic metadata helpers.
 
 The hw_agnostic isolation lint forbids imports from
-``vllm.v1.attention.backends.*``. The helpers below are duplicated from
-upstream so the hw_agnostic builders don't need to reach across that
-boundary. Keep this file in sync with upstream when its public
-signature changes; it is small and stable on purpose.
+``vllm.v1.attention.backends.*``. The helpers below duplicate the
+HW-specific equivalents so the hw_agnostic builders don't reach across
+that boundary. Keep in sync with the HW-specific signature; the surface
+is small and stable on purpose.
 """
 
 import torch

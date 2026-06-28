@@ -45,9 +45,9 @@ def _pack_seq_kernel(
     out_row_ptr = out_ptr + (pid_b * Lmax + off_t)[:, None] * D + off_d[None, :]
 
     # Initialize with PAD. PAD_IS_UINT8 selects the pad tensor's dtype so
-    # integer-typed outputs (e.g. MXFP4 packed nibbles, ue8m0 scale bytes)
-    # get an exact-byte pad rather than going through an fp32→uint8 cast
-    # that's implementation-defined outside of value 0.
+    # integer-typed outputs (e.g. byte-aligned ue8m0 scale rows) get an
+    # exact-byte pad rather than going through an fp32→uint8 cast that's
+    # implementation-defined outside of value 0.
     d_mask = off_d[None, :] < D
     if PAD_IS_UINT8:
         pad_vals = tl.full([BLOCK_T, BLOCK_D], PAD_VALUE, tl.uint8)
@@ -70,8 +70,8 @@ def pack_seq_triton(
     """Pack sequences of different lengths into a batched tensor.
 
     Supports float dtypes (any, via fp32 pad) and ``torch.uint8`` (exact-byte
-    pad — e.g. MXFP4 packed nibbles or ue8m0 scale bytes). For uint8 inputs
-    ``pad_value`` must be an integer in ``[0, 255]``.
+    pad — e.g. ue8m0 scale rows). For uint8 inputs ``pad_value`` must be an
+    integer in ``[0, 255]``.
 
     Args:
         x: [N, ...] — input tensor where N is total number of tokens.

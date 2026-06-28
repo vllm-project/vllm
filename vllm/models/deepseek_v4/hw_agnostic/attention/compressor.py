@@ -254,9 +254,9 @@ class DeepseekCompressor(nn.Module):
             [self.coff * self.head_dim, self.coff * self.head_dim], dim=-1
         )
 
-        # Profile/dummy run.
         attn_metadata = get_forward_context().attn_metadata
         if not isinstance(attn_metadata, dict):
+            # Profile run: attn_metadata is not a dict; nothing to write.
             return
 
         state_metadata = cast(
@@ -316,7 +316,6 @@ class DeepseekCompressor(nn.Module):
             rope_head_dim=self.rope_head_dim,
             compress_ratio=self.compress_ratio,
             overlap=self.overlap,
-            use_fp4_cache=False,
             rms_norm_weight=self.norm.weight,
             rms_norm_eps=self.rms_norm_eps,
             quant_block=self._quant_block,

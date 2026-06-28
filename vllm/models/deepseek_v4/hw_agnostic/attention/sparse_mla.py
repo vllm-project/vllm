@@ -22,7 +22,8 @@ from vllm.models.deepseek_v4.hw_agnostic.attention._metadata_utils import (
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 
-# FlashMLA asserts extra_topk % B_TOPK == 0; 128 covers h_q in {64, 128}.
+# Align C128A topk row width to 128 to satisfy OOT sparse kernels that key
+# divisibility off h_q ∈ {64, 128}.
 _C128A_TOPK_ALIGNMENT = 128
 
 
@@ -132,18 +133,11 @@ class DeepseekV4HWAgnosticBackend(AttentionBackend):
 
 @dataclass
 class DeepseekV4HWAgnosticMetadata(AttentionMetadata):
-    num_reqs: int
-    max_query_len: int
-    max_seq_len: int
-
-    num_actual_tokens: int
-    query_start_loc: torch.Tensor
-    slot_mapping: torch.Tensor
-
     block_table: torch.Tensor
-    req_id_per_token: torch.Tensor
     block_size: int
-    topk_tokens: int
+    # Compressed-cache slot ids (one per token, -1 for non-boundary positions).
+    # Consumed by ``compress_norm_rope_store_triton`` to address the KV write.
+    slot_mapping: torch.Tensor
 
     # Pre-computed C128A metadata (compress_ratio == 128 only).
     # Decode: global slot ids + valid-entry counts (fused from positions).
@@ -168,23 +162,20 @@ class DeepseekV4HWAgnosticMetadataBuilder(
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.model_config = vllm_config.model_config
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
-        self.topk_tokens = self.model_config.hf_config.index_topk
-
-        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        self.req_id_per_token_buffer = torch.empty(
-            (max_num_batched_tokens,), dtype=torch.int32, device=device
-        )
 
         assert hasattr(self.kv_cache_spec, "compress_ratio")
         self.compress_ratio = self.kv_cache_spec.compress_ratio
 
-        # CUDA-graph address stability buffers.
+        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+
+        # Compressed-cache slot ids (one per token; -1 for non-boundary
+        # positions). Consumed by the compressor's KV-write kernel.
         if self.compress_ratio > 1:
             self.compressed_slot_mapping_buffer = torch.empty(
                 max_num_batched_tokens, dtype=torch.int64, device=device
             )
 
-        # Pre-allocate C128A topk buffers for CUDA graph address stability.
+        # Pre-allocate C128A topk buffers for CUDA-graph address stability.
         if self.compress_ratio == 128:
             c128a_max_compressed = cdiv(
                 self.model_config.max_model_len, self.compress_ratio
@@ -193,12 +184,13 @@ class DeepseekV4HWAgnosticMetadataBuilder(
                 cdiv(c128a_max_compressed, _C128A_TOPK_ALIGNMENT)
                 * _C128A_TOPK_ALIGNMENT
             )
-            # Stored so _build_c128a_metadata passes it as the kernel's
-            # max_compressed_tokens, matching the buffer stride. Otherwise the
-            # kernel's default 8192 iterates past row width and spills writes
-            # into adjacent rows (present in both decode and prefill branches of
-            # _build_c128a_topk_metadata_kernel).
+            # Passed to the C128A kernel as max_compressed_tokens. The kernel
+            # default (8192) iterates past row width and spills writes into
+            # adjacent rows when buffer stride is smaller.
             self.c128a_max_compressed = c128a_max_compressed
+            self.req_id_per_token_buffer = torch.empty(
+                (max_num_batched_tokens,), dtype=torch.int32, device=device
+            )
             self.c128a_global_decode_buffer = torch.empty(
                 (max_num_batched_tokens, c128a_max_compressed),
                 dtype=torch.int32,
@@ -220,17 +212,6 @@ class DeepseekV4HWAgnosticMetadataBuilder(
         fast_build: bool = False,
     ) -> DeepseekV4HWAgnosticMetadata:
         cm = common_attn_metadata
-        num_tokens = cm.num_actual_tokens
-        starts = np.asarray(cm.query_start_loc_cpu, dtype=np.int32)
-        seg_lengths = np.diff(starts)
-        req_id_per_token = np.repeat(
-            np.arange(seg_lengths.shape[0], dtype=np.int32), seg_lengths
-        )
-        self.req_id_per_token_buffer.fill_(0)
-        self.req_id_per_token_buffer[: req_id_per_token.shape[0]].copy_(
-            torch.from_numpy(req_id_per_token), non_blocking=True
-        )
-        req_id_per_token = self.req_id_per_token_buffer[:num_tokens]
 
         slot_mapping = cm.slot_mapping
         if self.compress_ratio > 1:
@@ -246,19 +227,23 @@ class DeepseekV4HWAgnosticMetadataBuilder(
 
         c128a_fields: dict[str, torch.Tensor | None] = {}
         if self.compress_ratio == 128:
+            num_tokens = cm.num_actual_tokens
+            starts = np.asarray(cm.query_start_loc_cpu, dtype=np.int32)
+            seg_lengths = np.diff(starts)
+            req_id_per_token_np = np.repeat(
+                np.arange(seg_lengths.shape[0], dtype=np.int32), seg_lengths
+            )
+            self.req_id_per_token_buffer.fill_(0)
+            self.req_id_per_token_buffer[: req_id_per_token_np.shape[0]].copy_(
+                torch.from_numpy(req_id_per_token_np), non_blocking=True
+            )
+            req_id_per_token = self.req_id_per_token_buffer[:num_tokens]
             c128a_fields = self._build_c128a_metadata(cm, req_id_per_token)
 
         return DeepseekV4HWAgnosticMetadata(
-            num_reqs=cm.num_reqs,
-            max_query_len=cm.max_query_len,
-            max_seq_len=cm.max_seq_len,
-            num_actual_tokens=cm.num_actual_tokens,
-            query_start_loc=cm.query_start_loc,
-            slot_mapping=slot_mapping,
             block_table=cm.block_table_tensor,
-            req_id_per_token=req_id_per_token,
             block_size=self.kv_cache_spec.block_size,
-            topk_tokens=self.topk_tokens,
+            slot_mapping=slot_mapping,
             c128a_global_decode_topk_indices=c128a_fields.get(
                 "c128a_global_decode_topk_indices"
             ),

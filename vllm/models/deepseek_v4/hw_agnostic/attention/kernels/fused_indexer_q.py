@@ -5,9 +5,6 @@ import torch
 
 from vllm.triton_utils import tl, triton
 
-# MXFP4: 32 elements per block, packed 2 nibbles per byte, ue8m0 block scale.
-MXFP4_BLOCK_SIZE = 32
-
 
 @triton.jit
 def _get_cos_sin(
@@ -22,47 +19,6 @@ def _get_cos_sin(
     sin = tl.load(cos_sin_cache_ptr + pos * cos_sin_cache_stride + block + HALF_ROT_DIM)
     sin = sin.to(tl.float32)
     return cos, sin
-
-
-@triton.jit
-def _fp32x2_to_fp4x2(x_lo, x_hi):
-    # NOTE: $1 is high nibble, $2 is low nibble
-    return tl.inline_asm_elementwise(
-        """
-        {
-            .reg .b8 tmp;
-            cvt.rn.satfinite.e2m1x2.f32 tmp, $1, $2;
-            cvt.u32.u8 $0, tmp;
-        }
-        """,
-        constraints="=r,f,f",
-        args=[x_hi, x_lo],
-        dtype=tl.uint32,
-        is_pure=True,
-        pack=1,
-    ).to(tl.uint8)
-
-
-@triton.jit
-def _quantize_mxfp4_pair(x_lo, x_hi):
-    """Quantize a block of MXFP4_BLOCK_SIZE fp32 values given as two
-    interleaved halves (x_lo = values at even positions in the block,
-    x_hi = values at odd positions). Returns:
-        - packed : uint8[BLOCK/2]  (low nibble = quant(x_lo), high = quant(x_hi))
-        - ue8m0  : scalar uint8    (block scale = 2^(ue8m0 - 127))
-    """
-    amax = tl.maximum(tl.max(tl.abs(x_lo)), tl.max(tl.abs(x_hi)))
-    # 6 * 2^-126 is from https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/blob/main/inference/kernel.py#L163
-    amax = tl.maximum(amax, 6.0 * (2**-126))
-    # ue8m0 block scale: 2^ceil(log2(amax/6.0)).
-    log2_ratio = tl.math.ceil(tl.math.log2(amax * (1.0 / 6.0)))
-    log2_ratio = tl.minimum(tl.maximum(log2_ratio, -127.0), 127.0)
-    scale = tl.math.exp2(log2_ratio)
-    ue8m0 = (log2_ratio + 127.0).to(tl.uint8)
-
-    inv_scale = 1.0 / scale
-    packed = _fp32x2_to_fp4x2(x_lo * inv_scale, x_hi * inv_scale)
-    return packed, ue8m0
 
 
 @triton.jit
@@ -88,10 +44,10 @@ def _fused_indexer_q_rope_quant_kernel(
     index_weights_out_ptr,
     index_weights_out_stride,
 ):
-    # Layout matches the unfused reference (DeepseekV4ScalingRotaryEmbedding
-    # + per_token_group_quant_fp8): GPT-J interleaved RoPE applied to the
-    # LAST rope_dim dims of each head; the leading [0, NOPE_DIM) is passed
-    # through unchanged.
+    # Layout matches the reference (DeepseekV4ScalingRotaryEmbedding +
+    # per_token_group_quant_fp8): GPT-J interleaved RoPE applied to the LAST
+    # rope_dim dims of each head; the leading [0, NOPE_DIM) passes through
+    # unchanged.
     INDEX_Q_ROT_DIM: tl.constexpr = 2 * INDEX_Q_HALF_ROT_DIM
     INDEX_Q_NOPE_DIM: tl.constexpr = INDEX_Q_HEAD_DIM - INDEX_Q_ROT_DIM
     tl.static_assert(INDEX_Q_NOPE_DIM >= 0)
@@ -149,129 +105,16 @@ def _fused_indexer_q_rope_quant_kernel(
         tl.div_rn(r_odd, index_q_scale).to(tl.float8e4nv),
     )
 
-    # FP8 weight-fold contract:
+    # FP8 weight-fold:
     #   index_weights_out = index_weights * q_scale * softmax_scale * head_scale
-    # The per-token-per-head q_scale (fp32) IS folded into the output weights
-    # here because FP8 Q is stored WITHOUT a companion scale tensor — the
-    # downstream fp8_fp4_mqa_logits/fp8_fp4_paged_mqa_logits kernels use `weights` to
-    # apply per-token Q scale inline. See the MXFP4 kernel below for the
-    # contrasting convention (scales live with the Q values, weights are NOT
-    # q-scaled).
+    # FP8 Q is stored WITHOUT a companion scale tensor; folding the per-token
+    # q_scale (fp32) into the output weights lets the downstream logits kernel
+    # apply it inline.
     index_weights = tl.load(
         index_weights_ptr + tok_idx * index_weights_stride + head_idx
     )
     index_weights = index_weights.to(tl.float32)
     index_weights *= index_q_scale
-    index_weights *= index_weights_softmax_scale
-    index_weights *= index_weights_head_scale
-    tl.store(
-        index_weights_out_ptr + tok_idx * index_weights_out_stride + head_idx,
-        index_weights,
-    )
-
-
-@triton.jit
-def _fused_indexer_q_rope_mxfp4_kernel(
-    pos_ptr,
-    # Index Q RoPE input (fp/bf16)
-    index_q_ptr,
-    index_q_stride0,
-    index_q_stride1,
-    index_q_cos_sin_ptr,
-    index_q_cos_sin_stride,
-    INDEX_Q_HALF_ROT_DIM: tl.constexpr,
-    # MXFP4 Q outputs
-    index_q_mxfp4_ptr,  # uint8, (T, H, HEAD_DIM // 2)
-    index_q_mxfp4_stride0,
-    index_q_mxfp4_stride1,
-    index_q_scale_ptr,  # uint8 ue8m0, (T, H, HEAD_DIM // BLOCK)
-    index_q_scale_stride0,
-    index_q_scale_stride1,
-    INDEX_Q_HEAD_DIM: tl.constexpr,
-    MXFP4_BLOCK: tl.constexpr,
-    # Weights (NO per-token q_scale fold for MXFP4; per-block scales stay
-    # with the Q values in the output scale tensor).
-    index_weights_ptr,
-    index_weights_stride,
-    index_weights_softmax_scale,
-    index_weights_head_scale,
-    index_weights_out_ptr,
-    index_weights_out_stride,
-):
-    INDEX_Q_ROT_DIM: tl.constexpr = 2 * INDEX_Q_HALF_ROT_DIM
-    INDEX_Q_NOPE_DIM: tl.constexpr = INDEX_Q_HEAD_DIM - INDEX_Q_ROT_DIM
-    NUM_NOPE_BLOCKS: tl.constexpr = INDEX_Q_NOPE_DIM // MXFP4_BLOCK
-    NUM_ROPE_BLOCKS: tl.constexpr = INDEX_Q_ROT_DIM // MXFP4_BLOCK
-    HALF_BLOCK: tl.constexpr = MXFP4_BLOCK // 2
-    tl.static_assert(INDEX_Q_NOPE_DIM >= 0)
-    tl.static_assert(INDEX_Q_NOPE_DIM % MXFP4_BLOCK == 0)
-    tl.static_assert(INDEX_Q_ROT_DIM % MXFP4_BLOCK == 0)
-    tl.static_assert(MXFP4_BLOCK % 2 == 0)
-
-    tok_idx = tl.program_id(0)
-    head_idx = tl.program_id(1)
-
-    pos = tl.load(pos_ptr + tok_idx)
-
-    q_base = index_q_ptr + tok_idx * index_q_stride0 + head_idx * index_q_stride1
-    out_base = (
-        index_q_mxfp4_ptr
-        + tok_idx * index_q_mxfp4_stride0
-        + head_idx * index_q_mxfp4_stride1
-    )
-    scale_base = (
-        index_q_scale_ptr
-        + tok_idx * index_q_scale_stride0
-        + head_idx * index_q_scale_stride1
-    )
-
-    half_off = tl.arange(0, HALF_BLOCK)
-
-    # ---- NoPE blocks: direct load, pair as (even-index, odd-index) values ----
-    for b in tl.static_range(NUM_NOPE_BLOCKS):
-        base = b * MXFP4_BLOCK
-        x_lo = tl.load(q_base + base + half_off * 2).to(tl.float32)
-        x_hi = tl.load(q_base + base + half_off * 2 + 1).to(tl.float32)
-        packed, ue8m0 = _quantize_mxfp4_pair(x_lo, x_hi)
-        tl.store(out_base + base // 2 + half_off, packed)
-        tl.store(scale_base + b, ue8m0)
-
-    # ---- RoPE blocks: apply GPT-J interleaved RoPE to the block's 16 pairs,
-    # then quantize. Each block covers HALF_BLOCK (=16) cos/sin pairs. ----
-    rot_q_base = q_base + INDEX_Q_NOPE_DIM
-    for b in tl.static_range(NUM_ROPE_BLOCKS):
-        pair_off = b * HALF_BLOCK + half_off  # indices in [0, HALF_ROT_DIM)
-        cos_b = tl.load(
-            index_q_cos_sin_ptr + pos * index_q_cos_sin_stride + pair_off
-        ).to(tl.float32)
-        sin_b = tl.load(
-            index_q_cos_sin_ptr
-            + pos * index_q_cos_sin_stride
-            + pair_off
-            + INDEX_Q_HALF_ROT_DIM
-        ).to(tl.float32)
-        x_even = tl.load(rot_q_base + pair_off * 2).to(tl.float32)
-        x_odd = tl.load(rot_q_base + pair_off * 2 + 1).to(tl.float32)
-        r_even = x_even * cos_b - x_odd * sin_b
-        r_odd = x_odd * cos_b + x_even * sin_b
-        # bf16 roundtrip for parity with the FP8 kernel / reference numerics.
-        r_even = r_even.to(tl.bfloat16).to(tl.float32)
-        r_odd = r_odd.to(tl.bfloat16).to(tl.float32)
-        packed, ue8m0 = _quantize_mxfp4_pair(r_even, r_odd)
-        rope_byte_off = (INDEX_Q_NOPE_DIM + b * MXFP4_BLOCK) // 2
-        tl.store(out_base + rope_byte_off + half_off, packed)
-        tl.store(scale_base + NUM_NOPE_BLOCKS + b, ue8m0)
-
-    # MXFP4 weight-fold contract:
-    #   index_weights_out = index_weights * softmax_scale * head_scale
-    # NOTE: q_scale is NOT folded here (contrast with the FP8 kernel above).
-    # MXFP4 Q emits a separate ue8m0 scale tensor of shape
-    # (T, H, HEAD_DIM // MXFP4_BLOCK) alongside the packed values, so each
-    # per-block scale is applied by the downstream MXFP4 logits kernel when
-    # dequantizing Q — there is no per-token scalar to fold into `weights`.
-    index_weights = tl.load(
-        index_weights_ptr + tok_idx * index_weights_stride + head_idx
-    ).to(tl.float32)
     index_weights *= index_weights_softmax_scale
     index_weights *= index_weights_head_scale
     tl.store(
@@ -288,34 +131,13 @@ def fused_indexer_q_rope_quant(
     index_weights: torch.Tensor,
     index_weights_softmax_scale: float,
     index_weights_head_scale: float,
-    use_fp4: bool = False,
-) -> tuple[
-    torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-    torch.Tensor,
-]:
-    """Fused RoPE + quantize Q for the sparse indexer.
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fused RoPE + FP8 quantize Q for the sparse indexer.
 
-    Weight-fold semantics (important — the two paths differ):
-
-    FP8 path (use_fp4=False, default):
-        q_fp8      : (T, H, HEAD_DIM) float8_e4m3fn, per-token-per-head
-                     scalar scale (NOT stored — folded into weights below)
-        weights_out = weights * q_scale * softmax_scale * head_scale
-        Rationale: a single per-token q_scale is a scalar the downstream FP8
-        logits kernel would otherwise multiply in. Folding it into `weights`
-        avoids emitting a separate tensor and is free for the logits kernel.
-
-    MXFP4 path (use_fp4=True):
-        q_packed   : (T, H, HEAD_DIM // 2) uint8 (2 E2M1 nibbles per byte)
-        q_scale    : (T, H, HEAD_DIM // MXFP4_BLOCK_SIZE) uint8 ue8m0 bytes
-        weights_out = weights * softmax_scale * head_scale
-        Rationale: MXFP4 has PER-BLOCK (32-element) scales that live with
-        the Q values — they cannot be folded into a per-token weight
-        scalar, so `weights` carries only the softmax and head scales.
-
-    Returns (q_quant, weights_out) where q_quant is either a Tensor (FP8) or
-    a (values, scales) tuple (MXFP4). This matches the union type accepted
-    by `SparseAttnIndexer.forward_*`.
+    Returns:
+        q_fp8: (T, H, HEAD_DIM) ``torch.float8_e4m3fn``. Per-token-per-head
+            scalar scale is NOT stored — it is folded into ``weights_out``.
+        weights_out: weights * q_scale * softmax_scale * head_scale.
     """
     assert positions.ndim == 1
     assert index_q.ndim == 3
@@ -326,58 +148,6 @@ def fused_indexer_q_rope_quant(
     index_q_head_dim = index_q.shape[2]
 
     index_weights_out = torch.empty_like(index_weights, dtype=torch.float32)
-
-    if use_fp4:
-        assert index_q_head_dim % MXFP4_BLOCK_SIZE == 0, (
-            f"head_dim={index_q_head_dim} must be a multiple of MXFP4 block "
-            f"size {MXFP4_BLOCK_SIZE}"
-        )
-        num_scale_blocks = index_q_head_dim // MXFP4_BLOCK_SIZE
-        index_q_packed = torch.empty(
-            (num_tokens, num_index_q_heads, index_q_head_dim // 2),
-            dtype=torch.uint8,
-            device=index_q.device,
-        )
-        index_q_scale = torch.empty(
-            (num_tokens, num_index_q_heads, num_scale_blocks),
-            dtype=torch.uint8,
-            device=index_q.device,
-        )
-        _fused_indexer_q_rope_mxfp4_kernel[(num_tokens, num_index_q_heads)](
-            positions,
-            index_q,
-            index_q.stride(0),
-            index_q.stride(1),
-            index_q_cos_sin_cache,
-            index_q_cos_sin_cache.stride(0),
-            index_q_cos_sin_cache.shape[-1] // 2,
-            index_q_packed,
-            index_q_packed.stride(0),
-            index_q_packed.stride(1),
-            index_q_scale,
-            index_q_scale.stride(0),
-            index_q_scale.stride(1),
-            index_q_head_dim,
-            MXFP4_BLOCK_SIZE,
-            index_weights,
-            index_weights.stride(0),
-            index_weights_softmax_scale,
-            index_weights_head_scale,
-            index_weights_out,
-            index_weights_out.stride(0),
-            num_warps=1,  # TODO: Tune this
-        )
-
-        # Values stay uint8 (2 E2M1 nibbles per byte). Scales are 4 ue8m0
-        # bytes per (token, head) reinterpreted as one int32, then squeezed
-        # from (T, H, 1) to (T, H) to match DeepGEMM's expected q_sf rank
-        # (prefill wants 2-D (seq_len, num_heads); decode reshapes this to
-        # 3-D (batch, next_n, num_heads)).
-        return (
-            index_q_packed,
-            index_q_scale.view(torch.int32).squeeze(-1),
-        ), index_weights_out
-
     index_q_fp8 = torch.empty_like(index_q, dtype=torch.float8_e4m3fn)
     _fused_indexer_q_rope_quant_kernel[(num_tokens, num_index_q_heads)](
         positions,
@@ -397,6 +167,6 @@ def fused_indexer_q_rope_quant(
         index_weights_head_scale,
         index_weights_out,
         index_weights_out.stride(0),
-        num_warps=1,  # TODO: Tune this
+        num_warps=1,
     )
     return index_q_fp8, index_weights_out

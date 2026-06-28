@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Sparse Attention Indexer for the hw_agnostic path.
+"""Sparse Attention Indexer — Triton + PyTorch.
 
-Triton + PyTorch only. Stripped of CUDA / XPU / ROCm dispatch and the
-DeepGEMM scheduling apparatus. Registered as
-``torch.ops.vllm.dsv4_sparse_attn_indexer`` to coexist with the
-upstream registration.
+Registered as ``torch.ops.vllm.dsv4_sparse_attn_indexer`` so the agnostic
+op coexists with the HW-specific ``sparse_attn_indexer`` registration of
+the same op family.
 """
 
 import torch
@@ -82,13 +81,14 @@ def dsv4_sparse_attn_indexer(
     topk_indices_buffer: torch.Tensor,
     skip_k_cache_insert: bool,
 ) -> torch.Tensor:
-    # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
     fp8_dtype = current_platform.fp8_dtype()
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
 
     if not isinstance(attn_metadata, dict):
-        # Reserve workspace for indexer during profiling run
+        # Profile run: attn_metadata is not a dict. Reserve the indexer
+        # K-gather workspace and the peak logits allocation so memory
+        # planning sees real high-water marks, then return the fake op.
         values_spec, scales_spec = _gather_workspace_shapes(
             total_seq_lens, head_dim, fp8_dtype
         )
@@ -97,8 +97,7 @@ def dsv4_sparse_attn_indexer(
             scales_spec,
         )
 
-        # Dummy allocation to simulate for peak logits tensor memory during inference.
-        # FP8 elements so elements == bytes
+        # FP8 elements so elements == bytes.
         max_logits_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
         _ = torch.empty(
             max_logits_elems, dtype=torch.uint8, device=hidden_states.device
@@ -299,9 +298,9 @@ class SparseAttnIndexer(nn.Module):
         k: torch.Tensor,
         weights: torch.Tensor,
     ):
-        # Per-token Q scale is folded into ``weights`` upstream
-        # (``fused_indexer_q_rope_quant``); the kernel sees a single
-        # quantized tensor.
+        # Per-token Q scale is folded into ``weights`` earlier in the
+        # pipeline (``fused_indexer_q_rope_quant``); the kernel sees a
+        # single quantized tensor.
         return torch.ops.vllm.dsv4_sparse_attn_indexer(
             hidden_states,
             _encode_layer_name(self.k_cache.prefix),

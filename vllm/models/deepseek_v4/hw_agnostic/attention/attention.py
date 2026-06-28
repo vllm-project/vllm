@@ -25,6 +25,11 @@ from vllm.model_executor.hw_agnostic.layers.layernorm import (
     RMSNorm,
 )
 from vllm.model_executor.hw_agnostic.layers.linear import ReplicatedLinear
+from vllm.model_executor.hw_agnostic.v1.attention.backend import AttentionBackend
+from vllm.model_executor.hw_agnostic.v1.kv_cache_interface import (
+    KVCacheSpec,
+    MLAAttentionSpec,
+)
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.models.deepseek_v4.hw_agnostic.attention.compressor import DeepseekCompressor
 from vllm.models.deepseek_v4.hw_agnostic.attention.indexer import (
@@ -50,11 +55,6 @@ from vllm.models.deepseek_v4.hw_agnostic.attention.sparse_mla import (
     DeepseekV4HWAgnosticMetadata,
 )
 from vllm.models.deepseek_v4.hw_agnostic.attention.sparse_swa import DeepseekV4SWACache
-from vllm.model_executor.hw_agnostic.v1.attention.backend import AttentionBackend
-from vllm.model_executor.hw_agnostic.v1.kv_cache_interface import (
-    KVCacheSpec,
-    MLAAttentionSpec,
-)
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -124,10 +124,10 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         # padded_heads is the head count of the o_padded / q workspaces that
         # cross the PluggableLayer boundary. OOT plugins that override
-        # ``attention_impl`` to call FlashMLA / TRTLLM-gen sparse kernels
-        # require h_q in {64, 128}; the agnostic Triton kernel accepts any
-        # count and ignores the padding. Keep the buffer shape stable so
-        # OOT subclasses do not need to special-case head counts.
+        # ``attention_impl`` may require h_q in {64, 128}; the agnostic Triton
+        # kernel accepts any count and ignores the padding. Keep the buffer
+        # shape stable so OOT subclasses do not need to special-case head
+        # counts.
         if num_heads <= 64:
             self.padded_heads = 64
         elif num_heads <= 128:
@@ -167,7 +167,8 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         self.q_head_norm = RMSNorm(head_dim, eps=self.eps, has_weight=False)
 
-        # TODO(yifan): generalize beyond FP8 sparse.
+        # FP8 sparse layout; other dtypes live in HW-specific subtrees and
+        # are rejected at quant-config construction on this path.
         head_bytes = (
             self.nope_head_dim  # 448 fp8 NoPE
             + self.rope_head_dim * 2  # 64 bf16 RoPE
@@ -318,8 +319,9 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
                 self.indexer_rotary_emb,
             )
 
-        # Profile run: pre-allocate bf16-gather workspace.
         if not isinstance(attn_metadata, dict):
+            # Profile run: attn_metadata is not a dict; reserve the bf16
+            # K-gather workspace and zero the output, then return.
             sub = self.mla_attn
             swa_only = sub.compress_ratio <= 1
             N = (
@@ -342,14 +344,15 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         q: torch.Tensor,
         kv: torch.Tensor,
         positions: torch.Tensor,
-        # Untyped here because ``forward_context.attn_metadata`` carries
-        # upstream's ``AttentionMetadata`` value type, while the runtime
+        # Untyped here because ``forward_context.attn_metadata`` carries the
+        # framework's ``AttentionMetadata`` value type, while the runtime
         # narrow below is to ``DeepseekSparseSWAMetadata``. The cast() is
         # the real type guard.
         attn_metadata: Any,
     ) -> torch.Tensor:
-        # Profile run: pad q manually since kernel doesn't fire.
         if not isinstance(attn_metadata, dict):
+            # Profile run: attn_metadata is not a dict; the fp8-insert
+            # kernel does not fire, so pad q here.
             if self.n_local_heads < self.padded_heads:
                 return F.pad(
                     q,
@@ -523,7 +526,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
         assert isinstance(attn_metadata, dict)
-        flashmla_metadata = cast(
+        mla_metadata = cast(
             DeepseekV4HWAgnosticMetadata | None, attn_metadata.get(self.prefix)
         )
         swa_metadata = cast(
@@ -547,7 +550,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 compressed_k_cache=self_kv_cache,
                 swa_k_cache=swa_kv_cache,
                 output=output[num_decode_tokens:],
-                attn_metadata=flashmla_metadata,
+                attn_metadata=mla_metadata,
                 swa_metadata=swa_metadata,
             )
         if num_decodes > 0:
@@ -555,7 +558,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 q=q[:num_decode_tokens],
                 kv_cache=self_kv_cache,
                 swa_metadata=swa_metadata,
-                attn_metadata=flashmla_metadata,
+                attn_metadata=mla_metadata,
                 swa_only=swa_only,
                 output=output[:num_decode_tokens],
             )
@@ -814,7 +817,7 @@ class DeepseekV4Indexer(nn.Module):
         self.softmax_scale = self.head_dim**-0.5
 
         self.scale_fmt = "ue8m0"
-        self.quant_block_size = 128  # TODO: get from config
+        self.quant_block_size = 128
         self.topk_indices_buffer = topk_indices_buffer
 
         self.max_model_len = (
