@@ -608,6 +608,64 @@ def _compute_prefill_metadata_kernel(
     tl.store(prefill_gather_lens_ptr + offset, gather_len, mask=mask)
 
 
+def warmup_deepseek_v4_prefill_metadata_kernel(
+    device: torch.device,
+    *,
+    max_num_prefills: int,
+    window_size: int,
+) -> int:
+    """Precompile the Triton prefill metadata kernel used by DSv4 SWA.
+
+    Mixed sparse-MLA warmup can miss the pure-prefill first-request shape on a
+    fresh Triton cache. Warm both pure prefill and mixed decode+prefill cases
+    across the small power-of-two BLOCK_SIZE specializations used by the
+    metadata builder.
+    """
+    if not torch.cuda.is_available():
+        return 0
+
+    max_num_prefills = max(1, int(max_num_prefills))
+    cases: set[int] = {1, max_num_prefills}
+    block_size = 1
+    while block_size < max_num_prefills:
+        block_size *= 2
+        cases.add(min(block_size, max_num_prefills))
+
+    launches = 0
+    for num_prefills in sorted(cases):
+        for num_decodes in (0, 1):
+            query_lens = torch.tensor(
+                [1] * num_decodes + [16] * num_prefills,
+                dtype=torch.int32,
+                device=device,
+            )
+            seq_lens = query_lens.clone()
+            query_start_loc = torch.empty(
+                query_lens.numel() + 1,
+                dtype=torch.int32,
+                device=device,
+            )
+            query_start_loc[0].zero_()
+            torch.cumsum(query_lens, dim=0, out=query_start_loc[1:])
+            prefill_gather_lens = torch.empty(
+                num_prefills,
+                dtype=torch.int32,
+                device=device,
+            )
+            _compute_prefill_metadata_kernel[(1,)](
+                prefill_gather_lens,
+                seq_lens,
+                query_start_loc,
+                num_prefills,
+                num_decodes,
+                window_size,
+                BLOCK_SIZE=triton.next_power_of_2(num_prefills),
+            )
+            launches += 1
+    torch.cuda.synchronize(device)
+    return launches
+
+
 @triton.jit(do_not_specialize=["token_offset"])
 def _compute_swa_indices_and_lens_kernel(
     swa_indices_ptr,

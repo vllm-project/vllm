@@ -68,6 +68,9 @@ def _select_mhc_warmup_token_sizes(
     *,
     max_tokens: int,
     cudagraph_capture_sizes: list[int],
+    hidden_size: int,
+    hc_mult: int,
+    num_sms: int,
 ) -> list[int]:
     if max_tokens <= 0:
         return []
@@ -76,6 +79,18 @@ def _select_mhc_warmup_token_sizes(
     candidates = list(_DEFAULT_TOKEN_SIZE_CANDIDATES)
     candidates.extend(cudagraph_capture_sizes)
     candidates.append(max_auto_tokens)
+    last_split = None
+    for grid_size in range(1, cdiv(max_auto_tokens, 64) + 1):
+        size = (grid_size - 1) * 64 + 1
+        split = _compute_mhc_pre_num_split(
+            num_tokens=size,
+            hidden_size=hidden_size,
+            hc_mult=hc_mult,
+            num_sms=num_sms,
+        )
+        if split != last_split:
+            candidates.append(size)
+            last_split = split
     return _normalize_token_sizes(candidates, max_tokens=max_auto_tokens)
 
 
@@ -203,9 +218,15 @@ def deepseek_v4_mhc_warmup(
         return
 
     deepseek_model = _find_deepseek_v4_model(model)
+    hidden_size = int(layer.hidden_size)
+    hc_mult = int(layer.hc_mult)
+    num_sms = torch.cuda.get_device_properties(device).multi_processor_count
     token_sizes = _select_mhc_warmup_token_sizes(
         max_tokens=max_tokens,
         cudagraph_capture_sizes=cudagraph_capture_sizes or [],
+        hidden_size=hidden_size,
+        hc_mult=hc_mult,
+        num_sms=num_sms,
     )
     if not token_sizes:
         return

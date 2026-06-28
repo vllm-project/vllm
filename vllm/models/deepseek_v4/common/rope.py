@@ -14,10 +14,12 @@ def build_deepseek_v4_rope(
     max_position_embeddings: int,
     compress_ratio: int,
 ) -> RotaryEmbedding:
-    rope_parameters = config.rope_parameters
+    rope_parameters = dict(config.rope_parameters)
     rope_parameters["rope_theta"] = (
         config.compress_rope_theta if compress_ratio > 1 else config.rope_theta
     )
+    if compress_ratio == 0:
+        rope_parameters["rope_type"] = "default"
     if rope_parameters["rope_type"] != "default":
         rope_parameters["rope_type"] = (
             "deepseek_yarn"

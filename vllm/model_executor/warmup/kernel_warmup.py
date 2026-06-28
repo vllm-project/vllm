@@ -40,15 +40,20 @@ def kernel_warmup(worker: "Worker"):
         minimax_m3_msa_warmup,
     )
 
+    mhc_warmup_token_sizes = list(
+        worker.vllm_config.compilation_config.cudagraph_capture_sizes or []
+    )
+    max_num_scheduled_tokens = worker.scheduler_config.max_num_scheduled_tokens
+    if max_num_scheduled_tokens is not None:
+        mhc_warmup_token_sizes.append(max_num_scheduled_tokens)
+
     # DSv4 mHC TileLang kernels (hc_pre/hc_post/hc_head_op) run every decoder
     # layer per token; warm them across token sizes first so the first real
     # request doesn't pay JIT cost. No-op for non-DSv4 models (gated inside).
     deepseek_v4_mhc_warmup(
         worker.get_model(),
         max_tokens=worker.scheduler_config.max_num_batched_tokens,
-        cudagraph_capture_sizes=(
-            worker.vllm_config.compilation_config.cudagraph_capture_sizes or []
-        ),
+        cudagraph_capture_sizes=mhc_warmup_token_sizes,
     )
 
     # Run next so input-prep kernels JIT against pristine runner state.

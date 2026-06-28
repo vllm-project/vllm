@@ -1023,6 +1023,12 @@ class DeepseekV4Model(nn.Module):
             )
         else:
             self._mtp_hidden_buffer = None
+        self.aux_hidden_state_layers: tuple[int, ...] = ()
+        self.aux_hidden_state_capture_mode: str | None = None
+
+    def set_dspark_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.aux_hidden_state_layers = layers
+        self.aux_hidden_state_capture_mode = "dspark_post_layer_mean"
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -1053,7 +1059,7 @@ class DeepseekV4Model(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]] | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -1067,8 +1073,13 @@ class DeepseekV4Model(nn.Module):
         if self.use_mega_moe:
             input_ids = input_ids.to(torch.int64)
 
+        aux_hidden_states: list[torch.Tensor] = []
         residual, post_mix, res_mix = None, None, None
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
+        layer = None
+        for idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
+        ):
             hidden_states, residual, post_mix, res_mix = layer(
                 hidden_states,
                 positions,
@@ -1077,6 +1088,23 @@ class DeepseekV4Model(nn.Module):
                 res_mix,
                 residual,
             )
+            if idx in self.aux_hidden_state_layers:
+                if self.aux_hidden_state_capture_mode == "dspark_post_layer_mean":
+                    if hidden_states.dim() == 3:
+                        aux_hidden_states.append(hidden_states.mean(dim=1))
+                    else:
+                        assert residual is not None
+                        assert post_mix is not None
+                        assert res_mix is not None
+                        aux_hc_states = mhc_post_tilelang(
+                            hidden_states,
+                            residual,
+                            post_mix,
+                            res_mix,
+                        )
+                        aux_hidden_states.append(aux_hc_states.mean(dim=1))
+                else:
+                    aux_hidden_states.append(hidden_states.flatten(1))
         if layer is not None:
             hidden_states = mhc_post_tilelang(
                 hidden_states, residual, post_mix, res_mix
@@ -1098,6 +1126,8 @@ class DeepseekV4Model(nn.Module):
             self.hc_eps,
         )
         hidden_states = self.norm(hidden_states)
+        if aux_hidden_states:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -1394,7 +1424,7 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV4MixtureOfExperts):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]] | IntermediateTensors:
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )

@@ -150,6 +150,18 @@ class DeepseekV4FlashMLAMetadataBuilder(
         # Classify single-token queries (plus num_speculative_tokens via
         # supports_spec_as_decode=True) as decodes; longer queries go to prefill.
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
+        speculative_config = self.vllm_config.speculative_config
+        num_speculative_tokens = (
+            speculative_config.num_speculative_tokens
+            if speculative_config is not None
+            and speculative_config.num_speculative_tokens is not None
+            else 0
+        )
+        # DeepSeek V4 SWA and indexer metadata treat MTP/parallel-drafting rows
+        # as decode rows up to 1 + num_speculative_tokens. Do not use the generic
+        # parallel_drafting threshold (1 + 2N) here, otherwise C128A metadata can
+        # classify a short prefill as decode while SWA classifies it as prefill.
+        self.deepseek_v4_decode_threshold = 1 + num_speculative_tokens
         self.topk_tokens = self.model_config.hf_config.index_topk
 
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
@@ -263,7 +275,7 @@ class DeepseekV4FlashMLAMetadataBuilder(
         (num_decodes, _, num_decode_tokens, num_prefill_tokens) = (
             split_decodes_and_prefills(
                 cm,
-                decode_threshold=self.reorder_batch_threshold or 1,
+                decode_threshold=self.deepseek_v4_decode_threshold,
             )
         )
 

@@ -182,6 +182,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # in the compress ratio list
         if layer_id < config.num_hidden_layers:
             self.compress_ratio = max(1, config.compress_ratios[layer_id])
+        elif layer_id < len(config.compress_ratios):
+            self.compress_ratio = config.compress_ratios[layer_id]
         else:
             self.compress_ratio = 1
         self.eps = config.rms_norm_eps
