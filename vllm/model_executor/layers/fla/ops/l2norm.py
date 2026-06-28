@@ -55,12 +55,11 @@ def l2norm_fwd_kernel1(
     ],
     key=["D"],
 )
-@triton.jit(do_not_specialize=["NB"])
+@triton.jit
 def l2norm_fwd_kernel(
     x,
     y,
     eps,
-    NB,
     T,
     D: tl.constexpr,
     BT: tl.constexpr,
@@ -125,7 +124,6 @@ def l2norm_fwd(
         )
     else:
         if D <= 512:
-            NB = triton.cdiv(T, 2048)
 
             def grid(meta):
                 return (triton.cdiv(T, meta["BT"]),)
@@ -134,7 +132,6 @@ def l2norm_fwd(
                 x,
                 y,
                 eps,
-                NB=NB,
                 T=T,
                 D=D,
                 BD=BD,
