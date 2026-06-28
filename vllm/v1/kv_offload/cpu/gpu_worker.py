@@ -523,7 +523,9 @@ class CPUOffloadingWorker(OffloadingWorker):
                     name="CPUTensorPinThread",
                 )
                 self.pin_thread.start()
-                logger.info("Starting to pin memory in background...")
+                # Band-aid fix for https://github.com/vllm-project/vllm/issues/46933
+                logger.warning("Disabling async pin memory")
+                self.pin_thread.join()
 
         self._store_handler = SingleDirectionOffloadingHandler(
             gpu_tensors=gpu_tensors,
