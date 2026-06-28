@@ -819,6 +819,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             not self.is_kvcache_nvfp4
             or can_use_trtllm
             or self.head_dim != self.head_dim_v
+            or max(self.head_dim, self.head_dim_v) > 256
             or self.use_dcp
             or not is_workspace_manager_initialized()
             or not _is_flash_attn_varlen_func_available()
@@ -1572,6 +1573,7 @@ class FlashInferImpl(AttentionImpl):
             self.is_kvcache_nvfp4
             and self.fa_version is not None
             and self.head_size == self.head_size_v
+            and max(self.head_size, self.head_size_v) <= 256
             and vllm_config is not None
         ):
             self._nvfp4_fa2_cu_q = torch.zeros(2, device="cuda", dtype=torch.int32)
@@ -1655,6 +1657,7 @@ class FlashInferImpl(AttentionImpl):
             or self._nvfp4_paged_dequant is None
             or self.fa_version is None
             or self.head_size != self.head_size_v
+            or max(self.head_size, self.head_size_v) > 256
             or not _is_flash_attn_varlen_func_available()
             or prefill_query.dtype not in (torch.float16, torch.bfloat16)
             or not isinstance(attn_metadata.causal, bool)

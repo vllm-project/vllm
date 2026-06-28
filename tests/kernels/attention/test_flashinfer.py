@@ -264,6 +264,7 @@ def test_nvfp4_kv_cache_split_views_rejects_non_inferable_dim() -> None:
     [
         (128, 128, 1),
         (256, 512, 0),
+        (512, 512, 0),
     ],
 )
 def test_flashinfer_nvfp4_fa2_prefill_reservation_requires_matching_head_dims(
