@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING
-
 import torch
 import torch.nn as nn
 from transformers import DeepseekV2Config, DeepseekV3Config
@@ -23,7 +21,10 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
+from vllm.model_executor.layers.sparse_attn_indexer import (
+    SparseAttnIndexer,
+    sparse_attn_indexer,
+)
 from vllm.model_executor.models.deepseek_v2 import (
     DeepSeekV2FusedQkvAProjLinear,
     DeepseekV32IndexerCache,
@@ -32,10 +33,7 @@ from vllm.model_executor.models.deepseek_v2 import (
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.torch_utils import is_quantized_kv_cache
 
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.attention.mla_attention import (
-        MLACommonMetadata,
-    )
+from .kernels import fused_norm_rope, fused_q
 
 
 class DeepseekV32Indexer(nn.Module):
@@ -160,6 +158,10 @@ class DeepseekV32Indexer(nn.Module):
 
 
 class DeepseekV32Attention(MLAAttention):
+    # Narrow the base's broadly-typed `indexer` to the concrete type so the
+    # `if self.indexer is not None` guards below type-check its attributes.
+    indexer: "DeepseekV32Indexer | None"
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -263,21 +265,27 @@ class DeepseekV32Attention(MLAAttention):
         self.num_local_heads = num_local_heads
         self.qk_head_dim = qk_head_dim
         self.indexer = indexer
+        self.topk_indices_buffer = topk_indices_buffer
         # Runtime toggle for index_share_for_mtp_iteration: MTP draft step 0
         # computes the top-k, steps 1+ set this True to reuse it.
         self.skip_topk = False
-        # Whether the paged KV cache must be viewed as fp8 before the attention
-        # (per-tensor fp8; the fp8_ds_mla layout is read as uint8).
-        self._fp8_kv_needs_view = (
-            is_quantized_kv_cache(self.kv_cache_dtype)
-            and self.kv_cache_dtype != "fp8_ds_mla"
-        )
-        # Whether the backend takes an fp8-quantized query (FlashInfer sparse)
-        # vs the (ql_nope, q_pe) tuple (FlashMLA sparse).
-        self._use_concat_quant = (
+        # Single fused fp8 path: Triton fused norm/rope/cache + fused-q write a
+        # single fp8 MQA query and the contiguous [kv_c; k_pe] MLA cache layout.
+        # This requires an fp8 KV cache and a sparse MLA backend that accepts a
+        # quantized query (FlashInfer sparse on SM100).
+        assert (
             is_quantized_kv_cache(self.kv_cache_dtype)
             and self.impl.supports_quant_query_input
+        ), (
+            "deepseek_v32 (nvidia) requires an fp8 KV cache served by the "
+            "FlashInfer sparse MLA backend (which accepts a quantized query). "
+            "Launch with --kv-cache-dtype fp8."
         )
+        # The paged KV cache is stored as uint8 and viewed as fp8 for the decode
+        # (per-tensor fp8; never the fp8_ds_mla layout on this path).
+        self._fp8_kv_needs_view = self.kv_cache_dtype != "fp8_ds_mla"
+        # GLM-5.2 uses interleaved indexer RoPE; DeepSeek-V3.2 uses NeoX.
+        self._index_rope_interleave = getattr(config, "indexer_rope_interleave", False)
 
         # Remaining MLA projections (registered on this module).
         self.fused_qkv_a_proj = DeepSeekV2FusedQkvAProjLinear(
@@ -295,10 +303,14 @@ class DeepseekV32Attention(MLAAttention):
             prefix=f"{prefix}.q_b_proj",
         )
         self.kv_a_layernorm = RMSNorm(kv_lora_rank, eps=config.rms_norm_eps)
+        # reduce_results=False: the attention all-reduce is fused with the
+        # following post_attention_layernorm in the decoder layer via
+        # fused_allreduce_rms_norm.
         self.o_proj = RowParallelLinear(
             num_heads * v_head_dim,
             hidden_size,
             bias=False,
+            reduce_results=False,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
@@ -322,102 +334,177 @@ class DeepseekV32Attention(MLAAttention):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        # Captured: A-projections (+ indexer A-GEMM on indexer layers).
         qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
-        q_c, kv_lora = qkv_lora.split(
-            [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim], dim=-1
+        q_c, kv_c, k_pe = qkv_lora.split(
+            [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
-        q_c = self.q_a_layernorm(q_c)
-        q = self.q_b_proj(q_c)[0]
 
-        kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        kv_c_normed = self.kv_a_layernorm(kv_c)
-
-        q = q.view(-1, self.num_local_heads, self.qk_head_dim)
-        k_pe = k_pe.unsqueeze(1)
-        q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
-            positions, q[..., self.qk_nope_head_dim :], k_pe
-        )
+        if self.indexer is not None and not self.skip_topk:
+            kw = self.indexer.wk_weights_proj(hidden_states)[0]
+            index_k = kw[:, : self.indexer.head_dim]
+            index_weights = kw[:, self.indexer.head_dim :]
+        else:
+            index_k = None
+            index_weights = None
 
         num_tokens = hidden_states.shape[0]
-        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-        q_nope = q_nope.transpose(0, 1)  # (N, B, P)
-        ql_nope = torch.bmm(q_nope, self.W_UK_T).transpose(0, 1)  # (B, N, L)
-
-        # Lightning indexer writes the top-k indices into the shared buffer.
-        # "Shared" layers (indexer is None) reuse the top-k from the previous
-        # indexer layer already sitting in the buffer.
-        if self.indexer is not None and not self.skip_topk:
-            self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)  # type: ignore[operator]
-
-        attn_latent = torch.empty(
-            (num_tokens, self.num_local_heads, self.kv_lora_rank),
-            dtype=q.dtype,
-            device=q.device,
-        )
-        self._sparse_attention(kv_c_normed, k_pe, ql_nope, q_pe, attn_latent)
-
-        # V up-projection + output projection are metadata-independent GEMMs and
-        # stay captured.
         output = torch.empty(
             (num_tokens, self.num_local_heads * self.v_head_dim),
-            dtype=q.dtype,
-            device=q.device,
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
         )
-        self._v_up_proj(attn_latent, out=output)
+        self._fused_attention(
+            positions, q_c, kv_c, k_pe, index_k, index_weights, output
+        )
         return self.o_proj(output)[0]
 
     @eager_break_during_capture
-    def _sparse_attention(
+    def _fused_attention(
         self,
-        kv_c_normed: torch.Tensor,
+        positions: torch.Tensor,
+        q_c: torch.Tensor,
+        kv_c: torch.Tensor,
         k_pe: torch.Tensor,
-        ql_nope: torch.Tensor,
-        q_pe: torch.Tensor,
-        attn_latent: torch.Tensor,
+        index_k: torch.Tensor | None,
+        index_weights: torch.Tensor | None,
+        output: torch.Tensor,
     ) -> None:
+        # One eager break for the whole attention. In FULL cudagraph mode (pure
+        # decode) this decorator is a no-op, so everything here is captured; in
+        # PIECEWISE (prefill) it runs eagerly. The cache writes, sparse indexer,
+        # and forward_mqa all depend on per-step metadata and must not be split
+        # out (PIECEWISE capture would otherwise miss them).
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
-        attn_metadata: MLACommonMetadata | None
         if isinstance(attn_metadata_raw, dict):
-            attn_metadata = attn_metadata_raw[self.layer_name]  # type: ignore[assignment]
+            attn_metadata = attn_metadata_raw.get(self.layer_name)
         elif isinstance(attn_metadata_raw, list):
-            # Speculative decoding: [0] is the base-model metadata dict.
-            attn_metadata = attn_metadata_raw[0][self.layer_name]  # type: ignore[assignment]
+            attn_metadata = attn_metadata_raw[0].get(self.layer_name)
         else:
             attn_metadata = attn_metadata_raw
 
         slot_mapping = forward_context.slot_mapping
         assert isinstance(slot_mapping, dict)
-        self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
-            kv_c_normed,
+        mla_slot = slot_mapping.get(self.layer_name)
+
+        if self.indexer is not None:
+            has_indexer = True
+            indexer_k_norm_w = self.indexer.k_norm.weight
+            indexer_k_norm_bias = self.indexer.k_norm.bias
+            indexer_k_norm_eps = self.indexer.k_norm.eps
+            indexer_k_rope_cos_sin_cache = self.indexer_rope_emb.cos_sin_cache
+            indexer_k_cache = self.indexer.k_cache.kv_cache
+            indexer_softmax_scale = self.indexer.softmax_scale
+            indexer_n_head_scale = self.indexer.n_head**-0.5
+        else:
+            has_indexer = False
+            indexer_k_norm_w = None
+            indexer_k_norm_bias = None
+            indexer_k_norm_eps = 1e-6
+            indexer_k_rope_cos_sin_cache = None
+            indexer_k_cache = None
+            indexer_softmax_scale = 0.0
+            indexer_n_head_scale = 0.0
+
+        if attn_metadata is None:
+            mla_kv_cache = None
+            mla_k_scale = None
+            indexer_k_cache = None
+            mla_slot = None
+        else:
+            mla_kv_cache = self.kv_cache
+            mla_k_scale = self._k_scale
+
+        q_c = fused_norm_rope(
+            positions,
+            q_c,
+            self.q_a_layernorm.weight,
+            self.q_a_layernorm.variance_epsilon,
+            kv_c,
+            self.kv_a_layernorm.weight,
+            self.kv_a_layernorm.variance_epsilon,
             k_pe,
-            self.kv_cache,
-            slot_mapping.get(self.layer_name),
-            self.kv_cache_dtype,
-            self._k_scale,
+            self.rotary_emb.cos_sin_cache,
+            index_k,
+            indexer_k_norm_w,
+            indexer_k_norm_bias,
+            indexer_k_norm_eps,
+            indexer_k_rope_cos_sin_cache,
+            self.topk_indices_buffer,
+            slot_mapping=mla_slot,
+            indexer_k_cache=indexer_k_cache,
+            mla_kv_cache=mla_kv_cache,
+            mla_kv_cache_dtype=self.kv_cache_dtype,
+            mla_k_scale=mla_k_scale,
+            has_indexer=has_indexer,
+            index_rope_interleave=self._index_rope_interleave,
+        )
+
+        q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+        q_nope = q_nope.transpose(0, 1)
+        ql_nope = torch.bmm(q_nope, self.W_UK_T).transpose(0, 1)
+
+        if self.indexer is not None:
+            index_q = self.indexer.wq_b(q_c)[0]
+            index_q = index_q.view(-1, self.indexer.n_head, self.indexer.head_dim)
+        else:
+            index_q = None
+
+        index_q_fp8, index_weights_out, mqa_q = fused_q(
+            positions,
+            q_pe,
+            self.rotary_emb.cos_sin_cache,
+            index_q,
+            self.indexer_rope_emb.cos_sin_cache if has_indexer else None,
+            ql_nope,
+            self._q_scale,
+            index_weights,
+            indexer_softmax_scale,
+            indexer_n_head_scale,
+            has_indexer=has_indexer,
+            index_rope_interleave=self._index_rope_interleave,
         )
 
         if attn_metadata is None:
-            # Profile / warmup: zero-fill for DP+EP determinism.
-            attn_latent.zero_()
+            output.zero_()
             return
 
-        num_actual = attn_metadata.num_actual_tokens
+        if self.indexer is not None:
+            sparse_attn_indexer(
+                q_c,
+                self.indexer.k_cache.prefix,
+                self.indexer.k_cache.kv_cache,
+                index_q_fp8,
+                None,  # q_scale folded into weights on the fp8 path
+                None,  # k unused when skip_k_cache_insert=True
+                index_weights_out,
+                self.indexer.quant_block_size,
+                self.indexer.scale_fmt,
+                self.indexer.topk_tokens,
+                self.indexer.head_dim,
+                self.indexer.max_model_len,
+                self.indexer.max_total_seq_len,
+                self.topk_indices_buffer,
+                True,  # skip_k_cache_insert
+                False,  # use_fp4_cache
+                True,  # skip_topk_buffer_clear (fused_norm_rope already did it)
+            )
+
+        num_actual = attn_metadata.num_actual_tokens  # type: ignore[attr-defined]
         kv_cache = self.kv_cache
         if self._fp8_kv_needs_view:
             kv_cache = kv_cache.view(torch.float8_e4m3fn)
-
-        ql_nope = ql_nope[:num_actual]
-        q_pe = q_pe[:num_actual]
-        # FlashInfer sparse takes a single fp8-quantized query; FlashMLA sparse
-        # takes the (ql_nope, q_pe) tuple and concatenates internally.
-        mqa_q: torch.Tensor | tuple[torch.Tensor, torch.Tensor]
-        if self._use_concat_quant:
-            mqa_q = self._decode_concat_quant_fp8_op(ql_nope, q_pe, self._q_scale)
-        else:
-            mqa_q = (ql_nope, q_pe)
-
-        attn_out, _ = self.impl.forward_mqa(mqa_q, kv_cache, attn_metadata, self)  # type: ignore[attr-defined]
-        attn_latent[:num_actual] = attn_out.view(
-            num_actual, self.num_local_heads, self.kv_lora_rank
+        attn_out, _ = self.impl.forward_mqa(  # type: ignore[attr-defined]
+            mqa_q[:num_actual], kv_cache, attn_metadata, self
         )
+        x = attn_out.view(
+            num_actual, self.num_local_heads, self.kv_lora_rank
+        ).transpose(0, 1)
+        out = (
+            output[:num_actual]
+            .view(num_actual, self.num_local_heads, self.v_head_dim)
+            .transpose(0, 1)
+        )
+        torch.bmm(x, self.W_UV, out=out)
