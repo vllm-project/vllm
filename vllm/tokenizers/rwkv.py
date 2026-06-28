@@ -19,6 +19,8 @@ from .protocol import TokenizerLike
 _VOCAB_FILE = Path(__file__).parent / "assets" / "rwkv_vocab_v20230424.txt"
 _RWKV_NATIVE_CHAT_TEMPLATE = "{# RWKV native chat template #}"
 _BLANK_LINES_RE = re.compile(r"\n{2,}")
+_RWKV7_VOCAB_SIZE = 65536
+_UNKNOWN_TOKEN_BYTES = "\ufffd".encode()
 
 
 class _Trie:
@@ -58,9 +60,17 @@ class RWKVTokenizer(TokenizerLike):
             idx2token[idx] = token
 
         self.token2idx = {token: idx for idx, token in idx2token.items()}
-        self.idx2token = [b"" for _ in range(max(idx2token) + 1)]
+        self.idx2token = [
+            _UNKNOWN_TOKEN_BYTES
+            for _ in range(max(max(idx2token) + 1, _RWKV7_VOCAB_SIZE))
+        ]
+        self.idx2token[0] = b""
         for idx, token in idx2token.items():
             self.idx2token[idx] = token
+        self._vocab = {
+            self._token_to_vocab_key(token): idx
+            for token, idx in self.token2idx.items()
+        }
 
         self.name_or_path = str(name_or_path or vocab_file)
         self._max_chars_per_token = max(len(token) for token in self.idx2token)
@@ -108,7 +118,7 @@ class RWKVTokenizer(TokenizerLike):
 
     @property
     def is_fast(self) -> bool:
-        return True
+        return False
 
     @property
     def vocab_size(self) -> int:
@@ -221,10 +231,7 @@ class RWKVTokenizer(TokenizerLike):
         )
 
     def get_vocab(self) -> dict[str, int]:
-        vocab: dict[str, int] = {}
-        for token, idx in self.token2idx.items():
-            vocab[token.decode("utf-8", errors="replace")] = idx
-        return vocab
+        return dict(self._vocab)
 
     def get_added_vocab(self) -> dict[str, int]:
         return {}
@@ -237,8 +244,8 @@ class RWKVTokenizer(TokenizerLike):
 
     def convert_tokens_to_ids(self, tokens: str | list[str]) -> int | list[int]:
         if isinstance(tokens, str):
-            return self.token2idx[tokens.encode("utf-8")]
-        return [self.token2idx[token.encode("utf-8")] for token in tokens]
+            return self._convert_token_to_id(tokens)
+        return [self._convert_token_to_id(token) for token in tokens]
 
     def convert_ids_to_tokens(
         self,
@@ -247,10 +254,26 @@ class RWKVTokenizer(TokenizerLike):
     ) -> list[str]:
         if skip_special_tokens:
             ids = [idx for idx in ids if idx not in self.all_special_ids]
-        return [self.idx2token[idx].decode("utf-8", errors="replace") for idx in ids]
+        return [self._token_to_vocab_key(self.idx2token[idx]) for idx in ids]
 
     def convert_tokens_to_string(self, tokens: list[str]) -> str:
-        return "".join(tokens)
+        chunks: list[bytes] = []
+        for token in tokens:
+            try:
+                chunks.append(token.encode("latin-1"))
+            except UnicodeEncodeError:
+                chunks.append(token.encode("utf-8"))
+        return b"".join(chunks).decode("utf-8", errors="replace")
+
+    @staticmethod
+    def _token_to_vocab_key(token: bytes) -> str:
+        return token.decode("latin-1")
+
+    def _convert_token_to_id(self, token: str) -> int:
+        idx = self._vocab.get(token)
+        if idx is not None:
+            return idx
+        return self.token2idx[token.encode("utf-8")]
 
     @staticmethod
     def _normalize_message_content(content: Any) -> str:

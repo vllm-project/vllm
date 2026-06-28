@@ -240,12 +240,13 @@ __global__ void __launch_bounds__(BLOCKDIM_X_SAMPLE, 1)
   }
   const float log2_inv_temp = float(M_LOG2E) / temperature;
 
-  logits += (b * T + (T - 1)) * V;  // B T V
+  const int64_t logits_offset = (static_cast<int64_t>(b) * T + (T - 1)) * V;
+  logits += logits_offset;  // B T V
   const int pb = (penalty_indices == nullptr) ? b : penalty_indices[b];
-  penalties += pb * V;             // max_B V
-  outputs += b;                    // B
-  states += b;                     // B
-  probs += (b * T + (T - 1)) * V;  // B T V
+  penalties += static_cast<int64_t>(pb) * V;  // max_B V
+  outputs += b;                               // B
+  states += b;                                // B
+  probs += logits_offset;                     // B T V
 
   float maxu = -INFINITY;
   for (int i = t; i < V4; i += d) {
@@ -552,10 +553,12 @@ at::Tensor batch_sampling_repetition_temperature_topk_topp(
   auto stream = at::cuda::getCurrentCUDAStream();
   auto probs = at::empty(
       {B, V}, at::TensorOptions().dtype(at::kFloat).device(at::kCUDA));
-  if (B * V * 4 <= 4194304) {
+  const size_t probs_window_bytes =
+      static_cast<size_t>(B) * static_cast<size_t>(V) * sizeof(float);
+  if (probs_window_bytes <= 4194304) {
     cudaStreamAttrValue stream_attribute;
     stream_attribute.accessPolicyWindow.base_ptr = probs.data_ptr();
-    stream_attribute.accessPolicyWindow.num_bytes = B * V * 4;
+    stream_attribute.accessPolicyWindow.num_bytes = probs_window_bytes;
     stream_attribute.accessPolicyWindow.hitRatio = 1;
     stream_attribute.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;
     stream_attribute.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;
@@ -613,10 +616,12 @@ at::Tensor batch_sampling_repetition_temperature_topk_topp_per_request(
   auto stream = at::cuda::getCurrentCUDAStream();
   auto probs = at::empty(
       {B, V}, at::TensorOptions().dtype(at::kFloat).device(at::kCUDA));
-  if (B * V * 4 <= 4194304) {
+  const size_t probs_window_bytes =
+      static_cast<size_t>(B) * static_cast<size_t>(V) * sizeof(float);
+  if (probs_window_bytes <= 4194304) {
     cudaStreamAttrValue stream_attribute;
     stream_attribute.accessPolicyWindow.base_ptr = probs.data_ptr();
-    stream_attribute.accessPolicyWindow.num_bytes = B * V * 4;
+    stream_attribute.accessPolicyWindow.num_bytes = probs_window_bytes;
     stream_attribute.accessPolicyWindow.hitRatio = 1;
     stream_attribute.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;
     stream_attribute.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;
@@ -676,10 +681,12 @@ at::Tensor batch_sampling_repetition_temperature_topk_topp_indexed(
   auto stream = at::cuda::getCurrentCUDAStream();
   auto probs = at::empty(
       {B, V}, at::TensorOptions().dtype(at::kFloat).device(at::kCUDA));
-  if (B * V * 4 <= 4194304) {
+  const size_t probs_window_bytes =
+      static_cast<size_t>(B) * static_cast<size_t>(V) * sizeof(float);
+  if (probs_window_bytes <= 4194304) {
     cudaStreamAttrValue stream_attribute;
     stream_attribute.accessPolicyWindow.base_ptr = probs.data_ptr();
-    stream_attribute.accessPolicyWindow.num_bytes = B * V * 4;
+    stream_attribute.accessPolicyWindow.num_bytes = probs_window_bytes;
     stream_attribute.accessPolicyWindow.hitRatio = 1;
     stream_attribute.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;
     stream_attribute.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;
@@ -736,10 +743,11 @@ __global__ void __launch_bounds__(BLOCKDIM_X_SAMPLE, 1)
   }
   const float log2e_inv_temp = float(M_LOG2E) / temperature;
 
-  logits += (b * T + (T - 1)) * V;  // B T V
-  outputs += b;                     // B
-  states += b;                      // B
-  probs += (b * T + (T - 1)) * V;   // B T V
+  const int64_t logits_offset = (static_cast<int64_t>(b) * T + (T - 1)) * V;
+  logits += logits_offset;  // B T V
+  outputs += b;             // B
+  states += b;              // B
+  probs += logits_offset;   // B T V
 
   float maxu = -INFINITY;
   for (int i = t; i < V4; i += d) {
@@ -998,10 +1006,11 @@ __global__ void __launch_bounds__(BLOCKDIM_X_SAMPLE, 1)
   const int V4 = V / 4;
   float4 l4, p4;
 
-  logits += (b * T + (T - 1)) * V;  // B T V
-  outputs += b;                     // B
-  states += b;                      // B
-  probs += (b * T + (T - 1)) * V;   // B T V
+  const int64_t logits_offset = (static_cast<int64_t>(b) * T + (T - 1)) * V;
+  logits += logits_offset;  // B T V
+  outputs += b;             // B
+  states += b;              // B
+  probs += logits_offset;   // B T V
 
   float maxu = -INFINITY;
   for (int i = t; i < V4; i += d) {
@@ -1239,10 +1248,12 @@ at::Tensor batch_sampling_temperature_topk_topp(at::Tensor& logits,
   auto stream = at::cuda::getCurrentCUDAStream();
   auto probs = at::empty(
       {B, V}, at::TensorOptions().dtype(at::kFloat).device(at::kCUDA));
-  if (B * V * 4 <= 4194304) {
+  const size_t probs_window_bytes =
+      static_cast<size_t>(B) * static_cast<size_t>(V) * sizeof(float);
+  if (probs_window_bytes <= 4194304) {
     cudaStreamAttrValue stream_attribute;
     stream_attribute.accessPolicyWindow.base_ptr = probs.data_ptr();
-    stream_attribute.accessPolicyWindow.num_bytes = B * V * 4;
+    stream_attribute.accessPolicyWindow.num_bytes = probs_window_bytes;
     stream_attribute.accessPolicyWindow.hitRatio = 1;
     stream_attribute.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;
     stream_attribute.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;
@@ -1295,10 +1306,12 @@ at::Tensor batch_sampling_temperature_topk_topp_per_request(
   auto stream = at::cuda::getCurrentCUDAStream();
   auto probs = at::empty(
       {B, V}, at::TensorOptions().dtype(at::kFloat).device(at::kCUDA));
-  if (B * V * 4 <= 4194304) {
+  const size_t probs_window_bytes =
+      static_cast<size_t>(B) * static_cast<size_t>(V) * sizeof(float);
+  if (probs_window_bytes <= 4194304) {
     cudaStreamAttrValue stream_attribute;
     stream_attribute.accessPolicyWindow.base_ptr = probs.data_ptr();
-    stream_attribute.accessPolicyWindow.num_bytes = B * V * 4;
+    stream_attribute.accessPolicyWindow.num_bytes = probs_window_bytes;
     stream_attribute.accessPolicyWindow.hitRatio = 1;
     stream_attribute.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;
     stream_attribute.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;

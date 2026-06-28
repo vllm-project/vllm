@@ -23,6 +23,30 @@ def test_rwkv_tokenizer_decode_replaces_invalid_utf8_tokens():
     assert tokenizer.decode([129, 196, 256]) == "\ufffd\ufffd\ufffd"
 
 
+def test_rwkv_tokenizer_pads_unused_logits_ids():
+    tokenizer = get_tokenizer("BlinkDL/rwkv7-g1", tokenizer_mode="rwkv")
+
+    assert tokenizer.vocab_size == 65536
+    assert tokenizer.max_token_id == 65535
+    assert tokenizer.decode([65530, 65535]) == "\ufffd\ufffd"
+
+
+def test_rwkv_tokenizer_exposes_lossless_byte_vocab_tokens():
+    tokenizer = get_tokenizer("BlinkDL/rwkv7-g1", tokenizer_mode="rwkv")
+
+    raw_byte_token = tokenizer.convert_ids_to_tokens([129])[0]
+    assert raw_byte_token == "\x80"
+    assert tokenizer.convert_tokens_to_ids(raw_byte_token) == 129
+    assert tokenizer.get_vocab()["\x80"] == 129
+    assert tokenizer.get_vocab()["\x81"] == 130
+
+
+def test_rwkv_tokenizer_reports_slow_until_offsets_are_supported():
+    tokenizer = get_tokenizer("BlinkDL/rwkv7-g1", tokenizer_mode="rwkv")
+
+    assert tokenizer.is_fast is False
+
+
 def test_rwkv_tokenizer_exposes_cached_metadata():
     tokenizer_cls = TokenizerRegistry.load_tokenizer_cls("rwkv")
     tokenizer = tokenizer_cls.from_pretrained("BlinkDL/rwkv7-g1")

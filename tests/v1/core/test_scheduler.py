@@ -649,6 +649,20 @@ def test_rwkv_scheduler_allows_running_prefill_chunk_when_decode_wave_unready():
     assert prefill in scheduler.running
 
 
+def test_rwkv_scheduler_holds_decode_behind_lower_running_prefill_chunk():
+    scheduler = _new_fake_scheduler(use_rwkv_native_decode_wave=True)
+    prefill = _new_running_prefill_chunk_request("p0")
+    decode = _new_ready_decode_request("r0")
+    scheduler.running = [prefill, decode]
+    remaining_prefill_tokens = prefill.num_tokens - prefill.num_computed_tokens
+
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens == {"p0": remaining_prefill_tokens}
+    assert prefill in scheduler.running
+    assert decode in scheduler.running
+
+
 def test_rwkv_scheduler_waits_when_live_decode_row_reaches_max_tokens():
     scheduler = _new_fake_scheduler(use_rwkv_native_decode_wave=True)
     req0 = _new_ready_decode_request("r0")

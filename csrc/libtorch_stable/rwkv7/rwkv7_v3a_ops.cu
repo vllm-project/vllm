@@ -2241,6 +2241,7 @@ at::Tensor layer_norm_f16_cuda(at::Tensor x, at::Tensor weight, at::Tensor bias,
   TORCH_CHECK(c64 <= INT_MAX, "C too large");
   const int C = static_cast<int>(c64);
   const int64_t rows = x.numel() / C;
+  TORCH_CHECK(rows <= INT_MAX, "rows too large");
   auto stream = at::cuda::getCurrentCUDAStream();
   if (C == LN_SMALL_C) {
     if (rows >= 1024) {
@@ -2326,6 +2327,7 @@ std::vector<at::Tensor> add_layer_norm_f16_cuda(at::Tensor x,
   TORCH_CHECK(c64 <= INT_MAX, "C too large");
   const int C = static_cast<int>(c64);
   const int64_t rows = x.numel() / C;
+  TORCH_CHECK(rows <= INT_MAX, "rows too large");
   auto stream = at::cuda::getCurrentCUDAStream();
   if (C == LN_SMALL_C) {
     if (rows >= 1024) {

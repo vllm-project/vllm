@@ -372,6 +372,39 @@ def test_rwkv7_config_defaults_to_no_compile():
     )
 
 
+def test_rwkv7_config_disables_prefix_caching():
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(enforce_eager=False),
+        cache_config=SimpleNamespace(enable_prefix_caching=True),
+        scheduler_config=SimpleNamespace(
+            max_num_seqs=4,
+            max_num_batched_tokens=8,
+            max_num_scheduled_tokens=None,
+        ),
+        compilation_config=CompilationConfig(),
+    )
+
+    RWKV7ForCausalLMConfig.verify_and_update_config(vllm_config)
+
+    assert vllm_config.cache_config.enable_prefix_caching is False
+
+
+def test_rwkv7_config_rejects_decode_budget_below_max_running_reqs():
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(enforce_eager=False),
+        cache_config=SimpleNamespace(enable_prefix_caching=False),
+        scheduler_config=SimpleNamespace(
+            max_num_seqs=4,
+            max_num_batched_tokens=8,
+            max_num_scheduled_tokens=2,
+        ),
+        compilation_config=CompilationConfig(),
+    )
+
+    with pytest.raises(ValueError, match="max_num_seqs"):
+        RWKV7ForCausalLMConfig.verify_and_update_config(vllm_config)
+
+
 @pytest.mark.parametrize(
     "cudagraph_mode",
     [None, CUDAGraphMode.FULL, CUDAGraphMode.FULL_AND_PIECEWISE],
@@ -1889,6 +1922,41 @@ def test_rwkv7_non_last_pp_postprocesses_pending_prefill_when_all_decode_next():
     GPUModelRunner.sample_tokens(runner, grammar_output=None)
 
     assert calls == ["num_computed", ("state", [0, 1], 0)]
+
+
+def test_non_rwkv_non_last_pp_rank_does_not_require_pending_state_hook():
+    from vllm.v1.worker.gpu.model_runner import ExecuteModelState, GPUModelRunner
+
+    runner = object.__new__(GPUModelRunner)
+    input_batch = SimpleNamespace(idx_mapping=torch.tensor([0, 1], dtype=torch.int32))
+    runner.execute_model_state = ExecuteModelState(
+        input_batch=input_batch,
+        attn_metadata=None,
+        slot_mappings_by_layer=None,
+        hidden_states=None,
+        aux_hidden_states=None,
+        finished_req_ids=set(),
+    )
+    runner.is_last_pp_rank = False
+    runner.pp_handler = SimpleNamespace(receive=lambda _input_batch: True)
+    runner.kv_connector = SimpleNamespace(
+        post_forward=lambda _finished_req_ids: SimpleNamespace(is_empty=lambda: True)
+    )
+    runner.eplb = SimpleNamespace(step=lambda **_kwargs: None)
+
+    calls: list[Any] = []
+    runner.postprocess_num_computed_tokens = lambda _input_batch: calls.append(
+        "num_computed"
+    )
+    runner.model_state = SimpleNamespace(
+        postprocess_state=lambda idx_mapping, num_sampled: calls.append(
+            ("state", idx_mapping.tolist(), num_sampled)
+        ),
+    )
+
+    GPUModelRunner.sample_tokens(runner, grammar_output=None)
+
+    assert calls == ["num_computed"]
 
 
 def test_rwkv7_model_state_remove_request_recycles_stable_row():

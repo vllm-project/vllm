@@ -496,6 +496,23 @@ class RWKV7ForCausalLMConfig(VerifyAndUpdateConfig):
                     f"Expected one of: {allowed_values}."
                 )
 
+        cache_config = getattr(vllm_config, "cache_config", None)
+        if cache_config is not None:
+            cache_config.enable_prefix_caching = False
+
+        scheduler_config = getattr(vllm_config, "scheduler_config", None)
+        if scheduler_config is not None:
+            token_budget = scheduler_config.max_num_scheduled_tokens
+            if token_budget is None:
+                token_budget = scheduler_config.max_num_batched_tokens
+            if scheduler_config.max_num_seqs > token_budget:
+                raise ValueError(
+                    "RWKV7 native decode wave requires max_num_seqs to fit "
+                    "within max_num_scheduled_tokens or max_num_batched_tokens. "
+                    f"Got max_num_seqs={scheduler_config.max_num_seqs} and "
+                    f"token_budget={token_budget}."
+                )
+
         compilation_config = vllm_config.compilation_config
         if compilation_config.mode not in (None, CompilationMode.NONE):
             raise ValueError(

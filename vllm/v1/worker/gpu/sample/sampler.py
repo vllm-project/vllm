@@ -73,12 +73,15 @@ class Sampler:
                 "rapid-sampling does not support frequency_penalty. "
                 "Set frequency_penalty=0.0."
             )
-        if self.use_rapid and (
+        use_rapid_penalty = self.use_rapid and (
             sampling_params.presence_penalty != 0.0
             or sampling_params.repetition_penalty != 1.0
             or sampling_params.penalty_decay != RAPID_PENALTY_DECAY_DEFAULT
-        ):
-            self._ensure_rapid_penalties()[req_idx].zero_()
+        )
+        if self.use_rapid and (self.rapid_penalties is not None or use_rapid_penalty):
+            self._reset_rapid_penalty_row(req_idx)
+        if use_rapid_penalty:
+            self._seed_rapid_prompt_penalties(req_idx, prompt_len, sampling_params)
         self.sampling_states.add_request(req_idx, sampling_params)
         self.penalties_state.add_request(req_idx, sampling_params)
         self.logit_bias_state.add_request(req_idx, prompt_len, sampling_params)
@@ -96,6 +99,36 @@ class Sampler:
                 device=self.req_states.device,
             )
         return self.rapid_penalties
+
+    def _reset_rapid_penalty_row(self, req_idx: int) -> None:
+        self._ensure_rapid_penalties()[req_idx].zero_()
+
+    def _seed_rapid_prompt_penalties(
+        self,
+        req_idx: int,
+        prompt_len: int,
+        sampling_params: SamplingParams,
+    ) -> None:
+        if sampling_params.repetition_penalty == 1.0 or prompt_len <= 0:
+            return
+        all_token_ids = self.req_states.all_token_ids.gpu
+        if all_token_ids is None:
+            return
+        penalties = self._ensure_rapid_penalties()
+        prompt_token_ids = all_token_ids[req_idx, :prompt_len].to(
+            device=penalties.device,
+            dtype=torch.long,
+            non_blocking=True,
+        )
+        valid_mask = (prompt_token_ids >= 0) & (prompt_token_ids < penalties.shape[1])
+        prompt_token_ids = prompt_token_ids[valid_mask]
+        if prompt_token_ids.numel() == 0:
+            return
+        penalties[req_idx].scatter_(
+            0,
+            prompt_token_ids,
+            float(sampling_params.repetition_penalty),
+        )
 
     def apply_staged_writes(self) -> None:
         self.sampling_states.apply_staged_writes()

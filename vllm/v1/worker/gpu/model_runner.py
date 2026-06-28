@@ -1397,7 +1397,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Optimistically update num_computed_tokens for entire batch here.
             # Will be adjusted for rejections if necessary in update_requests.
             self.postprocess_num_computed_tokens(input_batch)
-            if not all_decode_next or self.model_state.has_pending_postprocess_state():
+            has_pending_postprocess_state = getattr(
+                self.model_state, "has_pending_postprocess_state", None
+            )
+            has_pending_state = (
+                has_pending_postprocess_state()
+                if has_pending_postprocess_state is not None
+                else False
+            )
+            if not all_decode_next or has_pending_state:
                 # Might contain non-final prefill chunks, which will be scheduled
                 # in the immediate next step (rather than in pp_size steps), or
                 # model-specific recurrent state that must be made resident before

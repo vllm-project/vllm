@@ -63,10 +63,15 @@ class RWKVNativeDecodeWavePolicy:
         num_sampled_tokens_per_step: int,
     ) -> RWKVDecodeWavePlan:
         decode_wave: list[Request] = []
+        has_lower_running_prefill = False
 
         for request in running_requests:
             if request.is_prefill_chunk:
+                if not decode_wave:
+                    has_lower_running_prefill = True
                 continue
+            if has_lower_running_prefill:
+                return RWKVDecodeWavePlan()
             if current_step < request.next_decode_eligible_step:
                 return RWKVDecodeWavePlan()
             if (

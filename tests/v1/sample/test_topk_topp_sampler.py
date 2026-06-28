@@ -207,10 +207,22 @@ def test_rapid_sampler_respects_vllm_topk_topp_mask():
     not RAPID_SAMPLER_PLATFORM_SUPPORTED,
     reason="Rapid sampler requires CUDA compute capability >= 7.",
 )
-def test_rapid_sampler_backend_enabled_by_default(monkeypatch: pytest.MonkeyPatch):
-    from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
+def test_rapid_sampler_backend_disabled_by_default(monkeypatch: pytest.MonkeyPatch):
+    from vllm.v1.sample.ops import topk_topp_sampler
 
     monkeypatch.delenv("VLLM_USE_RAPID_SAMPLER", raising=False)
+
+    assert not topk_topp_sampler.rapid_sampler_supported()
+
+
+@pytest.mark.skipif(
+    not RAPID_SAMPLER_PLATFORM_SUPPORTED,
+    reason="Rapid sampler requires CUDA compute capability >= 7.",
+)
+def test_rapid_sampler_backend_enabled_by_env(monkeypatch: pytest.MonkeyPatch):
+    from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
+
+    monkeypatch.setenv("VLLM_USE_RAPID_SAMPLER", "1")
     sampler = TopKTopPSampler()
 
     assert sampler.forward.__name__ == "forward_rapid_cuda"
@@ -272,7 +284,7 @@ def test_rapid_sampler_handles_unfiltered_sampling_without_native_fallback(
             (logits.shape[0],), 4, dtype=torch.int32, device=logits.device
         )
 
-    monkeypatch.delenv("VLLM_USE_RAPID_SAMPLER", raising=False)
+    monkeypatch.setenv("VLLM_USE_RAPID_SAMPLER", "1")
     monkeypatch.setattr(topk_topp_sampler, "rapid_sample", fake_rapid_sample)
     monkeypatch.setattr(
         topk_topp_sampler.TopKTopPSampler,

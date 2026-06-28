@@ -95,7 +95,7 @@ __global__ void __launch_bounds__(CLONE_N, 2) wkv_fp16_v1_clone_kernel(
 
   __shared__ __align__(256) half2 state_smem[CLONE_N][CLONE_N / 2];
 
-  state_ptr += b * C * CLONE_N + h * CLONE_N * CLONE_N;
+  state_ptr += static_cast<int64_t>(b) * C * CLONE_N + h * CLONE_N * CLONE_N;
   constexpr int ldg_size = sizeof(int4) / sizeof(F);
 #pragma unroll
   for (int j0 = 0; j0 < CLONE_N / ldg_size; j0++) {
@@ -233,7 +233,7 @@ __global__ __launch_bounds__(N, 2) void wkv_fp16_v1_exact_kernel(
   const int lane = i % 32;
 
   __shared__ __align__(256) half2 state_smem[N][HALF2_N];
-  state_ptr += b_id * C * N + h * N * N;
+  state_ptr += static_cast<int64_t>(b_id) * C * N + h * N * N;
 
 #pragma unroll
   for (int j0 = 0; j0 < N / LDG_ELEMS; j0++) {

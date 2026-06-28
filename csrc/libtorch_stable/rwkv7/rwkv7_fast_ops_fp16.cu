@@ -12,6 +12,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_fp16.h>
 
+#include <limits>
 #include <vector>
 
 using dtype = at::Half;
@@ -1060,6 +1061,8 @@ at::Tensor tmix_lnx_rkvres_xg_cuda(int B, int T, int C, int H, at::Tensor x,
   assert(C == H * HEAD_SIZE);
   auto out = at::empty_like(x);
   const int64_t bth_size = static_cast<int64_t>(B) * T * H;
+  TORCH_CHECK(bth_size <= static_cast<int64_t>(std::numeric_limits<int>::max()),
+              "B*T*H (", bth_size, ") exceeds INT_MAX; cannot launch kernel");
   auto stream = at::cuda::getCurrentCUDAStream();
   tmix_lnx_rkvres_xg_kernel<<<static_cast<int>(bth_size), HEAD_SIZE, 0,
                               stream>>>(
