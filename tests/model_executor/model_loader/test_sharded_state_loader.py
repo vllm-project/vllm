@@ -12,6 +12,7 @@ import torch
 from huggingface_hub import snapshot_download
 
 from vllm import LLM, SamplingParams
+from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader import ShardedStateLoader
 from vllm.platforms import current_platform
 
@@ -48,6 +49,66 @@ def test_filter_subtensors():
     for key, tensor in filtered_state_dict.items():
         # NOTE: don't use `equal` here, as the tensor might contain NaNs
         assert tensor is state_dict[key]
+
+
+def test_sharded_state_loader_accepts_runai_tunable_params(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.delenv("RUNAI_STREAMER_CONCURRENCY", raising=False)
+    monkeypatch.delenv("RUNAI_STREAMER_MEMORY_LIMIT", raising=False)
+
+    loader = ShardedStateLoader(
+        LoadConfig(
+            load_format="runai_streamer_sharded",
+            model_loader_extra_config={
+                "pattern": "custom-rank-{rank}-part-{part}.safetensors",
+                "concurrency": 16,
+                "memory_limit": 5368709120,
+            },
+        )
+    )
+
+    assert loader.pattern == "custom-rank-{rank}-part-{part}.safetensors"
+    assert os.environ["RUNAI_STREAMER_CONCURRENCY"] == "16"
+    assert os.environ["RUNAI_STREAMER_MEMORY_LIMIT"] == "5368709120"
+
+
+@pytest.mark.parametrize(
+    ("extra_config", "unexpected_key"),
+    [
+        ({"distributed": True}, "distributed"),
+        ({"unexpected": "value"}, "unexpected"),
+    ],
+)
+def test_sharded_state_loader_rejects_unsupported_extra_config(
+    extra_config: dict[str, object],
+    unexpected_key: str,
+):
+    with pytest.raises(ValueError, match=unexpected_key):
+        ShardedStateLoader(
+            LoadConfig(
+                load_format="runai_streamer_sharded",
+                model_loader_extra_config=extra_config,
+            )
+        )
+
+
+def test_sharded_state_loader_rejects_runai_only_tunable_params(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.delenv("RUNAI_STREAMER_CONCURRENCY", raising=False)
+    monkeypatch.delenv("RUNAI_STREAMER_MEMORY_LIMIT", raising=False)
+
+    with pytest.raises(ValueError, match="concurrency"):
+        ShardedStateLoader(
+            LoadConfig(
+                load_format="sharded_state",
+                model_loader_extra_config={"concurrency": 16},
+            )
+        )
+
+    assert "RUNAI_STREAMER_CONCURRENCY" not in os.environ
+    assert "RUNAI_STREAMER_MEMORY_LIMIT" not in os.environ
 
 
 @pytest.fixture(scope="module")
