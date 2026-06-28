@@ -1287,6 +1287,12 @@ class FusedMoEConfig:
     has_bias: bool = False
     is_lora_enabled: bool = False
 
+    # When True, the MoE skips its final cross-rank all-reduce (and the separate
+    # shared-expert reduce), returning the partial per-rank sum. The caller is
+    # then responsible for the reduction (e.g. fusing it into the next RMSNorm).
+    # Only honored on the non-reduced (late-AR) TP path. Default False.
+    skip_final_all_reduce: bool = False
+
     # SwiGLU clamp limit. When set, backends that do not implement the clamp
     # are filtered out by `FusedMoEExperts.is_supported_config` so the oracle
     # cannot silently select one and drop the clamp.

@@ -227,6 +227,7 @@ def sparse_attn_indexer(
     topk_indices_buffer: torch.Tensor,
     skip_k_cache_insert: bool,
     use_fp4_cache: bool = False,
+    skip_topk_buffer_clear: bool = False,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
@@ -303,7 +304,13 @@ def sparse_attn_indexer(
             scale_fmt,
         )
 
-    topk_indices_buffer[: hidden_states.shape[0]] = -1
+    # The buffer must be pre-filled with -1 (the "no token" sentinel) before the
+    # top-k kernels scatter valid indices into it. On the fused deepseek_v32
+    # nvidia path, _fused_norm_rope_kernel already cleared the same
+    # [:num_tokens, :topk] region earlier in this forward, so skip the redundant
+    # fill.
+    if not skip_topk_buffer_clear:
+        topk_indices_buffer[: hidden_states.shape[0]] = -1
     if has_prefill:
         prefill_metadata = attn_metadata_narrowed.prefill
         assert prefill_metadata is not None
@@ -546,6 +553,7 @@ def sparse_attn_indexer_fake(
     topk_indices_buffer: torch.Tensor | None,
     skip_k_cache_insert: bool,
     use_fp4_cache: bool = False,
+    skip_topk_buffer_clear: bool = False,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
