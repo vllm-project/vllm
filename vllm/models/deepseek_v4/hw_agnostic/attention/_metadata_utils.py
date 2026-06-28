@@ -1,18 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Hw_agnostic-local copies of small platform-agnostic metadata helpers.
+"""Local copies of small platform-agnostic metadata helpers.
 
 The hw_agnostic isolation lint forbids imports from
-``vllm.v1.attention.backends.*`` (with no carve-outs after this module
-landed). The helpers below are duplicated from upstream so the
-hw_agnostic builders don't need to reach across that boundary. Keep
-this file in sync with upstream when its public signature changes;
-it is small and stable on purpose.
+``vllm.v1.attention.backends.*``. The helpers below are duplicated from
+upstream so the hw_agnostic builders don't need to reach across that
+boundary. Keep this file in sync with upstream when its public
+signature changes; it is small and stable on purpose.
 """
 
 import torch
 
-from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.model_executor.hw_agnostic.v1.attention.backend import (
+    CommonAttentionMetadata,
+)
 
 
 def split_decodes_and_prefills(

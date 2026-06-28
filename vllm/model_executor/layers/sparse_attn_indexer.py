@@ -27,10 +27,6 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
-from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
-    fp8_mqa_logits_torch,
-    fp8_paged_mqa_logits_torch,
-)
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
@@ -233,23 +229,6 @@ def sparse_attn_indexer(
                     chunk.cu_seqlen_ks,
                     chunk.cu_seqlen_ke,
                 )
-            elif current_platform.is_out_of_tree():
-                # OOT plugins inherit ``_enum=CUDA`` and would otherwise fall
-                # into the DeepGEMM ``fp8_fp4_mqa_logits`` path, whose JIT
-                # cannot produce kernels for the OOT device. The pure-PyTorch
-                # reference from rocm_aiter_mla_sparse.py covers the FP8 case
-                # portably; FP4 has no torch reference yet.
-                if q_scale_slice is not None:
-                    raise RuntimeError(
-                        "OOT fp8_mqa_logits torch fallback does not support FP4 Q"
-                    )
-                logits = fp8_mqa_logits_torch(
-                    q_slice_cast,
-                    (k_quant_cast, k_scale_cast),
-                    weights[chunk.token_start : chunk.token_end],
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
-                )
             else:
                 logits = fp8_fp4_mqa_logits(
                     (q_slice_cast, q_scale_slice),
@@ -339,24 +318,6 @@ def sparse_attn_indexer(
                 seq_lens_xpu,
                 decode_metadata.block_table,
                 decode_metadata.schedule_metadata,
-                max_model_len,
-            )
-        elif current_platform.is_out_of_tree():
-            # OOT plugins inherit ``_enum=CUDA`` and would otherwise fall
-            # into the DeepGEMM ``fp8_fp4_paged_mqa_logits`` path, whose
-            # JIT cannot produce kernels for the OOT device. The pure-PyTorch
-            # reference from rocm_aiter_mla_sparse.py covers the FP8 case
-            # portably; FP4 has no torch reference yet.
-            if padded_q_scale is not None:
-                raise RuntimeError(
-                    "OOT fp8_paged_mqa_logits torch fallback does not support FP4 Q"
-                )
-            logits = fp8_paged_mqa_logits_torch(
-                padded_q_quant_cast,
-                kv_cache,
-                weights[:num_padded_tokens],
-                seq_lens,
-                decode_metadata.block_table,
                 max_model_len,
             )
         else:

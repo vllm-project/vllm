@@ -50,9 +50,12 @@ from vllm.models.deepseek_v4.hw_agnostic.attention.sparse_mla import (
     DeepseekV4HWAgnosticMetadata,
 )
 from vllm.models.deepseek_v4.hw_agnostic.attention.sparse_swa import DeepseekV4SWACache
+from vllm.model_executor.hw_agnostic.v1.attention.backend import AttentionBackend
+from vllm.model_executor.hw_agnostic.v1.kv_cache_interface import (
+    KVCacheSpec,
+    MLAAttentionSpec,
+)
 from vllm.utils.torch_utils import direct_register_custom_op
-from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
@@ -119,6 +122,12 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         self.head_dim = head_dim
         self.scale = scale
 
+        # padded_heads is the head count of the o_padded / q workspaces that
+        # cross the PluggableLayer boundary. OOT plugins that override
+        # ``attention_impl`` to call FlashMLA / TRTLLM-gen sparse kernels
+        # require h_q in {64, 128}; the agnostic Triton kernel accepts any
+        # count and ignores the padding. Keep the buffer shape stable so
+        # OOT subclasses do not need to special-case head counts.
         if num_heads <= 64:
             self.padded_heads = 64
         elif num_heads <= 128:
@@ -407,9 +416,6 @@ direct_register_custom_op(
 
 
 class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
-    # FlashMLA FP8 sparse only supports 64 or 128 heads
-    SUPPORTED_HEAD_COUNTS = (64, 128)
-
     def __init__(
         self,
         num_heads: int,
@@ -447,19 +453,6 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         self.topk_indices_buffer = topk_indices_buffer
 
         self.prefix = prefix  # consumed by compressor
-
-        if num_heads not in self.SUPPORTED_HEAD_COUNTS:
-            if num_heads < 64:
-                self.padded_heads = 64
-            elif num_heads < 128:
-                self.padded_heads = 128
-            else:
-                raise ValueError(
-                    f"DeepseekV4MLAAttention does not support {num_heads} heads. "
-                    f"Supported: <= 128 (will be padded to 64 or 128)"
-                )
-        else:
-            self.padded_heads = num_heads
 
         assert attn_sink is not None
         self.attn_sink: torch.Tensor = attn_sink
@@ -507,7 +500,9 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             dtype=torch.uint8,
             compress_ratio=self.compress_ratio,
             cache_dtype_str=self.kv_cache_dtype,
-            alignment=576,  # FlashMLA requires 576B alignment
+            # fp8_ds_mla page payload (584B/token) rounded up to 576B
+            # alignment; the Triton dequant kernel reads at the same stride.
+            alignment=576,
             model_version="deepseek_v4",
         )
 
@@ -764,7 +759,10 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
             head_size=self.head_dim,
             dtype=self.dtype,
             compress_ratio=self.compress_ratio,
-            alignment=576,  # FlashMLA alignment; lets indexer + compressor pages pack.
+            # Match the fp8_ds_mla page alignment so the indexer's K cache
+            # and the compressor's state pages share contiguous physical
+            # blocks.
+            alignment=576,
         )
 
     def forward(self): ...

@@ -15,23 +15,23 @@ from vllm.model_executor.hw_agnostic.layers.layernorm import RMSNorm
 from vllm.model_executor.hw_agnostic.layers.linear import (
     MergedColumnParallelLinear,
 )
-from vllm.models.deepseek_v4.hw_agnostic.attention.kernels import (
-    compress_norm_rope_store_triton,
-    save_partial_states,
-)
-from vllm.platforms import current_platform
-from vllm.v1.attention.backend import (
+from vllm.model_executor.hw_agnostic.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.kv_cache_interface import (
+from vllm.model_executor.hw_agnostic.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
 )
+from vllm.models.deepseek_v4.hw_agnostic.attention.kernels import (
+    compress_norm_rope_store_triton,
+    save_partial_states,
+)
+from vllm.platforms import current_platform
 
 
 class CompressorBackend(AttentionBackend):
@@ -148,17 +148,17 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
             raise ValueError(f"Invalid compress ratio: {compress_ratio}")
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        # FlashMLA's UE8M0 paged layout needs 576B alignment; the FlashInfer
-        # full-cache path shares state pages with contiguous KV pages, so
-        # padding would break page matching.
-        is_flashmla = vllm_config.cache_config.cache_dtype == "fp8_ds_mla"
+        # fp8_ds_mla pages carry 584B of payload per token padded to 576B
+        # alignment; the compressor's state pages share the physical
+        # allocation with KV pages so they must use the same alignment.
+        uses_fp8_ds_mla_layout = vllm_config.cache_config.cache_dtype == "fp8_ds_mla"
         return SlidingWindowMLASpec(  # only has one vector instead of K + V
             block_size=self.block_size,
             num_kv_heads=1,
             head_size=self.state_dim,
             dtype=self.dtype,
             sliding_window=self.sliding_window,
-            alignment=576 if is_flashmla else None,
+            alignment=576 if uses_fp8_ds_mla_layout else None,
         )
 
     def forward(self): ...

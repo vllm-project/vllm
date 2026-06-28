@@ -92,7 +92,8 @@ CHECK_IMPORTS = {
             r"|model_executor\.models(?!\.utils\b)"
             r"|model_executor\.model_loader\.reload\.layerwise\b"
             r"|models\.[^.]+(?!\.hw_agnostic\b)"
-            r"|v1\.attention\.backends\b"
+            r"|v1\.attention\.backends?\b"
+            r"|v1\.kv_cache_interface\b"
             r")"
             r"(?:\.|\s+import\b)"
         ),
@@ -114,6 +115,11 @@ CHECK_IMPORTS = {
             "vllm/model_executor/hw_agnostic/quantization/quant_keys.py",
             "vllm/model_executor/hw_agnostic/quantization/input_quant_fp8.py",
             "vllm/model_executor/hw_agnostic/quantization/quant_activation.py",
+            # Attention-backend / KV-cache-spec shims: the V1 framework
+            # keys group identity on the same class object, so these
+            # re-exports must resolve to the upstream classes verbatim.
+            "vllm/model_executor/hw_agnostic/v1/attention/backend.py",
+            "vllm/model_executor/hw_agnostic/v1/kv_cache_interface.py",
         },
     ),
     "hw_agnostic_no_vendor_utils": ForbiddenImport(
@@ -131,6 +137,32 @@ CHECK_IMPORTS = {
         applies_to=re.compile(
             r"^vllm/(?:models/[^/]+/hw_agnostic|model_executor/hw_agnostic)"
             r"/.*\.py$"
+        ),
+    ),
+    "protected_upstream_no_oot_leak": ForbiddenImport(
+        # The principle: HW-specific attention authors must be able to
+        # change these files without breaking the hw-agnostic path. The
+        # corollary: these files must not contain hw-agnostic carve-outs
+        # ("is_out_of_tree" branches) and must not import from any
+        # hw_agnostic tree. The agnostic counterpart lives under
+        # vllm/models/deepseek_v4/hw_agnostic/attention/sparse_attn_indexer.py
+        # (registered as torch.ops.vllm.dsv4_sparse_attn_indexer) so no
+        # OOT branch is needed here.
+        pattern=(
+            r"(?:"
+            r"current_platform\.is_out_of_tree\("
+            r"|^\s*from\s+vllm\.(?:model_executor|models\.[^.]+)\.hw_agnostic\b"
+            r"|^\s*import\s+vllm\.(?:model_executor|models\.[^.]+)\.hw_agnostic\b"
+            r")"
+        ),
+        tip=(
+            "Protected upstream attention files must not depend on "
+            "is_out_of_tree() branches or import from any hw_agnostic "
+            "subtree. The agnostic path keeps its own implementation; "
+            "do not couple the two."
+        ),
+        applies_to=re.compile(
+            r"^vllm/model_executor/layers/sparse_attn_indexer\.py$"
         ),
     ),
 }
@@ -321,6 +353,28 @@ def test_regex():
         ("from vllm.v1.attention.backends.mla.indexer import X", True),
         ("from vllm.v1.attention.backends.mla.sparse_swa import Y", True),
         ("from vllm.v1.attention.backends.utils import split_decodes", True),
+        # ``v1.attention.backend`` (singular) and ``v1.kv_cache_interface``
+        # carry the abstract framework types. They are reached only
+        # through the re-export shims at
+        # ``hw_agnostic/v1/attention/backend.py`` and
+        # ``hw_agnostic/v1/kv_cache_interface.py``; direct imports from
+        # the agnostic tree are forbidden so the HW-specific framework
+        # path can evolve without touching us.
+        ("from vllm.v1.attention.backend import AttentionBackend", True),
+        ("from vllm.v1.attention.backend import CommonAttentionMetadata", True),
+        ("from vllm.v1.kv_cache_interface import KVCacheSpec", True),
+        ("from vllm.v1.kv_cache_interface import MLAAttentionSpec", True),
+        # The shim itself is exempt (see allowed_files).
+        (
+            "from vllm.model_executor.hw_agnostic.v1.attention.backend "
+            "import AttentionBackend",
+            False,
+        ),
+        (
+            "from vllm.model_executor.hw_agnostic.v1.kv_cache_interface "
+            "import MLAAttentionSpec",
+            False,
+        ),
         ("    from vllm.model_executor.layers.activation import SiluAndMul", True),
         ("from vllm.model_executor.custom_op import PluggableLayer", False),
         ("from vllm.model_executor.custom_op import CustomOp", False),
@@ -416,8 +470,6 @@ def test_regex():
             "default_weight_loader",
             False,
         ),
-        ("from vllm.v1.attention.backend import AttentionBackend", False),
-        ("from vllm.v1.kv_cache_interface import KVCacheSpec", False),
         ("from vllm.v1.worker.workspace import current_workspace_manager", False),
         ("from vllm.config import VllmConfig", False),
         ("from vllm.distributed import get_pp_group", False),
@@ -463,6 +515,39 @@ def test_regex():
             f"no_vendor_utils test case {i} failed: '{line}' "
             f"(expected {should_match}, got {result})"
         )
+
+    protected_upstream_cases = [
+        ("if current_platform.is_out_of_tree():", True),
+        ("        elif current_platform.is_out_of_tree():", True),
+        (
+            "from vllm.model_executor.hw_agnostic.v1.attention.backend import X",
+            True,
+        ),
+        (
+            "from vllm.models.deepseek_v4.hw_agnostic.attention.sparse_mla "
+            "import X",
+            True,
+        ),
+        ("import vllm.model_executor.hw_agnostic", True),
+        ("if current_platform.is_cuda():", False),
+        ("from vllm.platforms import current_platform", False),
+        ("# is_out_of_tree() — historical note", False),
+    ]
+    protected_rule = CHECK_IMPORTS["protected_upstream_no_oot_leak"]
+    protected_pattern = re.compile(protected_rule.pattern, re.MULTILINE)
+    for i, (line, should_match) in enumerate(protected_upstream_cases):
+        result = bool(protected_pattern.search(line))
+        assert result == should_match, (
+            f"protected_upstream test case {i} failed: '{line}' "
+            f"(expected {should_match}, got {result})"
+        )
+    assert protected_rule.applies_to is not None
+    assert protected_rule.applies_to.search(
+        "vllm/model_executor/layers/sparse_attn_indexer.py"
+    )
+    assert not protected_rule.applies_to.search(
+        "vllm/models/deepseek_v4/hw_agnostic/attention/sparse_attn_indexer.py"
+    )
 
     assert rule.applies_to is not None
     accept_paths = [

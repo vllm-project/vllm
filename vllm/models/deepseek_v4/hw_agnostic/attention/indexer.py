@@ -16,6 +16,17 @@ import torch
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.hw_agnostic.v1.attention.backend import (
+    AttentionBackend,
+    AttentionCGSupport,
+    AttentionMetadataBuilder,
+    CommonAttentionMetadata,
+    MultipleOf,
+)
+from vllm.model_executor.hw_agnostic.v1.kv_cache_interface import (
+    AttentionSpec,
+    MLAAttentionSpec,
+)
 from vllm.models.deepseek_v4.hw_agnostic.attention._metadata_utils import (
     split_decodes_and_prefills,
 )
@@ -24,14 +35,6 @@ from vllm.models.deepseek_v4.hw_agnostic.attention.sparse_mla import (
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.backend import (
-    AttentionBackend,
-    AttentionCGSupport,
-    AttentionMetadataBuilder,
-    CommonAttentionMetadata,
-    MultipleOf,
-)
-from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 from vllm.v1.worker.cp_utils import get_total_cp_world_size
 
 logger = init_logger(__name__)

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import ClassVar, cast
 
 import torch
 
@@ -9,46 +9,22 @@ from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.model_executor.hw_agnostic.layers.attention_layer_base import (
     AttentionLayerBase,
 )
-from vllm.models.deepseek_v4.hw_agnostic.attention._metadata_utils import (
-    split_decodes_and_prefills,
-)
-from vllm.triton_utils import tl, triton
-from vllm.v1.attention.backend import (
+from vllm.model_executor.hw_agnostic.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.kv_cache_interface import (
+from vllm.model_executor.hw_agnostic.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
 )
-
-if TYPE_CHECKING:
-    # Forward-declared in the dataclass; never imported at runtime.
-    from typing import Any
-
-    FlashMLASchedMeta = Any
-
-# Decode-layer kinds keyed by compress_ratio.
-_LAYER_TYPE_SWAONLY = "swaonly"
-_LAYER_TYPE_C4A = "c4a"
-_LAYER_TYPE_C128A = "c128a"
-
-
-def _layer_type_for(compress_ratio: int) -> str:
-    if compress_ratio <= 1:
-        return _LAYER_TYPE_SWAONLY
-    if compress_ratio == 4:
-        return _LAYER_TYPE_C4A
-    if compress_ratio == 128:
-        return _LAYER_TYPE_C128A
-    raise ValueError(
-        f"Unsupported DeepseekV4 compress_ratio={compress_ratio}; "
-        "expected 1, 4, or 128."
-    )
+from vllm.models.deepseek_v4.hw_agnostic.attention._metadata_utils import (
+    split_decodes_and_prefills,
+)
+from vllm.triton_utils import tl, triton
 
 
 class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
@@ -77,7 +53,10 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
         assert self.dtype in (torch.uint8, torch.bfloat16, torch.float8_e4m3fn)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        is_flashmla = self.cache_config.cache_dtype == "fp8_ds_mla"
+        # fp8_ds_mla pages carry 584B of payload per token (448B fp8 NoPE
+        # + 128B bf16 RoPE + 8B UE8M0 scale); padded to 576B alignment.
+        # The Triton dequant kernel reads pages at the same stride.
+        uses_fp8_ds_mla_layout = self.cache_config.cache_dtype == "fp8_ds_mla"
         return SlidingWindowMLASpec(
             block_size=self.block_size,
             num_kv_heads=1,
@@ -85,7 +64,7 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
             dtype=self.dtype,
             sliding_window=self.window_size,
             cache_dtype_str=self.cache_config.cache_dtype,
-            alignment=576 if is_flashmla else None,
+            alignment=576 if uses_fp8_ds_mla_layout else None,
             model_version="deepseek_v4",
         )
 
@@ -159,11 +138,6 @@ class DeepseekSparseSWAMetadata:
     prefill_seq_lens: torch.Tensor | None = None
     prefill_gather_lens: torch.Tensor | None = None
 
-    # Always None here; OOT FlashMLA-decode plugins populate them.
-    tile_sched_swaonly: object | None = None
-    tile_sched_c4a: object | None = None
-    tile_sched_c128a: object | None = None
-
 
 class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
     """Builds metadata for DeepseekV4 SWA cache."""
@@ -196,14 +170,6 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         hf_config = self.vllm_config.model_config.hf_config
         assert hasattr(hf_config, "sliding_window")
         self.window_size = hf_config.sliding_window
-
-        # Detect which DeepseekV4 layer types this model uses so we only build a
-        # FlashMLA tile-scheduler plan for types that will actually be called.
-        # Models without compress_ratios (pure SWA) fall back to swaonly.
-        compress_ratios = getattr(hf_config, "compress_ratios", None) or [1]
-        self._layer_types: set[str] = set()
-        for ratio in compress_ratios:
-            self._layer_types.add(_layer_type_for(int(ratio)))
 
         max_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
         self.token_to_req_indices = torch.zeros(
@@ -285,9 +251,6 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             num_prefills=num_prefills,
             num_decode_tokens=num_decode_tokens,
             num_prefill_tokens=num_prefill_tokens,
-            tile_sched_swaonly=None,
-            tile_sched_c4a=None,
-            tile_sched_c128a=None,
             **deepseek_v4_fields,
         )
 

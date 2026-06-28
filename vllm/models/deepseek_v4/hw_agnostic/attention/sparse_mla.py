@@ -7,12 +7,7 @@ import numpy as np
 import torch
 
 from vllm.config import VllmConfig
-from vllm.models.deepseek_v4.hw_agnostic.attention._metadata_utils import (
-    split_decodes_and_prefills,
-)
-from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.backend import (
+from vllm.model_executor.hw_agnostic.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
     AttentionMetadata,
@@ -20,7 +15,12 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.model_executor.hw_agnostic.v1.kv_cache_interface import AttentionSpec
+from vllm.models.deepseek_v4.hw_agnostic.attention._metadata_utils import (
+    split_decodes_and_prefills,
+)
+from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import cdiv
 
 # FlashMLA asserts extra_topk % B_TOPK == 0; 128 covers h_q in {64, 128}.
 _C128A_TOPK_ALIGNMENT = 128
