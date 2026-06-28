@@ -236,6 +236,20 @@ def test_nvfp4_kv_cache_split_views_mixed_packed_layout() -> None:
     )
 
 
+def test_nvfp4_kv_cache_split_views_rejects_incompatible_strides() -> None:
+    head_size = 64
+    full_dim = nvfp4_kv_cache_full_dim(head_size)
+    storage = torch.empty(1000, dtype=torch.uint8)
+    kv_side = torch.as_strided(
+        storage,
+        (2, 4, 3, full_dim),
+        (500, 100, 37, 1),
+    )
+
+    with pytest.raises(ValueError, match="strides are not compatible"):
+        nvfp4_kv_cache_split_views(kv_side, head_size)
+
+
 def test_flashinfer_impl_caches_nvfp4_slot_mapping_writer(monkeypatch) -> None:
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
 

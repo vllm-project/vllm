@@ -461,13 +461,27 @@ def _nvfp4_split_data_scale(
     # Derive inner strides from the kv_side strides, scaling by the
     # ratio of the target dim to full_dim.  This preserves the physical
     # layout (NHD vs HND) encoded in the input tensor's strides.
-    s1 = kv_side.stride(1) * data_dim // full_dim
-    s2 = kv_side.stride(2) * data_dim // full_dim
+    stride_1 = kv_side.stride(1)
+    stride_2 = kv_side.stride(2)
+    if (
+        stride_1 * data_dim % full_dim != 0
+        or stride_2 * data_dim % full_dim != 0
+        or stride_1 * scale_dim % full_dim != 0
+        or stride_2 * scale_dim % full_dim != 0
+    ):
+        raise ValueError(
+            "NVFP4 KV cache strides are not compatible with packed "
+            f"data/scale split: strides={kv_side.stride()}, "
+            f"full_dim={full_dim}, data_dim={data_dim}, "
+            f"scale_dim={scale_dim}"
+        )
+    s1 = stride_1 * data_dim // full_dim
+    s2 = stride_2 * data_dim // full_dim
     data_shape = (num_pages, dim_1, dim_2, data_dim)
     data_strides = (page_bytes, s1, s2, 1)
 
-    s1_s = kv_side.stride(1) * scale_dim // full_dim
-    s2_s = kv_side.stride(2) * scale_dim // full_dim
+    s1_s = stride_1 * scale_dim // full_dim
+    s2_s = stride_2 * scale_dim // full_dim
     scale_shape = (num_pages, dim_1, dim_2, scale_dim)
     scale_strides = (page_bytes, s1_s, s2_s, 1)
 
