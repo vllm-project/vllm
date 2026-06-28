@@ -179,7 +179,7 @@ FusedMoEExpertsModular performs the core of the FusedMoE operations. The various
 
 * maybe_make_prepare_finalize,
 * select_gemm_impl, and
-* init_prepare_finalize
+* maybe_init_modular_kernel
 
 #### maybe_make_prepare_finalize
 
@@ -200,11 +200,12 @@ Please refer to the implementations in,
 * `ModelOptNvFp4FusedMoE`
 derived classes.
 
-#### init_prepare_finalize
+#### maybe_init_modular_kernel
 
-Based on the input and env settings, the `init_prepare_finalize` method creates the appropriate `FusedMoEPrepareAndFinalizeModular` object. The method then queries `select_gemm_impl` for the appropriate `FusedMoEExpertsModular` object and builds the `FusedMoEModularKernel` object
+Based on the input and env settings, the `maybe_init_modular_kernel` method creates the appropriate `FusedMoEPrepareAndFinalizeModular` object. The method then queries `select_gemm_impl` for the appropriate `FusedMoEExpertsModular` object and builds the `FusedMoEModularKernel` object
 
-Please take a look at [init_prepare_finalize](https://github.com/vllm-project/vllm/blob/1cbf951ba272c230823b947631065b826409fa62/vllm/model_executor/layers/fused_moe/layer.py#L188).
+Please take a look at [maybe_init_modular_kernel]
+(<https://github.com/neuralmagic/vllm/blob/a0621a365ab48caf7f2bc6ed73ff982eabdf6fe5/vllm/model_executor/layers/fused_moe/layer.py#L246>).
 **Important**: The `FusedMoEMethodBase` derived classes use the `FusedMoEMethodBase::fused_experts` object in their `apply` methods. When settings permit the construction of a valid `FusedMoEModularKernel` object, we override `FusedMoEMethodBase::fused_experts` with it. This essentially makes the derived classes agnostic to what FusedMoE implementation is used.
 
 ### How To Unit Test
