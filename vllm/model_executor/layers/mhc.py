@@ -27,6 +27,7 @@ def _has_tilelang_mhc() -> bool:
 HAS_TILELANG_MHC = _has_tilelang_mhc()
 
 
+
 # --8<-- [start:mhc_pre]
 @CustomOp.register("mhc_pre")
 class MHCPreOp(CustomOp):
@@ -87,25 +88,27 @@ class MHCPreOp(CustomOp):
         norm_weight: torch.Tensor | None = None,
         norm_eps: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # TODO: Reenable aiter after we are at the aiter
-        # version that has this bugfix
-        # https://github.com/ROCm/aiter/commit/b639cb63bcac4672dce33a731fad042a65cb3649
-        # It has accuracy problem at large number of tokens.
-        # hidden_size = residual.shape[-1]
-        # if hidden_size % 256 == 0:
-        #     return torch.ops.vllm.mhc_pre_aiter(
-        #         residual,
-        #         fn,
-        #         hc_scale,
-        #         hc_base,
-        #         rms_eps,
-        #         hc_pre_eps,
-        #         hc_sinkhorn_eps,
-        #         hc_post_mult_value,
-        #         sinkhorn_repeat,
-        #     )
-        # else:
-        if HAS_TILELANG_MHC:
+        # mHC backend dispatch on ROCm (forward_hip): aiter pre/post kernels (default;
+        # require a hidden size that is a multiple of 256, and aiter >= 0.1.14 for the
+        # sqrsum race-condition fix in ``mhc_pre_gemm_sqrsum_kernel``, commit b639cb6)
+        # -> tilelang fused mHC -> torch/triton reference.
+        # The aiter mhc_pre kernel only supports hidden sizes that are a
+        # multiple of 256. Requires aiter >= 0.1.14 for correct results at
+        # large token counts (sqrsum race-condition fix, commit b639cb6).
+        hidden_size = residual.shape[-1]
+        if hidden_size % 256 == 0:
+            return torch.ops.vllm.mhc_pre_aiter(
+                residual,
+                fn,
+                hc_scale,
+                hc_base,
+                rms_eps,
+                hc_pre_eps,
+                hc_sinkhorn_eps,
+                hc_post_mult_value,
+                sinkhorn_repeat,
+            )
+        elif HAS_TILELANG_MHC:
             return torch.ops.vllm.mhc_pre_tilelang(
                 residual,
                 fn,
@@ -227,19 +230,17 @@ class MHCPostOp(CustomOp):
         post_layer_mix: torch.Tensor,
         comb_res_mix: torch.Tensor,
     ) -> torch.Tensor:
-        # TODO: Reenable aiter after we are at the aiter
-        # version that has this bugfix
-        # https://github.com/ROCm/aiter/commit/b639cb63bcac4672dce33a731fad042a65cb3649
-        # It has accuracy problem at large number of tokens.
-        # hidden_size = residual.shape[-1]
-        # if hidden_size % 256 == 0:
-        #     return torch.ops.vllm.mhc_post_aiter(
-        #         x,
-        #         residual,
-        #         post_layer_mix,
-        #         comb_res_mix,
-        #     )
-        # else:
+        # The aiter mhc_post kernel only supports hidden sizes that are a
+        # multiple of 256. Requires aiter >= 0.1.14 for correct results at
+        # large token counts (sqrsum race-condition fix, commit b639cb6).
+        hidden_size = residual.shape[-1]
+        if hidden_size % 256 == 0:
+            return torch.ops.vllm.mhc_post_aiter(
+                x,
+                residual,
+                post_layer_mix,
+                comb_res_mix,
+            )
         if HAS_TILELANG_MHC:
             return torch.ops.vllm.mhc_post_tilelang(
                 x, residual, post_layer_mix, comb_res_mix
