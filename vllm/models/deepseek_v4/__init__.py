@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DeepSeek V4 model — entry point.
 
-The actual implementation lives under ``nvidia/``, ``amd/``, etc. ; 
-this module picks the right one for the current platform and 
-re-exports the public classes used by the model registry and 
+The actual implementation lives under ``nvidia/``, ``amd/``, etc. ;
+this module picks the right one for the current platform and
+re-exports the public classes used by the model registry and
 quantization config lookup.
 """
 
