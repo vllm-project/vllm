@@ -2354,6 +2354,7 @@ class EngineArgs:
             optimization_level=self.optimization_level,
             performance_mode=self.performance_mode,
             weight_transfer_config=self.weight_transfer_config,
+            afd_config=self.afd_config,
             shutdown_timeout=self.shutdown_timeout,
         )
 

@@ -5,7 +5,7 @@ import time
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -181,6 +181,11 @@ class ForwardContext:
     # into the graph. Otherwise, the moe custom ops will pop a string from this list.
     all_moe_layers: list[str] | None = None
     moe_layer_index: int = 0
+
+    afd_metadata: "AFDMetadata | None" = None
+    # AFD communication stream and event for async overlap
+    afd_comm_event: Any | None = None
+    afd_comm_stream: Any | None = None
 
     additional_kwargs: dict[str, Any] = field(default_factory=dict)
 

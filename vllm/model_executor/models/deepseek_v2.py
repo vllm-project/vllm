@@ -27,6 +27,7 @@
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
+from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
@@ -35,7 +36,13 @@ from transformers import DeepseekV2Config, DeepseekV3Config
 import vllm._custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ParallelConfig, VllmConfig, get_current_vllm_config
+from vllm.config import (
+    AFDConfig,
+    CacheConfig,
+    ParallelConfig,
+    VllmConfig,
+    get_current_vllm_config,
+)
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -43,6 +50,10 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
+from vllm.distributed.afd_transfer.afd_connector.metadata import (
+    AFDConnectorMetadata,
+)
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention, RSWAAttention
@@ -114,6 +125,9 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+if TYPE_CHECKING:
+    from vllm.forward_context import AFDMetadata
 
 
 class DeepseekAttention(nn.Module):
@@ -264,6 +278,7 @@ class DeepseekV2MoE(nn.Module):
         parallel_config: ParallelConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        is_mtp=False,
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -285,17 +300,29 @@ class DeepseekV2MoE(nn.Module):
                 "Only silu is supported for now."
             )
 
-        self.gate = GateLinear(
-            config.hidden_size,
-            config.n_routed_experts,
-            prefix=f"{prefix}.gate",
-        )
-        if getattr(config, "topk_method", None) == "noaux_tc":
-            self.gate.e_score_correction_bias = nn.Parameter(
-                torch.empty(config.n_routed_experts, dtype=torch.float32)
+        vllm_config = get_current_vllm_config()
+        self.afd_config = getattr(vllm_config, "afd_config", None)
+        if (
+            self.afd_config is None
+            or not self.afd_config.compute_gate_on_attention
+            or is_mtp
+        ):
+            self.gate = GateLinear(
+                config.hidden_size,
+                config.n_routed_experts,
+                prefix=f"{prefix}.gate",
             )
+            if getattr(config, "topk_method", None) == "noaux_tc":
+                self.gate.e_score_correction_bias = nn.Parameter(
+                    torch.empty(config.n_routed_experts, dtype=torch.float32)
+                )
+            else:
+                self.gate.e_score_correction_bias = None
         else:
-            self.gate.e_score_correction_bias = None
+            self.gate = None
+        self.connector_name = (
+            self.afd_config.afd_connector if self.afd_config is not None else None
+        )
 
         # Load balancing settings.
         eplb_config = parallel_config.eplb_config
@@ -317,6 +344,7 @@ class DeepseekV2MoE(nn.Module):
         )
         if (
             self.is_rocm_aiter_moe_enabled
+            and self.gate is not None
             and self.gate.e_score_correction_bias is not None
         ):
             # Accumulates in fp32; avoids bf16->fp32 cast.
@@ -354,18 +382,23 @@ class DeepseekV2MoE(nn.Module):
             # aiter applies routed_scaling_factor internally
             routed_scaling_factor=self.routed_scaling_factor,
             apply_routed_scale_to_output=not self.is_rocm_aiter_moe_enabled,
-            e_score_correction_bias=self.gate.e_score_correction_bias,
+            e_score_correction_bias=self.gate.e_score_correction_bias
+            if self.gate is not None
+            else None,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
             n_shared_experts=config.n_shared_experts
             if self.is_fusion_moe_shared_experts_enabled
             else None,
-            router_logits_dtype=self.gate.out_dtype,
+            router_logits_dtype=self.gate.out_dtype
+            if self.gate is not None
+            else None,
         )
 
         if (
             self.is_rocm_aiter_moe_enabled
+            and self.gate is not None
             and self.gate.e_score_correction_bias is not None
         ):
             self.gate.e_score_correction_bias.data = (
@@ -392,6 +425,66 @@ class DeepseekV2MoE(nn.Module):
             final_hidden_states = self.experts(
                 hidden_states=hidden_states, router_logits=router_logits
             )
+
+        if self.is_sequence_parallel:
+            final_hidden_states = tensor_model_parallel_all_gather(
+                final_hidden_states, 0
+            )
+            final_hidden_states = final_hidden_states[:num_tokens]
+
+        return final_hidden_states.view(num_tokens, hidden_dim)
+
+    def afd_forward(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor | None = None,
+        group_list: torch.Tensor | None = None,
+        dynamic_scales: torch.Tensor | None = None,
+        topk_weights: torch.Tensor | None = None,
+        topk_ids: torch.Tensor | None = None,
+        row_idx: torch.Tensor | None = None,
+        x_active_mask: torch.Tensor | None = None,
+        cam_p2p_ep_name: str | None = "",
+    ) -> torch.Tensor:
+        num_tokens, hidden_dim = hidden_states.shape
+
+        forward_ctx = get_forward_context()
+        afd_connector = forward_ctx.afd_metadata.afd_connector
+        fused_moe_out = afd_connector.compute_moe(
+            experts=self.experts,
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            group_list=group_list,
+            dynamic_scales=dynamic_scales,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            row_idx=row_idx,
+            x_active_mask=x_active_mask,
+            cam_p2p_ep_name=cam_p2p_ep_name,
+            connector_name=self.connector_name,
+        )
+
+        if isinstance(fused_moe_out, tuple):
+            if self.shared_experts is not None:
+                shared_output, final_hidden_states = fused_moe_out
+            else:
+                shared_output = None
+                final_hidden_states = fused_moe_out[-1]
+        else:
+            shared_output = None
+            final_hidden_states = fused_moe_out
+
+        # Fix FP16 overflow
+        # See DeepseekV2DecoderLayer for more details.
+        if hidden_states.dtype != torch.float16:
+            final_hidden_states *= self.routed_scaling_factor
+        elif self.shared_experts is not None:
+            assert shared_output is not None
+            shared_output *= 1.0 / self.routed_scaling_factor
+
+        if self.shared_experts is not None:
+            assert shared_output is not None
+            final_hidden_states += shared_output
 
         if self.is_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(
@@ -1159,6 +1252,33 @@ class DeepseekV2DecoderLayer(nn.Module):
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
 
+        self.afd_config = vllm_config.afd_config
+        self.vllm_config = vllm_config
+        self.config = config
+        self.afd_role = (
+            self.afd_config.afd_role if self.afd_config is not None else None
+        )
+        self.connector_name = (
+            self.afd_config.afd_connector
+            if self.afd_config is not None
+            else None
+        )
+        self.top_k = getattr(config, "num_experts_per_tok", 8)
+        self.enable_force_load_balance: bool = bool(
+            self.vllm_config.additional_config.get(
+                "enable_force_load_balance", False
+            )
+        )
+        self.force_load_balance_topn_per_rank = int(
+            self.vllm_config.additional_config.get(
+                "force_load_balance_topn_per_rank", 0
+            )
+        )
+        self.max_force_lb_tokens = getattr(
+            vllm_config.scheduler_config, "max_num_batched_tokens", 128
+        )
+        self.force_lb_fake_topk_buffer: torch.Tensor | None = None
+
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         moe_layer_freq = getattr(config, "moe_layer_freq", 1)
@@ -1166,6 +1286,8 @@ class DeepseekV2DecoderLayer(nn.Module):
         # with the layer's index.
         layer_idx = int(prefix.split(sep=".")[-1])
         self.layer_idx = layer_idx
+        self.is_mtp_layer = layer_idx >= config.num_hidden_layers
+        self.first_k_dense_replace = config.first_k_dense_replace
 
         # verify MLA attention specific fields
         qk_nope_head_dim = getattr(config, "qk_nope_head_dim", 0)
@@ -1184,47 +1306,210 @@ class DeepseekV2DecoderLayer(nn.Module):
             attn_cls = DeepseekV2MLAAttention
         else:
             attn_cls = DeepseekV2Attention
-        self.self_attn = attn_cls(
-            vllm_config=vllm_config,
-            config=config,
-            hidden_size=self.hidden_size,
-            num_heads=config.num_attention_heads,
-            qk_nope_head_dim=qk_nope_head_dim,
-            qk_rope_head_dim=qk_rope_head_dim,
-            v_head_dim=v_head_dim,
-            q_lora_rank=config.q_lora_rank if hasattr(config, "q_lora_rank") else None,
-            kv_lora_rank=kv_lora_rank,
-            max_position_embeddings=max_position_embeddings,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.self_attn",
-            topk_indices_buffer=topk_indices_buffer,
-        )
+        # Role-based module construction: attention role only builds attn,
+        # ffn role only builds mlp. MTP layers always build both.
+        if (
+            self.afd_role is None
+            or self.afd_role == "attention"
+            or self.is_mtp_layer
+        ):
+            self.self_attn = attn_cls(
+                vllm_config=vllm_config,
+                config=config,
+                hidden_size=self.hidden_size,
+                num_heads=config.num_attention_heads,
+                qk_nope_head_dim=qk_nope_head_dim,
+                qk_rope_head_dim=qk_rope_head_dim,
+                v_head_dim=v_head_dim,
+                q_lora_rank=config.q_lora_rank
+                if hasattr(config, "q_lora_rank")
+                else None,
+                kv_lora_rank=kv_lora_rank,
+                max_position_embeddings=max_position_embeddings,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.self_attn",
+                topk_indices_buffer=topk_indices_buffer,
+            )
 
         if (
-            config.n_routed_experts is not None
-            and layer_idx >= config.first_k_dense_replace
-            and layer_idx % moe_layer_freq == 0
+            self.afd_role is None
+            or self.afd_role == "ffn"
+            or self.is_mtp_layer
         ):
-            self.mlp = DeepseekV2MoE(
-                config=config,
-                parallel_config=parallel_config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.mlp",
+            if (
+                config.n_routed_experts is not None
+                and layer_idx >= config.first_k_dense_replace
+                and layer_idx % moe_layer_freq == 0
+            ):
+                self.mlp = DeepseekV2MoE(
+                    config=config,
+                    parallel_config=parallel_config,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.mlp",
+                    is_mtp=self.is_mtp_layer,
+                )
+            else:
+                self.mlp = DeepseekV2MLP(
+                    hidden_size=config.hidden_size,
+                    intermediate_size=config.intermediate_size,
+                    hidden_act=config.hidden_act,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.mlp",
+                )
+
+        # On the attention side, when compute_gate_on_attention is enabled,
+        # the gate is moved from the MoE to the decoder layer so that routing
+        # can be computed before sending hidden states to the FFN workers.
+        if (
+            self.afd_role is not None
+            and self.afd_role == "attention"
+            or self.is_mtp_layer
+        ):
+            if layer_idx >= config.first_k_dense_replace:
+                if self.afd_config and self.afd_config.compute_gate_on_attention:
+                    # MTP predictor blocks use standard `forward()` ->
+                    # `mlp.gate` only. Layer-level `gate` is for AFD
+                    # `compute_attn_output()` on main-body MoE layers; it
+                    # duplicates param names vs checkpoint (`mlp.gate`).
+                    if not self.is_mtp_layer:
+                        self.gate = GateLinear(
+                            config.hidden_size,
+                            config.n_routed_experts,
+                            prefix=f"{prefix}.gate",
+                        )
+                        if getattr(config, "topk_method", None) == "noaux_tc":
+                            self.gate.e_score_correction_bias = nn.Parameter(
+                                torch.empty(
+                                    config.n_routed_experts, dtype=torch.float32
+                                )
+                            )
+                        else:
+                            self.gate.e_score_correction_bias = None
+
+            # Load balancing settings.
+            eplb_config = parallel_config.eplb_config
+            self.enable_eplb = parallel_config.enable_eplb
+            self.n_routed_experts: int = config.n_routed_experts
+            self.n_shared_experts: int = config.n_shared_experts
+            self.tp_rank = get_tensor_model_parallel_rank()
+            self.ep_group = get_ep_group().device_group
+            self.ep_size = self.ep_group.size()
+            self.ep_rank = get_ep_group().rank_in_group
+
+            self.n_redundant_experts = eplb_config.num_redundant_experts
+            self.n_logical_experts = self.n_routed_experts
+            self.n_physical_experts = (
+                self.n_logical_experts + self.n_redundant_experts
             )
-        else:
-            self.mlp = DeepseekV2MLP(
-                hidden_size=config.hidden_size,
-                intermediate_size=config.intermediate_size,
-                hidden_act=config.hidden_act,
-                quant_config=quant_config,
-                prefix=f"{prefix}.mlp",
+            self.n_local_physical_experts = (
+                self.n_physical_experts // self.ep_size
             )
+
+            self.physical_expert_start = (
+                self.ep_rank * self.n_local_physical_experts
+            )
+            self.physical_expert_end = (
+                self.physical_expert_start + self.n_local_physical_experts
+            )
+
+            self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+            if self.enable_force_load_balance:
+                max_tokens = max(self.max_force_lb_tokens, 1)
+                self._validate_force_lb_config()
+                self._init_force_lb_buffer(
+                    max_tokens=max_tokens, device=current_platform.device_type
+                )
+
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
+
+    def _init_force_lb_buffer(
+        self, max_tokens: int, device: torch.device
+    ) -> None:
+        # Pre-build a fixed fake routing table to avoid per-step graph ops.
+        base_shifted = self._build_force_lb_expert_cycle(device)
+
+        total_needed = max_tokens * self.top_k
+        repeat_times = (
+            total_needed + base_shifted.numel() - 1
+        ) // base_shifted.numel()
+        expanded = base_shifted.repeat(repeat_times)[:total_needed]
+        self.force_lb_fake_topk_buffer = expanded.reshape(max_tokens, self.top_k)
+        logger.info(
+            "Initialized force load balance fake topk ids for layer %d "
+            "(ep_rank=%d, topn_per_rank=%d, expert_cycle=%s, "
+            "first_token_topk=%s)",
+            self.layer_idx,
+            self.ep_rank,
+            self.force_load_balance_topn_per_rank,
+            base_shifted.detach().cpu().tolist(),
+            self.force_lb_fake_topk_buffer[0].detach().cpu().tolist(),
+        )
+
+    def _validate_force_lb_config(self) -> None:
+        if self.force_load_balance_topn_per_rank == 0:
+            return
+
+        assert self.force_load_balance_topn_per_rank > 0, (
+            "force_load_balance_topn_per_rank must be >= 0"
+        )
+        assert self.ep_size > 0, "ep_size must be positive"
+        assert self.n_routed_experts % self.ep_size == 0, (
+            "force_load_balance_topn_per_rank requires n_routed_experts "
+            "to be divisible by ep_size"
+        )
+
+        local_routed_experts = self.n_routed_experts // self.ep_size
+        assert self.force_load_balance_topn_per_rank <= local_routed_experts, (
+            "force_load_balance_topn_per_rank exceeds routed experts on each "
+            "FFN rank"
+        )
+        assert self.top_k <= self.force_load_balance_topn_per_rank * self.ep_size, (
+            "top_k must be <= force_load_balance_topn_per_rank * ep_size"
+        )
+
+    def _build_force_lb_expert_cycle(self, device: torch.device) -> torch.Tensor:
+        if self.force_load_balance_topn_per_rank > 0:
+            local_routed_experts = self.n_routed_experts // self.ep_size
+            per_rank_cycles = [
+                torch.arange(
+                    rank * local_routed_experts,
+                    rank * local_routed_experts
+                    + self.force_load_balance_topn_per_rank,
+                    device=device,
+                    dtype=torch.int32,
+                )
+                for rank in range(self.ep_size)
+            ]
+            return torch.cat(per_rank_cycles, dim=0)
+
+        global_num_experts = self.config.n_routed_experts
+        # Use a random permutation + strided partition so we can handle
+        # global_num_experts not divisible by ep_size.
+        base = torch.randperm(global_num_experts, device=device, dtype=torch.int32)
+        base_chunks = [base[i::self.ep_size] for i in range(self.ep_size)]
+        shifted_chunks = base_chunks[self.ep_rank:] + base_chunks[:self.ep_rank]
+        return torch.cat(shifted_chunks, dim=0)
+
+    def _get_force_lb_topk_ids(
+        self, batch_tokens: int, device: torch.device
+    ) -> torch.Tensor | None:
+        if self.force_lb_fake_topk_buffer is None:
+            raise RuntimeError(
+                "force_lb_fake_topk_buffer is not initialized; "
+                "expected preallocation during module init."
+            )
+        if self.force_lb_fake_topk_buffer.device != device:
+            self.force_lb_fake_topk_buffer = self.force_lb_fake_topk_buffer.to(
+                device, non_blocking=True
+            )
+        if batch_tokens > self.force_lb_fake_topk_buffer.size(0):
+            return None
+        return self.force_lb_fake_topk_buffer[:batch_tokens, : self.top_k]
 
     def forward(
         self,
@@ -1275,6 +1560,167 @@ class DeepseekV2DecoderLayer(nn.Module):
 
         return hidden_states, residual
 
+    def compute_attn_output(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+        llama_4_scaling: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        # Self Attention
+        if residual is None:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+
+        attn_kwargs = {
+            "positions": positions,
+            "hidden_states": hidden_states,
+        }
+        if not self.use_mha:
+            attn_kwargs["llama_4_scaling"] = llama_4_scaling
+        hidden_states = self.self_attn(**attn_kwargs)
+
+        if hidden_states.dtype == torch.float16:
+            # Fix FP16 overflow
+            # We scale both hidden_states and residual before
+            # rmsnorm, and rmsnorm result would not affect by scale.
+            hidden_states *= 1.0 / self.routed_scaling_factor
+            if self.layer_idx == 0:
+                # The residual is shared by all layers, we only scale it on
+                # first layer.
+                residual *= 1.0 / self.routed_scaling_factor
+
+        # Fully Connected
+        hidden_states, residual = self.post_attention_layernorm(
+            hidden_states, residual
+        )
+
+        topk_weights = None
+        topk_ids = None
+        # Compute gate on attention side.
+        router_logits = None
+        if (
+            self.layer_idx >= self.first_k_dense_replace
+            and self.afd_config.compute_gate_on_attention
+        ):
+            router_logits, _ = self.gate(hidden_states)
+
+            forward_ctx = get_forward_context()
+            afd_connector = None
+            if (
+                forward_ctx
+                and forward_ctx.afd_metadata
+                and forward_ctx.afd_metadata.afd_connector
+            ):
+                afd_connector = forward_ctx.afd_metadata.afd_connector
+
+            if afd_connector:
+                # adapt top9
+                mix_placement = self.vllm_config.additional_config.get(
+                    "mix_placement", False
+                )
+                num_redundant_experts = (
+                    self.vllm_config.parallel_config.eplb_config.num_redundant_experts
+                )
+                if mix_placement:
+                    global_num_experts = (
+                        self.config.n_shared_experts
+                        + self.config.n_routed_experts
+                        + num_redundant_experts
+                    )
+                else:
+                    global_num_experts = (
+                        self.config.n_routed_experts + num_redundant_experts
+                    )
+                routed_scaling_factor = getattr(
+                    self.config, "routed_scaling_factor", 1.0
+                )
+                topk_weights, topk_ids = afd_connector.select_experts(
+                    hidden_states=hidden_states,
+                    router_logits=router_logits,
+                    top_k=self.top_k,
+                    use_grouped_topk=True,
+                    renormalize=getattr(self.config, "norm_topk_prob", True),
+                    scoring_func=getattr(self.config, "scoring_func", "softmax"),
+                    num_expert_group=getattr(self.config, "n_group", 1),
+                    topk_group=getattr(self.config, "topk_group", 1),
+                    routed_scaling_factor=(
+                        1.0 if not mix_placement else routed_scaling_factor
+                    ),
+                    e_score_correction_bias=self.gate.e_score_correction_bias,
+                    mix_placement=mix_placement,
+                    num_logical_experts=router_logits.shape[1],
+                    num_shared_experts=self.config.n_shared_experts,
+                    global_num_experts=global_num_experts,
+                )
+                if self.enable_force_load_balance:
+                    fake_routed_topk_ids = self._get_force_lb_topk_ids(
+                        batch_tokens=topk_ids.shape[0], device=topk_ids.device
+                    )
+                    if fake_routed_topk_ids is not None:
+                        if mix_placement:
+                            shared_topk_ids = topk_ids[:, self.top_k :]
+                            topk_ids = torch.cat(
+                                [fake_routed_topk_ids, shared_topk_ids], dim=1
+                            )
+                        else:
+                            topk_ids = fake_routed_topk_ids
+
+            else:
+                raise RuntimeError(
+                    "AFD connector required for compute_gate_on_attention "
+                    "but not found in context."
+                )
+
+            topk_weights = topk_weights.to(torch.float)
+
+        return hidden_states, residual, topk_weights, topk_ids, router_logits
+
+    def compute_ffn_output(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor | None = None,
+        group_list: torch.Tensor | None = None,
+        dynamic_scales: torch.Tensor | None = None,
+        topk_weights: torch.Tensor | None = None,
+        topk_ids: torch.Tensor | None = None,
+        row_idx: torch.Tensor | None = None,
+        x_active_mask: torch.Tensor | None = None,
+        cam_p2p_ep_name: str | None = "",
+    ):
+        assert self.afd_role == "ffn"
+        if isinstance(self.mlp, DeepseekV2MoE):
+            if (
+                self.afd_config is not None
+                and self.afd_config.compute_gate_on_attention
+            ):
+                hidden_states = self.mlp.afd_forward(
+                    hidden_states=hidden_states,
+                    group_list=group_list,
+                    dynamic_scales=dynamic_scales,
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                    row_idx=row_idx,
+                    router_logits=router_logits,
+                    x_active_mask=x_active_mask,
+                    cam_p2p_ep_name=cam_p2p_ep_name,
+                )
+            else:
+                hidden_states = self.mlp(hidden_states)
+        else:
+            hidden_states = self.mlp(hidden_states)
+
+        if isinstance(self.mlp, DeepseekV2MLP) and hidden_states.dtype == torch.float16:
+            # Fix FP16 overflow
+            # Scaling the DeepseekV2MLP output, it is the input of
+            # input_layernorm of next decoder layer.
+            # The scaling of DeepseekV2MOE output would be done in the forward
+            # of DeepseekV2MOE
+            hidden_states *= 1.0 / self.routed_scaling_factor
+        return hidden_states
+
 
 @support_torch_compile
 class DeepseekV2Model(nn.Module):
@@ -1283,10 +1729,25 @@ class DeepseekV2Model(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
+        self.scheduler_config = vllm_config.scheduler_config
+        decode_max_num_seqs = getattr(
+            self.scheduler_config, "decode_max_num_seqs", 0
+        )
+        self.max_num_reqs = max(
+            self.scheduler_config.max_num_seqs, decode_max_num_seqs
+        )
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
         self.device = current_platform.device_type
+        self.enforce_eager = vllm_config.model_config.enforce_eager
+        self.first_k_dense_replace = config.first_k_dense_replace
+        self.afd_config = vllm_config.afd_config
+        self.connector_name = (
+            self.afd_config.afd_connector
+            if self.afd_config is not None
+            else None
+        )
 
         self.vocab_size = config.vocab_size
         self.is_v32 = hasattr(config, "index_topk")
@@ -1343,6 +1804,95 @@ class DeepseekV2Model(nn.Module):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
+    def forward_m2n(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        positions: torch.Tensor,
+        afd_metadata: "AFDMetadata",
+        llama_4_scaling: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        forward_ctx = get_forward_context()
+        afd_connector = afd_metadata.afd_connector
+        # ForwardContext in this codebase does not carry ubatch info; use
+        # sensible defaults so the metadata creation below stays consistent.
+        ubatch_idx = getattr(forward_ctx, "ubatch_idx", 0)
+        num_ubatches = getattr(forward_ctx, "num_ubatches", 1)
+
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
+            afd_metadata.afd_stage_idx = ubatch_idx
+
+            if self.enforce_eager:
+                logger.info(
+                    "forward_m2n deepseek_v2 layer_idx:%s "
+                    "stage_idx:%s, hidden_states:%s",
+                    layer.layer_idx,
+                    afd_metadata.afd_stage_idx,
+                    hidden_states.shape,
+                )
+
+            if layer.layer_idx > 0:
+                recv_hidden_states = afd_connector.recv_ffn_output(
+                    hidden_states=hidden_states,
+                    metadata=None,
+                )
+                hidden_states = recv_hidden_states
+
+            (
+                current_hidden,
+                residual,
+                topk_weights,
+                topk_ids,
+                router_logits,
+            ) = layer.compute_attn_output(
+                positions, hidden_states, residual, llama_4_scaling
+            )
+
+            metadata = AFDConnectorMetadata.create_attention_metadata(
+                layer_idx=layer.layer_idx,
+                stage_idx=afd_metadata.afd_stage_idx,
+                seq_len=hidden_states.shape[0],
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+                num_ubatches=num_ubatches,
+                connector_data=None,
+            )
+
+            afd_connector.configure_metadata(
+                metadata, config=self.config, batch_size=self.max_num_reqs
+            )
+
+            send_result = afd_connector.send_attn_output(
+                hidden_states=current_hidden,
+                metadata=metadata,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                router_logits=router_logits,
+                dynamic_scales=None,
+            )
+
+            if send_result is not None:
+                # Some connectors return [hidden_states, handle].
+                if isinstance(send_result, (list, tuple)):
+                    hidden_states = send_result[0]
+                    send_attn_handle = (
+                        send_result[1] if len(send_result) > 1 else None
+                    )
+                    if send_attn_handle is not None:
+                        metadata.connector_data.handle = send_attn_handle
+                else:
+                    hidden_states = send_result
+            else:
+                hidden_states = current_hidden
+
+        recv_hidden_states = afd_connector.recv_ffn_output(
+            hidden_states=hidden_states,
+            metadata=afd_metadata,
+        )
+        hidden_states = recv_hidden_states
+
+        return hidden_states, residual
+
     def forward(
         self,
         input_ids: torch.Tensor | None,
@@ -1380,16 +1930,30 @@ class DeepseekV2Model(nn.Module):
         else:
             llama_4_scaling = None
 
+        forward_ctx = get_forward_context()
+        afd_metadata = (
+            forward_ctx.afd_metadata if forward_ctx is not None else None
+        )
+
         aux_hidden_states = []
-        for idx, layer in enumerate(
-            islice(self.layers, self.start_layer, self.end_layer),
-            start=self.start_layer,
-        ):
-            if idx in self.aux_hidden_state_layers:
-                aux_hidden_states.append(hidden_states + residual)
-            hidden_states, residual = layer(
-                positions, hidden_states, residual, llama_4_scaling
+        if afd_metadata is not None:
+            hidden_states, residual = self.forward_m2n(
+                hidden_states,
+                residual,
+                positions,
+                afd_metadata,
+                llama_4_scaling,
             )
+        else:
+            for idx, layer in enumerate(
+                islice(self.layers, self.start_layer, self.end_layer),
+                start=self.start_layer,
+            ):
+                if idx in self.aux_hidden_state_layers:
+                    aux_hidden_states.append(hidden_states + residual)
+                hidden_states, residual = layer(
+                    positions, hidden_states, residual, llama_4_scaling
+                )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -1399,6 +1963,40 @@ class DeepseekV2Model(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
+        return hidden_states
+
+    def compute_ffn_output(
+        self,
+        hidden_states: torch.Tensor,
+        layer_idx: int,
+        router_logits: torch.Tensor | None = None,
+        group_list: torch.Tensor | None = None,
+        dynamic_scales: torch.Tensor | None = None,
+        topk_weights: torch.Tensor | None = None,
+        topk_ids: torch.Tensor | None = None,
+        row_idx: torch.Tensor | None = None,
+        x_active_mask: torch.Tensor | None = None,
+        cam_p2p_ep_name: str | None = "",
+    ) -> torch.Tensor:
+        if (
+            self.afd_config is not None
+            and self.afd_config.compute_gate_on_attention
+        ):
+            hidden_states = self.layers[layer_idx].compute_ffn_output(
+                hidden_states=hidden_states,
+                group_list=group_list,
+                dynamic_scales=dynamic_scales,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                row_idx=row_idx,
+                router_logits=router_logits,
+                x_active_mask=x_active_mask,
+                cam_p2p_ep_name=cam_p2p_ep_name,
+            )
+        else:
+            hidden_states = self.layers[layer_idx].compute_ffn_output(
+                hidden_states
+            )
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -1707,6 +2305,11 @@ class DeepseekV2ForCausalLM(
         if self.use_mha:
             self.packed_modules_mapping["qkv_proj"] = ["q_proj", "k_proj", "v_proj"]
 
+        self.afd_config = vllm_config.afd_config
+        self.afd_role = (
+            self.afd_config.afd_role if self.afd_config is not None else None
+        )
+
         # `packed_modules_mapping` needs to be modified before
         # initializing DeepseekV2Model, as it is passed inplace to
         # quantization config init and may be used to select the
@@ -1753,12 +2356,17 @@ class DeepseekV2ForCausalLM(
                 continue
 
             assert isinstance(layer, DeepseekV2DecoderLayer)
-            if isinstance(layer.mlp, DeepseekV2MoE):
+            # Attention role only builds self_attn; skip mlp collection.
+            if (
+                self.afd_role is None or self.afd_role == "ffn"
+            ) and isinstance(layer.mlp, DeepseekV2MoE):
                 # Pick last one layer since the first ones may be dense layers.
                 example_moe = layer.mlp
                 self.moe_mlp_layers.append(layer.mlp)
                 self.moe_layers.append(layer.mlp.experts)
 
+        if self.afd_role == "attention":
+            return
         self.extract_moe_parameters(example_moe)
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
@@ -1780,6 +2388,33 @@ class DeepseekV2ForCausalLM(
     ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds
+        )
+        return hidden_states
+
+    def compute_ffn_output(
+        self,
+        hidden_states: torch.Tensor,
+        layer_idx: int,
+        router_logits: torch.Tensor | None = None,
+        group_list: torch.Tensor | None = None,
+        dynamic_scales: torch.Tensor | None = None,
+        topk_weights: torch.Tensor | None = None,
+        topk_ids: torch.Tensor | None = None,
+        row_idx: torch.Tensor | None = None,
+        x_active_mask: torch.Tensor | None = None,
+        cam_p2p_ep_name: str | None = "",
+    ) -> torch.Tensor:
+        hidden_states = self.model.compute_ffn_output(
+            hidden_states=hidden_states,
+            layer_idx=layer_idx,
+            router_logits=router_logits,
+            group_list=group_list,
+            dynamic_scales=dynamic_scales,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            row_idx=row_idx,
+            x_active_mask=x_active_mask,
+            cam_p2p_ep_name=cam_p2p_ep_name,
         )
         return hidden_states
 
