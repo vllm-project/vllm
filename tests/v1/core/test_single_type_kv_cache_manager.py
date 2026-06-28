@@ -6,6 +6,8 @@ import random
 import pytest
 import torch
 
+from vllm.v1 import kv_cache_interface as kv_cache_specs
+from vllm.v1.core import single_type_kv_cache_manager as kv_cache_managers
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -14,14 +16,9 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
-    MambaManager,
     SlidingWindowManager,
 )
-from vllm.v1.kv_cache_interface import (
-    ChunkedLocalAttentionSpec,
-    MambaSpec,
-    SlidingWindowSpec,
-)
+from vllm.v1.kv_cache_interface import ChunkedLocalAttentionSpec, SlidingWindowSpec
 
 pytestmark = pytest.mark.cpu_test
 
@@ -52,7 +49,7 @@ def get_chunked_local_attention_manager(
 
 
 def test_mamba_none_allocates_fixed_request_blocks():
-    mamba_spec = MambaSpec(
+    mamba_spec = kv_cache_specs.MambaSpec(
         block_size=16,
         shapes=((8,),),
         dtypes=(torch.float32,),
@@ -64,7 +61,7 @@ def test_mamba_none_allocates_fixed_request_blocks():
         enable_caching=False,
         hash_block_size=mamba_spec.block_size,
     )
-    manager = MambaManager(
+    manager = kv_cache_managers.MambaManager(
         mamba_spec,
         block_pool=block_pool,
         enable_caching=False,
