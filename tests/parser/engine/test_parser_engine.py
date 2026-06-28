@@ -571,12 +571,19 @@ class TestPostToolContentDeferral:
 # ── TestFixArgTypes ──────────────────────────────────────────────────
 
 
-def _make_tool(name: str, properties: dict) -> ChatCompletionToolsParam:
+def _make_tool(
+    name: str,
+    properties: dict,
+    extra_parameters: dict | None = None,
+) -> ChatCompletionToolsParam:
+    parameters = {"type": "object", "properties": properties}
+    if extra_parameters is not None:
+        parameters.update(extra_parameters)
     return ChatCompletionToolsParam(
         type="function",
         function=FunctionDefinition(
             name=name,
-            parameters={"type": "object", "properties": properties},
+            parameters=parameters,
         ),
     )
 
@@ -697,6 +704,62 @@ class TestFixArgTypes:
         result = engine._fix_arg_types('{"inner": {"count": "42"}}', "f")
         parsed = json.loads(result)
         assert parsed["inner"]["count"] == 42
+
+    def test_nested_ref_object_coercion(self):
+        tool = _make_tool(
+            "f",
+            {
+                "period": {
+                    "$ref": "#/$defs/PeriodSpec",
+                    "description": "Business period.",
+                },
+                "scope": {"$ref": "#/$defs/ScopeSpec"},
+            },
+            {
+                "$defs": {
+                    "PeriodSpec": {
+                        "type": "object",
+                        "properties": {
+                            "kind": {"type": "string"},
+                            "days": {
+                                "anyOf": [
+                                    {"type": "integer"},
+                                    {"type": "null"},
+                                ]
+                            },
+                        },
+                    },
+                    "ScopeSpec": {
+                        "type": "object",
+                        "properties": {
+                            "shops": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "terminals": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                        },
+                    },
+                },
+            },
+        )
+        engine = _make_engine(tools=[tool])
+
+        result = engine._fix_arg_types(
+            json.dumps(
+                {
+                    "period": '{"kind": "week", "days": "7"}',
+                    "scope": '{"shops": [], "terminals": []}',
+                }
+            ),
+            "f",
+        )
+
+        parsed = json.loads(result)
+        assert parsed["period"] == {"kind": "week", "days": 7}
+        assert parsed["scope"] == {"shops": [], "terminals": []}
 
     def test_array_item_coercion(self):
         tool = _make_tool(

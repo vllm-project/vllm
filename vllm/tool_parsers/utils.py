@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import ast
+import copy
 import json
 import math
 import warnings
@@ -181,6 +182,44 @@ def _extract_tool_info(
         raise TypeError(f"Unsupported tool type: {type(tool)}")
 
 
+def _resolve_local_json_ref(
+    schema: Any,
+    root_schema: dict[str, Any],
+    seen_refs: frozenset[str] = frozenset(),
+) -> Any:
+    if isinstance(schema, list):
+        return [
+            _resolve_local_json_ref(item, root_schema, seen_refs) for item in schema
+        ]
+    if not isinstance(schema, dict):
+        return schema
+
+    ref = schema.get("$ref")
+    if not isinstance(ref, str) or not ref.startswith("#/$defs/") or ref in seen_refs:
+        return {
+            key: _resolve_local_json_ref(value, root_schema, seen_refs)
+            for key, value in schema.items()
+        }
+
+    def_name = ref.removeprefix("#/$defs/")
+    defs = root_schema.get("$defs", {})
+    if not isinstance(defs, dict) or def_name not in defs:
+        return {
+            key: _resolve_local_json_ref(value, root_schema, seen_refs)
+            for key, value in schema.items()
+        }
+
+    resolved = _resolve_local_json_ref(
+        copy.deepcopy(defs[def_name]),
+        root_schema,
+        seen_refs | frozenset({ref}),
+    )
+    for key, value in schema.items():
+        if key != "$ref":
+            resolved[key] = _resolve_local_json_ref(value, root_schema, seen_refs)
+    return resolved
+
+
 def find_tool_properties(
     tools: list[Tool] | None,
     tool_name: str,
@@ -193,7 +232,16 @@ def find_tool_properties(
             continue
         name, params = _extract_tool_info(tool)
         if name == tool_name:
-            return (params or {}).get("properties", {})
+            params = params or {}
+            properties = params.get("properties", {})
+            if not isinstance(properties, dict):
+                return {}
+            if "$defs" not in params:
+                return properties
+            return {
+                prop_name: _resolve_local_json_ref(prop_schema, params)
+                for prop_name, prop_schema in properties.items()
+            }
     return {}
 
 

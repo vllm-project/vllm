@@ -227,6 +227,8 @@ class ParserEngine(Parser):
             types = extract_types_from_schema(schema)
             coerced = coerce_to_schema_type(value, types)
             if coerced is not value:
+                if isinstance(coerced, (dict, list)):
+                    coerced, _ = ParserEngine._coerce_value(coerced, schema)
                 return coerced, True
             return value, False
 
