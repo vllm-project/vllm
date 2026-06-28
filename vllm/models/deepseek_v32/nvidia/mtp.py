@@ -1,13 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek V3.2 (DSA) MTP / nextn draft model — NVIDIA SM100.
-
-Self-contained (like ``deepseek_v4``'s MTP): uses the unified
-``DeepseekV32DecoderLayer`` and runs eager under the breakable CUDA graph
-(no ``@support_torch_compile``). Only ``SharedHead`` and small weight-name
-helpers are reused from the generic stack.
-"""
-
 import typing
 from collections.abc import Callable, Iterable
 
