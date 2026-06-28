@@ -21,6 +21,7 @@ from vllm.entrypoints.chat_utils import (
     validate_chat_template,
 )
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
+from vllm.entrypoints.openai.rwkv_defaults import resolve_rwkv_tool_parser
 from vllm.entrypoints.serve.utils.constants import (
     H11_MAX_HEADER_COUNT_DEFAULT,
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
@@ -391,6 +392,13 @@ def validate_parsed_serve_args(args: argparse.Namespace):
 
     # Ensure that the chat template is valid; raises if it likely isn't
     validate_chat_template(args.chat_template)
+
+    args.tool_call_parser = resolve_rwkv_tool_parser(
+        tool_parser=args.tool_call_parser,
+        enable_auto_tools=args.enable_auto_tool_choice,
+        tokenizer_mode=args.tokenizer_mode,
+        model=args.model,
+    )
 
     # Enable auto tool needs a tool call parser to be valid
     if args.enable_auto_tool_choice and not args.tool_call_parser:

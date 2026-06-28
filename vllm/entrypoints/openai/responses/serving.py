@@ -91,6 +91,7 @@ from vllm.entrypoints.openai.responses.utils import (
     extract_function_tool_names,
     extract_tool_types,
 )
+from vllm.entrypoints.openai.rwkv_defaults import resolve_rwkv_tool_parser
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import VLLMValidationError
@@ -184,6 +185,11 @@ class OpenAIServingResponses(OpenAIServing):
 
         # Set up the unified parser - either a unified parser or fall back to
         # separate parsers accessed through the parser interface
+        tool_parser = resolve_rwkv_tool_parser(
+            tool_parser=tool_parser,
+            enable_auto_tools=enable_auto_tools,
+            model_config=self.model_config,
+        )
         self.parser = ParserManager.get_parser(
             tool_parser_name=tool_parser,
             reasoning_parser_name=reasoning_parser,

@@ -166,6 +166,20 @@ def test_enable_auto_choice_passes_with_tool_call_parser(serve_parser):
     validate_parsed_serve_args(args)
 
 
+def test_enable_auto_choice_defaults_rwkv_tool_parser(serve_parser):
+    args = serve_parser.parse_args(
+        args=[
+            "--enable-auto-tool-choice",
+            "--tokenizer-mode",
+            "rwkv",
+        ]
+    )
+
+    validate_parsed_serve_args(args)
+
+    assert args.tool_call_parser == "rwkv"
+
+
 def test_enable_auto_choice_fails_with_enable_reasoning(serve_parser):
     """Ensure validation fails if reasoning is enabled with auto tool choice"""
     args = serve_parser.parse_args(

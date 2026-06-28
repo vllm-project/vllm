@@ -497,7 +497,9 @@ th {
     Graph are unsupported. RWKV7 does not allocate vLLM KV cache blocks; its
     per-request recurrent state is owned by `ModelState`, so any future RWKV
     state reuse must be documented separately from KV prefix caching. RWKV7
-    requires the vLLM V1 engine with Model Runner V2 enabled.
+    requires the vLLM V1 engine with Model Runner V2 enabled. RWKV7 also uses
+    a native chat template and the `rwkv` tool-call parser for OpenAI-compatible
+    tool calling.
 
 Some models are supported only via the [Transformers modeling backend](#transformers). The purpose of the table below is to acknowledge models which we officially support in this way. The logs will say that the Transformers modeling backend is being used, and you will see no warning that this is fallback behaviour. This means that, if you have issues with any of the models listed below, please [make an issue](https://github.com/vllm-project/vllm/issues/new/choose) and we'll do our best to fix it!
 

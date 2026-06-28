@@ -16,6 +16,7 @@ from vllm.entrypoints.openai.completion.protocol import (
 )
 from vllm.entrypoints.openai.engine.protocol import ToolCall
 from vllm.entrypoints.openai.engine.serving import resolve_token_id_placeholder
+from vllm.entrypoints.openai.rwkv_defaults import resolve_rwkv_tool_parser
 from vllm.entrypoints.serve.disagg.protocol import GenerateResponse
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.logger import init_logger
@@ -51,6 +52,11 @@ class OnlineDerenderer:
         self.enable_auto_tools = enable_auto_tools
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
         self.use_harmony = model_config.hf_config.model_type == "gpt_oss"
+        tool_parser = resolve_rwkv_tool_parser(
+            tool_parser=tool_parser,
+            enable_auto_tools=enable_auto_tools,
+            model_config=model_config,
+        )
         self.parser: type[Parser] | None = ParserManager.get_parser(
             tool_parser_name=tool_parser,
             reasoning_parser_name=reasoning_parser,

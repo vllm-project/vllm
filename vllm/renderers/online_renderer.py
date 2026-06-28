@@ -25,6 +25,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     render_for_completion,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.openai.rwkv_defaults import resolve_rwkv_tool_parser
 from vllm.entrypoints.serve.utils.error_response import create_error_response
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import (
@@ -70,6 +71,11 @@ class OnlineRenderer:
         self.enable_auto_tools = enable_auto_tools
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
         self.use_harmony = model_config.hf_config.model_type == "gpt_oss"
+        tool_parser = resolve_rwkv_tool_parser(
+            tool_parser=tool_parser,
+            enable_auto_tools=enable_auto_tools,
+            model_config=model_config,
+        )
         self.parser: type[Parser] | None = ParserManager.get_parser(
             tool_parser_name=tool_parser,
             reasoning_parser_name=reasoning_parser,

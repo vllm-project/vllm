@@ -608,6 +608,20 @@ def _build_serving_chat(
     return serving_chat
 
 
+def test_rwkv_serving_chat_defaults_tool_parser_when_auto_tools_enabled():
+    model_config = MockModelConfig()
+    model_config.model = "/models/rwkv7-g1g-7.2b-20260523-ctx8192.pth"
+    model_config.tokenizer = model_config.model
+    model_config.tokenizer_mode = "rwkv"
+    model_config.hf_config = MockHFConfig(model_type="rwkv7")
+    engine = MockEngine(model_config=model_config)
+
+    serving_chat = _build_serving_chat(engine, enable_auto_tools=True)
+
+    assert serving_chat.parser_cls is not None
+    assert serving_chat.parser_cls.tool_parser_cls.__name__ == "RWKVToolParser"
+
+
 @dataclass
 class MockEngine:
     model_config: MockModelConfig = field(default_factory=MockModelConfig)

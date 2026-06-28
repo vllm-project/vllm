@@ -154,6 +154,43 @@ If your favorite tool-calling model is not supported, please feel free to contri
 !!! note
     With `tool_choice="auto"`, schema-level constraint requires both `VLLM_ENFORCE_STRICT_TOOL_CALLING=true` (the default) and at least one tool with `strict: true`. When these conditions are met and the selected parser supports structural tags, vLLM constrains tool-call arguments. Otherwise, vLLM extracts tool calls from raw text, so arguments may occasionally be malformed or violate the function's parameter schema.
 
+### RWKV7 Models (`rwkv`)
+
+RWKV7 raw BlinkDL `.pth` checkpoints use the RWKV-native chat format instead
+of a Hugging Face tokenizer chat template. vLLM renders chat messages with
+`System:`, `User:`, and `Assistant:` labels for normal chat. When tools are
+present, vLLM renders the tool-aware training format with `### System`,
+`### User`, `### Assistant`, `### Tool Output`, and fenced JSON tool calls.
+
+If `--enable-auto-tool-choice` is used with an RWKV7 raw `.pth` checkpoint, or
+with `--tokenizer-mode rwkv`, vLLM selects `--tool-call-parser rwkv`
+automatically when no parser is specified:
+
+```bash
+VLLM_RWKV7_WKV_MODE=fp32io16 VLLM_RWKV7_EMB_DEVICE=cpu \
+vllm serve /path/to/rwkv7-g1g-7.2b-20260523-ctx8192.pth \
+    --enable-auto-tool-choice
+```
+
+You can still pass `--tool-call-parser rwkv` explicitly. The RWKV parser reads
+tool calls in this form:
+
+````text
+**Tool Call:**
+```json
+{
+  "name": "get_weather",
+  "arguments": {
+    "city": "Paris"
+  }
+}
+```
+````
+
+See
+[`examples/tool_calling/openai_chat_completion_client_with_tools_rwkv.py`](../../examples/tool_calling/openai_chat_completion_client_with_tools_rwkv.py)
+for a minimal OpenAI-compatible client example.
+
 ### Hermes Models (`hermes`)
 
 All Nous Research Hermes-series models newer than Hermes 2 Pro should be supported.
