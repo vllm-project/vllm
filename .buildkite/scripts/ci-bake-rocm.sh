@@ -18,6 +18,7 @@ DEFAULT_CI_HCL_SOURCE="docker/ci-rocm.hcl"
 DEFAULT_CI_BASE_CONTENT_FILES="requirements/common.txt requirements/rocm.txt requirements/test/rocm.txt docker/Dockerfile.rocm_base tools/install_torchcodec_rocm.sh tests/vllm_test_utils"
 DEFAULT_CI_BASE_DOCKERFILE="docker/Dockerfile.rocm"
 DEFAULT_CI_BASE_DOCKERFILE_STAGES="base build_rixl build_rocshmem build_deepep mori_base ci_base"
+DEFAULT_CI_BASE_METADATA_VERSION="1"
 IMAGE_EXISTED_BEFORE_BUILD=0
 
 TARGET=""
@@ -525,6 +526,22 @@ get_remote_image_label_with_retry() {
     return 0
 }
 
+remote_ci_base_metadata_is_current() {
+    local image_ref="$1"
+    local metadata_version=""
+
+    metadata_version=$(get_remote_image_label "${image_ref}" "vllm.ci_base.metadata_version")
+    [[ "${metadata_version}" == "${CI_BASE_METADATA_VERSION:-${DEFAULT_CI_BASE_METADATA_VERSION}}" ]]
+}
+
+remote_ci_base_metadata_is_current_with_retry() {
+    local image_ref="$1"
+    local metadata_version=""
+
+    metadata_version=$(get_remote_image_label_with_retry "${image_ref}" "vllm.ci_base.metadata_version")
+    [[ "${metadata_version}" == "${CI_BASE_METADATA_VERSION:-${DEFAULT_CI_BASE_METADATA_VERSION}}" ]]
+}
+
 remote_image_exists() {
     local image_ref="$1"
     docker manifest inspect "${image_ref}" >/dev/null 2>&1
@@ -581,6 +598,7 @@ init_config() {
     CI_BASE_CONTENT_FILES="${CI_BASE_CONTENT_FILES:-${DEFAULT_CI_BASE_CONTENT_FILES}}"
     CI_BASE_DOCKERFILE="${CI_BASE_DOCKERFILE:-${DEFAULT_CI_BASE_DOCKERFILE}}"
     CI_BASE_DOCKERFILE_STAGES="${CI_BASE_DOCKERFILE_STAGES:-${DEFAULT_CI_BASE_DOCKERFILE_STAGES}}"
+    CI_BASE_METADATA_VERSION="${CI_BASE_METADATA_VERSION:-${DEFAULT_CI_BASE_METADATA_VERSION}}"
     CI_BASE_IMAGE_TAG="${CI_BASE_IMAGE_TAG:-rocm/vllm-dev:ci_base}"
     export PYTORCH_ROCM_ARCH
 
@@ -635,6 +653,10 @@ load_ci_hcl() {
     echo "Copied ${CI_HCL_SOURCE} to ${CI_HCL_PATH}"
 }
 
+init_bake_files() {
+    BAKE_FILES=(-f "${VLLM_BAKE_FILE}" -f "${CI_HCL_PATH}")
+}
+
 compute_ci_base_hash_if_needed() {
     if [[ -z "${CI_BASE_CONTENT_FILES:-}" ]]; then
         return 0
@@ -676,12 +698,14 @@ configure_ci_base_image_refs() {
     fi
 
     content_tag=$(ci_base_tag_with_suffix "${stable_tag}" "${CI_BASE_CONTENT_HASH}")
+    CI_BASE_IMAGE_TAG_CONTENT_REF="${content_tag}"
     if [[ -n "${BUILDKITE_COMMIT:-}" ]]; then
         commit_tag=$(ci_base_tag_with_suffix "${stable_tag}" "${BUILDKITE_COMMIT}")
-        CI_BASE_IMAGE_TAG_COMMIT="${commit_tag}"
-        export CI_BASE_IMAGE_TAG_COMMIT
     fi
+    CI_BASE_IMAGE_TAG_COMMIT_REF="${commit_tag}"
 
+    # *_REF is the logical tag recorded in metadata. *_EXTRA is only passed to
+    # bake when that tag is not already the primary tag, avoiding duplicates.
     if should_push_stable_ci_base_tag; then
         primary_tag="${content_tag}"
         CI_BASE_IMAGE_TAG_STABLE="${stable_tag}"
@@ -691,19 +715,33 @@ configure_ci_base_image_refs() {
     fi
     CI_BASE_IMAGE_TAG="${primary_tag}"
     if [[ "${primary_tag}" == "${content_tag}" ]]; then
-        CI_BASE_IMAGE_TAG_CONTENT=""
+        CI_BASE_IMAGE_TAG_CONTENT_EXTRA=""
     else
-        CI_BASE_IMAGE_TAG_CONTENT="${content_tag}"
+        CI_BASE_IMAGE_TAG_CONTENT_EXTRA="${content_tag}"
     fi
-    export CI_BASE_IMAGE_TAG CI_BASE_IMAGE_TAG_CONTENT CI_BASE_IMAGE_TAG_STABLE
+    if [[ -n "${commit_tag}" && "${commit_tag}" != "${primary_tag}" ]]; then
+        CI_BASE_IMAGE_TAG_COMMIT_EXTRA="${commit_tag}"
+    else
+        CI_BASE_IMAGE_TAG_COMMIT_EXTRA=""
+    fi
+    export CI_BASE_IMAGE_TAG
+    export CI_BASE_IMAGE_TAG_COMMIT_EXTRA
+    export CI_BASE_IMAGE_TAG_CONTENT_EXTRA
+    export CI_BASE_IMAGE_TAG_CONTENT_REF
+    export CI_BASE_IMAGE_TAG_COMMIT_REF
+    export CI_BASE_IMAGE_TAG_STABLE
 
     if is_ci_base_target; then
         IMAGE_TAG="${primary_tag}"
         export IMAGE_TAG
 
         echo "ci_base primary image tag: ${CI_BASE_IMAGE_TAG}"
-        if [[ -n "${CI_BASE_IMAGE_TAG_COMMIT:-}" ]]; then
-            echo "ci_base commit image tag: ${CI_BASE_IMAGE_TAG_COMMIT}"
+        if [[ -n "${commit_tag}" ]]; then
+            if [[ "${commit_tag}" == "${primary_tag}" ]]; then
+                echo "ci_base commit image tag: ${commit_tag} (primary)"
+            else
+                echo "ci_base commit image tag: ${commit_tag}"
+            fi
         fi
         echo "ci_base content image tag: ${content_tag}"
         if [[ -n "${CI_BASE_IMAGE_TAG_STABLE}" ]]; then
@@ -728,8 +766,8 @@ ci_base_candidate_refs() {
     printf '%s\n' \
         "${IMAGE_TAG:-}" \
         "${CI_BASE_IMAGE_TAG:-}" \
-        "${CI_BASE_IMAGE_TAG_COMMIT:-}" \
-        "${CI_BASE_IMAGE_TAG_CONTENT:-}" \
+        "${CI_BASE_IMAGE_TAG_COMMIT_EXTRA:-}" \
+        "${CI_BASE_IMAGE_TAG_CONTENT_EXTRA:-}" \
         "${CI_BASE_IMAGE_TAG_STABLE:-}" \
         | awk 'NF && !seen[$0]++'
 }
@@ -743,6 +781,10 @@ find_matching_ci_base_ref() {
         remote_image_exists "${candidate}" || continue
         candidate_hash=$(get_remote_image_label "${candidate}" "vllm.ci_base.content_hash")
         if [[ "${candidate_hash}" == "${CI_BASE_CONTENT_HASH}" ]]; then
+            if ! remote_ci_base_metadata_is_current "${candidate}"; then
+                echo "Found matching ci_base content hash but stale metadata: ${candidate}" >&2
+                continue
+            fi
             printf '%s\n' "${candidate}"
             return 0
         fi
@@ -817,6 +859,10 @@ maybe_skip_existing_image() {
         if [[ -n "${remote_hash}" ]]; then
             echo "Remote ci_base content hash: ${remote_hash:0:16}..."
             if [[ "${remote_hash}" == "${CI_BASE_CONTENT_HASH}" ]]; then
+                if ! remote_ci_base_metadata_is_current "${IMAGE_TAG}"; then
+                    echo "Content hashes match but ci_base metadata is stale; rebuilding to refresh metadata"
+                    return 0
+                fi
                 if ! refresh_ci_base_tags_from_ref "${IMAGE_TAG}"; then
                     echo "ci_base tag refresh failed; rebuilding to push expected tags"
                     return 0
@@ -998,11 +1044,103 @@ prepare_git_cache_metadata() {
     fi
 }
 
+ci_base_metadata_pairs() {
+    local dockerfile="${CI_BASE_DOCKERFILE:-${DEFAULT_CI_BASE_DOCKERFILE}}"
+    local stages="${CI_BASE_DOCKERFILE_STAGES:-${DEFAULT_CI_BASE_DOCKERFILE_STAGES}}"
+    local content_files="${CI_BASE_CONTENT_FILES:-${DEFAULT_CI_BASE_CONTENT_FILES}}"
+    local content_files_hash=""
+    local base_image=""
+    local base_image_digest=""
+    local git_branch=""
+    local -a content_paths=()
+    local -a content_args=()
+
+    read -r -a content_paths <<< "${content_files}"
+    if [[ ${#content_paths[@]} -gt 0 ]]; then
+        content_files_hash=$(compute_content_hash "${content_paths[@]}")
+    fi
+    mapfile -t content_args < <(
+        get_content_arg_names "${dockerfile}" "${stages}" "${CI_BASE_CONTENT_ARGS:-}"
+    )
+
+    base_image=$(resolve_dockerfile_arg_value "${dockerfile}" "BASE_IMAGE")
+    if [[ -n "${base_image}" ]]; then
+        base_image_digest=$(resolve_image_digest "${base_image}")
+    fi
+    git_branch="${BUILDKITE_BRANCH:-${VLLM_BRANCH:-}}"
+
+    metadata_pair "vllm.ci_base.metadata_version" "${CI_BASE_METADATA_VERSION:-${DEFAULT_CI_BASE_METADATA_VERSION}}"
+    metadata_pair "vllm.ci_base.content_hash" "${CI_BASE_CONTENT_HASH:-}"
+    metadata_pair "vllm.ci_base.content_files_hash" "${content_files_hash}"
+    metadata_pair "vllm.ci_base.content_files" "${content_files}"
+    metadata_pair "vllm.ci_base.content_args" "$(join_words "${content_args[@]}")"
+    metadata_pair "vllm.ci_base.dockerfile" "${dockerfile}"
+    metadata_pair "vllm.ci_base.dockerfile_stages" "${stages}"
+    metadata_pair "vllm.ci_base.image.primary" "${CI_BASE_IMAGE_TAG:-}"
+    metadata_pair "vllm.ci_base.image.content" "${CI_BASE_IMAGE_TAG_CONTENT_REF:-${CI_BASE_IMAGE_TAG_CONTENT_EXTRA:-}}"
+    metadata_pair "vllm.ci_base.image.commit" "${CI_BASE_IMAGE_TAG_COMMIT_REF:-${CI_BASE_IMAGE_TAG_COMMIT_EXTRA:-}}"
+    metadata_pair "vllm.ci_base.image.stable" "${CI_BASE_IMAGE_TAG_STABLE:-}"
+    metadata_pair "vllm.ci_base.git_commit" "${BUILDKITE_COMMIT:-}"
+    metadata_pair "vllm.ci_base.git_branch" "${git_branch}"
+    metadata_pair "vllm.ci_base.vllm_branch" "${VLLM_BRANCH:-}"
+    metadata_pair "vllm.ci_base.stable_branch" "${CI_BASE_STABLE_BRANCH:-main}"
+
+    metadata_pair "vllm.rocm.base_image" "${base_image}"
+    metadata_pair "vllm.rocm.base_image_digest" "${base_image_digest}"
+    metadata_pair "vllm.rocm.pytorch_rocm_arch" "${PYTORCH_ROCM_ARCH:-}"
+    metadata_pair "vllm.rocm.nic_backend" "$(resolve_dockerfile_arg_value "${dockerfile}" "NIC_BACKEND")"
+    metadata_pair "vllm.rocm.ainic_version" "$(resolve_dockerfile_arg_value "${dockerfile}" "AINIC_VERSION")"
+    metadata_pair "vllm.rocm.ubuntu_codename" "$(resolve_dockerfile_arg_value "${dockerfile}" "UBUNTU_CODENAME")"
+    metadata_pair "vllm.rocm.rixl_repo" "$(resolve_dockerfile_arg_value "${dockerfile}" "RIXL_REPO")"
+    metadata_pair "vllm.rocm.rixl_commit" "${RIXL_BRANCH:-$(resolve_dockerfile_arg_value "${dockerfile}" "RIXL_BRANCH")}"
+    metadata_pair "vllm.rocm.ucx_repo" "$(resolve_dockerfile_arg_value "${dockerfile}" "UCX_REPO")"
+    metadata_pair "vllm.rocm.ucx_commit" "${UCX_BRANCH:-$(resolve_dockerfile_arg_value "${dockerfile}" "UCX_BRANCH")}"
+    metadata_pair "vllm.rocm.rocshmem_repo" "$(resolve_dockerfile_arg_value "${dockerfile}" "ROCSHMEM_REPO")"
+    metadata_pair "vllm.rocm.rocshmem_commit" "${ROCSHMEM_BRANCH:-$(resolve_dockerfile_arg_value "${dockerfile}" "ROCSHMEM_BRANCH")}"
+    metadata_pair "vllm.rocm.deepep_repo" "$(resolve_dockerfile_arg_value "${dockerfile}" "DEEPEP_REPO")"
+    metadata_pair "vllm.rocm.deepep_commit" "${DEEPEP_BRANCH:-$(resolve_dockerfile_arg_value "${dockerfile}" "DEEPEP_BRANCH")}"
+    metadata_pair "vllm.rocm.deepep_nic" "$(resolve_dockerfile_arg_value "${dockerfile}" "DEEPEP_NIC")"
+    metadata_pair "vllm.rocm.deepep_rocm_arch" "$(resolve_dockerfile_arg_value "${dockerfile}" "DEEPEP_ROCM_ARCH")"
+    metadata_pair "vllm.rocm.rixl_cache_key" "${RIXL_CACHE_KEY:-}"
+    metadata_pair "vllm.rocm.rocshmem_cache_key" "${ROCSHMEM_CACHE_KEY:-}"
+    metadata_pair "vllm.rocm.deepep_cache_key" "${DEEPEP_CACHE_KEY:-}"
+
+    metadata_pair "vllm.buildkite.build_number" "${BUILDKITE_BUILD_NUMBER:-}"
+    metadata_pair "vllm.buildkite.build_id" "${BUILDKITE_BUILD_ID:-}"
+}
+
+write_ci_base_metadata_annotations() {
+    local metadata="$1"
+    local key=""
+    local value=""
+    local annotation=""
+
+    [[ -n "${metadata}" ]] || return 0
+    while IFS=$'\t' read -r key value; do
+        [[ -n "${key}" && -n "${value}" ]] || continue
+        annotation="manifest:${key}=${value}"
+        printf '    "%s",\n' "$(hcl_escape_string "${annotation}")"
+    done <<< "${metadata}"
+}
+
+write_ci_base_metadata_labels() {
+    local metadata="$1"
+    local key=""
+    local value=""
+
+    [[ -n "${metadata}" ]] || return 0
+    while IFS=$'\t' read -r key value; do
+        [[ -n "${key}" && -n "${value}" ]] || continue
+        printf '    "%s" = "%s"\n' \
+            "$(hcl_escape_string "${key}")" \
+            "$(hcl_escape_string "${value}")"
+    done <<< "${metadata}"
+}
+
 write_ci_base_label_override() {
     local target_name=""
+    local metadata=""
     local -a ci_base_targets=()
-
-    BAKE_FILES=(-f "${VLLM_BAKE_FILE}" -f "${CI_HCL_PATH}")
 
     if [[ -z "${CI_BASE_CONTENT_HASH:-}" ]]; then
         return 0
@@ -1019,16 +1157,23 @@ write_ci_base_label_override() {
         return 0
     fi
 
+    metadata=$(ci_base_metadata_pairs)
+
     : > "${CI_BASE_LABEL_OVERRIDE_PATH}"
     for target_name in "${ci_base_targets[@]}"; do
         cat >> "${CI_BASE_LABEL_OVERRIDE_PATH}" <<EOF
 target "${target_name}" {
   annotations = [
     "manifest:org.opencontainers.image.revision=",
+EOF
+        write_ci_base_metadata_annotations "${metadata}" >> "${CI_BASE_LABEL_OVERRIDE_PATH}"
+        cat >> "${CI_BASE_LABEL_OVERRIDE_PATH}" <<EOF
   ]
   labels = {
     "org.opencontainers.image.revision" = ""
-    "vllm.ci_base.content_hash" = "${CI_BASE_CONTENT_HASH}"
+EOF
+        write_ci_base_metadata_labels "${metadata}" >> "${CI_BASE_LABEL_OVERRIDE_PATH}"
+        cat >> "${CI_BASE_LABEL_OVERRIDE_PATH}" <<EOF
   }
 }
 
@@ -1036,7 +1181,7 @@ EOF
     done
 
     BAKE_FILES+=(-f "${CI_BASE_LABEL_OVERRIDE_PATH}")
-    echo "Appended ci_base content-hash label override for targets: ${ci_base_targets[*]}"
+    echo "Appended ci_base metadata label override for targets: ${ci_base_targets[*]}"
 }
 
 uses_rocm_csrc_cache() {
@@ -1117,6 +1262,18 @@ hcl_escape_string() {
     value="${value//\\/\\\\}"
     value="${value//\"/\\\"}"
     printf '%s' "${value}"
+}
+
+join_words() {
+    local IFS=" "
+    printf '%s' "$*"
+}
+
+metadata_pair() {
+    local key="$1"
+    local value="${2:-}"
+
+    printf '%s\t%s\n' "${key}" "${value}"
 }
 
 write_hcl_string_list() {
@@ -1541,7 +1698,13 @@ confirm_remote_image_push() {
 
         remote_hash=$(get_remote_image_label_with_retry "${image_ref}" "vllm.ci_base.content_hash")
         if [[ -n "${remote_hash}" && "${remote_hash}" == "${CI_BASE_CONTENT_HASH}" ]]; then
-            return 0
+            if remote_ci_base_metadata_is_current_with_retry "${image_ref}"; then
+                return 0
+            fi
+
+            echo "Remote image exists with the expected ci_base content hash but stale metadata."
+            echo "  expected metadata version: ${CI_BASE_METADATA_VERSION:-${DEFAULT_CI_BASE_METADATA_VERSION}}"
+            return 1
         fi
 
         echo "Remote image exists but does not have the expected ci_base content hash."
@@ -1724,15 +1887,16 @@ main() {
     print_header
     validate_inputs
     load_ci_hcl
+    init_bake_files
     compute_ci_base_hash_if_needed
     configure_ci_base_image_refs
     maybe_skip_existing_image
     setup_builder
     prepare_git_cache_metadata
-    write_ci_base_label_override
     extract_dependency_pins
     write_rocm_build_arg_override
     compute_dependency_cache_keys
+    write_ci_base_label_override
     compute_rocm_csrc_content_hash_if_needed
     write_rocm_cache_override
     resolve_ci_base_dependency_targets
