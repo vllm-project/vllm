@@ -191,14 +191,16 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # For num_attention_heads < 16 (e.g. kimi-k2.5 head=8 with TP8),
         # make sure get_mla_metadata_info_v1 / get_mla_metadata_v1 are consistent
         # with the actual tensor shape passed to mla_decode_fwd.
-        self._num_attention_heads = max(16, self.num_heads)
         q_dtype = self.decode_attn_out_dtype
-        kv_cache_dtype_str = getattr(vllm_config.cache_config, "cache_dtype", "auto")
-        if kv_cache_dtype_str in ("fp8", "fp8_e4m3", "fp8_e5m2"):
-            kv_cache_dtype_str = "fp8"
-        else:
-            kv_cache_dtype_str = "bf16"
+        is_fp8_kv = AiterMLAHelper.is_fp8_kv_cache(
+            getattr(vllm_config.cache_config, "cache_dtype", "auto")
+        )
+        kv_cache_dtype_str = "fp8" if is_fp8_kv else "bf16"
         kv_dtype = dtypes.d_dtypes.get(kv_cache_dtype_str, dtypes.bf16)
+
+        self._num_attention_heads = AiterMLAHelper.get_actual_mla_num_heads(
+            self.num_heads, is_fp8=is_fp8_kv
+        )
         (
             (work_meta_data_size, work_meta_data_type),
             (work_indptr_size, work_indptr_type),
@@ -623,27 +625,50 @@ class AiterMLAHelper:
             else AiterMLAHelper._AITER_MIN_MLA_HEADS % num_heads == 0
         )
 
-    @staticmethod
-    def get_actual_mla_num_heads(num_heads: int) -> int:
-        return max(num_heads, AiterMLAHelper._AITER_MIN_MLA_HEADS)
+    # AITER's FP8 MLA decode on gfx950 only has native (fold-free) asm kernels
+    # for these per-rank q-head counts. Other counts take
+    # an internal nhead->16 fold path that is numerically BROKEN in aiter
+    # 0.1.16.post2. We pad FP8 decode to the next native count.
+    _AITER_FP8_NATIVE_DECODE_HEADS: ClassVar[tuple[int, ...]] = (16, 64, 128)
 
     @staticmethod
-    def get_mla_padded_q(num_heads: int, q: torch.Tensor) -> torch.Tensor:
-        return (
-            q
-            if num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS
-            else q.repeat_interleave(
+    def is_fp8_kv_cache(kv_cache_dtype) -> bool:
+        return str(kv_cache_dtype) in ("fp8", "fp8_e4m3", "fp8_e5m2")
+
+    @staticmethod
+    def get_actual_mla_num_heads(num_heads: int, is_fp8: bool = False) -> int:
+        base = max(num_heads, AiterMLAHelper._AITER_MIN_MLA_HEADS)
+        if not is_fp8:
+            return base
+        # Round up to the next native (fold-free) FP8 decode head count
+        return next(
+            (n for n in AiterMLAHelper._AITER_FP8_NATIVE_DECODE_HEADS if n >= base),
+            base,
+        )
+
+    @staticmethod
+    def get_mla_padded_q(
+        num_heads: int, q: torch.Tensor, is_fp8: bool = False
+    ) -> torch.Tensor:
+        if num_heads < AiterMLAHelper._AITER_MIN_MLA_HEADS:
+            return q.repeat_interleave(
                 AiterMLAHelper._AITER_MIN_MLA_HEADS // num_heads, dim=1
             )
-        )
+        target = AiterMLAHelper.get_actual_mla_num_heads(num_heads, is_fp8)
+        if target == num_heads:
+            return q
+        # Zero-pad the extra heads; attention is per-head independent so the
+        # real heads are unaffected, and the padded heads are sliced off below.
+        pad = q.new_zeros((q.shape[0], target - num_heads, q.shape[2]))
+        return torch.cat([q, pad], dim=1)
 
     @staticmethod
-    def get_mla_unpadded_o(num_heads: int, o: torch.Tensor) -> torch.Tensor:
-        return (
-            o
-            if num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS
-            else o[:, :: AiterMLAHelper._AITER_MIN_MLA_HEADS // num_heads, :]
-        )
+    def get_mla_unpadded_o(
+        num_heads: int, o: torch.Tensor, is_fp8: bool = False
+    ) -> torch.Tensor:
+        if num_heads < AiterMLAHelper._AITER_MIN_MLA_HEADS:
+            return o[:, :: AiterMLAHelper._AITER_MIN_MLA_HEADS // num_heads, :]
+        return o[:, :num_heads, :]
 
 
 class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
@@ -879,8 +904,11 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         assert isinstance(q, torch.Tensor)
         B = q.shape[0]
 
-        mla_padded_q = AiterMLAHelper.get_mla_padded_q(self.num_heads, q)
-        mla_num_heads = AiterMLAHelper.get_actual_mla_num_heads(self.num_heads)
+        is_fp8_kv = AiterMLAHelper.is_fp8_kv_cache(self.kv_cache_dtype)
+        mla_padded_q = AiterMLAHelper.get_mla_padded_q(self.num_heads, q, is_fp8_kv)
+        mla_num_heads = AiterMLAHelper.get_actual_mla_num_heads(
+            self.num_heads, is_fp8_kv
+        )
         o = torch.empty(
             B,
             mla_num_heads,
@@ -922,4 +950,4 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             **mla_kwargs,
         )
 
-        return AiterMLAHelper.get_mla_unpadded_o(self.num_heads, o), None
+        return AiterMLAHelper.get_mla_unpadded_o(self.num_heads, o, is_fp8_kv), None
