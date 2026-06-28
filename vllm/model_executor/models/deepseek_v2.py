@@ -98,6 +98,7 @@ from vllm.v1.attention.backends.mla.indexer import (
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
 from .interfaces import (
+    EagleModelMixin,
     MixtureOfExperts,
     SupportsEagle,
     SupportsEagle3,
@@ -1277,7 +1278,7 @@ class DeepseekV2DecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class DeepseekV2Model(nn.Module):
+class DeepseekV2Model(nn.Module, EagleModelMixin):
     fall_back_to_pt_during_load = False
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -1327,8 +1328,6 @@ class DeepseekV2Model(nn.Module):
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
-
-        self.aux_hidden_state_layers = tuple[int, ...]()
 
         # Needed by load_weights
         qk_nope_head_dim = getattr(config, "qk_nope_head_dim", 0)
@@ -1380,15 +1379,15 @@ class DeepseekV2Model(nn.Module):
         else:
             llama_4_scaling = None
 
-        aux_hidden_states = []
+        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for idx, layer in enumerate(
-            islice(self.layers, self.start_layer, self.end_layer),
-            start=self.start_layer,
+            islice(self.layers, self.start_layer, self.end_layer)
         ):
-            if idx in self.aux_hidden_state_layers:
-                aux_hidden_states.append(hidden_states + residual)
             hidden_states, residual = layer(
                 positions, hidden_states, residual, llama_4_scaling
+            )
+            self._maybe_add_hidden_state(
+                aux_hidden_states, idx + 1, hidden_states, residual
             )
 
         if not get_pp_group().is_last_rank:
