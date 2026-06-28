@@ -117,14 +117,8 @@ def _load_ov2_processor(
     trust_remote_code: bool,
     **kwargs: Any,
 ):
-    # Custom processor loader for OV2. Its ``trust_remote_code`` processor is a
-    # bare class that does not subclass ``ProcessorMixin``, so the shared,
-    # type-checked ``get_hf_processor`` / ``get_processor`` path rejects it. We
-    # load it directly via ``AutoProcessor`` here (mirroring what
-    # ``get_processor`` does for the AutoProcessor branch, minus the trailing
-    # ``isinstance`` validation). Keeping the load in model code means no shared
-    # loader carries a ``disable_type_check`` flag that an API caller could reach
-    # through per-request ``mm_processor_kwargs``.
+    # OV2's trust_remote_code processor is a bare class (not a ProcessorMixin),
+    # so the shared type-checked get_hf_processor rejects it; load it directly.
     return AutoProcessor.from_pretrained(
         convert_model_repo_to_path(model),
         revision=revision or "main",
@@ -149,19 +143,22 @@ def _pack_timestamps(per_video: list[list[float]]) -> torch.Tensor:
     return padded
 
 
-def _validate_video_source(path: str, model_config) -> None:
-    """Re-apply vLLM's media access controls to a raw video path/URL.
+def _validate_video_source(path: str, model_config) -> str:
+    """Confine a codec video path to ``--allowed-local-media-path``.
 
-    The frame and codec backends keep the raw path string alive past vLLM's
-    ``MultiModalDataParser`` (which for standard models decodes *and* validates
-    media upstream through ``MediaConnector``). Because this model dispatches on
-    the path at the processor stage, the string would otherwise reach
-    ``qwen_vl_utils.fetch_video`` / the codec module without any SSRF or
-    local-file-read protection. This mirrors the gates in
-    ``vllm/multimodal/media/connector.py`` (``load_from_url`` scheme check,
-    ``_assert_url_in_allowed_media_domains``, and ``_load_file_url`` subpath
-    confinement) so the two video backends honour ``--allowed-media-domains``
-    and ``--allowed-local-media-path`` exactly like the standard pipeline.
+    The codec backend keeps the raw path string alive past vLLM's
+    ``MultiModalDataParser`` and hands it to the trust-remote-code codec
+    module, which opens it directly via ``cv2.VideoCapture`` / ffmpeg. That
+    bypasses both ``MediaConnector``'s access controls and its redirect
+    handling (``VLLM_MEDIA_URL_ALLOW_REDIRECTS``), so we restrict the codec
+    backend to **local files only**: remote ``http(s)`` / ``data`` URLs are
+    rejected here and must instead go through the frame backend (a registered
+    ``VIDEO_LOADER_REGISTRY`` loader), which rides vLLM's connector and its
+    domain/redirect gates.
+
+    Returns the *resolved* absolute path so the codec module opens exactly the
+    file that was validated, closing the validate-vs-open (symlink-retarget)
+    window. Mirrors the confinement in ``MediaConnector._load_file_url``.
     """
     from pathlib import Path
     from urllib.request import url2pathname
@@ -169,98 +166,57 @@ def _validate_video_source(path: str, model_config) -> None:
     from urllib3.util import parse_url
 
     allowed_local = getattr(model_config, "allowed_local_media_path", "") or ""
-    allowed_domains = getattr(model_config, "allowed_media_domains", None) or []
 
-    # Use urllib3's parser (not stdlib ``urlsplit``) to match the URL parsing
-    # used by downstream HTTP libraries (urllib3/requests) and by
-    # ``MediaConnector._assert_url_in_allowed_media_domains``. The parser
-    # differential would otherwise let crafted URLs such as
-    # ``http://evil.com\@good.com/v.mp4`` (which ``urlsplit`` reads as host
-    # ``good.com`` but urllib3/requests dial as ``evil.com``) bypass the
-    # ``--allowed-media-domains`` allowlist.
     parsed = parse_url(str(path))
     scheme = (parsed.scheme or "").lower()
 
-    if scheme in ("http", "https"):
-        if allowed_domains and parsed.hostname not in allowed_domains:
-            raise ValueError(
-                f"Video URL host {parsed.hostname!r} is not in the allowed "
-                f"media domains; set --allowed-media-domains to permit it."
-            )
-        return
-    if scheme == "data":
-        return
-    if scheme in ("", "file"):
-        # Local file access is opt-in: require --allowed-local-media-path and
-        # confine the resolved path to that directory (connector.py:253-271).
-        if not allowed_local:
-            raise ValueError(
-                "Local video file access is disabled. Set "
-                "--allowed-local-media-path to enable reading local videos."
-            )
-        # Decode percent-encoding before the confinement check so traversal
-        # sequences hidden as %2e%2e are resolved to ``..`` first; otherwise a
-        # URL like file:///allowed/%2e%2e/etc/passwd stays literally under the
-        # allowed root here while the codec module URL-decodes it downstream and
-        # escapes. Mirrors MediaConnector._load_file_url (connector.py:266),
+    if scheme in ("http", "https", "data"):
+        raise ValueError(
+            f"The codec video backend does not support remote {scheme!r} URLs: "
+            f"its trust-remote-code decoder fetches them outside vLLM's domain "
+            f"and redirect controls. Use a local file path, or the frame "
+            f"backend for remote videos."
+        )
+    if scheme not in ("", "file"):
+        raise ValueError(
+            f"Unsupported codec video URL scheme {scheme!r}; only local file "
+            f"paths or file:// URLs are supported."
+        )
+
+    # Local file access is opt-in: require --allowed-local-media-path and
+    # confine the resolved path to that directory (connector.py:253-271).
+    if not allowed_local:
+        raise ValueError(
+            "Local video file access is disabled. Set "
+            "--allowed-local-media-path to enable reading local videos."
+        )
+    if scheme == "file":
+        # Decode percent-encoding (mirrors MediaConnector._load_file_url),
         # including the netloc so file://host/path is handled identically.
-        if scheme == "file":
-            local = Path(url2pathname((parsed.netloc or "") + (parsed.path or "")))
-            # A file:// URL with a netloc (e.g. ``file://host/path``) makes
-            # ``url2pathname`` yield a *relative* path ("host/path"). That would
-            # resolve against the CWD and could slip past the confinement check
-            # below while the raw ``file://`` string handed to the codec backend
-            # still names something else -- a validate-vs-open differential.
-            # MediaConnector._load_file_url is immune because it opens the very
-            # Path it validates; our codec path forwards the original string, so
-            # we additionally require the resolved path to be absolute (matching
-            # the bare-path branch invariant).
-            if not local.is_absolute():
-                raise ValueError(
-                    f"file:// video path {str(path)!r} resolved to a relative "
-                    f"path; only absolute file:// paths are supported."
-                )
-        else:
-            # Bare local path (scheme==""): only the codec backend produces
-            # these, and they bypass MediaConnector by design (path-survival,
-            # see the design note below). MediaConnector itself only accepts
-            # explicit file:// URLs; here we additionally require the bare path
-            # to be absolute, because resolving a *relative* path against an
-            # ambiguous CWD before the confinement check is brittle and unsafe.
-            #
-            # Deliberately NOT percent-decoded (unlike the file:// branch): the
-            # codec backend consumes this exact string with
-            # ``cv2.VideoCapture(path)`` / ``Path(path)``
-            # (codec_video_processing_llava_onevision2.py), which open it as a
-            # literal filename with no URL semantics. ``%2e%2e`` therefore stays
-            # the literal characters "%2e%2e" downstream and never collapses to
-            # ``..``, so decoding it *here* would create a validate-vs-open
-            # differential (and could reject legitimate names containing ``%``).
-            # The file:// branch decodes because url2pathname defines its
-            # on-disk path; bare paths have no such URL layer.
-            local = Path(str(path))
-            if not local.is_absolute():
-                raise ValueError(
-                    f"Local video path {str(path)!r} must be absolute; "
-                    f"relative paths are not supported."
-                )
-        allowed_root = Path(allowed_local).resolve()
-        resolved = local.resolve()
-        if resolved != allowed_root and allowed_root not in resolved.parents:
-            raise ValueError(
-                f"Video path {str(path)!r} is outside the allowed local media "
-                f"directory {allowed_local!r}."
-            )
-        return
-    raise ValueError(
-        f"Unsupported video URL scheme {scheme!r}; must be http(s), data, or "
-        f"file (mirrors MediaConnector.load_from_url)."
-    )
+        local = Path(url2pathname((parsed.netloc or "") + (parsed.path or "")))
+    else:
+        local = Path(str(path))
+    # Require an absolute path: resolving a relative path against an ambiguous
+    # CWD before the confinement check is brittle/unsafe.
+    if not local.is_absolute():
+        raise ValueError(
+            f"Local video path {str(path)!r} must be absolute; "
+            f"relative paths are not supported."
+        )
+    allowed_root = Path(allowed_local).resolve()
+    resolved = local.resolve()
+    if resolved != allowed_root and allowed_root not in resolved.parents:
+        raise ValueError(
+            f"Video path {str(path)!r} is outside the allowed local media "
+            f"directory {allowed_local!r}."
+        )
+    return str(resolved)
 
 
-def _validate_video_sources(paths, model_config) -> None:
-    for path in paths:
-        _validate_video_source(path, model_config)
+def _validate_video_sources(paths, model_config) -> list[str]:
+    # Return the resolved paths so the codec module opens exactly what was
+    # validated (no validate-vs-open / symlink-retarget differential).
+    return [_validate_video_source(path, model_config) for path in paths]
 
 
 # Design note: the two video backends take deliberately different paths.
@@ -270,14 +226,15 @@ def _validate_video_sources(paths, model_config) -> None:
 #   ``(frames, metadata)`` is exactly what loaders are for, so frame sampling
 #   participates in the standard decode-stage pipeline.
 #
-# * codec backend: NOT a loader. OV2's codec path needs the *raw video path
-#   string* to survive untouched into ``_call_hf_processor``, where the HF
-#   processor builds the codec canvas + smart_resize + patchify
+# * codec backend: NOT a loader. OV2's codec path needs the video path string
+#   to survive into ``_call_hf_processor``, where the HF processor builds the
+#   codec canvas + smart_resize + patchify
 #   (pixel_values/image_grid_thw/patch_positions). That transform is
 #   path-level and inseparable; it cannot be reconstructed from pre-decoded
 #   RGB frames, so it must run at the processor stage rather than the decode
-#   stage. The small marker/parser machinery below is what keeps the path
-#   alive for codec given that constraint.
+#   stage. The small marker/parser machinery below keeps the path alive for
+#   codec; ``_validate_video_source`` then confines it to a local file (codec
+#   does not support remote URLs -- see its docstring).
 _CODEC_VIDEO_MARKER = "ov2_codec_video"
 
 
@@ -290,12 +247,10 @@ def prepare_codec_video_input(video_path: str) -> tuple:
 
         multi_modal_data = {"video": prepare_codec_video_input("foo.mp4")}
 
-    The dummy ndarray bytes encode a hash of ``video_path``. vLLM's
-    MultiModalDataParser._parse_video_data (parse.py:639) drops the metadata
-    dict unless ``video_needs_metadata=True``; only the ndarray reaches
-    MultiModalHasher.hash_kwargs. Without this variance, distinct codec
-    videos would collide on mm_hash and EncoderCacheManager would skip the
-    encoder for every video after the first.
+    The dummy ndarray bytes encode a hash of ``video_path`` so distinct codec
+    videos get distinct mm_hashes: the parser drops the metadata dict before
+    hashing (only the ndarray reaches MultiModalHasher), so without this
+    variance every video after the first would collide and skip the encoder.
     """
     path_str = str(video_path)
     digest = hashlib.blake2b(path_str.encode("utf-8"), digest_size=16).digest()
@@ -586,15 +541,13 @@ def _expand_video_markers_in_prompt(
 # path are decoded + sampled inside vLLM (no qwen_vl_utils dependency, and the
 # connector's SSRF / local-file gates apply automatically).
 #
-# Parity note: ``compute_frames_index_to_sample`` faithfully replicates
+# Parity note: ``compute_frames_index_to_sample`` replicates
 # ``qwen_vl_utils.smart_nframes`` (the policy the OV2 hf-chat recipe validated)
-# -- frame *count* and index *selection* are byte-identical to qwen. The one
-# residual difference from the original qwen path is the source frame *count*
-# itself: qwen defaults to a decord decode whereas vLLM has no decord backend
-# and decodes via OpenCV/PyAV. OpenCV reports ``CAP_PROP_FRAME_COUNT`` (a
-# duration x fps estimate) which can differ from decord's exact index count by
-# +/-1 frame on some containers, so sampled indices may shift by one frame on
-# those files. Downstream task metrics are validated to stay within noise.
+# -- frame count and index selection are byte-identical to qwen. The one
+# residual difference is the source frame *count*: qwen decodes via decord
+# whereas vLLM uses OpenCV/PyAV, whose ``CAP_PROP_FRAME_COUNT`` (a duration x
+# fps estimate) can differ by +/-1 frame on some containers, shifting sampled
+# indices by one frame on those files. Downstream metrics stay within noise.
 _OV2_FRAME_FACTOR = 2
 _OV2_FPS_MIN_FRAMES = 4
 
@@ -1272,30 +1225,22 @@ class LlavaOnevision2ProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_config()
 
     def get_data_parser(self) -> MultiModalDataParser:
-        # ``video_needs_metadata=True`` makes the base parser preserve the
-        # ``(frames, metadata)`` tuples produced by
-        # ``LlavaOnevision2VideoBackend`` (frame backend, via the connector)
-        # AND the ``(dummy, {marker: path})`` tuples produced by
-        # ``prepare_codec_video_input`` (codec backend, direct mm input).
-        # Both survive into ``_call_hf_processor`` where they are dispatched
-        # by metadata content.
+        # ``video_needs_metadata=True`` makes the parser preserve both the
+        # ``(frames, metadata)`` tuples from the frame backend and the
+        # ``(dummy, {marker: path})`` tuples from prepare_codec_video_input;
+        # both are dispatched by metadata content in ``_call_hf_processor``.
         return LlavaOnevision2MultiModalDataParser(
             self.get_hf_config().vision_config.spatial_merge_size,
             video_needs_metadata=True,
         )
 
     def get_hf_processor(self, **kwargs: object):
-        # OV2's ``trust_remote_code`` processor is a bare class that does not
-        # subclass ``ProcessorMixin``, so the shared ``get_hf_processor`` (which
-        # enforces an ``isinstance`` check) cannot load it. Load it directly via
-        # ``AutoProcessor`` here -- the same pattern other ``trust_remote_code``
-        # models use (e.g. Whisper, Qwen3-ASR). Keeping the load in model code
-        # means no shared loader carries a ``disable_type_check`` flag that an
-        # API caller could reach through per-request ``mm_processor_kwargs``.
+        # OV2's trust_remote_code processor is a bare class (not a
+        # ProcessorMixin), so the shared get_hf_processor cannot load it; load
+        # via AutoProcessor here (as other trust_remote_code models do).
         model_config = self.ctx.model_config
-        # ``_merge_mm_kwargs`` applies ``get_allowed_kwarg_only_overrides`` so a
-        # caller's ``mm_processor_kwargs`` can only set known processor args
-        # (and wraps values as hashable for the lru_cache below).
+        # ``_merge_mm_kwargs`` restricts caller ``mm_processor_kwargs`` to known
+        # processor args and wraps values as hashable for the lru_cache.
         merged = _merge_mm_kwargs(model_config, AutoProcessor, **kwargs)
         merged.setdefault("use_fast", True)
         return _load_ov2_processor(
@@ -1553,11 +1498,10 @@ class LlavaOnevision2MultiModalProcessor(
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        # The wrapped OV2 processor is a bare custom class that lacks the
-        # standard ProcessorMixin ``_merge_kwargs`` machinery, so vLLM's
-        # default path through call_hf_processor_mm_only fails. Overriding
-        # this method makes the base class route through
-        # _apply_hf_processor_text_mm which calls us directly.
+        # The wrapped OV2 processor is a bare custom class without the standard
+        # ProcessorMixin ``_merge_kwargs`` machinery, so vLLM's default path
+        # fails; overriding this method routes the base class to call us
+        # directly.
         hf_processor = self.info.get_hf_processor(**mm_kwargs)
         merged_kwargs = self.info.ctx.get_merged_mm_kwargs(
             dict(**mm_kwargs, **tok_kwargs)
@@ -1615,9 +1559,13 @@ class LlavaOnevision2MultiModalProcessor(
         is_codec = is_codec_marker or is_codec_kwarg
 
         if is_codec:
-            # Enforce vLLM's media access controls before the codec module
-            # decodes the path (SSRF / local-file-read protection).
-            _validate_video_sources(codec_video_paths, self.info.ctx.model_config)
+            # Confine codec paths to --allowed-local-media-path (local-only;
+            # SSRF / local-file-read protection) and use the *resolved* paths
+            # downstream so the codec module opens exactly the file that was
+            # validated (no symlink-retarget / validate-vs-open gap).
+            codec_video_paths = _validate_video_sources(
+                codec_video_paths, self.info.ctx.model_config
+            )
             # Codec backend: HF processor consumes the path string directly and
             # performs decode + canvas-packing internally. The dummy ndarray
             # we attached during prepare_codec_video_input is discarded here.
@@ -1677,16 +1625,12 @@ class LlavaOnevision2MultiModalProcessor(
             )
 
             # Build the merged ``images`` list the wrapped HF processor will
-            # consume. ``new_prompt`` keeps every image marker in place and
-            # expands each video marker into per-frame ``<|image_pad|>`` blocks,
-            # so the processor assigns the merged image list *positionally* to
-            # the ``<|image_pad|>`` slots in prompt order. The merged list must
-            # therefore follow the *interleaved marker order of the prompt*, not
-            # a fixed "videos first" order -- otherwise frame data is bound to
-            # the wrong placeholder and mixed image+video requests break
-            # alignment (the dummy-profiling prompt emits image markers before
-            # video markers). ``row_is_video`` labels each resulting grid row so
-            # the outputs can be split back into per-modality keys below.
+            # consume. The processor binds the merged list *positionally* to the
+            # ``<|image_pad|>`` slots in prompt order, so it must follow the
+            # interleaved marker order of the prompt (not a fixed "videos first"
+            # order) -- otherwise mixed image+video requests bind frames to the
+            # wrong placeholder. ``row_is_video`` labels each grid row so outputs
+            # can be split back into per-modality keys below.
             merged_mm_data = dict(mm_data)
             existing_images = merged_mm_data.pop("images", None)
             caller_images: list[Image.Image] = []
@@ -1741,13 +1685,10 @@ class LlavaOnevision2MultiModalProcessor(
             data = dict(output)
 
             # Split the image-series processor outputs back into video rows and
-            # genuine-image rows. The processor emits one ``image_grid_thw`` row
-            # per frame/image (in ``flat_frames`` / prompt order) and one
-            # ``pixel_values`` / ``patch_positions`` patch block per row. Video
-            # rows become video-series keys (found by the ``<|video_pad|>``
-            # replacement); caller-image rows stay under image-series keys.
-            # Without this split a mixed image+video request silently drops the
-            # image modality (``out_mm_kwargs`` would carry only ``video``).
+            # genuine-image rows (one grid row per frame/image, in flat_frames
+            # order). Video rows become video-series keys; caller-image rows
+            # stay under image-series keys. Without this split a mixed
+            # image+video request silently drops the image modality.
             grid = data.get("image_grid_thw")
             has_caller_images = any(not v for v in row_is_video)
             if grid is not None and has_caller_images:
@@ -1818,20 +1759,17 @@ class LlavaOnevision2MultiModalProcessor(
         # Codec branch emits image-series keys; vLLM expects video-series.
         # Timestamps are NOT synthesized here: the codec format packs multiple
         # source-frame timestamps into one canvas, so a per-canvas list is
-        # ill-defined. Instead we ship the per-video fps and let
-        # get_video_replacement reconstruct (timestamp, token_count) runs from
-        # patch_positions_videos at replacement time (mirrors HF's
-        # _timestamp_runs / rewrite_text_with_codec_positions exactly).
+        # ill-defined. We ship per-video fps and let get_video_replacement
+        # reconstruct (timestamp, token_count) runs from patch_positions_videos.
         data["pixel_values_videos"] = data.pop("pixel_values")
         video_grid_thw = data.pop("image_grid_thw")
         data["video_grid_thw"] = video_grid_thw
         patch_positions = data.pop("patch_positions")
         data["patch_positions_videos"] = patch_positions
 
-        # Read per-video fps from processor output (list[float], order matches
-        # codec_video_paths). Falls back to _codec_fps_for only if the processor
-        # didn't populate codec_fps (older model snapshots). Avoids triggering
-        # a redundant second process_codec_video call with default CodecConfig.
+        # Read per-video fps from processor output (order matches
+        # codec_video_paths); fall back to _codec_fps_for only if the processor
+        # didn't populate codec_fps (older model snapshots).
         processor_fps = data.pop("codec_fps", None)
         per_video_canvas_counts: list[int] = []
         per_video_fps: list[float] = []
@@ -1864,9 +1802,6 @@ class LlavaOnevision2MultiModalProcessor(
         # frame_timestamps is required by the field-config schema; emit an
         # empty per-video list (frames-backend populates it, codec ignores it).
         data["frame_timestamps"] = _pack_timestamps([[] for _ in codec_video_paths])
-        # The processor output was already dtype-postprocessed by the base
-        # ``_call_hf_processor`` at the call site; the fields added here are all
-        # int64 / empty float32 and need no further casting.
         return data
 
     def _count_canvases_for_video(
@@ -1876,12 +1811,9 @@ class LlavaOnevision2MultiModalProcessor(
         canvas_offset: int,
         grid_offset: int,
     ) -> int:
-        # Single-video case (the only one we test): every remaining grid row
-        # belongs to this video. Multi-video would need explicit per-video
-        # canvas counts from HF, which the processor doesn't emit today.
-        # NOTE: HF processor merges per-canvas rows into a single [N,H,W]
-        # row per video (fix(codec): merge per-canvas image_grid_thw).
-        # The canvas count therefore lives in the t-dim, not shape[0].
+        # Single-video case: every remaining grid row belongs to this video.
+        # HF merges per-canvas rows into one [N,H,W] row per video, so the
+        # canvas count lives in the t-dim, not shape[0].
         return int(video_grid_thw[grid_offset:, 0].sum().item())
 
     def _get_prompt_updates(
@@ -1919,13 +1851,11 @@ class LlavaOnevision2MultiModalProcessor(
             tokens: list[int] = []
 
             if is_codec:
-                # Codec packs multiple source-frame timestamps into one
-                # canvas, so timestamps are per-run (consecutive patches
-                # sharing the same source-frame t), NOT per-canvas. We
-                # mirror HF rewrite_text_with_codec_positions exactly:
-                # group patch_positions by run, emit
-                # ``<sec seconds><|vision_start|><pad*N><|vision_end|>\n``
-                # per run. decimals=1 matches HF default.
+                # Codec packs multiple source-frame timestamps into one canvas,
+                # so timestamps are per-run (consecutive patches sharing the
+                # same source-frame t), not per-canvas. Mirrors HF's
+                # rewrite_text_with_codec_positions: group patch_positions by
+                # run, emit ``<sec seconds><|vision_start|><pad*N><|vision_end|>\n``.
                 patch_positions = out_item["patch_positions_videos"].data
                 fps_t = out_item["codec_fps"].data
                 fps = float(int(fps_t.item())) / 1_000_000_000.0
@@ -2067,9 +1997,8 @@ class LlavaOnevision2ForConditionalGeneration(
                 raise ValueError(
                     f"{name} must be 2D or batched-3D, got shape={mm_input.shape}"
                 )
-            # Flatten the leading batch dim into the patch dim (b, n, d) ->
-            # (b*n, d). flatten avoids materializing a Python list of row
-            # tensors (which torch.concat(list(...)) would do).
+            # Flatten the leading batch dim into the patch dim: (b, n, d) ->
+            # (b*n, d), avoiding a Python list of row tensors.
             return mm_input.flatten(0, 1)
         return torch.concat(mm_input)
 

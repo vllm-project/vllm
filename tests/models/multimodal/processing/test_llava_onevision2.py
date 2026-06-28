@@ -102,48 +102,36 @@ def test_extract_codec_video_paths_mixed_batch_returns_none():
 # ---------------------------------------------------------------------------
 # Media access controls (_validate_video_source)
 #
-# The codec backend keeps the raw path/URL string alive past vLLM's
-# MultiModalDataParser, so the model re-applies the gates from
-# vllm/multimodal/media/connector.py before the string reaches the codec
-# module. (Frame videos go through the connector, which gates them already.)
-# These tests pin that the self-contained validator matches MediaConnector's
-# behaviour for --allowed-media-domains and --allowed-local-media-path.
+# The codec backend keeps the raw path string alive past vLLM's
+# MultiModalDataParser and hands it to the trust-remote-code codec module,
+# which opens it directly (cv2/ffmpeg) outside vLLM's MediaConnector. So the
+# codec backend is restricted to *local files* confined to
+# --allowed-local-media-path; remote http(s)/data URLs are rejected (they must
+# use the frame backend, which rides the connector). The validator also returns
+# the *resolved* path so the codec module opens exactly what was validated
+# (no symlink-retarget / validate-vs-open gap).
 # ---------------------------------------------------------------------------
 
 
-def test_validate_http_allowed_when_no_domain_allowlist():
-    # No --allowed-media-domains configured: any http(s) host is permitted
-    # (matches MediaConnector, which only filters when an allowlist is set).
-    _validate_video_source("http://example.com/v.mp4", _model_config())
+def test_validate_http_url_rejected():
+    # Codec backend is local-only: remote URLs bypass the connector's domain
+    # and redirect controls, so they are rejected regardless of allowlist.
+    with pytest.raises(ValueError):
+        _validate_video_source("http://example.com/v.mp4", _model_config())
 
 
-def test_validate_http_blocked_when_host_not_in_allowlist():
+def test_validate_https_url_rejected_even_when_host_allowlisted():
     with pytest.raises(ValueError):
         _validate_video_source(
-            "http://evil.com/v.mp4",
+            "https://good.com/v.mp4",
             _model_config(domains=["good.com"]),
         )
 
 
-def test_validate_http_allowed_when_host_in_allowlist():
-    _validate_video_source(
-        "http://good.com/v.mp4",
-        _model_config(domains=["good.com"]),
-    )
-
-
-def test_validate_http_userinfo_confusion_blocked():
-    # Parser differential guard: stdlib ``urlsplit`` reads the host of
-    # ``http://evil.com\@good.com/v.mp4`` as ``good.com``, but urllib3/requests
-    # (which actually issue the request downstream) dial ``evil.com``. We parse
-    # with urllib3's ``parse_url`` so the allowlist sees the same host the HTTP
-    # client will, and this crafted URL is rejected against an allowlist that
-    # only permits ``good.com``.
+def test_validate_data_url_rejected():
+    # data: URLs are a remote/inline source for the frame backend, not codec.
     with pytest.raises(ValueError):
-        _validate_video_source(
-            "http://evil.com\\@good.com/v.mp4",
-            _model_config(domains=["good.com"]),
-        )
+        _validate_video_source("data:video/mp4;base64,AAAA", _model_config())
 
 
 def test_validate_local_file_blocked_without_allowed_path():
@@ -153,11 +141,10 @@ def test_validate_local_file_blocked_without_allowed_path():
         _validate_video_source("/data/v.mp4", _model_config())
 
 
-def test_validate_local_file_allowed_inside_allowed_dir():
-    _validate_video_source(
-        "/tmp/ov2/v.mp4",
-        _model_config(local="/tmp/ov2"),
-    )
+def test_validate_local_file_allowed_inside_allowed_dir(tmp_path):
+    f = tmp_path / "v.mp4"
+    f.touch()
+    assert _validate_video_source(str(f), _model_config(local=str(tmp_path))) == str(f)
 
 
 def test_validate_local_file_traversal_blocked():
@@ -169,17 +156,18 @@ def test_validate_local_file_traversal_blocked():
         )
 
 
-def test_validate_file_scheme_allowed_inside_allowed_dir():
-    _validate_video_source(
-        "file:///tmp/ov2/v.mp4",
-        _model_config(local="/tmp/ov2"),
+def test_validate_file_scheme_allowed_inside_allowed_dir(tmp_path):
+    f = tmp_path / "v.mp4"
+    f.touch()
+    assert (
+        _validate_video_source(f.as_uri(), _model_config(local=str(tmp_path)))
+        == str(f)
     )
 
 
 def test_validate_file_scheme_percent_encoded_traversal_blocked():
-    # ``%2e%2e`` decodes to ``..``; the confinement check must URL-decode first
-    # (url2pathname) so the path cannot stay literally under the allowed root
-    # here while the codec module decodes and escapes downstream.
+    # ``%2e%2e`` decodes to ``..``; the confinement check URL-decodes first
+    # (url2pathname) so the path cannot stay literally under the allowed root.
     with pytest.raises(ValueError):
         _validate_video_source(
             "file:///tmp/ov2/%2e%2e/%2e%2e/etc/passwd",
@@ -187,14 +175,21 @@ def test_validate_file_scheme_percent_encoded_traversal_blocked():
         )
 
 
-def test_validate_data_url_allowed():
-    # data: URLs carry inline bytes and need no filesystem/network access.
-    _validate_video_source("data:video/mp4;base64,AAAA", _model_config())
-
-
 def test_validate_unsupported_scheme_blocked():
     with pytest.raises(ValueError):
         _validate_video_source("ftp://example.com/v.mp4", _model_config())
+
+
+def test_validate_returns_resolved_path_through_symlink(tmp_path):
+    # The validator resolves symlinks and returns the *real* path, so the codec
+    # module opens exactly what was validated (closes the validate-vs-open gap).
+    real = tmp_path / "real.mp4"
+    real.touch()
+    link = tmp_path / "link.mp4"
+    link.symlink_to(real)
+    assert _validate_video_source(
+        str(link), _model_config(local=str(tmp_path))
+    ) == str(real)
 
 
 def test_validate_relative_bare_path_blocked():
