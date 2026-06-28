@@ -56,6 +56,14 @@ def _get_mla_prefill_backend_priorities(
     Returns:
         List of backends in priority order (highest priority first).
     """
+    from vllm.platforms import current_platform
+
+    if current_platform.is_rocm():
+        return [
+            MLAPrefillBackendEnum.ROCM_AITER_FA,
+            MLAPrefillBackendEnum.FLASH_ATTN,
+        ]
+
     if device_capability.major == 10:  # Blackwell
         return [
             MLAPrefillBackendEnum.FLASH_ATTN,
