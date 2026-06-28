@@ -45,7 +45,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention import Attention, RSWAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
@@ -174,15 +174,28 @@ class DeepseekAttention(nn.Module):
             max_position=max_position_embeddings,
             rope_parameters=config.rope_parameters,
         )
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.attn",
-        )
+        rswa_window = getattr(vllm_config.model_config.hf_config, "rswa_window", None)
+        if rswa_window is not None:
+            self.attn = RSWAAttention(
+                self.num_heads,
+                self.head_dim,
+                self.scaling,
+                num_kv_heads=self.num_kv_heads,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.attn",
+                rswa_window=rswa_window,
+            )
+        else:
+            self.attn = Attention(
+                self.num_heads,
+                self.head_dim,
+                self.scaling,
+                num_kv_heads=self.num_kv_heads,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.attn",
+            )
 
     def forward(
         self,
@@ -588,12 +601,12 @@ class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
         compilation_config.static_forward_context[prefix] = self
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        return MLAAttentionSpec(  # Only has one vector instead of K + V
+        return MLAAttentionSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
-        )
+        )  # Only has one vector instead of K + V
 
     def forward(self): ...
 
@@ -1438,6 +1451,11 @@ class DeepseekV2Model(nn.Module):
         pp_missing_layer_names = get_pp_missing_layer_names(self)
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        # With index_topk_freq>1 only some layers build an indexer, yet the
+        # checkpoint ships indexer weights for all of them; track the built ones.
+        indexer_present_prefixes = {
+            n.rsplit(".indexer.", 1)[0] for n in params_dict if ".indexer." in n
+        }
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -1445,6 +1463,11 @@ class DeepseekV2Model(nn.Module):
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is not None:
                 continue  # skip spec decode layers for main model
+
+            if ".indexer." in name and (
+                name.rsplit(".indexer.", 1)[0] not in indexer_present_prefixes
+            ):
+                continue  # this layer has no indexer; drop its checkpoint weights
 
             is_fusion_moe_shared_experts_layer = (
                 rocm_aiter_moe_shared_expert_enabled and ("mlp.shared_experts" in name)
