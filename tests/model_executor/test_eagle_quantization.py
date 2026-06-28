@@ -133,7 +133,7 @@ def test_eagle3_lm_head_receives_quant_config():
 
     mock_vllm_config = Mock()
     mock_vllm_config.speculative_config.draft_model_config.hf_config = mock_hf_config
-    mock_vllm_config.model_config.get_num_layers.return_value = 32
+    mock_vllm_config.model_config.get_total_num_hidden_layers.return_value = 32
     mock_vllm_config.speculative_config.parallel_drafting = False
 
     with (
@@ -157,3 +157,63 @@ def test_eagle3_lm_head_receives_quant_config():
         assert call_kwargs["quant_config"] is mock_quant_config, (
             "ParallelLMHead must receive the draft model's quant_config"
         )
+
+
+def test_eagle3_llama_uses_global_target_layer_count_with_pp():
+    from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+
+    mock_hf_config = Mock()
+    mock_hf_config.draft_vocab_size = 1000
+    mock_hf_config.hidden_size = 256
+    mock_hf_config.vocab_size = 32000
+    mock_hf_config.logit_scale = 1.0
+
+    mock_vllm_config = Mock()
+    mock_vllm_config.speculative_config.draft_model_config.hf_config = mock_hf_config
+    mock_vllm_config.model_config.get_total_num_hidden_layers.return_value = 61
+    mock_vllm_config.model_config.get_num_layers.return_value = 31
+    mock_vllm_config.speculative_config.parallel_drafting = False
+
+    with (
+        patch("vllm.model_executor.models.llama_eagle3.LlamaModel") as MockModel,
+        patch("vllm.model_executor.models.llama_eagle3.ParallelLMHead"),
+        patch("vllm.model_executor.models.llama_eagle3.LogitsProcessor"),
+        patch("vllm.model_executor.models.llama_eagle3.get_draft_quant_config"),
+    ):
+        MockModel.return_value.fc_input_size = 256
+
+        Eagle3LlamaForCausalLM(vllm_config=mock_vllm_config)
+
+    assert mock_hf_config.target_layer_count == 61
+    assert MockModel.call_args.kwargs["start_layer_id"] == 61
+    mock_vllm_config.model_config.get_num_layers.assert_not_called()
+
+
+def test_eagle3_deepseek_uses_global_target_layer_count_with_pp():
+    from vllm.model_executor.models.deepseek_eagle3 import (
+        Eagle3DeepseekV2ForCausalLM,
+    )
+
+    mock_hf_config = Mock()
+    mock_hf_config.draft_vocab_size = 1000
+    mock_hf_config.hidden_size = 256
+    mock_hf_config.vocab_size = 32000
+    mock_hf_config.logit_scale = 1.0
+
+    mock_vllm_config = Mock()
+    mock_vllm_config.speculative_config.draft_model_config.hf_config = mock_hf_config
+    mock_vllm_config.model_config.get_total_num_hidden_layers.return_value = 61
+    mock_vllm_config.model_config.get_num_layers.return_value = 31
+
+    with (
+        patch(
+            "vllm.model_executor.models.deepseek_eagle3.DeepseekV2Eagle3Model"
+        ) as MockModel,
+        patch("vllm.model_executor.models.deepseek_eagle3.ParallelLMHead"),
+        patch("vllm.model_executor.models.deepseek_eagle3.LogitsProcessor"),
+    ):
+        Eagle3DeepseekV2ForCausalLM(vllm_config=mock_vllm_config)
+
+    assert mock_hf_config.target_layer_count == 61
+    assert MockModel.call_args.kwargs["start_layer_id"] == 61
+    mock_vllm_config.model_config.get_num_layers.assert_not_called()

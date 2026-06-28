@@ -317,14 +317,19 @@ class GptOssModel(nn.Module, EagleModelMixin):
             residual = intermediate_tensors["residual"]
 
         aux_hidden_states = self._maybe_add_hidden_state(
-            [], self.start_layer, x, residual
+            self._get_eagle3_aux_hidden_states(intermediate_tensors),
+            0,
+            x,
+            residual,
         )
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             x, residual = layer(x, positions, residual)
             self._maybe_add_hidden_state(aux_hidden_states, i + 1, x, residual)
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors({"hidden_states": x, "residual": residual})
+            return self._make_intermediate_tensors_with_eagle3_aux(
+                x, residual, aux_hidden_states
+            )
         x, _ = self.norm(x, residual)
 
         if len(aux_hidden_states) > 0:
