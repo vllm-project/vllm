@@ -45,7 +45,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention import Attention, RSWAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
@@ -73,6 +73,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sparse_attn_indexer import (
     SparseAttnIndexer,
+    fused_indexer_q_rope_quant,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -173,15 +174,28 @@ class DeepseekAttention(nn.Module):
             max_position=max_position_embeddings,
             rope_parameters=config.rope_parameters,
         )
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.attn",
-        )
+        rswa_window = getattr(vllm_config.model_config.hf_config, "rswa_window", None)
+        if rswa_window is not None:
+            self.attn = RSWAAttention(
+                self.num_heads,
+                self.head_dim,
+                self.scaling,
+                num_kv_heads=self.num_kv_heads,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.attn",
+                rswa_window=rswa_window,
+            )
+        else:
+            self.attn = Attention(
+                self.num_heads,
+                self.head_dim,
+                self.scaling,
+                num_kv_heads=self.num_kv_heads,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.attn",
+            )
 
     def forward(
         self,
@@ -587,12 +601,12 @@ class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
         compilation_config.static_forward_context[prefix] = self
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        return MLAAttentionSpec(  # Only has one vector instead of K + V
+        return MLAAttentionSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
-        )
+        )  # Only has one vector instead of K + V
 
     def forward(self): ...
 
@@ -674,6 +688,13 @@ class Indexer(nn.Module):
         )
 
         self.is_inplace_rope = is_inplace_rope
+        self.use_fused_indexer_q = (
+            current_platform.is_cuda()
+            and self.quant_block_size == self.head_dim
+            and self.head_dim == 128
+            and self.rope_dim == 64
+            and self.scale_fmt is not None
+        )
 
     def forward(
         self, hidden_states: torch.Tensor, qr: torch.Tensor, positions, rotary_emb
@@ -698,6 +719,34 @@ class Indexer(nn.Module):
             rotary_emb(
                 positions, q[..., : self.rope_dim], k[..., : self.rope_dim].unsqueeze(1)
             )
+        elif self.use_fused_indexer_q and q.dtype == torch.bfloat16:
+            # fused wk + weights_proj: one GEMM, then split
+            kw, _ = self.wk_weights_proj(hidden_states)
+            k = kw[:, : self.head_dim]
+            weights = kw[:, self.head_dim :]
+
+            k = self.k_norm(k)
+            k_pe, k_nope = torch.split(
+                k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
+            )
+
+            q_fp8, weights = fused_indexer_q_rope_quant(
+                positions,
+                q,
+                rotary_emb.cos_sin_cache,
+                weights,
+                self.softmax_scale,
+                self.n_head**-0.5,
+                rotary_emb.is_neox_style,
+            )
+
+            # rotate only the MQA K
+            q_dummy = torch.empty_like(k_pe.unsqueeze(1))
+            _, k_pe = rotary_emb(positions, q_dummy, k_pe.unsqueeze(1))
+            k_pe = k_pe.reshape(-1, 1, self.rope_dim)
+            k = torch.cat([k_pe.squeeze(-2), k_nope], dim=-1)
+
+            return self.indexer_op(hidden_states, q_fp8, k, weights)
         else:
             q_pe, q_nope = torch.split(
                 q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1

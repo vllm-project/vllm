@@ -878,7 +878,7 @@ class DiffusionGemmaModelState(ModelState):
         scheduled_encoder_inputs: dict[str, list[int]],
         input_batch: InputBatch,
         req_states: RequestState,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | None:
         if not self.supports_mm_inputs:
             return None
 
