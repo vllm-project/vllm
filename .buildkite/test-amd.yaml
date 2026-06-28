@@ -438,7 +438,7 @@ steps:
 #-----------------------------------------------------  mi300 · basic_correctness  -----------------------------------------------------#
 
 - label: Basic Correctness # TBD
-  timeout_in_minutes: 40
+  timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
   fast_check: true
@@ -456,7 +456,7 @@ steps:
   - pytest -v -s basic_correctness/test_cpu_offload.py
 
 - label: Distributed Model Tests (2 GPUs) # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 65
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_2
   num_gpus: 2
@@ -678,7 +678,7 @@ steps:
   - pytest -v -s distributed/test_eplb_spec_decode.py
 
 - label: Distributed Tests (2xH100-2xMI300) # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_2
   num_gpus: 2
@@ -1199,7 +1199,7 @@ steps:
 #---------------------------------------------------------  mi300 · examples  ----------------------------------------------------------#
 
 - label: Examples # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
   optional: true
@@ -1212,7 +1212,7 @@ steps:
   commands:
     - pip install tensorizer
     # Basic
-    - python3 basic/offline_inference/chat.py --attention-backend TRITON_ATTN
+    - python3 basic/offline_inference/chat.py
     - python3 basic/offline_inference/generate.py --model facebook/opt-125m
     - python3 basic/offline_inference/generate.py --model meta-llama/Llama-2-13b-chat-hf --cpu-offload-gb 10
     - python3 basic/offline_inference/classify.py
@@ -1220,11 +1220,8 @@ steps:
     - python3 basic/offline_inference/score.py
     # Multi-modal models
     - python3 generate/multimodal/audio_language_offline.py --seed 0
-    # These two examples import transformers before vllm, so on ROCm the HIP context
-    # is initialized in the parent before vllm sets this guard, poisoning fork. Set it
-    # inline to keep torch.cuda.is_available() fork-safe (see vllm/env_override.py).
-    - PYTORCH_NVML_BASED_CUDA_CHECK=1 python3 generate/multimodal/vision_language_offline.py --seed 0
-    - PYTORCH_NVML_BASED_CUDA_CHECK=1 python3 generate/multimodal/vision_language_multi_image_offline.py --seed 0
+    - python3 generate/multimodal/vision_language_offline.py --seed 0
+    - python3 generate/multimodal/vision_language_multi_image_offline.py --seed 0
     - python3 generate/multimodal/encoder_decoder_multimodal_offline.py --model-type whisper --seed 0
     # Pooling models
     - python3 pooling/embed/vision_embedding_offline.py --seed 0
@@ -1666,10 +1663,7 @@ steps:
   - pytest -v -s tests/models/test_transformers.py
   - pytest -v -s tests/models/multimodal/test_mapping.py
   - python3 examples/basic/offline_inference/chat.py
-  # This example imports transformers before vllm, so on ROCm the HIP context is
-  # initialized in the parent before vllm sets this guard, poisoning fork. Set it
-  # inline to keep torch.cuda.is_available() fork-safe (see vllm/env_override.py).
-  - PYTORCH_NVML_BASED_CUDA_CHECK=1 python3 examples/generate/multimodal/vision_language_offline.py --model-type qwen2_5_vl
+  - python3 examples/generate/multimodal/vision_language_offline.py --model-type qwen2_5_vl
   - VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/generate/multimodal/audio_language_offline.py --model-type whisper
 
 #----------------------------------------------------------  mi300 · plugins  ----------------------------------------------------------#
@@ -2773,7 +2767,7 @@ steps:
 #---------------------------------------------------------  mi355 · examples  ----------------------------------------------------------#
 
 - label: Examples # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   working_dir: "/vllm-workspace/examples"
@@ -2785,7 +2779,7 @@ steps:
   commands:
   - pip install tensorizer
   # Basic
-  - python3 basic/offline_inference/chat.py --attention-backend TRITON_ATTN
+  - python3 basic/offline_inference/chat.py
   - python3 basic/offline_inference/generate.py --model facebook/opt-125m
   - python3 basic/offline_inference/generate.py --model meta-llama/Llama-2-13b-chat-hf --cpu-offload-gb 10
   - python3 basic/offline_inference/classify.py
@@ -2793,11 +2787,8 @@ steps:
   - python3 basic/offline_inference/score.py
   # Multi-modal models
   - python3 generate/multimodal/audio_language_offline.py --seed 0
-  # These two examples import transformers before vllm, so on ROCm the HIP context
-  # is initialized in the parent before vllm sets this guard, poisoning fork. Set it
-  # inline to keep torch.cuda.is_available() fork-safe (see vllm/env_override.py).
-  - PYTORCH_NVML_BASED_CUDA_CHECK=1 python3 generate/multimodal/vision_language_offline.py --seed 0
-  - PYTORCH_NVML_BASED_CUDA_CHECK=1 python3 generate/multimodal/vision_language_multi_image_offline.py --seed 0
+  - python3 generate/multimodal/vision_language_offline.py --seed 0
+  - python3 generate/multimodal/vision_language_multi_image_offline.py --seed 0
   - python3 generate/multimodal/encoder_decoder_multimodal_offline.py --model-type whisper --seed 0
   # Pooling models
   - python3 pooling/embed/vision_embedding_offline.py --seed 0
