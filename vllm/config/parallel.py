@@ -668,6 +668,14 @@ class ParallelConfig:
         )
 
     @property
+    def use_all2all(self) -> bool:
+        return (
+            self.data_parallel_size > 1
+            or self.use_sequence_parallel_moe
+            or (self.enable_expert_parallel and self.prefill_context_parallel_size > 1)
+        )
+
+    @property
     def use_batched_dp_moe(self) -> bool:
         return (
             self.all2all_backend
