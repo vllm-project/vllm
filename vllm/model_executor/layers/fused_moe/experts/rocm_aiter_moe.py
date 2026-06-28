@@ -251,12 +251,17 @@ def rocm_aiter_fused_experts(
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
+    # Gate/up interleave hint; only the SWIGLUOAI activations override it.
+    activation_interleave = None
     if activation == MoEActivation.SILU:
         activation_method = ActivationMethod.SILU
     elif activation == MoEActivation.GELU:
         activation_method = ActivationMethod.GELU
     elif activation == MoEActivation.SWIGLUOAI:
         activation_method = rocm_aiter_ops.get_aiter_activation_type("swiglu")
+    elif activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
+        activation_method = rocm_aiter_ops.get_aiter_activation_type("swiglu")
+        activation_interleave = False
     else:
         raise ValueError(f"Unsupported activation: {activation}")
 
@@ -337,9 +342,14 @@ def rocm_aiter_fused_experts(
         assert moe_config.intermediate_size_per_partition_unpadded is not None
         hidden_pad = hidden_states.shape[1] - moe_config.hidden_dim_unpadded
         intermediate_pad = (
-            moe_config.intermediate_size_per_partition
-            - moe_config.intermediate_size_per_partition_unpadded
+            (
+                moe_config.intermediate_size_per_partition
+                - moe_config.intermediate_size_per_partition_unpadded
+            )
+            if moe_config.intermediate_pad is None
+            else moe_config.intermediate_pad
         )
+
         # Round hidden_pad/intermediate_pad to match AITER's CK/FlyDSL MoE
         # dispatch (currently pinned to v0.1.13.post1):
         # https://github.com/ROCm/aiter/blob/v0.1.13.post1/aiter/fused_moe.py#L1073
@@ -357,14 +367,17 @@ def rocm_aiter_fused_experts(
         # `rocm_aiter_ops.shuffle_weight_a16w4` in `oracle/mxfp4.py`,
         # which always sets `is_guinterleave=True`.
         # Hence, we pass in GateMode.INTERLEAVE to match the weight shuffling.
+        from aiter.ops.flydsl.moe_common import GateMode
+
         gate_mode = ""
         if quant_config.use_mxfp4_w4a16:
-            try:
-                from aiter.ops.flydsl.moe_common import GateMode
-
-                gate_mode = GateMode.INTERLEAVE.value
-            except ImportError:
-                pass
+            gate_mode = GateMode.INTERLEAVE.value
+        elif activation_interleave is not None:
+            gate_mode = (
+                GateMode.INTERLEAVE.value
+                if activation_interleave
+                else GateMode.SEPARATED.value
+            )
 
         return rocm_aiter_ops.fused_moe(
             hidden_states,
@@ -458,6 +471,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             MoEActivation.SILU,
             MoEActivation.GELU,
             MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
         ]
 
     @staticmethod
