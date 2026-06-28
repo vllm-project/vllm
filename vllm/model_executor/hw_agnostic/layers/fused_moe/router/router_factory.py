@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Router selection for the hw-agnostic FusedMoE.
+"""Router selection.
 
-Vendor-specific routers (AITER fused-shared, RoutingSimulator, ZeroExpert,
-GroupedTopK, custom) are out of scope. Selection here picks between
-``FusedTopKBiasRouter`` (DSv4-style sqrtsoftplus / hash MoE / sigmoid+bias)
-and ``FusedTopKRouter`` (plain softmax/sigmoid top-k).
+``FusedTopKBiasRouter`` covers sqrtsoftplus / hash-MoE / sigmoid+bias
+routing (any router that needs ``e_score_correction_bias`` or a
+``hash_indices_table``); ``FusedTopKRouter`` handles plain
+softmax/sigmoid top-k.
 """
 
 from collections.abc import Callable
@@ -43,9 +43,8 @@ def create_fused_moe_router(
 ) -> FusedMoERouter:
     """Construct the appropriate ``FusedMoERouter`` subclass.
 
-    Returns ``FusedTopKBiasRouter`` when an ``e_score_correction_bias`` or
-    ``hash_indices_table`` is set (DSv4-style sqrtsoftplus / hash MoE),
-    otherwise ``FusedTopKRouter``.
+    Returns ``FusedTopKBiasRouter`` when ``e_score_correction_bias`` or
+    ``hash_indices_table`` is set, otherwise ``FusedTopKRouter``.
     """
 
     if envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY:

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Hardware-agnostic FusedMoE — vendored Triton path."""
+"""FusedMoE Triton path."""
 
 from contextlib import contextmanager
 from typing import Any

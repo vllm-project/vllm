@@ -100,8 +100,7 @@ class BaseRouter(FusedMoERouter):
     Base router class that provides common functionality for all router implementations.
 
     Concrete subclasses in this tree: ``FusedTopKRouter`` (unbiased) and
-    ``FusedTopKBiasRouter`` (grouped-topk + score-correction bias, used by
-    DeepSeek V4).
+    ``FusedTopKBiasRouter`` (score-correction bias).
 
     Implements the template method pattern: ``select_experts`` handles common
     pre- and post-processing and delegates the actual routing logic to the

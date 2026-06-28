@@ -28,7 +28,9 @@ class MoERunnerInterface(PluggableLayer, ABC):
 
     def __init__(self):
         super().__init__()
-        # HACK
+        # Sentinel for online-quant flows that re-trigger
+        # process_weights_after_loading; subclasses flip this False before
+        # the first weight-load if they need the hook to run.
         self._already_called_process_weights_after_loading = True
 
     @abstractmethod

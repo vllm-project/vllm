@@ -3,8 +3,6 @@
 import torch
 import torch.nn.functional as F
 
-import vllm._custom_ops as ops
-import vllm.envs as envs
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.hw_agnostic.layers.fused_moe.config import (
     RoutingMethodType,
@@ -13,10 +11,6 @@ from vllm.model_executor.hw_agnostic.layers.fused_moe.config import (
 from vllm.model_executor.hw_agnostic.layers.fused_moe.router.base_router import (  # noqa: E501
     BaseRouter,
 )
-
-# ``torch.ops._moe_C.topk_*`` are CUDA C++ kernels; on hosts without them we
-# fall back to pure-PyTorch implementations.
-_HAS_MOE_C_KERNELS = hasattr(torch.ops, "_moe_C")
 
 
 def vllm_topk_softmax(
@@ -27,20 +21,10 @@ def vllm_topk_softmax(
     renormalize: bool = False,
     e_score_correction_bias: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, ...]:
-    if _HAS_MOE_C_KERNELS:
-        ops.topk_softmax(
-            topk_weights,
-            topk_indices,
-            token_expert_indices,
-            gating_output,
-            renormalize,
-            e_score_correction_bias,
-        )
-        return topk_weights, topk_indices
-    return _topk_softmax_torch(
+    return _topk_score_torch(
         topk_weights,
         topk_indices,
-        gating_output,
+        F.softmax(gating_output.float(), dim=-1),
         renormalize,
         e_score_correction_bias,
     )
@@ -54,48 +38,6 @@ def vllm_topk_sigmoid(
     renormalize: bool = False,
     e_score_correction_bias: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, ...]:
-    if _HAS_MOE_C_KERNELS:
-        ops.topk_sigmoid(
-            topk_weights,
-            topk_indices,
-            token_expert_indices,
-            gating_output,
-            renormalize,
-            e_score_correction_bias,
-        )
-        return topk_weights, topk_indices
-    return _topk_sigmoid_torch(
-        topk_weights,
-        topk_indices,
-        gating_output,
-        renormalize,
-        e_score_correction_bias,
-    )
-
-
-def _topk_softmax_torch(
-    topk_weights: torch.Tensor,
-    topk_indices: torch.Tensor,
-    gating_output: torch.Tensor,
-    renormalize: bool,
-    e_score_correction_bias: torch.Tensor | None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return _topk_score_torch(
-        topk_weights,
-        topk_indices,
-        F.softmax(gating_output.float(), dim=-1),
-        renormalize,
-        e_score_correction_bias,
-    )
-
-
-def _topk_sigmoid_torch(
-    topk_weights: torch.Tensor,
-    topk_indices: torch.Tensor,
-    gating_output: torch.Tensor,
-    renormalize: bool,
-    e_score_correction_bias: torch.Tensor | None,
-) -> tuple[torch.Tensor, torch.Tensor]:
     return _topk_score_torch(
         topk_weights,
         topk_indices,
@@ -112,7 +54,7 @@ def _topk_score_torch(
     renormalize: bool,
     e_score_correction_bias: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Pure PyTorch top-k over pre-computed scores (softmax/sigmoid)."""
+    """Top-k over pre-computed scores (softmax/sigmoid)."""
     if e_score_correction_bias is not None:
         scores_for_choice = scores + e_score_correction_bias.float()
     else:
@@ -127,7 +69,7 @@ def _topk_score_torch(
     return topk_weights, topk_indices
 
 
-def _topk_softplus_sqrt_torch(
+def vllm_topk_softplus_sqrt(
     topk_weights: torch.Tensor,
     topk_indices: torch.Tensor,
     token_expert_indices: torch.Tensor,
@@ -138,7 +80,6 @@ def _topk_softplus_sqrt_torch(
     hash_indices_table: torch.Tensor | None = None,
     routed_scaling_factor: float = 1.0,
 ) -> tuple[torch.Tensor, ...]:
-    """Pure PyTorch fallback for ``topk_hash_softplus_sqrt``."""
     # scores = sqrt(softplus(gating_output))
     scores = torch.sqrt(F.softplus(gating_output.float()))
 
@@ -170,44 +111,6 @@ def _topk_softplus_sqrt_torch(
         weights = weights / (weights.sum(dim=-1, keepdim=True).clamp(min=1e-20))
 
     topk_weights.copy_(weights * routed_scaling_factor)
-    return topk_weights, topk_indices
-
-
-def vllm_topk_softplus_sqrt(
-    topk_weights: torch.Tensor,
-    topk_indices: torch.Tensor,
-    token_expert_indices: torch.Tensor,
-    gating_output: torch.Tensor,
-    renormalize: bool = False,
-    e_score_correction_bias: torch.Tensor | None = None,
-    input_tokens: torch.Tensor | None = None,
-    hash_indices_table: torch.Tensor | None = None,
-    routed_scaling_factor: float = 1.0,
-) -> tuple[torch.Tensor, ...]:
-    if not _HAS_MOE_C_KERNELS:
-        return _topk_softplus_sqrt_torch(
-            topk_weights,
-            topk_indices,
-            token_expert_indices,
-            gating_output,
-            renormalize,
-            e_score_correction_bias,
-            input_tokens,
-            hash_indices_table,
-            routed_scaling_factor,
-        )
-
-    ops.topk_hash_softplus_sqrt(
-        topk_weights,
-        topk_indices,
-        token_expert_indices,
-        gating_output,
-        renormalize,
-        routed_scaling_factor,
-        e_score_correction_bias,
-        input_tokens,
-        hash_indices_table,
-    )
     return topk_weights, topk_indices
 
 
@@ -274,9 +177,6 @@ def fused_topk_bias(
         return topk_weights, topk_ids
     if scoring_func == "sqrtsoftplus":
         # sqrtsoftplus already folds routed_scaling_factor into the weights.
-        if envs.VLLM_BATCH_INVARIANT and not _HAS_MOE_C_KERNELS:
-            # Force deterministic expert selection on the torch fallback path.
-            pass
         return vllm_topk_softplus_sqrt(
             topk_weights,
             topk_ids,

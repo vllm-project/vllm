@@ -51,12 +51,14 @@ from vllm.utils.torch_utils import (
 
 logger = init_logger(__name__)
 
-# Settings the hw-agnostic MoE pipeline accepts. Anything outside these hits a
-# deleted code path; reject at construction time so the user sees the right CLI
-# flag instead of an opaque error later.
-
 
 def _validate_supported_settings(vllm_config) -> None:
+    """Reject knob values that bypass the supported MoE pipeline.
+
+    Note: ``ParallelConfig._validate_parallel_config`` rewrites
+    ``'naive'``/``'pplx'`` to ``'allgather_reducescatter'`` before we run,
+    so a single equality check on ``all2all_backend`` is enough.
+    """
     pc = vllm_config.parallel_config
     kc = vllm_config.kernel_config
     if kc.moe_backend not in ("auto", "triton"):
@@ -64,8 +66,6 @@ def _validate_supported_settings(vllm_config) -> None:
             f"hw-agnostic FusedMoE requires --moe-backend triton (or auto); "
             f"got {kc.moe_backend!r}."
         )
-    # ParallelConfig._validate_parallel_config rewrites 'naive'/'pplx' to
-    # 'allgather_reducescatter' before we get here, so a single check suffices.
     if pc.all2all_backend != "allgather_reducescatter":
         raise ValueError(
             f"hw-agnostic FusedMoE requires --all2all-backend "
@@ -133,11 +133,6 @@ def _resolve_layer_name(layer_name: str | LayerName) -> str:
     return layer_name
 
 
-# Note: _moe_forward and _moe_forward_shared should not contain any
-# implementation details, They should merely pass along control to
-# the runner's '_forward_impl' method.
-# These functions should never be called directly since they do not
-# include all the functionality of the MoE layer.
 def _moe_forward(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
@@ -163,10 +158,10 @@ def _moe_forward_fake(
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
 ) -> torch.Tensor:
-    # `hidden_dim_unpadded > 0` only on the TRT-LLM MXFP4 path, where the
-    # real kernel writes narrower than `hidden_states.shape[-1]`. Plumbed
-    # as an op arg (not peeked from the layer registry) to keep the fake
-    # a pure shape function of its inputs and preserve subgraph dedup.
+    # ``hidden_dim_unpadded > 0`` only when the real kernel writes narrower
+    # than ``hidden_states.shape[-1]``. Plumbed as an op arg (not peeked
+    # from the layer registry) to keep the fake a pure shape function of
+    # its inputs and preserve subgraph dedup.
     if hidden_dim_unpadded > 0:
         return hidden_states.new_empty((*hidden_states.shape[:-1], hidden_dim_unpadded))
     return torch.empty_like(hidden_states)
@@ -590,10 +585,6 @@ class MoERunner(MoERunnerInterface):
         self,
         shared_experts_input: torch.Tensor | None,
     ):
-        # If router/gate provided, then apply it here.
-        # (Note: This code runs only when "overlapped mode" is on to allow
-        #        parallel execution of shared experts with the FusedMoE via
-        #        separate cuda stream)
         if self._shared_experts is not None:
             assert shared_experts_input is not None
             self._shared_experts.maybe_sync_shared_experts_stream(shared_experts_input)
@@ -606,22 +597,10 @@ class MoERunner(MoERunnerInterface):
     ) -> torch.Tensor:
         """Invoke the fused moe layer.
 
-        Input:
-        - hidden_states
-        - router_logits
-
-        Output:
-        - The new hidden_states.
-
-        Calling sequence
-        - forward
-          - self._forward_entry (_moe_forward or _moe_forward_shared custom op)
-            - _forward_impl
-
-        Note: The existence of _moe_forward and _moe_forward_shared custom ops are due
-        to the following reason:
-        1. pytorch cannot handle union types in custom op signatures so
-           _moe_forward and _moe_forward_shared must be split.
+        ``_forward_entry`` resolves to one of two custom ops
+        (``moe_forward`` / ``moe_forward_shared``); they are split because
+        pytorch custom-op signatures cannot express the union return type
+        the shared-experts path needs.
         """
 
         # Apply transform for routed experts (e.g., latent projection
@@ -696,10 +675,8 @@ class MoERunner(MoERunnerInterface):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # For naive dispatch/combine Dp/Ep, dispatch the hidden states and
-        # router logits to all experts.
-        # NOTE: this will be removed once all kernels are migrated into the
-        # MoEKernel framework.
+        # For naive DP/EP, dispatch hidden states and router logits to all
+        # experts.
         if self.do_naive_dispatch_combine:
             result = get_ep_group().dispatch_router_logits(
                 hidden_states,
@@ -709,9 +686,7 @@ class MoERunner(MoERunnerInterface):
             assert len(result) == 2
             hidden_states, router_logits = result
 
-        # NOTE: Similar with DP, PCP also needs dispatch and combine. For
-        # simplicity, AgRsAll2All was added separately for PCP here. Maybe
-        # we should modify All2AllManager abstraction to better support PCP.
+        # PCP also needs dispatch / combine; we use AgRsAll2All here.
         if self.moe_config.pcp_size > 1:
             hidden_states = get_pcp_group().all_gather(
                 hidden_states,
@@ -770,9 +745,8 @@ class MoERunner(MoERunnerInterface):
         # Sync aux and main stream for shared expert multi-stream overlap.
         self._maybe_sync_shared_experts_stream(shared_experts_input)
 
-        # If the Runner holds the gate, apply it after the stream sync,
-        # so it can run overlapped with the
-        # NOTE: in future PR, MoE runner will always hold the gate.
+        # If the Runner holds the gate, apply it after the stream sync so
+        # it can run overlapped with the shared experts on the aux stream.
         if self.gate is not None:
             if self._fse_fuse_gate:
                 self._maybe_fuse_gate_weights()
@@ -799,8 +773,8 @@ class MoERunner(MoERunnerInterface):
             )
 
     def maybe_init_modular_kernel(self) -> None:
-        # All vendored quant methods build their own modular kernel in
-        # ``process_weights_after_loading``; no late init is needed.
+        # Quant methods build their modular kernel during
+        # process_weights_after_loading; no late init needed.
         return None
 
     #
@@ -837,20 +811,15 @@ class MoERunner(MoERunnerInterface):
 
     @property
     def expert_global_to_physical(self) -> torch.Tensor | None:
-        tables = self.expert_map_manager.routing_tables
-        return tables[0] if tables else None
+        return None
 
     @property
     def expert_physical_to_global(self) -> torch.Tensor | None:
-        """Routing table: physical expert ID to global expert ID."""
-        tables = self.expert_map_manager.routing_tables
-        return tables[1] if tables else None
+        return None
 
     @property
     def expert_local_to_global(self) -> torch.Tensor | None:
-        """Routing table: local expert ID to global expert ID."""
-        tables = self.expert_map_manager.routing_tables
-        return tables[2] if tables else None
+        return None
 
     @property
     def expert_map(self) -> torch.Tensor | None:

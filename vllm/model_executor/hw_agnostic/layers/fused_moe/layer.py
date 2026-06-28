@@ -100,8 +100,6 @@ def FusedMoE(
     scoring_func: str = "softmax",
     routed_scaling_factor: float = 1.0,
     swiglu_limit: float | None = None,
-    swiglu_alpha: float | None = None,
-    swiglu_beta: float | None = None,
     e_score_correction_bias: torch.Tensor | None = None,
     apply_router_weight_on_input: bool = False,
     activation: str = "silu",
@@ -290,8 +288,6 @@ def FusedMoE(
         device=vllm_config.device_config.device,
         routing_method=router.routing_method_type,  # Not ideal
         swiglu_limit=swiglu_limit,
-        swiglu_alpha=swiglu_alpha,
-        swiglu_beta=swiglu_beta,
         max_capture_size=vllm_config.compilation_config.max_cudagraph_capture_size,
     )
 
@@ -323,9 +319,6 @@ def FusedMoE(
         if not apply_routed_scale_to_output
         else 1.0,
         swiglu_limit=swiglu_limit,
-        swiglu_alpha=swiglu_alpha,
-        swiglu_beta=swiglu_beta,
-        # TODO get from router? needs to be truncated?
         e_score_correction_bias=e_score_correction_bias,
         apply_router_weight_on_input=apply_router_weight_on_input,
         **routed_experts_args if routed_experts_args is not None else {},

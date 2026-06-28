@@ -53,15 +53,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def supports_eplb(self) -> bool:
         return True
 
-    def maybe_make_prepare_finalize(
-        self,
-        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ):
-        raise ValueError(
-            f"{self.__class__.__name__} builds its modular kernel directly "
-            "in process_weights_after_loading; this hook is unused."
-        )
-
     def create_weights(
         self,
         layer: "RoutedExperts",

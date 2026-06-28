@@ -81,7 +81,6 @@ def _quant_flags_to_group_shape(
     if block_shape is not None:
         assert not per_act_token_quant
         assert not per_out_ch_quant
-        # Note: a_shape's first dim should arguably be 1, not block_shape[0].
         a_shape = GroupShape(row=block_shape[0], col=block_shape[1])
         w_shape = GroupShape(row=block_shape[0], col=block_shape[1])
     else:
@@ -97,33 +96,20 @@ def _quant_flags_to_group_shape(
     return a_shape, w_shape
 
 
-# The type of method in top-K routing
-# Please keep this in sync with the counterpart defined in https://github.com/flashinfer-ai/flashinfer/blob/main/include/flashinfer/trtllm/fused_moe/runner.h
+# Keep enum values in sync with the FlashInfer counterpart at
+# https://github.com/flashinfer-ai/flashinfer/blob/main/include/flashinfer/trtllm/fused_moe/runner.h
 class RoutingMethodType(IntEnum):
-    # Default: Softmax -> TopK
     Default = (0,)
-    # Renormalize: TopK -> Softmax
     Renormalize = (1,)
-    # DeepSeekV3: Sigmoid -> RoutingBiasAdd -> Top2 in group -> Top4 groups
-    # -> Top8 experts from the Top4 groups
     DeepSeekV3 = (2,)
-    # Llama4: Top1 -> Sigmoid
     Llama4 = (3,)
-    # RenormalizeNaive: Softmax -> TopK -> Renormalize
     RenormalizeNaive = (4,)
-    # TopK: TopK (no softmax)
     TopK = (5,)
-    # SigmoidRenorm: Sigmoid -> TopK -> Renormalize (divide by sum of top-K)
     SigmoidRenorm = (6,)
-    # MiniMax2: Sigmoid + Bias -> TopK -> ScaledSumNormalize
-    # (routeScale=1.0, epsilon=1e-20)
     MiniMax2 = (7,)
-    # Sigmoid: Sigmoid -> TopK (no renormalization)
     Sigmoid = (8,)
-    # Unspecified
     Unspecified = (9,)
-    # other routing types (not passed to FlashInfer kernels)
-    # Deepseek V4 -> sqrtsoftplus + Bias + Normalize
+    # Routing types not passed to FlashInfer kernels:
     DeepseekV4 = (100,)
     Custom = (101,)
     Simulated = (102,)
@@ -138,8 +124,6 @@ def get_routing_method_type(
     routed_scaling_factor: float | None = 1.0,
 ) -> RoutingMethodType:
     if scoring_func == "sqrtsoftplus":
-        # DeepSeek V4 uses sqrtsoftplus routing with optional routing bias
-        # and top-k renormalization.
         if renormalize:
             return RoutingMethodType.DeepseekV4
         else:
@@ -194,8 +178,7 @@ class FusedMoEQuantDesc:
     # Quantization scales.
     scale: Union[torch.Tensor, "PrecisionConfig", None] = None
 
-    # Per-channel scales for W4A8 FP8 (the previous FP4 ``gscale`` use is
-    # gone with the FP4 path).
+    # Per-channel scales for W4A8 FP8.
     alpha_or_gscale: torch.Tensor | None = None
 
     # Zero points for int4/int8 types
@@ -221,9 +204,7 @@ class FusedMoEQuantConfig:
     _w1: FusedMoEQuantDesc
     _w2: FusedMoEQuantDesc
 
-    # SwiGLU clamp params (used by gated activations on the Triton path).
-    gemm1_alpha: float | None = None
-    gemm1_beta: float | None = None
+    # Clamp limit threaded to the silu+clamp fused activation.
     gemm1_clamp_limit: float | None = None
 
     def __post_init__(self):
@@ -417,12 +398,9 @@ class FusedMoEQuantConfig:
         w1_zp: torch.Tensor | None = None,
         w2_zp: torch.Tensor | None = None,
         weight_dtype: torch.dtype | str | None = None,
-        gemm1_alpha: float | None = None,
-        gemm1_beta: float | None = None,
         gemm1_clamp_limit: float | None = None,
     ) -> "FusedMoEQuantConfig":
-        """
-        General builder for a FusedMoEQuantConfig used by the Triton path.
+        """General builder for a FusedMoEQuantConfig used by the Triton path.
 
         Supported dtypes: BF16/FP16 (``quant_dtype=None``), FP8 W8A8
         (per-tensor or block-quant via ``block_shape``), FP8 W8A16,
@@ -449,8 +427,6 @@ class FusedMoEQuantConfig:
             _w2=FusedMoEQuantDesc(
                 weight_dtype, w_shape, w2_scale, g2_alphas, w2_zp, w2_bias
             ),
-            gemm1_alpha=gemm1_alpha,
-            gemm1_beta=gemm1_beta,
             gemm1_clamp_limit=gemm1_clamp_limit,
         )
         assert quant_config.per_act_token_quant == per_act_token_quant
@@ -471,8 +447,6 @@ def fp8_w8a8_moe_quant_config(
     block_shape: list[int] | None = None,
     g1_alphas: torch.Tensor | None = None,
     g2_alphas: torch.Tensor | None = None,
-    gemm1_alpha: float | None = None,
-    gemm1_beta: float | None = None,
     gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
     """Quant config for FP8 activations and FP8 weights (per-tensor or block)."""
@@ -489,8 +463,6 @@ def fp8_w8a8_moe_quant_config(
         per_act_token_quant=per_act_token_quant,
         per_out_ch_quant=per_out_ch_quant,
         block_shape=block_shape,
-        gemm1_alpha=gemm1_alpha,
-        gemm1_beta=gemm1_beta,
         gemm1_clamp_limit=gemm1_clamp_limit,
     )
 
@@ -525,13 +497,9 @@ def fp8_w8a16_moe_quant_config(
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
     block_shape: list[int] | None = None,
-    gemm1_alpha: float | None = None,
-    gemm1_beta: float | None = None,
     gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
-    """
-    Construct a quant config for 16-bit float activations and fp8 weights.
-    """
+    """Quant config for 16-bit float activations and fp8 weights."""
     group_shape = GroupShape(*block_shape) if block_shape is not None else None
     fp8_dtype = current_platform.fp8_dtype()
     return FusedMoEQuantConfig(
@@ -553,8 +521,6 @@ def fp8_w8a16_moe_quant_config(
             None,
             w2_bias,
         ),
-        gemm1_alpha=gemm1_alpha,
-        gemm1_beta=gemm1_beta,
         gemm1_clamp_limit=gemm1_clamp_limit,
     )
 
@@ -581,23 +547,14 @@ def int8_w8a16_moe_quant_config(
 def biased_moe_quant_config(
     w1_bias: torch.Tensor | None,
     w2_bias: torch.Tensor | None,
-    gemm1_alpha: float | None = None,
-    gemm1_beta: float | None = None,
     gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
-    """
-    Construct a quant config for unquantized activations with biases.
-
-    gemm1_alpha/gemm1_beta/gemm1_clamp_limit carry the SwiGLU gate params
-    through to the fused activation kernel (e.g. swigluoai_uninterleave).
-    """
+    """Quant config for unquantized activations with biases."""
     return FusedMoEQuantConfig(
         _a1=FusedMoEQuantDesc(),
         _a2=FusedMoEQuantDesc(),
         _w1=FusedMoEQuantDesc(bias=w1_bias),
         _w2=FusedMoEQuantDesc(bias=w2_bias),
-        gemm1_alpha=gemm1_alpha,
-        gemm1_beta=gemm1_beta,
         gemm1_clamp_limit=gemm1_clamp_limit,
     )
 
@@ -628,8 +585,6 @@ class FusedMoEParallelConfig:
 
     @property
     def use_all2all_kernels(self):
-        # True iff DP+EP is on. The only supported transport on the
-        # hw-agnostic path is the naive AllGather/ReduceScatter pair.
         return self.dp_size > 1 and self.use_ep
 
     @property
@@ -658,78 +613,12 @@ class FusedMoEParallelConfig:
         sp_size_: int,
         vllm_parallel_config: ParallelConfig,
     ) -> "FusedMoEParallelConfig":
-        """
-        Determine MoE parallel configuration. Based on the input `tp_size_`,
-        `dp_size_` and vllm's parallel config, determine what
-        level's of parallelism to use in the fused moe layer.
+        """Compute the MoE parallel configuration.
 
-        Args:
-            tp_size_ (int): `tp_size` passed into the FusedMoE constructor.
-            pcp_size_ (int): `pcp_size` passed into the FusedMoE constructor.
-            dp_size_ (int): `dp_size` passed into the FusedMoE constructor.
-            vllm_parallel_config (ParallelConfig): vLLM's parallel config
-                object which contains the `enable_expert_parallel` flag.
-
-        Examples:
-            When there is no parallelism requested,
-            i.e. `tp_size_` = `pcp_size_` = `dp_size_` = 1, we simply return the sizes
-            unaltered and the ranks set to 0.
-
-            Expert Parallelism is considered only when either `dp_size_`, `pcp_size_` or
-            `tp_size_` is non trivial.
-
-            Note that PCP serves the same function as DP here.
-
-            When TP = 2, DP(PCP) = 1 and EP = False, the configuration on different
-            devices:
-
-            - device 0 : TP = {2, 0} DP = {1, 0} EP = {1, 0} //
-                legend : {size, rank}
-            - device 1 : TP = {2, 1} DP = {1, 0} EP = {1, 0}
-            - Comment : Tensors are sharded across 2 devices.
-
-            When TP = 1, DP(PCP) = 2 and EP = False, the configuration on different
-                devices:
-
-            - device 0 : TP = {2, 0} DP = {2, 0} EP = {1, 0}
-            - device 1 : TP = {2, 1} DP = {2, 1} EP = {1, 0}
-            - Comment: There are 2 engine instances and the tensors are sharded
-                across 2 decvices.
-
-            When TP = 2, DP(PCP) = 2 and EP = False, the configuration on different
-                devices:
-
-            - device 0: TP = {4, 0} DP = {2, 0} EP = {1, 0}
-            - device 1: TP = {4, 1} DP = {2, 0} EP = {1, 0}
-            - device 2: TP = {4, 2} DP = {2, 1} EP = {1, 0}
-            - device 3: TP = {4, 3} DP = {2, 1} EP = {1, 0}
-            - Comment: There are 2 engine instances and the tensors are sharded
-                across 4 devices.
-
-            When, TP = 2, DP(PCP) = 1 and EP = True, the configuration on different
-                devices:
-
-            - device 0: TP = {1, 0} DP = {1, 0} EP = {2, 0}
-            - device 1: TP = {1, 0} DP = {1, 0} EP = {2, 1}
-            - Comment: The experts are split between the 2 devices.
-
-            When, TP = 1, DP(PCP) = 2 and EP = True, the configuration on different
-                devices:
-
-            - device 0: TP = {1, 0} DP = {2, 0} EP = {2, 0}
-            - device 1: TP = {1, 0} DP = {2, 1} EP = {2, 1}
-            - Comment: There are 2 engine instances and the experts are split
-                between the 2 devices.
-
-            When TP = 2, DP(PCP) = 2 and EP = True, the configuration on different
-                devices:
-
-            - device 0: TP = {1, 0} DP = {2, 0} EP = {4, 0}
-            - device 1: TP = {1, 0} DP = {2, 0} EP = {4, 1}
-            - device 2: TP = {1, 0} DP = {2, 1} EP = {4, 2}
-            - device 3: TP = {1, 0} DP = {2, 1} EP = {4, 3}
-            - Comment: There are 2 engine instances and the experts are split
-                between the 4 devices.
+        When ``enable_expert_parallel`` is set and there is more than one
+        device across TP/DP/PCP, the MoE layer runs in EP mode (TP is
+        flattened into EP across the DP+PCP+TP product). PCP plays the
+        same role as DP for sharding purposes.
         """
         use_ep = (
             dp_size_ * pcp_size_ * tp_size_ > 1
@@ -829,10 +718,8 @@ class FusedMoEConfig:
     has_bias: bool = False
     is_lora_enabled: bool = False
 
-    # SwiGLU clamp params threaded through to the experts kernel.
+    # Clamp limit threaded through to the silu+clamp fused activation.
     swiglu_limit: float | None = None
-    swiglu_alpha: float | None = None
-    swiglu_beta: float | None = None
 
     max_capture_size: int = 0
 

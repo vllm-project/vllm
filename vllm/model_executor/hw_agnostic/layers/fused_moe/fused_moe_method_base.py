@@ -13,10 +13,6 @@ from vllm.model_executor.hw_agnostic.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.hw_agnostic.layers.fused_moe.modular_kernel import (
-    FusedMoEExpertsModular,
-    FusedMoEPrepareAndFinalizeModular,
-)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
@@ -77,30 +73,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         act_dtype: torch.dtype,
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> tuple[int, int]:
-        # Naive AG/RS transport doesn't constrain hidden / intermediate.
         return hidden_size, intermediate_size_per_partition
-
-    def maybe_make_prepare_finalize(
-        self,
-        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> FusedMoEPrepareAndFinalizeModular | None:
-        from vllm.model_executor.hw_agnostic.layers.fused_moe.all2all_utils import (
-            maybe_make_prepare_finalize,
-        )
-
-        pf = maybe_make_prepare_finalize(self.moe)
-        assert isinstance(pf, FusedMoEPrepareAndFinalizeModular)
-        return pf
-
-    def select_gemm_impl(
-        self,
-        prepare_finalize: FusedMoEPrepareAndFinalizeModular,
-        layer: "RoutedExperts",
-    ) -> FusedMoEExpertsModular:
-        raise ValueError(
-            f"{self.__class__.__name__} owns its modular kernel; "
-            "select_gemm_impl is unused on the hw-agnostic path."
-        )
 
     @abstractmethod
     def get_fused_moe_quant_config(

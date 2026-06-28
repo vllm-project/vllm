@@ -3,7 +3,7 @@
 
 from collections.abc import Callable, Iterable
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Literal, cast, overload
+from typing import TYPE_CHECKING, Any, Literal, overload
 
 import torch
 
@@ -74,8 +74,6 @@ class RoutedExperts(PluggableLayer):
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
         swiglu_limit: float | None = None,
-        swiglu_alpha: float | None = None,
-        swiglu_beta: float | None = None,
         e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
     ):
@@ -105,8 +103,6 @@ class RoutedExperts(PluggableLayer):
         self.scoring_func = scoring_func
         self.routed_scaling_factor = routed_scaling_factor
         self.swiglu_limit = swiglu_limit
-        self.swiglu_alpha = swiglu_alpha
-        self.swiglu_beta = swiglu_beta
         self.e_score_correction_bias = e_score_correction_bias
         self.apply_router_weight_on_input = apply_router_weight_on_input
 
@@ -117,7 +113,6 @@ class RoutedExperts(PluggableLayer):
         )
 
         # Round up hidden size and update moe_config.
-        # TODO: move roundup to _get_quant_method?
         self.hidden_size, self.intermediate_size_per_partition = (
             self.quant_method.maybe_roundup_sizes(
                 self.hidden_size,
@@ -135,13 +130,6 @@ class RoutedExperts(PluggableLayer):
             self.moe_config.moe_parallel_config.enable_eplb
             and not self.quant_method.supports_eplb
         ):
-            # TODO: Add support for additional quantization methods.
-            # The implementation for other quantization methods does not
-            # contain essential differences, but the current quant API
-            # design causes duplicated work when extending to new
-            # quantization methods, so I'm leaving it for now.
-            # If you plan to add support for more quantization methods,
-            # please refer to the implementation in `Fp8MoEMethod`.
             raise NotImplementedError(
                 f"EPLB is not supported {self.quant_method.__class__.__name__}."
             )
@@ -158,7 +146,6 @@ class RoutedExperts(PluggableLayer):
             "global_num_experts": moe_config.num_experts,
         }
 
-        # need full intermediate size pre-sharding for WNA16 act order
         if self._needs_intermediate_size_param(self.quant_method):
             moe_quant_params["intermediate_size_full"] = (
                 self.moe_config.intermediate_size
@@ -190,9 +177,6 @@ class RoutedExperts(PluggableLayer):
         return quant_method
 
     def _needs_intermediate_size_param(self, quant_method: FusedMoEMethodBase) -> bool:
-        # Vendor-marker quant methods that need the full pre-shard
-        # intermediate size (GPTQ act-order / Compressed-Tensors WNA16) are
-        # out of scope on the hw-agnostic path.
         return False
 
     def _ensure_moe_quant_config_init(self):
@@ -217,28 +201,9 @@ class RoutedExperts(PluggableLayer):
         self.expert_placement_strategy = self.expert_map_manager.placement_strategy
         self.register_buffer("_expert_map", self.expert_map_manager.expert_map)
 
-        # Get routing tables from ExpertMapManager
-        routing_tables = self.expert_map_manager.routing_tables
-        if routing_tables is not None:
-            # Register routing tables as buffers for this layer
-            global_to_physical, physical_to_global, local_global = routing_tables
-            self.register_buffer("expert_global_to_physical", global_to_physical)
-            self.register_buffer("expert_physical_to_global", physical_to_global)
-            self.register_buffer("expert_local_to_global", local_global)
-
     def _expert_routing_tables(
         self,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
-        # Return cached routing tables if already registered as buffers
-        if hasattr(self, "expert_global_to_physical"):
-            return cast(
-                tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-                (
-                    self.expert_global_to_physical,
-                    self.expert_physical_to_global,
-                    self.expert_local_to_global,
-                ),
-            )
         return None
 
     def update_expert_map(self):
@@ -271,10 +236,9 @@ class RoutedExperts(PluggableLayer):
         expert_id: int,
     ):
         param_data = param.data
-        # for per tensor weight quantization
         if shard_id in ("w1", "w3"):
-            # We have to keep the weight scales of w1 and w3 because
-            # we need to re-quantize w1/w3 weights after weight loading.
+            # w1 and w3 land at indices 0 and 1 of the per-expert scale
+            # tensor of shape (num_experts, 2).
             idx = 0 if shard_id == "w1" else 1
             param_data[expert_id][idx] = loaded_weight
         # If we are in the row parallel case (down_proj)
@@ -311,33 +275,6 @@ class RoutedExperts(PluggableLayer):
                 tp_rank=tp_rank,
                 load_full=load_full_w2,
             )
-        elif shard_id in ("w1", "w3"):
-            self._load_w13(
-                shard_id=shard_id,
-                shard_dim=shard_dim,
-                loaded_weight=loaded_weight,
-                expert_data=expert_data,
-                tp_rank=tp_rank,
-            )
-
-    def _load_per_channel_weight_scale(
-        self,
-        expert_data: torch.Tensor,
-        shard_dim: int,
-        shard_id: str,
-        loaded_weight: torch.Tensor,
-        tp_rank: int,
-    ):
-        # for per channel weight quantization
-        if shard_id == "w2":
-            hidden_dim = self._get_hidden_dim(shard_dim, expert_data.ndim)
-            expert_data = self._narrow_expert_data_for_padding(
-                expert_data,
-                loaded_weight,
-                hidden_dim=hidden_dim,
-                shard_dim=shard_dim,
-            )
-            expert_data.copy_(loaded_weight)
         elif shard_id in ("w1", "w3"):
             self._load_w13(
                 shard_id=shard_id,
@@ -566,24 +503,10 @@ class RoutedExperts(PluggableLayer):
             )
             return True if return_success else None
 
-        # Case weight scales, zero_points and offset, weight/input global scales
-        if "scale" in weight_name or "zero" in weight_name or "offset" in weight_name:
-            # load the weight scales and zp based on the quantization scheme
-            # supported weight scales/zp can be found in
-            # FusedMoeWeightScaleSupported
+        # Weight scales: only BLOCK and TENSOR fire on the FP8 MoE path.
+        if "scale" in weight_name:
             quant_method = getattr(param, "quant_method", None)
-            if quant_method == FusedMoeWeightScaleSupported.CHANNEL.value:
-                self._load_per_channel_weight_scale(
-                    shard_id=shard_id,
-                    shard_dim=shard_dim,
-                    loaded_weight=loaded_weight,
-                    expert_data=expert_data,
-                    tp_rank=self.moe_config.tp_rank,
-                )
-            elif quant_method in [
-                FusedMoeWeightScaleSupported.GROUP.value,
-                FusedMoeWeightScaleSupported.BLOCK.value,
-            ]:
+            if quant_method == FusedMoeWeightScaleSupported.BLOCK.value:
                 self._load_model_weight_or_group_weight_scale(
                     shard_id=shard_id,
                     shard_dim=shard_dim,
@@ -600,9 +523,9 @@ class RoutedExperts(PluggableLayer):
                     expert_id=expert_id,
                 )
             else:
-                WEIGHT_SCALE_SUPPORTED = [e.value for e in FusedMoeWeightScaleSupported]
                 raise ValueError(
-                    f"quant method must be one of {WEIGHT_SCALE_SUPPORTED}"
+                    f"Unsupported FusedMoE weight-scale quant_method "
+                    f"{quant_method!r}; expected 'block' or 'tensor'."
                 )
             return True if return_success else None
 
@@ -785,19 +708,15 @@ class RoutedExperts(PluggableLayer):
         weights = list(self.named_parameters())
         weights = [(name, _maybe_make_contiguous(name, p)) for name, p in weights]
 
-        # `w13_input_scale` and `w2_input_scale` are global per-tensor
-        # activation scales shared across all experts (e.g. NVFP4).
-        # They are broadcast views (stride 0) from .expand() and are
-        # not actual expert weights, so exclude them from EPLB.
+        # `w*_input_scale` are global activation scales (FP8 static), not
+        # per-expert weights; the routing bias and hash table are likewise
+        # layer-global, so exclude them from EPLB weight rearrangement.
         NON_EXPERT_WEIGHTS = {
             "e_score_correction_bias",
             "w13_input_scale",
             "w2_input_scale",
             "hash_indices_table",
         }
-
-        # Parameters of non-expert submodules that live inside runner (RoutedExperts).
-        # These must be excluded from EPLB weight rearrangement.
         NON_EXPERT_PREFIXES = ()
 
         assert all(

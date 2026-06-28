@@ -106,9 +106,6 @@ class ExpertMapManager:
         del num_expert_group, num_redundant_experts, enable_eplb
 
         self._calculate_expert_maps()
-        self._routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = (
-            None
-        )
 
         if self.use_ep:
             logger.info_once(
@@ -160,20 +157,8 @@ class ExpertMapManager:
         return self._expert_map
 
     @property
-    def expert_mask(self) -> torch.Tensor | None:
-        # Kept for API compatibility (was AITER-only); always None now.
-        return None
-
-    @property
     def placement_strategy(self) -> ExpertPlacementStrategy:
         return self._placement_strategy
-
-    @property
-    def routing_tables(
-        self,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
-        # Was round-robin only; always None now.
-        return self._routing_tables
 
     def map_global_to_local(self, global_id: int) -> int:
         """

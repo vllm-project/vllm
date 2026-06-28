@@ -99,8 +99,6 @@ class SharedExperts(torch.nn.Module):
         self,
         shared_experts_input: torch.Tensor,
     ) -> torch.Tensor:
-        # TODO: assert that maybe_sync_shared_experts_stream has been called.
-
         # Run shared experts in parallel on a separate stream.
         with torch.cuda.stream(self._stream):
             output = self._layer(shared_experts_input)

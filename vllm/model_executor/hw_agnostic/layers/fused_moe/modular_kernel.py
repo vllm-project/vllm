@@ -18,9 +18,7 @@ from vllm.model_executor.hw_agnostic.layers.fused_moe.activation import (
 )
 from vllm.model_executor.hw_agnostic.layers.fused_moe.config import (
     FusedMoEConfig,
-    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
-    RoutingMethodType,
 )
 from vllm.model_executor.hw_agnostic.layers.fused_moe.runner.shared_experts import (  # noqa: E501
     SharedExperts,
@@ -29,10 +27,6 @@ from vllm.model_executor.hw_agnostic.layers.fused_moe.runner.shared_experts impo
 from vllm.model_executor.hw_agnostic.layers.fused_moe.utils import (
     _resize_cache,
 )
-from vllm.model_executor.hw_agnostic.quantization.quant_keys import (
-    QuantKey,
-)
-from vllm.platforms import current_platform
 from vllm.v1.worker.ubatching import (
     dbo_enabled,
     dbo_maybe_run_recv_hook,
@@ -43,54 +37,24 @@ from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
 
-#
-# Modular MoE kernel building blocks. The fused MoE forward is broken into:
-#
-#   [Router] → [Quantize-Dispatch] → [Permute-Experts-Unpermute] → [Combine]
-#
-# Components are mixed and matched so DP+EP can be supported across different
-# experts kernels without combinatoric implementations:
-#   * FusedMoEPrepareAndFinalize - handles [Quantize-Dispatch] and [Combine]
-#     together (they may share a collective transport).
-#   * FusedMoEExperts - the [Permute-Experts-Unpermute] step. May also handle
-#     weight application / reduction, signalled to [Finalize] via a
-#     TopKWeightAndReduce object.
-#   * FusedMoEKernel - composes a prepare/finalize and an experts impl.
-#
+# MoE kernel building blocks. The fused MoE forward is composed of
+#   FusedMoEPrepareAndFinalize  -- [Quantize-Dispatch] and [Combine]
+#   FusedMoEExperts             -- [Permute-Experts-Unpermute]
+#   FusedMoEKernel              -- glues a P/F with an experts impl
 
 
 class FusedMoEActivationFormat(Enum):
-    """
-    The standard activation format (num_tokens, hidden dim).
-    """
+    """Activation tensor layout, (num_tokens, hidden dim)."""
 
     Standard = ("standard",)
-    """
-    The batched experts format (num experts, max tokens per expert, hidden dim)
-    """
-    BatchedExperts = ("batched_experts",)
 
 
 @dataclass
 class ExpertTokensMetadata:
-    """
-    Metadata regarding expert-token routing.
-    """
+    """Metadata regarding expert-token routing."""
 
     expert_num_tokens: torch.Tensor
     expert_num_tokens_cpu: torch.Tensor | None
-
-    @staticmethod
-    def make_from_list(
-        expert_num_tokens_list: list[int], device: str
-    ) -> "ExpertTokensMetadata":
-        expert_num_tokens_cpu = torch.tensor(
-            expert_num_tokens_list, device="cpu", dtype=torch.int32
-        )
-        return ExpertTokensMetadata(
-            expert_num_tokens=expert_num_tokens_cpu.to(device, non_blocking=True),
-            expert_num_tokens_cpu=expert_num_tokens_cpu,
-        )
 
 
 class TopKWeightAndReduce(ABC):
@@ -115,18 +79,7 @@ class TopKWeightAndReduce(ABC):
         raise NotImplementedError
 
 
-#
-# PrepareResultType is a tuple of:
-# - quantized + dispatched a.
-# - quantized + dispatched a1_scales.
-# - Optional ExpertTokensMetadata containing gpu/cpu tensors
-#   as big as the number of local experts with the information about the
-#   number of tokens assigned to each local expert.
-# - Optional dispatched expert topk IDs
-# - Optional dispatched expert topk weight
-#
-# See `prepare` method below.
-#
+# See FusedMoEPrepareAndFinalizeModular.prepare for field semantics.
 PrepareResultType = tuple[
     torch.Tensor,
     torch.Tensor | None,
@@ -390,191 +343,28 @@ class FusedMoEExperts(ABC):
         self,
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
-        max_num_tokens: int | None = None,
-        num_dispatchers: int | None = None,
     ):
         """
         moe_config: MoE layer configuration.
         quant_config: Quantization parameters for this experts instance.
         """
-        if self.activation_format() == FusedMoEActivationFormat.Standard and (
-            max_num_tokens is not None or num_dispatchers is not None
-        ):
-            raise ValueError(
-                "max_num_tokens and num_dispatchers should only be set for "
-                "BatchedExperts activation format."
-            )
-        elif self.activation_format() == FusedMoEActivationFormat.BatchedExperts and (
-            max_num_tokens is None or num_dispatchers is None
-        ):
-            raise ValueError(
-                "max_num_tokens and num_dispatchers must be set for "
-                "BatchedExperts activation format."
-            )
-
         self.moe_config = moe_config
         self.quant_config = quant_config
-        self.max_num_tokens = max_num_tokens
-        self.num_dispatchers = num_dispatchers
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:  # noqa: B027
         pass
 
     @property
     def expects_unquantized_inputs(self) -> bool:
-        """
-        Whether or not the PrepareFinalize should defer input quantization
-        in the prepare step. If True, then the Experts kernel will
-        execute the input quantization itself.
-
-        Sample subclasses that override are AITER and FlashInfer CUTLASS.
-        """
+        """Whether the prepare step should defer activation quantization to
+        the experts kernel."""
         return False
 
     @staticmethod
     @abstractmethod
     def activation_format() -> FusedMoEActivationFormat:
-        """
-        A property which is a tuple of the input and output activation formats
-        for the 'apply' method.
-        """
+        """Activation format produced by ``prepare`` and consumed by ``apply``."""
         raise NotImplementedError
-
-    #
-    # Various helpers for registering support for various features.
-    # Used by the oracle to select a particular kernel for a deployment.
-    #
-
-    @staticmethod
-    def is_supported_config(
-        cls: type["FusedMoEExperts"],
-        moe_config: FusedMoEConfig,
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-        activation_format: FusedMoEActivationFormat,
-    ) -> tuple[bool, str | None]:
-        def _make_reason(reason: str) -> str:
-            return f"kernel does not support {reason}"
-
-        if not cls._supports_current_device():
-            return False, _make_reason(f"current device {current_platform.device_name}")
-        elif not (moe_config.is_act_and_mul or cls._supports_no_act_and_mul()):
-            return False, _make_reason("no act_and_mul MLP layer")
-        elif not cls._supports_activation(moe_config.activation):
-            return False, _make_reason(f"{moe_config.activation} activation")
-        elif not cls._supports_quant_scheme(weight_key, activation_key):
-            return False, _make_reason(
-                f"quantization scheme {weight_key}x{activation_key}"
-            )
-        elif not cls._supports_parallel_config(moe_config.moe_parallel_config):
-            return False, _make_reason(
-                f"parallel config {moe_config.moe_parallel_config}"
-            )
-        elif not cls._supports_routing_method(
-            moe_config.routing_method, weight_key, activation_key
-        ):
-            return False, _make_reason(f"routing method {moe_config.routing_method}")
-        elif not cls._supports_router_logits_dtype(
-            moe_config.router_logits_dtype,
-            moe_config.routing_method,
-        ):
-            return False, _make_reason(
-                f"router logits dtype {moe_config.router_logits_dtype}"
-            )
-        elif not cls._supports_shape(moe_config.hidden_dim):
-            return False, _make_reason(
-                f"{moe_config.hidden_dim} hidden dim is not supported"
-            )
-        elif activation_format != cls.activation_format():
-            return False, _make_reason(f"{activation_format.value} activation format")
-        elif envs.VLLM_BATCH_INVARIANT and not cls._supports_batch_invariance():
-            return False, _make_reason("batch invariance")
-        elif moe_config.is_lora_enabled and not cls.supports_lora():
-            return False, _make_reason("LoRA")
-        return True, None
-
-    @staticmethod
-    @abstractmethod
-    def _supports_current_device() -> bool:
-        """
-        Whether the kernel supports the current device type
-        (compute cability and current platform).
-        """
-        raise NotImplementedError
-
-    @staticmethod
-    @abstractmethod
-    def _supports_no_act_and_mul() -> bool:
-        """
-        Whether the kernel supports act_and_mul=False, i.e.
-        non-gated MoE models like Nemotron-Nano.
-        """
-        raise NotImplementedError
-
-    @staticmethod
-    @abstractmethod
-    def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-    ) -> bool:
-        raise NotImplementedError
-
-    @staticmethod
-    @abstractmethod
-    def _supports_activation(activation: MoEActivation) -> bool:
-        """
-        Whether the kernel supports a particular act function.
-        """
-        raise NotImplementedError
-
-    @staticmethod
-    @abstractmethod
-    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        """
-        Whether the kernel supports deployment in particular parallel config.
-
-        Can be overridden if a kernel does not support EP, SP or some other
-        configuration.
-        """
-        raise NotImplementedError
-
-    @staticmethod
-    def _supports_routing_method(
-        routing_method: RoutingMethodType,
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-    ) -> bool:
-        """
-        Whether the kernel supports a routing method (e.g. GroupedTopK).
-        """
-        return True
-
-    @staticmethod
-    def _supports_router_logits_dtype(
-        router_logits_dtype: torch.dtype | None,
-        routing_method: RoutingMethodType,
-    ) -> bool:
-        """
-        Whether a kernel supports a particular dtype for router logits input.
-        """
-        return True
-
-    @staticmethod
-    def _supports_shape(hidden_dim: int) -> bool:
-        """
-        Whether a kernel supports a particular shape. Can be overridden if a kernel
-        has specific shape requirements.
-        """
-        return True
-
-    @staticmethod
-    def _supports_batch_invariance() -> bool:
-        """
-        Whether the kernel supports batch invariance, i.e. the output does not
-        depend on the order of the tokens in the input batch. This is useful
-        for determining if the kernel can used with VLLM_BATCH_INVARIANT=1.
-        """
-        return False
 
     #
     # Various helpers for accessing quantization parameters from the
@@ -789,12 +579,8 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         input: torch.Tensor,
         *,
         clamp_limit: float | None = None,
-        alpha: float = 1.0,
-        beta: float = 0.0,
     ) -> None:
-        apply_moe_activation(
-            activation, output, input, clamp_limit=clamp_limit, alpha=alpha, beta=beta
-        )
+        apply_moe_activation(activation, output, input, clamp_limit=clamp_limit)
 
     @abstractmethod
     def finalize_weight_and_reduce_impl(self) -> TopKWeightAndReduce:
@@ -988,7 +774,6 @@ class FusedMoEKernelModularImpl:
             is_padding = get_forward_context().is_padding
         if is_padding is not None:
             n = topk_ids.shape[0]
-            # TODO: Properly support DBO (padding lives at the batch tail).
             topk_ids = torch.where(is_padding[:n].unsqueeze(1), -1, topk_ids)
 
         if not self.prepare_finalize.supports_async():

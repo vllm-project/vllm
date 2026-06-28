@@ -234,15 +234,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
         )
 
-    def maybe_make_prepare_finalize(
-        self,
-        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> mk.FusedMoEPrepareAndFinalizeModular | None:
-        raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel initialization "
-            "logic. This function should not be called."
-        )
-
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
         quant_config = fp8_w8a8_moe_quant_config(
             w1_scale=getattr(layer, f"w13_{self.weight_scale_name}"),
