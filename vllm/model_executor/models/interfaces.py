@@ -358,6 +358,14 @@ class SupportsMultiModal(Protocol):
         *,
         is_multimodal: Tensor | None,
     ) -> Tensor:
+        # Speculative decoding fills padding/placeholder slots with a negative
+        # sentinel token id (PADDING_SLOT_ID = -1). These positions are discarded
+        # downstream, but a negative id is not a valid embedding index and triggers
+        # a CUDA "vectorized gather kernel index out of bounds" assertion. Clamp
+        # negatives into range before the embedding gather; their (unused) output
+        # is harmless. This is only reached for multimodal models whose image
+        # placeholder token is in-vocab (_has_oov_mm_tokens is False), so the
+        # masked_fill branch below does not run.
         if is_multimodal is not None and self._has_oov_mm_tokens:
             # Force all input IDs to be in vocab; we do this instead of squeezing
             # to ensure that any external configuration requiring offset tracking,
@@ -366,9 +374,9 @@ class SupportsMultiModal(Protocol):
             in_vocab_ids = input_ids.masked_fill(
                 is_multimodal.to(device=input_ids.device, non_blocking=True), 0
             )
-            return embed_input_ids(in_vocab_ids)
+            return embed_input_ids(in_vocab_ids.clamp_min_(0))
 
-        return embed_input_ids(input_ids)
+        return embed_input_ids(input_ids.clamp_min(0))
 
     def embed_input_ids(
         self,
