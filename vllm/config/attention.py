@@ -27,8 +27,11 @@ class AttentionConfig:
     """Use separate prefill and decode kernels for attention instead of
     the unified triton kernel."""
 
-    flash_attn_max_num_splits_for_cuda_graph: int = 32
-    """Flash Attention max number splits for cuda graph decode."""
+    flash_attn_max_num_splits_for_cuda_graph: int | None = None
+    """Flash Attention max number of splits for cuda graph decode.
+    If None, the FA backend resolves a default; for FA3 on Hopper a
+    heuristic is applied to maximize SM utilization, otherwise a fixed
+    default is used."""
 
     tq_max_kv_splits_for_cuda_graph: int = 32
     """TurboQuant max NUM_KV_SPLITS for cuda graph decode.
