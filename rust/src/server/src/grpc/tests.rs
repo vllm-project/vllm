@@ -206,6 +206,7 @@ impl ChatRenderer for FakeTextBackend {
     fn render(&self, _request: &ChatRequest) -> vllm_chat::Result<RenderedPrompt> {
         Ok(RenderedPrompt {
             prompt: Prompt::Text(String::new()),
+            effective_template_kwargs: Default::default(),
         })
     }
 }
@@ -426,6 +427,34 @@ async fn unary_generate_missing_prompt_returns_invalid_argument() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn unary_generate_min_tokens_above_max_tokens_returns_invalid_argument() {
+    let (mut client, server_task, _engine_task) =
+        grpc_test_server(b"engine-grpc-min-above-max", default_stream_output_specs()).await;
+
+    let status = client
+        .generate(pb::GenerateRequest {
+            request_id: "test-min-above-max".to_string(),
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::Text("hi".to_string())),
+            stopping: Some(pb::StoppingCriteria {
+                max_new_tokens: 4,
+                min_new_tokens: 5,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect_err("should fail when min_new_tokens exceeds max_new_tokens");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("min_tokens=5"));
+    assert!(status.message().contains("max_tokens=4"));
+
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn streaming_generate_yields_incremental_responses() {
     let (mut client, server_task, engine_task) =
         grpc_test_server(b"engine-grpc-stream", default_stream_output_specs()).await;
@@ -508,6 +537,37 @@ async fn streaming_generate_missing_prompt_returns_invalid_argument() {
         .expect_err("should fail without prompt");
 
     assert_eq!(status.code(), tonic::Code::InvalidArgument);
+
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn streaming_generate_min_tokens_above_max_tokens_returns_invalid_argument() {
+    let (mut client, server_task, _engine_task) = grpc_test_server(
+        b"engine-grpc-stream-min-above-max",
+        default_stream_output_specs(),
+    )
+    .await;
+
+    let status = client
+        .generate_stream(pb::GenerateRequest {
+            request_id: "test-stream-min-above-max".to_string(),
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::Text("hi".to_string())),
+            stopping: Some(pb::StoppingCriteria {
+                max_new_tokens: 4,
+                min_new_tokens: 5,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect_err("should fail when min_new_tokens exceeds max_new_tokens");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("min_tokens=5"));
+    assert!(status.message().contains("max_tokens=4"));
 
     server_task.abort();
 }

@@ -73,6 +73,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sparse_attn_indexer import (
     SparseAttnIndexer,
+    fused_indexer_q_rope_quant,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -674,6 +675,13 @@ class Indexer(nn.Module):
         )
 
         self.is_inplace_rope = is_inplace_rope
+        self.use_fused_indexer_q = (
+            current_platform.is_cuda()
+            and self.quant_block_size == self.head_dim
+            and self.head_dim == 128
+            and self.rope_dim == 64
+            and self.scale_fmt is not None
+        )
 
     def forward(
         self, hidden_states: torch.Tensor, qr: torch.Tensor, positions, rotary_emb
@@ -698,6 +706,34 @@ class Indexer(nn.Module):
             rotary_emb(
                 positions, q[..., : self.rope_dim], k[..., : self.rope_dim].unsqueeze(1)
             )
+        elif self.use_fused_indexer_q and q.dtype == torch.bfloat16:
+            # fused wk + weights_proj: one GEMM, then split
+            kw, _ = self.wk_weights_proj(hidden_states)
+            k = kw[:, : self.head_dim]
+            weights = kw[:, self.head_dim :]
+
+            k = self.k_norm(k)
+            k_pe, k_nope = torch.split(
+                k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
+            )
+
+            q_fp8, weights = fused_indexer_q_rope_quant(
+                positions,
+                q,
+                rotary_emb.cos_sin_cache,
+                weights,
+                self.softmax_scale,
+                self.n_head**-0.5,
+                rotary_emb.is_neox_style,
+            )
+
+            # rotate only the MQA K
+            q_dummy = torch.empty_like(k_pe.unsqueeze(1))
+            _, k_pe = rotary_emb(positions, q_dummy, k_pe.unsqueeze(1))
+            k_pe = k_pe.reshape(-1, 1, self.rope_dim)
+            k = torch.cat([k_pe.squeeze(-2), k_nope], dim=-1)
+
+            return self.indexer_op(hidden_states, q_fp8, k, weights)
         else:
             q_pe, q_nope = torch.split(
                 q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
@@ -998,8 +1034,35 @@ class DeepseekV2MLAAttention(nn.Module):
 
         self.is_v32 = hasattr(config, "index_topk")
 
+        # IndexCache config
+        # Refer: https://arxiv.org/abs/2603.12201 for more details.
         _skip_topk = False
+        is_mtp_layer = False
         if self.is_v32:
+            _index_topk_freq = getattr(config, "index_topk_freq", 1)
+            _index_topk_pattern = getattr(config, "index_topk_pattern", None)
+            _index_skip_topk_offset = getattr(config, "index_skip_topk_offset", 2)
+            layer_id = extract_layer_index(prefix)
+
+            if _index_topk_pattern is None:
+                _skip_topk = (
+                    max(layer_id - _index_skip_topk_offset + 1, 0) % _index_topk_freq
+                    != 0
+                )
+            elif 0 <= layer_id < len(_index_topk_pattern):
+                _skip_topk = _index_topk_pattern[layer_id] == "S"
+
+            # The skip pattern only governs backbone layers. MTP/nextn
+            # layers (layer_id >= num_hidden_layers) always build a full
+            # indexer: they compute indices at draft step 0 and toggle
+            # at runtime via set_skip_topk
+            # (index_share_for_mtp_iteration).
+            _num_hidden_layers = getattr(config, "num_hidden_layers", None)
+            is_mtp_layer = (
+                _num_hidden_layers is not None and layer_id >= _num_hidden_layers
+            )
+
+        if self.is_v32 and (not _skip_topk or is_mtp_layer):
             self.indexer_rope_emb = get_rope(
                 qk_rope_head_dim,
                 max_position=max_position_embeddings,
@@ -1017,22 +1080,6 @@ class DeepseekV2MLAAttention(nn.Module):
                 f"{prefix}.indexer",
                 is_inplace_rope=self.indexer_rope_emb.enabled(),
             )
-
-            # IndexCache config
-            # Refer: https://arxiv.org/abs/2603.12201 for more details.
-            _index_topk_freq = getattr(config, "index_topk_freq", 1)
-            _index_topk_pattern = getattr(config, "index_topk_pattern", None)
-            _index_skip_topk_offset = getattr(config, "index_skip_topk_offset", 2)
-            layer_id = extract_layer_index(prefix)
-
-            if _index_topk_pattern is None:
-                _skip_topk = (
-                    max(layer_id - _index_skip_topk_offset + 1, 0) % _index_topk_freq
-                    != 0
-                )
-            elif 0 <= layer_id < len(_index_topk_pattern):
-                _skip_topk = _index_topk_pattern[layer_id] == "S"
-
         else:
             self.indexer_rope_emb = None
             self.indexer = None
@@ -1175,7 +1222,7 @@ class DeepseekV2DecoderLayer(nn.Module):
     ) -> torch.Tensor:
         # Self Attention
         if residual is None:
-            residual = hidden_states.clone()
+            residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
@@ -1673,8 +1720,6 @@ class DeepseekV2ForCausalLM(
         self.set_moe_parameters()
 
     def set_moe_parameters(self):
-        self.expert_weights = []
-
         self.num_expert_groups = getattr(self.config, "n_group", 1)
 
         self.moe_layers = []

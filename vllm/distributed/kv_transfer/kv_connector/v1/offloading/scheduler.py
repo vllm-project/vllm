@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from itertools import islice
 from typing import Any, NamedTuple
 
-from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
+from vllm.distributed.kv_events import KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
@@ -13,6 +13,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingWorkerMetadata,
     ReqId,
     TransferJob,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
+    OffloadingEventGroupSpec,
+    OffloadingEventsTracker,
+    get_offloading_event_group_spec,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
@@ -30,13 +35,13 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
+    LookupResult,
     OffloadingManager,
     OffloadingSpec,
     OffloadKey,
     OffloadPolicy,
     ReqContext,
     RequestOffloadingContext,
-    get_offload_block_hash,
     make_offload_key,
 )
 from vllm.v1.outputs import KVConnectorOutput
@@ -69,6 +74,9 @@ class GroupOffloadConfig(NamedTuple):
     gpu_block_size: int
     offloaded_block_size: int
     hash_block_size_factor: int
+    # KV cache spec metadata propagated onto emitted BlockStored events so
+    # KV-aware consumers can classify and filter the group.
+    kv_event_group_spec: OffloadingEventGroupSpec
     # None below means full attention
     sliding_window_size_in_blocks: int | None
     # Number of this group's offloaded blocks per full-attention alignment
@@ -77,6 +85,10 @@ class GroupOffloadConfig(NamedTuple):
     # than the MLA full-attention group).
     # None for full-attention groups or when the optimization doesn't apply.
     alignment_block_count: int | None = None
+    # True for EAGLE/MTP draft-model attention groups. The trailing block
+    # of these groups is volatile and lacks a stable hash, so it must
+    # be excluded from store and load scheduling.
+    is_eagle_group: bool = False
 
 
 def get_sliding_window_size_in_blocks(
@@ -155,6 +167,27 @@ class SchedulerOffloadConfig(NamedTuple):
                 return None
             return per_segment
 
+        eagle_groups = {
+            idx
+            for idx, g in enumerate(spec.kv_cache_config.kv_cache_groups)
+            if g.is_eagle_group
+        }
+
+        use_eagle = (
+            spec.vllm_config.speculative_config is not None
+            and spec.vllm_config.speculative_config.use_eagle()
+        )
+        if use_eagle and not eagle_groups:
+            eagle_groups = set(range(len(spec.kv_cache_config.kv_cache_groups)))
+
+        if eagle_groups:
+            logger.info(
+                "KV offloading: EAGLE/MTP draft attention groups %s "
+                "detected. The trailing block of these groups will be "
+                "excluded from offloading due to volatility.",
+                sorted(eagle_groups),
+            )
+
         return cls(
             num_workers=spec.vllm_config.parallel_config.world_size,
             kv_group_configs=tuple(
@@ -175,6 +208,10 @@ class SchedulerOffloadConfig(NamedTuple):
                     alignment_block_count=_alignment_block_count(
                         gpu_block_size * spec.block_size_factor, sw
                     ),
+                    kv_event_group_spec=get_offloading_event_group_spec(
+                        spec.kv_cache_config.kv_cache_groups[idx]
+                    ),
+                    is_eagle_group=idx in eagle_groups,
                 )
                 for idx, gpu_block_size in enumerate(spec.gpu_block_size)
             ),
@@ -335,6 +372,8 @@ class OffloadingConnectorScheduler:
         # be freed before a request finishes).
         self._block_id_to_pending_jobs: dict[int, set[int]] = {}
 
+        self._events_tracker = OffloadingEventsTracker(spec.kv_events_config)
+
     def _generate_job_id(self) -> int:
         job_id = self._job_counter
         self._job_counter += 1
@@ -355,15 +394,18 @@ class OffloadingConnectorScheduler:
         hit_count = 0
         defer_lookup = False
         for key in keys:
-            result = self.manager.lookup(key, req_context)
-            if result is None:
-                defer_lookup = True
-                # continue lookup to allow manager to kick-off async lookups
-                # for all blocks (until a miss is detected)
-                result = True
-            if not result:
-                break
-            hit_count += 1
+            match self.manager.lookup(key, req_context):
+                case LookupResult.HIT:
+                    hit_count += 1
+                case LookupResult.HIT_PENDING:
+                    defer_lookup = True
+                    hit_count += 1
+                case LookupResult.RETRY:
+                    # Don't break: keep scanning to let manager kick off
+                    # async lookups (until a miss is detected).
+                    defer_lookup = True
+                case LookupResult.MISS:
+                    break
         return hit_count if not defer_lookup else None
 
     def _sliding_window_lookup(
@@ -378,18 +420,25 @@ class OffloadingConnectorScheduler:
         defer_lookup = False
         consecutive_hits = 0
         for idx in range(len(keys) - 1, -1, -1):
-            result = self.manager.lookup(keys[idx], req_context)
-            if result is None:
-                defer_lookup = True
-                # continue lookup to allow manager to kick-off async lookups
-                # for all blocks (until a hit is detected)
-                result = False
-            if not result:
-                consecutive_hits = 0
-            else:
-                consecutive_hits += 1
-                if consecutive_hits == sliding_window_size:
-                    return idx + sliding_window_size if not defer_lookup else None
+            match self.manager.lookup(keys[idx], req_context):
+                case LookupResult.HIT:
+                    consecutive_hits += 1
+                case LookupResult.HIT_PENDING:
+                    # Block is in cache, just not readable yet — counts
+                    # as hit for the consecutive streak. Don't break:
+                    # keep scanning to let manager kick off async lookups.
+                    defer_lookup = True
+                    consecutive_hits += 1
+                case LookupResult.RETRY:
+                    # Block location uncertain — does not count as hit.
+                    # Don't break: keep scanning to let manager kick off
+                    # async lookups.
+                    defer_lookup = True
+                    consecutive_hits = 0
+                case LookupResult.MISS:
+                    consecutive_hits = 0
+            if consecutive_hits == sliding_window_size:
+                return idx + sliding_window_size if not defer_lookup else None
         return consecutive_hits if not defer_lookup else None
 
     def _touch(self, req_status: RequestOffloadState):
@@ -436,6 +485,11 @@ class OffloadingConnectorScheduler:
         num_hit_tokens: int = 0
         defer_lookup = False
         lookup_groups = self._lookup_groups
+
+        # Tracks which eagle groups have already popped their volatile trailing block
+        # in the current convergence iteration. Reset when a non-eagle group
+        # tightens the hit boundary, requiring a fresh pop.
+        eagle_verified: set[int] = set()
         while lookup_groups:
             looked_up_sliding_window: bool = False
             groups_iter = iter(lookup_groups)
@@ -453,6 +507,10 @@ class OffloadingConnectorScheduler:
                     >= req_status.req.num_tokens // offloaded_block_size
                 )
 
+                is_eagle_unverified = (
+                    group_config.is_eagle_group and group_idx not in eagle_verified
+                )
+
                 # Constrain to block-aligned boundary for this group
                 max_hit_size_tokens = min(
                     max_hit_size_tokens, len(offload_keys) * offloaded_block_size
@@ -461,14 +519,24 @@ class OffloadingConnectorScheduler:
                     # we can only load less than a block, better skip
                     return 0
 
-                num_blocks = min(
-                    cdiv(max_hit_size_tokens, offloaded_block_size), len(offload_keys)
-                )
-                start_block_idx = num_computed_tokens // offloaded_block_size
-                offload_keys = offload_keys[start_block_idx:num_blocks]
                 sliding_window_size_in_blocks = (
                     group_config.sliding_window_size_in_blocks
                 )
+
+                # For eagle groups, query one extra block that will be popped.
+                # We only need to increase the query size for sliding window groups.
+                query_max = max_hit_size_tokens
+                if is_eagle_unverified and sliding_window_size_in_blocks is not None:
+                    query_max = min(
+                        max_hit_size_tokens + offloaded_block_size,
+                        len(offload_keys) * offloaded_block_size,
+                    )
+
+                num_blocks = min(
+                    cdiv(query_max, offloaded_block_size), len(offload_keys)
+                )
+                start_block_idx = num_computed_tokens // offloaded_block_size
+                offload_keys = offload_keys[start_block_idx:num_blocks]
 
                 # end index (in the sliced offload_keys) up to which we
                 # have backend-confirmed hits
@@ -478,9 +546,12 @@ class OffloadingConnectorScheduler:
                         offload_keys, req_status.req_context
                     )
                 else:
+                    required_window = sliding_window_size_in_blocks
+                    if is_eagle_unverified:
+                        required_window += 1
                     num_hit_blocks = self._sliding_window_lookup(
                         offload_keys,
-                        sliding_window_size_in_blocks,
+                        required_window,
                         req_status.req_context,
                     )
                 if num_hit_blocks == 0:
@@ -489,6 +560,10 @@ class OffloadingConnectorScheduler:
                 if num_hit_blocks is None:
                     defer_lookup = True
                 else:
+                    if is_eagle_unverified:
+                        num_hit_blocks -= 1
+                        eagle_verified.add(group_idx)
+
                     max_hit_size_tokens = min(
                         max_hit_size_tokens,
                         offloaded_block_size * (start_block_idx + num_hit_blocks),
@@ -500,6 +575,8 @@ class OffloadingConnectorScheduler:
                     return 0
 
                 if new_num_hit_tokens < num_hit_tokens:
+                    if not group_config.is_eagle_group:
+                        eagle_verified.clear()
                     if defer_lookup:
                         # make another iteration on all groups to check
                         # if we still need to defer lookup
@@ -592,6 +669,13 @@ class OffloadingConnectorScheduler:
         req_status = self._req_status[request.request_id]
         for group_state in req_status.group_states:
             group_state.block_ids.clear()
+
+        if req_status.transfer_jobs:
+            logger.debug(
+                "Delaying request %s since it still has in-flight transfers",
+                request.request_id,
+            )
+            return None, False
 
         req_status.update_offload_keys()
         req_status.num_locally_computed_tokens = num_computed_tokens
@@ -689,7 +773,8 @@ class OffloadingConnectorScheduler:
         load_job_id = self._generate_job_id()
         self._current_batch_load_jobs[load_job_id] = TransferJob(
             req_id=request.request_id,
-            transfer_spec=(src_spec, dst_spec),
+            src_spec=src_spec,
+            dst_spec=dst_spec,
         )
         # a load can only be issued when no other jobs are pending.
         assert not req_status.transfer_jobs
@@ -791,6 +876,9 @@ class OffloadingConnectorScheduler:
                 self.config.kv_group_configs, req_status.group_states
             ):
                 num_blocks = num_offloadable_tokens // group_config.offloaded_block_size
+                if group_config.is_eagle_group:
+                    num_blocks = max(0, num_blocks - 1)
+
                 start_block_idx = group_state.next_stored_block_idx
                 if num_blocks <= start_block_idx:
                     continue
@@ -870,6 +958,11 @@ class OffloadingConnectorScheduler:
                         continue
 
                     offloaded_block_idx = start_block_idx + idx
+
+                    self._events_tracker.record_store(
+                        req, group_config, offloaded_block_idx, offload_key
+                    )
+
                     gpu_block_idx = offloaded_block_idx * block_size_factor
                     for i in range(block_size_factor):
                         block_id = block_ids[gpu_block_idx + i]
@@ -917,7 +1010,7 @@ class OffloadingConnectorScheduler:
             )
 
             store_jobs[job_id] = TransferJob(
-                req_id=req_id, transfer_spec=(src_spec, dst_spec)
+                req_id=req_id, src_spec=src_spec, dst_spec=dst_spec
             )
 
             logger.debug(
@@ -959,14 +1052,6 @@ class OffloadingConnectorScheduler:
                 for jid in self._block_id_to_pending_jobs[bid]
             )
 
-        # If all tracked requests are finished, flush all pending jobs
-        # (both store and load) - there might not be a future scheduler
-        # step to trigger their completion.
-        if self._req_status and all(
-            rs.req.is_finished() for rs in self._req_status.values()
-        ):
-            self._current_batch_jobs_to_flush.update(self._jobs.keys())
-
         meta = OffloadingConnectorMetadata(
             load_jobs=self._current_batch_load_jobs,
             store_jobs=self._build_store_jobs(scheduler_output),
@@ -976,6 +1061,14 @@ class OffloadingConnectorScheduler:
         self._current_batch_jobs_to_flush = set()
         self._current_batch_allocated_block_ids = set()
         return meta
+
+    def has_pending_push_work(self) -> bool:
+        """Whether the engine must keep stepping.
+
+        While True, build_connector_meta() and update_connector_output()
+        continue to be called even when no requests are scheduled.
+        """
+        return bool(self._jobs) or self.manager.has_pending_work()
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """
@@ -1091,18 +1184,26 @@ class OffloadingConnectorScheduler:
         # which may have been deferred due to async scheduling
         req_status = self._req_status.get(request.request_id)
 
-        req_context = (
-            req_status.req_context if req_status else _create_req_context(request)
-        )
-        self.manager.on_request_finished(req_context)
-
         if req_status is None:
+            # Untracked request (offloading never started): no in-flight jobs,
+            # nothing was deferred, so finalize immediately.
+            req_context = _create_req_context(request)
+            self.manager.on_new_request(req_context)
+            self.manager.on_request_finished(req_context)
             return False, None
+
+        self.manager.on_request_finished(req_status.req_context)
+
         if not req_status.transfer_jobs:
+            # No in-flight jobs: no later complete_store()/complete_load() calls
+            # need this request's state.
             del self._req_status[request.request_id]
             return False, None
-        # Pending stores will outlive the request's block ownership.
-        # Register them so future block reuse triggers a flush.
+
+        # In-flight jobs remain after the request stopped. Their completion may
+        # still call manager.complete_store()/complete_load(), so keep req_status.
+        # Pending stores outlive the request's block ownership; register them so
+        # future reuse of those blocks triggers a flush.
         for job_id in req_status.transfer_jobs:
             job_status = self._jobs[job_id]
             for bid in job_status.non_sliding_window_block_ids or ():
@@ -1110,25 +1211,17 @@ class OffloadingConnectorScheduler:
         return False, None
 
     def take_events(self) -> Iterable[KVCacheEvent]:
-        """Take the KV cache events from the connector.
+        """Drain pending KV cache events.
 
-        Returns:
-            A list of KV cache events.
+        Complete metadata is available only when self-describing KV events
+        are enabled, and only for full-attention groups. Other shapes retain
+        the previous placeholder payload so consumers can ignore them.
+
+        Yields:
+            ``BlockStored`` or ``BlockRemoved`` events corresponding to
+            the underlying :class:`OffloadingEvent` stream.
         """
-        for event in self.manager.take_events():
-            block_hashes = [get_offload_block_hash(key) for key in event.keys]
-            if event.removed:
-                yield BlockRemoved(block_hashes=block_hashes, medium=event.medium)
-            else:
-                yield BlockStored(
-                    block_hashes=block_hashes,
-                    parent_block_hash=None,
-                    token_ids=[],
-                    lora_id=None,
-                    block_size=0,
-                    medium=event.medium,
-                    lora_name=None,
-                )
+        yield from self._events_tracker.take_events(self.manager.take_events())
 
     def reset_cache(self) -> None:
         """Reset the offloading manager cache, evicting all stored blocks."""
@@ -1140,6 +1233,10 @@ class OffloadingConnectorScheduler:
 
         # Flush all in-flight jobs
         self._current_batch_jobs_to_flush.update(self._jobs.keys())
+
+        for req_id, status in list(self._req_status.items()):
+            if status.req.is_finished():
+                del self._req_status[req_id]
 
         # Reset offloading manager cache
         self.manager.reset_cache()
@@ -1153,6 +1250,10 @@ class OffloadingConnectorScheduler:
         self._stale_job_threshold = self._job_counter
         self._jobs.clear()
         self._block_id_to_pending_jobs.clear()
+
+        # The manager pool is empty; pending event payloads and announced
+        # reference counts are stale.
+        self._events_tracker.reset()
 
         # Note: _current_batch_jobs_to_flush is intentionally NOT cleared.
         # The load flush IDs collected above must be delivered to workers.

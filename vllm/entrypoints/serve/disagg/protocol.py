@@ -82,6 +82,13 @@ class GenerateRequest(BaseModel):
             raise ValueError("token_ids must not contain negative values")
         return v
 
+    token_offsets: list[tuple[int, int]] | None = None
+    """Char-level (start, end) offsets per token, relative to the
+    tokenized source string. Present only when the request set
+    `return_token_offsets=True` and the renderer was able to compute
+    them (Fast tokenizer, text input, no multimodal data). List length
+    equals `token_ids` length when present. None otherwise."""
+
     features: MultiModalFeatures | None = None
     """Multimodal hashes and placeholder positions (populated for MM inputs)."""
 
@@ -181,6 +188,7 @@ class GenerateResponseStreamChoice(BaseModel):
     logprobs: ChatCompletionLogProbs | None = None
     finish_reason: str | None = None
     token_ids: list[int] | None = None
+    routed_experts: str | None = None
 
 
 class GenerateStreamResponse(BaseModel):
@@ -219,10 +227,14 @@ class GenerateResponse(BaseModel):
 
 
 class DerenderChatRequest(BaseModel):
-    """Request for the /v1/chat/completions/derender endpoint.
+    """Request for the /v1/chat/completions/derender endpoint (non-streaming).
 
-    Wraps a GenerateResponse and caller-supplied metadata needed to produce
-    a fully-formed ChatCompletionResponse without a GPU.
+    Wraps a complete GenerateResponse and caller-supplied metadata needed to
+    produce a fully-formed ChatCompletionResponse without a GPU.
+
+    Streaming derender would require a separate endpoint design with
+    incremental token delivery, ``OutputProcessor``-based detokenization,
+    and ``parser.parse_delta()`` instead of ``parser.parse()``.
     """
 
     model: str
@@ -244,7 +256,7 @@ class DerenderChatRequest(BaseModel):
 
 
 class DerenderCompletionRequest(BaseModel):
-    """Request for the /v1/completions/derender endpoint.
+    """Request for the /v1/completions/derender endpoint (non-streaming).
 
     Parallel to DerenderChatRequest but handles the multi-prompt completions
     case: one GenerateResponse per prompt, mirroring the list[GenerateRequest]

@@ -1,4 +1,4 @@
-<!-- markdownlint-disable MD041 -->
+<!-- markdownlint-disable MD041 MD051 -->
 --8<-- [start:installation]
 
 vLLM supports basic model inferencing and serving on x86 CPU platform, with data types FP32, FP16 and BF16.
@@ -200,7 +200,19 @@ docker build -f docker/Dockerfile.cpu \
         --target vllm-openai .
 ```
 
-#### Launching the OpenAI server
+#### Building with AMD Zen optimizations
+
+For AMD Zen 4 / Zen 5 hosts (`linux/amd64` only), use the `vllm-openai-zen` target. It extends the default `vllm-openai` image and adds `zentorch` via the `vllm[zen]` extra so `ZenCpuPlatform` auto-activates at runtime:
+
+```bash
+docker build -f docker/Dockerfile.cpu \
+        --tag vllm-cpu-zen-env \
+        --target vllm-openai-zen .
+```
+
+The resulting image accepts the same arguments and environment variables as `vllm-openai` (see [Launching the OpenAI server](#launching-the-openai-server) below); no extra flag is needed to engage Zen optimizations. See [AMD Zen optimizations](cpu.md#amd-zen-optimizations) for runtime behavior and the supported-dtype caveats.
+
+#### Launching the OpenAI server {#launching-the-openai-server}
 
 ```bash
 docker run --rm \
@@ -216,5 +228,36 @@ docker run --rm \
 ```
 
 --8<-- [end:build-image-from-source]
+--8<-- [start:amd-zen-optimizations]
+
+On AMD Zen CPUs, vLLM auto-selects `ZenCpuPlatform` (a subclass of `CpuPlatform`) which dispatches linear layers through [`zentorch`](https://github.com/amd/ZenDNN-pytorch-plugin)'s ZenDNN-optimized kernels. See the FAQ entry [How do I enable AMD Zen optimizations?](#how-do-i-enable-amd-zen-optimizations) for the install command.
+
+### Detection rules
+
+`ZenCpuPlatform` is selected when **all** of the following hold:
+
+- vLLM is built for CPU
+- `/proc/cpuinfo` reports `AuthenticAMD` and `avx512`
+- `import zentorch` succeeds
+
+Otherwise, vLLM falls back to the default `CpuPlatform` (oneDNN / sgl-kernel paths).
+
+### Supported dtypes
+
+`float16` is **not** supported on `ZenCpuPlatform`. `ZenCpuPlatform.supported_dtypes` advertises only `bfloat16` and `float32`, so models declared with `torch_dtype=float16` are auto-downcast to `bfloat16` at load time with the standard `"Your device 'cpu' doesn't support torch.float16. Falling back to torch.bfloat16 for compatibility."` warning emitted from `vllm/config/model.py`.
+
+### Environment variables
+
+- `VLLM_ZENTORCH_WEIGHT_PREPACK` (default `1`): eagerly prepacks linear weights into ZenDNN's blocked layout at model load time, eliminating per-inference layout conversion overhead. Set to `0` to disable.
+
+### Docker
+
+The `vllm-openai-zen` Docker target (in `docker/Dockerfile.cpu`) extends the default `vllm-openai` image with `vllm[zen]`. Build it with `docker build -f docker/Dockerfile.cpu --target vllm-openai-zen .` — see [Building with AMD Zen optimizations](#building-with-amd-zen-optimizations) for the full command and run instructions.
+
+### Reference
+
+For the design rationale, see [RFC #35089: In-Tree AMD Zen CPU Backend via zentorch](https://github.com/vllm-project/vllm/issues/35089).
+
+--8<-- [end:amd-zen-optimizations]
 --8<-- [start:extra-information]
 --8<-- [end:extra-information]

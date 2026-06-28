@@ -3,13 +3,14 @@
 """Object store secondary tier implementation."""
 
 import ctypes
+import time
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, NamedTuple
 
 from vllm.distributed.nixl_utils import NixlWrapper as nixl_agent
 from vllm.distributed.nixl_utils import nixl_agent_config
 from vllm.logger import init_logger
-from vllm.v1.kv_offload.base import OffloadKey, ReqContext
+from vllm.v1.kv_offload.base import LookupResult, OffloadKey, ReqContext
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
 from vllm.v1.kv_offload.tiering.base import (
@@ -104,7 +105,10 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         params = {**obj_config.to_nixl_params(), "num_threads": str(io_threads)}
         self._agent.create_backend("OBJ", params)
         self._transfers: dict[int, TransferEntry] = {}
-        self._failed_jobs: list[JobResult] = []
+        # Buffered results awaiting the next get_finished_jobs() call:
+        # submission-time failures + poll-time completions accumulated
+        # during drain_jobs().
+        self._pending_results: list[JobResult] = []
         self._primary_reg = None
         self._block_size_bytes: int = 0
         root_dir = f"{prefix}/" if prefix else ""
@@ -182,14 +186,14 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         files_desc = self._agent.register_memory(nixl_files, "OBJ")
         if files_desc is None:
             logger.warning("register_memory (OBJ) failed for job %d", job_id)
-            self._failed_jobs.append(JobResult(job_id=job_id, success=False))
+            self._pending_results.append(JobResult(job_id=job_id, success=False))
             return
 
         obj_handle = self._agent.prep_xfer_dlist("ObjAgent", files_desc.trim())
         if not obj_handle:
             logger.warning("prep_xfer_dlist (OBJ) failed for job %d", job_id)
             self._agent.deregister_memory(files_desc)
-            self._failed_jobs.append(JobResult(job_id=job_id, success=False))
+            self._pending_results.append(JobResult(job_id=job_id, success=False))
             return
 
         xfer_handle = self._agent.make_prepped_xfer(
@@ -203,7 +207,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             logger.warning("make_prepped_xfer failed for job %d", job_id)
             self._agent.release_dlist_handle(obj_handle)
             self._agent.deregister_memory(files_desc)
-            self._failed_jobs.append(JobResult(job_id=job_id, success=False))
+            self._pending_results.append(JobResult(job_id=job_id, success=False))
             return
 
         state = self._agent.transfer(xfer_handle)
@@ -212,13 +216,16 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             self._agent.release_dlist_handle(obj_handle)
             self._agent.deregister_memory(files_desc)
             self._agent.release_xfer_handle(xfer_handle)
-            self._failed_jobs.append(JobResult(job_id=job_id, success=False))
+            self._pending_results.append(JobResult(job_id=job_id, success=False))
             return
 
         self._transfers[job_id] = TransferEntry(xfer_handle, files_desc, obj_handle)
 
-    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
-        return self._lookup_manager.lookup(key, req_context)
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
+        result = self._lookup_manager.lookup(key, req_context)
+        if result is None:
+            return LookupResult.RETRY
+        return LookupResult.HIT if result else LookupResult.MISS
 
     def submit_store(self, job_metadata: JobMetadata) -> None:
         obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
@@ -241,10 +248,9 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
         return RequestOffloadingContext()
 
-    def get_finished_jobs(self) -> Iterable[JobResult]:
-        """Poll in-flight transfers; return completed (job_id, success) pairs."""
-        results: list[JobResult] = self._failed_jobs
-        self._failed_jobs = []
+    def _poll_active_transfers(self) -> None:
+        """Poll all in-flight transfers once; move newly-completed (success or
+        failure) into ``_pending_results`` and release their NIXL handles."""
         for job_id, entry in list(self._transfers.items()):
             try:
                 state = self._agent.check_xfer_state(entry.xfer_handle)
@@ -263,8 +269,38 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             self._agent.release_xfer_handle(entry.xfer_handle)
             self._agent.release_dlist_handle(entry.obj_handle)
             self._agent.deregister_memory(entry.files_desc)
-            results.append(JobResult(job_id=job_id, success=success))
+            self._pending_results.append(JobResult(job_id=job_id, success=success))
+
+    def get_finished_jobs(self) -> Iterable[JobResult]:
+        """Poll in-flight transfers; return completed (job_id, success) pairs."""
+        self._poll_active_transfers()
+        results = self._pending_results
+        self._pending_results = []
         return results
+
+    def drain_jobs(self) -> None:
+        """Block until every submitted transfer has completed or failed.
+
+        nixl exposes only ``check_xfer_state`` (poll-based), so this loops
+        until ``_transfers`` is empty. Results accumulate in
+        ``_pending_results`` and are surfaced by the next
+        ``get_finished_jobs()`` call.
+        """
+        start = time.monotonic()
+        warned = False
+        while self._transfers:
+            self._poll_active_transfers()
+            if not self._transfers:
+                break
+            if not warned and time.monotonic() - start > 5.0:
+                logger.warning(
+                    "ObjectStoreSecondaryTierManager.drain_jobs: still "
+                    "draining after 5s (%d transfers in flight); a stuck "
+                    "transfer will block the engine.",
+                    len(self._transfers),
+                )
+                warned = True
+            time.sleep(0.001)
 
     def shutdown(self) -> None:
         self._lookup_manager.shutdown()
