@@ -8,9 +8,10 @@ from typing import Any, Literal, get_args
 from vllm.config.utils import config
 from vllm.utils.hashing import safe_hash
 
-KVProducer = Literal["kv_producer", "kv_both"]
-KVConsumer = Literal["kv_consumer", "kv_both"]
-KVRole = Literal[KVProducer, KVConsumer]
+KVProducer = Literal["kv_producer"]
+KVConsumer = Literal["kv_consumer"]
+KVBoth = Literal["kv_both"]
+KVRole = Literal[KVProducer, KVConsumer, KVBoth]
 
 
 def kv_buffer_device_default_factory() -> str:
