@@ -1257,19 +1257,38 @@ def get_default_config(
     num_stages_rocm = 2
 
     if dtype == "fp8_w8a8" and block_shape is not None:
-        # Block-wise quant: tile sizes are constrained by block_shape.
-        # Use a small M tile for decode-like batches where tokens are
-        # spread thin across experts. Larger batches benefit from
-        # GROUP_SIZE_M > 1 because the per-block scales add memory
-        # traffic that benefits from L2 tile reuse.
+        # Block-wise quant. Use a small M tile for decode-like batches where
+        # tokens are spread thin across experts. Larger batches benefit from
+        # GROUP_SIZE_M > 1 because the per-block scales add memory traffic
+        # that benefits from L2 tile reuse.
+        #
+        # BLOCK_SIZE_N need not equal block_shape[0]: the kernel indexes block
+        # scales per N element (offs_bn // group_n), so any N tile dividing the
+        # quant block is valid. At decode a 128-wide N tile leaves the gate-up
+        # GEMM SM-bound; a 64-wide tile exposes ~2x the thread blocks, and the
+        # swap-AB kernel keeps it efficient on Hopper down to the smallest
+        # batches, so prefer N=64 through low batch sizes. CUDA only (validated
+        # on NVIDIA); ROCm keeps its prior tile/pipeline sizes.
+        if current_platform.is_rocm():
+            block_n = block_shape[0]
+            num_stages = num_stages_rocm
+        elif M <= 8 and block_shape[0] % 64 == 0:
+            block_n = 64
+            # The smallest batches are memory-latency bound, so a deeper
+            # pipeline hides the weight loads; by M=8 it turns occupancy/SMEM
+            # bound and the extra stages hurt.
+            num_stages = 4 if M <= 4 else 3
+        else:
+            block_n = block_shape[0]
+            num_stages = 3
         config = {
             "BLOCK_SIZE_M": 16 if M <= 64 else 64,
-            "BLOCK_SIZE_N": block_shape[0],
+            "BLOCK_SIZE_N": block_n,
             "BLOCK_SIZE_K": block_shape[1],
             "GROUP_SIZE_M": 1 if M <= 16 else 32,
             "SPLIT_K": 1,
             "num_warps": 4,
-            "num_stages": 3 if not current_platform.is_rocm() else num_stages_rocm,
+            "num_stages": num_stages,
         }
     elif dtype in ["int4_w4a16", "int8_w8a16"] and block_shape is not None:
         # moe wna16 kernels

@@ -127,11 +127,33 @@ class ServingRender(BaseServing):
         )
         params = request.to_sampling_params(max_tokens, self.default_sampling_params)
 
+        assistant_tokens_mask: list[int] | None = engine_input.get(  # type: ignore[assignment]
+            "assistant_tokens_mask"
+        )
+        if assistant_tokens_mask is not None and len(assistant_tokens_mask) != len(
+            token_ids
+        ):
+            logger.warning(
+                "assistant_tokens_mask length (%d) != token_ids length (%d); "
+                "this can happen with multimodal inputs where "
+                "placeholder expansion changes the token count. "
+                "The mask may be positionally misaligned.",
+                len(assistant_tokens_mask),
+                len(token_ids),
+            )
+            if len(assistant_tokens_mask) < len(token_ids):
+                assistant_tokens_mask.extend(
+                    [0] * (len(token_ids) - len(assistant_tokens_mask))
+                )
+            else:
+                assistant_tokens_mask = assistant_tokens_mask[: len(token_ids)]
+
         request_id = f"chatcmpl-{random_uuid()}"
 
         return GenerateRequest(
             request_id=request_id,
             token_ids=token_ids,
+            assistant_tokens_mask=assistant_tokens_mask,
             features=self._extract_mm_features(engine_input),
             sampling_params=params,
             model=request.model,
@@ -139,6 +161,7 @@ class ServingRender(BaseServing):
             stream_options=(request.stream_options if request.stream else None),
             cache_salt=request.cache_salt,
             priority=request.priority,
+            token_offsets=engine_input.get("prompt_token_offsets"),
         )
 
     async def render_completion_request(
@@ -194,6 +217,7 @@ class ServingRender(BaseServing):
                     stream_options=(request.stream_options if request.stream else None),
                     cache_salt=request.cache_salt,
                     priority=request.priority,
+                    token_offsets=engine_input.get("prompt_token_offsets"),
                 )
             )
 
