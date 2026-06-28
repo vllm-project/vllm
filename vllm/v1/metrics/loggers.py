@@ -531,6 +531,35 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             gauge_kv_cache_usage, per_engine_labelvalues
         )
 
+        self.histogram_eplb_balancedness = self._histogram_cls(
+            name="vllm:eplb_balancedness",
+            documentation=("Per-(layer, EP-rank) routed-token load ratio"),
+            buckets=[
+                0.5,
+                0.55,
+                0.6,
+                0.65,
+                0.7,
+                0.75,
+                0.8,
+                0.85,
+                0.9,
+                0.95,
+                1.0,
+                1.05,
+                1.1,
+                1.15,
+                1.2,
+                1.25,
+                1.3,
+                1.35,
+                1.4,
+                1.45,
+                1.5,
+            ],
+            labelnames=labelnames + ["model"],
+        )
+
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             counter_corrupted_requests = self._counter_cls(
                 name="vllm:corrupted_requests",
@@ -1112,6 +1141,20 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
             if scheduler_stats.perf_stats is not None:
                 self.perf_metrics_prom.observe(scheduler_stats.perf_stats, engine_idx)
+
+            if scheduler_stats.eplb_metrics is not None:
+                model_name, engine = self.per_engine_labelvalues[engine_idx]
+                for (
+                    model,
+                    ratios,
+                ) in scheduler_stats.eplb_metrics.balancedness.items():
+                    hist = self.histogram_eplb_balancedness.labels(
+                        model_name=model_name,
+                        engine=engine,
+                        model=model,
+                    )
+                    for ratio in ratios:
+                        hist.observe(ratio)
 
             if (
                 self.kv_cache_metrics_enabled

@@ -88,6 +88,76 @@ class EplbStats:
     """
 
 
+class EplbMetricsState:
+    """Per-model state for the EPLB balancedness Prometheus metric.
+    balancedness[L] = tokens_to_this_rank[L] / (total / ep_size).
+    """
+
+    def __init__(self, num_layers: int, device: torch.device):
+        # The cumulative total of all tokens routed to this rank for each layer across
+        # the lifetime of the server.
+        # NOTE: The total cumulative number of tokens is stored in the last index.
+        self.routed_tokens: torch.Tensor = torch.zeros(
+            num_layers + 1, dtype=torch.int64, device=device
+        )
+
+        # CPU copy of routed_tokens.
+        self.routed_tokens_cpu: torch.Tensor = torch.zeros(
+            num_layers + 1, dtype=torch.int64, device="cpu", pin_memory=True
+        )
+        self.event: torch.cuda.Event = torch.cuda.Event()
+
+        self.prev_routed_tokens: torch.Tensor = torch.zeros(
+            num_layers + 1, dtype=torch.int64, device="cpu"
+        )
+        self.pending: bool = False
+        self.ratios: list[float] | None = None
+
+    def accumulate(self, expert_load_pass: torch.Tensor) -> None:
+        """
+        Adds this step's routed tokens into the cumulative totals.
+        This code assumes that expert_load_pass is zeroed out between calls.
+        Args:
+            expert_load_pass: (num_moe_layers, num_physical_experts) contains the number
+            of routed tokens for each layer and physical expert across all ranks.
+            Populated by the router and zeroed out by EPLB every step.
+        """
+        ep_group = get_ep_group().device_group
+        ep_size = ep_group.size()
+        rank = ep_group.rank()
+        # (num_moe_layers, ep_size, experts_per_rank)
+        per_layer_rank = expert_load_pass.reshape(
+            expert_load_pass.shape[0], ep_size, -1
+        )
+        # Accumulate this ranks routed tokens for each layer
+        self.routed_tokens[:-1].add_(per_layer_rank[:, rank, :].sum(dim=-1))
+        # Accumulate the total number of tokens
+        self.routed_tokens[-1].add_(per_layer_rank[0].sum())
+
+    def step(self) -> None:
+        """Snapshot the cumulative totals, then derive per-layer balancedness
+        ratios from the delta against the previous snapshot."""
+        # If there's not a device to host transfer in-flight, start one
+        if not self.pending:
+            self.routed_tokens_cpu.copy_(self.routed_tokens, non_blocking=True)
+            self.event.record()
+            self.pending = True
+            self.ratios = None
+        # if the transfer from device to host has finished, compute the result
+        elif self.event.query():
+            ep_size = get_ep_group().device_group.size()
+            delta = self.routed_tokens_cpu - self.prev_routed_tokens
+            local_num_tokens = delta[:-1]
+            total = delta[-1].item()
+            if total > 0:
+                ratios = ep_size * local_num_tokens.double() / total
+                self.ratios = ratios.tolist()
+            else:
+                self.ratios = []
+            self.prev_routed_tokens.copy_(self.routed_tokens_cpu)
+            self.pending = False
+
+
 @dataclass
 class EplbModelState:
     """EPLB metrics."""
@@ -150,7 +220,7 @@ class EplbModelState:
 
     expert_load_pass: torch.Tensor
     """
-    Expert load during this forward pass. 
+    Expert load during this forward pass.
     We use the token count each expert processes as the load.
 
     Shape: (num_moe_layers, num_physical_experts)
@@ -196,6 +266,10 @@ class EplbModelState:
     communicator: EplbCommunicator
     """
     The communicator for expert weight transfers.
+    """
+    metrics_state: EplbMetricsState
+    """
+    State used to populate Prometheus metrics
     """
     pending_result: AsyncEplbLayerResult | None = None
     """
@@ -471,6 +545,10 @@ class EplbState:
             eplb_stats=None,
             cuda_device_index=self.cuda_device_index,
             communicator=communicator,
+            metrics_state=EplbMetricsState(
+                num_layers=model.num_moe_layers,
+                device=self.device,
+            ),
         )
         self.model_states[model_config.compute_hash()] = model_state
         self.num_valid_physical_experts = model.num_physical_experts
@@ -509,6 +587,14 @@ class EplbState:
             # Do not record load metrics for dummy steps
             for eplb_model_state in self.model_states.values():
                 eplb_model_state.expert_load_pass.zero_()
+
+        # Metrics collection is on by default
+        if not self.parallel_config.eplb_config.disable_metrics_collection:
+            for eplb_model_state in self.model_states.values():
+                eplb_model_state.metrics_state.accumulate(
+                    eplb_model_state.expert_load_pass
+                )
+                eplb_model_state.metrics_state.step()
 
         if (
             log_stats
@@ -616,6 +702,12 @@ class EplbState:
         1) The next rearrangement step, so the sliding window is ready.
         2) The next balancedness logging step, when log_stats is enabled.
         """
+
+        # If eplb metrics are being collected, which is the default behavior,
+        # _should_record_current_step returns True
+        if not self.parallel_config.eplb_config.disable_metrics_collection:
+            return True
+
         steps_remaining = (
             self.expert_rearrangement_step_interval - self.expert_rearrangement_step
         )
@@ -638,7 +730,17 @@ class EplbState:
                 self._should_record_current_step(log_stats=log_stats)
             )
 
-    def _init_should_record_tensor(self, model: "MixtureOfExperts") -> None:  # type: ignore[name-defined]
+    def get_latest_balancedness(self) -> dict[str, list[float]]:
+        """Returns per-model, per-layer balancedness ratios for this rank
+        since the last snapshot."""
+        return {
+            state.model_name: state.metrics_state.ratios
+            for state in self.model_states.values()
+            if state.metrics_state.ratios is not None
+        }
+
+    # type: ignore[name-defined]
+    def _init_should_record_tensor(self, model: "MixtureOfExperts") -> None:
         """Allocate (once) and propagate the shared ``should_record_tensor``.
 
         Must be called after :meth:`model.set_eplb_state` so that each
@@ -1092,7 +1194,8 @@ def compute_logical_maps(
     layer_indices = torch.arange(num_layers, device=device)
     for phys_idx in range(num_physical):
         # Logical expert at physical slot phys_idx for each layer
-        logical_expert_ids = physical_to_logical_map_view[:, phys_idx]  # [num_layers]
+        # [num_layers]
+        logical_expert_ids = physical_to_logical_map_view[:, phys_idx]
 
         # Scale up will set the logical expert ids to -1 for all new physical experts.
         # Only consider "valid" experts when setting up the logical_to_physical map.

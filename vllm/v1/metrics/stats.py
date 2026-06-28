@@ -168,6 +168,19 @@ class KVCacheEvictionEvent:
 
 
 @dataclass
+class EplbMetrics:
+    """
+    Stores EPLB
+
+    - `ep_rank`: The EP rank of the worker that produced this sample.
+    - `balancedness`
+    """
+
+    ep_rank: int = 0
+    balancedness: dict[str, list[float]] = field(default_factory=dict)
+
+
+@dataclass
 class SchedulerStats:
     """Stats associated with the scheduler."""
 
@@ -196,6 +209,8 @@ class SchedulerStats:
     cudagraph_stats: CUDAGraphStat | None = None
 
     perf_stats: PerfStats | None = None
+
+    eplb_metrics: EplbMetrics | None = None
 
 
 @dataclass
