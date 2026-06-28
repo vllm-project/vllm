@@ -314,7 +314,7 @@ def _reshape_kv_cache(
                         cache_dtype_str=cache_dtype,
                     )
                 else:
-                    kv_cache_shape = group.backend.get_kv_cache_shape(
+                    kv_cache_shape = group.backend.get_kv_cache_shape(  # type: ignore[call-arg]
                         kernel_num_blocks,
                         kernel_block_size,
                         kv_cache_spec.num_kv_heads,
@@ -326,7 +326,7 @@ def _reshape_kv_cache(
                 # FIXME(woosuk): Add kv_cache_stride_order to all attention backends.
                 try:
                     if head_size_v is not None:
-                        kv_cache_stride_order = group.backend.get_kv_cache_stride_order(
+                        kv_cache_stride_order = group.backend.get_kv_cache_stride_order(  # type: ignore[call-arg]
                             head_size=kv_cache_spec.head_size,
                             head_size_v=head_size_v,
                             cache_dtype_str=cache_dtype,

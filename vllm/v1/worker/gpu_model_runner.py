@@ -7160,7 +7160,7 @@ class GPUModelRunner(
                             cache_dtype_str=self.cache_config.cache_dtype,
                         )
                     else:
-                        kv_cache_shape = attn_backend.get_kv_cache_shape(
+                        kv_cache_shape = attn_backend.get_kv_cache_shape(  # type: ignore[call-arg]
                             kernel_num_blocks,
                             shape_block_size,
                             kv_cache_spec.num_kv_heads,
@@ -7171,7 +7171,7 @@ class GPUModelRunner(
                     try:
                         if head_size_v is not None:
                             kv_cache_stride_order = (
-                                attn_backend.get_kv_cache_stride_order(
+                                attn_backend.get_kv_cache_stride_order(  # type: ignore[call-arg]
                                     head_size=kv_cache_spec.head_size,
                                     head_size_v=head_size_v,
                                     cache_dtype_str=self.cache_config.cache_dtype,
