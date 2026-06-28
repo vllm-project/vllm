@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import copy
 import gc
 import weakref
 from collections.abc import Iterable, Sequence
@@ -190,21 +189,16 @@ class ElasticEPScalingExecutor:
         self.reconfig_request = reconfig_request
         new_dp_size = reconfig_request.new_data_parallel_size
         old_dp_size = get_dp_group().world_size
-        world_size = self.worker.vllm_config.parallel_config.world_size
+        parallel_config = self.worker.vllm_config.parallel_config
+        world_size = parallel_config.world_size
         new_world_size_across_dp = world_size * new_dp_size
-        updated_config = copy.copy(self.worker.vllm_config)
-        updated_config.parallel_config = copy.deepcopy(
-            self.worker.vllm_config.parallel_config
+        create_standby_groups(
+            new_dp_size=new_dp_size,
+            new_world_size_across_dp=new_world_size_across_dp,
+            master_ip=reconfig_request.new_data_parallel_master_ip,
+            coord_store_port=reconfig_request.coord_store_port,
+            enable_eplb=parallel_config.enable_eplb,
         )
-        updated_config.parallel_config.data_parallel_size = new_dp_size
-        with set_current_vllm_config(updated_config):
-            create_standby_groups(
-                new_dp_size=new_dp_size,
-                new_world_size_across_dp=new_world_size_across_dp,
-                master_ip=reconfig_request.new_data_parallel_master_ip,
-                coord_store_port=reconfig_request.coord_store_port,
-                enable_eplb=updated_config.parallel_config.enable_eplb,
-            )
         if new_dp_size > old_dp_size:
             self._set_eplb_suppressed(True)
             eplb_state = self.worker.model_runner.eplb_state
