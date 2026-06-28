@@ -159,10 +159,9 @@ def test_validate_local_file_traversal_blocked():
 def test_validate_file_scheme_allowed_inside_allowed_dir(tmp_path):
     f = tmp_path / "v.mp4"
     f.touch()
-    assert (
-        _validate_video_source(f.as_uri(), _model_config(local=str(tmp_path)))
-        == str(f)
-    )
+    assert _validate_video_source(
+        f.as_uri(), _model_config(local=str(tmp_path))
+    ) == str(f)
 
 
 def test_validate_file_scheme_percent_encoded_traversal_blocked():
@@ -187,9 +186,9 @@ def test_validate_returns_resolved_path_through_symlink(tmp_path):
     real.touch()
     link = tmp_path / "link.mp4"
     link.symlink_to(real)
-    assert _validate_video_source(
-        str(link), _model_config(local=str(tmp_path))
-    ) == str(real)
+    assert _validate_video_source(str(link), _model_config(local=str(tmp_path))) == str(
+        real
+    )
 
 
 def test_validate_relative_bare_path_blocked():
