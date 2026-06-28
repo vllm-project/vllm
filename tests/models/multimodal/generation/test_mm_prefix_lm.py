@@ -69,6 +69,7 @@ def _get_vllm_prefill_hidden(
         return vllm_model.apply_model(_get_prefill_hidden)[0]
 
 
+@pytest.mark.core_model
 def test_mm_prefix_lm_e2e(
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
