@@ -405,3 +405,40 @@ def test_single_end_token_delta_returns_none(parser):
         delta_token_ids=[END_TOKEN_ID],
     )
     assert out is None
+
+
+# ---------------------------------------------------------------------------
+# Non-streaming extract_reasoning (the fix: DSML marker without </think>)
+# ---------------------------------------------------------------------------
+
+
+def test_extract_reasoning_explicit_end(parser):
+    """Healthy path: explicit </think> defers to parent split."""
+    reasoning, content = parser.extract_reasoning("thinking</think>the answer", None)
+    assert reasoning == "thinking"
+    assert content == "the answer"
+
+
+def test_extract_reasoning_implicit_marker_without_end(parser):
+    """The fix: DSML marker with no </think> must split at the marker so the
+    tool call lands in content instead of being swallowed as reasoning (which
+    is what the inherited base parser does, returning content=None)."""
+    out = f'some reasoning{DSML_MARKER}\n<｜DSML｜invoke name="w">'
+    reasoning, content = parser.extract_reasoning(out, None)
+    assert reasoning == "some reasoning"
+    assert content == f'{DSML_MARKER}\n<｜DSML｜invoke name="w">'
+
+
+def test_extract_reasoning_pure_reasoning_no_marker(parser):
+    """No </think> and no marker: all reasoning, no content (parent behavior)."""
+    reasoning, content = parser.extract_reasoning("just thinking, no tool", None)
+    assert reasoning == "just thinking, no tool"
+    assert content is None
+
+
+def test_extract_reasoning_marker_with_leading_start_token(parser):
+    """A leading <think> is stripped (parent behavior) before the marker split."""
+    out = f"<think>reasoning here{DSML_MARKER}call"
+    reasoning, content = parser.extract_reasoning(out, None)
+    assert reasoning == "reasoning here"
+    assert content == f"{DSML_MARKER}call"

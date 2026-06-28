@@ -276,6 +276,13 @@ class RoutedExperts(PluggableLayer):
     #
 
     @staticmethod
+    def _to_scalar(loaded_weight: torch.Tensor) -> torch.Tensor:
+        # Per-tensor scales arrive 0-D or as shape-(1,) (e.g. llm-compressor /
+        # ModelOpt NVFP4 input scales); reduce to a 0-D scalar. numel > 1 raises
+        # (reshape to ()) instead of silently broadcasting/picking an element.
+        return loaded_weight.reshape(())
+
+    @staticmethod
     def _normalize_loaded_weight_for_copy(
         expert_data: torch.Tensor, loaded_weight: torch.Tensor
     ) -> torch.Tensor:

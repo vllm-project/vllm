@@ -234,6 +234,28 @@ class DeepSeekV4ThinkingReasoningParser(DeepSeekR1ReasoningParser):
         # DSML grammars, so this conservative answer is acceptable.
         return list(input_ids)
 
+    def extract_reasoning(
+        self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
+    ) -> tuple[str | None, str | None]:
+        # Healthy path: an explicit </think> is present -> parent splits on it.
+        if self.end_token in model_output:
+            return super().extract_reasoning(model_output, request)
+        # Implicit-end fallback (the failure this parser targets): the model
+        # emitted a DSML tool-call marker without </think>. Without this, the
+        # base parser would return the whole output as reasoning with no
+        # content, so _extract_tool_calls never sees the marker and the tool
+        # call is dropped. Split at the marker so it + the rest become content.
+        # Mirror the base by first stripping a leading <think> start token.
+        parts = model_output.partition(self.start_token)
+        stripped = parts[2] if parts[1] else parts[0]
+        marker = self._find_implicit_end_marker(stripped)
+        if marker is None:
+            return super().extract_reasoning(model_output, request)
+        _marker_str, idx = marker
+        reasoning = stripped[:idx] or None
+        content = stripped[idx:] or None
+        return reasoning, content
+
 
 class DeepSeekV4ReasoningParser(ReasoningParser):
     """
