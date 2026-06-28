@@ -178,6 +178,18 @@ class ServingTokens(OpenAIServing):
         # Schedule the request and get the result generator.
         result_generator: AsyncGenerator[RequestOutput, None] | None = None
 
+        # Thread ``request.kv_transfer_params`` through to the KV connector
+        # via ``sampling_params.extra_args``. The chat-completion path does
+        # the same in ``ChatCompletionRequest.to_sampling_params``; without
+        # it here, PD disagg silently degrades for ``/inference/v1/generate``
+        # — the prefill response carries ``kv_transfer_params=None``, the
+        # decode worker receives an empty NIXL handshake, and it re-prefills
+        # the prompt locally instead of pulling KV cache from prefill.
+        if request.kv_transfer_params is not None:
+            extra = sampling_params.extra_args or {}
+            extra["kv_transfer_params"] = request.kv_transfer_params
+            sampling_params.extra_args = extra
+
         # Apply server-side ``max_tokens`` defaulting when the client did
         # not set it, matching the OpenAI-compat endpoints. ``SamplingParams``
         # defaults ``max_tokens`` to 16, which would otherwise silently cap
