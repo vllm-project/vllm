@@ -7,8 +7,8 @@ from typing import Any
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.openai.rwkv_defaults import (
-    RWKV_DEFAULT_STOP,
     RWKV_DEFAULT_STOP_TOKEN_IDS,
+    RWKV_DEFAULT_STOPS,
     apply_rwkv_default_sampling_params,
 )
 
@@ -38,7 +38,7 @@ def test_rwkv_chat_defaults_stop_string_and_token_id() -> None:
 
     sampling_params = _chat_request().to_sampling_params(128, default_sampling_params)
 
-    assert sampling_params.stop == [RWKV_DEFAULT_STOP]
+    assert sampling_params.stop == list(RWKV_DEFAULT_STOPS)
     assert sampling_params.stop_token_ids == list(RWKV_DEFAULT_STOP_TOKEN_IDS)
 
 
@@ -71,5 +71,5 @@ def test_rwkv_responses_defaults_stop_string_and_token_id() -> None:
     request = ResponsesRequest(model="rwkv-test", input="hi")
     sampling_params = request.to_sampling_params(128, default_sampling_params)
 
-    assert sampling_params.stop == [RWKV_DEFAULT_STOP]
+    assert sampling_params.stop == list(RWKV_DEFAULT_STOPS)
     assert sampling_params.stop_token_ids == list(RWKV_DEFAULT_STOP_TOKEN_IDS)

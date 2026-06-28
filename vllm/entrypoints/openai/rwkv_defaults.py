@@ -7,7 +7,7 @@ from typing import Any
 from vllm.transformers_utils.configs.rwkv7 import build_rwkv7_config_from_pth
 
 RWKV_TOOL_CALL_PARSER = "rwkv"
-RWKV_DEFAULT_STOP = "\nUser:"
+RWKV_DEFAULT_STOPS = ("\nUser:", "\n### User")
 RWKV_DEFAULT_STOP_TOKEN_IDS = (0,)
 
 
@@ -55,6 +55,6 @@ def apply_rwkv_default_sampling_params(
     if not is_rwkv_model_config(model_config):
         return
     if "stop" not in default_sampling_params:
-        default_sampling_params["stop"] = [RWKV_DEFAULT_STOP]
+        default_sampling_params["stop"] = list(RWKV_DEFAULT_STOPS)
     if "stop_token_ids" not in default_sampling_params:
         default_sampling_params["stop_token_ids"] = list(RWKV_DEFAULT_STOP_TOKEN_IDS)
