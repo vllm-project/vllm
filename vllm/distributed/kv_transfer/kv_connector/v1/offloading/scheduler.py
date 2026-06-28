@@ -1154,11 +1154,13 @@ class OffloadingConnectorScheduler:
                 stored_keys = self.manager.complete_store(
                     job_status.keys, req_status.req_context
                 )
-                if self._emit_stored_events and stored_keys:
+                # Evaluate the manager medium once (same gate as record_store).
+                medium = self.manager.medium() if self._emit_kv_events else None
+                if medium is not None and stored_keys:
                     self._pending_store_events.append(
                         OffloadingEvent(
                             keys=list(stored_keys),
-                            medium=self.manager.medium(),
+                            medium=medium,
                             removed=False,
                         )
                     )

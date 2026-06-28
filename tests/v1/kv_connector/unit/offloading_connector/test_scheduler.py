@@ -8,6 +8,7 @@ import torch
 
 from tests.v1.kv_connector.unit.offloading_connector.utils import (
     generate_store_output,
+    to_key,
     to_keys,
 )
 from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
@@ -16,6 +17,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
     RequestOffloadState,
 )
+from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -1096,9 +1098,11 @@ def test_connector_emits_stored_from_complete_store(
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
-    # complete_store reports the keys it stored; the connector emits the Stored
-    # event from them using manager.medium().
-    runner.manager.complete_store.side_effect = lambda keys, req_context: list(keys)
+    # complete_store reports the keys it stored. Return a sentinel key that is
+    # NOT in the input store keys, so the test pins that the event is built from
+    # the RETURNED keys (not the input), tagged with manager.medium().
+    sentinel = to_key(987654)
+    runner.manager.complete_store.side_effect = lambda keys, req_context: [sentinel]
     runner.manager.medium.return_value = MEDIUM_CPU
     runner.manager.take_events.return_value = []
 
@@ -1119,8 +1123,12 @@ def test_connector_emits_stored_from_complete_store(
     assert runner.manager.complete_store.call_count == 1
 
     stored = [e for e in captured if isinstance(e, BlockStored)]
-    assert stored, captured
-    assert all(e.medium == MEDIUM_CPU for e in stored)
+    assert len(stored) == 1, captured
+    expected_hash = maybe_convert_block_hash(
+        BlockHash(get_offload_block_hash(sentinel))
+    )
+    assert stored[0].block_hashes == [expected_hash]
+    assert stored[0].medium == MEDIUM_CPU
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
