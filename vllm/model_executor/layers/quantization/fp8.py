@@ -320,7 +320,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
     def create_weights(
         self,
-        layer: RoutedExperts,
+        layer: torch.nn.Module,
         input_size_per_partition: int,
         output_partition_sizes: list[int],
         input_size: int,
@@ -394,7 +394,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
         self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
 
-    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if self.use_marlin:
             if not self.block_quant:
                 # Canonicalize to (K, N) for the kernel.

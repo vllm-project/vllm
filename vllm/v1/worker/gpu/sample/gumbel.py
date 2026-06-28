@@ -74,6 +74,14 @@ def tl_rand64(seed, offset, includes_zero: tl.constexpr):
 
 
 @triton.jit
+def tl_rand32(seed, offset, includes_zero: tl.constexpr):
+    u = tl.rand(seed, offset)
+    if not includes_zero:
+        u = tl.maximum(u, _TL_RAND_MIN)
+    return u
+
+
+@triton.jit
 def gumbel_block_argmax(
     logits,
     block,
@@ -131,8 +139,7 @@ def gumbel_block_argmax(
             u = tl_rand64(gumbel_seed, block, includes_zero=False)
             gumbel_noise = -tl.log(-tl.log(u))
         else:
-            u = tl.rand(gumbel_seed, block)
-            u = tl.maximum(u, _TL_RAND_MIN)
+            u = tl_rand32(gumbel_seed, block, includes_zero=False)
             # Draw the large-noise tail (which decides the argmax winner) from u -> 0,
             # where fp32 has fine resolution, instead of u -> 1, where fp32 spacing is
             # ~2**-24. The naive `-log(-log(u))` puts the winning tail at u -> 1,
