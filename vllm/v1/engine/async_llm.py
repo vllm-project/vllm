@@ -303,6 +303,19 @@ class AsyncLLM(EngineClient):
         is_pooling = isinstance(params, PoolingParams)
 
         if (
+            self.vllm_config.cache_config.enable_prefix_caching
+            and not is_pooling
+            and params.prompt_logprobs
+            and params.skip_reading_prefix_cache is False
+        ):
+            raise ValueError(
+                "skip_reading_prefix_cache=False is incompatible with "
+                "prompt_logprobs when prefix caching is enabled. "
+                "prefix-cache hits return zero logprob. "
+                "Remove the explicit override or disable prompt_logprobs."
+            )
+
+        if (
             self.vllm_config.cache_config.kv_sharing_fast_prefill
             and not is_pooling
             and params.prompt_logprobs
