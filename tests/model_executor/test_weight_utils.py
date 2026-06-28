@@ -10,6 +10,7 @@ from huggingface_hub.utils import LocalEntryNotFoundError
 from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf,
     maybe_remap_kv_scale_name,
+    _prefetch_checkpoint,
 )
 
 
@@ -160,5 +161,34 @@ class TestMaybeRemapKvScaleName:
         assert result is None
 
 
+def test_prefetch_checkpoint():
+    import os
+
+    with tempfile.NamedTemporaryFile(delete=False) as f:
+        f.write(b"a" * 2 * 1024 * 1024 + b"b" * 1234)
+        file_path = f.name
+
+    try:
+        # Pre-fetch the file
+        _prefetch_checkpoint(file_path)
+    finally:
+        os.remove(file_path)
+
+
+def test_prefetch_checkpoint_empty():
+    import os
+
+    with tempfile.NamedTemporaryFile(delete=False) as f:
+        file_path = f.name
+
+    try:
+        # Pre-fetch the empty file
+        _prefetch_checkpoint(file_path)
+    finally:
+        os.remove(file_path)
+
+
 if __name__ == "__main__":
     test_download_weights_from_hf()
+    test_prefetch_checkpoint()
+    test_prefetch_checkpoint_empty()
