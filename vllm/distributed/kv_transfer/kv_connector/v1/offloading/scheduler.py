@@ -292,12 +292,31 @@ class RequestOffloadState:
         for group_state, new_blocks in zip(self.group_states, new_block_id_groups):
             group_state.block_ids.extend(new_blocks)
 
+    @staticmethod
+    def storable_blocks(
+        group_config: "GroupOffloadConfig", num_offloadable_tokens: int
+    ) -> int:
+        """Number of leading offloaded blocks eligible for store.
+
+        For eagle/MTP groups the single volatile trailing block of the
+        offloadable range is excluded (it lacks a stable hash). This must be
+        applied consistently everywhere ``next_stored_block_idx`` is derived:
+        otherwise the trailing block of each chunked-prefill chunk is skipped
+        on collection but jumped over by ``next_stored_block_idx``, so it is
+        never re-considered and a permanent hole breaks prefix-reuse lookup.
+        """
+        num_blocks = num_offloadable_tokens // group_config.offloaded_block_size
+        if group_config.is_eagle_group:
+            num_blocks = max(0, num_blocks - 1)
+        return num_blocks
+
     def advance_stored_idx(self, num_offloadable_tokens: int) -> None:
         for group_config, group_state in zip(
             self.config.kv_group_configs, self.group_states
         ):
-            num_blocks = num_offloadable_tokens // group_config.offloaded_block_size
-            group_state.next_stored_block_idx = num_blocks
+            group_state.next_stored_block_idx = self.storable_blocks(
+                group_config, num_offloadable_tokens
+            )
 
     def update_num_hit_blocks(self, num_cached_tokens: int) -> None:
         for group_config, group_state in zip(
@@ -875,9 +894,9 @@ class OffloadingConnectorScheduler:
             for group_config, group_state in zip(
                 self.config.kv_group_configs, req_status.group_states
             ):
-                num_blocks = num_offloadable_tokens // group_config.offloaded_block_size
-                if group_config.is_eagle_group:
-                    num_blocks = max(0, num_blocks - 1)
+                num_blocks = req_status.storable_blocks(
+                    group_config, num_offloadable_tokens
+                )
 
                 start_block_idx = group_state.next_stored_block_idx
                 if num_blocks <= start_block_idx:
@@ -946,7 +965,9 @@ class OffloadingConnectorScheduler:
                 is_sliding_window = (
                     group_config.sliding_window_size_in_blocks is not None
                 )
-                num_blocks = num_offloadable_tokens // group_config.offloaded_block_size
+                num_blocks = req_status.storable_blocks(
+                    group_config, num_offloadable_tokens
+                )
                 start_block_idx = group_state.next_stored_block_idx
                 block_ids = group_state.block_ids
                 num_group_blocks = 0

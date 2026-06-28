@@ -2294,6 +2294,69 @@ class TestEagle:
         runner.manager.prepare_store.assert_not_called()
 
     @pytest.mark.parametrize("async_scheduling", [True, False])
+    def test_multichunk_store_no_interior_holes(
+        self, request_runner, async_scheduling: bool
+    ):
+        """Eagle store must not drop interior blocks across prefill chunks.
+
+        Regression: the trailing-block exclusion (num_blocks - 1) was applied
+        when collecting keys, but next_stored_block_idx advanced by the
+        non-decremented count, so the trailing block of every chunked-prefill
+        chunk was skipped and never re-considered. With the harness chunk budget
+        (1000 tokens) and block_size 4, a prompt longer than one chunk lost the
+        block at the chunk boundary, leaving a permanent gap that caps prefix
+        reuse at the first hole. Only the single true tail block may be held
+        back; all interior blocks must be stored.
+        """
+        block_size = 4
+        block_size_factor = 1
+        offloaded_block_size = block_size * block_size_factor
+        num_gpu_blocks = 1000
+
+        kv_cache_groups = [
+            KVCacheGroupSpec(
+                ["layer0"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+                is_eagle_group=True,
+            ),
+        ]
+        runner = request_runner(
+            block_size=block_size,
+            num_gpu_blocks=num_gpu_blocks,
+            async_scheduling=async_scheduling,
+            kv_cache_groups=kv_cache_groups,
+            block_size_factor=block_size_factor,
+        )
+        assert runner.connector_scheduler.config.kv_group_configs[0].is_eagle_group
+
+        # Prompt spans more than one prefill chunk (chunk budget 1000 tokens).
+        num_blocks = 256
+        runner.new_request(token_ids=[0] * offloaded_block_size * num_blocks)
+        runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+            generate_store_output(keys)
+        )
+        # Decode a few non-EOS tokens so prefill completes across both chunks
+        # before the request finishes.
+        runner._run([1, 1, 1, 1, EOS_TOKEN_ID], complete_transfers=True)
+
+        offsets = sorted(
+            b.request_block_offset
+            for t in runner.completed_stores
+            for b in t.gpu_blocks
+        )
+        # The stored blocks must be contiguous from 0: no interior block is
+        # dropped at a chunk boundary. (The bug left a gap at offloaded block
+        # 249, the tail of the first 1000-token chunk.)
+        assert offsets == list(range(len(offsets))), (
+            f"interior hole in stored blocks: {offsets}"
+        )
+
+    @pytest.mark.parametrize("async_scheduling", [True, False])
     def test_full_attn_store_then_load(self, request_runner, async_scheduling: bool):
         """Eagle group constrains load: convergence tightens both groups.
 
