@@ -19,7 +19,9 @@ DEVICES = (
 
 
 def test_get_draft_quant_config_with_draft_model():
+    """Draft model with its own quantization returns that config."""
     mock_draft_model_config = Mock(spec=ModelConfig)
+    mock_draft_model_config.quantization = "fp8"
     mock_load_config = Mock(spec=LoadConfig)
     mock_speculative_config = Mock(spec=SpeculativeConfig)
     mock_speculative_config.draft_model_config = mock_draft_model_config
@@ -52,6 +54,74 @@ def test_get_draft_quant_config_without_draft_model():
     result = get_draft_quant_config(mock_vllm_config)
 
     assert result is None
+
+
+def test_get_draft_quant_config_inherits_online_quant():
+    """Draft without explicit quant inherits target's OnlineQuantizationConfig."""
+    from vllm.model_executor.layers.quantization.online.base import (
+        OnlineQuantizationConfig,
+    )
+
+    mock_draft_model_config = Mock(spec=ModelConfig)
+    mock_draft_model_config.quantization = None
+    mock_speculative_config = Mock(spec=SpeculativeConfig)
+    mock_speculative_config.draft_model_config = mock_draft_model_config
+
+    mock_online_config = Mock(spec=OnlineQuantizationConfig)
+
+    mock_vllm_config = Mock(spec=VllmConfig)
+    mock_vllm_config.speculative_config = mock_speculative_config
+    mock_vllm_config.load_config = Mock(spec=LoadConfig)
+    mock_vllm_config.quant_config = mock_online_config
+
+    result = get_draft_quant_config(mock_vllm_config)
+
+    assert result is mock_online_config
+
+
+def test_get_draft_quant_config_no_inherit_non_online():
+    """Draft without explicit quant does NOT inherit non-online target config."""
+    mock_draft_model_config = Mock(spec=ModelConfig)
+    mock_draft_model_config.quantization = None
+    mock_speculative_config = Mock(spec=SpeculativeConfig)
+    mock_speculative_config.draft_model_config = mock_draft_model_config
+
+    mock_vllm_config = Mock(spec=VllmConfig)
+    mock_vllm_config.speculative_config = mock_speculative_config
+    mock_vllm_config.load_config = Mock(spec=LoadConfig)
+    # Target uses a non-online quant config (e.g., checkpoint-based GPTQ)
+    mock_vllm_config.quant_config = Mock()
+
+    result = get_draft_quant_config(mock_vllm_config)
+
+    assert result is None
+
+
+def test_get_draft_quant_config_fallback_on_config_error():
+    """Draft with explicit quant that fails config lookup falls through
+    to online quant inheritance."""
+    from vllm.model_executor.layers.quantization.online.base import (
+        OnlineQuantizationConfig,
+    )
+
+    mock_draft_model_config = Mock(spec=ModelConfig)
+    mock_draft_model_config.quantization = "nvfp4_per_tensor"
+    mock_speculative_config = Mock(spec=SpeculativeConfig)
+    mock_speculative_config.draft_model_config = mock_draft_model_config
+
+    mock_online_config = Mock(spec=OnlineQuantizationConfig)
+
+    mock_vllm_config = Mock(spec=VllmConfig)
+    mock_vllm_config.speculative_config = mock_speculative_config
+    mock_vllm_config.load_config = Mock(spec=LoadConfig)
+    mock_vllm_config.quant_config = mock_online_config
+
+    with patch.object(
+        VllmConfig, "get_quantization_config", side_effect=ValueError("bad config")
+    ):
+        result = get_draft_quant_config(mock_vllm_config)
+
+    assert result is mock_online_config
 
 
 @torch.inference_mode()

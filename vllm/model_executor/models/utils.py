@@ -22,6 +22,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
+from vllm.model_executor.layers.quantization.online.base import (
+    OnlineQuantizationConfig,
+)
 from vllm.model_executor.model_loader.reload import (
     support_quantized_model_reload_from_hp_weights,
 )
@@ -740,22 +743,49 @@ def get_draft_quant_config(
     """Get quantization config for Draft models.
 
     Draft models should use their own quantization config instead of the verifier/target
-    model's config. This helper retrieves the draft model's quantization config.
+    model's config. This helper retrieves the draft model's quantization
+    config.
+
+    When the target model uses online quantization (e.g., fp8) and the
+    draft model has no explicit quantization, the target's
+    online quant config is inherited so that the draft model's weights are
+    also quantized, reducing memory bandwidth during draft steps.
 
     Args:
         vllm_config: The vLLM configuration object.
 
     Returns:
-        The draft model's config if available, None otherwise.
+        The draft model's quantization config if available, None otherwise.
     """
     draft_model_config = vllm_config.speculative_config.draft_model_config
+    if not draft_model_config:
+        return None
+
     draft_load_config = vllm_config.load_config
 
-    return (
-        VllmConfig.get_quantization_config(draft_model_config, draft_load_config)
-        if draft_model_config
-        else None
-    )
+    # If the draft model has its own quantization, use it.
+    if draft_model_config.quantization:
+        try:
+            return VllmConfig.get_quantization_config(
+                draft_model_config, draft_load_config
+            )
+        except (ValueError, FileNotFoundError) as exc:
+            # Online quant methods may fail through the checkpoint-based
+            # config path (e.g., hf_overrides is a callable, not a dict).
+            # Fall through to the target inheritance path below.
+            logger.warning(
+                "Draft model has quantization=%s but "
+                "get_quantization_config failed: %s. "
+                "Falling back to target model's quant config.",
+                draft_model_config.quantization,
+                exc,
+            )
+
+    # Inherit target model's online quantization config for the draft model.
+    if isinstance(vllm_config.quant_config, OnlineQuantizationConfig):
+        return vllm_config.quant_config
+
+    return None
 
 
 def extract_layer_index(layer_name: str, num_attn_module: int = 1) -> int:
