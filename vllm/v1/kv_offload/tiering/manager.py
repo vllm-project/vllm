@@ -229,30 +229,11 @@ class TieringOffloadingManager(OffloadingManager):
                 else:
                     # primary→secondary transfer completed.
                     # Decrement ref_cnt on primary blocks.
+                    # NOTE: secondary-tier Stored presence events are a
+                    # follow-up (opt-in per tier); none are emitted here.
                     self.primary_tier.complete_read(
                         job_metadata.keys, job_metadata.req_context
                     )
-                    # Announce secondary-tier presence as a raw OffloadingEvent
-                    # (keys + medium, removed=False); the connector's tracker
-                    # renders it downstream as a hash-only placeholder
-                    # BlockStored. Opt-in: emit only when the tier reports a
-                    # wire medium (tier.medium() is not None), the cascade
-                    # succeeded, and events are enabled. Secondary eviction is
-                    # not reported here (it may be tier-external), so there is
-                    # no matching removed=True event.
-                    secondary_medium = tier.medium()
-                    if (
-                        completed_job.success
-                        and secondary_medium is not None
-                        and self.events is not None
-                    ):
-                        self.events.append(
-                            OffloadingEvent(
-                                keys=list(job_metadata.keys),
-                                medium=secondary_medium,
-                                removed=False,
-                            )
-                        )
 
     @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
@@ -520,7 +501,7 @@ class TieringOffloadingManager(OffloadingManager):
         keys: Collection[OffloadKey],
         req_context: ReqContext,
         success: bool = True,
-    ):
+    ) -> list[OffloadKey]:
         """
         Mark blocks as done storing from GPU to primary tier.
 
@@ -538,9 +519,13 @@ class TieringOffloadingManager(OffloadingManager):
             keys: Blocks that finished storing.
             success: Whether the GPU→primary transfer succeeded.
             req_context: Per-request context forwarded to primary.prepare_read().
+
+        Returns:
+            The primary-tier keys that transitioned to stored, for the
+            connector to emit the GPU->CPU Stored event.
         """
         # Step 1: Complete store in primary tier (makes blocks loadable)
-        self.primary_tier.complete_store(keys, req_context, success)
+        stored_keys = self.primary_tier.complete_store(keys, req_context, success)
 
         if success:
             # Step 2: Cascade to ALL secondary tiers
@@ -575,11 +560,13 @@ class TieringOffloadingManager(OffloadingManager):
         state.pending_primary_stores -= 1
         self._maybe_finalize_request(req_id)
 
+        return stored_keys
+
     @override
     def medium(self) -> str | None:
-        # The parent store is GPU->primary(CPU); the primary tier emits that
-        # Stored event using this medium. Secondary-tier Stored events use
-        # their own SecondaryTierManager.medium() (see _process_finished_jobs).
+        # The parent store is GPU->primary(CPU); the connector emits that
+        # Stored event using this medium. Secondary-tier Stored events are a
+        # follow-up (opt-in per tier) and are not emitted here.
         return self.primary_tier.medium()
 
     @override

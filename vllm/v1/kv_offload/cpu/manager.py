@@ -242,7 +242,7 @@ class CPUOffloadingManager(OffloadingManager):
         keys: Collection[OffloadKey],
         req_context: ReqContext,
         success: bool = True,
-    ) -> None:
+    ) -> list[OffloadKey]:
         stored_keys: list[OffloadKey] = []
 
         if success:
@@ -260,17 +260,10 @@ class CPUOffloadingManager(OffloadingManager):
                     self._policy.remove(key)
                     self._free_block(block)
 
-        # medium() gates Stored emission: emit only when this manager reports a
-        # wire medium (always MEDIUM_CPU for the CPU tier).
-        medium = self.medium()
-        if stored_keys and self.events is not None and medium is not None:
-            self.events.append(
-                OffloadingEvent(
-                    keys=stored_keys,
-                    medium=medium,
-                    removed=False,
-                )
-            )
+        # The Stored KV event is emitted by the connector from these returned
+        # keys (gated on medium()); this manager only reports eviction Removed
+        # events (see prepare_store).
+        return stored_keys
 
     @override
     def reset_cache(self) -> None:
@@ -293,9 +286,9 @@ class CPUOffloadingManager(OffloadingManager):
 
     @override
     def medium(self) -> str | None:
-        # Primary CPU tier always reports a wire medium; it is used as the
-        # medium of the Stored/Removed events this manager emits. Independent
-        # of CPULoadStoreSpec.medium() (the worker transfer-dispatch key).
+        # Primary CPU tier always reports a wire medium: the connector emits
+        # the GPU->CPU Stored event with it, and this manager tags its eviction
+        # Removed events with it.
         return MEDIUM_CPU
 
     def get_stats(self) -> OffloadingConnectorStats | None:

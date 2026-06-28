@@ -81,10 +81,9 @@ class SecondaryTierManager(ABC):
 
     def medium(self) -> str | None:
         """Wire medium for this tier's Stored KV events, or None if this tier
-        should not auto-emit Stored events (the default). Built-in tiers
-        override to return their stable wire medium (e.g. MEDIUM_FS), gated on
-        their own per-tier opt-in (enable_kv_events). Mirrors
-        OffloadingManager.medium()."""
+        should not auto-emit Stored events (the default). Mirrors
+        OffloadingManager.medium(). Secondary-tier Stored events are a
+        follow-up (opt-in per tier); today all tiers return None."""
         return None
 
     @abstractmethod
