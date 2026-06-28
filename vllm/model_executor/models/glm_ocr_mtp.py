@@ -134,7 +134,6 @@ class GlmOcrMTP(nn.Module, SupportsPP):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
-        self.expert_weights = []
         self.num_layers = self.config.num_nextn_predict_layers
         for layer in self.model.layers.values():
             assert isinstance(layer, GlmOcrMultiTokenPredictorLayer)
