@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from math import sqrt
 from typing import Annotated, Any, Literal, TypeAlias
 
@@ -781,6 +781,7 @@ class Step3VLForConditionalGeneration(
         self,
         mm_kwargs: dict[str, Any],
         indices: list[int],
+        secondary_capture_axis_key: Hashable | None = None,
     ) -> dict[str, Any]:
         pixel_values = mm_kwargs["pixel_values"]
         patch_pixel_values = mm_kwargs["patch_pixel_values"]
@@ -818,6 +819,7 @@ class Step3VLForConditionalGeneration(
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        secondary_capture_axis_key: Hashable | None = None,
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,

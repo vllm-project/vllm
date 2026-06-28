@@ -43,7 +43,7 @@
 # SOFTWARE.
 
 import math
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
@@ -411,6 +411,7 @@ class KimiVLForConditionalGeneration(
         self,
         mm_kwargs: dict[str, Any],
         indices: list[int],
+        secondary_capture_axis_key: Hashable | None = None,
     ) -> dict[str, Any]:
         grid_hws = self._get_grid_hws(mm_kwargs)
         pixel_values = mm_kwargs["pixel_values"]
@@ -447,6 +448,7 @@ class KimiVLForConditionalGeneration(
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        secondary_capture_axis_key: Hashable | None = None,
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,

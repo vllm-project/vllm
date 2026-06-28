@@ -6,6 +6,7 @@ from collections.abc import (
     AsyncGenerator,
     Callable,
     Iterable,
+    Hashable,
     Mapping,
     MutableSequence,
     Sequence,
@@ -1603,6 +1604,7 @@ class SupportsEncoderCudaGraph(Protocol):
         self,
         mm_kwargs: dict[str, Any],
         indices: list[int],
+        secondary_capture_axis_key: Hashable | None = None,
     ) -> dict[str, Any]:
         """Select a subset of items and return mm_kwargs for the sub-batch.
 
@@ -1647,6 +1649,7 @@ class SupportsEncoderCudaGraph(Protocol):
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        secondary_capture_axis_key: Hashable | None = None,
     ) -> "EncoderCudaGraphCaptureInputs":
         """Create dummy inputs and buffers for CUDA graph capture."""
         ...
@@ -1682,6 +1685,28 @@ class SupportsEncoderCudaGraph(Protocol):
         Used as eager fallback when inputs exceed all budgets.
         """
         ...
+
+    def get_encoder_cudagraph_secondary_capture_axis_keys(
+        self,
+    ) -> Sequence[Hashable] | None:
+        """Ordered secondary capture axis keys, or None to disable the second axis.
+
+        Used when multiple graphs are captured for the same token budget.
+        """
+        return None
+
+    def resolve_encoder_cudagraph_secondary_capture_axis_key(
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+        ordered_secondary_capture_axis_keys: Sequence[Hashable],
+    ) -> Hashable:
+        """Resolve the secondary capture axis key for the given indices.
+
+        Called only when secondary capture axis is enabled. The returned key must be
+        one of ordered_secondary_capture_axis_keys.
+        """
+        return ordered_secondary_capture_axis_keys[0]
 
 
 @overload

@@ -8,7 +8,7 @@
 # Licensed under The MIT License [see LICENSE for details]
 # --------------------------------------------------------
 from abc import abstractmethod
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from functools import cached_property
 from typing import Annotated, Any, Literal, TypeAlias, TypeVar
 
@@ -970,6 +970,7 @@ class InternVLChatModel(
         self,
         mm_kwargs: dict[str, Any],
         indices: list[int],
+        secondary_capture_axis_key: Hashable | None = None,
     ) -> dict[str, Any]:
         modality = self.get_input_modality(mm_kwargs)
         pv_key = (
@@ -1005,6 +1006,7 @@ class InternVLChatModel(
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        secondary_capture_axis_key: Hashable | None = None,
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
