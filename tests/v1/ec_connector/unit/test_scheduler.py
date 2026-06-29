@@ -890,7 +890,6 @@ def test_poll_step_triggers_on_peer_down_on_disconnect_event(consumer):
         consumer_session_id="test-sess",
     )
 
-    consumer._consumer._step_polled = False  # allow a fresh poll
     with patch(
         "vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.control.zmq.recv_monitor_message",
         return_value={"event": zmq.EVENT_DISCONNECTED},
@@ -928,7 +927,6 @@ def test_ack_timeout_never_calls_add_remote_peer(consumer):
     addr = ("host", 1234)
     session = consumer._consumer._sessions[addr]
     session._xfers["h"].deadline = time.monotonic() - 1.0
-    consumer._consumer._step_polled = False  # allow a fresh poll
 
     consumer._consumer._poll_step()
 

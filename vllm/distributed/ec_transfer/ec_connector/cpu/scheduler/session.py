@@ -536,7 +536,6 @@ class ConsumerSession:
                 self._cancelled.add(mm_hash)
             else:
                 self._quarantined.append(xfer)
-                self._tombstoned.add(mm_hash)
         self._xfers.clear()
 
     def take_results(self) -> ConsumerSessionResults:

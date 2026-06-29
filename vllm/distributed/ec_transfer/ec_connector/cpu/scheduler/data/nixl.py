@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """NIXL-backed data-plane transport for ECCPUConnector."""
 
+import threading
 from typing import Any
 
 from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.data.base import (
@@ -26,10 +27,9 @@ class NixlDataTransport(DataTransport):
     internally keyed by agent_name. Callers never touch raw NIXL handles —
     post_read() resolves the handle from agent_name internally.
 
-    Thread-safety: NixlWrapper is not thread-safe. In single-role pods this is
-    safe by construction (producer touches it only from the router thread;
-    consumer only from the scheduler thread). In ec_both pods serialize behind
-    a lock before enabling ec_both.
+    Thread-safety: NixlWrapper is not thread-safe. This class wraps all
+    NIXL operations with a lock to ensure safe concurrent access from
+    multiple threads (required for ec_both mode).
     """
 
     def __init__(
@@ -64,6 +64,8 @@ class NixlDataTransport(DataTransport):
         self._mem_descriptor_bytes = serialize_mem_descriptor(block_descs)
         # agent_name → remote dlist handle (from add_remote_peer, used by post_read)
         self._peer_handles: dict[str, int] = {}
+        # Serialize access to self._nixl for thread-safe operation.
+        self._lock = threading.Lock()
 
     def get_agent_metadata(self) -> bytes:
         return self._agent_metadata
@@ -76,18 +78,20 @@ class NixlDataTransport(DataTransport):
 
         Returns agent_name for use in post_read() and remove_remote_peer().
         """
-        agent_name = self._nixl.add_remote_agent(metadata)
-        remote_blocks = deserialize_mem_descriptor(mem_descriptor)
-        remote_xfer_descs = self._nixl.get_xfer_descs(remote_blocks, _NIXL_DRAM)
-        self._peer_handles[agent_name] = self._nixl.prep_xfer_dlist(
-            agent_name, remote_xfer_descs
-        )
-        return agent_name
+        with self._lock:
+            agent_name = self._nixl.add_remote_agent(metadata)
+            remote_blocks = deserialize_mem_descriptor(mem_descriptor)
+            remote_xfer_descs = self._nixl.get_xfer_descs(remote_blocks, _NIXL_DRAM)
+            self._peer_handles[agent_name] = self._nixl.prep_xfer_dlist(
+                agent_name, remote_xfer_descs
+            )
+            return agent_name
 
     def remove_remote_peer(self, agent_name: str) -> None:
         self._peer_handles.pop(agent_name, None)
         try:
-            self._nixl.remove_remote_agent(agent_name)
+            with self._lock:
+                self._nixl.remove_remote_agent(agent_name)
         except Exception:
             logger.warning(
                 "EC: remove_remote_peer failed for %s", agent_name, exc_info=True
@@ -106,31 +110,36 @@ class NixlDataTransport(DataTransport):
                 f"({len(local_indices)} vs {len(remote_indices)})"
             )
         remote_handle = self._peer_handles[agent_name]
-        handle = self._nixl.make_prepped_xfer(
-            "READ",
-            self._local_xfer_handle,
-            local_indices,
-            remote_handle,
-            remote_indices,
-            notif_msg=notif_msg,
-        )
-        self._nixl.transfer(handle)
+        with self._lock:
+            handle = self._nixl.make_prepped_xfer(
+                "READ",
+                self._local_xfer_handle,
+                local_indices,
+                remote_handle,
+                remote_indices,
+                notif_msg=notif_msg,
+            )
+            self._nixl.transfer(handle)
         return handle
 
     def get_new_notifs(self) -> dict[str, list[bytes]]:
-        return self._nixl.get_new_notifs()
+        with self._lock:
+            return self._nixl.get_new_notifs()
 
     def check_xfer_state(self, handle: Any) -> str:
-        return self._nixl.check_xfer_state(handle)
+        with self._lock:
+            return self._nixl.check_xfer_state(handle)
 
     def release_xfer_handle(self, handle: Any) -> None:
         try:
-            self._nixl.release_xfer_handle(handle)
+            with self._lock:
+                self._nixl.release_xfer_handle(handle)
         except Exception:
             logger.warning("EC: release_xfer_handle failed", exc_info=True)
 
     def deregister(self) -> None:
         try:
-            self._nixl.deregister_memory(self._reg_descs)
+            with self._lock:
+                self._nixl.deregister_memory(self._reg_descs)
         except Exception:
             logger.warning("EC: deregister failed", exc_info=True)
