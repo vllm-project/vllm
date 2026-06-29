@@ -868,6 +868,7 @@ class RoutedExperts(PluggableLayer):
                 "`self.expert_mapping` must be provided to "
                 "load weights using `self.load_weights`."
             )
+        unpadded_hidden = self.moe_config.hidden_dim_unpadded
         for expert_name, loaded_weight in weights:
             qual_name = f"{self.layer_name}.{expert_name}"
             for param_name, weight_name, expert_id, shard_id in expert_mapping:
@@ -878,11 +879,16 @@ class RoutedExperts(PluggableLayer):
                 param = getattr(self, param_name)
                 # Fused expert weights can be identified by their 3D tensors
                 if loaded_weight.dim() == 3:
-                    # Repurpose expert_id as shard_idx for deconcatenating w1 and w3
                     if shard_id in {"w1", "w3"}:
-                        shard_idx = expert_id
-                        experts_shard = loaded_weight.chunk(2, dim=1)[shard_idx]
+                        if loaded_weight.shape[-1] != unpadded_hidden:
+                            # [..., hidden, intermediate] -> [..., intermediate, hidden]
+                            loaded_weight = loaded_weight.transpose(-1, -2)
+                        # Repurpose expert_id for deconcatenating w1 and w3
+                        experts_shard = loaded_weight.chunk(2, dim=1)[expert_id]
                     else:
+                        if loaded_weight.shape[-2] != unpadded_hidden:
+                            # [..., intermediate, hidden] -> [..., hidden, intermediate]
+                            loaded_weight = loaded_weight.transpose(-1, -2)
                         experts_shard = loaded_weight
                     start = 0
                 else:
