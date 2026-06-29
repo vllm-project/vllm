@@ -1332,6 +1332,9 @@ def _test_body_eplb(
     eplb_moe_layer.router.eplb_state.should_record_tensor = torch.ones(
         (), dtype=torch.bool, device=device
     )
+    eplb_moe_layer.router.eplb_state.num_unpadded_tokens_tensors = [
+        torch.tensor(0, dtype=torch.int32, device=device)
+    ]
 
     # Get "after" output with rearranged weights and EPLB routing
     with set_forward_context(
