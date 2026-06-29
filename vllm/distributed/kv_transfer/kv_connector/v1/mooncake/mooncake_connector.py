@@ -56,6 +56,8 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
     MambaSpec,
+    MLAAttentionSpec,
+    SlidingWindowMLASpec,
     SlidingWindowSpec,
 )
 from vllm.v1.request import RequestStatus
@@ -117,6 +119,7 @@ def _get_tp_ratio(local_tp_size: int, remote_tp_size: int) -> int:
 def _expand_transfer_regions(
     base_addrs: list[int],
     block_lens: list[int],
+    kv_block_lens: list[int],
     layer_names: list[str],
     layer_indices: list[int],
     is_kv_layout_blocks_first: bool,
@@ -125,10 +128,15 @@ def _expand_transfer_regions(
 ) -> list[TransferRegion]:
     """Expand registered KV tensors into the regions transferred by Mooncake."""
     assert (
-        len(base_addrs) == len(block_lens) == len(layer_names) == len(layer_indices)
+        len(base_addrs)
+        == len(block_lens)
+        == len(kv_block_lens)
+        == len(layer_names)
+        == len(layer_indices)
     ), (
         "Mooncake transfer regions require matching metadata lengths, got "
         f"base_addrs={len(base_addrs)}, block_lens={len(block_lens)}, "
+        f"kv_block_lens={len(kv_block_lens)}, "
         f"layer_names={len(layer_names)}, "
         f"layer_indices={len(layer_indices)}."
     )
@@ -149,6 +157,7 @@ def _expand_transfer_regions(
     for (
         base_addr,
         block_len,
+        kv_block_len,
         layer_name,
         layer_index,
         group_index,
@@ -156,12 +165,12 @@ def _expand_transfer_regions(
     ) in zip(
         base_addrs,
         block_lens,
+        kv_block_lens,
         layer_names,
         layer_indices,
         group_indices,
         split_kv_regions,
     ):
-        kv_block_len = block_len // 2 if split_kv_region else block_len
         regions.append(
             TransferRegion(
                 layer_name=layer_name,
@@ -378,6 +387,7 @@ class MooncakeXferMetadata(
     req_blocks: dict[ReqId, tuple[TransferId, list[list[int]]]]
     kv_caches_base_addr: list[int]
     block_lens: list[int]
+    kv_block_lens: list[int]
     registered_layer_names: list[str] = msgspec.field(default_factory=list)
     registered_layer_indices: list[int] = msgspec.field(default_factory=list)
     registered_group_indices: list[int] = msgspec.field(default_factory=list)
@@ -940,6 +950,7 @@ class MooncakeConnectorWorker:
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.block_len_per_layer: list[int] = []
+        self.kv_block_len_per_layer: list[int] = []
         self.registered_layer_names: list[str] = []
         self.registered_layer_indices: list[int] = []
         self.registered_group_indices: list[int] = []
@@ -1015,11 +1026,14 @@ class MooncakeConnectorWorker:
         logger.debug("Detected kv cache layout %s", self.kv_cache_layout)
 
         self._tp_size: dict[EngineId, int] = {self.engine_id: self.tp_size}
-        self._layer_specs: dict[str, KVCacheSpec] = {
-            layer: group.kv_cache_spec
-            for group in kv_cache_config.kv_cache_groups
-            for layer in group.layer_names
-        }
+        self._layer_specs: dict[str, KVCacheSpec] = {}
+        for group in kv_cache_config.kv_cache_groups:
+            group_spec = group.kv_cache_spec
+            specs_by_layer = getattr(group_spec, "kv_cache_specs", {})
+            for layer_name in group.layer_names:
+                self._layer_specs[layer_name] = specs_by_layer.get(
+                    layer_name, group_spec
+                )
         self._layer_group_indices: dict[str, int] = {
             layer: group_index
             for group_index, group in enumerate(kv_cache_config.kv_cache_groups)
@@ -1193,6 +1207,7 @@ class MooncakeConnectorWorker:
         local_regions = self._get_transfer_regions(
             self.kv_caches_base_addr,
             self.block_len_per_layer,
+            self.kv_block_len_per_layer,
             self.registered_layer_names,
             self.registered_layer_indices,
             self.registered_group_indices,
@@ -1200,6 +1215,7 @@ class MooncakeConnectorWorker:
         remote_regions = self._get_transfer_regions(
             meta.kv_caches_base_addr,
             meta.block_lens,
+            meta.kv_block_lens,
             meta.registered_layer_names,
             meta.registered_layer_indices,
             meta.registered_group_indices,
@@ -1638,6 +1654,7 @@ class MooncakeConnectorWorker:
         kv_data_lens: list[int] = []
         region_base_addresses: list[int] = []
         self.block_len_per_layer = []
+        self.kv_block_len_per_layer = []
         self.registered_layer_names = []
         self.registered_layer_indices = []
         self.registered_group_indices = []
@@ -1670,22 +1687,21 @@ class MooncakeConnectorWorker:
                 base_addr = cache.data_ptr()
                 region_base_addresses.append(base_addr)
 
-                # Use stride-based block length so RDMA reaches the last
-                # block's padding (e.g. DeepseekV4 MLA alignment). stride(0)
-                # reflects the actual byte distance between consecutive
-                # blocks in GPU memory, which matches or exceeds the
-                # shape-based size.
-                block_len = cache.stride(0) * cache.element_size()
+                kv_block_len = layer_spec.page_size_bytes
+                if isinstance(layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)):
+                    # MLA cache entries are transferred as page-sized regions.
+                    block_len = kv_block_len
+                else:
+                    # Non-MLA tensors use the real memory stride between blocks.
+                    block_len = cache.stride(0) * cache.element_size()
                 region_len = cache.shape[0] * block_len
-
                 self.block_len_per_layer.append(block_len)
+                self.kv_block_len_per_layer.append(kv_block_len)
                 self.registered_layer_names.append(layer_name)
                 self.registered_layer_indices.append(layer_index)
                 self.registered_group_indices.append(
                     self._layer_group_indices[layer_name]
                 )
-                # Register shared backing memory once, while keeping duplicate
-                # region metadata above for group-specific address calculation.
                 if base_addr in kv_data_ptrs:
                     registered_index = kv_data_ptrs.index(base_addr)
                     kv_data_lens[registered_index] = max(
@@ -1707,7 +1723,11 @@ class MooncakeConnectorWorker:
             raise RuntimeError("Mooncake batch memory registration failed.")
 
         self.device_kv_caches = kv_caches
-        logger.debug("registered block_lens=%s", self.block_len_per_layer)
+        logger.debug(
+            "registered block_lens=%s kv_block_lens=%s",
+            self.block_len_per_layer,
+            self.kv_block_len_per_layer,
+        )
 
         # No need to launch server for D node.
         if self.is_kv_consumer:
@@ -1809,6 +1829,7 @@ class MooncakeConnectorWorker:
             },
             kv_caches_base_addr=self.kv_caches_base_addr,
             block_lens=self.block_len_per_layer,
+            kv_block_lens=self.kv_block_len_per_layer,
             registered_layer_names=self.registered_layer_names,
             registered_layer_indices=self.registered_layer_indices,
             registered_group_indices=self.registered_group_indices,
@@ -2020,6 +2041,7 @@ class MooncakeConnectorWorker:
         self,
         base_addrs: list[int],
         block_lens: list[int],
+        kv_block_lens: list[int],
         layer_names: list[str],
         layer_indices: list[int],
         group_indices: list[int] | None = None,
@@ -2032,12 +2054,16 @@ class MooncakeConnectorWorker:
         split_kv_regions = None
         if self.transfer_topo.virtually_split_kv_in_blocks:
             split_kv_regions = [
-                not isinstance(self._layer_specs[layer_name], MambaSpec)
+                not isinstance(
+                    self._layer_specs[layer_name],
+                    (MambaSpec, MLAAttentionSpec, SlidingWindowMLASpec),
+                )
                 for layer_name in layer_names
             ]
         return _expand_transfer_regions(
             base_addrs=base_addrs,
             block_lens=block_lens,
+            kv_block_lens=kv_block_lens,
             layer_names=layer_names,
             layer_indices=layer_indices,
             is_kv_layout_blocks_first=self.transfer_topo.virtually_split_kv_in_blocks,

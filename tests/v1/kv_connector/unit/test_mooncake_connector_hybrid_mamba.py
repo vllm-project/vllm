@@ -273,6 +273,7 @@ def test_hybrid_gdn_transfer_params_preserve_group_identity(monkeypatch):
             },
             kv_caches_base_addr=[],
             block_lens=[],
+            kv_block_lens=[],
         )
 
         local_regions = [
@@ -369,6 +370,7 @@ def test_hybrid_gdn_splits_fa_regions_but_keeps_gdn_state_whole(
         regions = worker._get_transfer_regions(
             base_addrs=[0x1000, 0x2000],
             block_lens=[0x100, 0x100],
+            kv_block_lens=[0x40, 0x100],
             layer_names=[
                 "model.layers.0.self_attn",
                 "model.layers.1.linear_attn",
@@ -381,8 +383,8 @@ def test_hybrid_gdn_splits_fa_regions_but_keeps_gdn_state_whole(
             (region.group_index, region.base_addr, region.kv_block_len)
             for region in regions
         ] == [
-            (0, 0x1000, 0x80),
-            (0, 0x1080, 0x80),
+            (0, 0x1000, 0x40),
+            (0, 0x1040, 0x40),
             (1, 0x2000, 0x100),
         ]
 

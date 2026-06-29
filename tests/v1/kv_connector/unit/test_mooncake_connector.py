@@ -231,6 +231,7 @@ async def test_build_transfer_params_separates_prefill_pp_layers():
         req_blocks={"d-req-pp": (transfer_id, [[20, 21]])},
         kv_caches_base_addr=[region.base_addr for region in remote_regions],
         block_lens=[region.block_len for region in remote_regions],
+        kv_block_lens=[region.kv_block_len for region in remote_regions],
         registered_layer_names=[region.layer_name for region in remote_regions],
         registered_layer_indices=[region.layer_index for region in remote_regions],
     )
@@ -319,6 +320,7 @@ async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
             req_blocks={"d-req-layer-align": (transfer_id, [[20]])},
             kv_caches_base_addr=[0xA000, 0xB000],
             block_lens=[block_len, block_len],
+            kv_block_lens=[block_len, block_len],
             registered_layer_names=[
                 "model.layers.0.self_attn",
                 "model.layers.1.self_attn",
@@ -857,6 +859,7 @@ async def test_kv_producer(monkeypatch):
             req_blocks={"d-req-1": (transfer_id, [[20, 21]])},
             kv_caches_base_addr=[0x2000],
             block_lens=[block_len],
+            kv_block_lens=[block_len],
             registered_layer_names=["model.layers.0.self_attn"],
             registered_layer_indices=[0],
         )
@@ -1308,6 +1311,7 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
                     },
                     kv_caches_base_addr=[0x2000],
                     block_lens=[remote_block_len],
+                    kv_block_lens=[remote_block_len],
                     registered_layer_names=["model.layers.0.self_attn"],
                     registered_layer_indices=[0],
                 )
