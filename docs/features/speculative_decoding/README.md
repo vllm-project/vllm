@@ -18,6 +18,7 @@ vLLM supports a variety of methods of speculative decoding. Model-based methods 
 - [Hidden State Extraction](extract_hidden_states.md)
 - [Custom Proposer Backend (Experimental)](#custom-proposer-backend-experimental)
 - [Dynamic Speculative Decoding](dynamic_speculative_decoding.md)
+- [Per-Request Acceptance Metrics](acceptance_metrics.md)
 
 ## Method Selection at a Glance
 
