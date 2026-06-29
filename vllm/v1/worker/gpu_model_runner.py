@@ -2800,7 +2800,7 @@ class GPUModelRunner(
         # cu_num_sampled_tokens: [4, 5, 8, 9, 11]
         # _arange_scratch[:11]: [0, 1, 2, 3, 0, 0, 1, 2, 0, 0, 1]
         cu_num_sampled_tokens = self._get_cumsum_and_arange(
-            num_sampled_tokens, self._arange_scratch, cumsum_dtype=np.dtype(np.int32)
+            num_sampled_tokens, self._arange_scratch, cumsum_dtype=np.int32
         )
         # Step 2. [0, 0, 0, 0, 103, 104, 104, 104, 206, 207, 207]
         logits_indices = np.repeat(
@@ -2816,7 +2816,7 @@ class GPUModelRunner(
         # cu_num_draft_tokens: [3, 3, 5, 5, 6]
         # _arange_scratch[:6]: [0, 1, 2, 0, 1, 0]
         cu_num_draft_tokens = self._get_cumsum_and_arange(
-            num_draft_tokens, self._arange_scratch, cumsum_dtype=np.dtype(np.int32)
+            num_draft_tokens, self._arange_scratch, cumsum_dtype=np.int32
         )
         # [0, 0, 0, 5, 5, 9]
         target_logits_indices = np.repeat(
@@ -3707,7 +3707,7 @@ class GPUModelRunner(
                 valid_sampled_token_ids, logprobs_lists = RejectionSampler.parse_output(
                     sampled_token_ids,
                     self.input_batch.vocab_size,
-                    discard_sampled_tokens_req_indices.tolist(),
+                    discard_sampled_tokens_req_indices,
                     logprobs_tensors=logprobs_tensors,
                 )
         else:

@@ -1048,12 +1048,8 @@ class InputBatch:
         """
 
         req_lora_mapping = self.request_lora_mapping[: self.num_reqs]
-        prompt_lora_mapping = tuple(
-            int(x) for x in req_lora_mapping.repeat(num_sampled_tokens)
-        )
-        token_lora_mapping = tuple(
-            int(x) for x in req_lora_mapping.repeat(num_scheduled_tokens)
-        )
+        prompt_lora_mapping = tuple(req_lora_mapping.repeat(num_sampled_tokens))
+        token_lora_mapping = tuple(req_lora_mapping.repeat(num_scheduled_tokens))
 
         active_lora_requests: set[LoRARequest] = set(
             self.lora_id_to_lora_request.values()
