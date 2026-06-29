@@ -139,6 +139,23 @@ MODELS = [
             "--enable-expert-parallel",
         ],
     ),
+    OffloadingModelConfig(
+        id="simple-deepseek-v4-flash",
+        model="deepseek-ai/DeepSeek-V4-Flash",
+        connector="SimpleCPUOffloadConnector",
+        accuracy_threshold=0.90,
+        extra_server_args=[
+            "--tensor-parallel-size",
+            "2",
+            "--enable-expert-parallel",
+            "--kv-cache-dtype",
+            "fp8",
+            "--block-size",
+            "256",
+        ],
+        cpu_offload_gib=16,
+        startup_timeout=1200,
+    ),
 ]
 
 
