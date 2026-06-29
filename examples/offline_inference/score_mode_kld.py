@@ -392,6 +392,14 @@ def main():
         help="Trust remote code when loading model",
     )
     parser.add_argument(
+        "--max-num-seqs",
+        type=int,
+        default=128,
+        help="Maximum number of sequences per batch (default: 128). Hybrid "
+        "Mamba models require this to be <= available Mamba cache blocks. "
+        "For KLD evaluation (one window at a time), 128 is more than enough.",
+    )
+    parser.add_argument(
         "--language-model-only",
         action="store_true",
         help="Disable multimodal modules for text-only models (e.g., Qwen-3.5) "
@@ -422,6 +430,7 @@ def main():
         "trust_remote_code": args.trust_remote_code,
         "enable_prefix_caching": False,
         "max_model_len": args.context_length * 2,
+        "max_num_seqs": args.max_num_seqs,
     }
     if args.quantization:
         llm_kwargs["quantization"] = args.quantization
