@@ -72,16 +72,6 @@ class EAGLEConfig(PretrainedConfig):
                 else f"DFlash{arch}"
                 for arch in self.model.architectures
             ]
-        elif method == "dflash":
-            assert self.model is not None, (
-                "model should not be None when method is dflash"
-            )
-            kwargs["architectures"] = [
-                arch
-                if arch.startswith("DFlash") or arch.endswith("DFlash")
-                else f"DFlash{arch}"
-                for arch in self.model.architectures
-            ]
             self._normalize_dflash_layer_ids(kwargs)
         else:
             raise ValueError(
