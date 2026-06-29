@@ -688,6 +688,28 @@ def _patched_set_stream(stream: torch.cuda.Stream) -> None:
 torch.cuda.set_stream = _patched_set_stream
 
 
+def make_current_stream_tracking_setter(set_stream_fn):
+    def _tracked_set_stream(stream):
+        _current_stream_tls.value = stream
+        set_stream_fn(stream)
+
+    return _tracked_set_stream
+
+
+def make_current_stream_tracking_context(set_stream_fn):
+    @contextlib.contextmanager
+    def _tracked_stream_context(stream):
+        previous_stream = current_stream()
+        tracked_set_stream = make_current_stream_tracking_setter(set_stream_fn)
+        tracked_set_stream(stream)
+        try:
+            yield
+        finally:
+            tracked_set_stream(previous_stream)
+
+    return _tracked_stream_context
+
+
 class _StreamPlaceholder:
     def __init__(self):
         self.synchronize = lambda: None

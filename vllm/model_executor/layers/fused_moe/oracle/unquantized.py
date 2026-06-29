@@ -93,7 +93,11 @@ def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBac
             _move_to_back(_AVAILABLE_BACKENDS, UnquantizedMoeBackend.FLASHINFER_CUTLASS)
 
     elif current_platform.is_xpu():
-        _AVAILABLE_BACKENDS = [UnquantizedMoeBackend.XPU]
+        _AVAILABLE_BACKENDS = [
+            UnquantizedMoeBackend.XPU,
+            UnquantizedMoeBackend.TRITON,
+            UnquantizedMoeBackend.BATCHED_TRITON,
+        ]
     elif current_platform.is_cpu():
         _AVAILABLE_BACKENDS = [UnquantizedMoeBackend.CPU]
     return _AVAILABLE_BACKENDS
@@ -260,7 +264,7 @@ def select_unquantized_moe_backend(
             logger.info_once(_make_log_backend(backend))
             return backend, k_cls
 
-        logger.debug_once(_make_log_unsupported(backend, reason))
+        logger.info_once(_make_log_unsupported(backend, reason))
 
     raise NotImplementedError(
         "No Unquantized MoE backend supports the deployment configuration."

@@ -5980,8 +5980,10 @@ class GPUModelRunner(
                     inputs_embeds=inputs_embeds,
                     **model_kwargs,
                 )
-
-            if self.use_aux_hidden_state_outputs:
+            if outputs is None:
+                # Can happen with EP when all tokens routed to other ranks
+                hidden_states = None
+            elif self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
             else:
                 hidden_states = outputs

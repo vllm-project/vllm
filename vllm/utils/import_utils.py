@@ -412,9 +412,24 @@ def _has_module(module_name: str) -> bool:
     return True
 
 
+@cache
+def import_deep_ep() -> ModuleType:
+    """Import the available DeepEP module for the current environment.
+
+    CUDA/ROCm environments expose the package as ``deep_ep`` while XPU uses
+    ``deep_ep_xpu``. Prefer ``deep_ep`` when both are present so existing
+    installations keep their current behavior.
+    """
+    if _has_module("deep_ep"):
+        return importlib.import_module("deep_ep")
+    if _has_module("deep_ep_xpu"):
+        return importlib.import_module("deep_ep_xpu")
+    raise ModuleNotFoundError("No module named 'deep_ep' or 'deep_ep_xpu'")
+
+
 def has_deep_ep() -> bool:
-    """Whether the optional `deep_ep` package is available."""
-    return _has_module("deep_ep")
+    """Whether a DeepEP package is available in the current environment."""
+    return _has_module("deep_ep") or _has_module("deep_ep_xpu")
 
 
 DEEPEP_V2_MIN_NCCL_VERSION_RAW = 23004  # 2.30.4
