@@ -313,6 +313,8 @@ class DraftTokenIds:
     req_ids: list[str]
     # num_reqs x num_draft_tokens
     draft_token_ids: list[list[int]]
+    # Optional per-request number of draft tokens to keep for D-Cut.
+    dcut_keep_lens: list[int] | None = None
 
 
 def make_empty_encoder_model_runner_output(
