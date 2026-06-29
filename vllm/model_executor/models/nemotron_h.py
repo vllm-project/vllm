@@ -814,7 +814,17 @@ class NemotronHForCausalLM(
     def get_mamba_state_dtype_from_config(
         cls,
         vllm_config: "VllmConfig",
-    ) -> tuple[torch.dtype, torch.dtype]:
+    ) -> tuple[torch.dtype, ...]:
+        if (
+            vllm_config.cache_config.enable_mamba_mtp_replay
+            and vllm_config.speculative_config
+            and vllm_config.cache_config.mamba_cache_mode == "none"
+        ):
+            return MambaStateDtypeCalculator.mamba2_spec_replay_state_dtype(
+                vllm_config.model_config.dtype,
+                vllm_config.cache_config.mamba_cache_dtype,
+                vllm_config.cache_config.mamba_ssm_cache_dtype,
+            )
         return MambaStateDtypeCalculator.mamba2_state_dtype(
             vllm_config.model_config.dtype,
             vllm_config.cache_config.mamba_cache_dtype,
@@ -825,7 +835,7 @@ class NemotronHForCausalLM(
     def get_mamba_state_shape_from_config(
         cls,
         vllm_config: "VllmConfig",
-    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+    ) -> tuple[tuple[int, ...], ...]:
         """Calculate shapes for Mamba's convolutional and state caches.
 
         Args:
@@ -839,6 +849,22 @@ class NemotronHForCausalLM(
         parallel_config = vllm_config.parallel_config
         hf_config = vllm_config.model_config.hf_config
         intermediate_size = hf_config.mamba_num_heads * hf_config.mamba_head_dim
+
+        if (
+            vllm_config.cache_config.enable_mamba_mtp_replay
+            and vllm_config.speculative_config
+            and vllm_config.cache_config.mamba_cache_mode == "none"
+        ):
+            return MambaStateShapeCalculator.mamba2_spec_replay_state_shape(
+                intermediate_size=intermediate_size,
+                tp_world_size=parallel_config.tensor_parallel_size,
+                n_groups=hf_config.n_groups,
+                num_heads=hf_config.mamba_num_heads,
+                head_dim=hf_config.mamba_head_dim,
+                state_size=hf_config.ssm_state_size,
+                conv_kernel=hf_config.conv_kernel,
+                num_spec=vllm_config.num_speculative_tokens,
+            )
 
         return MambaStateShapeCalculator.mamba2_state_shape(
             intermediate_size=intermediate_size,

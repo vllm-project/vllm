@@ -100,6 +100,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         self.use_spec_decode = self.num_spec_tokens > 0
 
         assert isinstance(kv_cache_spec, MambaSpec)
+        self.num_decode_state_blocks = 1 + kv_cache_spec.num_speculative_blocks
         scheduler_config = vllm_config.scheduler_config
         self.decode_cudagraph_max_bs: int = scheduler_config.max_num_seqs
         if self.compilation_config.max_cudagraph_capture_size is not None:
@@ -145,7 +146,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 )
         else:
             self.state_indices_tensor_d = torch.empty(
-                (self.decode_cudagraph_max_bs, 1 + self.num_spec_tokens),
+                (self.decode_cudagraph_max_bs, self.num_decode_state_blocks),
                 dtype=torch.int32,
                 device=device,
             )
@@ -473,7 +474,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         )
         if self.vllm_config.cache_config.mamba_cache_mode != "all":
             state_indices_tensor_d = state_indices_tensor_d[
-                :, : 1 + self.num_spec_tokens
+                :, : self.num_decode_state_blocks
             ]
             state_indices_tensor_p = state_indices_tensor_p[:, 0]
 

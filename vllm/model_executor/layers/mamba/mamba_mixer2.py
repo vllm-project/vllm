@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
 import torch
 from torch import nn
 
+from vllm import envs
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
+from vllm.config.mamba import MambaBackendEnum, MambaConfig
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -32,6 +33,9 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_update,
 )
 from vllm.model_executor.layers.mamba.ops.layernorm_gated import rms_norm_gated
+from vllm.model_executor.layers.mamba.ops.replay_selective_state_update import (
+    replay_selective_state_update,
+)
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
 )
@@ -54,10 +58,32 @@ from vllm.utils.torch_utils import (
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 logger = init_logger(__name__)
 
-# Added by the IBM Team, 2024
+def _filter_replay_cache_indices(
+    state_indices: torch.Tensor,
+    cache_size: int,
+) -> torch.Tensor:
+    state_indices = state_indices.reshape(-1).to(torch.long)
+    valid_mask = (
+        (state_indices != NULL_BLOCK_ID)
+        & (state_indices >= 0)
+        & (state_indices < cache_size)
+    )
+    return state_indices[valid_mask].contiguous()
+
+
+def _new_replay_tied_dt_buffer(
+    src: torch.Tensor,
+    num_decodes: int,
+    num_steps: int,
+    num_heads: int,
+    head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    dt_storage = src.new_zeros(num_decodes, num_steps, num_heads, 1)
+    return dt_storage, dt_storage.expand(-1, -1, -1, head_dim)
 
 
 # Adapted from transformers.models.mamba2.modeling_mamba2.MambaRMSNormGated
@@ -494,12 +520,14 @@ class MambaMixer2(MambaBase, PluggableLayer):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
-        # The tuple is (conv_state, ssm_state)
+        # The tuple starts with (conv_state, ssm_state). MTP replay mode appends
+        # per-block replay history tensors through MambaSpec.
         self.kv_cache = (torch.tensor([]), torch.tensor([]))
 
         self.model_config = model_config
         self.cache_config = cache_config
         self.prefix = prefix
+        self.mamba_config: MambaConfig = vllm_config.mamba_config
 
         self.num_spec = vllm_config.num_speculative_tokens
         if self.num_spec > 0:
@@ -524,8 +552,84 @@ class MambaMixer2(MambaBase, PluggableLayer):
             dim=-1,
         )
 
+        self._use_mtp_replay = (
+            self.num_spec > 0
+            and cache_config is not None
+            and cache_config.mamba_cache_mode == "none"
+            and self.mamba_config.backend == MambaBackendEnum.TRITON
+            and current_platform.is_cuda()
+            and cache_config.enable_mamba_mtp_replay
+        )
+        if self._use_mtp_replay:
+            logger.info_once(
+                "Using replay-based Mamba2 MTP SSM state update for %s.",
+                self.prefix,
+            )
+        self._replay_cb_scaled: torch.Tensor | None
+        self._replay_decay_vec: torch.Tensor | None
+        self.register_buffer("_replay_cb_scaled", None, persistent=False)
+        self.register_buffer("_replay_decay_vec", None, persistent=False)
+
         # Check if running on Blackwell (SM100+) for kernel tuning
         self.is_blackwell = current_platform.is_device_capability_family(100)
+
+    def _ensure_replay_workspace(
+        self,
+        batch: int,
+        num_heads: int,
+        num_steps: int,
+        device: torch.device,
+    ) -> None:
+        block_size_t = max(1 << (num_steps - 1).bit_length(), 16)
+        cb_shape = (num_heads, block_size_t, block_size_t)
+        decay_shape = (num_heads, block_size_t)
+        if (
+            self._replay_cb_scaled is not None
+            and self._replay_decay_vec is not None
+            and self._replay_cb_scaled.shape[0] >= batch
+            and self._replay_cb_scaled.shape[1:] == cb_shape
+            and self._replay_decay_vec.shape[0] >= batch
+            and self._replay_decay_vec.shape[1:] == decay_shape
+            and self._replay_cb_scaled.device == device
+            and self._replay_decay_vec.device == device
+        ):
+            return
+
+        self._replay_cb_scaled = torch.empty(
+            batch,
+            num_heads,
+            block_size_t,
+            block_size_t,
+            dtype=torch.float32,
+            device=device,
+        )
+        self._replay_decay_vec = torch.empty(
+            batch,
+            num_heads,
+            block_size_t,
+            dtype=torch.float32,
+            device=device,
+        )
+
+    def _invalidate_mtp_replay_cache(
+        self,
+        state_indices: torch.Tensor | None,
+    ) -> None:
+        if len(self.kv_cache) < 8 or state_indices is None:
+            return
+        replay_valid = self.kv_cache[7]
+        cache_size = replay_valid.shape[0]
+        valid_indices = _filter_replay_cache_indices(state_indices, cache_size)
+        if valid_indices.numel() == 0:
+            return
+        valid_indices = valid_indices.to(device=replay_valid.device, dtype=torch.long)
+        replay_valid.index_fill_(0, valid_indices, 0)
+
+    def invalidate_mtp_replay_cache(
+        self,
+        state_indices: torch.Tensor | None,
+    ) -> None:
+        self._invalidate_mtp_replay_cache(state_indices)
 
     def forward(
         self,
@@ -575,6 +679,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
         if self._ssd_kernels_warmed_up:
             return
         self._ssd_kernels_warmed_up = True
+        if envs.VLLM_MAMBA_SKIP_SSD_WARMUP:
+            logger.info_once("Skipping Mamba2 SSD Triton kernel warmup.")
+            return
         logger.info_once("Warming up Mamba2 SSD Triton kernels...")
 
         device = projected_states.device
@@ -591,7 +698,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
         # Triton's autotuner includes tensor dtypes in its cache key,
         # so state_dtype must match what real inference uses.
-        _, ssm_state_dtype = self.get_state_dtype()
+        ssm_state_dtype = self.get_state_dtype()[1]
 
         # SSD kernel autotune keys depend on dtype and head dimensions,
         # not on sequence length or batch size, so a single shape suffices.
@@ -987,6 +1094,59 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 state_indices_tensor_d_input = state_indices_tensor_d
                 state_indices_tensor_d_output = state_indices_tensor_d
 
+            use_mtp_replay = (
+                self._use_mtp_replay
+                and num_accepted_tokens is not None
+                and query_start_loc_d is not None
+                and state_indices_tensor_d.dim() == 2
+                and state_indices_tensor_d.size(1) in (1, 1 + self.num_spec)
+            )
+            full_mtp_decode_rows = (
+                use_mtp_replay
+                and num_decode_tokens == num_decodes * (1 + self.num_spec)
+            )
+            use_mtp_replay_external_pdl = (
+                full_mtp_decode_rows
+                and self.cache_config.enable_mamba_mtp_replay_pdl
+            )
+            use_mtp_replay_internal_pdl = (
+                use_mtp_replay and self.cache_config.enable_mamba_mtp_replay_pdl
+            )
+            replay_num_accepted_tokens = None
+            replay_state_indices = None
+            replay_ssm_state = ssm_state
+            replay_cache_tensors: tuple[torch.Tensor, ...] | None = None
+            if use_mtp_replay:
+                num_steps = 1 + self.num_spec
+                num_heads = self.num_heads // self.tp_size
+                if len(self.kv_cache) < 8:
+                    raise RuntimeError(
+                        "MTP replay requires replay tensors in the Mamba "
+                        "cache page."
+                    )
+                replay_cache_tensors = (
+                    self.kv_cache[2],
+                    self.kv_cache[3],
+                    self.kv_cache[4],
+                    self.kv_cache[5],
+                    self.kv_cache[6],
+                    self.kv_cache[7],
+                )
+                self._ensure_replay_workspace(
+                    num_decodes,
+                    num_heads,
+                    num_steps,
+                    hidden_states_B_C_d.device,
+                )
+                replay_num_accepted_tokens = num_accepted_tokens[:num_decodes]
+                # Keep the defensive contiguous copy out of the external PDL
+                # chain. TRTLLM's replay path also requires the conv1d ->
+                # precompute gap to contain only view/no-op work.
+                physical_replay_state_indices = state_indices_tensor_d[
+                    :num_decodes, 0
+                ].contiguous()
+                replay_state_indices = physical_replay_state_indices
+
             # 2. Convolution sequence transformation
             hidden_states_B_C_d = causal_conv1d_update(
                 hidden_states_B_C_d,
@@ -999,7 +1159,12 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 initial_state_idx=block_idx_last_computed_token_d,
                 num_accepted_tokens=num_accepted_tokens,
                 query_start_loc=query_start_loc_d,
-                max_query_len=state_indices_tensor_d.size(-1),
+                max_query_len=(
+                    1 + self.num_spec
+                    if use_mtp_replay
+                    else state_indices_tensor_d.size(-1)
+                ),
+                launch_dependent_kernels=use_mtp_replay_external_pdl,
             )
 
             hidden_states_d, B_d, C_d = self.split_hidden_states_B_C_fn(
@@ -1027,34 +1192,184 @@ class MambaMixer2(MambaBase, PluggableLayer):
             # - mamba_cache_params.ssm_state's slots will be selected
             #   using state_indices_tensor_d
             # NOTE: final output is an in-place update of out tensor
-            selective_state_update(
-                ssm_state,
-                hidden_states_d,
-                dt_d,
-                A_d,
-                B_d,
-                C_d,
-                D_d,
-                dt_bias,
-                dt_softplus=True,
-                state_batch_indices=state_indices_tensor_d_input,
-                dst_state_batch_indices=state_indices_tensor_d_output,
-                out=preallocated_ssm_out_d.view(num_decode_tokens, -1, self.head_dim),
-                num_accepted_tokens=num_accepted_tokens,
-                cu_seqlens=query_start_loc_d,
-                is_blackwell=self.is_blackwell,
-            )
+            if use_mtp_replay:
+                assert num_accepted_tokens is not None
+                assert state_indices_tensor_d is not None
+                assert query_start_loc_d is not None
+                assert replay_num_accepted_tokens is not None
+                assert replay_state_indices is not None
+                assert replay_cache_tensors is not None
+                num_steps = 1 + self.num_spec
+                num_heads = self.num_heads // self.tp_size
+                assert self._replay_cb_scaled is not None
+                assert self._replay_decay_vec is not None
+                (
+                    replay_old_x,
+                    replay_old_B,
+                    replay_old_dt,
+                    replay_old_dA_cumsum,
+                    replay_cache_buf_idx,
+                    replay_valid,
+                ) = replay_cache_tensors
+                replay_kernel_num_accepted_tokens = replay_num_accepted_tokens
+                if num_decode_tokens == num_decodes * num_steps:
+                    replay_hidden_states = hidden_states_d.view(
+                        num_decodes,
+                        num_steps,
+                        num_heads,
+                        self.head_dim,
+                    )
+                    replay_dt = dt_d.view(
+                        num_decodes,
+                        num_steps,
+                        num_heads,
+                        self.head_dim,
+                    )
+                    replay_B = B_d.view(
+                        num_decodes, num_steps, n_groups, self.ssm_state_size
+                    )
+                    replay_C = C_d.view(
+                        num_decodes, num_steps, n_groups, self.ssm_state_size
+                    )
+                    replay_out = preallocated_ssm_out_d.view(
+                        num_decodes,
+                        num_steps,
+                        num_heads,
+                        self.head_dim,
+                    )
+                else:
+                    # Replay keeps only a compact previous-step input trace.
+                    # For shorter decode rows, pad the missing speculative
+                    # positions so the next step can still replay accepted
+                    # prefixes without falling back to stale speculative slots.
+                    replay_hidden_states = hidden_states_d.new_zeros(
+                        num_decodes,
+                        num_steps,
+                        num_heads,
+                        self.head_dim,
+                    )
+                    replay_dt_storage, replay_dt = _new_replay_tied_dt_buffer(
+                        dt_d,
+                        num_decodes,
+                        num_steps,
+                        num_heads,
+                        self.head_dim,
+                    )
+                    replay_B = B_d.new_zeros(
+                        num_decodes,
+                        num_steps,
+                        n_groups,
+                        self.ssm_state_size,
+                    )
+                    replay_C = C_d.new_zeros(
+                        num_decodes,
+                        num_steps,
+                        n_groups,
+                        self.ssm_state_size,
+                    )
+                    replay_out = preallocated_ssm_out_d.new_empty(
+                        num_decodes,
+                        num_steps,
+                        num_heads,
+                        self.head_dim,
+                    )
+                    for decode_idx in range(num_decodes):
+                        start = int(query_start_loc_d[decode_idx].item())
+                        end = int(query_start_loc_d[decode_idx + 1].item())
+                        seq_len = end - start
+                        replay_hidden_states[decode_idx, :seq_len] = hidden_states_d[
+                            start:end
+                        ]
+                        replay_dt_storage[decode_idx, :seq_len] = dt_d[
+                            start:end, :, :1
+                        ]
+                        replay_B[decode_idx, :seq_len] = B_d[start:end]
+                        replay_C[decode_idx, :seq_len] = C_d[start:end]
 
-    def get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
+                replay_selective_state_update(
+                    replay_ssm_state,
+                    replay_old_x,
+                    replay_old_B,
+                    replay_old_dt,
+                    replay_old_dA_cumsum,
+                    replay_cache_buf_idx,
+                    replay_valid,
+                    replay_hidden_states,
+                    replay_dt,
+                    A_d,
+                    replay_B,
+                    replay_C,
+                    replay_out,
+                    replay_kernel_num_accepted_tokens,
+                    D=D_d,
+                    dt_bias=dt_bias,
+                    dt_softplus=True,
+                    state_batch_indices=replay_state_indices,
+                    # The speculative SSU baseline stores per-token SSM states
+                    # with a normal cache-dtype cast, even when non-spec decode
+                    # uses stochastic rounding. Match that behavior here.
+                    enable_stochastic_rounding=False,
+                    cb_scaled=self._replay_cb_scaled,
+                    decay_vec=self._replay_decay_vec,
+                    launch_with_pdl=use_mtp_replay_external_pdl,
+                    use_internal_pdl=use_mtp_replay_internal_pdl,
+                )
+                if num_decode_tokens != num_decodes * num_steps:
+                    for decode_idx in range(num_decodes):
+                        start = int(query_start_loc_d[decode_idx].item())
+                        end = int(query_start_loc_d[decode_idx + 1].item())
+                        seq_len = end - start
+                        preallocated_ssm_out_d[start:end] = replay_out[
+                            decode_idx, :seq_len
+                        ].view(seq_len, -1)
+            else:
+                selective_state_update(
+                    ssm_state,
+                    hidden_states_d,
+                    dt_d,
+                    A_d,
+                    B_d,
+                    C_d,
+                    D_d,
+                    dt_bias,
+                    dt_softplus=True,
+                    state_batch_indices=state_indices_tensor_d_input,
+                    dst_state_batch_indices=state_indices_tensor_d_output,
+                    out=preallocated_ssm_out_d.view(
+                        num_decode_tokens, -1, self.head_dim
+                    ),
+                    num_accepted_tokens=num_accepted_tokens,
+                    cu_seqlens=query_start_loc_d,
+                    is_blackwell=self.is_blackwell,
+                )
+
+    def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         assert self.model_config is not None
         assert self.cache_config is not None
+        if self._use_mtp_replay:
+            return MambaStateDtypeCalculator.mamba2_spec_replay_state_dtype(
+                self.model_config.dtype,
+                self.cache_config.mamba_cache_dtype,
+                self.cache_config.mamba_ssm_cache_dtype,
+            )
         return MambaStateDtypeCalculator.mamba2_state_dtype(
             self.model_config.dtype,
             self.cache_config.mamba_cache_dtype,
             self.cache_config.mamba_ssm_cache_dtype,
         )
 
-    def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
+        if self._use_mtp_replay:
+            return MambaStateShapeCalculator.mamba2_spec_replay_state_shape(
+                intermediate_size=self.intermediate_size,
+                tp_world_size=get_tensor_model_parallel_world_size(),
+                n_groups=self.n_groups,
+                num_heads=self.num_heads,
+                head_dim=self.head_dim,
+                state_size=self.ssm_state_size,
+                conv_kernel=self.conv_kernel_size,
+                num_spec=self.num_spec,
+            )
         return MambaStateShapeCalculator.mamba2_state_shape(
             intermediate_size=self.intermediate_size,
             tp_world_size=get_tensor_model_parallel_world_size(),

@@ -192,6 +192,41 @@ def test_causal_conv1d_update(dim, width, seqlen, has_bias, silu_activation, ity
     assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
 
 
+def test_causal_conv1d_update_with_pdl_signal():
+    device = DEVICE
+    itype = torch.bfloat16
+    rtol, atol = 1e-2, 5e-2
+    set_random_seed(0)
+
+    batch = 2
+    dim = 512
+    seqlen = 3
+    width = 4
+    x = torch.randn(batch, dim, seqlen, device=device, dtype=itype)
+    x_ref = x.clone()
+    conv_state = torch.randn(batch + 1, dim, width - 1, device=device, dtype=itype)
+    weight = torch.randn(dim, width, device=device, dtype=itype)
+    bias = torch.randn(dim, device=device, dtype=itype)
+    conv_state_indices = torch.arange(1, batch + 1, dtype=torch.int32, device=device)
+    conv_state_ref = conv_state[conv_state_indices].detach().clone()
+
+    out = causal_conv1d_update(
+        x,
+        conv_state,
+        weight,
+        bias,
+        activation="silu",
+        conv_state_indices=conv_state_indices,
+        launch_dependent_kernels=True,
+    )
+    out_ref = causal_conv1d_update_ref(
+        x_ref, conv_state_ref, weight, bias, activation="silu"
+    )
+
+    assert torch.equal(conv_state[conv_state_indices], conv_state_ref)
+    assert torch.allclose(out, out_ref, rtol=rtol, atol=atol)
+
+
 @pytest.mark.parametrize("itype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("silu_activation", [False, True])
 @pytest.mark.parametrize("has_bias", [False, True])

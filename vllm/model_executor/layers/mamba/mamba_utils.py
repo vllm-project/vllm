@@ -81,6 +81,27 @@ class MambaStateDtypeCalculator:
         )
 
     @classmethod
+    def mamba2_spec_replay_state_dtype(
+        cls,
+        model_dtype: ModelDType | torch.dtype,
+        mamba_cache_dtype: MambaDType,
+        mamba_ssm_cache_dtype: MambaDType,
+    ) -> tuple[torch.dtype, ...]:
+        conv_state_dtype, temporal_state_dtype = cls.mamba2_state_dtype(
+            model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype
+        )
+        return (
+            conv_state_dtype,
+            temporal_state_dtype,
+            conv_state_dtype,
+            conv_state_dtype,
+            torch.float32,
+            torch.float32,
+            torch.int32,
+            torch.int32,
+        )
+
+    @classmethod
     def _mamba_state_dtype(
         cls,
         model_dtype: ModelDType | torch.dtype,
@@ -185,6 +206,46 @@ class MambaStateShapeCalculator:
         #   e.g., (h_heads, head_dim, state_size) = (128, 64, 128)
         temporal_state_shape = (divide(num_heads, tp_world_size), head_dim, state_size)
         return conv_state_shape, temporal_state_shape
+
+    @classmethod
+    def mamba2_spec_replay_state_shape(
+        cls,
+        tp_world_size: int,
+        intermediate_size: int,
+        n_groups: int,
+        num_heads: int,
+        head_dim: int,
+        state_size: int,
+        conv_kernel: int,
+        num_spec: int,
+    ) -> tuple[tuple[int, ...], ...]:
+        conv_state_shape, temporal_state_shape = cls.mamba2_state_shape(
+            tp_world_size=tp_world_size,
+            intermediate_size=intermediate_size,
+            n_groups=n_groups,
+            num_heads=num_heads,
+            head_dim=head_dim,
+            state_size=state_size,
+            conv_kernel=conv_kernel,
+            num_spec=num_spec,
+        )
+        num_steps = 1 + num_spec
+        local_heads = divide(num_heads, tp_world_size)
+        local_groups = divide(n_groups, tp_world_size)
+        old_x_shape = (num_steps, local_heads, head_dim)
+        old_B_shape = (2, num_steps, local_groups, state_size)
+        old_dt_shape = (2, local_heads, num_steps)
+        old_dA_cumsum_shape = old_dt_shape
+        return (
+            conv_state_shape,
+            temporal_state_shape,
+            old_x_shape,
+            old_B_shape,
+            old_dt_shape,
+            old_dA_cumsum_shape,
+            (),
+            (),
+        )
 
     @classmethod
     def short_conv_state_shape(

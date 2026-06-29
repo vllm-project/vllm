@@ -45,6 +45,17 @@ class MambaBase(AttentionLayerBase):
         mamba_block_size = vllm_config.cache_config.mamba_block_size
         assert mamba_block_size is not None
         page_size_padded = vllm_config.cache_config.mamba_page_size_padded
+        num_speculative_blocks = (
+            vllm_config.speculative_config.num_speculative_tokens
+            if vllm_config.speculative_config
+            else 0
+        )
+        if (
+            vllm_config.cache_config.enable_mamba_mtp_replay
+            and vllm_config.speculative_config
+            and vllm_config.cache_config.mamba_cache_mode == "none"
+        ):
+            num_speculative_blocks = 0
         return MambaSpec(
             shapes=tuple(self.get_state_shape()),
             dtypes=self.get_state_dtype(),
@@ -52,11 +63,7 @@ class MambaBase(AttentionLayerBase):
             page_size_padded=page_size_padded,
             mamba_type=self.mamba_type,
             mamba_cache_mode=vllm_config.cache_config.mamba_cache_mode,
-            num_speculative_blocks=(
-                vllm_config.speculative_config.num_speculative_tokens
-                if vllm_config.speculative_config
-                else 0
-            ),
+            num_speculative_blocks=num_speculative_blocks,
         )
 
     def get_attn_backend(self) -> type[AttentionBackend]:
