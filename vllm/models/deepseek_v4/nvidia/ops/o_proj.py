@@ -60,10 +60,16 @@ def deep_gemm_fp8_o_proj(
         device=o.device,
         dtype=torch.bfloat16,
     )
+    # Compressed tensors uses weight_scale, native FP8 uses weight_scale_inv
+    weight_scale = (
+        wo_a.weight_scale
+        if hasattr(wo_a, "weight_scale")
+        else wo_a.weight_scale_inv
+    )
     fp8_einsum(
         "bhr,hdr->bhd",
         (o_fp8, o_scale),
-        (wo_a.weight, wo_a.weight_scale_inv),
+        (wo_a.weight, weight_scale),
         z,
         recipe=einsum_recipe,
     )
