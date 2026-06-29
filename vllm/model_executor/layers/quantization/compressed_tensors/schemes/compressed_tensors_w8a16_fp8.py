@@ -139,6 +139,8 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
                 )
             # Canonicalize to (K, N) for the kernel.
             replace_parameter(layer, "weight", layer.weight.t())
+            # The transpose drops the param's dim attrs; re-tag so layout-aware
+            # kernels (e.g. the humming linear converter) see (K, N).
             layer.weight.input_dim = 0
             layer.weight.output_dim = 1
 

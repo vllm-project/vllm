@@ -11,6 +11,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )
@@ -81,6 +82,14 @@ def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBac
         # Updating the oracle querying logic is out of the scope of this
         # PR. Need to fix the kernel or update structure in follow up.
         if moe_config.moe_parallel_config.dp_size > 1:
+            _move_to_back(_AVAILABLE_BACKENDS, UnquantizedMoeBackend.FLASHINFER_CUTLASS)
+
+        # HACK: unquantized FlashInfer aliases SWIGLUOAI to plain Swiglu
+        # (swiglu_alpha/limit only set on the MXFP4 branch). Route to
+        # Triton's swigluoai_and_mul until that's plumbed through. Same
+        # demotion pattern as the Qwen3.5/dp_size hack above.
+        if moe_config.activation == MoEActivation.SWIGLUOAI:
+            _move_to_back(_AVAILABLE_BACKENDS, UnquantizedMoeBackend.FLASHINFER_TRTLLM)
             _move_to_back(_AVAILABLE_BACKENDS, UnquantizedMoeBackend.FLASHINFER_CUTLASS)
 
     elif current_platform.is_xpu():
@@ -223,9 +232,8 @@ def select_unquantized_moe_backend(
         raise ValueError(_make_log_unsupported(backend, reason))
 
     runner_backend = moe_config.moe_backend
-    # 'humming' is a quantization-only MoE backend; an unquantized layer here
-    # means a mixed checkpoint excluded it (e.g. via modules_to_not_convert), so
-    # fall through to automatic selection instead of failing on the request.
+    # 'humming' is quantization-only; an unquantized layer (e.g. excluded via
+    # modules_to_not_convert) falls through to auto instead of erroring.
     if runner_backend not in ["auto", "humming"]:
         requested_backend = map_unquantized_backend(runner_backend)
         if (

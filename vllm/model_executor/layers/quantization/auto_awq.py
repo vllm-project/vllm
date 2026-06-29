@@ -667,12 +667,12 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
         if self.wna16_moe_backend == WNA16MoEBackend.HUMMING:
             # Humming consumes the AWQ weights in-place (no marlin repack).
             from vllm.model_executor.layers.quantization.utils.humming_utils import (
-                prepare_humming_moe_layer,
+                convert_to_humming_moe_kernel_format,
             )
 
-            prepare_humming_moe_layer(
+            convert_to_humming_moe_kernel_format(
                 layer,
-                {
+                quant_config={
                     "quant_method": "awq",
                     "bits": self.quant_config.weight_bits,
                     "group_size": self.quant_config.group_size,
@@ -750,17 +750,17 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         self.moe_kernel = make_wna16_moe_kernel(
-            backend=self.wna16_moe_backend,
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             experts_cls=self.experts_cls,
+            backend=self.wna16_moe_backend,
+            layer=layer,
             is_k_full=self.is_k_full,
             w13_g_idx=getattr(layer, "w13_g_idx", None),
             w2_g_idx=getattr(layer, "w2_g_idx", None),
             w13_g_idx_sort_indices=getattr(layer, "w13_g_idx_sort_indices", None),
             w2_g_idx_sort_indices=getattr(layer, "w2_g_idx_sort_indices", None),
             routing_tables=layer._expert_routing_tables(),
-            layer=layer,
         )
 
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
@@ -797,13 +797,6 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             "initialization logic. This function should not be called."
         )
 
-    def _moe_weights(self, layer: RoutedExperts) -> tuple[torch.Tensor, torch.Tensor]:
-        # Humming converts weights in-place to the standard ``w13_weight`` /
-        # ``w2_weight`` names; other backends keep the AWQ ``*_qweight`` params.
-        if self.wna16_moe_backend == WNA16MoEBackend.HUMMING:
-            return layer.w13_weight, layer.w2_weight
-        return layer.w13_qweight, layer.w2_qweight
-
     def apply(
         self,
         layer: RoutedExperts,
@@ -815,11 +808,10 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
     ) -> torch.Tensor:
         assert not self.is_monolithic
         assert self.moe_kernel is not None
-        w1, w2 = self._moe_weights(layer)
         return self.moe_kernel.apply(
             hidden_states=x,
-            w1=w1,
-            w2=w2,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation=layer.activation,
@@ -839,11 +831,10 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
     ) -> torch.Tensor:
         assert self.is_monolithic
         assert self.moe_kernel is not None
-        w1, w2 = self._moe_weights(layer)
         return self.moe_kernel.apply_monolithic(
             hidden_states=x,
-            w1=w1,
-            w2=w2,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
             router_logits=router_logits,
             activation=layer.activation,
             global_num_experts=layer.global_num_experts,

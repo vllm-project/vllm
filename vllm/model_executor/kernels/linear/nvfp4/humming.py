@@ -5,7 +5,6 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.humming_utils import (
-    convert_linear_layer_to_humming_standard,
     prepare_humming_layer,
 )
 from vllm.platforms import current_platform
@@ -35,21 +34,26 @@ class HummingNvFp4LinearKernel(NvFp4LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        name_map = {
-            "weight": "weight",
-            "weight_scale": "weight_scale",
-            "global_scale": "weight_global_scale",
-        }
-
+        # Route through humming's compressed-tensors nvfp4 loader (same path as
+        # the MoE oracle); the native group_tensor schema mishandles a scalar
+        # global scale.
         quant_config = {
-            "quant_method": "humming",
-            "dtype": "float4e2m1",
-            "scale_dtype": "float8e4m3",
+            "quant_method": "compressed-tensors",
+            "format": "nvfp4-pack-quantized",
+            "type": "float",
+            "num_bits": 4,
+            "strategy": "group",
             "group_size": 16,
-            "weight_scale_type": "group_tensor",
         }
-
-        convert_linear_layer_to_humming_standard(layer=layer, name_map=name_map)
+        # CT pack-quantized reads `weight_packed`; the scheme renamed it to `weight`.
+        if not hasattr(layer, "weight_packed"):
+            layer.weight_packed = layer.weight
+            del layer.weight
+        # The CT linear scheme inverts the global scale (1/scale) for
+        # marlin/cutlass; humming wants the original.
+        layer.weight_global_scale = torch.nn.Parameter(
+            1.0 / layer.weight_global_scale, requires_grad=False
+        )
         prepare_humming_layer(layer, quant_config)
 
     def apply_weights(

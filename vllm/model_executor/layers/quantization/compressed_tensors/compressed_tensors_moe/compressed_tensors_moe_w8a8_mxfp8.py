@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
-from compressed_tensors.quantization import QuantizationArgs
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe import (
@@ -41,16 +40,8 @@ class CompressedTensorsW8A8Mxfp8MoEMethod(CompressedTensorsMoEMethod):
     Supports FlashInfer TRT-LLM and Marlin backends (auto-selected).
     """
 
-    def __init__(
-        self,
-        weight_quant: QuantizationArgs,
-        input_quant: QuantizationArgs,
-        moe: FusedMoEConfig,
-    ):
+    def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
-        self.weight_quant = weight_quant
-        self.input_quant = input_quant
-
         self.weight_block_size = [1, MXFP8_BLOCK_SIZE]
         self.fp8_backend, self.experts_cls = select_mxfp8_moe_backend(config=self.moe)
 

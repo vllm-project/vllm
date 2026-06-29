@@ -20,22 +20,23 @@ _SUPPORTED_BACKENDS = (
     Fp8MoeBackend.FLASHINFER_TRTLLM,
     Fp8MoeBackend.DEEPGEMM,
     Fp8MoeBackend.MARLIN,
-    Fp8MoeBackend.HUMMING,
     Fp8MoeBackend.XPU,
     # AITER FlyDSL (gfx950): auto-picked by select_mxfp8_moe_backend when
     # is_supported_config passes (gfx950 + flydsl installed + not EP). On other
     # devices / no flydsl / EP it is skipped and native is used.
     Fp8MoeBackend.AITER_MXFP8,
+    # Last-resort in auto mode (gated by has_humming()); opt-in via --moe-backend.
+    Fp8MoeBackend.HUMMING,
 )
 
 _BACKEND_NAME_MAP: dict[str, Fp8MoeBackend] = {
     "flashinfer_trtllm": Fp8MoeBackend.FLASHINFER_TRTLLM,
     "deep_gemm": Fp8MoeBackend.DEEPGEMM,
     "marlin": Fp8MoeBackend.MARLIN,
-    "humming": Fp8MoeBackend.HUMMING,
     "xpu": Fp8MoeBackend.XPU,
     "aiter": Fp8MoeBackend.AITER_MXFP8,
     "triton": Fp8MoeBackend.TRITON_MXFP8,
+    "humming": Fp8MoeBackend.HUMMING,
 }
 
 

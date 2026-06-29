@@ -319,6 +319,7 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
         Mxfp4MoeBackend.MARLIN,
         Mxfp4MoeBackend.BATCHED_MARLIN,
         Mxfp4MoeBackend.XPU,
+        Mxfp4MoeBackend.EMULATION,
     ]
     return _AVAILABLE_BACKENDS
 
@@ -554,8 +555,6 @@ def select_mxfp4_moe_backend(
             f"weight_key=kMxfp4Static, activation_key={activation_key}. "
             "Native backends require specific hardware. "
             "Set `VLLM_LOGGING_LEVEL=DEBUG` to see detailed unsupported reasons. "
-            "To use the emulation backend for research/debugging, pass "
-            "--moe-backend emulation."
         )
 
     return Mxfp4MoeBackend.NONE, None
@@ -712,15 +711,12 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
 
     if mxfp4_backend == Mxfp4MoeBackend.HUMMING:
         from vllm.model_executor.layers.quantization.utils.humming_utils import (
-            prepare_humming_moe_layer,
+            convert_to_humming_moe_kernel_format,
         )
 
-        layer.w13_weight.data = w13_weight.view(torch.int8)
-        layer.w2_weight.data = w2_weight.view(torch.int8)
-        layer.w13_weight_scale.data = w13_weight_scale.view(torch.float8_e8m0fnu)
-        layer.w2_weight_scale.data = w2_weight_scale.view(torch.float8_e8m0fnu)
-
-        prepare_humming_moe_layer(layer, {"quant_method": "mxfp4"})
+        convert_to_humming_moe_kernel_format(
+            layer, quant_config={"quant_method": "gpt_oss_mxfp4"}
+        )
         return (
             layer.w13_weight,
             layer.w2_weight,
@@ -1283,10 +1279,12 @@ def convert_weight_to_mxfp4_moe_kernel_format(
 
     if mxfp4_backend == Mxfp4MoeBackend.HUMMING:
         from vllm.model_executor.layers.quantization.utils.humming_utils import (
-            prepare_humming_moe_layer,
+            convert_to_humming_moe_kernel_format,
         )
 
-        prepare_humming_moe_layer(layer, {"quant_method": "mxfp4"})
+        convert_to_humming_moe_kernel_format(
+            layer, quant_config={"quant_method": "mxfp4"}
+        )
         return (
             layer.w13_weight,
             layer.w2_weight,
@@ -1575,7 +1573,7 @@ def make_mxfp4_moe_quant_config(
     w2_bias: torch.Tensor | None = None,
     a1_scale: torch.Tensor | None = None,
     a2_scale: torch.Tensor | None = None,
-    layer: torch.nn.Module | None = None,
+    layer: "RoutedExperts | None" = None,
 ) -> FusedMoEQuantConfig | None:
     """Create a FusedMoEQuantConfig for the given MXFP4 backend."""
     if mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
@@ -1668,7 +1666,7 @@ def make_mxfp4_moe_quant_config(
             get_humming_moe_quant_config,
         )
 
-        assert isinstance(layer, RoutedExperts)
+        assert layer is not None
         return get_humming_moe_quant_config(
             layer,
             gemm1_alpha=gemm1_alpha,
@@ -1709,11 +1707,12 @@ def make_mxfp4_moe_kernel(
     assert prepare_finalize is not None
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
+    logger.info_once("Using %s", experts_cls.__name__)
 
-    extra_args = {}
+    extra_kwargs = {}
     if mxfp4_backend == Mxfp4MoeBackend.HUMMING:
         assert layer is not None
-        extra_args["layer"] = layer
+        extra_kwargs["layer"] = layer
 
     # Create Experts.
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
@@ -1724,13 +1723,13 @@ def make_mxfp4_moe_kernel(
             quant_config=moe_quant_config,
             max_num_tokens=max_num_tokens,
             num_dispatchers=prepare_finalize.num_dispatchers(),
-            **extra_args,
+            **extra_kwargs,
         )
     else:
         experts = experts_cls(
             moe_config=moe_config,
             quant_config=moe_quant_config,
-            **extra_args,
+            **extra_kwargs,
         )
 
     kernel = mk.FusedMoEKernel(

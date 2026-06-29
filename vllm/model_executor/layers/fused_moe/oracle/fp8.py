@@ -419,6 +419,37 @@ def select_fp8_moe_backend(
     return Fp8MoeBackend.NONE, None
 
 
+def _humming_fp8_weight_schema(
+    layer: RoutedExperts, weight: torch.Tensor, weight_scale: torch.Tensor
+) -> dict[str, Any]:
+    """Build the humming weight schema from the canonical on-device fp8/mxfp8
+    tensors (scale dtype/shape, block size), not the producing quant method."""
+    # mxfp8: e8m0 group-32 scales (stored as uint8 bytes or e8m0). humming has
+    # no compressed-tensors mxfp8 loader; its modelopt schema fits both sources.
+    if weight_scale.dtype in (torch.uint8, torch.float8_e8m0fnu):
+        return {"quant_method": "modelopt", "quant_algo": "mxfp8"}
+
+    # fp8 (e4m3): recover the strategy from the scale layout (block from
+    # weight_block_size, else channel vs tensor by per-expert scale count).
+    config: dict[str, Any] = {
+        "quant_method": "compressed-tensors",
+        "format": "float-quantized",
+        "type": "float",
+        "num_bits": 8,
+        "symmetric": True,
+    }
+    weight_block_size = getattr(layer, "weight_block_size", None)
+    num_experts, num_output = weight.shape[0], weight.shape[-2]
+    if weight_block_size is not None:
+        config["strategy"] = "block"
+        config["block_structure"] = list(weight_block_size)
+    elif weight_scale.numel() >= num_experts * num_output:
+        config["strategy"] = "channel"
+    else:
+        config["strategy"] = "tensor"
+    return config
+
+
 def convert_to_fp8_moe_kernel_format(
     fp8_backend: Fp8MoeBackend,
     # TODO(bnell): replace layer with weight_block_size
@@ -442,38 +473,22 @@ def convert_to_fp8_moe_kernel_format(
         )
     elif fp8_backend == Fp8MoeBackend.AITER:
         w13, w2 = rocm_aiter_ops.shuffle_weights(w13, w2)
-    elif fp8_backend == Fp8MoeBackend.HUMMING:
-        from vllm.model_executor.layers.quantization.utils.humming_utils import (
-            prepare_humming_moe_layer,
-        )
-
-        quant_config: dict[str, Any]
-        weight_block_size = getattr(layer, "weight_block_size", None)
-        quant_method_name = layer.quant_method.__class__.__name__
-        if "CompressedTensors" in quant_method_name:
-            from compressed_tensors.quantization import QuantizationArgs
-
-            weight_quant = getattr(layer.quant_method, "weight_quant", None)
-            assert isinstance(weight_quant, QuantizationArgs)
-            quant_config = weight_quant.model_dump()
-            quant_config["quant_method"] = "compressed-tensors"
-            quant_config["format"] = "float-quantized"
-        elif "ModelOptMxfp8" in quant_method_name:
-            quant_config = {"quant_method": "modelopt", "quant_algo": "mxfp8"}
-        else:
-            quant_config = {"quant_method": "fp8"}
-            if weight_block_size is not None:
-                quant_config["weight_block_size"] = weight_block_size
-
-        prepare_humming_moe_layer(layer, quant_config)
-        w13 = layer.w13_weight
-        w2 = layer.w2_weight
-        w13_scale = layer.w13_weight_scale
-        w2_scale = layer.w2_weight_scale
     elif fp8_backend == Fp8MoeBackend.AITER_MXFP8:
         w13, w2, w13_scale, w2_scale = rocm_aiter_ops.shuffle_mxfp8_moe_weights(
             w13, w2, w13_scale, w2_scale
         )
+    elif fp8_backend == Fp8MoeBackend.HUMMING:
+        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+            convert_to_humming_moe_kernel_format,
+        )
+
+        convert_to_humming_moe_kernel_format(
+            layer, quant_config=_humming_fp8_weight_schema(layer, w13, w13_scale)
+        )
+        w13 = layer.w13_weight
+        w2 = layer.w2_weight
+        w13_scale = layer.w13_weight_scale
+        w2_scale = layer.w2_weight_scale
     elif fp8_backend == Fp8MoeBackend.MARLIN:
         weight_block_size = getattr(layer, "weight_block_size", None)
         if weight_block_size == [1, 32]:

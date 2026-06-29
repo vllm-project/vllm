@@ -1252,7 +1252,6 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 mxfp4_backend=self.mxfp4_backend,
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
-                layer=layer,
             )
 
     def get_fused_moe_quant_config(
@@ -1281,6 +1280,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 gemm1_alpha=getattr(layer, "swiglu_alpha", None),
                 gemm1_beta=getattr(layer, "swiglu_beta", None),
                 swiglu_limit=getattr(layer, "swiglu_limit", None),
+                layer=layer,
             )
 
         # Emulation and other schemes
@@ -1554,11 +1554,12 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
         if self.moe_quant_config:
             assert self.experts_cls is not None
             self.moe_kernel = make_nvfp4_moe_kernel(
-                backend=self.nvfp4_backend,
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 experts_cls=self.experts_cls,
+                backend=self.nvfp4_backend,
                 routing_tables=layer._expert_routing_tables(),
+                layer=layer,
             )
 
     def get_fused_moe_quant_config(
@@ -1572,6 +1573,7 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
             w2_scale_2=layer.w2_weight_scale_2,
             a13_scale=layer.w13_input_scale_2,
             a2_scale=layer.w2_input_scale_2,
+            layer=layer,
         )
 
     def apply(

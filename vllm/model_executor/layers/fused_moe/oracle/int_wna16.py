@@ -22,6 +22,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     BatchedMarlinExperts,
     MarlinExperts,
+    MarlinExpertsBase,
 )
 from vllm.model_executor.layers.fused_moe.experts.trtllm_mxint4_moe import (
     TrtLlmMxint4ExpertsMonolithic,
@@ -68,7 +69,6 @@ def backend_to_kernel_cls(
             HummingGroupedExperts,
             HummingIndexedExperts,
         ]
-
     elif backend == WNA16MoEBackend.MARLIN:
         return [MarlinExperts]
     elif backend == WNA16MoEBackend.BATCHED_MARLIN:
@@ -104,6 +104,7 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
         WNA16MoEBackend.FLASHINFER_TRTLLM,
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
+        # Last-resort in auto mode (gated by has_humming()); opt-in via --moe-backend.
         WNA16MoEBackend.HUMMING,
     ]
     return _AVAILABLE_BACKENDS
@@ -248,8 +249,8 @@ def make_wna16_moe_kernel(
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
     experts_cls: type[mk.FusedMoEExperts],
-    backend: WNA16MoEBackend,
-    layer: torch.nn.Module,
+    backend: WNA16MoEBackend = WNA16MoEBackend.MARLIN,
+    layer: torch.nn.Module | None = None,
     is_k_full: bool = False,
     w13_g_idx: torch.Tensor | None = None,
     w2_g_idx: torch.Tensor | None = None,
@@ -298,7 +299,7 @@ def make_wna16_moe_kernel(
     if backend == WNA16MoEBackend.HUMMING:
         assert layer is not None
         extra_args = {"layer": layer}
-    elif backend == WNA16MoEBackend.MARLIN:
+    elif issubclass(experts_cls, MarlinExpertsBase):
         extra_args = {
             "w13_g_idx": w13_g_idx,
             "w2_g_idx": w2_g_idx,
@@ -1030,15 +1031,7 @@ def convert_to_wna16_moe_kernel_format(
         quant_config: the ``QuantizationConfig`` for this layer.
         input_dtype: optional activation dtype, usually should be 16 bit.
     """
-    if backend == WNA16MoEBackend.HUMMING:
-        from vllm.model_executor.layers.fused_moe import RoutedExperts
-        from vllm.model_executor.layers.quantization.utils.humming_utils import (
-            get_humming_moe_quant_config,
-        )
-
-        assert isinstance(layer, RoutedExperts)
-        return get_humming_moe_quant_config(layer)
-    elif backend in (
+    if backend in (
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
     ):

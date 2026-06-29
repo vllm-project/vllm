@@ -3,7 +3,6 @@
 
 
 import torch
-from compressed_tensors.quantization import QuantizationArgs
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
@@ -38,16 +37,12 @@ logger = init_logger(__name__)
 class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
     def __init__(
         self,
-        weight_quant: QuantizationArgs,
-        input_quant: QuantizationArgs,
         moe: FusedMoEConfig,
         layer_name: str | None = None,
         use_a16: bool = False,
     ):
         super().__init__(moe)
         self.group_size = 16
-        self.weight_quant = weight_quant
-        self.input_quant = input_quant
 
         # Select experts implementation.
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(

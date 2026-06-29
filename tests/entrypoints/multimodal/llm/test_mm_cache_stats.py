@@ -61,8 +61,9 @@ def test_mm_cache_stats(
     image_urls,
     mm_processor_cache_type,
     caplog_vllm,
+    multimodal_llm_factory,
 ):
-    llm = LLM(
+    llm = multimodal_llm_factory(
         model="llava-hf/llava-1.5-7b-hf",
         max_model_len=4096,
         max_num_seqs=5,

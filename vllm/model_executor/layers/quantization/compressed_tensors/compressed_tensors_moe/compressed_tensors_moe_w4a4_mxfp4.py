@@ -3,7 +3,6 @@
 
 
 import torch
-from compressed_tensors.quantization import QuantizationArgs
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
@@ -13,7 +12,6 @@ from vllm.model_executor.layers.fused_moe import (
     SharedExperts,
 )
 from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEConfig,
     FusedMoEQuantConfig,
     mxfp4_moe_quant_config,
 )
@@ -44,16 +42,8 @@ logger = init_logger(__name__)
 
 
 class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
-    def __init__(
-        self,
-        weight_quant: QuantizationArgs,
-        input_quant: QuantizationArgs,
-        moe: FusedMoEConfig,
-    ):
+    def __init__(self, moe):
         super().__init__(moe)
-        self.weight_quant = weight_quant
-        self.input_quant = input_quant
-
         self.group_size = 32
         self.mxfp4_backend = Mxfp4MoeBackend.MARLIN
         # use cutlass if supported, otherwise fallback to marlin for weight-only FP4
@@ -217,7 +207,6 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
                 experts_cls=self.experts_cls,
                 mxfp4_backend=self.mxfp4_backend,
                 routing_tables=layer._expert_routing_tables(),
-                layer=layer,
             )
 
     def apply(

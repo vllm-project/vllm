@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from enum import Enum
+from typing import Any
 
 import torch
 
@@ -17,12 +18,12 @@ from vllm.model_executor.layers.fused_moe.config import (
     int8_w8a8_moe_quant_config,
     int8_w8a16_moe_quant_config,
 )
-from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kInt8DynamicTokenSym,
     kInt8StaticChannelSym,
 )
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -30,6 +31,7 @@ logger = init_logger(__name__)
 class Int8MoeBackend(Enum):
     TRITON = "TRITON"
     HUMMING = "HUMMING"
+    CPU = "CPU"
 
 
 def _get_priority_backends(
@@ -38,7 +40,19 @@ def _get_priority_backends(
     """
     Get available backends in priority order based on platform and config.
     """
-    return [Int8MoeBackend.TRITON, Int8MoeBackend.HUMMING]
+    _AVAILABLE_BACKENDS = [
+        Int8MoeBackend.TRITON,
+        Int8MoeBackend.HUMMING,
+        Int8MoeBackend.CPU,
+    ]
+
+    def _move_to_front(backends: list[Int8MoeBackend], backend: Int8MoeBackend) -> None:
+        backends.insert(0, backends.pop(backends.index(backend)))
+
+    if current_platform.is_cpu():
+        _move_to_front(_AVAILABLE_BACKENDS, Int8MoeBackend.CPU)
+
+    return _AVAILABLE_BACKENDS
 
 
 def backend_to_kernel_cls(
@@ -63,6 +77,13 @@ def backend_to_kernel_cls(
             HummingGroupedExperts,
             HummingIndexedExperts,
         ]
+
+    elif backend == Int8MoeBackend.CPU:
+        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+            CPUExpertsInt8,
+        )
+
+        return [CPUExpertsInt8]
 
     else:
         raise ValueError(f"Unknown Int8 MoE backend: {backend.value}")
@@ -203,50 +224,53 @@ def make_int8_moe_quant_config(
     )
 
 
+def _humming_int8_weight_schema(
+    weight: torch.Tensor, weight_scale: torch.Tensor
+) -> dict[str, Any]:
+    """Build the humming compressed-tensors int8 schema from the canonical
+    on-device tensors; humming does the signed-int8 -> native conversion."""
+    config: dict[str, Any] = {
+        "quant_method": "compressed-tensors",
+        "format": "int-quantized",
+        "type": "int",
+        "num_bits": 8,
+        "symmetric": True,
+        "strategy": "channel",
+    }
+    num_experts, num_output = weight.shape[0], weight.shape[-2]
+    if weight_scale.numel() < num_experts * num_output:
+        config["strategy"] = "tensor"
+    return config
+
+
 def convert_to_int8_moe_kernel_format(
     int8_backend: Int8MoeBackend,
-    layer: torch.nn.Module,
     w13: torch.Tensor,
     w2: torch.Tensor,
-    w13_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-    w13_input_scale: torch.Tensor | None,
-    w2_input_scale: torch.Tensor | None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    layer: torch.nn.Module | None = None,
+    w13_scale: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Convert INT8 MoE weights to backend-specific kernel format."""
     if int8_backend == Int8MoeBackend.HUMMING:
         from vllm.model_executor.layers.quantization.utils.humming_utils import (
-            prepare_humming_moe_layer,
+            convert_to_humming_moe_kernel_format,
         )
 
-        quant_method_name = layer.quant_method.__class__.__name__
-        if "CompressedTensors" in quant_method_name:
-            from compressed_tensors.quantization import QuantizationArgs
-
-            weight_quant = getattr(layer.quant_method, "weight_quant", None)
-            assert isinstance(weight_quant, QuantizationArgs)
-            quant_config = weight_quant.model_dump()
-            quant_config["quant_method"] = "compressed-tensors"
-            quant_config["format"] = "int-quantized"
-        else:
-            assert "Int8Online" in quant_method_name
-            replace_parameter(layer, "w13_weight", (w13 + 128).view(torch.int32))
-            replace_parameter(layer, "w2_weight", (w2 + 128).view(torch.int32))
-            w13_scale = w13_scale.to(layer.params_dtype).unsqueeze(-1)
-            w2_scale = w2_scale.to(layer.params_dtype).unsqueeze(-1)
-            layer.w13_weight_scale = torch.nn.Parameter(w13_scale, requires_grad=False)
-            layer.w2_weight_scale = torch.nn.Parameter(w2_scale, requires_grad=False)
-            quant_config = {"quant_method": "humming", "dtype": "int8"}
-
-        prepare_humming_moe_layer(layer, quant_config)
-
-        return (
-            layer.w13_weight,
-            layer.w2_weight,
-            layer.w13_weight_scale,
-            layer.w2_weight_scale,
+        assert layer is not None and w13_scale is not None
+        convert_to_humming_moe_kernel_format(
+            layer, quant_config=_humming_int8_weight_schema(w13, w13_scale)
+        )
+        return layer.w13_weight, layer.w2_weight
+    elif int8_backend == Int8MoeBackend.CPU:
+        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+            prepare_int8_moe_layer_for_cpu,
         )
 
-    return w13, w2, w13_scale, w2_scale
+        w13, w2 = prepare_int8_moe_layer_for_cpu(w13, w2)
+    elif int8_backend != Int8MoeBackend.TRITON:
+        raise ValueError(f"Unsupported Int8 MoE backend: {int8_backend.value}")
+
+    return w13, w2
 
 
 def make_int8_moe_kernel(
