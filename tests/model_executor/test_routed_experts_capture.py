@@ -91,6 +91,7 @@ def test_base_router_capture_with_eplb_enabled():
     eplb_state.logical_to_physical_map = torch.arange(32).view(32, 1)
     eplb_state.logical_replica_count = torch.ones(32, dtype=torch.int64)
     eplb_state.should_record_tensor = torch.ones((), dtype=torch.bool)
+    eplb_state.num_unpadded_tokens_tensors = [torch.tensor(0, dtype=torch.int32)]
     router = _make_router(eplb_state=eplb_state)
 
     captured = []

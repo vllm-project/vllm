@@ -3,7 +3,7 @@
 import torch
 
 from vllm.triton_utils import tl, tldevice, triton
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_block_argmax, tl_rand64
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_block_argmax, tl_rand32
 
 
 @triton.jit
@@ -243,7 +243,7 @@ def _rejection_kernel(
 
                 if SYNTHETIC_MODE:
                     pos = tl.load(pos_ptr + logit_idx)
-                    u = tl_rand64(seed, pos, includes_zero=False)
+                    u = tl_rand32(seed, pos, includes_zero=False)
                     rate = tl.load(synthetic_conditional_rates_ptr + i)
                     # -1 is used for padded draft token ids that should be rejected.
                     accepted &= (u < rate) & (draft_sampled >= 0)
@@ -272,7 +272,7 @@ def _rejection_kernel(
                 )
                 target_log_prob = target_logit - target_lse
                 pos = tl.load(pos_ptr + logit_idx)
-                u = tl_rand64(seed, pos, includes_zero=False)
+                u = tl_rand32(seed, pos, includes_zero=False)
                 if HAS_DRAFT_LOGITS:
                     draft_logit = tl.load(
                         draft_logits_ptr

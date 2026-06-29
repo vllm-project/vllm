@@ -24,6 +24,7 @@ from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
     deepseek_v4_sparse_mla_attention_warmup,
     flashinfer_sparse_mla_decode_autotune_warmup,
 )
+from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer
@@ -39,6 +40,8 @@ def kernel_warmup(worker: "Worker"):
     from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
         minimax_m3_msa_warmup,
     )
+
+    qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
 
     # DSv4 mHC TileLang kernels (hc_pre/hc_post/hc_head_op) run every decoder
     # layer per token; warm them across token sizes first so the first real
