@@ -221,10 +221,6 @@ class AccuracyTestConfig:
         if model_max_len is not None:
             model_args["max_model_len"] = model_max_len
 
-        # Emulation backend on MI300, MI250 is opt-in following https://github.com/vllm-project/vllm/pull/45896
-        if not on_gfx950():
-            model_args["moe_backend"] = "emulation"
-
         return model_args
 
 
