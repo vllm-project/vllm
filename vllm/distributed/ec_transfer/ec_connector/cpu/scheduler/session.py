@@ -59,6 +59,7 @@ logger = init_logger(__name__)
 
 PRODUCER_PIN_LEASE_S = 30.0
 _CONSUMER_READ_TIMEOUT_S = 20.0
+_CONSUMER_QUARANTINE_TIMEOUT_S = 60.0
 _CONSUMER_ACK_TIMEOUT_S = 2.0
 
 
@@ -136,7 +137,7 @@ class ConsumerXfer:
 
     def poll(self, now: float) -> XferState:
         if self._quarantined:
-            return self._poll_quarantined()
+            return self._poll_quarantined(now)
         if self.transfer_handle is None:
             return (
                 XferState.ACK_TIMEOUT if now > self.deadline else XferState.WAITING_ACK
@@ -159,6 +160,7 @@ class ConsumerXfer:
         if state == "PROC":
             if now > self.deadline:
                 self._quarantined = True
+                self.deadline = now + _CONSUMER_QUARANTINE_TIMEOUT_S
                 logger.warning(
                     "EC: READ for mm_hash=%s from %s:%d timed out; quarantining",
                     self.mm_hash,
@@ -174,9 +176,20 @@ class ConsumerXfer:
         self.transfer_handle = None
         return XferState.READ_FAILED
 
-    def _poll_quarantined(self) -> XferState:
+    def _poll_quarantined(self, now: float) -> XferState:
         if self.transfer_handle is None:
             return XferState.SETTLED
+        # If quarantine has been too long, assume NIXL is stuck and evict blocks.
+        if now > self.deadline:
+            self.data.release_xfer_handle(self.transfer_handle)
+            self.transfer_handle = None
+            logger.warning(
+                "EC: quarantined mm_hash=%s from %s:%d timed out; evicting blocks",
+                self.mm_hash,
+                self.addr[0],
+                self.addr[1],
+            )
+            return XferState.READ_FAILED
         try:
             state = self.data.check_xfer_state(self.transfer_handle)
         except Exception:
@@ -383,11 +396,11 @@ class ConsumerSession:
         self._nixl_metadata_bytes: bytes | None = None
 
         self._xfers: dict[str, ConsumerXfer] = {}  # mm_hash → xfer
-        self._quarantined: list[ConsumerXfer] = []
+        self._quarantined: list[ConsumerXfer] = []  # DMA pending, to poll
+        self._newly_quarantined: set[str] = set()  # quarantined since last take_results
 
         self._completed: set[str] = set()
         self._tombstoned: set[str] = set()
-        self._quarantined_set: set[str] = set()
         self._cancelled: set[str] = set()
         self._settled: list[tuple[str, list[int]]] = []
 
@@ -456,8 +469,8 @@ class ConsumerSession:
             elif state == XferState.QUARANTINED:
                 # DMA may still be writing — caller must NOT free blocks.
                 self._quarantined.append(xfer)
+                self._newly_quarantined.add(mm_hash)
                 del self._xfers[mm_hash]
-                self._quarantined_set.add(mm_hash)
 
         self._drain_quarantine(now)
 
@@ -520,7 +533,7 @@ class ConsumerSession:
 
     def _drain_quarantine(self, now: float) -> None:
         still_pending: list[ConsumerXfer] = []
-        for xfer in self._quarantined:
+        for xfer in list(self._quarantined):
             state = xfer.poll(now)
             if state == XferState.SETTLED:
                 self._settled.append((xfer.mm_hash, xfer.block_indices))
@@ -536,6 +549,7 @@ class ConsumerSession:
                 self._cancelled.add(mm_hash)
             else:
                 self._quarantined.append(xfer)
+                self._newly_quarantined.add(mm_hash)
         self._xfers.clear()
 
     def take_results(self) -> ConsumerSessionResults:
@@ -543,13 +557,13 @@ class ConsumerSession:
         results = ConsumerSessionResults(
             completed=self._completed,
             tombstoned=self._tombstoned,
-            quarantined=self._quarantined_set,
+            quarantined=self._newly_quarantined,
             cancelled=self._cancelled,
             settled=self._settled,
         )
         self._completed = set()
         self._tombstoned = set()
-        self._quarantined_set = set()
+        self._newly_quarantined = set()
         self._cancelled = set()
         self._settled = []
         return results

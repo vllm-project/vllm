@@ -867,6 +867,41 @@ def test_on_peer_down_tolerates_unknown_addr(consumer):
     consumer._consumer._on_peer_down(("ghost", 9999))  # must not raise
 
 
+def test_on_peer_down_reading_stays_quarantined(consumer):
+    """READING xfers (with transfer_handle) should go to quarantine, not be freed."""
+    addr = ("host", 1234)
+    session = _put_session(consumer, addr)
+    indices = consumer._memory_context.region.alloc(2)
+    consumer._consumer._blocks["h"] = indices
+    consumer._consumer._in_flight.add("h")
+    from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.session import (
+        ConsumerXfer,
+    )
+
+    # Create a READING xfer (has transfer_handle)
+    session._xfers["h"] = ConsumerXfer(
+        mm_hash="h",
+        block_indices=indices,
+        addr=addr,
+        deadline=time.monotonic() + 60,
+        data=consumer._data,
+        consumer_session_id="test-sess",
+    )
+    session._xfers["h"].transfer_handle = "fake-handle"  # Mark as READING
+
+    free_before = len(consumer._memory_context.region._free)
+
+    consumer._consumer._on_peer_down(addr)
+
+    # READING → quarantined: blocks NOT freed, tombstone added (prevent retry this step)
+    assert "h" not in consumer._consumer._in_flight
+    assert "h" in consumer._consumer._tombstones  # blocked for this step
+    # Key invariant: blocks are NOT freed when peer goes down during READING state
+    assert len(consumer._memory_context.region._free) == free_before
+    # session is closed after processing results
+    assert addr not in consumer._consumer._sessions
+
+
 # ── poll_dead wiring (consumer) ───────────────────────────────────────────────
 
 

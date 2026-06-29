@@ -13,6 +13,7 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.protocol import (
     XferStatus,
 )
 from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.session import (
+    _CONSUMER_QUARANTINE_TIMEOUT_S,
     ConsumerSession,
     ConsumerXfer,
     ProducerXfer,
@@ -205,6 +206,20 @@ def test_consumer_xfer_quarantined_exception_settles():
     x.poll(time.monotonic() + 9999)
     data.check_xfer_state.side_effect = RuntimeError("gone")
     assert x.poll(time.monotonic()) == XferState.SETTLED
+
+
+def test_consumer_xfer_quarantined_timeout_evicts_blocks():
+    """Quarantine timeout should release handle and return READ_FAILED."""
+
+    data = _make_data(xfer_state="PROC")
+    x = _started(data)
+    # First poll transitions to QUARANTINED (deadline extended by 60s)
+    x.poll(time.monotonic() + 9999)
+    # Second poll with expired quarantine deadline should evict
+    expired_time = time.monotonic() + 9999 + _CONSUMER_QUARANTINE_TIMEOUT_S + 1
+    assert x.poll(expired_time) == XferState.READ_FAILED
+    data.release_xfer_handle.assert_called_once_with(99)
+    assert x.transfer_handle is None
 
 
 # ── ConsumerXfer.cancel / release ────────────────────────────────────────────
