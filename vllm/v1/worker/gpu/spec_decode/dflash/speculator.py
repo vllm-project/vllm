@@ -317,6 +317,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.num_speculative_steps,
             self.max_num_reqs,
             self.max_num_tokens,
+            self.max_model_len,
         )
 
         # Pre-insert context K/V into the cache. Runs eagerly outside the captured graph
@@ -408,6 +409,7 @@ def _prepare_dflash_inputs_kernel(
     num_speculative_steps,
     max_num_reqs,
     max_num_tokens,
+    max_model_len,
     PAD_SLOT_ID: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -468,7 +470,8 @@ def _prepare_dflash_inputs_kernel(
     q_slot = q_block_id * block_size + (query_pos % block_size)
 
     tl.store(out_input_ids_ptr + query_idx, input_id, mask=is_query)
-    tl.store(out_query_positions_ptr + query_idx, query_pos, mask=is_query)
+    clamped_query_pos = tl.minimum(query_pos, max_model_len - 1)
+    tl.store(out_query_positions_ptr + query_idx, clamped_query_pos, mask=is_query)
     tl.store(out_query_slot_mapping_ptr + query_idx, q_slot, mask=is_query)
 
     # --- Sample indices / positions / idx_mapping (mask tokens only) ---
@@ -540,6 +543,7 @@ def prepare_dflash_inputs(
     num_speculative_steps: int,
     max_num_reqs: int,
     max_num_tokens: int,
+    max_model_len: int,
 ) -> None:
     num_reqs = input_batch.num_reqs
     assert num_reqs > 0
@@ -575,6 +579,7 @@ def prepare_dflash_inputs(
         num_speculative_steps,
         max_num_reqs,
         max_num_tokens,
+        max_model_len,
         PAD_SLOT_ID=PAD_SLOT_ID,
         BLOCK_SIZE=BLOCK_SIZE,
     )
