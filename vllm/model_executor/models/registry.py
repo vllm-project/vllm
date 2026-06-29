@@ -462,6 +462,10 @@ _MULTIMODAL_MODELS = {
         "LightOnOCRForConditionalGeneration",
     ),
     "Lfm2VlForConditionalGeneration": ("lfm2_vl", "Lfm2VLForConditionalGeneration"),
+    "LocateAnythingForConditionalGeneration": (
+        "locate_anything",
+        "LocateAnythingForConditionalGeneration",
+    ),
     "Llama4ForConditionalGeneration": ("mllama4", "Llama4ForConditionalGeneration"),
     "Llama_Nemotron_Nano_VL": ("nemotron_vl", "LlamaNemotronVLChatModel"),
     "LlavaForConditionalGeneration": ("llava", "LlavaForConditionalGeneration"),

@@ -377,6 +377,8 @@ llvmlite==0.47.0
     # via numba
 lm-eval==0.4.12
     # via -r requirements/test/cuda.in
+lmdb==2.2.1
+    # via -r requirements/test/cuda.in
 lxml==5.3.0
     # via
     #   blobfile
