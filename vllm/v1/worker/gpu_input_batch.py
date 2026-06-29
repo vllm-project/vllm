@@ -300,9 +300,10 @@ class InputBatch:
         self.sampled_token_ids_cpu: torch.Tensor | None = None
         self.async_copy_ready_event: torch.Event | None = None
 
+        # Multi-MTP target cache is allocated lazily only for models that use it.
         self.disable_multi_mtp_cache = True
 
-    def init_target_model_hidden_states_cache(
+    def init_multi_mtp_target_cache(
         self,
         n_predict: int,
         hidden_size: int,
@@ -310,12 +311,13 @@ class InputBatch:
         device: torch.device,
     ) -> None:
         self.disable_multi_mtp_cache = False
-        self.target_model_hidden_states_cache = torch.zeros(
+        # Cache target inputs from the previous verify pass for KV correction.
+        self.multi_mtp_target_hidden_states_cache = torch.zeros(
             (self.max_num_reqs, n_predict + 1, hidden_size),
             dtype=dtype,
             device=device,
         )
-        self.target_token_ids_cache = torch.zeros(
+        self.multi_mtp_target_token_ids_cache = torch.zeros(
             (self.max_num_reqs, n_predict + 1),
             dtype=torch.int32,
             device=device,
@@ -352,12 +354,6 @@ class InputBatch:
             )
 
         return new_req_index
-
-    def _add_request_for_multi_mtp(self, req_index):
-        if self.disable_multi_mtp_cache:
-            return
-        self.target_model_hidden_states_cache[req_index].zero_()
-        self.target_token_ids_cache[req_index].zero_()
 
     def add_request(
         self,
@@ -505,7 +501,10 @@ class InputBatch:
             # No LoRA
             self.request_lora_mapping[req_index] = 0
 
-        self._add_request_for_multi_mtp(req_index)
+        # Clear stale multi-MTP cache when a request slot is reused.
+        if not self.disable_multi_mtp_cache:
+            self.multi_mtp_target_hidden_states_cache[req_index].zero_()
+            self.multi_mtp_target_token_ids_cache[req_index].zero_()
         return req_index
 
     def update_req_spec_token_ids(
@@ -590,18 +589,6 @@ class InputBatch:
         self.bad_words_token_ids.pop(req_index, None)
         self.thinking_token_budget_reqs.discard(req_id)
         return req_index
-
-    def _swap_states_for_target_model_hidden_states_cache(self, i1: int, i2: int):
-        if self.disable_multi_mtp_cache:
-            return
-        tmp_hidden = self.target_model_hidden_states_cache[i1].clone()
-        self.target_model_hidden_states_cache[i1] = (
-            self.target_model_hidden_states_cache[i2]
-        )
-        self.target_model_hidden_states_cache[i2] = tmp_hidden
-        tmp_token = self.target_token_ids_cache[i1].clone()
-        self.target_token_ids_cache[i1] = self.target_token_ids_cache[i2]
-        self.target_token_ids_cache[i2] = tmp_token
 
     def swap_states(self, i1: int, i2: int) -> None:
         old_id_i1 = self._req_ids[i1]
@@ -715,26 +702,23 @@ class InputBatch:
                 self.allowed_token_ids_mask_cpu_tensor[i1],
             )
 
-        self._swap_states_for_target_model_hidden_states_cache(i1, i2)
+        # Keep multi-MTP target cache aligned with swapped request slots.
+        if not self.disable_multi_mtp_cache:
+            tmp_hidden = self.multi_mtp_target_hidden_states_cache[i1].clone()
+            self.multi_mtp_target_hidden_states_cache[i1] = (
+                self.multi_mtp_target_hidden_states_cache[i2]
+            )
+            self.multi_mtp_target_hidden_states_cache[i2] = tmp_hidden
+            tmp_token = self.multi_mtp_target_token_ids_cache[i1].clone()
+            self.multi_mtp_target_token_ids_cache[i1] = (
+                self.multi_mtp_target_token_ids_cache[i2]
+            )
+            self.multi_mtp_target_token_ids_cache[i2] = tmp_token
 
     def _get_active_token_count(self, req_index: int) -> int:
         return int(self.num_tokens_no_spec[req_index]) + len(
             self.spec_token_ids[req_index]
         )
-
-    def _condense_target_model_hidden_states_cache(self, num_prior_moves):
-        if self.disable_multi_mtp_cache:
-            return
-        moves = self.batch_update_builder.moved[num_prior_moves:]
-        for last_req_index, empty_index, _ in moves:
-            self.target_model_hidden_states_cache[empty_index] = (
-                self.target_model_hidden_states_cache[last_req_index]
-            )
-            self.target_model_hidden_states_cache[last_req_index].zero_()
-            self.target_token_ids_cache[empty_index] = self.target_token_ids_cache[
-                last_req_index
-            ]
-            self.target_token_ids_cache[last_req_index].zero_()
 
     def condense(self) -> None:
         """Slide non-empty requests down into lower, empty indices.
@@ -747,7 +731,6 @@ class InputBatch:
           empty_req_indices: indices not filled by condensation
         """
         num_reqs = self.num_reqs
-        num_prior_moves = len(self.batch_update_builder.moved)
 
         if not (empty_req_indices := self.batch_update_builder.removed):
             # All removed requests were replaced by added requests, or else no
@@ -857,10 +840,19 @@ class InputBatch:
             if bad_words_token_ids is not None:
                 self.bad_words_token_ids[empty_index] = bad_words_token_ids
 
+            # Keep multi-MTP target cache aligned with the moved request.
+            if not self.disable_multi_mtp_cache:
+                self.multi_mtp_target_hidden_states_cache[empty_index] = (
+                    self.multi_mtp_target_hidden_states_cache[last_req_index]
+                )
+                self.multi_mtp_target_hidden_states_cache[last_req_index].zero_()
+                self.multi_mtp_target_token_ids_cache[empty_index] = (
+                    self.multi_mtp_target_token_ids_cache[last_req_index]
+                )
+                self.multi_mtp_target_token_ids_cache[last_req_index].zero_()
+
             # Decrement last_req_index since it is now empty.
             last_req_index -= 1
-
-        self._condense_target_model_hidden_states_cache(num_prior_moves)
 
         # Trim lists to the batch size.
         del self._req_ids[num_reqs:]

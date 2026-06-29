@@ -50,7 +50,7 @@ class OpenPanguV2MTPProposer(EagleProposer):
             dtype=torch.int32,
             device=device,
         )
-        self.fix_multi_mtp_kvcache = self.use_multi_mtp_heads
+        self.fix_multi_mtp_kvcache = True
 
     def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode) -> None:
         if self.use_multi_mtp_heads:
@@ -318,8 +318,8 @@ class OpenPanguV2MTPProposer(EagleProposer):
         final_token_ids = target_token_ids[final_n_token_indices]
         final_hidden_states = target_hidden_states[final_n_token_indices]
 
-        previous_token_ids = input_batch.target_token_ids_cache[:batch_size]
-        previous_hidden_states = input_batch.target_model_hidden_states_cache[
+        previous_token_ids = input_batch.multi_mtp_target_token_ids_cache[:batch_size]
+        previous_hidden_states = input_batch.multi_mtp_target_hidden_states_cache[
             :batch_size
         ]
 
@@ -353,10 +353,10 @@ class OpenPanguV2MTPProposer(EagleProposer):
         ]
         target_token_ids[final_n_token_indices.view(-1)] = selected_token_ids
         target_hidden_states[final_n_token_indices.view(-1)] = selected_hidden_states
-        input_batch.target_token_ids_cache[:batch_size] = selected_token_ids.view(
-            batch_size, -1
+        input_batch.multi_mtp_target_token_ids_cache[:batch_size] = (
+            selected_token_ids.view(batch_size, -1)
         )
-        input_batch.target_model_hidden_states_cache[:batch_size] = (
+        input_batch.multi_mtp_target_hidden_states_cache[:batch_size] = (
             selected_hidden_states.view(
                 batch_size, -1, selected_hidden_states.shape[-1]
             )

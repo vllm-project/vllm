@@ -924,7 +924,7 @@ class GPUModelRunner(
         if hidden_size is None:
             hidden_size = self.model_config.get_hidden_size()
         n_predict = getattr(drafter, "n_predict", self.num_spec_tokens)
-        self.input_batch.init_target_model_hidden_states_cache(
+        self.input_batch.init_multi_mtp_target_cache(
             n_predict,
             hidden_size,
             self.dtype,
@@ -2506,9 +2506,6 @@ class GPUModelRunner(
                     ),
                 ):
                     if self.drafter.kv_cache_gid == kv_cache_gid:
-                        spec_decode_common_attn_metadata = cm
-                elif hasattr(self.drafter, "has_draft_kv_cache_group"):
-                    if self.drafter.has_draft_kv_cache_group(kv_cache_gid):
                         spec_decode_common_attn_metadata = cm
                 else:
                     spec_decode_common_attn_metadata = cm

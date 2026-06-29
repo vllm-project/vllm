@@ -35,6 +35,7 @@ class MomeAttentionMetadata:
     num_computed_tokens_p: torch.Tensor | None
     state_indices_tensor_p: torch.Tensor | None
 
+    num_computed_tokens_d: torch.Tensor | None
     state_indices_tensor_d: torch.Tensor | None
     query_start_loc_d: torch.Tensor | None
     num_accepted_tokens: torch.Tensor | None
@@ -42,6 +43,7 @@ class MomeAttentionMetadata:
     block_idx_first_scheduled_token_p: torch.Tensor | None
     block_idx_last_scheduled_token_p: torch.Tensor | None
     block_idx_last_computed_token_p: torch.Tensor | None
+    block_idx_first_scheduled_token_d: torch.Tensor | None
     block_idx_last_scheduled_token_d: torch.Tensor | None
     block_idx_last_computed_token_d: torch.Tensor | None
 
@@ -102,6 +104,12 @@ class MomeAttentionMetadataBuilder(AttentionMetadataBuilder[MomeAttentionMetadat
             (self.decode_cudagraph_max_bs,), dtype=torch.int32, device=device
         )
         self.block_idx_last_computed_token_d: torch.Tensor = torch.empty(
+            (self.decode_cudagraph_max_bs,), dtype=torch.int32, device=device
+        )
+        self.num_computed_tokens_d: torch.Tensor = torch.empty(
+            (self.decode_cudagraph_max_bs,), dtype=torch.int32, device=device
+        )
+        self.block_idx_first_scheduled_token_d: torch.Tensor = torch.empty(
             (self.decode_cudagraph_max_bs,), dtype=torch.int32, device=device
         )
 
@@ -264,48 +272,19 @@ class MomeAttentionMetadataBuilder(AttentionMetadataBuilder[MomeAttentionMetadat
         state_indices_tensor_d, state_indices_tensor_p = torch.split(
             state_indices_tensor, [num_decodes, num_prefills], dim=0
         )
+        num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
+        num_computed_tokens_d, num_computed_tokens_p = torch.split(
+            num_computed_tokens, [num_decodes, num_prefills], dim=0
+        )
         block_idx_last_computed_token_d, block_idx_last_computed_token_p = torch.split(
             block_idx_last_computed_token,
             [num_decodes, num_prefills],
             dim=0,
         )
-        if num_decodes > 0 and self.use_spec_decode and num_accepted_tokens is not None:
-            block_size = self.kv_cache_spec.block_size
-            num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
-            num_computed_tokens_d = num_computed_tokens[:num_decodes]
-            num_accepted_tokens_d = num_accepted_tokens[:num_decodes]
-            prev_num_computed_tokens_d = num_computed_tokens_d - num_accepted_tokens_d
-            prev_scheduled_len_d = torch.clamp(
-                self.vllm_config.model_config.max_model_len
-                - 1
-                - prev_num_computed_tokens_d,
-                min=1,
-                max=self.num_spec_tokens + 1,
+        block_idx_first_scheduled_token_d, block_idx_first_scheduled_token_p = (
+            torch.split(
+                block_idx_first_scheduled_token, [num_decodes, num_prefills], dim=0
             )
-            spec_block_idx_last_computed_token_d = (
-                cdiv(prev_num_computed_tokens_d + prev_scheduled_len_d, block_size) - 1
-            )
-            use_spec_block_idx: torch.Tensor | None = None
-            if is_drafting:
-                use_spec_block_idx = num_accepted_tokens_d > 0
-            elif num_prompt_tokens is not None:
-                num_prompt_tokens = num_prompt_tokens.to(
-                    device=num_computed_tokens.device, non_blocking=True
-                )
-                num_prompt_tokens_d = num_prompt_tokens[:num_decodes]
-                use_spec_block_idx = num_computed_tokens_d > num_prompt_tokens_d
-
-            if use_spec_block_idx is not None:
-                block_idx_last_computed_token_d = torch.where(
-                    use_spec_block_idx,
-                    spec_block_idx_last_computed_token_d,
-                    block_idx_last_computed_token_d,
-                )
-            block_idx_last_computed_token_d = torch.clamp(
-                block_idx_last_computed_token_d, min=0
-            )
-        _, block_idx_first_scheduled_token_p = torch.split(
-            block_idx_first_scheduled_token, [num_decodes, num_prefills], dim=0
         )
         block_idx_last_scheduled_token_d, block_idx_last_scheduled_token_p = (
             torch.split(
@@ -317,20 +296,53 @@ class MomeAttentionMetadataBuilder(AttentionMetadataBuilder[MomeAttentionMetadat
 
         query_start_loc_d = None
         max_decode_query_len = None
-        if num_decodes > 0 and self.use_spec_decode and num_accepted_tokens is not None:
+        num_accepted_tokens_d = None
+        if num_decodes > 0:
             query_start_loc_d = common_attn_metadata.query_start_loc[: num_decodes + 1]
-            num_accepted_tokens = num_accepted_tokens[:num_decodes]
             query_lens_cpu = torch.diff(
                 common_attn_metadata.query_start_loc_cpu[: num_decodes + 1]
             )
             max_decode_query_len = int(query_lens_cpu.max().item())
+            if num_accepted_tokens is not None:
+                block_size = self.kv_cache_spec.block_size
+                num_accepted_tokens_d = num_accepted_tokens[:num_decodes]
+                prev_num_computed_tokens_d = (
+                    num_computed_tokens_d - num_accepted_tokens_d
+                )
+                prev_scheduled_len_d = torch.clamp(
+                    self.vllm_config.model_config.max_model_len
+                    - 1
+                    - prev_num_computed_tokens_d,
+                    min=1,
+                    max=self.num_spec_tokens + 1,
+                )
+                spec_block_idx_last_computed_token_d = (
+                    cdiv(prev_num_computed_tokens_d + prev_scheduled_len_d, block_size)
+                    - 1
+                )
+                use_spec_block_idx: torch.Tensor | None = None
+                if is_drafting:
+                    use_spec_block_idx = num_accepted_tokens_d > 0
+                elif num_prompt_tokens is not None:
+                    num_prompt_tokens = num_prompt_tokens.to(
+                        device=num_computed_tokens.device, non_blocking=True
+                    )
+                    num_prompt_tokens_d = num_prompt_tokens[:num_decodes]
+                    use_spec_block_idx = num_computed_tokens_d > num_prompt_tokens_d
+                if use_spec_block_idx is not None:
+                    block_idx_last_computed_token_d = torch.where(
+                        use_spec_block_idx,
+                        spec_block_idx_last_computed_token_d,
+                        block_idx_last_computed_token_d,
+                    )
+                block_idx_last_computed_token_d = torch.clamp(
+                    block_idx_last_computed_token_d, min=0
+                )
 
         has_initial_states_p = None
         query_start_loc_p = None
-        num_computed_tokens_p = None
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
         if num_prefills > 0:
-            num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
             query_start_loc_p_cpu = (
                 common_attn_metadata.query_start_loc_cpu[-num_prefills - 1 :]
                 - num_decode_tokens
@@ -339,9 +351,6 @@ class MomeAttentionMetadataBuilder(AttentionMetadataBuilder[MomeAttentionMetadat
                 common_attn_metadata.query_start_loc[-num_prefills - 1 :]
                 - num_decode_tokens
             )
-            num_computed_tokens_p = num_computed_tokens[
-                num_reqs - num_prefills : num_reqs
-            ]
             has_initial_states_p = num_computed_tokens_p > 0
             nums_dict, batch_ptr, token_chunk_offset_ptr = (
                 compute_causal_conv1d_metadata(
@@ -359,14 +368,16 @@ class MomeAttentionMetadataBuilder(AttentionMetadataBuilder[MomeAttentionMetadat
             has_initial_states_p=has_initial_states_p,
             query_start_loc_p=query_start_loc_p,
             num_computed_tokens_p=num_computed_tokens_p,
+            num_computed_tokens_d=num_computed_tokens_d,
             state_indices_tensor_p=state_indices_tensor_p,
             state_indices_tensor_d=state_indices_tensor_d,
             query_start_loc_d=query_start_loc_d,
-            num_accepted_tokens=num_accepted_tokens,
+            num_accepted_tokens=num_accepted_tokens_d,
             max_decode_query_len=max_decode_query_len,
             block_idx_first_scheduled_token_p=block_idx_first_scheduled_token_p,
             block_idx_last_scheduled_token_p=block_idx_last_scheduled_token_p,
             block_idx_last_computed_token_p=block_idx_last_computed_token_p,
+            block_idx_first_scheduled_token_d=block_idx_first_scheduled_token_d,
             block_idx_last_scheduled_token_d=block_idx_last_scheduled_token_d,
             block_idx_last_computed_token_d=block_idx_last_computed_token_d,
             seq_lens=common_attn_metadata.seq_lens,
@@ -405,6 +416,25 @@ class MomeAttentionMetadataBuilder(AttentionMetadataBuilder[MomeAttentionMetadat
         block_idx_last_computed_token_d = metadata.block_idx_last_computed_token_d
         assert block_idx_last_scheduled_token_d is not None
         assert block_idx_last_computed_token_d is not None
+        num_computed_tokens_d = metadata.num_computed_tokens_d
+        block_idx_first_scheduled_token_d = metadata.block_idx_first_scheduled_token_d
+        assert num_computed_tokens_d is not None
+        assert block_idx_first_scheduled_token_d is not None
+
+        padded_num_computed_tokens_d = self.num_computed_tokens_d[:padded_bs]
+        padded_num_computed_tokens_d[: metadata.num_decodes].copy_(
+            num_computed_tokens_d[: metadata.num_decodes], non_blocking=True
+        )
+        padded_num_computed_tokens_d[metadata.num_decodes :] = 0
+
+        padded_block_idx_first_scheduled_token_d = (
+            self.block_idx_first_scheduled_token_d[:padded_bs]
+        )
+        padded_block_idx_first_scheduled_token_d[: metadata.num_decodes].copy_(
+            block_idx_first_scheduled_token_d[: metadata.num_decodes],
+            non_blocking=True,
+        )
+        padded_block_idx_first_scheduled_token_d[metadata.num_decodes :] = 0
 
         padded_block_idx_last_scheduled_token_d = self.block_idx_last_scheduled_token_d[
             :padded_bs
@@ -438,6 +468,8 @@ class MomeAttentionMetadataBuilder(AttentionMetadataBuilder[MomeAttentionMetadat
         return replace(
             metadata,
             state_indices_tensor_d=padded_state_indices_tensor_d,
+            num_computed_tokens_d=padded_num_computed_tokens_d,
+            block_idx_first_scheduled_token_d=padded_block_idx_first_scheduled_token_d,
             block_idx_last_scheduled_token_d=(padded_block_idx_last_scheduled_token_d),
             block_idx_last_computed_token_d=padded_block_idx_last_computed_token_d,
             num_accepted_tokens=num_accepted_tokens,
