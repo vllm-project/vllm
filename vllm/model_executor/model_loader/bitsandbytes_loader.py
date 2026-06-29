@@ -576,7 +576,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         # For some models like Molmo, we need to use hf_to_vllm_mapper
         # to ensure correct loading of weights.
         if hf_to_vllm_mapper := getattr(model, "hf_to_vllm_mapper", None):
-            self.weight_mapper = lambda name: hf_to_vllm_mapper._map_name(name)
+            unstacked_mapper = hf_to_vllm_mapper.get_unstacked_mapper()
+            self.weight_mapper = lambda name, m=unstacked_mapper: m._map_name(name)
 
         self._get_bnb_target_modules(model)
         self._classify_module_sharding(model)
