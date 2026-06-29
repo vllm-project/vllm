@@ -35,17 +35,17 @@ pub(super) fn validate_request_compat(
     }
 
     if let Some(prompt_logprobs) = request.sampling_params.prompt_logprobs {
-        if request.stream && (prompt_logprobs > 0 || prompt_logprobs == -1) {
-            bail_invalid_request!(
-                param = "sampling_params",
-                "`prompt_logprobs` are not available when `stream=true`."
-            );
-        }
-
         if prompt_logprobs < 0 && prompt_logprobs != -1 {
             bail_invalid_request!(
                 param = "sampling_params",
                 "`prompt_logprobs` must be a non-negative value or -1."
+            );
+        }
+
+        if request.stream {
+            bail_invalid_request!(
+                param = "sampling_params",
+                "`prompt_logprobs` are not available when `stream=true`."
             );
         }
     }
@@ -106,6 +106,17 @@ mod tests {
 
     #[test]
     fn validate_request_compat_rejects_streaming_prompt_logprobs() {
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "token_ids": [11, 22],
+            "stream": true,
+            "sampling_params": {
+                "prompt_logprobs": 0
+            }
+        }))
+        .expect("parse request");
+        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
+
         let request: GenerateRequest = serde_json::from_value(json!({
             "model": "Qwen/Qwen1.5-0.5B-Chat",
             "token_ids": [11, 22],
