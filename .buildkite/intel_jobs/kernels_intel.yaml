@@ -1,25 +1,567 @@
 group: Kernels Intel
-depends_on: 
+depends_on:
   - image-build-xpu
 steps:
 - label: vLLM IR Tests
+  timeout_in_minutes: 10
+  device: intel_gpu
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s tests/ir
+  - pytest -v -s tests/kernels/ir
+  source_file_dependencies:
+  - vllm/ir
+  - vllm/kernels
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest -v -s tests/ir &&
+    pytest -v -s tests/kernels/ir'
+- label: Kernels Core Operation Test
+  timeout_in_minutes: 75
+  device: intel_gpu
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py  kernels/test_concat_mla_q.py kernels/test_fused_qk_norm_rope_gate.py
+  source_file_dependencies:
+  - csrc/
+  - tests/kernels/core
+  - tests/kernels/test_concat_mla_q.py
+  - tests/kernels/test_fused_qk_norm_rope_gate.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py  kernels/test_concat_mla_q.py kernels/test_fused_qk_norm_rope_gate.py'
+- label: Kernels MiniMax Reduce RMS Test (2 GPUs)
+  timeout_in_minutes: 15
+  num_devices: 2
+  device: intel_gpu
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 2+
+  _raw_old_commands:
+  - pytest -v -s kernels/core/test_minimax_reduce_rms.py
+  source_file_dependencies:
+  - csrc/minimax_reduce_rms_kernel.cu
+  - csrc/minimax_reduce_rms_kernel.h
+  - vllm/model_executor/layers/mamba/linear_attn.py
+  - vllm/model_executor/layers/mamba/lamport_workspace.py
+  - tests/kernels/core/test_minimax_reduce_rms.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s kernels/core/test_minimax_reduce_rms.py'
+- label: Deepseek V4 Kernel Test (H100)
+  timeout_in_minutes: 15
+  device: intel_gpu
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s kernels/test_fused_deepseek_v4_*.py
+  - pytest -v -s kernels/test_top_k_per_row.py
+  source_file_dependencies:
+  - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
+  - vllm/models/deepseek_v4/common/ops/
+  - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
+  - tests/kernels/test_top_k_per_row.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s kernels/test_fused_deepseek_v4_*.py &&
+    pytest -v -s kernels/test_top_k_per_row.py'
+- label: Deepseek V4 Kernel Test (B200)
+  timeout_in_minutes: 15
+  device: intel_gpu
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s kernels/test_fused_deepseek_v4_*.py
+  source_file_dependencies:
+  - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
+  - vllm/models/deepseek_v4/common/ops/
+  - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s kernels/test_fused_deepseek_v4_*.py'
+- label: Kernels Attention Test %N
+  timeout_in_minutes: 35
+  parallelism: 2
+  device: intel_gpu
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  source_file_dependencies:
+  - csrc/attention/
+  - vllm/v1/attention
+  - vllm/model_executor/layers/attention
+  - vllm/utils/flashinfer.py
+  - tests/kernels/attention
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT'
+- label: Kernels Attention DiffKV Test (H100)
+  timeout_in_minutes: 20
+  device: intel_gpu
+  num_devices: 1
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s kernels/attention/test_triton_unified_attention_diffkv.py
+  source_file_dependencies:
+  - vllm/v1/attention/ops/triton_unified_attention_diffkv.py
+  - vllm/v1/attention/backends/triton_attn_diffkv.py
+  - vllm/v1/attention/backends/flash_attn_diffkv.py
+  - tests/kernels/attention/test_triton_unified_attention_diffkv.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s kernels/attention/test_triton_unified_attention_diffkv.py'
+- label: Kernels Quantization Test %N
+  timeout_in_minutes: 90
+  parallelism: 2
+  device: intel_gpu
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  source_file_dependencies:
+  - csrc/quantization/
+  - vllm/model_executor/layers/quantization
+  - tests/kernels/quantization
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT'
+- label: Kernels MoE Test %N
+  timeout_in_minutes: 25
+  parallelism: 5
+  device: intel_gpu
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  source_file_dependencies:
+  - csrc/quantization/cutlass_w8a8/moe/
+  - csrc/moe/
+  - tests/kernels/moe
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/distributed/device_communicators/
+  - vllm/envs.py
+  - vllm/config
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT &&
+    pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT'
+- label: Kernels Mamba Test
+  timeout_in_minutes: 45
+  device: intel_gpu
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s kernels/mamba
+  source_file_dependencies:
+  - csrc/mamba/
+  - tests/kernels/mamba
+  - vllm/model_executor/layers/mamba/ops
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s kernels/mamba'
+- label: Kernels KDA Test
+  timeout_in_minutes: 20
+  device: intel_gpu
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s kernels/test_kda.py
+  source_file_dependencies:
+  - vllm/model_executor/layers/fla/ops/kda.py
+  - vllm/model_executor/layers/fla/ops/chunk_delta_h.py
+  - vllm/model_executor/layers/fla/ops/l2norm.py
+  - tests/kernels/test_kda.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s kernels/test_kda.py'
+- label: Kernels DeepGEMM Test (H100)
+  timeout_in_minutes: 45
+  device: intel_gpu
+  num_devices: 1
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - python3 ../tools/check_wheel_deepgemm.py
+  - pytest -v -s kernels/quantization/test_block_fp8.py
+  - pytest -v -s kernels/moe/test_deepgemm.py
+  - pytest -v -s kernels/moe/test_batched_deepgemm.py
+  - pytest -v -s kernels/attention/test_deepgemm_attention.py
+  - pytest -v -s quantization/test_cutlass_w4a16.py
+  source_file_dependencies:
+  - cmake/external_projects/deepgemm.cmake
+  - tools/install_deepgemm.sh
+  - tools/build_deepgemm_C.py
+  - tools/setup_deepgemm_pythons.sh
+  - tools/check_wheel_deepgemm.py
+  - vllm/utils/deep_gemm.py
+  - vllm/model_executor/layers/fused_moe
+  - vllm/model_executor/layers/quantization
+  - tests/kernels/quantization/test_block_fp8.py
+  - tests/kernels/moe/test_deepgemm.py
+  - tests/kernels/moe/test_batched_deepgemm.py
+  - tests/kernels/attention/test_deepgemm_attention.py
+  - tests/quantization/test_cutlass_w4a16.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s kernels/quantization/test_block_fp8.py &&
+    pytest -v -s kernels/moe/test_deepgemm.py &&
+    pytest -v -s kernels/moe/test_batched_deepgemm.py &&
+    pytest -v -s kernels/attention/test_deepgemm_attention.py &&
+    pytest -v -s quantization/test_cutlass_w4a16.py'
+- label: Kernels (B200)
+  timeout_in_minutes: 30
+  working_dir: .
+  device: intel_gpu
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - nvidia-smi
+  - python3 examples/basic/offline_inference/chat.py
+  - pytest -v -s tests/kernels/attention/test_attention_selector.py
+  - pytest -v -s tests/kernels/attention/test_flashinfer.py -k 'not num_heads2'
+  - pytest -v -s tests/kernels/attention/test_flashinfer_trtllm_attention.py
+  - pytest -v -s tests/kernels/attention/test_cutlass_mla_decode.py
+  - pytest -v -s tests/kernels/attention/test_flashinfer_mla_decode.py
+  - pytest -v -s tests/kernels/test_top_k_per_row.py
+  - pytest -v -s tests/kernels/quantization/test_cutlass_scaled_mm.py -k 'fp8'
+  - pytest -v -s tests/kernels/quantization/test_nvfp4_quant.py
+  - pytest -v -s tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
+  - pytest -v -s tests/kernels/quantization/test_nvfp4_scaled_mm.py
+  - pytest -v -s tests/kernels/quantization/test_flashinfer_scaled_mm.py
+  - pytest -v -s tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
+  - pytest -v -s tests/kernels/quantization/test_nvfp4_qutlass.py
+  - pytest -v -s tests/kernels/quantization/test_mxfp4_qutlass.py
+  - pytest -v -s tests/kernels/moe/test_nvfp4_moe.py
+  - pytest -v -s tests/kernels/moe/test_mxfp4_moe.py
+  - pytest -v -s tests/kernels/moe/test_ocp_mx_moe.py
+  - pytest -v -s tests/kernels/moe/test_flashinfer.py
+  - pytest -v -s tests/kernels/moe/test_flashinfer_moe.py
+  - pytest -v -s tests/kernels/moe/test_trtllm_nvfp4_moe.py
+  - pytest -v -s tests/kernels/moe/test_cutedsl_moe.py
+  - pytest -v -s tests/models/quantization/test_nvfp4.py
+  source_file_dependencies:
+  - csrc/quantization/fp4/
+  - csrc/attention/mla/
+  - csrc/quantization/cutlass_w8a8/moe/
+  - vllm/model_executor/layers/fused_moe/experts/cutlass_moe.py
+  - vllm/model_executor/layers/fused_moe/experts/flashinfer_cutlass_moe.py
+  - vllm/model_executor/layers/fused_moe/experts/trtllm_nvfp4_moe.py
+  - vllm/model_executor/layers/fused_moe/oracle/nvfp4.py
+  - vllm/model_executor/layers/fused_moe/prepare_finalize/flashinfer_nvlink_one_sided.py
+  - vllm/model_executor/layers/fused_moe/prepare_finalize/flashinfer_nvlink_two_sided.py
+  - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
+  - vllm/v1/attention/backends/flashinfer.py
+  - vllm/v1/attention/backends/mla/cutlass_mla.py
+  - vllm/v1/attention/backends/mla/flashinfer_mla.py
+  - vllm/v1/attention/selector.py
+  - vllm/platforms/cuda.py
+  - tests/kernels/test_top_k_per_row.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest -v -s tests/kernels/attention/test_attention_selector.py &&
+    pytest -v -s tests/kernels/attention/test_flashinfer.py -k "not num_heads2" &&
+    pytest -v -s tests/kernels/attention/test_flashinfer_trtllm_attention.py &&
+    pytest -v -s tests/kernels/attention/test_cutlass_mla_decode.py &&
+    pytest -v -s tests/kernels/attention/test_flashinfer_mla_decode.py &&
+    pytest -v -s tests/kernels/test_top_k_per_row.py &&
+    pytest -v -s tests/kernels/quantization/test_cutlass_scaled_mm.py -k "fp8" &&
+    pytest -v -s tests/kernels/quantization/test_nvfp4_quant.py &&
+    pytest -v -s tests/kernels/quantization/test_silu_mul_nvfp4_quant.py &&
+    pytest -v -s tests/kernels/quantization/test_nvfp4_scaled_mm.py &&
+    pytest -v -s tests/kernels/quantization/test_flashinfer_scaled_mm.py &&
+    pytest -v -s tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py &&
+    pytest -v -s tests/kernels/quantization/test_nvfp4_qutlass.py &&
+    pytest -v -s tests/kernels/quantization/test_mxfp4_qutlass.py &&
+    pytest -v -s tests/kernels/moe/test_nvfp4_moe.py &&
+    pytest -v -s tests/kernels/moe/test_mxfp4_moe.py &&
+    pytest -v -s tests/kernels/moe/test_ocp_mx_moe.py &&
+    pytest -v -s tests/kernels/moe/test_flashinfer.py &&
+    pytest -v -s tests/kernels/moe/test_flashinfer_moe.py &&
+    pytest -v -s tests/kernels/moe/test_trtllm_nvfp4_moe.py &&
+    pytest -v -s tests/kernels/moe/test_cutedsl_moe.py &&
+    pytest -v -s tests/models/quantization/test_nvfp4.py'
+- label: Kernels Helion Test
   timeout_in_minutes: 30
   device: intel_gpu
-  agent_tags:
-    label: production
-    gpu: 1+
-    mem: 16+
   no_plugin: true
-  working_dir: "."
+  working_dir: .
   env:
-    REGISTRY: "public.ecr.aws/q9t5s3a7"
-    REPO: "vllm-ci-test-repo"
-    VLLM_TEST_DEVICE: "xpu"
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pip install helion==1.1.0
+  - pytest -v -s kernels/helion/
   source_file_dependencies:
-    - vllm/ir
-    - vllm/kernels
+  - vllm/utils/import_utils.py
+  - tests/kernels/helion/
   commands:
-    - >-
-      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'cd tests &&
-      pytest -v -s kernels/ir'
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pip install helion==1.1.0 &&
+    pytest -v -s kernels/helion/'
+- label: Kernels FP8 MoE Test (1xH100)
+  timeout_in_minutes: 90
+  device: intel_gpu
+  num_devices: 1
+  optional: true
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s kernels/moe/test_cutlass_moe.py
+  - pytest -v -s kernels/moe/test_flashinfer.py
+  - pytest -v -s kernels/moe/test_gpt_oss_triton_kernels.py
+  - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py
+  - pytest -v -s kernels/moe/test_moe.py
+  - pytest -v -s kernels/moe/test_block_int8.py
+  - pytest -v -s kernels/moe/test_triton_moe_no_act_mul.py
+  - pytest -v -s kernels/moe/test_triton_moe_ptpc_fp8.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s kernels/moe/test_cutlass_moe.py &&
+    pytest -v -s kernels/moe/test_flashinfer.py &&
+    pytest -v -s kernels/moe/test_gpt_oss_triton_kernels.py &&
+    pytest -v -s kernels/moe/test_modular_oai_triton_moe.py &&
+    pytest -v -s kernels/moe/test_moe.py &&
+    pytest -v -s kernels/moe/test_block_int8.py &&
+    pytest -v -s kernels/moe/test_triton_moe_no_act_mul.py &&
+    pytest -v -s kernels/moe/test_triton_moe_ptpc_fp8.py'
+- label: Kernels FP8 MoE Test (2xH100)
+  timeout_in_minutes: 90
+  device: intel_gpu
+  num_devices: 2
+  optional: true
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 2+
+  _raw_old_commands:
+  - pytest -v -s kernels/moe/test_deepep_deepgemm_moe.py
+  - pytest -v -s kernels/moe/test_deepep_moe.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s kernels/moe/test_deepep_deepgemm_moe.py &&
+    pytest -v -s kernels/moe/test_deepep_moe.py'
+- label: Kernels Fp4 MoE Test (B200)
+  timeout_in_minutes: 60
+  device: intel_gpu
+  num_devices: 1
+  optional: true
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s kernels/moe/test_cutedsl_moe.py
+  - pytest -v -s kernels/moe/test_flashinfer_moe.py
+  - pytest -v -s kernels/moe/test_nvfp4_moe.py
+  - pytest -v -s kernels/moe/test_ocp_mx_moe.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s kernels/moe/test_cutedsl_moe.py &&
+    pytest -v -s kernels/moe/test_flashinfer_moe.py &&
+    pytest -v -s kernels/moe/test_nvfp4_moe.py &&
+    pytest -v -s kernels/moe/test_ocp_mx_moe.py'
+- label: Kernels FusedMoE Layer Test (2 H100s)
+  timeout_in_minutes: 90
+  device: intel_gpu
+  num_devices: 2
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 2+
+  _raw_old_commands:
+  - pytest -v -s kernels/moe/test_moe_layer.py
+  source_file_dependencies:
+  - csrc/quantization/cutlass_w8a8/moe/
+  - csrc/moe/
+  - tests/kernels/moe
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/
+  - vllm/distributed/device_communicators/
+  - vllm/config
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s kernels/moe/test_moe_layer.py'
+- label: Kernels FusedMoE Layer Test (2 B200s)
+  timeout_in_minutes: 90
+  device: intel_gpu
+  num_devices: 2
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 2+
+  _raw_old_commands:
+  - pytest -v -s kernels/moe/test_moe_layer.py
+  - pytest -v -s kernels/moe/test_deepep_v2_moe.py
+  source_file_dependencies:
+  - csrc/quantization/cutlass_w8a8/moe/
+  - csrc/moe/
+  - tests/kernels/moe
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/
+  - vllm/distributed/device_communicators/
+  - vllm/config
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s kernels/moe/test_moe_layer.py &&
+    pytest -v -s kernels/moe/test_deepep_v2_moe.py'

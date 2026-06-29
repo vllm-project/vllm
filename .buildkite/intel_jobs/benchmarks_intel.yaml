@@ -1,0 +1,26 @@
+group: Benchmarks Intel
+depends_on:
+  - image-build-xpu
+steps:
+- label: Benchmarks CLI Test
+  timeout_in_minutes: 20
+  device: intel_gpu
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s benchmarks/
+  source_file_dependencies:
+  - vllm/
+  - tests/benchmarks/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s benchmarks/'

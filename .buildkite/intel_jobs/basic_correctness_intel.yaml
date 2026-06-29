@@ -1,0 +1,34 @@
+group: Basic Correctness Intel
+depends_on:
+  - image-build-xpu
+steps:
+- label: Basic Correctness
+  timeout_in_minutes: 30
+  device: intel_gpu
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s basic_correctness/test_mem.py
+  - pytest -v -s basic_correctness/test_basic_correctness.py
+  - pytest -v -s basic_correctness/test_cpu_offload.py
+  source_file_dependencies:
+  - vllm/
+  - tests/basic_correctness/test_basic_correctness
+  - tests/basic_correctness/test_cpu_offload
+  - tests/basic_correctness/test_mem.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
+    pytest -v -s basic_correctness/test_mem.py &&
+    pytest -v -s basic_correctness/test_basic_correctness.py &&
+    pytest -v -s basic_correctness/test_cpu_offload.py'

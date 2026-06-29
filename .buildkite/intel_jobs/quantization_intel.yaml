@@ -1,0 +1,106 @@
+group: Quantization Intel
+depends_on:
+  - image-build-xpu
+steps:
+- label: Quantization
+  timeout_in_minutes: 90
+  device: intel_gpu
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - uv pip install --system torchao==0.17.0 --index-url https://download.pytorch.org/whl/cu130
+  - uv pip install --system conch-triton-kernels
+  - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  - tests/quantization
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    uv pip install --system torchao==0.17.0 --index-url https://download.pytorch.org/whl/cu130 &&
+    uv pip install --system conch-triton-kernels &&
+    VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py'
+- label: Quantized Fusions
+  timeout_in_minutes: 30
+  device: intel_gpu
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s fusion/
+  source_file_dependencies:
+  - tests/fusion
+  - vllm/model_executor/layers/fusion
+  - vllm/model_executor/kernels/linear
+  - vllm/model_executor/layers/quantization/compressed_tensors
+  - vllm/model_executor/layers/quantization/modelopt.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s fusion/'
+- label: Quantized MoE Test (B200)
+  timeout_in_minutes: 60
+  working_dir: .
+  device: intel_gpu
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -s -v tests/quantization/test_blackwell_moe.py
+  source_file_dependencies:
+  - tests/quantization/test_blackwell_moe.py
+  - vllm/model_executor/models/deepseek_v2.py
+  - vllm/model_executor/models/gpt_oss.py
+  - vllm/model_executor/models/llama4.py
+  - vllm/model_executor/layers/fused_moe
+  - vllm/model_executor/layers/quantization/compressed_tensors
+  - vllm/model_executor/layers/quantization/modelopt.py
+  - vllm/model_executor/layers/quantization/mxfp4.py
+  - vllm/v1/attention/backends/flashinfer.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest -s -v tests/quantization/test_blackwell_moe.py'
+- label: Quantized Models Test
+  timeout_in_minutes: 60
+  device: intel_gpu
+  no_plugin: true
+  working_dir: .
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s models/quantization
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization
+  - tests/models/quantization
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests && 
+    pytest -v -s models/quantization'

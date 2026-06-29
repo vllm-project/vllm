@@ -1,0 +1,307 @@
+group: Compile Intel
+depends_on:
+  - image-build-xpu
+steps:
+- label: Sequence Parallel Correctness Tests (2 GPUs)
+  timeout_in_minutes: 50
+  working_dir: .
+  num_devices: 2
+  device: intel_gpu
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 2+
+  _raw_old_commands:
+  - export VLLM_TEST_CLEAN_GPU_MEMORY=1
+  - pytest -v -s tests/compile/correctness_e2e/test_sequence_parallel.py
+  source_file_dependencies:
+  - vllm/model_executor/layers/
+  - vllm/compilation/
+  - vllm/v1/worker/
+  - vllm/v1/cudagraph_dispatcher.py
+  - tests/compile/correctness_e2e/test_sequence_parallel.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'export VLLM_TEST_CLEAN_GPU_MEMORY=1 &&
+    pytest -v -s tests/compile/correctness_e2e/test_sequence_parallel.py'
+- label: AsyncTP Correctness Tests (2xH100)
+  timeout_in_minutes: 50
+  working_dir: .
+  device: intel_gpu
+  optional: true
+  num_devices: 2
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 2+
+  _raw_old_commands:
+  - export VLLM_TEST_CLEAN_GPU_MEMORY=1
+  - pytest -v -s tests/compile/correctness_e2e/test_async_tp.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'export VLLM_TEST_CLEAN_GPU_MEMORY=1 &&
+    pytest -v -s tests/compile/correctness_e2e/test_async_tp.py'
+- label: Distributed Compile Unit Tests (2xH100)
+  timeout_in_minutes: 20
+  working_dir: .
+  device: intel_gpu
+  num_devices: 2
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 2+
+  _raw_old_commands:
+  - export VLLM_TEST_CLEAN_GPU_MEMORY=1
+  - pytest -s -v tests/compile/passes/distributed
+  source_file_dependencies:
+  - vllm/compilation/
+  - vllm/model_executor/layers
+  - tests/compile/passes/distributed/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'export VLLM_TEST_CLEAN_GPU_MEMORY=1 &&
+    pytest -s -v tests/compile/passes/distributed'
+- label: Fusion and Compile Unit Tests (2xB200)
+  timeout_in_minutes: 20
+  working_dir: .
+  device: intel_gpu
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - nvidia-smi
+  - pytest -v -s tests/compile/passes/test_fusion_attn.py -k FLASHINFER
+  - pytest -v -s tests/compile/passes/test_mla_attn_quant_fusion.py
+  - pytest -v -s tests/compile/passes/test_silu_mul_quant_fusion.py
+  - pytest -v -s tests/compile/passes/distributed/test_fusion_all_reduce.py
+  - pytest -v -s tests/compile/fullgraph/test_full_graph.py::test_fp8_kv_scale_compile
+  source_file_dependencies:
+  - csrc/quantization/fp4/
+  - vllm/model_executor/layers/quantization/
+  - vllm/model_executor/layers/layernorm.py
+  - vllm/model_executor/layers/activation.py
+  - vllm/model_executor/layers/attention/attention.py
+  - vllm/v1/attention/backends/flashinfer.py
+  - vllm/compilation/
+  - tests/compile/passes/test_fusion_attn.py
+  - tests/compile/passes/test_mla_attn_quant_fusion.py
+  - tests/compile/passes/test_silu_mul_quant_fusion.py
+  - tests/compile/passes/distributed/test_fusion_all_reduce.py
+  - tests/compile/fullgraph/test_full_graph.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest -v -s tests/compile/passes/test_fusion_attn.py -k FLASHINFER &&
+    pytest -v -s tests/compile/passes/test_mla_attn_quant_fusion.py &&
+    pytest -v -s tests/compile/passes/test_silu_mul_quant_fusion.py &&
+    pytest -v -s tests/compile/passes/distributed/test_fusion_all_reduce.py &&
+    pytest -v -s tests/compile/fullgraph/test_full_graph.py::test_fp8_kv_scale_compile'
+- label: Fusion E2E Quick (H100)
+  timeout_in_minutes: 15
+  working_dir: .
+  device: intel_gpu
+  num_devices: 1
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - nvidia-smi
+  - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "inductor_partition and not +rms_norm and not +quant_fp8"
+  - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "inductor_partition and not +rms_norm and +quant_fp8 and (qwen3 or deepseek)"
+  source_file_dependencies:
+  - csrc/quantization/
+  - vllm/model_executor/
+  - vllm/v1/attention/
+  - vllm/compilation/
+  - tests/compile/fusions_e2e/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "inductor_partition and not +rms_norm and not +quant_fp8" &&
+    pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "inductor_partition and not +rms_norm and +quant_fp8 and (qwen3 or deepseek)"'
+- label: Fusion E2E Config Sweep (H100)
+  timeout_in_minutes: 30
+  working_dir: .
+  device: intel_gpu
+  num_devices: 1
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - nvidia-smi
+  - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "llama-3"
+  source_file_dependencies:
+  - csrc/quantization/
+  - vllm/compilation/
+  - vllm/model_executor/layers/layernorm.py
+  - vllm/model_executor/layers/activation.py
+  - vllm/model_executor/layers/attention/attention.py
+  - vllm/model_executor/layers/quantization/input_quant_fp8.py
+  - tests/compile/fusions_e2e/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "llama-3"'
+- label: Fusion E2E Config Sweep (B200)
+  timeout_in_minutes: 30
+  working_dir: .
+  device: intel_gpu
+  num_devices: 1
+  optional: true
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - nvidia-smi
+  - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "inductor_partition and (FLASHINFER and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek)) or llama-3)"
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "inductor_partition and (FLASHINFER and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek)) or llama-3)"'
+- label: Fusion E2E TP2 Quick (H100)
+  timeout_in_minutes: 20
+  working_dir: .
+  device: intel_gpu
+  num_devices: 2
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 2+
+  _raw_old_commands:
+  - nvidia-smi
+  - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k "inductor_partition and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek))"
+  - pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k "inductor_partition and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek))"
+  source_file_dependencies:
+  - csrc/quantization/
+  - vllm/model_executor/
+  - vllm/v1/attention/
+  - vllm/compilation/
+  - tests/compile/fusions_e2e/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k "inductor_partition and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek))" &&
+    pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k "inductor_partition and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek))"'
+- label: Fusion E2E TP2 AR-RMS Config Sweep (H100)
+  timeout_in_minutes: 40
+  working_dir: .
+  device: intel_gpu
+  num_devices: 2
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 2+
+  _raw_old_commands:
+  - nvidia-smi
+  - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k "llama-3"
+  source_file_dependencies:
+  - csrc/quantization/
+  - vllm/compilation/
+  - vllm/model_executor/layers/layernorm.py
+  - vllm/model_executor/layers/activation.py
+  - vllm/model_executor/layers/attention/attention.py
+  - vllm/model_executor/layers/quantization/input_quant_fp8.py
+  - tests/compile/fusions_e2e/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k "llama-3"'
+- label: Fusion E2E TP2 AsyncTP Config Sweep (H100)
+  timeout_in_minutes: 40
+  working_dir: .
+  device: intel_gpu
+  num_devices: 2
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 2+
+  _raw_old_commands:
+  - nvidia-smi
+  - pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k "llama-3"
+  source_file_dependencies:
+  - csrc/quantization/
+  - vllm/compilation/
+  - vllm/model_executor/layers/layernorm.py
+  - vllm/model_executor/layers/activation.py
+  - vllm/model_executor/layers/attention/attention.py
+  - vllm/model_executor/layers/quantization/input_quant_fp8.py
+  - tests/compile/fusions_e2e/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k "llama-3"'
+- label: Fusion E2E TP2 (B200)
+  timeout_in_minutes: 20
+  working_dir: .
+  device: intel_gpu
+  num_devices: 2
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 2+
+  _raw_old_commands:
+  - nvidia-smi
+  - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k "(FLASHINFER and inductor_partition and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek))) or Llama-3.1-8B-Instruct-FP4"
+  - pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k "FLASHINFER and inductor_partition and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek))"
+  source_file_dependencies:
+  - csrc/quantization/
+  - vllm/model_executor/
+  - vllm/v1/attention/
+  - vllm/compilation/
+  - tests/compile/fusions_e2e/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k "(FLASHINFER and inductor_partition and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek))) or Llama-3.1-8B-Instruct-FP4" &&
+    pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k "FLASHINFER and inductor_partition and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek))"'
