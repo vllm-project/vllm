@@ -622,6 +622,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "DeepSeekV4MTPModel": ("vllm.models.deepseek_v4", "DeepSeekV4MTP"),
     "MiniMaxM3MTP": ("vllm.models.minimax_m3", "MiniMaxM3MTP"),
     "Gemma4MTPModel": ("gemma4_mtp", "Gemma4MTP"),
+    "BailingMTPModel": ("bailing_mtp", "BailingMTP"),
     "ErnieMTPModel": ("ernie_mtp", "ErnieMTP"),
     "ExaoneMoeMTP": ("exaone_moe_mtp", "ExaoneMoeMTP"),
     "Exaone4_5_MTP": ("exaone4_5_mtp", "Exaone4_5_MTP"),

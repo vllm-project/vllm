@@ -1573,6 +1573,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         trust_remote_code=True,
         min_transformers_version="5.8.0",
     ),
+    "BailingMTPModel": _HfExamplesInfo(
+        "inclusionAI/Ling-2.6-flash",
+        trust_remote_code=True,
+        speculative_model="inclusionAI/Ling-2.6-flash",
+        is_available_online=True,
+    ),
     "ErnieMTPModel": _HfExamplesInfo(
         "baidu/ERNIE-4.5-21B-A3B-PT",
         trust_remote_code=True,
