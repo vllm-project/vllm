@@ -10,7 +10,6 @@ use std::task::{Context, Poll};
 use futures::{Stream, StreamExt as _};
 use thiserror_ext::AsReport as _;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_openssl::SslStream;
 use tokio_stream::wrappers::ReceiverStream;
@@ -20,6 +19,7 @@ use tracing::info;
 use vllm_text::{DecodedTextEvent, TextOutputStreamExt as _};
 
 use self::convert::ResponseOpts;
+use crate::listener::{ListenerAddr, ListenerIo};
 use crate::state::AppState;
 
 /// Generated protobuf/gRPC types for the `vllm` package.
@@ -35,12 +35,13 @@ mod tests;
 /// Newtype over `tokio-openssl`'s `SslStream` so we can implement tonic's
 /// [`Connected`] on it (the orphan rule blocks doing so on the foreign type).
 pub(crate) struct GrpcTlsStream {
-    inner: SslStream<TcpStream>,
-    remote_addr: SocketAddr,
+    inner: SslStream<ListenerIo>,
+    remote_addr: Option<SocketAddr>,
 }
 
 impl GrpcTlsStream {
-    pub(crate) fn new(inner: SslStream<TcpStream>, remote_addr: SocketAddr) -> Self {
+    pub(crate) fn new(inner: SslStream<ListenerIo>, remote_addr: ListenerAddr) -> Self {
+        let remote_addr = remote_addr.tcp_addr();
         Self { inner, remote_addr }
     }
 }
@@ -79,7 +80,7 @@ impl Connected for GrpcTlsStream {
     fn connect_info(&self) -> TcpConnectInfo {
         TcpConnectInfo {
             local_addr: None,
-            remote_addr: Some(self.remote_addr),
+            remote_addr: self.remote_addr,
         }
     }
 }

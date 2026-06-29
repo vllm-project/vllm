@@ -26,6 +26,7 @@ arc-swap = "1.9.0"
 async-openai = { version = "0.33.1", default-features = false, features = ["native-tls"] }
 async-trait = "0.1.89"
 asynk-strim-attr = "0.1.0"
+auto_enums = { version = "0.8.9", features = ["tokio1"] }
 axum = "0.8.8"
 base64 = "0.22.1"
 bytemuck = { version = "1.25.0", features = ["extern_crate_alloc"] }

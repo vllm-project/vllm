@@ -31,9 +31,10 @@ use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
 use super::pb::generate_client::GenerateClient;
 use super::{GenerateServer, GenerateServiceImpl, pb};
+use crate::listener::Listener;
 use crate::state::AppState;
 use crate::tls_tests::{TestCerts, server_tls};
-use crate::{grpc_tls_incoming, tls};
+use crate::{grpc_incoming, grpc_tls_incoming, tls};
 
 // ========================================================================================
 // Helpers (mirrors the patterns in routes/tests.rs)
@@ -286,7 +287,7 @@ async fn grpc_test_server(
     let addr = listener.local_addr().expect("local addr");
 
     let server_task = tokio::spawn(async move {
-        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+        let incoming = grpc_incoming(Listener::Tcp(listener));
         TonicServer::builder()
             .add_service(svc)
             .serve_with_incoming(incoming)
@@ -317,7 +318,8 @@ async fn grpc_tls_test_server(
     let addr = listener.local_addr().expect("local addr").to_string();
 
     let server_task = tokio::spawn(async move {
-        let incoming = grpc_tls_incoming(listener, context, tls::TLS_HANDSHAKE_TIMEOUT);
+        let incoming =
+            grpc_tls_incoming(Listener::Tcp(listener), context, tls::TLS_HANDSHAKE_TIMEOUT);
         TonicServer::builder()
             .add_service(svc)
             .serve_with_incoming(incoming)
@@ -412,7 +414,7 @@ async fn grpc_server_with_keepalive(
     }
 
     let server_task = tokio::spawn(async move {
-        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
+        let incoming = grpc_incoming(Listener::Tcp(listener));
         builder
             .add_service(svc)
             .serve_with_incoming(incoming)
