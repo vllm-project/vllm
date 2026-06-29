@@ -564,8 +564,8 @@ __global__ void grouped_topk_fused_kernel(
   T* s_group_scores = reinterpret_cast<T*>(ptr_u);
 
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-  asm volatile("griddepcontrol.wait;");  // I think all prolog can be put before
-                                         // acqbulk because it's ptr arithmetic
+  cudaGridDependencySynchronize();  // I think all prolog can be put before
+                                    // acqbulk because it's ptr arithmetic
 #endif
 
   // phase 1: per-group scan
@@ -609,7 +609,7 @@ __global__ void grouped_topk_fused_kernel(
       topk_values[i] = 1.0f / static_cast<float>(topk_i32);
     }
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-    asm volatile("griddepcontrol.launch_dependents;");
+    cudaTriggerProgrammaticLaunchCompletion();
 #endif
     return;
   }
@@ -670,7 +670,7 @@ __global__ void grouped_topk_fused_kernel(
   }
 
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-  asm volatile("griddepcontrol.launch_dependents;");
+  cudaTriggerProgrammaticLaunchCompletion();
 #endif
 }
 
@@ -1052,7 +1052,7 @@ std::tuple<torch::stable::Tensor, torch::stable::Tensor> grouped_topk(
             reinterpret_cast<IdxT*>(topk_indices.mutable_data_ptr()),         \
             reinterpret_cast<BiasT const*>(bias.data_ptr()), num_tokens,      \
             num_experts, n_group, topk_group, topk, renormalize,              \
-            routed_scaling_factor, false, stream);                            \
+            routed_scaling_factor, true, stream);                             \
         break;                                                                \
       case vllm::moe::SCORING_SIGMOID:                                        \
         vllm::moe::invokeNoAuxTc<T, BiasT, IdxT, vllm::moe::SCORING_SIGMOID>( \
@@ -1061,7 +1061,7 @@ std::tuple<torch::stable::Tensor, torch::stable::Tensor> grouped_topk(
             reinterpret_cast<IdxT*>(topk_indices.mutable_data_ptr()),         \
             reinterpret_cast<BiasT const*>(bias.data_ptr()), num_tokens,      \
             num_experts, n_group, topk_group, topk, renormalize,              \
-            routed_scaling_factor, false, stream);                            \
+            routed_scaling_factor, true, stream);                             \
         break;                                                                \
       default:                                                                \
         STD_TORCH_CHECK(false, "Unsupported scoring_func");                   \
