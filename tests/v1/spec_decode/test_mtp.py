@@ -114,6 +114,7 @@ def test_mtp_load_model_unified(mock_get_model, mock_get_layers, mock_get_pp_gro
     # MTP shares embed_tokens with target model
     assert proposer.model.model.embed_tokens == target_model.model.embed_tokens
 
+
 @pytest.mark.parametrize("num_speculative_tokens", [1])
 def test_mtp_propose(num_speculative_tokens, monkeypatch):
     """Test that MTP's forward method returns hidden states directly"""
