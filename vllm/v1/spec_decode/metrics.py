@@ -29,6 +29,8 @@ class SpecDecodingStats:
     num_accepted_tokens: int = 0
     num_accepted_tokens_per_pos: list[int] = field(default_factory=list)
     num_draft_tokens_per_pos: list[int] = field(default_factory=list)
+    dcut_kept_draft_tokens: int = 0
+    dcut_total_draft_tokens: int = 0
 
     @classmethod
     def new(cls, num_spec_tokens: int) -> "SpecDecodingStats":
@@ -47,6 +49,10 @@ class SpecDecodingStats:
             self.num_accepted_tokens_per_pos[i] += 1
         for i in range(num_draft_tokens):
             self.num_draft_tokens_per_pos[i] += 1
+
+    def observe_dcut(self, kept_draft_tokens: int, total_draft_tokens: int):
+        self.dcut_kept_draft_tokens += kept_draft_tokens
+        self.dcut_total_draft_tokens += total_draft_tokens
 
 
 class SpecDecodingLogging:
@@ -68,6 +74,8 @@ class SpecDecodingLogging:
         self.num_drafts: list[int] = []
         self.num_draft_tokens: list[int] = []
         self.num_accepted_tokens: list[int] = []
+        self.dcut_kept_draft_tokens: list[int] = []
+        self.dcut_total_draft_tokens: list[int] = []
         self.accepted_tokens_per_pos_lists: list[list[int]] = []
         self.last_log_time = time.monotonic()
 
@@ -75,6 +83,8 @@ class SpecDecodingLogging:
         self.num_drafts.append(spec_decoding_stats.num_drafts)
         self.num_draft_tokens.append(spec_decoding_stats.num_draft_tokens)
         self.num_accepted_tokens.append(spec_decoding_stats.num_accepted_tokens)
+        self.dcut_kept_draft_tokens.append(spec_decoding_stats.dcut_kept_draft_tokens)
+        self.dcut_total_draft_tokens.append(spec_decoding_stats.dcut_total_draft_tokens)
         self.accepted_tokens_per_pos_lists.append(
             spec_decoding_stats.num_accepted_tokens_per_pos
         )
@@ -109,6 +119,13 @@ class SpecDecodingLogging:
             if num_draft_tokens > 0
             else float("nan")
         )
+        dcut_kept_draft_tokens = np.sum(self.dcut_kept_draft_tokens)
+        dcut_total_draft_tokens = np.sum(self.dcut_total_draft_tokens)
+        dcut_keep_ratio = (
+            dcut_kept_draft_tokens / dcut_total_draft_tokens
+            if dcut_total_draft_tokens > 0
+            else float("nan")
+        )
 
         # Conventionally, mean acceptance length includes the bonus token
         mean_acceptance_length = 1 + (num_accepted_tokens / num_drafts)
@@ -125,7 +142,8 @@ class SpecDecodingLogging:
             "Accepted: %d tokens, "
             "Drafted: %d tokens, "
             "Per-position acceptance rate: %s, "
-            "Avg Draft acceptance rate: %.1f%%",
+            "Avg Draft acceptance rate: %.1f%%, "
+            "D-Cut keep ratio: %.3f",
             mean_acceptance_length,
             accepted_throughput,
             draft_throughput,
@@ -133,6 +151,7 @@ class SpecDecodingLogging:
             num_draft_tokens,
             rates_str,
             draft_acceptance_rate,
+            dcut_keep_ratio,
         )
         self.reset()
 
