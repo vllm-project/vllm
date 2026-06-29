@@ -568,6 +568,7 @@ RUN apt-get update -q -y && apt-get install -q -y --no-install-recommends \
     libibverbs1 \
     ibverbs-providers \
     ibverbs-utils \
+    unzip \
     pkg-config ffmpeg libavcodec-dev libavformat-dev libavutil-dev \
     libswscale-dev libavdevice-dev libavfilter-dev libswresample-dev \
     && rm -rf /var/lib/apt/lists/*
