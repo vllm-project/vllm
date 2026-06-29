@@ -18,7 +18,6 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 )
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
     DecodeSpeculatorCudaGraphManager,
     PrefillSpeculatorCudaGraphManager,
@@ -58,16 +57,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
         True for Eagle/standard MTP (each step produces new KV).
         False for Gemma4 MTP (Q-only, shares target KV, constant positions).
-        """
-        return True
-
-    @property
-    def model_returns_tuple(self) -> bool:
-        """
-        Whether the draft model's forward() returns a tuple.
-
-        True: returns (last_hidden_states, hidden_states) — Eagle, Gemma4 MTP.
-        False: returns a single tensor used for both — standard MTP (DeepSeek).
         """
         return True
 
@@ -224,6 +213,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             need_eager=is_profile,
         )
 
+        self._prepare_eplb_forward(input_batch.num_tokens)
+
         if prefill_batch_desc.cg_mode == CUDAGraphMode.FULL:
             # Replay the full graph for draft prefill.
             assert self.prefill_cudagraph_manager is not None
@@ -279,34 +270,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
         return self.draft_tokens[:num_reqs]
 
-    def sample_draft(
-        self,
-        hidden_states: torch.Tensor,
-        positions: torch.Tensor,
-        idx_mapping: torch.Tensor,
-        temperature: torch.Tensor,
-        seeds: torch.Tensor,
-        draft_step: torch.Tensor,
-        draft_logits: torch.Tensor | None,
-    ) -> torch.Tensor:
-        logits = self.model.compute_logits(hidden_states)
-        if draft_logits is not None:
-            # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
-            # used for draft and target sampling.
-            return gumbel_sample(
-                logits,
-                idx_mapping,
-                temperature,
-                seeds,
-                positions + 1,
-                apply_temperature=True,
-                output_processed_logits=draft_logits,
-                output_processed_logits_col=draft_step,
-                use_fp64=self.use_fp64_gumbel,
-            )
-        else:
-            return logits.argmax(dim=-1)
-
     @torch.inference_mode()
     def _run_model(
         self,
@@ -357,7 +320,9 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             else:
                 # Eager (NONE): call the raw model directly.
                 ret_hidden_states = self.model(**model_inputs)
-        if self.model_returns_tuple:
+        # Some MTP models declare a single-tensor contract but return
+        # (logits_hidden, feedback_hidden) for final-norm correctness.
+        if isinstance(ret_hidden_states, tuple):
             last_hidden_states, hidden_states = ret_hidden_states
         else:
             last_hidden_states = ret_hidden_states
@@ -397,7 +362,10 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             self.current_draft_step,
             self.draft_logits,
         )
-        self.hidden_states[:num_reqs] = hidden_states[last_token_indices]
+        if last_hidden_states is hidden_states:
+            self.hidden_states[:num_reqs] = sample_hidden_states
+        else:
+            self.hidden_states[:num_reqs] = hidden_states[last_token_indices]
         self.input_buffers.positions[:num_reqs] = positions
 
     def _multi_step_decode(
@@ -458,6 +426,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     ) -> None:
+        self._prepare_eplb_forward(num_reqs)
+
         idx_mapping = self.idx_mapping[:num_reqs]
         positions = self.input_buffers.positions[:num_reqs]
         # Run the draft model forward pass.

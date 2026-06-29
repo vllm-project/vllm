@@ -6,6 +6,7 @@ from typing import Any
 
 import torch
 
+import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import ParallelConfig, get_current_vllm_config
 from vllm.distributed import (
@@ -77,24 +78,20 @@ def determine_expert_counts(
 ) -> tuple[int, int, int]:
     global_num_experts = num_experts + num_redundant_experts
     logical_num_experts = num_experts
-    # ROCm aiter shared experts fusion
-    # AITER only supports gated activations (silu/gelu), so disable it
-    # for non-gated MoE (is_act_and_mul=False)
-    # rocm_aiter_fmoe_enabled = rocm_aiter_ops.is_fused_moe_enabled() and is_act_and_mul
-    aiter_fmoe_shared_expert_enabled = (
-        rocm_aiter_ops.is_fusion_moe_shared_experts_enabled() and is_act_and_mul
-    )
+    # Shared-expert fusion: append the shared expert(s) as routed-expert slots
+    # so they run in the same grouped GEMM. Gated by
+    # VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: either the native aiter fused-MoE
+    # path (env + master switch, via is_fusion_moe_shared_experts_enabled) or the
+    # backend-neutral router-append path (env alone, independent of the master
+    # switch; e.g. the MM3 triton/flydsl mxfp8 MoE). Gated activations only.
+    fuse_shared_enabled = (
+        rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+        or envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
+    ) and is_act_and_mul
 
     num_fused_shared_experts = (
-        n_shared_experts
-        if n_shared_experts is not None and aiter_fmoe_shared_expert_enabled
-        else 0
+        n_shared_experts if n_shared_experts is not None and fuse_shared_enabled else 0
     )
-    if not aiter_fmoe_shared_expert_enabled and num_fused_shared_experts != 0:
-        raise ValueError(
-            "n_shared_experts is only supported on ROCm aiter when "
-            "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled"
-        )
 
     return global_num_experts, logical_num_experts, num_fused_shared_experts
 
@@ -105,6 +102,7 @@ def FusedMoE(
     top_k: int,
     hidden_size: int,
     intermediate_size: int,
+    intermediate_pad: int | None = None,
     params_dtype: torch.dtype | None = None,
     renormalize: bool = True,
     use_grouped_topk: bool = False,
@@ -120,6 +118,8 @@ def FusedMoE(
     scoring_func: str = "softmax",
     routed_scaling_factor: float = 1.0,
     swiglu_limit: float | None = None,
+    swiglu_alpha: float | None = None,
+    swiglu_beta: float | None = None,
     e_score_correction_bias: torch.Tensor | None = None,
     apply_router_weight_on_input: bool = False,
     activation: str = "silu",
@@ -185,7 +185,8 @@ def FusedMoE(
         has_bias: Whether expert layers have bias terms
         is_sequence_parallel: Whether sequence parallelism is enabled
         expert_mapping: Expert parameter mapping for weight loading
-        n_shared_experts: Number of shared experts (ROCm aiter only)
+        n_shared_experts: Number of shared experts to fuse into the routed
+            grouped GEMM (ROCm; requires aiter FSE or the router-append path)
         router_logits_dtype: Data type for router logits buffers
         gate: Pre-configured gate module
         shared_experts: Pre-configured shared experts module
@@ -286,6 +287,19 @@ def FusedMoE(
             else 1.0,
             e_score_correction_bias=e_score_correction_bias,
             num_fused_shared_experts=num_fused_shared_experts,
+            # Fused shared-expert slot weight. With apply_routed_scale_to_output
+            # the runner scales the combined output by routed_scaling_factor, so
+            # the shared slot weight must be 1/routed_scaling_factor for its net
+            # contribution to be 1.0 (matching the un-scaled separate-MLP add).
+            shared_expert_weight=(
+                (1.0 / routed_scaling_factor)
+                if (
+                    apply_routed_scale_to_output
+                    and num_fused_shared_experts > 0
+                    and routed_scaling_factor
+                )
+                else 1.0
+            ),
             zero_expert_type=zero_expert_type,
             num_logical_experts=logical_num_experts,
             hash_indices_table=hash_indices_table,
@@ -309,6 +323,7 @@ def FusedMoE(
         experts_per_token=top_k,
         hidden_dim=hidden_size,
         intermediate_size=intermediate_size,
+        intermediate_pad=intermediate_pad,
         num_local_experts=expert_map_manager.local_num_experts,
         num_logical_experts=logical_num_experts,
         moe_parallel_config=moe_parallel_config,
@@ -322,6 +337,8 @@ def FusedMoE(
         device=vllm_config.device_config.device,
         routing_method=router.routing_method_type,  # Not ideal
         swiglu_limit=swiglu_limit,
+        swiglu_alpha=swiglu_alpha,
+        swiglu_beta=swiglu_beta,
         max_capture_size=vllm_config.compilation_config.max_cudagraph_capture_size,
     )
 
@@ -349,8 +366,12 @@ def FusedMoE(
         topk_group=topk_group,
         custom_routing_function=custom_routing_function,
         scoring_func=scoring_func,
-        routed_scaling_factor=routed_scaling_factor,
+        routed_scaling_factor=routed_scaling_factor
+        if not apply_routed_scale_to_output
+        else 1.0,
         swiglu_limit=swiglu_limit,
+        swiglu_alpha=swiglu_alpha,
+        swiglu_beta=swiglu_beta,
         # TODO get from router? needs to be truncated?
         e_score_correction_bias=e_score_correction_bias,
         apply_router_weight_on_input=apply_router_weight_on_input,

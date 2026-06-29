@@ -21,8 +21,9 @@ steps:
   - csrc/
   - tests/kernels/core
   - tests/kernels/test_concat_mla_q.py
+  - tests/kernels/test_fused_qk_norm_rope_gate.py
   commands:
-    - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py  kernels/test_concat_mla_q.py
+    - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py  kernels/test_concat_mla_q.py kernels/test_fused_qk_norm_rope_gate.py
 
 - label: Kernels MiniMax Reduce RMS Test (2 GPUs)
   key: kernels-minimax-reduce-rms-test-2-gpus
@@ -46,8 +47,10 @@ steps:
   - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
   - vllm/models/deepseek_v4/common/ops/
   - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
+  - tests/kernels/test_top_k_per_row.py # it runs on Blackwell too - some kernels have arch-specific optimizations
   commands:
     - pytest -v -s kernels/test_fused_deepseek_v4_*.py
+    - pytest -v -s kernels/test_top_k_per_row.py
 
 - label: Deepseek V4 Kernel Test (B200)
   key: deepseek-v4-kernel-test-b200
@@ -73,6 +76,33 @@ steps:
   commands:
     - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
+  mirror:
+    amd:
+      device: mi325_1
+      timeout_in_minutes: 55
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/attention/
+      - vllm/v1/attention
+      - vllm/model_executor/layers/attention
+      - tests/kernels/attention
+      - vllm/_aiter_ops.py
+      - vllm/envs.py
+      - vllm/platforms/rocm.py
+
+- label: Kernels Attention DiffKV Test (H100)
+  key: kernels-attention-diffkv-test-h100
+  timeout_in_minutes: 20
+  device: h100
+  num_devices: 1
+  source_file_dependencies:
+  - vllm/v1/attention/ops/triton_unified_attention_diffkv.py
+  - vllm/v1/attention/backends/triton_attn_diffkv.py
+  - vllm/v1/attention/backends/flash_attn_diffkv.py
+  - tests/kernels/attention/test_triton_unified_attention_diffkv.py
+  commands:
+    - pytest -v -s kernels/attention/test_triton_unified_attention_diffkv.py
 
 - label: Kernels Quantization Test %N
   key: kernels-quantization-test
@@ -86,10 +116,11 @@ steps:
   parallelism: 2
   mirror:
     amd:
-      device: mi300_1
+      device: mi325_1
       source_file_dependencies:
       - csrc/quantization/
       - vllm/model_executor/layers/quantization
+      - vllm/config/
       - tests/kernels/quantization
       - tests/kernels/quantization/test_rocm_skinny_gemms.py
       - vllm/_aiter_ops.py
@@ -113,6 +144,22 @@ steps:
     - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
     - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 5
+  mirror:
+    amd:
+      device: mi325_1
+      timeout_in_minutes: 50
+      source_file_dependencies:
+      - csrc/quantization/cutlass_w8a8/moe/
+      - csrc/moe/
+      - tests/kernels/moe
+      - vllm/model_executor/layers/fused_moe/
+      - vllm/distributed/device_communicators/
+      - vllm/envs.py
+      - vllm/config
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      depends_on:
+      - image-build-amd
 
 - label: Kernels Mamba Test
   key: kernels-mamba-test
@@ -223,12 +270,12 @@ steps:
   - vllm/utils/import_utils.py
   - tests/kernels/helion/
   commands:
-    - pip install helion==1.0.0
+    - pip install helion==1.1.0
     - pytest -v -s kernels/helion/
 
  
-- label: Kernels FP8 MoE Test (1 H100)
-  key: kernels-fp8-moe-test-1-h100
+- label: Kernels FP8 MoE Test (1xH100)
+  key: kernels-fp8-moe-test-1xh100
   timeout_in_minutes: 90
   device: h100
   num_devices: 1
@@ -244,8 +291,8 @@ steps:
     - pytest -v -s kernels/moe/test_triton_moe_no_act_mul.py
     - pytest -v -s kernels/moe/test_triton_moe_ptpc_fp8.py
 
-- label: Kernels FP8 MoE Test (2 H100s)
-  key: kernels-fp8-moe-test-2-h100s
+- label: Kernels FP8 MoE Test (2xH100)
+  key: kernels-fp8-moe-test-2xh100
   timeout_in_minutes: 90
   device: h100
   num_devices: 2

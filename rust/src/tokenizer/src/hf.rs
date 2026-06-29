@@ -8,7 +8,10 @@ use tokenizers::Tokenizer as HfTokenizer;
 use tracing::{info, warn};
 
 use crate::byte_level_decode::decode_byte_level;
+use crate::hf::added_tokens::load_tokenizer_json_with_extra_tokens;
 use crate::{Result, Tokenizer};
+
+mod added_tokens;
 
 enum Backend {
     Hf(Box<HfTokenizer>),
@@ -104,7 +107,8 @@ impl HuggingFaceTokenizer {
     /// Load from `tokenizer.json` with `fastokens`.
     pub fn new_fastokens(path: &Path) -> Result<Self> {
         info!(path = %path.display(), "loading tokenizer with fastokens");
-        let t = FastokensTokenizer::from_file(path)
+        let tokenizer_json = load_tokenizer_json_with_extra_tokens(path)?;
+        let t = FastokensTokenizer::from_json(tokenizer_json)
             .map_err(|error| tokenizer_error!("failed to load tokenizer: {}", error.as_report()))?;
         Ok(Self::from_fastokens_backend(t))
     }
@@ -112,7 +116,8 @@ impl HuggingFaceTokenizer {
     /// Load from `tokenizer.json` with Hugging Face `tokenizers`.
     pub fn new_hf(path: &Path) -> Result<Self> {
         info!(path = %path.display(), "loading tokenizer with huggingface tokenizers");
-        let t = HfTokenizer::from_file(path)
+        let tokenizer_json = load_tokenizer_json_with_extra_tokens(path)?;
+        let t = serde_json::from_value::<HfTokenizer>(tokenizer_json)
             .map_err(|error| tokenizer_error!("failed to load tokenizer: {}", error.as_report()))?;
         Ok(Self::from_hf_backend(t))
     }
@@ -166,6 +171,13 @@ impl Tokenizer for HuggingFaceTokenizer {
         match &self.backend {
             Backend::Hf(t) => t.token_to_id(token),
             Backend::Fastokens(t) | Backend::FastokensByteLevel(t) => t.token_to_id(token),
+        }
+    }
+
+    fn vocab_size(&self) -> usize {
+        match &self.backend {
+            Backend::Hf(t) => t.get_vocab_size(true),
+            Backend::Fastokens(t) | Backend::FastokensByteLevel(t) => t.vocab_size(),
         }
     }
 
@@ -248,6 +260,37 @@ mod tests {
         ));
         let special_id = wrapper.token_to_id("<|im_end|>").expect("resolve added special token id");
         assert!(wrapper.is_special_id(special_id));
+    }
+
+    #[test]
+    fn constructors_merge_extra_added_tokens_from_tokenizer_config() {
+        let tokenizer = tiny_bpe_tokenizer();
+
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("tokenizer.json");
+        tokenizer.save(&path, false).expect("save tokenizer json");
+        std::fs::write(
+            dir.path().join("tokenizer_config.json"),
+            r#"{
+                "added_tokens_decoder": {
+                    "9": {
+                        "content": "<|image_pad|>",
+                        "special": true,
+                        "normalized": false
+                    }
+                }
+            }"#,
+        )
+        .expect("write tokenizer config");
+
+        for wrapper in [
+            HuggingFaceTokenizer::new_fastokens(&path).expect("load fastokens wrapper"),
+            HuggingFaceTokenizer::new_hf(&path).expect("load hf wrapper"),
+        ] {
+            assert_eq!(wrapper.token_to_id("<|image_pad|>"), Some(9));
+            assert_eq!(wrapper.id_to_token(9).as_deref(), Some("<|image_pad|>"));
+            assert!(wrapper.is_special_id(9));
+        }
     }
 
     /// BPE tokenizer that round-trips through fastokens with a genuine
