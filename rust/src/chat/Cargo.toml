@@ -25,6 +25,7 @@ strum.workspace = true
 subenum.workspace = true
 thiserror.workspace = true
 thiserror-ext.workspace = true
+time.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 trait-set.workspace = true
