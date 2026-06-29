@@ -10,6 +10,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.v1.kv_cache_interface import KVQuantMode
 
 FP8_MIN, FP8_MAX = get_fp8_min_max()
 
@@ -276,6 +277,7 @@ def triton_reshape_and_cache_flash_per_token_head_quant(
     k_scale_cache: torch.Tensor,  # [num_blocks, block_size, num_kv_heads] float32
     v_scale_cache: torch.Tensor,  # [num_blocks, block_size, num_kv_heads] float32
     slot_mapping: torch.Tensor,  # [num_tokens]
+    kv_quant_mode: KVQuantMode,
 ):
     """Quantize key/value per (token, head) and write to paged cache.
 
@@ -283,9 +285,26 @@ def triton_reshape_and_cache_flash_per_token_head_quant(
     quantized data in key_cache/value_cache, and stores the float32
     scale in k_scale_cache/v_scale_cache.
 
-    The quantization range (QUANT_MAX, QUANT_MIN) is derived from the
-    cache tensor dtype so the same code path works for int8 and fp8.
+    INT4 needs sub-byte packing + a Hadamard rotation, so it is handled by
+    its own kernel; INT8 / FP8 share this kernel, with the quantization
+    range (QUANT_MAX, QUANT_MIN) derived from the cache tensor dtype.
     """
+    if kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+        from vllm.v1.attention.ops.int4_per_token_head import (
+            reshape_and_cache_int4,
+        )
+
+        reshape_and_cache_int4(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            k_scale_cache=k_scale_cache,
+            v_scale_cache=v_scale_cache,
+        )
+        return
+
     cache_dtype = key_cache.dtype
     quant_params = _PER_TOKEN_HEAD_QUANT_PARAMS.get(cache_dtype)
     if quant_params is None:
