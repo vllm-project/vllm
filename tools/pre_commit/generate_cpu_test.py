@@ -89,8 +89,6 @@ TRANSFORMS: list[Transform] = [
     Pin("torch", "2.11.0"),
     Unpin("torchaudio"),
     Unpin("torchvision"),
-    # https://github.com/vllm-project/vllm/pull/38800#issuecomment-4228314305
-    Pin("sentence-transformers", "5.3.0"),
 ]
 
 
