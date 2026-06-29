@@ -70,13 +70,6 @@ PAUSE_TOKEN_THRESHOLD = 10
 ATTN_BACKEND = "TRITON_ATTN" if current_platform.is_rocm() else "FLASH_ATTN"
 
 
-def _get_ray_assigned_device() -> torch.device:
-    gpu_ids = ray.get_gpu_ids()
-    if not gpu_ids:
-        return torch.device("cuda:0")
-    return torch.device(f"cuda:{int(gpu_ids[0])}")
-
-
 class MyLLM(vllm.AsyncLLMEngine):
     """Configure the vLLM worker for Ray placement group execution."""
 
@@ -139,15 +132,12 @@ class TrainModel:
             init_batch_invariance,
         )
 
-        self.device = _get_ray_assigned_device()
-        torch.accelerator.set_device(self.device)
-
         # need to init all env vars for batch invariance which affect nccl ops
         init_batch_invariance()
 
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name, dtype=torch.bfloat16
-        ).to(self.device)
+        ).to("cuda:0")
         self.port = get_open_port()
         self.master_address = get_ip()
 
@@ -167,7 +157,6 @@ class TrainModel:
 
     def init_weight_transfer_group(self, world_size):
         """Initialize the NCCL process group for weight transfer."""
-        torch.accelerator.set_device(self.device)
         self.model_update_group = NCCLWeightTransferEngine.trainer_init(
             dict(
                 master_address=self.master_address,
@@ -178,7 +167,6 @@ class TrainModel:
 
     def broadcast_weights(self, packed: bool = True):
         """Broadcast weights to the inference engine."""
-        torch.accelerator.set_device(self.device)
         trainer_args = NCCLTrainerSendWeightsArgs(
             group=self.model_update_group,
             packed=packed,
@@ -191,8 +179,7 @@ class TrainModel:
     @torch.inference_mode()
     def generate(self, token_ids: list[int], max_new_tokens: int) -> list[int]:
         """Greedy-decode max_new_tokens from the given context."""
-        torch.accelerator.set_device(self.device)
-        input_ids = torch.tensor([token_ids], device=self.device)
+        input_ids = torch.tensor([token_ids], device="cuda:0")
         output = self.model.generate(
             input_ids,
             max_new_tokens=max_new_tokens,
@@ -206,17 +193,11 @@ class TrainModel:
 ray_env_vars = {}
 
 if current_platform.is_rocm():
-    # Work around ROCm/RCCL peer-access failures when Ray narrows each actor's
-    # GPU visibility. Keep the full topology visible, then explicitly pin the
-    # trainer actor to the GPU assigned by Ray.
-    # https://github.com/ROCm/rocm-systems/issues/5756
-    ray_env_vars["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"] = "1"
+    # Workaround for RCCL bug. See https://github.com/ROCm/rocm-systems/issues/5756
     ray_env_vars["RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES"] = "1"
-    ray_env_vars["RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES"] = "1"
-    # For ROCm, BATCH_INVARIANT vLLM is not supported.
+    # For ROCm, BATCH_INVARIANT vllm is not supported
     ray_env_vars["VLLM_ROCM_USE_SKINNY_GEMM"] = "0"
 else:
-    ray_env_vars["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"] = "1"
     # Enable batch invariance for deterministic outputs on NVIDIA
     ray_env_vars["VLLM_BATCH_INVARIANT"] = "1"
 
