@@ -1,4 +1,4 @@
-//! Unified HTTP listener wrapper for the Rust frontend.
+//! Unified listener wrapper for the Rust frontend.
 //!
 //! This module hides the difference between TCP and Unix-domain listeners so
 //! the rest of the server can bind or inherit one socket and pass it to
@@ -38,22 +38,10 @@ pub enum ListenerIo {
 
 /// Runtime listener address type which is either a TCP address or a Unix-domain address.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum ListenerAddr {
     Tcp(SocketAddr),
     Unix(tokio::net::unix::SocketAddr),
-}
-
-impl ListenerAddr {
-    /// Return the TCP socket address if this is a TCP listener.
-    pub(crate) fn tcp_addr(&self) -> Option<SocketAddr> {
-        match self {
-            Self::Tcp(addr) => Some(*addr),
-            Self::Unix(addr) => {
-                let _ = addr.as_pathname();
-                None
-            }
-        }
-    }
 }
 
 impl Listener {

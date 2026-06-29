@@ -27,7 +27,7 @@ pub use config::{
     ApiServerOptions, Config, CoordinatorMode, CorsConfig, DEFAULT_KEEP_ALIVE_TIMEOUT,
     HttpListenerMode, TlsConfig,
 };
-use futures::{FutureExt as _, StreamExt as _, stream};
+use futures::FutureExt as _;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
@@ -296,11 +296,11 @@ where
             let server = match grpc_tls {
                 Some(context) => {
                     let incoming =
-                        grpc_tls_incoming(grpc_listener, context, tls::TLS_HANDSHAKE_TIMEOUT);
+                        grpc::tls_incoming(grpc_listener, context, tls::TLS_HANDSHAKE_TIMEOUT);
                     svc.serve_with_incoming_shutdown(incoming, shutdown.cancelled_owned()).boxed()
                 }
                 None => {
-                    let incoming = grpc_incoming(grpc_listener);
+                    let incoming = grpc::incoming(grpc_listener);
                     svc.serve_with_incoming_shutdown(incoming, shutdown.cancelled_owned()).boxed()
                 }
             };
@@ -341,33 +341,8 @@ pub(crate) struct ConnectionTimeouts {
     pub(crate) keep_alive_enabled: bool,
 }
 
-/// Wrap the gRPC `TcpListener` so each accepted connection completes a TLS
-/// handshake (bounded by `handshake_timeout`) before tonic serves it.
-fn grpc_tls_incoming(
-    listener: Listener,
-    context: openssl::ssl::SslContext,
-    handshake_timeout: Duration,
-) -> impl futures::Stream<Item = std::io::Result<grpc::GrpcTlsStream>> {
-    tls_listener::builder(context)
-        .handshake_timeout(handshake_timeout)
-        .listen(listener)
-        .map(|res| {
-            res.map(|(inner, remote_addr)| grpc::GrpcTlsStream::new(inner, remote_addr))
-                .map_err(std::io::Error::other)
-        })
-}
-
-fn grpc_incoming(
-    listener: Listener,
-) -> impl futures::Stream<Item = std::io::Result<crate::listener::ListenerIo>> {
-    stream::unfold(listener, |mut listener| async move {
-        let (io, _) = axum::serve::Listener::accept(&mut listener).await;
-        Some((Ok(io), listener))
-    })
-}
-
-/// Apply `TCP_NODELAY`, optional TLS termination, and per-connection timeouts,
-/// then serve `app`. Shared by [`serve_with_router_extension`] and the TLS tests.
+/// Apply optional TLS termination and per-connection HTTP timeouts, then serve
+/// `app`. Shared by [`serve_with_router_extension`] and the TLS tests.
 async fn serve_listener(
     listener: Listener,
     tls: Option<openssl::ssl::SslContext>,

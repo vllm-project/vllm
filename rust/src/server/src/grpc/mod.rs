@@ -2,12 +2,11 @@
 
 mod convert;
 
-use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use futures::{Stream, StreamExt as _};
+use futures::{Stream, StreamExt as _, stream};
 use thiserror_ext::AsReport as _;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::mpsc;
@@ -19,7 +18,7 @@ use tracing::info;
 use vllm_text::{DecodedTextEvent, TextOutputStreamExt as _};
 
 use self::convert::ResponseOpts;
-use crate::listener::{ListenerAddr, ListenerIo};
+use crate::listener::{Listener, ListenerIo};
 use crate::state::AppState;
 
 /// Generated protobuf/gRPC types for the `vllm` package.
@@ -36,13 +35,11 @@ mod tests;
 /// [`Connected`] on it (the orphan rule blocks doing so on the foreign type).
 pub(crate) struct GrpcTlsStream {
     inner: SslStream<ListenerIo>,
-    remote_addr: Option<SocketAddr>,
 }
 
 impl GrpcTlsStream {
-    pub(crate) fn new(inner: SslStream<ListenerIo>, remote_addr: ListenerAddr) -> Self {
-        let remote_addr = remote_addr.tcp_addr();
-        Self { inner, remote_addr }
+    pub(crate) fn new(inner: SslStream<ListenerIo>) -> Self {
+        Self { inner }
     }
 }
 
@@ -78,11 +75,32 @@ impl Connected for GrpcTlsStream {
     type ConnectInfo = TcpConnectInfo;
 
     fn connect_info(&self) -> TcpConnectInfo {
-        TcpConnectInfo {
-            local_addr: None,
-            remote_addr: self.remote_addr,
-        }
+        self.inner.get_ref().connect_info()
     }
+}
+
+/// Adapt the shared server listener into tonic's incoming stream shape.
+pub(crate) fn incoming(listener: Listener) -> impl Stream<Item = std::io::Result<ListenerIo>> {
+    stream::unfold(listener, |mut listener| async move {
+        let (io, _) = axum::serve::Listener::accept(&mut listener).await;
+        Some((Ok(io), listener))
+    })
+}
+
+/// Wrap the gRPC listener so each accepted connection completes a TLS handshake
+/// before tonic serves it.
+pub(crate) fn tls_incoming(
+    listener: Listener,
+    context: openssl::ssl::SslContext,
+    handshake_timeout: std::time::Duration,
+) -> impl Stream<Item = std::io::Result<GrpcTlsStream>> {
+    tls_listener::builder(context)
+        .handshake_timeout(handshake_timeout)
+        .listen(listener)
+        .map(|res| {
+            res.map(|(inner, _addr)| GrpcTlsStream::new(inner))
+                .map_err(std::io::Error::other)
+        })
 }
 
 /// gRPC Generate service implementation backed by the shared application state.
