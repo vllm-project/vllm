@@ -88,6 +88,18 @@ def test_benchmark_repo_default_ref_is_main():
     assert "BENCHMARK_REPO_REF: ${{ vars.VLLM_HUST_BENCHMARK_REPO_REF || 'main' }}" in text
 
 
+def test_pr_checkout_urls_use_https_without_publish_ssh_key():
+    text = workflow_text()
+
+    assert "format('https://github.com/{0}.git', github.repository)" in text
+    assert "format('git@github.com:{0}.git', github.repository)" in text
+    assert (
+        "github.event_name == 'pull_request' || github.event_name == 'issue_comment'"
+    ) in text
+    assert "https://github.com/vLLM-HUST/vllm-hust-benchmark.git" in text
+    assert "https://github.com/vLLM-HUST/vllm-ascend-hust.git" in text
+
+
 def test_main_benchmark_defaults_match_ascend_main_config():
     text = workflow_text()
 
@@ -95,11 +107,23 @@ def test_main_benchmark_defaults_match_ascend_main_config():
     assert "github.event_name == 'pull_request' || github.event_name == 'issue_comment'" in text
     assert "&& '3B' || '14B'" in text
     assert "&& 'BF16' || 'FP16'" in text
-    assert "&& '256' || '1024'" in text
+    assert 'MAX_MODEL_LEN: ""' in text
     assert "&& '64' || '1024'" in text
     assert "&& '16' || '256'" in text
     assert "perfgate-ascend-qwen25-3b-910b3.json" in text
     assert "official-ascend-jan-2026-v0180-random-online-qwen25-14b-910b2.json" in text
+
+
+def test_benchmark_script_does_not_force_max_model_len():
+    script = (
+        Path(__file__).resolve().parents[2]
+        / ".github/workflows/scripts/run_ascend_benchmark_ci.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "MAX_MODEL_LEN=${MAX_MODEL_LEN:-}" in script
+    assert "max_model_len_args=()" in script
+    assert '"${max_model_len_args[@]}"' in script
+    assert script.count('"${max_model_len_args[@]}"') == 2
 
 
 def test_issue_comment_uses_ubuntu_gate_before_self_hosted_runner():

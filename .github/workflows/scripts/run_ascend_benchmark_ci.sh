@@ -33,7 +33,7 @@ MODEL_PRECISION=${MODEL_PRECISION:-FP16}
 HOST=${HOST:-127.0.0.1}
 PORT=${PORT:-}
 DTYPE=${DTYPE:-float16}
-MAX_MODEL_LEN=${MAX_MODEL_LEN:-1024}
+MAX_MODEL_LEN=${MAX_MODEL_LEN:-}
 MAX_NUM_SEQS=${MAX_NUM_SEQS:-1}
 BENCH_NUM_PROMPTS=${BENCH_NUM_PROMPTS:-200}
 BENCH_RANDOM_INPUT_LEN=${BENCH_RANDOM_INPUT_LEN:-1024}
@@ -1021,6 +1021,11 @@ run_same_spec_current_benchmark() {
 }
 
 start_server() {
+  local max_model_len_args=()
+  if [[ -n "$MAX_MODEL_LEN" ]]; then
+    max_model_len_args=(--max-model-len "$MAX_MODEL_LEN")
+  fi
+
   if command -v setsid >/dev/null 2>&1; then
     if [[ "$ASCEND_BENCHMARK_USE_SUDO" == "1" ]]; then
       local preserve_list
@@ -1038,7 +1043,7 @@ start_server() {
         --host "$HOST" \
         --port "$PORT" \
         --dtype "$DTYPE" \
-        --max-model-len "$MAX_MODEL_LEN" \
+        "${max_model_len_args[@]}" \
         --max-num-seqs "$MAX_NUM_SEQS" \
         --enforce-eager >"$SERVER_LOG" 2>&1 &
     fi
@@ -1052,7 +1057,7 @@ start_server() {
         --host "$HOST" \
         --port "$PORT" \
         --dtype "$DTYPE" \
-        --max-model-len "$MAX_MODEL_LEN" \
+        "${max_model_len_args[@]}" \
         --max-num-seqs "$MAX_NUM_SEQS" \
         --enforce-eager >"$SERVER_LOG" 2>&1 &
     fi
