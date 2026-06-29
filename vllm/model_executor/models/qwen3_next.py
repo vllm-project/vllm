@@ -88,6 +88,26 @@ logger = init_logger(__name__)
 KVCache = tuple[torch.Tensor, torch.Tensor]
 
 
+def _is_shared_expert_fse_compatible(quant_config) -> bool:
+    """Check if shared expert can be fused with routed experts.
+
+    FSE requires that shared and routed expert weights use the same
+    quantization format. Returns False when the shared expert is
+    excluded from quantization (e.g. float32 shared in an MXFP4 model)
+    or has a different quant spec than routed experts.
+    """
+    if quant_config is None:
+        return True
+    # Quark stores its full config dict in quant_config.quant_config
+    raw_config = getattr(quant_config, "quant_config", None)
+    if not isinstance(raw_config, dict):
+        return True
+    exclude = raw_config.get("exclude", [])
+    if not exclude:
+        return True
+    return not any("shared_expert." in str(e) for e in exclude)
+
+
 class Qwen3NextSparseMoeBlock(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -142,10 +162,15 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             prefix=f"{prefix}.shared_expert_gate",
         )
 
-        if (
-            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
-            or config.shared_expert_intermediate_size <= 0
-        ):
+        _fse_requested = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+        _fse_enabled = _fse_requested and _is_shared_expert_fse_compatible(quant_config)
+        if _fse_requested and not _fse_enabled:
+            logger.warning(
+                "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but "
+                "shared expert has a different quantization spec than routed "
+                "experts. Falling back to non-fused shared expert path."
+            )
+        if _fse_enabled or config.shared_expert_intermediate_size <= 0:
             self.shared_expert = None
         else:
             self.shared_expert = Qwen3NextMLP(
@@ -738,8 +763,6 @@ class QwenNextMixtureOfExperts(MixtureOfExperts):
                 moe.experts.update_expert_map()
 
     def set_moe_parameters(self):
-        self.expert_weights = []
-
         self.moe_layers = []
         example_moe = None
         for layer in self.model.layers:

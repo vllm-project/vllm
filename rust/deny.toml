@@ -1,0 +1,15 @@
+[bans]
+multiple-versions = "allow"
+
+deny = [
+    # TLS / crypto provider
+    # We prefer the system's TLS (e.g. OpenSSL) over Rust implementations.
+    { name = "rustls" },
+    { name = "ring" },
+    { name = "aws-lc-rs" },
+    { name = "aws-lc-sys" },
+    { name = "s2n-tls" },
+    { name = "s2n-tls-sys" },
+    { name = "boring" },
+    { name = "boring-sys" },
+]

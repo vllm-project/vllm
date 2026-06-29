@@ -13,12 +13,8 @@ from starlette.datastructures import Headers
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.beam_search.online import BeamSearchOnlineMixin
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.completion.protocol import (
-    CompletionRequest,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     GenerationError,
