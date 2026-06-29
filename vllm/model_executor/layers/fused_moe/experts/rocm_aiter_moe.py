@@ -15,6 +15,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceDelegate,
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -556,3 +557,170 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             output.set_(result)
         else:
             output.copy_(result)
+
+
+class AiterBatchedExpertsFp8(mk.FusedMoEExpertsModular):
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int,
+        num_dispatchers: int,
+    ):
+        super().__init__(
+            moe_config=moe_config,
+            quant_config=quant_config,
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=num_dispatchers,
+        )
+        self._inner = AiterExperts(
+            moe_config=moe_config,
+            quant_config=quant_config,
+        )
+
+    @property
+    def expects_unquantized_inputs(self) -> bool:
+        return False
+
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.BatchedExperts
+
+    @staticmethod
+    def is_supported_config(
+        cls,
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[bool, str | None]:
+        is_supported, reason = super().is_supported_config(
+            cls, moe_config, weight_key, activation_key, activation_format
+        )
+        if not is_supported and not rocm_aiter_ops.is_fused_moe_enabled():
+            reason = (
+                f"{reason}. AITER MoE is not enabled - "
+                "set VLLM_ROCM_USE_AITER=1 and VLLM_ROCM_USE_AITER_MOE=1 "
+                "to enable it"
+            )
+        return is_supported, reason
+
+    @staticmethod
+    def _supports_current_device() -> bool:
+        return rocm_aiter_ops.is_fused_moe_enabled()
+
+    @staticmethod
+    def _supports_no_act_and_mul() -> bool:
+        return False
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return (weight_key, activation_key) in {
+            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+            (kFp8StaticTensorSym, kFp8StaticTensorSym),
+            (kFp8StaticTensorSym, kFp8DynamicTensorSym),
+            (kFp8StaticChannelSym, kFp8DynamicTokenSym),
+        }
+
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return AiterExperts._supports_activation(activation)
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        return moe_parallel_config.use_batched_experts_activation_format
+
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        return TopKWeightAndReduceDelegate()
+
+    def workspace_shapes(
+        self,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        global_num_experts: int,
+        local_num_experts: int,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: MoEActivation,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        return (0,), (0,), (local_num_experts, M, K)
+
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool,
+    ) -> None:
+        assert hidden_states.dim() == 3, (
+            "AiterBatchedExpertsFp8 expects hidden_states shaped "
+            f"(E_local, M_e, K), got {tuple(hidden_states.shape)}"
+        )
+        assert output.shape == hidden_states.shape, (
+            "AiterBatchedExpertsFp8 expects output to match hidden_states, "
+            f"got {tuple(output.shape)} and {tuple(hidden_states.shape)}"
+        )
+        assert output.is_contiguous(), (
+            "AiterBatchedExpertsFp8 expects a contiguous output buffer"
+        )
+        assert expert_tokens_meta is not None, (
+            "AiterBatchedExpertsFp8 requires BatchedExperts token metadata"
+        )
+
+        e_local, tokens_per_expert, hidden_dim = hidden_states.shape
+        assert w1.size(0) == e_local, (
+            f"w1 expert dim {w1.size(0)} != hidden_states expert dim {e_local}"
+        )
+
+        flat_hidden_states = hidden_states.reshape(
+            e_local * tokens_per_expert, hidden_dim
+        )
+        flat_output = output.view(e_local * tokens_per_expert, hidden_dim)
+        flat_topk_ids = (
+            torch.arange(e_local, device=hidden_states.device, dtype=torch.int32)
+            .repeat_interleave(tokens_per_expert)
+            .unsqueeze(-1)
+        )
+        flat_topk_weights = torch.ones(
+            (e_local * tokens_per_expert, 1),
+            device=hidden_states.device,
+            dtype=torch.float32,
+        )
+        flat_a1q_scale = a1q_scale
+        if a1q_scale is not None and a1q_scale.dim() == 3:
+            flat_a1q_scale = a1q_scale.reshape(
+                a1q_scale.size(0) * a1q_scale.size(1), a1q_scale.size(2)
+            )
+
+        self._inner.apply(
+            output=flat_output,
+            hidden_states=flat_hidden_states,
+            w1=w1,
+            w2=w2,
+            topk_weights=flat_topk_weights,
+            topk_ids=flat_topk_ids,
+            activation=activation,
+            global_num_experts=e_local,
+            expert_map=None,
+            a1q_scale=flat_a1q_scale,
+            a2_scale=a2_scale,
+            workspace13=workspace13,
+            workspace2=workspace2,
+            expert_tokens_meta=None,
+            apply_router_weight_on_input=False,
+        )

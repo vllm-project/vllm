@@ -48,6 +48,7 @@ class Fp8MoeBackend(Enum):
     TRITON = "TRITON"
     BATCHED_TRITON = "BATCHED_TRITON"
     AITER = "AITER"
+    BATCHED_AITER = "BATCHED_AITER"
     VLLM_CUTLASS = "VLLM_CUTLASS"
     BATCHED_VLLM_CUTLASS = "BATCHED_VLLM_CUTLASS"
     XPU = "XPU"
@@ -83,6 +84,7 @@ def _get_priority_backends(
         Fp8MoeBackend.VLLM_CUTLASS,
         Fp8MoeBackend.TRITON,
         Fp8MoeBackend.MARLIN,
+        Fp8MoeBackend.BATCHED_AITER,
         Fp8MoeBackend.BATCHED_DEEPGEMM,
         Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
         Fp8MoeBackend.BATCHED_TRITON,
@@ -189,6 +191,13 @@ def backend_to_kernel_cls(
         )
 
         return [AiterExperts]
+
+    elif backend == Fp8MoeBackend.BATCHED_AITER:
+        from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+            AiterBatchedExpertsFp8,
+        )
+
+        return [AiterBatchedExpertsFp8]
 
     elif backend == Fp8MoeBackend.VLLM_CUTLASS:
         from vllm.model_executor.layers.fused_moe.experts.triton_cutlass_moe import (
@@ -321,6 +330,8 @@ def select_fp8_moe_backend(
                 requested_backend = Fp8MoeBackend.BATCHED_TRITON
             elif requested_backend == Fp8MoeBackend.VLLM_CUTLASS:
                 requested_backend = Fp8MoeBackend.BATCHED_VLLM_CUTLASS
+            elif requested_backend == Fp8MoeBackend.AITER:
+                requested_backend = Fp8MoeBackend.BATCHED_AITER
 
         if (
             requested_backend
@@ -364,8 +375,13 @@ def select_fp8_moe_backend(
     if envs.is_set("VLLM_ROCM_USE_AITER") or envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
         if not envs.VLLM_ROCM_USE_AITER or not envs.VLLM_ROCM_USE_AITER_MOE:
             AVAILABLE_BACKENDS.remove(Fp8MoeBackend.AITER)
+            AVAILABLE_BACKENDS.remove(Fp8MoeBackend.BATCHED_AITER)
         else:
-            backend = Fp8MoeBackend.AITER
+            backend = (
+                Fp8MoeBackend.AITER
+                if activation_format == mk.FusedMoEActivationFormat.Standard
+                else Fp8MoeBackend.BATCHED_AITER
+            )
             return _return_or_raise(
                 backend, config, weight_key, activation_key, activation_format
             )
@@ -423,7 +439,7 @@ def convert_to_fp8_moe_kernel_format(
             w2_scale,
             tuple(layer.weight_block_size),
         )
-    elif fp8_backend == Fp8MoeBackend.AITER:
+    elif fp8_backend in (Fp8MoeBackend.AITER, Fp8MoeBackend.BATCHED_AITER):
         w13, w2 = rocm_aiter_ops.shuffle_weights(w13, w2)
     elif fp8_backend == Fp8MoeBackend.AITER_MXFP8:
         w13, w2, w13_scale, w2_scale = rocm_aiter_ops.shuffle_mxfp8_moe_weights(

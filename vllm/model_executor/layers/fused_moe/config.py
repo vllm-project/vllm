@@ -1067,6 +1067,10 @@ class FusedMoEParallelConfig:
 
     @property
     def use_batched_activation_format(self):
+        return self.use_batched_experts_activation_format
+
+    @property
+    def use_batched_experts_activation_format(self):
         return self.use_deepep_ll_kernels or self.use_nixl_ep_kernels
 
     @property
