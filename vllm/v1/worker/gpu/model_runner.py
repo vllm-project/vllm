@@ -1046,13 +1046,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         # Slot mappings: [num_kv_cache_groups, num_tokens_padded].
         # Kernel pads beyond num_tokens with PAD_SLOT_ID. Route through the PCP
-        # manager when active so it can cache the physical slot mappings used by
-        # the KV-cache gather in do_kv_cache_update.
-        compute_slot_mappings = (
-            self.pcp_manager.compute_slot_mappings
-            if self.pcp_manager is not None
-            else self.block_tables.compute_slot_mappings
-        )
+        # manager when active (Phase 1, dcp==1) so it can cache the physical
+        # slot mappings used by the KV-cache gather in do_kv_cache_update. Case 1
+        # (dcp==pcp) uses the standard slot mapping (DCP sharding is in-kernel).
+        if self.pcp_manager is not None and self.dcp_size == 1:
+            compute_slot_mappings = self.pcp_manager.compute_slot_mappings
+        else:
+            compute_slot_mappings = self.block_tables.compute_slot_mappings
         slot_mappings = compute_slot_mappings(
             input_batch.idx_mapping,
             input_batch.query_start_loc,
@@ -1187,10 +1187,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Common case.
             # Prepare all the inputs and copy to the input buffers.
             input_batch = self.prepare_inputs(scheduler_output, batch_desc)
-            # PCP: rewrite the physical batch into per-rank virtual DualChunkSwap
-            # rows. The standard forward then runs on the virtual batch; hidden
-            # states are restored to physical order before sampling.
-            if self.pcp_manager is not None:
+            # PCP (Phase 1, dcp==1): rewrite the physical batch into per-rank
+            # virtual DualChunkSwap rows; the standard forward runs on the virtual
+            # batch and hidden states are restored before sampling. For Case 1
+            # (dcp==pcp) the PCP query-split is bypassed -- the prefill/decode
+            # parallelism comes from DCP KV-sharding via _forward_with_dcp
+            # instead, so no virtual-batch rewrite or restore is needed.
+            if self.pcp_manager is not None and self.dcp_size == 1:
                 input_batch = self.pcp_manager.partition_batch(input_batch)
             block_tables, slot_mappings = self.prepare_attn(input_batch)
 
@@ -1331,7 +1334,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mapping=slot_mappings_by_layer,
                 skip_compiled=skip_compiled,
                 additional_forward_kwargs=get_pcp_forward_context_kwargs(
-                    self.pcp_manager, dummy_run
+                    self.pcp_manager if self.dcp_size == 1 else None, dummy_run
                 ),
             ):
                 self.kv_connector.pre_forward(scheduler_output)
@@ -1413,9 +1416,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
 
         # Last rank: sample tokens
-        # PCP: restore hidden states to physical order and recover the physical
-        # batch before sampling (the forward ran on virtual DualChunkSwap rows).
-        if self.pcp_manager is not None:
+        # PCP (Phase 1, dcp==1): restore hidden states to physical order and
+        # recover the physical batch before sampling (the forward ran on virtual
+        # DualChunkSwap rows). Case 1 (dcp==pcp) does not use the virtual batch.
+        if self.pcp_manager is not None and self.dcp_size == 1:
             hidden_states, input_batch = self.pcp_manager.restore_for_sampling(
                 hidden_states
             )

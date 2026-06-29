@@ -145,8 +145,16 @@ class BlockTable:
         positions: torch.Tensor,
     ) -> None:
         num_tokens = positions.shape[0]
-        total_cp_world_size = self.pcp_world_size * self.dcp_world_size
-        total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
+        # Case 1 (dcp == pcp): the DCP and PCP groups coincide, so the KV is
+        # sharded only by DCP -- the shard count is dcp and each rank's shard
+        # index is its dcp_rank (== pcp_rank). Otherwise (orthogonal PCP+DCP)
+        # the shards multiply across the two independent rank sets.
+        if self.dcp_world_size > 1 and self.dcp_world_size == self.pcp_world_size:
+            total_cp_world_size = self.dcp_world_size
+            total_cp_rank = self.dcp_rank
+        else:
+            total_cp_world_size = self.pcp_world_size * self.dcp_world_size
+            total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
         _compute_slot_mapping_kernel[(num_reqs + 1,)](
             num_tokens,
             self.max_num_batched_tokens,

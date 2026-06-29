@@ -28,7 +28,7 @@ from vllm.v1.attention.backends.fa_utils import (
     is_flash_attn_varlen_func_available,
 )
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
-from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
+from vllm.v1.attention.ops.common import cp_lse_ag_out_ar, cp_lse_ag_out_rs
 from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -717,7 +717,20 @@ class FlashAttentionImpl(AttentionImpl):
             and vllm_config.parallel_config.decode_context_parallel_size > 1
             and vllm_config.parallel_config.dcp_comm_backend == "a2a"
         )
-        self.dcp_combine = dcp_a2a_lse_reduce if dcp_a2a else cp_lse_ag_out_rs
+        # Case 1 (dcp == pcp): Q is replicated across the DCP ranks, so the
+        # partial attentions are combined with an all-reduce (every rank ends
+        # with the full output) instead of the gathered-Q + reduce-scatter used
+        # by Case 2.
+        self.dcp_case1 = (
+            vllm_config is not None
+            and vllm_config.parallel_config.decode_context_parallel_size > 1
+            and vllm_config.parallel_config.decode_context_parallel_size
+            == vllm_config.parallel_config.prefill_context_parallel_size
+        )
+        if self.dcp_case1:
+            self.dcp_combine = cp_lse_ag_out_ar
+        else:
+            self.dcp_combine = dcp_a2a_lse_reduce if dcp_a2a else cp_lse_ag_out_rs
 
         self._dcp_dtype: torch.dtype | None = None
         if vllm_config is not None and self.dcp_world_size > 1:
@@ -1030,19 +1043,27 @@ class FlashAttentionImpl(AttentionImpl):
         block_table = attn_metadata.block_table
 
         query = query.contiguous()
-        query_across_dcp = get_dcp_group().all_gather(query, dim=1)
+        # Case 1 (dcp == pcp): Q is replicated across the DCP ranks, so attend
+        # directly with the local heads and combine via all-reduce. Case 2
+        # gathers Q across heads and reduce-scatters the result.
+        if self.dcp_case1:
+            query_for_context = query
+            context_num_heads = self.num_heads
+        else:
+            query_for_context = get_dcp_group().all_gather(query, dim=1)
+            context_num_heads = self.num_heads * self.dcp_world_size
         sliding_window_size = (
             list(self.sliding_window) if self.sliding_window is not None else None
         )
-        n = query_across_dcp.shape[0]
+        n = query_for_context.shape[0]
         (dcp_context_out,) = current_workspace_manager().get_simultaneous(
             (
-                (n, self.num_heads * self.dcp_world_size, self.head_size),
+                (n, context_num_heads, self.head_size),
                 self._dcp_dtype,
             ),
         )
         context_attn_out, context_lse = flash_attn_varlen_func(
-            q=query_across_dcp,
+            q=query_for_context,
             k=key_cache,
             v=value_cache,
             out=dcp_context_out,

@@ -1180,7 +1180,21 @@ class ModelConfig:
             )
 
         decode_context_parallel_size = parallel_config.decode_context_parallel_size
-        if decode_context_parallel_size > 1 and not self.use_mla:
+        # Case 1 (orthogonal groups, dcp == pcp): DCP reuses the PCP ranks and
+        # shards the decode KV *sequence* round-robin with Q replicated across the
+        # DCP ranks. It does NOT shard heads, so the GQA/MQA head-divisibility
+        # constraints below (which are for Case 2, DCP-inside-TP head sharding)
+        # do not apply.
+        is_case1_dcp_pcp = (
+            decode_context_parallel_size > 1
+            and decode_context_parallel_size
+            == parallel_config.prefill_context_parallel_size
+        )
+        if (
+            decode_context_parallel_size > 1
+            and not self.use_mla
+            and not is_case1_dcp_pcp
+        ):
             total_num_kv_heads = self.get_total_num_kv_heads()
             assert tensor_parallel_size > total_num_kv_heads, (
                 f"tensor parallel size {tensor_parallel_size} must be greater "

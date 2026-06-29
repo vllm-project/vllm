@@ -492,10 +492,20 @@ class ParallelConfig:
         # because the world size does not change by dcp, it simply
         # reuses the GPUs of TP group, and split one TP group into
         # tp_size//dcp_size DCP groups.
-        if self.tensor_parallel_size % self.decode_context_parallel_size != 0:
+        #
+        # Case 1 (orthogonal groups, dcp == pcp): DCP instead reuses the PCP
+        # ranks -- the decode KV is sharded across the same ranks that split the
+        # prefill query. This requires tp_size == 1 (so the PCP ranks are
+        # adjacent in the flattened rank layout and the DCP group coincides with
+        # the PCP group) and dcp == pcp.
+        dcp = self.decode_context_parallel_size
+        pcp = self.prefill_context_parallel_size
+        case1_dcp_in_pcp = dcp > 1 and dcp == pcp and self.tensor_parallel_size == 1
+        if self.tensor_parallel_size % dcp != 0 and not case1_dcp_in_pcp:
             raise ValueError(
                 f"tp_size={self.tensor_parallel_size} must be divisible by"
-                f"dcp_size={self.decode_context_parallel_size}."
+                f"dcp_size={dcp}, or (Case 1) dcp==pcp with tp_size==1 "
+                f"(got pcp={pcp})."
             )
 
         if self.dcp_comm_backend == "a2a" and self.decode_context_parallel_size <= 1:
