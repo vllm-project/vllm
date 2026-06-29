@@ -155,7 +155,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         vllm_config: VllmConfig,
         prefix: str,
         topk_indices_buffer: torch.Tensor | None = None,
-        aux_stream_list: list[torch.cuda.Stream] | None = None,
+        aux_stream_list: list[torch.Stream] | None = None,
     ) -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -672,7 +672,7 @@ class DeepseekV4Indexer(nn.Module):
         topk_indices_buffer: torch.Tensor | None,
         compress_ratio: int = 1,
         prefix: str = "",
-        aux_stream: torch.cuda.Stream | None = None,
+        aux_stream: torch.Stream | None = None,
     ):
         super().__init__()
         self.vllm_config = vllm_config

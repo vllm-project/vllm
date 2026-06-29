@@ -576,7 +576,7 @@ class PyNvVideoCodecVideoBackendMixin:
     def _create_decoder_slot(cls) -> PyNvVideoCodecDecoderSlot:
         import torch
 
-        return PyNvVideoCodecDecoderSlot(torch.cuda.Stream(device=cls._DEVICE_INDEX))
+        return PyNvVideoCodecDecoderSlot(torch.Stream(device=cls._DEVICE_INDEX))
 
     @staticmethod
     @contextmanager

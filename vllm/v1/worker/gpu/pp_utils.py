@@ -66,7 +66,7 @@ class PPHandler:
         self.max_sample_len = num_speculative_steps + 1
         self.device = device
         self.main_stream = torch.cuda.current_stream(device)
-        self.broadcast_stream = torch.cuda.Stream(device)
+        self.broadcast_stream = torch.Stream(device)
 
         # On non-last ranks, a FIFO with one entry per in-flight step: the entry
         # pushed by step T's `receive` is consumed pp_size steps later. Pre-seeded

@@ -1117,10 +1117,10 @@ class GPUModelRunner(
     def _sync_device(self) -> None:
         torch.accelerator.synchronize()
 
-    def _get_or_create_async_output_copy_stream(self) -> torch.cuda.Stream:
+    def _get_or_create_async_output_copy_stream(self) -> torch.Stream:
         stream = self.async_output_copy_stream
         if stream is None:
-            stream = torch.cuda.Stream()
+            stream = torch.Stream()
             self.async_output_copy_stream = stream
         return stream
 

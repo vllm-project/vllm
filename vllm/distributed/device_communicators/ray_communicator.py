@@ -14,6 +14,7 @@ from vllm.distributed.device_communicators.base_device_communicator import (
 )
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import current_stream
 
 logger = init_logger(__name__)
@@ -240,11 +241,11 @@ class RayPPCommunicator(Communicator):
 
     @property
     def recv_stream(self):
-        return torch.cuda.StreamContext(current_stream())
+        return current_platform.stream(current_stream())
 
     @property
     def send_stream(self):
-        return torch.cuda.StreamContext(current_stream())
+        return current_platform.stream(current_stream())
 
     def destroy(self) -> None:
         # Just sets a flag, vLLM manages the lifecycle of the underlying

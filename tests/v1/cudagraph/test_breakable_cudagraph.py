@@ -36,7 +36,7 @@ def cuda_capture_stream():
     """
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
-    stream = torch.cuda.Stream()
+    stream = torch.Stream()
     with torch.cuda.stream(stream):
         yield stream
     torch.cuda.current_stream().wait_stream(stream)

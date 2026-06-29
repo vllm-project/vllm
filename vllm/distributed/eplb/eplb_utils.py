@@ -34,7 +34,7 @@ class CpuGpuEvent:
         self._event = torch.cuda.Event()
         self._recorded = threading.Event()
 
-    def wait(self, stream: torch.cuda.Stream | None = None):
+    def wait(self, stream: torch.Stream | None = None):
         """
         Blocks the calling thread until record finishes. Used to guarantee that the
         record kernel is called before wait.
@@ -45,7 +45,7 @@ class CpuGpuEvent:
         self._event.wait(stream)
         self._recorded.clear()
 
-    def record(self, stream: torch.cuda.Stream | None = None):
+    def record(self, stream: torch.Stream | None = None):
         """
         Unblocks the waiting thread after calling event.record().
 

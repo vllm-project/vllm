@@ -40,7 +40,7 @@ class _StreamPlaceholder:
 
 torch.Event = _EventPlaceholder
 torch.cuda.Event = _EventPlaceholder
-torch.cuda.Stream = _StreamPlaceholder
+torch.Stream = _StreamPlaceholder
 torch.cuda.set_stream = noop
 torch.cuda.current_stream = lambda *args, **kwargs: _StreamPlaceholder()
 torch.accelerator.synchronize = noop

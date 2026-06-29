@@ -50,7 +50,7 @@ class MoELoRAContext:
     # aux_stream, which the default stream sums in afterwards.
     # Events are paired one-per-overlap-pair: events[0,1] for w13,
     # events[2,3] for w2, so the two pairs do not race on the same event.
-    aux_stream: torch.cuda.Stream | None = None
+    aux_stream: torch.Stream | None = None
     events: tuple[torch.cuda.Event, ...] | None = None
 
     # Per-rank token→LoRA mapping after EP dispatch. Set by

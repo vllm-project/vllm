@@ -116,7 +116,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         return self.moe_config.intermediate_size_per_partition
 
     def _init_lora_stream_context(self) -> None:
-        self._lora_stream: torch.cuda.Stream | None = None
+        self._lora_stream: torch.Stream | None = None
         self._events: tuple[torch.cuda.Event, ...] | None = None
         if not self._enable_aux_cuda_stream:
             return

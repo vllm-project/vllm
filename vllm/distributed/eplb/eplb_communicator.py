@@ -357,7 +357,7 @@ class NixlEplbCommunicator(EplbCommunicator):
         uid = uuid.uuid4().hex[:8]
         return f"eplb-{self._rank}{pp_suffix}-{uid}"
 
-    def set_stream(self, cuda_stream: torch.cuda.Stream | None) -> None:
+    def set_stream(self, cuda_stream: torch.Stream | None) -> None:
         pass
 
     def add_send(

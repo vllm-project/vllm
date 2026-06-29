@@ -41,14 +41,14 @@ def _make_backend() -> tuple[DmaCopyBackend, torch.Tensor, torch.Tensor]:
     gpu = {"k": torch.zeros((NUM_BLOCKS, BLOCK_BYTES), dtype=torch.int8, device="cuda")}
     cpu = {"k": torch.zeros((NUM_BLOCKS, BLOCK_BYTES), dtype=torch.int8, device="cpu")}
     pin_tensor(cpu["k"])
-    low_pri, _ = torch.cuda.Stream.priority_range()
+    low_pri, _ = torch.Stream.priority_range()
     backend = DmaCopyBackend()
     backend.init(
         gpu,
         cpu,
         gpu["k"].device,
-        torch.cuda.Stream(priority=low_pri),
-        torch.cuda.Stream(priority=low_pri),
+        torch.Stream(priority=low_pri),
+        torch.Stream(priority=low_pri),
     )
     return backend, gpu["k"], cpu["k"]
 
@@ -69,7 +69,7 @@ def _drive_store(
     happens-before edge.
     """
     block_ids = list(range(gpu.shape[0]))
-    compute_stream = torch.cuda.Stream()
+    compute_stream = torch.Stream()
     corrupt = 0
     for it in range(ITERS):
         val = (it % 126) + 1  # 1..126; distinct from the zero-initialized pool
@@ -172,7 +172,7 @@ def test_build_params_src_access_order():
     """build_params defaults to ANY and honors an explicit STREAM override."""
     gpu = {"k": torch.zeros((4, 64), dtype=torch.int8, device="cuda")}
     cpu = {"k": torch.zeros((4, 64), dtype=torch.int8, device="cpu")}
-    stream = torch.cuda.Stream()
+    stream = torch.Stream()
 
     default = build_params(gpu, cpu, stream)
     assert default.attrs.srcAccessOrder == CU_MEMCPY_SRC_ACCESS_ORDER_ANY

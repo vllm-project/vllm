@@ -230,7 +230,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         vllm_config,
         prefix,
         topk_indices_buffer: torch.Tensor | None = None,
-        aux_stream_list: list[torch.cuda.Stream] | None = None,
+        aux_stream_list: list[torch.Stream] | None = None,
     ):
         super().__init__()
 
@@ -453,9 +453,7 @@ class DeepseekV4Model(nn.Module):
         # kv_score). fused_wqa_wkv stays on the default stream.
         # Disable them on ROCm because of hang issues.
         aux_stream_list = (
-            None
-            if current_platform.is_rocm()
-            else [torch.cuda.Stream() for _ in range(3)]
+            None if current_platform.is_rocm() else [torch.Stream() for _ in range(3)]
         )
 
         self.device = current_platform.device_type

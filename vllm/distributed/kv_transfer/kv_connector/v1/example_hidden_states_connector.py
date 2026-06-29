@@ -165,7 +165,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         # Async write infrastructure (worker-side).
         # Dedicated CUDA stream for DtoH copies so they don't block
         # the default stream (model forward). Thread pool for disk writes.
-        self._copy_stream: torch.cuda.Stream | None = None  # lazy init
+        self._copy_stream: torch.Stream | None = None  # lazy init
         self._executor = ThreadPoolExecutor(
             max_workers=self._kv_transfer_config.get_from_extra_config(
                 "num_writer_threads", 8
@@ -203,10 +203,10 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         # accumulated across get_finished calls.
         self._accumulated_finished_req_ids: set[str] = set()
 
-    def _get_copy_stream(self) -> torch.cuda.Stream:
+    def _get_copy_stream(self) -> torch.Stream:
         """Lazily create the copy stream (CUDA must be initialized)."""
         if self._copy_stream is None:
-            self._copy_stream = torch.cuda.Stream()
+            self._copy_stream = torch.Stream()
         return self._copy_stream
 
     # ==============================
