@@ -679,24 +679,19 @@ class SparseAttnIndexer(CustomOp):
         assert isinstance(q_quant, torch.Tensor), (
             "AMD sparse_attn_indexer expects a single FP8 q_quant tensor"
         )
-        if rocm_aiter_ops.is_enabled():
-            return torch.ops.vllm.rocm_aiter_sparse_attn_indexer(
-                hidden_states,
-                _encode_layer_name(self.k_cache.prefix),
-                self.k_cache.kv_cache,
-                q_quant,
-                k,
-                weights,
-                self.quant_block_size,
-                self.scale_fmt,
-                self.topk_tokens,
-                self.head_dim,
-                self.max_model_len,
-                self.max_total_seq_len,
-                self.topk_indices_buffer,
+        return torch.ops.vllm.rocm_aiter_sparse_attn_indexer(
+            hidden_states,
+            _encode_layer_name(self.k_cache.prefix),
+            self.k_cache.kv_cache,
+            q_quant,
+            k,
+            weights,
+            self.quant_block_size,
+            self.scale_fmt,
+            self.topk_tokens,
+            self.head_dim,
+            self.max_model_len,
+            self.max_total_seq_len,
+            self.topk_indices_buffer,
                 skip_k_cache_insert=self.skip_k_cache_insert,
-            )
-        raise RuntimeError(
-            "Sparse attention indexer ROCm path is only supported on AITER. "
-            "Please enable aiter with VLLM_ROCM_USE_AITER=1"
         )
