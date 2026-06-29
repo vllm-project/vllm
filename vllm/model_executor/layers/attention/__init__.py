@@ -14,6 +14,7 @@ from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderA
 from vllm.model_executor.layers.attention.prefill_prefix_lm_attention import (
     PrefillPrefixLMAttention,
 )
+from vllm.model_executor.layers.attention.rswa_attention import RSWAAttention
 from vllm.model_executor.layers.attention.static_sink_attention import (
     StaticSinkAttention,
 )
@@ -26,5 +27,6 @@ __all__ = [
     "MLAAttention",
     "MMEncoderAttention",
     "PrefillPrefixLMAttention",
+    "RSWAAttention",
     "StaticSinkAttention",
 ]
