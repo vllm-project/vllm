@@ -3,12 +3,12 @@
 from pathlib import Path
 from unittest.mock import patch
 
-import librosa
 import numpy as np
 import pybase64 as base64
 import pytest
 
 from vllm.multimodal.media import AudioMediaIO
+from vllm.multimodal.media.audio import load_audio
 
 from ...conftest import AudioTestAssets
 
@@ -68,11 +68,28 @@ def test_audio_media_io_encode_base64(dummy_audio):
         mock_write.assert_called_once()
 
 
+def test_load_audio_max_duration_respected(dummy_audio_bytes):
+    """Valid audio within the duration limit should load successfully."""
+    from io import BytesIO
+
+    y, sr = load_audio(BytesIO(dummy_audio_bytes), sr=None, max_duration_s=3600)
+    assert isinstance(y, np.ndarray)
+    assert len(y) > 0
+
+
+def test_load_audio_max_duration_rejected(dummy_audio_bytes):
+    """Audio exceeding the duration limit must be rejected during decode."""
+    from io import BytesIO
+
+    with pytest.raises(ValueError, match="exceeds maximum allowed duration"):
+        load_audio(BytesIO(dummy_audio_bytes), sr=None, max_duration_s=0.0001)
+
+
 def test_audio_media_io_from_video(video_assets):
     audio_io = AudioMediaIO()
     video_path = video_assets[0].video_path
     with open(video_path, "rb") as f:
         audio, sr = audio_io.load_bytes(f.read())
-    audio_ref, sr_ref = librosa.load(video_path, sr=None)
+    audio_ref, sr_ref = load_audio(video_path, sr=None)
     assert sr == sr_ref
     np.testing.assert_allclose(audio_ref, audio, atol=1e-4)

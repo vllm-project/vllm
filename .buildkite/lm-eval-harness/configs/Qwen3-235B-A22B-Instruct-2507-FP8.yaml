@@ -1,4 +1,7 @@
 model_name: "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8"
+required_gpu_arch:
+  - gfx942
+  - gfx950
 tasks:
   - name: "mmlu_pro"
     metrics:

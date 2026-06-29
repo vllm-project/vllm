@@ -3,10 +3,12 @@
 """Backend for GatedDeltaNet attention."""
 
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
 
 from vllm.config import VllmConfig
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -14,7 +16,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.utils import (
-    PAD_SLOT_ID,
+    NULL_BLOCK_ID,
     compute_causal_conv1d_metadata,
     mamba_get_block_table_tensor,
     split_decodes_and_prefills,
@@ -30,6 +32,10 @@ class GDNAttentionBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["GDNAttentionMetadataBuilder"]:
         return GDNAttentionMetadataBuilder
+
+    @classmethod
+    def is_ssm(cls) -> bool:
+        return True
 
 
 @dataclass
@@ -59,6 +65,14 @@ class GDNAttentionMetadata:
 
     num_accepted_tokens: torch.Tensor | None = None  # shape: [batch,]
 
+    # Pre-computed FLA chunk metadata (avoids GPU->CPU sync in prepare_chunk_indices)
+    chunk_indices: torch.Tensor | None = None
+    chunk_offsets: torch.Tensor | None = None
+    # Chunk-kernel inputs for prefill
+    prefill_query_start_loc: torch.Tensor | None = None
+    prefill_state_indices: torch.Tensor | None = None
+    prefill_has_initial_state: torch.Tensor | None = None
+
     # The following attributes are for triton implementation of causal_conv1d
     nums_dict: dict | None = None
     batch_ptr: torch.Tensor | None = None
@@ -82,6 +96,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         self.compilation_config = vllm_config.compilation_config
         self.speculative_config = vllm_config.speculative_config
         self.kv_cache_spec = kv_cache_spec
+        from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+            _resolve_gdn_prefill_backend,
+        )
+
+        self.gdn_prefill_backend: Literal["triton", "flashinfer", "cutedsl"]
+        _, self.gdn_prefill_backend = _resolve_gdn_prefill_backend(vllm_config)
 
         if self.speculative_config:
             assert self.speculative_config.num_speculative_tokens is not None
@@ -184,8 +204,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 spec_sequence_masks = None
                 spec_sequence_masks_cpu = None
             else:
-                spec_sequence_masks = spec_sequence_masks_cpu.to(
-                    query_start_loc.device, non_blocking=True
+                spec_sequence_masks = async_tensor_h2d(
+                    spec_sequence_masks_cpu, device=query_start_loc.device
                 )
 
         if spec_sequence_masks is None:
@@ -245,7 +265,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 )
                 # Filter by spec_sequence_masks to exclude padded sequences
                 spec_state_indices_tensor = block_table_tensor[
-                    spec_sequence_masks, : self.num_spec + 1
+                    spec_sequence_masks_cpu, : self.num_spec + 1
                 ]
                 non_spec_state_indices_tensor = None
                 # Padded sequences are always at the back, so the first
@@ -256,7 +276,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 non_spec_query_start_loc_cpu = None
             else:
                 spec_token_masks = torch.repeat_interleave(
-                    spec_sequence_masks, query_lens
+                    spec_sequence_masks,
+                    query_lens,
+                    output_size=query_start_loc_cpu[-1].item(),
                 )
                 index = torch.argsort(spec_token_masks, stable=True)
                 num_non_spec_tokens = num_prefill_tokens + num_decode_tokens
@@ -264,10 +286,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 spec_token_indx = index[num_non_spec_tokens:]
 
                 spec_state_indices_tensor = block_table_tensor[
-                    spec_sequence_masks, : self.num_spec + 1
+                    spec_sequence_masks_cpu, : self.num_spec + 1
                 ]
                 non_spec_state_indices_tensor = block_table_tensor[
-                    ~spec_sequence_masks, 0
+                    ~spec_sequence_masks_cpu, 0
                 ]
 
                 spec_query_start_loc = torch.zeros(
@@ -276,7 +298,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     device=query_start_loc.device,
                 )
                 torch.cumsum(
-                    query_lens[spec_sequence_masks], dim=0, out=spec_query_start_loc[1:]
+                    query_lens[spec_sequence_masks_cpu],
+                    dim=0,
+                    out=spec_query_start_loc[1:],
                 )
                 non_spec_query_start_loc = torch.zeros(
                     query_lens.size(0) - num_spec_decodes + 1,
@@ -284,7 +308,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     device=query_start_loc.device,
                 )
                 torch.cumsum(
-                    query_lens[~spec_sequence_masks],
+                    query_lens[~spec_sequence_masks_cpu],
                     dim=0,
                     out=non_spec_query_start_loc[1:],
                 )
@@ -299,12 +323,73 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 )
 
             assert num_accepted_tokens is not None
-            num_accepted_tokens = num_accepted_tokens[spec_sequence_masks]
+            num_accepted_tokens = num_accepted_tokens[spec_sequence_masks_cpu]
+
+        chunk_indices: torch.Tensor | None = None
+        chunk_offsets: torch.Tensor | None = None
+        prefill_query_start_loc: torch.Tensor | None = None
+        prefill_state_indices: torch.Tensor | None = None
+        prefill_has_initial_state: torch.Tensor | None = None
+        if num_prefills > 0:
+            from vllm.model_executor.layers.fla.ops.utils import FLA_CHUNK_SIZE
+
+            # In a mixed non-spec batch, decodes are peeled off to the recurrent
+            # kernel (decode-first front slice), so build chunk metadata from the
+            # rebased prefill-only cu_seqlens; otherwise use the full non-spec one.
+            # _forward_core keys off the same condition, so they agree.
+            if spec_sequence_masks is None and num_decodes > 0:
+                assert non_spec_query_start_loc is not None
+                assert non_spec_query_start_loc_cpu is not None
+                assert non_spec_state_indices_tensor is not None
+                prefill_query_start_loc = (
+                    non_spec_query_start_loc[num_decodes:] - num_decode_tokens
+                )
+                prefill_query_start_loc_cpu = (
+                    non_spec_query_start_loc_cpu[num_decodes:] - num_decode_tokens
+                )
+                prefill_state_indices = non_spec_state_indices_tensor[num_decodes:]
+            else:
+                prefill_query_start_loc = non_spec_query_start_loc
+                prefill_query_start_loc_cpu = non_spec_query_start_loc_cpu
+                prefill_state_indices = non_spec_state_indices_tensor
+
+            if self.gdn_prefill_backend == "cutedsl":
+                from vllm.model_executor.layers.mamba.ops.gdn_chunk_cutedsl import (
+                    prepare_metadata_cutedsl,
+                )
+
+                assert prefill_query_start_loc is not None
+                assert prefill_query_start_loc_cpu is not None
+                total_tokens = int(prefill_query_start_loc_cpu[-1].item())
+                chunk_indices, chunk_offsets = prepare_metadata_cutedsl(
+                    prefill_query_start_loc,
+                    total_tokens,
+                    FLA_CHUNK_SIZE,
+                )
+            else:
+                gpu_device = query_start_loc.device
+                # Only prefill batches use FLA chunk ops.
+                # Pre-compute on CPU and async-copy to GPU to avoid
+                # GPU→CPU sync (.tolist()) in prepare_chunk_indices.
+                from vllm.model_executor.layers.fla.ops.index import (
+                    prepare_chunk_indices,
+                    prepare_chunk_offsets,
+                )
+
+                assert prefill_query_start_loc_cpu is not None
+                chunk_indices = async_tensor_h2d(
+                    prepare_chunk_indices(prefill_query_start_loc_cpu, FLA_CHUNK_SIZE),
+                    device=gpu_device,
+                )
+                chunk_offsets = async_tensor_h2d(
+                    prepare_chunk_offsets(prefill_query_start_loc_cpu, FLA_CHUNK_SIZE),
+                    device=gpu_device,
+                )
 
         if num_prefills > 0:
             has_initial_state = context_lens_tensor > 0
-            if spec_sequence_masks is not None:
-                has_initial_state = has_initial_state[~spec_sequence_masks]
+            if spec_sequence_masks_cpu is not None:
+                has_initial_state = has_initial_state[~spec_sequence_masks_cpu]
                 assert non_spec_query_start_loc_cpu is not None
             nums_dict, batch_ptr, token_chunk_offset_ptr = (
                 compute_causal_conv1d_metadata(
@@ -312,6 +397,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                     device=query_start_loc.device,
                 )
             )
+            if spec_sequence_masks is None and num_decodes > 0:
+                prefill_has_initial_state = has_initial_state[num_decodes:]
+            else:
+                prefill_has_initial_state = has_initial_state
         else:
             has_initial_state = None
 
@@ -321,9 +410,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             f"num_decodes: {num_decodes}, num_spec_decodes: {num_spec_decodes}"
         )
 
-        # Prepare tensors for cudagraph
-        # Note: m.num_actual_tokens is already padded by the model runner for CUDAGraph
-        batch_size = m.num_actual_tokens
+        # Prepare per-request tensors for cudagraph. m.num_actual_tokens is
+        # token-padded for FULL graph replay, but the GDN state/query/accepted
+        # metadata below is indexed by request.
+        batch_size = m.num_reqs
 
         if (
             self.use_full_cuda_graph
@@ -337,7 +427,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 spec_state_indices_tensor, non_blocking=True
             )
             spec_state_indices_tensor = self.spec_state_indices_tensor[:batch_size]
-            spec_state_indices_tensor[num_spec_decodes:].fill_(PAD_SLOT_ID)
+            spec_state_indices_tensor[num_spec_decodes:].fill_(NULL_BLOCK_ID)
 
             self.spec_sequence_masks[:num_spec_decodes].copy_(
                 spec_sequence_masks[:num_spec_decodes], non_blocking=True
@@ -383,7 +473,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_state_indices_tensor = self.non_spec_state_indices_tensor[
                 :batch_size
             ]
-            non_spec_state_indices_tensor[num_decodes:].fill_(PAD_SLOT_ID)
+            non_spec_state_indices_tensor[num_decodes:].fill_(NULL_BLOCK_ID)
 
             self.non_spec_query_start_loc[: num_decodes + 1].copy_(
                 non_spec_query_start_loc, non_blocking=True
@@ -401,6 +491,11 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_spec_decode_tokens=num_spec_decode_tokens,
             num_actual_tokens=m.num_actual_tokens,
             has_initial_state=has_initial_state,
+            chunk_indices=chunk_indices,
+            chunk_offsets=chunk_offsets,
+            prefill_query_start_loc=prefill_query_start_loc,
+            prefill_state_indices=prefill_state_indices,
+            prefill_has_initial_state=prefill_has_initial_state,
             spec_query_start_loc=spec_query_start_loc,
             non_spec_query_start_loc=non_spec_query_start_loc,
             spec_state_indices_tensor=spec_state_indices_tensor,

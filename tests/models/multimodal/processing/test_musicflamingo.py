@@ -17,11 +17,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from importlib.metadata import version
 from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 import torch
+from packaging.version import Version
 from transformers import PretrainedConfig
 
 from tests.models.registry import HF_EXAMPLE_MODELS
@@ -47,6 +49,13 @@ class MockMusicFlamingoProcessor:
         self.max_audio_len = 1200
         self.feature_extractor = MockFeatureExtractor()
 
+    def __call__(self, text=None, audio=None, **kwargs):
+        return {
+            "input_ids": torch.tensor([[1, 2, 3]], dtype=torch.long),
+            "input_features": torch.zeros((3, 80, 3000)),
+            "input_features_mask": torch.ones((3, 3000), dtype=torch.long),
+        }
+
 
 class MockFeatureExtractor:
     def __init__(self):
@@ -61,6 +70,9 @@ def mock_ctx():
     ctx = MagicMock()
     ctx.get_hf_config.return_value = config
     ctx.get_hf_processor.return_value = MockMusicFlamingoProcessor()
+    ctx.call_hf_processor.side_effect = lambda processor, data, kwargs: processor(
+        **data, **kwargs
+    )
     ctx.model_config.hf_config = config
     return ctx
 
@@ -71,7 +83,7 @@ def check_transformers_version():
     model_info.check_transformers_version(on_fail="skip")
 
 
-def test_musicflamingo_chunk_counting_uses_rote_timestamps(mock_ctx, monkeypatch):
+def test_musicflamingo_chunk_counting_without_rote_timestamps(mock_ctx):
     from vllm.model_executor.models.musicflamingo import (
         MusicFlamingoDummyInputsBuilder,
         MusicFlamingoMultiModalProcessor,
@@ -90,24 +102,13 @@ def test_musicflamingo_chunk_counting_uses_rote_timestamps(mock_ctx, monkeypatch
     mm_data = {"audio": [audio_1, audio_2]}
     prompt = "<|user|>Listen.<|end|>"
 
-    from vllm.multimodal.processing import BaseMultiModalProcessor
-
-    def mock_base_call(self, prompt, mm_data, mm_kwargs, tok_kwargs):
-        del self, prompt, mm_data, mm_kwargs, tok_kwargs
-        return {
-            "input_ids": [1, 2, 3],
-            "input_features": torch.randn(3, 80, 3000),
-            "rote_timestamps": torch.randn(3, 750),
-        }
-
-    monkeypatch.setattr(BaseMultiModalProcessor, "_call_hf_processor", mock_base_call)
-
     processed = processor._call_hf_processor(prompt, mm_data, {}, {})
 
     chunk_counts = processed["chunk_counts"]
 
     assert chunk_counts.tolist() == [1, 2]
-    assert "rote_timestamps" in processed
+    assert "rote_timestamps" not in processed
+    assert processed["feature_attention_mask"].shape == (3, 3000)
 
 
 def test_musicflamingo_dummy_text_uses_plain_audio_tokens(mock_ctx):
@@ -122,6 +123,11 @@ def test_musicflamingo_dummy_text_uses_plain_audio_tokens(mock_ctx):
     assert builder.get_dummy_text({"audio": 2}) == "<sound><sound>"
 
 
+@pytest.mark.skipif(
+    Version(version("transformers")) >= Version("5.5"),
+    reason="transformers v5.5 added native MusicFlamingoForConditionalGeneration "
+    "with a different get_audio_features signature (requires input_ids)",
+)
 def test_musicflamingo_audio_feature_pipeline_matches_hf_small_config():
     from transformers.models.musicflamingo import (
         modeling_musicflamingo as hf_musicflamingo_modeling,

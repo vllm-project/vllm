@@ -9,14 +9,11 @@ import regex as re
 from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
-from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-
-logger = init_logger(__name__)
 
 
 class Step3ReasoningParser(ReasoningParser):
@@ -29,6 +26,7 @@ class Step3ReasoningParser(ReasoningParser):
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
+        self.think_start_token = "<think>"
         self.think_end_token = "</think>"
 
         self.reasoning_regex = re.compile(rf"(.*?){self.think_end_token}", re.DOTALL)
@@ -46,6 +44,14 @@ class Step3ReasoningParser(ReasoningParser):
                 "token in the tokenizer!"
             )
         self.think_end_token_id: int = think_end_token_id
+
+    @property
+    def reasoning_start_str(self) -> str:
+        return self.think_start_token
+
+    @property
+    def reasoning_end_str(self) -> str:
+        return self.think_end_token
 
     def extract_reasoning_streaming(
         self,

@@ -6,28 +6,17 @@ from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.collection_utils import full_groupby
 from vllm.utils.import_utils import PlaceholderModule
 
 from .plot import DummyExecutor, _json_load_bytes
 from .utils import sanitize_filename
 
-try:
-    import matplotlib.pyplot as plt
-except ImportError:
-    plt = PlaceholderModule("matplotlib").placeholder_attr("pyplot")
-
-try:
+if TYPE_CHECKING:
     import pandas as pd
-except ImportError:
-    pd = PlaceholderModule("pandas")
-
-try:
-    import seaborn as sns
-except ImportError:
-    seaborn = PlaceholderModule("seaborn")
 
 
 def _first_present(run_data: dict[str, object], keys: list[str]):
@@ -195,6 +184,20 @@ def _plot_fig(
         print("[END FIGURE]")
         return
 
+    # Lazy-import matplotlib/pandas/seaborn
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        plt = PlaceholderModule("matplotlib").placeholder_attr("pyplot")
+    try:
+        import pandas as pd
+    except ImportError:
+        pd = PlaceholderModule("pandas")
+    try:
+        import seaborn as sns
+    except ImportError:
+        sns = PlaceholderModule("seaborn")
+
     df = pd.DataFrame.from_records(fig_data)
     df = df.dropna(subset=["tokens_per_user", "tokens_per_gpu"])
 
@@ -340,7 +343,7 @@ class SweepPlotParetoArgs:
         )
 
     @classmethod
-    def add_cli_args(cls, parser: argparse.ArgumentParser):
+    def add_cli_args(cls, parser: FlexibleArgumentParser):
         parser.add_argument(
             "EXPERIMENT_DIR",
             type=str,
@@ -392,7 +395,7 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=SweepPlotParetoArgs.parser_help)
+    parser = FlexibleArgumentParser(description=SweepPlotParetoArgs.parser_help)
     SweepPlotParetoArgs.add_cli_args(parser)
 
     main(parser.parse_args())

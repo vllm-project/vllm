@@ -7,6 +7,7 @@ from typing import Any, Literal
 import torch
 
 from vllm.config import VllmConfig
+from vllm.config.lora import LoRAConfig
 from vllm.exceptions import LoRAAdapterNotFoundError
 from vllm.logger import init_logger
 from vllm.lora.lora_model import LoRAModel
@@ -17,11 +18,7 @@ from vllm.lora.model_manager import (
 )
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
-from vllm.lora.utils import (
-    get_adapter_absolute_path,
-    is_in_target_modules,
-    is_supported_lora_module,
-)
+from vllm.lora.utils import get_adapter_absolute_path
 
 logger = init_logger(__name__)
 
@@ -49,7 +46,10 @@ class WorkerLoRAManager:
             vllm_config.scheduler_config.max_num_batched_tokens
         )
         self.vocab_size = vllm_config.model_config.get_vocab_size()
-        self.lora_config = vllm_config.lora_config
+        lora_config = vllm_config.lora_config
+        if lora_config is None:
+            raise ValueError("LoRA config must be set for WorkerLoRAManager.")
+        self.lora_config: LoRAConfig = lora_config
 
         # Use get_text_config() in case of multimodal models
         text_config = vllm_config.model_config.hf_config.get_text_config()
@@ -85,8 +85,10 @@ class WorkerLoRAManager:
     def create_lora_manager(
         self,
         model: torch.nn.Module,
-        vllm_config: VllmConfig | None = None,
+        vllm_config: VllmConfig,
     ) -> Any:
+        if vllm_config is None:
+            raise ValueError("vllm_config must be provided to create a LoRA manager.")
         lora_manager = create_lora_manager(
             model,
             max_num_seqs=self.max_num_seqs,
@@ -126,9 +128,13 @@ class WorkerLoRAManager:
             peft_helper.validate_legal(self.lora_config)
 
             # For some models like Qwen2VL, we need to use hf_to_vllm_mapper
-            # to ensure correct loading of lora weights.
+            # to ensure correct loading of lora weights. Drop the QKV/MLP fusion
+            # substr maps so constituent names (e.g. `q_proj`) survive for the
+            # LoRA manager to pack, while keeping genuine renames/prefixes.
             model = self._adapter_manager.model
             hf_to_vllm_mapper = getattr(model, "hf_to_vllm_mapper", None)
+            if hf_to_vllm_mapper is not None:
+                hf_to_vllm_mapper = hf_to_vllm_mapper.get_unstacked_mapper()
 
             # Get model-defined prefixes to skip during LoRA loading.
             lora_skip_prefixes = getattr(model, "lora_skip_prefixes", None)
@@ -144,31 +150,12 @@ class WorkerLoRAManager:
                 tensorizer_config_dict=lora_request.tensorizer_config_dict,
                 weights_mapper=hf_to_vllm_mapper,
                 skip_prefixes=lora_skip_prefixes,
+                moe_ep_spec=self._adapter_manager.moe_ep_load_spec,
             )
-
-            # Warn about adapter modules that will be ignored.
-            target_modules = self.lora_config.target_modules
-            expected_lora_modules_lst = list(expected_lora_modules)
-            for module_name in lora.loras:
-                if not is_supported_lora_module(module_name, expected_lora_modules_lst):
-                    logger.warning_once(
-                        "LoRA module '%s' in adapter '%s' is not in the "
-                        "model's supported LoRA target modules [%s]. "
-                        "These parameters will be ignored, which may "
-                        "cause abnormal model behavior.",
-                        module_name,
-                        lora_request.lora_path,
-                        ", ".join(sorted(expected_lora_modules_lst)),
-                    )
-                elif not is_in_target_modules(module_name, target_modules):
-                    logger.warning_once(
-                        "LoRA module '%s' in adapter '%s' is not in the "
-                        "deployment-time target_modules restriction [%s]."
-                        " These parameters will be ignored.",
-                        module_name,
-                        lora_request.lora_path,
-                        ", ".join(sorted(target_modules)),
-                    )
+            # Stamp the on-disk MoE layout onto the loaded model so the
+            # adapter manager can route 3D-format checkpoints through the
+            # 3D->2D conversion when running under the universal 2D wrapper.
+            lora.is_3d_lora_weight = lora_request.is_3d_lora_weight
 
         except FileNotFoundError as e:
             # FileNotFoundError should be raised if both
@@ -196,6 +183,9 @@ class WorkerLoRAManager:
             if self._cached_dummy_lora is None:
                 self._cached_dummy_lora = dummy_lora
         return self._adapter_manager.add_adapter(dummy_lora)
+
+    def get_dummy_lora_warmup_rank(self, default_rank: int) -> int:
+        return self._adapter_manager.get_dummy_lora_warmup_rank(default_rank)
 
     def pin_adapter(self, adapter_id: int) -> bool:
         return self._adapter_manager.pin_adapter(adapter_id)
@@ -260,8 +250,10 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
     def create_lora_manager(
         self,
         model: torch.nn.Module,
-        vllm_config: VllmConfig | None = None,
+        vllm_config: VllmConfig,
     ) -> Any:
+        if vllm_config is None:
+            raise ValueError("vllm_config must be provided to create a LoRA manager.")
         lora_manager = create_lora_manager(
             model,
             lora_manager_cls=self._manager_cls,

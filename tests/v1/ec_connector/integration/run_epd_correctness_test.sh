@@ -15,8 +15,9 @@
 
 # set -xe
 
-# Find the git repository root directory
-GIT_ROOT=$(git rev-parse --show-toplevel)
+# Resolve the repository root from the script location instead of `.git`.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+GIT_ROOT="${GIT_ROOT:-$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)}"
 
 # Model to test
 MODEL="${MODEL:-Qwen/Qwen2.5-VL-3B-Instruct}"
@@ -184,7 +185,7 @@ run_epd_1e_1pd() {
 
     # Start proxy
     echo "Starting EPD proxy on port $PROXY_PORT"
-    python "${GIT_ROOT}/examples/online_serving/disaggregated_encoder/disagg_epd_proxy.py" \
+    python "${GIT_ROOT}/examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py" \
         --host "0.0.0.0" \
         --port "$PROXY_PORT" \
         --encode-servers-urls "http://localhost:$ENCODE_PORT" \
@@ -410,7 +411,7 @@ run_epd_1e_1p_1d() {
     
     # Start proxy
     echo "Starting EPD proxy on port $PROXY_PORT"
-    python "${GIT_ROOT}/examples/online_serving/disaggregated_encoder/disagg_epd_proxy.py" \
+    python "${GIT_ROOT}/examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py" \
         --host "0.0.0.0" \
         --port "$PROXY_PORT" \
         --encode-servers-urls "http://localhost:$ENCODE_PORT" \

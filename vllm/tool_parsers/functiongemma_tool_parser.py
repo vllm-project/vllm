@@ -18,6 +18,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
@@ -33,6 +34,21 @@ class FunctionGemmaToolParser(ToolParser):
     <start_function_call>call:func_name{param:<escape>value<escape>}<end_function_call>
     """
 
+    # FunctionGemma tokens
+    tool_call_start_token: str = "<start_function_call>"
+    tool_call_end_token: str = "<end_function_call>"
+
+    # Regex patterns
+    tool_call_regex: re.Pattern = re.compile(
+        r"<start_function_call>call:(\w+)\{(.*?)\}<end_function_call>"
+        r"|<start_function_call>call:(\w+)\{(.*)",
+        re.DOTALL,
+    )
+    arg_regex: re.Pattern = re.compile(
+        r"(\w+):<escape>(.*?)<escape>",
+        re.DOTALL,
+    )
+
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
 
@@ -41,33 +57,6 @@ class FunctionGemmaToolParser(ToolParser):
         self.prev_tool_call_arr: list[dict] = []
         self.current_tool_id: int = -1
         self.streamed_args_for_tool: list[str] = []
-
-        # FunctionGemma tokens
-        self.tool_call_start_token: str = "<start_function_call>"
-        self.tool_call_end_token: str = "<end_function_call>"
-
-        # Regex patterns
-        self.tool_call_regex = re.compile(
-            r"<start_function_call>call:(\w+)\{(.*?)\}<end_function_call>"
-            r"|<start_function_call>call:(\w+)\{(.*)",
-            re.DOTALL,
-        )
-        self.arg_regex = re.compile(
-            r"(\w+):<escape>(.*?)<escape>",
-            re.DOTALL,
-        )
-
-        if self.model_tokenizer:
-            self.tool_call_start_token_ids = self.model_tokenizer.encode(
-                self.tool_call_start_token, add_special_tokens=False
-            )
-            self.tool_call_end_token_ids = self.model_tokenizer.encode(
-                self.tool_call_end_token, add_special_tokens=False
-            )
-        else:
-            self.tool_call_start_token_ids = []
-            self.tool_call_end_token_ids = []
-
         self.buffered_delta_text = ""
 
     def _parse_arguments(self, args_str: str) -> dict:
@@ -86,7 +75,9 @@ class FunctionGemmaToolParser(ToolParser):
 
         return arguments
 
-    def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+    def adjust_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
         request = super().adjust_request(request)
         if request.tools and request.tool_choice != "none":
             request.skip_special_tokens = False

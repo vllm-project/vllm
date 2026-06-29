@@ -141,6 +141,7 @@ def use_fused_moe_lora_kernel(
     block_size,
     fully_sharded=False,
     offset=0,
+    add_inputs=True,
 ):
     max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
     max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
@@ -222,6 +223,7 @@ def use_fused_moe_lora_kernel(
         mul_routed_weight,
         fully_sharded=fully_sharded,
         offset=offset,
+        add_inputs=add_inputs,
     )
 
 
@@ -371,6 +373,7 @@ def use_fused_moe_lora_kernel_naive(
     block_size,
     fully_sharded=False,
     offset=0,
+    add_inputs=True,
 ):
     """
     Test helper for naive_block_assignment path.
@@ -435,6 +438,7 @@ def use_fused_moe_lora_kernel_naive(
         mul_routed_weight=mul_routed_weight,
         fully_sharded=fully_sharded,
         offset=offset,
+        add_inputs=add_inputs,
     )
 
 
@@ -637,7 +641,7 @@ def use_fused_moe_lora_kernel_tensor_parallel(
 
     set_random_seed(seed)
 
-    device = torch.device(f"cuda:{local_rank}")
+    device = torch.device(f"{DEVICE_TYPE}:{local_rank}")
     torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
@@ -647,6 +651,7 @@ def use_fused_moe_lora_kernel_tensor_parallel(
         rank=local_rank,
         local_rank=local_rank,
         distributed_init_method=init_method,
+        backend=current_platform.dist_backend,
     )
     with ensure_current_vllm_config():
         initialize_model_parallel(world_size, 1)
@@ -744,3 +749,494 @@ def use_fused_moe_lora_kernel_tensor_parallel(
         output = tensor_model_parallel_all_reduce(output)
 
     torch.testing.assert_close(output, ref_output, atol=1e-2, rtol=1e-2)
+
+
+# -- one-shot fast-path coverage --------------------------------------------
+# The fused shrink+expand one-shot kernel pads `BLOCK_R` to next_pow2(rank),
+# with a floor of 16 (tensor-core minimum). Small ranks (4, 8) exercise the
+# rank-dim masking and are not covered by the original tests, which start at
+# rank=16. The legacy two-kernel path additionally fails on rank=4 in TMA
+# mode because the rank-dim stride (rank * elem_size) is not 16-byte
+# aligned; the one-shot fast path takes precedence whenever fully_sharded
+# is False so this regression is hidden in normal use, but the test still
+# ensures the one-shot logic is correct against the pytorch reference.
+
+
+@pytest.mark.parametrize("num_tokens", [16, 100])
+@pytest.mark.parametrize("top_k_num", [2])
+@pytest.mark.parametrize("num_experts", [8, 64])
+@pytest.mark.parametrize("max_loras", [4])
+@pytest.mark.parametrize("N", [1408])
+@pytest.mark.parametrize("K", [2048])
+@pytest.mark.parametrize("max_lora_rank", [4, 8])
+@pytest.mark.parametrize("block_size", [16, 64])
+@pytest.mark.parametrize("num_slices", [1, 2])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("seed", SEED)
+def test_fused_moe_lora_kernel_small_rank(
+    num_tokens,
+    top_k_num,
+    num_experts,
+    max_loras,
+    N,
+    K,
+    max_lora_rank,
+    block_size,
+    num_slices,
+    dtype,
+    device,
+    seed,
+):
+    """One-shot fast path covering rank<16 (padded to BLOCK_R=16 inside kernel)."""
+    torch.set_default_device(device)
+    set_random_seed(seed)
+    num_sequences = max(1, min(num_tokens, 8))
+    topk_ids, topk_weights, token_lora_mapping, lora_ids = sample_data(
+        num_tokens, num_sequences, max_loras, num_experts, top_k_num
+    )
+
+    lora_a_stacked = [
+        torch.rand(
+            (max_loras, num_experts, max_lora_rank, K),
+            dtype=dtype,
+        )
+        for _ in range(num_slices)
+    ]
+    lora_b_stacked = [
+        torch.rand(
+            (max_loras, num_experts, N // num_slices, max_lora_rank),
+            dtype=dtype,
+        )
+        for _ in range(num_slices)
+    ]
+    hidden_states = torch.rand((num_tokens, K), dtype=dtype)
+
+    output = torch.zeros((num_tokens, top_k_num, N), dtype=dtype)
+    use_fused_moe_lora_kernel(
+        topk_ids,
+        topk_weights,
+        token_lora_mapping,
+        max_lora_rank,
+        top_k_num,
+        lora_ids,
+        lora_a_stacked,
+        lora_b_stacked,
+        hidden_states,
+        output,
+        max_loras,
+        num_experts,
+        block_size,
+    )
+    output_ref = use_torch(
+        hidden_states,
+        token_lora_mapping,
+        topk_ids,
+        lora_a_stacked,
+        lora_b_stacked,
+        top_k_num,
+        num_slices,
+    )
+    torch.testing.assert_close(output, output_ref, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize("num_tokens", [16, 64])
+@pytest.mark.parametrize("top_k_num", [2])
+@pytest.mark.parametrize("num_experts", [8])
+@pytest.mark.parametrize("max_loras", [4])
+@pytest.mark.parametrize("N", [2048])
+@pytest.mark.parametrize("K", [4096])
+@pytest.mark.parametrize("max_lora_rank", [8, 16, 32, 64])
+@pytest.mark.parametrize("block_size", [64])
+@pytest.mark.parametrize("num_slices", [2])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("seed", SEED)
+def test_fused_moe_lora_kernel_npid_path(
+    num_tokens,
+    top_k_num,
+    num_experts,
+    max_loras,
+    N,
+    K,
+    max_lora_rank,
+    block_size,
+    num_slices,
+    dtype,
+    device,
+    seed,
+):
+    """Exercise the small-batch / NPID > 1 branch of the one-shot fast path.
+
+    With these sizes the one-shot wrapper computes NPID_FACTOR > 1 (base CTA count
+    < SM count), so each program covers only an outer chunk of N. The
+    cross-outer-block write mask is the correctness-critical bit.
+    """
+    torch.set_default_device(device)
+    set_random_seed(seed)
+    num_sequences = max(1, min(num_tokens, 4))
+    topk_ids, topk_weights, token_lora_mapping, lora_ids = sample_data(
+        num_tokens, num_sequences, max_loras, num_experts, top_k_num
+    )
+
+    lora_a_stacked = [
+        torch.rand(
+            (max_loras, num_experts, max_lora_rank, K),
+            dtype=dtype,
+        )
+        for _ in range(num_slices)
+    ]
+    lora_b_stacked = [
+        torch.rand(
+            (max_loras, num_experts, N // num_slices, max_lora_rank),
+            dtype=dtype,
+        )
+        for _ in range(num_slices)
+    ]
+    hidden_states = torch.rand((num_tokens, K), dtype=dtype)
+
+    output = torch.zeros((num_tokens, top_k_num, N), dtype=dtype)
+    use_fused_moe_lora_kernel(
+        topk_ids,
+        topk_weights,
+        token_lora_mapping,
+        max_lora_rank,
+        top_k_num,
+        lora_ids,
+        lora_a_stacked,
+        lora_b_stacked,
+        hidden_states,
+        output,
+        max_loras,
+        num_experts,
+        block_size,
+    )
+    output_ref = use_torch(
+        hidden_states,
+        token_lora_mapping,
+        topk_ids,
+        lora_a_stacked,
+        lora_b_stacked,
+        top_k_num,
+        num_slices,
+    )
+    torch.testing.assert_close(output, output_ref, atol=2e-2, rtol=2e-2)
+
+
+# -- one-shot corner-case coverage ------------------------------------------
+# Each of the following exercises a path where the kernel is launched but
+# every program early-exits, leaving the output unchanged. The contract is
+# additive (`output += contribution`), so an empty contribution must leave
+# the input residual untouched.
+
+
+def _build_one_shot_inputs(
+    num_tokens,
+    top_k_num,
+    num_experts,
+    max_loras,
+    max_lora_rank,
+    K,
+    N,
+    num_slices,
+    block_size,
+    dtype,
+):
+    """Common scaffolding for the corner-case tests below."""
+    num_sequences = max(1, min(num_tokens, 4)) if num_tokens > 0 else 1
+    if num_tokens > 0:
+        topk_ids, topk_weights, token_lora_mapping, lora_ids = sample_data(
+            num_tokens, num_sequences, max_loras, num_experts, top_k_num
+        )
+    else:
+        # M=0 path: caller may still hand us empty tensors with the right shape.
+        topk_ids = torch.empty((0, top_k_num), dtype=torch.int32)
+        topk_weights = torch.empty((0, top_k_num), dtype=torch.float32)
+        token_lora_mapping = torch.empty((0,), dtype=torch.int32)
+        lora_ids = torch.full((max_loras + 1,), -1, dtype=torch.int32)
+
+    lora_a_stacked = [
+        torch.rand((max_loras, num_experts, max_lora_rank, K), dtype=dtype)
+        for _ in range(num_slices)
+    ]
+    lora_b_stacked = [
+        torch.rand(
+            (max_loras, num_experts, N // num_slices, max_lora_rank), dtype=dtype
+        )
+        for _ in range(num_slices)
+    ]
+    hidden_states = torch.rand((max(num_tokens, 0), K), dtype=dtype)
+    return (
+        topk_ids,
+        topk_weights.to(dtype),
+        token_lora_mapping,
+        lora_ids,
+        lora_a_stacked,
+        lora_b_stacked,
+        hidden_states,
+    )
+
+
+def _call_one_shot(
+    output,
+    hidden_states,
+    lora_a_stacked,
+    lora_b_stacked,
+    topk_weights,
+    sorted_token_ids,
+    expert_ids,
+    num_tokens_post_padded,
+    token_lora_mapping,
+    max_lora_rank,
+    top_k_num,
+    lora_ids,
+    num_active_loras,
+    adapter_enabled,
+    block_size,
+    add_inputs=True,
+):
+    """Direct call into fused_moe_lora with one-shot-routed defaults."""
+    from vllm.lora.ops.triton_ops import fused_moe_lora as _op
+
+    _op(
+        output,
+        hidden_states,
+        lora_a_stacked,
+        lora_b_stacked,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        token_lora_mapping,
+        max_lora_rank,
+        top_k_num,
+        lora_ids,
+        num_active_loras,
+        adapter_enabled,
+        block_size,
+        32,
+        64,
+        1,
+        4,
+        3,
+        1,
+        block_size,
+        32,
+        64,
+        1,
+        4,
+        3,
+        1,
+        False,
+        False,
+        0,
+        add_inputs,
+    )
+
+
+@pytest.mark.parametrize(
+    "trigger",
+    ["sorted_lora_ids_neg", "naive_mapping_neg", "naive_all_disabled"],
+)
+@pytest.mark.parametrize("device", DEVICES)
+def test_fused_moe_lora_kernel_one_shot_early_exit(trigger, device):
+    """one-shot must leave the residual byte-identical when every program
+    must early-exit. Three trigger conditions are covered:
+
+      - "sorted_lora_ids_neg":  sorted path, lora_ids all -1 (lora_id<0 check)
+      - "naive_mapping_neg":    naive path, token_lora_mapping all -1
+      - "naive_all_disabled":   naive path, adapter_enabled all 0
+    """
+    torch.set_default_device(device)
+    set_random_seed(0)
+
+    # Per-trigger shapes: naive_mapping_neg needs the naive dispatch gate
+    # `num_tokens*top_k*8 <= num_experts*max_loras` to hold, hence the
+    # larger E/max_loras and smaller num_tokens.
+    if trigger == "naive_mapping_neg":
+        num_tokens, top_k, E, max_loras, R = 8, 2, 64, 8, 16
+    elif trigger == "naive_all_disabled":
+        num_tokens, top_k, E, max_loras, R = 32, 2, 8, 4, 32
+    else:  # sorted_lora_ids_neg
+        num_tokens, top_k, E, max_loras, R = 32, 2, 8, 4, 16
+    K, N = 1024, 1024
+    block_size, num_slices, dtype = 16, 2, torch.bfloat16
+
+    (
+        topk_ids,
+        topk_weights,
+        token_lora_mapping,
+        lora_ids,
+        lora_a_stacked,
+        lora_b_stacked,
+        hidden_states,
+    ) = _build_one_shot_inputs(
+        num_tokens, top_k, E, max_loras, R, K, N, num_slices, block_size, dtype
+    )
+
+    adapter_enabled = torch.ones(max_loras + 1, dtype=torch.int32)
+    num_active_loras = torch.tensor([max_loras + 1], dtype=torch.int32, device="cpu")
+
+    if trigger == "sorted_lora_ids_neg":
+        lora_ids = torch.full((max_loras + 1,), -1, dtype=torch.int32)
+        max_pad = topk_ids.numel() + E * (block_size - 1)
+        max_pad = round_up(max_pad, block_size)
+        max_blocks = CEILDIV(max_pad, block_size)
+        sorted_token_ids = torch.zeros((max_loras, max_pad), dtype=torch.int32)
+        expert_ids = torch.full((max_loras, max_blocks), -1, dtype=torch.int32)
+        num_post = torch.zeros((max_loras,), dtype=torch.int32)
+    else:
+        sorted_token_ids = None
+        expert_ids = topk_ids.reshape(-1).contiguous()
+        num_post = None
+        if trigger == "naive_mapping_neg":
+            token_lora_mapping = torch.full((num_tokens,), -1, dtype=torch.int32)
+            lora_ids = torch.full((max_loras + 1,), -1, dtype=torch.int32)
+        else:  # naive_all_disabled
+            adapter_enabled = torch.zeros(max_loras + 1, dtype=torch.int32)
+
+    residual = torch.randn((num_tokens, top_k, N), dtype=dtype) * 0.1
+    output = residual.clone()
+
+    _call_one_shot(
+        output,
+        hidden_states,
+        lora_a_stacked,
+        lora_b_stacked,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_post,
+        token_lora_mapping,
+        R,
+        top_k,
+        lora_ids,
+        num_active_loras,
+        adapter_enabled,
+        block_size,
+    )
+    torch.testing.assert_close(output, residual, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_fused_moe_lora_kernel_zero_grid_no_crash(device):
+    """num_active_loras=0 (or num_slices=0) would otherwise launch a grid
+    with a zero dimension. one-shot wrapper must short-circuit before launch."""
+    torch.set_default_device(device)
+    set_random_seed(0)
+    num_tokens, top_k, E, max_loras, R, K, N = 8, 2, 8, 4, 16, 1024, 1024
+    block_size, num_slices, dtype = 16, 2, torch.bfloat16
+
+    (
+        topk_ids,
+        topk_weights,
+        token_lora_mapping,
+        lora_ids,
+        lora_a_stacked,
+        lora_b_stacked,
+        hidden_states,
+    ) = _build_one_shot_inputs(
+        num_tokens,
+        top_k,
+        E,
+        max_loras,
+        R,
+        K,
+        N,
+        num_slices,
+        block_size,
+        dtype,
+    )
+    adapter_enabled = torch.ones(max_loras + 1, dtype=torch.int32)
+    num_active_loras = torch.tensor([0], dtype=torch.int32, device="cpu")
+    residual = torch.randn((num_tokens, top_k, N), dtype=dtype) * 0.1
+    output = residual.clone()
+
+    # sorted path is the one that uses num_active_loras for grid axis 2
+    max_pad = topk_ids.numel() + E * (block_size - 1)
+    max_pad = round_up(max_pad, block_size)
+    max_blocks = CEILDIV(max_pad, block_size)
+    sorted_token_ids = torch.zeros((max_loras, max_pad), dtype=torch.int32)
+    expert_ids = torch.full((max_loras, max_blocks), -1, dtype=torch.int32)
+    num_post = torch.zeros((max_loras,), dtype=torch.int32)
+    _call_one_shot(
+        output,
+        hidden_states,
+        lora_a_stacked,
+        lora_b_stacked,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_post,
+        token_lora_mapping,
+        R,
+        top_k,
+        lora_ids,
+        num_active_loras,
+        adapter_enabled,
+        block_size,
+    )
+    torch.testing.assert_close(output, residual, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_fused_moe_lora_kernel_rejects_bad_block_size_m(device):
+    """one-shot must surface a clear assertion when shrink_block_size_m is not
+    a power of 2 / less than 16, instead of the cryptic Triton compile
+    failure (`arange's range must be a power of 2`)."""
+    torch.set_default_device(device)
+    set_random_seed(0)
+    num_tokens, top_k, E, max_loras, R, K, N = 32, 2, 8, 4, 16, 1024, 1024
+    num_slices, dtype = 2, torch.bfloat16
+    block_size = 24  # NOT a power of 2
+
+    (
+        topk_ids,
+        topk_weights,
+        token_lora_mapping,
+        lora_ids,
+        lora_a_stacked,
+        lora_b_stacked,
+        hidden_states,
+    ) = _build_one_shot_inputs(
+        num_tokens,
+        top_k,
+        E,
+        max_loras,
+        R,
+        K,
+        N,
+        num_slices,
+        16,
+        dtype,
+    )
+    # Build sorted-mode metadata at block_size=16 so shapes are sane,
+    # but pass block_size=24 to the op (the buggy combination).
+    max_pad = topk_ids.numel() + E * (16 - 1)
+    max_pad = round_up(max_pad, 16)
+    max_blocks = CEILDIV(max_pad, 16)
+    sorted_token_ids = torch.zeros((max_loras, max_pad), dtype=torch.int32)
+    expert_ids = torch.full((max_loras, max_blocks), -1, dtype=torch.int32)
+    num_post = torch.zeros((max_loras,), dtype=torch.int32)
+    adapter_enabled = torch.ones(max_loras + 1, dtype=torch.int32)
+    num_active_loras = torch.tensor([max_loras + 1], dtype=torch.int32, device="cpu")
+    output = torch.zeros((num_tokens, top_k, N), dtype=dtype)
+
+    with pytest.raises(AssertionError, match="shrink_block_size_m"):
+        _call_one_shot(
+            output,
+            hidden_states,
+            lora_a_stacked,
+            lora_b_stacked,
+            topk_weights,
+            sorted_token_ids,
+            expert_ids,
+            num_post,
+            token_lora_mapping,
+            R,
+            top_k,
+            lora_ids,
+            num_active_loras,
+            adapter_enabled,
+            block_size,
+        )
