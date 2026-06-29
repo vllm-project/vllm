@@ -85,7 +85,7 @@ MM_DATA_PATCHES = {
 }
 
 _XPU_EXCLUDED_MODEL_IDS = {
-    "baidu/UnlimitedOCR",
+    "baidu/Unlimited-OCR",
     "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4",
     "Qwen/Qwen2.5-Omni-7B-AWQ",
 }
