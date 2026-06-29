@@ -299,14 +299,17 @@ class AnthropicServingMessages(OpenAIServingChat):
         if reasoning:
             content.append(AnthropicContentBlock(type="thinking", thinking=reasoning))
 
-        content.append(
-            AnthropicContentBlock(
-                type="text",
-                text=generator.choices[0].message.content
-                if generator.choices[0].message.content
-                else "",
+        # Only emit a text block when there is actual content. The real
+        # Anthropic API omits empty text blocks; appending one here produces a
+        # spurious {"type":"text","text":""} alongside thinking / tool_use.
+        text_content = generator.choices[0].message.content
+        if text_content:
+            content.append(
+                AnthropicContentBlock(
+                    type="text",
+                    text=text_content,
+                )
             )
-        )
 
         for tool_call in generator.choices[0].message.tool_calls:
             anthropic_tool_call = AnthropicContentBlock(

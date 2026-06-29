@@ -75,6 +75,12 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         # Extract reasoning content from the model output.
         reasoning, _, content = model_output.partition(self.end_token)
 
+        # The chat template trains the model to emit "\n\n" right after
+        # </think>, and the incremental detokenizer can prepend a space to
+        # the special token (spaces_between_special_tokens). Strip both
+        # leading whitespace artifacts so they don't leak into the content.
+        content = content.lstrip()
+
         final_content = content or None
         return reasoning, final_content
 

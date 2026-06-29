@@ -748,6 +748,11 @@ class OpenAIServingChat(OpenAIServing):
             added_content_delta_arr = [False] * num_choices
             reasoning_end_arr = [False] * num_choices
             prompt_is_reasoning_end_arr: list[bool | None] = [None] * num_choices
+            # Track whether real (non-whitespace) content has started after
+            # reasoning ended, so the leading "\n\n"/space the chat template
+            # and detokenizer leave right after </think> can be stripped
+            # before they leak into the streamed content.
+            content_started_arr = [False] * num_choices
         else:
             all_previous_token_ids = None
 
@@ -1209,6 +1214,45 @@ class OpenAIServingChat(OpenAIServing):
                     # handle streaming just a content delta
                     else:
                         delta_message = DeltaMessage(content=delta_text)
+
+                    # Strip the reasoning-end artifacts that leak into the
+                    # streamed content. The chat template trains the model to
+                    # emit "</think>\n\n" and the incremental detokenizer can
+                    # prepend a space to the special token, so the content
+                    # right after reasoning ends starts with stray whitespace.
+                    # Depending on the prompt/template the model may even emit
+                    # "</think>" itself into the content stream (reasoning
+                    # routed as content), so we also drop a leaked end-token
+                    # marker and re-arm whitespace swallowing for the text that
+                    # follows it. ``content_started_arr[i]`` is False while we
+                    # are still swallowing leading whitespace.
+                    if (
+                        reasoning_parser is not None
+                        and not self.use_harmony
+                        and delta_message is not None
+                        and delta_message.content
+                    ):
+                        cleaned = delta_message.content
+                        end_token = getattr(reasoning_parser, "end_token", None)
+                        if end_token and end_token in cleaned:
+                            cleaned = cleaned[
+                                cleaned.rfind(end_token) + len(end_token) :
+                            ]
+                            # Re-arm: swallow the whitespace after the marker.
+                            content_started_arr[i] = False
+                        if not content_started_arr[i]:
+                            cleaned = cleaned.lstrip()
+                            if cleaned:
+                                content_started_arr[i] = True
+                        if cleaned:
+                            delta_message.content = cleaned
+                        elif (
+                            not delta_message.reasoning and not delta_message.tool_calls
+                        ):
+                            # Nothing but the artifact in this delta: drop it.
+                            delta_message = None
+                        else:
+                            delta_message.content = None
 
                     # update the previous values for the next iteration
                     if (tool_choice_auto or reasoning_parser) and not self.use_harmony:
