@@ -643,7 +643,7 @@ class ParserEngine(Parser):
         events = self._feed(text, token_ids)
         events.extend(self._engine.finish())
 
-        delta = self._events_to_delta(events)
+        delta = self._events_to_delta(events, finished=True)
         tool_call_info = self._build_extracted_result()
 
         reasoning = delta.reasoning if delta else None

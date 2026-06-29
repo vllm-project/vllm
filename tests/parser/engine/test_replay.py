@@ -428,12 +428,6 @@ class TestToolCallFilteringNonStreaming:
         expected_reasoning, expected_content = _tool_suppression_expectations(
             sample, think_end, tool_start, include_tool_block=False
         )
-        # Non-streaming _single_pass_parse defers whitespace-only content
-        # (finished defaults to False), so whitespace-only expected content
-        # becomes empty.
-        if expected_content and not expected_content.strip():
-            expected_content = ""
-
         assert output.reasoning == expected_reasoning, (
             f"Reasoning mismatch:\n"
             f"  expected: {expected_reasoning!r}\n"
@@ -446,6 +440,57 @@ class TestToolCallFilteringNonStreaming:
             f"Content mismatch:\n"
             f"  expected: {expected_content!r}\n"
             f"  actual:   {output.content!r}"
+        )
+
+
+_WS_TOOL_SAMPLES = [(t[0], t[1]) for t in _TOOL_CALL_SAMPLES if "whitespace" in t[1].id]
+
+
+@pytest.mark.parametrize(
+    "parser_cls,sample",
+    _WS_TOOL_SAMPLES,
+    ids=lambda v: v.id if hasattr(v, "id") else getattr(v, "__name__", ""),
+)
+class TestToolChoiceNoneStreamingParity:
+    """Streaming and non-streaming must return the same content
+    when tool_choice='none' suppresses tool calls."""
+
+    def test_content_matches(self, parser_cls, sample):
+        tokenizer = make_mock_tokenizer(sample)
+        kwargs = {}
+        if sample.chat_template_kwargs:
+            kwargs["chat_template_kwargs"] = sample.chat_template_kwargs
+        request = _test_request()
+        request.tools = DUMMY_TOOLS
+        request.tool_choice = "none"
+
+        ns_output = parse_non_streaming(
+            parser_cls(tokenizer, **kwargs),
+            sample,
+            request,
+        )
+
+        s_parser = parser_cls(tokenizer, **kwargs)
+        results = []
+        for i, (tid, text) in enumerate(sample.tokens):
+            is_last = i == len(sample.tokens) - 1
+            results.append(
+                s_parser.parse_delta(
+                    text,
+                    [tid],
+                    request,
+                    prompt_token_ids=(sample.prompt_token_ids or [])
+                    if i == 0
+                    else None,
+                    finished=is_last,
+                )
+            )
+        s_output = collect_output(results)
+
+        assert ns_output.content == s_output.content, (
+            f"Streaming/non-streaming content mismatch:\n"
+            f"  streaming:     {s_output.content!r}\n"
+            f"  non-streaming: {ns_output.content!r}"
         )
 
 
