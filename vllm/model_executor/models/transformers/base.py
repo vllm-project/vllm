@@ -158,9 +158,6 @@ class Base(
                     "Transformers modeling backend does "
                     "not support MXFP4 quantization yet."
                 )
-            # Skip loading extra bias for GPTQ models.
-            if "gptq" in quant_method_name:
-                self.ignore_unexpected_suffixes.append(".bias")
 
         self._patch_config()
         from_config_kwargs = dict(
