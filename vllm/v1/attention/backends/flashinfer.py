@@ -754,10 +754,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if current_platform.is_device_capability(90) and any(
             params.window_left != -1 for params in per_layer_parameters.values()
         ):
+            # FlashInfer SM90 sliding-window prefill is not reliable with FP8-Q:
+            # https://github.com/flashinfer-ai/flashinfer/issues/3578
             raise NotImplementedError(
-                "FlashInfer backend on SM90 does not currently support "
+                "FlashInfer backend on SM90 currently crashes with "
                 "sliding-window attention layers. Use the default attention "
-                "backend or disable sliding-window attention."
+                "backend."
             )
         self.global_hyperparameters = infer_global_hyperparameters(per_layer_parameters)
         self.sm_scale = self.global_hyperparameters.sm_scale
@@ -1559,6 +1561,14 @@ class FlashInferImpl(AttentionImpl):
         if self.sinks is not None and self.sinks.dtype != torch.float32:
             self.sinks = self.sinks.to(torch.float32)
 
+    def get_xqa_bmm1_scale(self, layer: torch.nn.Module, q_data_type: torch.dtype):
+        bmm1_scale = self.scale
+        if is_quantized_kv_cache(self.kv_cache_dtype):
+            if q_data_type in (torch.float8_e4m3fn, torch.float8_e5m2):
+                bmm1_scale *= layer._q_scale_float
+            bmm1_scale *= layer._k_scale_float
+        return bmm1_scale
+
     # SM90 may need FP8-Q for native prefill and BF16/FP16-Q for XQA decode,
     # so quantize only the slice whose target dtype differs.
     def maybe_quant_query(
@@ -2054,6 +2064,14 @@ class FlashInferImpl(AttentionImpl):
                         "FlashInfer XQA speculative decode is not wired in vLLM yet."
                     )
 
+                # XQA decode can use model-dtype Q with FP8 KV, so only include
+                # q_scale when the decode query is actually FP8.
+                bmm1_scale = (
+                    self.get_xqa_bmm1_scale(layer, attn_metadata.q_data_type_decode)
+                    if decode_with_xqa
+                    else self.bmm1_scale
+                )
+
                 trtllm_batch_decode_with_kv_cache(
                     query=decode_query,
                     kv_cache=(
@@ -2063,7 +2081,7 @@ class FlashInferImpl(AttentionImpl):
                     block_tables=block_tables_decode,
                     seq_lens=seq_lens_decode,
                     max_seq_len=attn_metadata.decode.max_seq_len,
-                    bmm1_scale=self.bmm1_scale,
+                    bmm1_scale=bmm1_scale,
                     bmm2_scale=self.bmm2_scale,
                     window_left=self.window_left,
                     sinks=self.sinks,

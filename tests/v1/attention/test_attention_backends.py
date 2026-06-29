@@ -634,6 +634,26 @@ def test_causal_backend_correctness(
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
     reason="FlashInfer is not available.",
 )
+def test_flashinfer_xqa_bmm1_scale_matches_decode_q_dtype():
+    """XQA decode should only apply q_scale when decode Q is FP8."""
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    class MockLayer:
+        _q_scale_float = 2.0
+        _k_scale_float = 3.0
+
+    impl = object.__new__(flashinfer_backend.FlashInferImpl)
+    impl.scale = 0.5
+    impl.kv_cache_dtype = "fp8"
+
+    assert impl.get_xqa_bmm1_scale(MockLayer, torch.bfloat16) == 1.5
+    assert impl.get_xqa_bmm1_scale(MockLayer, torch.float8_e4m3fn) == 3.0
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
 def test_flashinfer_sm90_xqa_decode_correctness(default_vllm_config):
     """FlashInfer should route Hopper decode through XQA and match SDPA."""
     if not current_platform.is_cuda() or not current_platform.is_device_capability(90):
