@@ -49,6 +49,25 @@ def test_kernel_warmup_runs_hybrid_warmup(monkeypatch) -> None:
 
     monkeypatch.setattr(kernel_warmup.envs, "VLLM_USE_DEEP_GEMM", False)
     monkeypatch.setattr(kernel_warmup, "has_flashinfer", lambda: False)
+    monkeypatch.setattr(kernel_warmup, "qwen_triton_warmup", lambda *args: None)
+    monkeypatch.setattr(
+        kernel_warmup, "deepseek_v4_mhc_warmup", lambda *args, **kw: None
+    )
+    monkeypatch.setattr(
+        kernel_warmup,
+        "sparse_mla_triton_warmup_if_needed",
+        lambda *args: None,
+    )
+    monkeypatch.setattr(
+        kernel_warmup,
+        "flashinfer_sparse_mla_decode_autotune_warmup",
+        lambda *args: None,
+    )
+    monkeypatch.setattr(
+        kernel_warmup,
+        "deepseek_v4_sparse_mla_attention_warmup",
+        lambda *args: None,
+    )
     monkeypatch.setattr(
         kernel_warmup,
         "hybrid_gdn_mamba_mrope_warmup",
@@ -61,9 +80,12 @@ def test_kernel_warmup_runs_hybrid_warmup(monkeypatch) -> None:
 
     worker = SimpleNamespace(
         get_model=lambda: model,
+        use_v2_model_runner=True,
         scheduler_config=SimpleNamespace(max_num_batched_tokens=16),
         vllm_config=SimpleNamespace(
-            kernel_config=SimpleNamespace(enable_flashinfer_autotune=False)
+            compilation_config=SimpleNamespace(cudagraph_capture_sizes=[]),
+            kernel_config=SimpleNamespace(enable_flashinfer_autotune=False),
+            model_config=SimpleNamespace(),
         ),
         model_runner=SimpleNamespace(
             dtype=torch.bfloat16,
