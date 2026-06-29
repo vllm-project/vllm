@@ -16,7 +16,6 @@
 # limitations under the License.
 """Transformers modeling backend mixin for Mixture of Experts (MoE) models."""
 
-from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -81,11 +80,6 @@ class TransformersMoERunner(MoERunner):
         topk_weights: torch.Tensor,
     ) -> torch.Tensor:
         return super().forward(hidden_states, topk_weights)
-
-    def load_weights(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> Iterable[str]:
-        return self.routed_experts.load_weights(weights)
 
 
 def _transformers_moe_forward(
