@@ -17,19 +17,19 @@ from vllm.logger import init_logger
 from vllm.models.deepseek_v4.hw_agnostic.attention.indexer import (
     DeepseekV4IndexerMetadata,
 )
-from vllm.models.deepseek_v4.hw_agnostic.attention.ops.fp8_logits_torch import (
+from vllm.models.deepseek_v4.hw_agnostic.attention.kernels.fp8_logits_torch import (
     fp8_mqa_logits_torch,
     fp8_paged_mqa_logits_torch,
 )
-from vllm.models.deepseek_v4.hw_agnostic.attention.ops.indexer_quant_cache import (
+from vllm.models.deepseek_v4.hw_agnostic.attention.kernels.indexer_quant_cache import (
     cp_gather_indexer_k_quant_cache_triton,
     indexer_k_quant_and_cache_triton,
 )
-from vllm.models.deepseek_v4.hw_agnostic.attention.ops.seq_packing import (
+from vllm.models.deepseek_v4.hw_agnostic.attention.kernels.seq_packing import (
     pack_seq_triton,
     unpack_seq_triton,
 )
-from vllm.models.deepseek_v4.hw_agnostic.attention.ops.topk_torch import (
+from vllm.models.deepseek_v4.hw_agnostic.attention.kernels.topk_torch import (
     topk_indices_torch,
 )
 from vllm.platforms import current_platform

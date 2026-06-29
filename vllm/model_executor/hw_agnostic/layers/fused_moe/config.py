@@ -587,13 +587,6 @@ class FusedMoEParallelConfig:
     def use_all2all_kernels(self):
         return self.dp_size > 1 and self.use_ep
 
-    @property
-    def use_ag_rs_all2all_kernels(self):
-        return (
-            self.use_all2all_kernels
-            and self.all2all_backend == "allgather_reducescatter"
-        )
-
     @staticmethod
     def flatten_tp_across_dp_and_pcp(
         tp_size: int, dp_size: int, dp_rank: int, pcp_size: int, pcp_rank: int
@@ -795,7 +788,3 @@ class FusedMoEConfig:
     @property
     def use_ep(self):
         return self.moe_parallel_config.use_ep
-
-    @property
-    def use_ag_rs_all2all_kernels(self):
-        return self.moe_parallel_config.use_ag_rs_all2all_kernels
