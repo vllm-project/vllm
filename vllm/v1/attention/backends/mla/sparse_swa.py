@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import ClassVar, cast
+from typing import Any, ClassVar, cast
 
 import torch
 
@@ -9,6 +10,7 @@ from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.triton_utils.warmup import VllmJitKernelWithWarmup, WarmupIntRange
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -274,6 +276,55 @@ class DeepseekSparseSWAMetadata:
             chunk_start = chunk_end
 
         return chunk_plan
+
+
+class ComputePrefillMetadataKernel(
+    VllmJitKernelWithWarmup["ComputePrefillMetadataKernel.CompileKey"]
+):
+    @dataclass(frozen=True)
+    class CompileKey:
+        BLOCK_SIZE: int
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        num_prefills: int,
+    ) -> CompileKey:
+        return self.CompileKey(
+            BLOCK_SIZE=triton.next_power_of_2(num_prefills),
+        )
+
+    def get_warmup_keys(self, vllm_config: VllmConfig) -> list[CompileKey]:
+        max_prefills = max(1, min(vllm_config.scheduler_config.max_num_seqs, 8))
+        return self._trace_dispatch(self.dispatch)(
+            num_prefills=WarmupIntRange(1, max_prefills + 1),
+        )
+
+    def compile(self, compile_key: CompileKey) -> Callable[..., Any]:
+        warmup = getattr(_compute_prefill_metadata_kernel, "warmup", None)
+        if warmup is not None:
+            warmup(
+                torch.int32,
+                torch.int32,
+                torch.int32,
+                compile_key.BLOCK_SIZE,
+                0,
+                1,
+                BLOCK_SIZE=compile_key.BLOCK_SIZE,
+                grid=(1,),
+            )
+
+        def call(**kwargs: Any) -> None:
+            _compute_prefill_metadata_kernel[(1,)](
+                **kwargs,
+                BLOCK_SIZE=compile_key.BLOCK_SIZE,
+            )
+
+        return call
+
+
+_COMPUTE_PREFILL_METADATA_KERNEL = ComputePrefillMetadataKernel()
+ComputePrefillMetadataKernelCompileKey = ComputePrefillMetadataKernel.CompileKey
 
 
 class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
@@ -553,14 +604,13 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             pfx_gather_lens = torch.empty(
                 num_prefills, dtype=torch.int32, device=seq_lens.device
             )
-            _compute_prefill_metadata_kernel[(1,)](
-                pfx_gather_lens,
-                seq_lens,
-                query_start_loc,
-                num_prefills,
-                num_decodes,
-                self.window_size,
-                BLOCK_SIZE=triton.next_power_of_2(num_prefills),
+            _COMPUTE_PREFILL_METADATA_KERNEL(
+                prefill_gather_lens_ptr=pfx_gather_lens,
+                seq_lens_ptr=seq_lens,
+                query_start_loc_ptr=query_start_loc,
+                num_prefills=num_prefills,
+                num_decodes=num_decodes,
+                window_size=self.window_size,
             )
 
             result["prefill_seq_lens"] = seq_lens[num_decodes:]
@@ -577,7 +627,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         return result
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_prefills", "num_decodes", "window_size"])
 def _compute_prefill_metadata_kernel(
     # Outputs
     prefill_gather_lens_ptr,
@@ -606,6 +656,11 @@ def _compute_prefill_metadata_kernel(
     gather_len = query_len + tl.minimum(prefix_len, window_size - 1)
 
     tl.store(prefill_gather_lens_ptr + offset, gather_len, mask=mask)
+
+
+_COMPUTE_PREFILL_METADATA_KERNEL.assert_compile_key_matches_triton(
+    _compute_prefill_metadata_kernel
+)
 
 
 @triton.jit(do_not_specialize=["token_offset"])

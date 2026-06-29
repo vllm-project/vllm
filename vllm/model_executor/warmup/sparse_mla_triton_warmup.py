@@ -101,7 +101,7 @@ def _warm_sparse_swa_prefill_metadata_kernel(
     prefill_tokens: int,
 ) -> None:
     from vllm.v1.attention.backends.mla.sparse_swa import (
-        _compute_prefill_metadata_kernel,
+        _COMPUTE_PREFILL_METADATA_KERNEL,
     )
 
     for num_prefills in _SPARSE_PREFILL_METADATA_NUM_PREFILLS:
@@ -124,20 +124,21 @@ def _warm_sparse_swa_prefill_metadata_kernel(
             prefill_gather_lens = torch.empty(
                 num_prefills, dtype=torch.int32, device=device
             )
-            _compute_prefill_metadata_kernel[(1,)](
-                prefill_gather_lens,
-                seq_lens,
-                query_start_loc,
-                num_prefills,
-                num_decodes,
-                window_size,
-                BLOCK_SIZE=_next_power_of_2(num_prefills),
+            _COMPUTE_PREFILL_METADATA_KERNEL(
+                prefill_gather_lens_ptr=prefill_gather_lens,
+                seq_lens_ptr=seq_lens,
+                query_start_loc_ptr=query_start_loc,
+                num_prefills=num_prefills,
+                num_decodes=num_decodes,
+                window_size=window_size,
             )
 
 
 def _warm_prefill_chunk_metadata_kernel(
     device: torch.device,
     compress_ratio: int,
+    query_slice_start: int,
+    query_slice_stop: int,
     query_len: int,
 ) -> None:
     from vllm.v1.attention.backends.mla.indexer import build_prefill_chunk_metadata
@@ -164,31 +165,18 @@ def _warm_prefill_chunk_metadata_kernel(
         device=device,
     )
 
-    offset_uncompressed_seq_lens = torch.empty(
-        num_reqs + 1, dtype=torch.int32, device=device
-    )[1:]
-    offset_uncompressed_seq_lens.copy_(uncompressed_seq_lens)
-    query_slices = tuple(
-        slice(start, num_reqs * query_len + stop)
-        for start, stop in _PREFILL_CHUNK_METADATA_QUERY_SLICE_OFFSETS
-    )
-    for warmup_uncompressed_seq_lens in (
+    build_prefill_chunk_metadata(
+        0,
+        num_reqs,
+        query_start_loc,
+        query_start_loc_cpu,
         uncompressed_seq_lens,
-        offset_uncompressed_seq_lens,
-    ):
-        for query_slice in query_slices:
-            build_prefill_chunk_metadata(
-                0,
-                num_reqs,
-                query_start_loc,
-                query_start_loc_cpu,
-                warmup_uncompressed_seq_lens,
-                compressed_seq_lens,
-                compressed_seq_lens_cpu,
-                block_table,
-                compress_ratio,
-                query_slice=query_slice,
-            )
+        compressed_seq_lens,
+        compressed_seq_lens_cpu,
+        block_table,
+        compress_ratio,
+        query_slice=slice(query_slice_start, query_slice_stop),
+    )
 
 
 def _warm_combine_topk_swa_indices_kernel(
@@ -277,12 +265,40 @@ def sparse_mla_triton_warmup(
     compress_ratios: tuple[int, ...],
     combine_topk_swa_cases: tuple[tuple[int, int, int, int], ...] = (),
 ) -> None:
+    from vllm.v1.attention.backends.mla.indexer import (
+        BUILD_PREFILL_CHUNK_METADATA_KERNEL,
+    )
+
     device = getattr(runner, "device", torch.device("cuda"))
     window_size = _hf_config_int(runner, "sliding_window", 128)
 
     _warm_sparse_swa_prefill_metadata_kernel(device, window_size, num_tokens)
-    for compress_ratio in compress_ratios:
-        _warm_prefill_chunk_metadata_kernel(device, compress_ratio, num_tokens)
+    query_slice_bounds = tuple(
+        (start, 2 * num_tokens + stop)
+        for start, stop in _PREFILL_CHUNK_METADATA_QUERY_SLICE_OFFSETS
+    )
+    compile_keys = tuple(
+        dict.fromkeys(
+            BUILD_PREFILL_CHUNK_METADATA_KERNEL.compile_key(
+                {
+                    "query_slice_start": query_slice_start,
+                    "query_slice_stop": query_slice_stop,
+                    "BLOCK_SIZE": 1024,
+                    "COMPRESS_RATIO": compress_ratio,
+                }
+            )
+            for compress_ratio in compress_ratios
+            for query_slice_start, query_slice_stop in query_slice_bounds
+        )
+    )
+    for key in compile_keys:
+        _warm_prefill_chunk_metadata_kernel(
+            device,
+            key.COMPRESS_RATIO,
+            key.query_slice_start,
+            key.query_slice_stop,
+            num_tokens,
+        )
     for compress_ratio, topk, topk_width, n in combine_topk_swa_cases:
         _warm_combine_topk_swa_indices_kernel(
             device,

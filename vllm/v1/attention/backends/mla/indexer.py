@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 
@@ -9,6 +11,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.triton_utils.warmup import VllmJitKernelWithWarmup, WarmupIntRange
 from vllm.utils.deep_gemm import (
     get_paged_mqa_logits_metadata,
     has_deep_gemm,
@@ -177,6 +180,113 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     token_end: int
     num_reqs: int
     skip_kv_gather: bool = False
+
+
+class BuildPrefillChunkMetadataKernel(
+    VllmJitKernelWithWarmup["BuildPrefillChunkMetadataKernel.CompileKey"]
+):
+    @dataclass(frozen=True)
+    class CompileKey:
+        query_slice_start: int
+        query_slice_stop: int
+        BLOCK_SIZE: int
+        COMPRESS_RATIO: int
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        query_slice_start: int,
+        query_slice_stop: int,
+        BLOCK_SIZE: int,
+        COMPRESS_RATIO: int,
+    ) -> CompileKey:
+        return self.CompileKey(
+            query_slice_start=query_slice_start,
+            query_slice_stop=query_slice_stop,
+            BLOCK_SIZE=BLOCK_SIZE,
+            COMPRESS_RATIO=COMPRESS_RATIO,
+        )
+
+    def get_warmup_keys(self, vllm_config: VllmConfig) -> list[CompileKey]:
+        max_tokens = max(1, min(vllm_config.scheduler_config.max_num_batched_tokens, 8))
+        hf_config = vllm_config.model_config.hf_config
+        compress_ratios = tuple(
+            int(ratio)
+            for ratio in (getattr(hf_config, "compress_ratios", None) or (1,))
+        )
+        return self._trace_dispatch(self.dispatch)(
+            query_slice_start=WarmupIntRange(0, 2),
+            query_slice_stop=WarmupIntRange(2 * max_tokens - 1, 2 * max_tokens + 1),
+            BLOCK_SIZE=1024,
+            COMPRESS_RATIO=list(compress_ratios),
+        )
+
+    def compile(self, compile_key: CompileKey) -> Callable[..., Any]:
+        warmup = getattr(_build_prefill_chunk_metadata_kernel, "warmup", None)
+        if warmup is not None:
+            warmup(
+                torch.int32,
+                torch.int32,
+                torch.int32,
+                torch.int32,
+                torch.int32,
+                torch.int32,
+                compile_key.query_slice_start,
+                compile_key.query_slice_stop,
+                BLOCK_SIZE=compile_key.BLOCK_SIZE,
+                COMPRESS_RATIO=compile_key.COMPRESS_RATIO,
+                grid=(1,),
+            )
+
+        def call(num_reqs: int, **kwargs: Any) -> None:
+            _build_prefill_chunk_metadata_kernel[(num_reqs,)](
+                **kwargs,
+                BLOCK_SIZE=compile_key.BLOCK_SIZE,
+                COMPRESS_RATIO=compile_key.COMPRESS_RATIO,
+            )
+
+        return call
+
+    def __call__(  # type: ignore[override]
+        self,
+        query_start_loc_ptr: Any,
+        uncompressed_seq_lens_ptr: Any,
+        cu_compressed_seq_lens_ptr: Any,
+        token_to_seq_ptr: Any,
+        cu_compressed_seq_len_ks_ptr: Any,
+        cu_compressed_seq_len_ke_ptr: Any,
+        query_slice_start: int,
+        query_slice_stop: int,
+        *,
+        num_reqs: int,
+        BLOCK_SIZE: int,
+        COMPRESS_RATIO: int,
+    ) -> Any:
+        compile_key = self.dispatch(
+            query_slice_start=query_slice_start,
+            query_slice_stop=query_slice_stop,
+            BLOCK_SIZE=BLOCK_SIZE,
+            COMPRESS_RATIO=COMPRESS_RATIO,
+        )
+        fn = self.callables.get(compile_key)
+        if fn is None:
+            fn = self.compile(compile_key)
+            self.callables[compile_key] = fn
+        return fn(
+            num_reqs=num_reqs,
+            query_start_loc_ptr=query_start_loc_ptr,
+            uncompressed_seq_lens_ptr=uncompressed_seq_lens_ptr,
+            cu_compressed_seq_lens_ptr=cu_compressed_seq_lens_ptr,
+            token_to_seq_ptr=token_to_seq_ptr,
+            cu_compressed_seq_len_ks_ptr=cu_compressed_seq_len_ks_ptr,
+            cu_compressed_seq_len_ke_ptr=cu_compressed_seq_len_ke_ptr,
+            query_slice_start=query_slice_start,
+            query_slice_stop=query_slice_stop,
+        )
+
+
+BUILD_PREFILL_CHUNK_METADATA_KERNEL = BuildPrefillChunkMetadataKernel()
+PrefillChunkMetadataKernelCompileKey = BuildPrefillChunkMetadataKernel.CompileKey
 
 
 @dataclass
@@ -677,8 +787,8 @@ def build_prefill_chunk_metadata(
         (query_start_loc_cpu[end_idx] - query_start_loc_cpu[start_idx]).item()
     )
     if query_slice is not None:
-        qs_start = query_slice.start
-        qs_stop = query_slice.stop
+        qs_start = int(query_slice.start)
+        qs_stop = int(query_slice.stop)
     else:
         qs_start = 0
         qs_stop = total_query_len
@@ -687,7 +797,7 @@ def build_prefill_chunk_metadata(
     cu_seq_len_ks = torch.empty(output_query_len, dtype=torch.int32, device=device)
     cu_seq_len_ke = torch.empty(output_query_len, dtype=torch.int32, device=device)
 
-    _build_prefill_chunk_metadata_kernel[(num_reqs,)](
+    BUILD_PREFILL_CHUNK_METADATA_KERNEL(
         query_start_loc,
         uncompressed_seq_lens[start_idx:end_idx],
         cu_seq_lens,
@@ -696,6 +806,7 @@ def build_prefill_chunk_metadata(
         cu_seq_len_ke,
         qs_start,
         qs_stop,
+        num_reqs=num_reqs,
         BLOCK_SIZE=1024,
         COMPRESS_RATIO=compress_ratio,
     )
@@ -776,3 +887,8 @@ def _build_prefill_chunk_metadata_kernel(
         offset = i + tl.arange(0, BLOCK_SIZE)
         mask = offset < compressed_seq_len
         tl.store(token_to_seq_ptr + seq_start + offset, batch_idx, mask=mask)
+
+
+BUILD_PREFILL_CHUNK_METADATA_KERNEL.assert_compile_key_matches_triton(
+    _build_prefill_chunk_metadata_kernel
+)
