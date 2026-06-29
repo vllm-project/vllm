@@ -715,6 +715,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         # that don't support .detach(). Manually assign parameters.
         if (
             self.mxfp4_backend not in TRITON_BACKENDS
+            and self.mxfp4_backend != Mxfp4MoeBackend.TOKENSPEED
             and isinstance(w13_scale, torch.Tensor)
             and isinstance(w2_scale, torch.Tensor)
         ):
@@ -772,7 +773,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         w2_bias = getattr(layer, "w2_bias", None)
         swiglu_limit = getattr(layer, "swiglu_limit", None)
 
-        if self.mxfp4_backend in TRITON_BACKENDS:
+        if self.mxfp4_backend in TRITON_BACKENDS or (
+            self.mxfp4_backend == Mxfp4MoeBackend.TOKENSPEED
+        ):
             # TRITON backends free w13/w2_weight_scale after swizzling; the
             # swizzled scales live inside the precision configs instead.
             assert self.w13_precision_config is not None

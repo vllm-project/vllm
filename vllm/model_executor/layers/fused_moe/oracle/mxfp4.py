@@ -1182,12 +1182,21 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             ) from e
 
         preprocess_gluon_mxfp4_gfx950_moe_weights({}, layer, preshuffle=True)
+        if not hasattr(layer, "w13_mx_scale"):
+            layer.w13_mx_scale = layer.w13_precision_config.b_mx_scale
+        if not hasattr(layer, "w2_mx_scale"):
+            layer.w2_mx_scale = layer.w2_precision_config.b_mx_scale
+        if not hasattr(layer, "tokenspeed_out_dtype"):
+            w2_precision_config = getattr(layer, "w2_precision_config", None)
+            layer.tokenspeed_out_dtype = (
+                getattr(w2_precision_config, "out_dtype", None) or torch.bfloat16
+            )
 
         return (
             layer.w13_weight_triton_tensor,
             layer.w2_weight_triton_tensor,
-            layer.w13_precision_config,
-            layer.w2_precision_config,
+            layer.w13_mx_scale,
+            layer.w2_mx_scale,
             None,
             None,
         )

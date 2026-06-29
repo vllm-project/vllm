@@ -18,6 +18,77 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Static,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import direct_register_custom_op
+
+_DTYPE_TO_CODE = {
+    torch.bfloat16: 0,
+    torch.float16: 1,
+}
+_CODE_TO_DTYPE = {code: dtype for dtype, code in _DTYPE_TO_CODE.items()}
+
+
+def _tokenspeed_mxfp4_moe(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    w13_weight: torch.Tensor,
+    w2_weight: torch.Tensor,
+    w13_mx_scale: torch.Tensor,
+    w2_mx_scale: torch.Tensor,
+    w13_act_scale: torch.Tensor,
+    w2_act_scale: torch.Tensor,
+    w13_bias: torch.Tensor | None,
+    w2_bias: torch.Tensor | None,
+    top_k: int,
+    out_dtype_code: int,
+    enable_warp_decode: bool,
+    swiglu_alpha: float,
+    swiglu_limit: float,
+) -> torch.Tensor:
+    return gluon_mxfp_fused_moe(
+        hidden_states,
+        router_logits,
+        w13_weight,
+        w2_weight,
+        w13_mx_scale=w13_mx_scale,
+        w2_mx_scale=w2_mx_scale,
+        w13_act_scale=w13_act_scale,
+        w2_act_scale=w2_act_scale,
+        top_k=top_k,
+        w13_bias=w13_bias,
+        w2_bias=w2_bias,
+        out_dtype=_CODE_TO_DTYPE[out_dtype_code],
+        enable_warp_decode=enable_warp_decode,
+        swiglu_alpha=swiglu_alpha,
+        swiglu_limit=swiglu_limit,
+    )
+
+
+def _tokenspeed_mxfp4_moe_fake(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    w13_weight: torch.Tensor,
+    w2_weight: torch.Tensor,
+    w13_mx_scale: torch.Tensor,
+    w2_mx_scale: torch.Tensor,
+    w13_act_scale: torch.Tensor,
+    w2_act_scale: torch.Tensor,
+    w13_bias: torch.Tensor | None,
+    w2_bias: torch.Tensor | None,
+    top_k: int,
+    out_dtype_code: int,
+    enable_warp_decode: bool,
+    swiglu_alpha: float,
+    swiglu_limit: float,
+) -> torch.Tensor:
+    return torch.empty_like(hidden_states)
+
+
+direct_register_custom_op(
+    op_name="tokenspeed_mxfp4_moe",
+    op_func=_tokenspeed_mxfp4_moe,
+    fake_impl=_tokenspeed_mxfp4_moe_fake,
+    tags=(torch.Tag.needs_fixed_stride_order,),
+)
 
 
 class TokenSpeedMxfp4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
@@ -123,22 +194,22 @@ class TokenSpeedMxfp4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             )
 
         enable_warp_decode = True
-        w13_precision_config = self.quant_config._w1.scale
-        w2_precision_config = self.quant_config._w2.scale
+        out_dtype_code = _DTYPE_TO_CODE[torch.bfloat16]
 
-        return gluon_mxfp_fused_moe(
+        return torch.ops.vllm.tokenspeed_mxfp4_moe(
             hidden_states,
             router_logits,
             w1,
             w2,
-            w13_bias=self.w1_bias,
-            w2_bias=self.w2_bias,
-            w13_precision_config=w13_precision_config,
-            w2_precision_config=w2_precision_config,
-            w13_act_scale=self.a1_scale,
-            w2_act_scale=self.a2_scale,
-            top_k=self.topk,
-            enable_warp_decode=enable_warp_decode,
-            swiglu_alpha=self.swiglu_alpha,
-            swiglu_limit=self.swiglu_limit,
+            self.quant_config._w1.scale,
+            self.quant_config._w2.scale,
+            self.a1_scale,
+            self.a2_scale,
+            self.w1_bias,
+            self.w2_bias,
+            self.topk,
+            out_dtype_code,
+            enable_warp_decode,
+            self.swiglu_alpha,
+            self.swiglu_limit,
         )
