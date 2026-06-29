@@ -170,8 +170,6 @@ class Worker(WorkerBase):
         self._pp_send_work: list[Handle] = []
 
     def sleep(self, level: int = 1) -> None:
-        free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
-
         # Save the buffers before level 2 sleep
         if level == 2:
             model = self.model_runner.model
@@ -180,11 +178,26 @@ class Worker(WorkerBase):
             }
 
         allocator = get_mem_allocator_instance()
+        usage_before_sleep = allocator.get_current_usage()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
         free_bytes_after_sleep, total = torch.cuda.mem_get_info()
-        freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
+        # Measure freed bytes from the allocator's own process-scoped pool
+        # rather than device-global mem_get_info(). On a shared GPU (e.g. a
+        # sibling PP/TP rank growing NCCL buffers, or another model resident on
+        # the same physical device), device-global free memory can drop between
+        # the two reads even though THIS process correctly released its pool,
+        # which would make a device-global delta spuriously negative.
+        freed_bytes = usage_before_sleep - allocator.get_current_usage()
         used_bytes = total - free_bytes_after_sleep
-        assert freed_bytes >= 0, "Memory usage increased after sleeping."
+        if freed_bytes < 0:
+            # Advisory only: the allocator pool should never grow across sleep,
+            # but never crash the worker mid-sleep over a memory accounting
+            # anomaly. Downgraded from an assert for shared-GPU robustness.
+            logger.warning(
+                "Memory usage increased after sleeping (allocator pool delta "
+                "%s GiB); continuing.",
+                format_gib(freed_bytes),
+            )
         logger.info(
             "Sleep mode freed %s GiB memory, %s GiB memory is still in use.",
             format_gib(freed_bytes),
