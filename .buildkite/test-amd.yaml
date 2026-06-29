@@ -480,7 +480,7 @@ steps:
 
 - label: PyTorch Compilation Unit Tests # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi300]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
   torch_nightly: true
   optional: true
