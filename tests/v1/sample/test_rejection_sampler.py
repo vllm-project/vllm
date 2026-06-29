@@ -14,6 +14,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import (
     PLACEHOLDER_TOKEN_ID,
     RejectionSampler,
+    rejection_sample,
     sample_recovered_tokens,
 )
 from vllm.v1.sample.sampler import Sampler, SamplerOutput
@@ -127,6 +128,155 @@ def create_sampling_metadata(
         bad_words_token_ids={} if bad_words_token_ids is None else bad_words_token_ids,
         logitsprocs=LogitsProcessors(),
     )
+
+
+requires_cuda_like = pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="relaxed rejection sampling runs in a Triton GPU kernel",
+)
+
+
+def run_relaxed_rejection_sample(
+    draft_token_ids: list[int],
+    target_logits: torch.Tensor,
+    thinking_state: bool | None,
+    *,
+    relax_ratio: float = 0.5,
+    relax_top_k: int = 3,
+    think_start_token_id: int = 10,
+    think_end_token_id: int = 11,
+    sampling_metadata: SamplingMetadata | None = None,
+) -> list[int]:
+    num_draft_tokens = [len(draft_token_ids)]
+    thinking_states = (
+        None
+        if thinking_state is None
+        else torch.tensor([thinking_state], dtype=torch.bool, device=DEVICE_TYPE)
+    )
+    output = rejection_sample(
+        draft_token_ids=torch.tensor(
+            draft_token_ids, dtype=torch.int32, device=DEVICE_TYPE
+        ),
+        num_draft_tokens=num_draft_tokens,
+        max_spec_len=len(draft_token_ids),
+        cu_num_draft_tokens=torch.tensor(
+            num_draft_tokens, dtype=torch.int32, device=DEVICE_TYPE
+        ),
+        draft_probs=None,
+        target_logits=target_logits,
+        bonus_token_ids=torch.tensor([12], dtype=torch.int64, device=DEVICE_TYPE),
+        sampling_metadata=sampling_metadata
+        if sampling_metadata is not None
+        else create_sampling_metadata(all_greedy=True),
+        relaxed_thinking=True,
+        relax_ratio=relax_ratio,
+        relax_top_k=relax_top_k,
+        thinking_states=thinking_states,
+        think_start_token_id=think_start_token_id,
+        think_end_token_id=think_end_token_id,
+    )
+    return output[0].tolist()
+
+
+@requires_cuda_like
+def test_relaxed_thinking_accepts_top_k_token_above_ratio():
+    target_logits = torch.full((1, 16), -100.0, device=DEVICE_TYPE)
+    target_logits[0, 5] = 10.0
+    target_logits[0, 7] = 9.4
+
+    output = run_relaxed_rejection_sample([7], target_logits, True)
+
+    assert output == [7, 12]
+
+
+@requires_cuda_like
+def test_relaxed_thinking_false_uses_strict_argmax():
+    target_logits = torch.full((1, 16), -100.0, device=DEVICE_TYPE)
+    target_logits[0, 5] = 10.0
+    target_logits[0, 7] = 9.4
+
+    output = run_relaxed_rejection_sample([7], target_logits, False)
+
+    assert output == [5, PLACEHOLDER_TOKEN_ID]
+
+
+@requires_cuda_like
+def test_relaxed_thinking_fallback_truncates_after_boundary_token():
+    target_logits = torch.full((2, 16), -100.0, device=DEVICE_TYPE)
+    target_logits[0, 10] = 10.0
+    target_logits[1, 8] = 10.0
+
+    output = run_relaxed_rejection_sample([10, 8], target_logits, None)
+
+    assert output == [
+        10,
+        PLACEHOLDER_TOKEN_ID,
+        PLACEHOLDER_TOKEN_ID,
+    ]
+
+
+@requires_cuda_like
+def test_relaxed_thinking_rejects_token_below_ratio_floor():
+    target_logits = torch.full((1, 16), -100.0, device=DEVICE_TYPE)
+    target_logits[0, 5] = 10.0
+    target_logits[0, 7] = 8.0
+
+    output = run_relaxed_rejection_sample([7], target_logits, True)
+
+    assert output == [5, PLACEHOLDER_TOKEN_ID]
+
+
+@requires_cuda_like
+def test_relaxed_thinking_truncates_after_accepted_boundary_token():
+    target_logits = torch.full((3, 16), -100.0, device=DEVICE_TYPE)
+    target_logits[0, 7] = 10.0
+    target_logits[1, 11] = 10.0
+    target_logits[2, 8] = 10.0
+
+    output = run_relaxed_rejection_sample([7, 11, 8], target_logits, True)
+
+    assert output == [7, 11, PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID]
+
+
+@requires_cuda_like
+def test_relaxed_thinking_rejects_non_greedy_sampling():
+    target_logits = torch.full((1, 16), -100.0, device=DEVICE_TYPE)
+    target_logits[0, 7] = 10.0
+
+    with pytest.raises(ValueError, match="greedy sampling"):
+        run_relaxed_rejection_sample(
+            [7],
+            target_logits,
+            True,
+            sampling_metadata=create_sampling_metadata(
+                all_greedy=False,
+                temperature=torch.ones(1, device=DEVICE_TYPE),
+            ),
+        )
+
+
+@requires_cuda_like
+def test_relaxed_thinking_rejects_misaligned_thinking_states():
+    target_logits = torch.full((1, 16), -100.0, device=DEVICE_TYPE)
+    target_logits[0, 7] = 10.0
+
+    with pytest.raises(ValueError, match="thinking_states"):
+        rejection_sample(
+            draft_token_ids=torch.tensor([7], dtype=torch.int32, device=DEVICE_TYPE),
+            num_draft_tokens=[1],
+            max_spec_len=1,
+            cu_num_draft_tokens=torch.tensor(
+                [1], dtype=torch.int32, device=DEVICE_TYPE
+            ),
+            draft_probs=None,
+            target_logits=target_logits,
+            bonus_token_ids=torch.tensor([12], dtype=torch.int64, device=DEVICE_TYPE),
+            sampling_metadata=create_sampling_metadata(all_greedy=True),
+            relaxed_thinking=True,
+            thinking_states=torch.tensor(
+                [True, False], dtype=torch.bool, device=DEVICE_TYPE
+            ),
+        )
 
 
 ########################### Tests for Greedy Sampling ###################

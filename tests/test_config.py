@@ -5,6 +5,7 @@ import logging
 import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import patch
 
 import pydantic
@@ -16,6 +17,7 @@ import vllm.envs as envs
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
     CompilationConfig,
+    DeviceConfig,
     KernelConfig,
     ModelConfig,
     ParallelConfig,
@@ -28,6 +30,7 @@ from vllm.config import (
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
+from vllm.config.speculative import MAX_RELAX_TOP_K
 from vllm.config.utils import get_field
 from vllm.config.vllm import (
     OPTIMIZATION_LEVEL_TO_CONFIG,
@@ -307,6 +310,126 @@ def test_async_scheduling_with_pipeline_parallelism_is_allowed():
         ),
     )
     assert cfg.scheduler_config.async_scheduling is True
+
+
+def _relaxed_thinking_spec_config() -> SpeculativeConfig:
+    return SpeculativeConfig(
+        method="ngram_gpu",
+        num_speculative_tokens=1,
+        relaxed_thinking=True,
+        relax_ratio=0.7,
+        relax_top_k=3,
+    )
+
+
+@pytest.mark.parametrize("relax_ratio", [0, -0.1, 1.1])
+def test_relaxed_thinking_rejects_invalid_ratio(relax_ratio):
+    with pytest.raises(ValueError, match="relax_ratio"):
+        SpeculativeConfig(
+            method="ngram_gpu",
+            num_speculative_tokens=1,
+            relaxed_thinking=True,
+            relax_ratio=relax_ratio,
+        )
+
+
+def test_relaxed_thinking_rejects_invalid_top_k():
+    with pytest.raises(ValueError, match="relax_top_k"):
+        SpeculativeConfig(
+            method="ngram_gpu",
+            num_speculative_tokens=1,
+            relaxed_thinking=True,
+            relax_top_k=0,
+        )
+
+
+def test_relaxed_thinking_rejects_excessive_top_k():
+    with pytest.raises(ValueError, match=f"<= {MAX_RELAX_TOP_K}"):
+        SpeculativeConfig(
+            method="ngram_gpu",
+            num_speculative_tokens=1,
+            relaxed_thinking=True,
+            relax_top_k=MAX_RELAX_TOP_K + 1,
+        )
+
+
+def test_relaxed_thinking_rejects_synthetic_rejection_sampling():
+    with pytest.raises(ValueError, match="standard rejection sampling"):
+        SpeculativeConfig(
+            method="ngram_gpu",
+            num_speculative_tokens=1,
+            relaxed_thinking=True,
+            rejection_sample_method="synthetic",
+            synthetic_acceptance_rates=[1.0],
+        )
+
+
+def test_relaxed_thinking_rejects_async_scheduling():
+    with pytest.raises(ValueError, match="async scheduling"):
+        VllmConfig(
+            scheduler_config=SchedulerConfig(
+                max_model_len=8192,
+                is_encoder_decoder=False,
+                async_scheduling=True,
+            ),
+            device_config=DeviceConfig(device="cuda"),
+            speculative_config=_relaxed_thinking_spec_config(),
+        )
+
+
+def test_relaxed_thinking_rejects_cpu_workers():
+    with pytest.raises(ValueError, match="CPU workers"):
+        VllmConfig(
+            device_config=DeviceConfig(device="cpu"),
+            scheduler_config=SchedulerConfig(
+                max_model_len=8192,
+                is_encoder_decoder=False,
+                async_scheduling=False,
+            ),
+            speculative_config=_relaxed_thinking_spec_config(),
+        )
+
+
+def test_relaxed_thinking_rejects_skip_tokenizer_init():
+    with pytest.raises(ValueError, match="skip_tokenizer_init"):
+        VllmConfig(
+            model_config=cast(ModelConfig, SimpleNamespace(skip_tokenizer_init=True)),
+            device_config=DeviceConfig(device="cuda"),
+            scheduler_config=SchedulerConfig(
+                max_model_len=8192,
+                is_encoder_decoder=False,
+                async_scheduling=False,
+            ),
+            speculative_config=_relaxed_thinking_spec_config(),
+        )
+
+
+def test_relaxed_thinking_marks_v2_model_runner_unsupported():
+    cfg = SimpleNamespace(
+        model_config=None,
+        speculative_config=_relaxed_thinking_spec_config(),
+        cache_config=SimpleNamespace(
+            mamba_cache_mode="auto",
+            kv_sharing_fast_prefill=False,
+        ),
+        parallel_config=SimpleNamespace(
+            prefill_context_parallel_size=1,
+            tensor_parallel_size=1,
+            pipeline_parallel_size=1,
+            enable_dbo=False,
+            enable_elastic_ep=False,
+            distributed_executor_backend=None,
+        ),
+        compilation_config=SimpleNamespace(
+            mode=CompilationMode.NONE,
+            pass_config=SimpleNamespace(enable_sp=False),
+        ),
+        ec_transfer_config=None,
+    )
+
+    unsupported = VllmConfig._get_v2_model_runner_unsupported_features(cfg)
+
+    assert "relaxed thinking speculative decoding" in unsupported
 
 
 @dataclass
