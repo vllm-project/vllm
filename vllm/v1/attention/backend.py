@@ -202,6 +202,38 @@ class AttentionBackend(ABC):
         return min(s.base if isinstance(s, MultipleOf) else s for s in supported_sizes)
 
     @classmethod
+    def indexes_kv_by_block_stride(cls) -> bool:
+        """Whether the backend reads KV pages by the runtime block stride.
+
+        True when ``num_blocks`` is the outermost physical dimension of the KV
+        cache, so the backend tolerates a non-contiguous block dim. This gates
+        page size padding and cross-layer uniform KV layout.
+
+        Returns:
+            True if the backend's physical KV layout is num-blocks-first. False
+            otherwise, including when the backend does not define a layered
+            stride order.
+        """
+        try:
+            kv_cache_stride_order = cls.get_kv_cache_stride_order(
+                include_num_layers_dimension=False
+            )
+            layered_kv_cache_stride_order = cls.get_kv_cache_stride_order(
+                include_num_layers_dimension=True
+            )
+        except (AttributeError, NotImplementedError):
+            return False
+
+        # Check that attention backend includes a layers dimension.
+        if len(layered_kv_cache_stride_order) != len(kv_cache_stride_order) + 1:
+            return False
+
+        # stride_order[0] == 0 means num_layers stays first in physical
+        # layout (identity permutation), so indexing by block stride is
+        # not supported.
+        return layered_kv_cache_stride_order[0] != 0
+
+    @classmethod
     def is_mla(cls) -> bool:
         return False
 
@@ -267,6 +299,7 @@ class AttentionBackend(ABC):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        use_mm_prefix: bool,
         device_capability: "DeviceCapability",
     ) -> str | None:
         return None
@@ -334,6 +367,7 @@ class AttentionBackend(ABC):
             use_mla,
             has_sink,
             use_sparse,
+            use_mm_prefix,
             device_capability,
         )
         if combination_reason is not None:
@@ -385,7 +419,7 @@ class CommonAttentionMetadata:
     block_table_tensor: torch.Tensor
     slot_mapping: torch.Tensor
 
-    causal: bool = True
+    causal: bool | torch.Tensor = True
 
     # Needed by FastPrefillAttentionBuilder
     logits_indices_padded: torch.Tensor | None = None
@@ -402,7 +436,7 @@ class CommonAttentionMetadata:
     positions: torch.Tensor | None = None
     """(num_actual_tokens,) token positions.  Optional; set when the caller
     has positions available so that builders can pre-compute position-dependent
-    metadata (e.g. C128A topk indices for DeepSeek V4)."""
+    sparse metadata for DeepSeek V4 C128A layers."""
 
     is_prefilling: torch.Tensor | None = None
     """(batch_size,) bool tensor: True if request is still in prefill phase
@@ -414,6 +448,19 @@ class CommonAttentionMetadata:
     and for all rows outside async spec decode; optimistic for async-spec
     decode rows (assumes every draft was accepted). Not safe for kernels
     that need exact per-row context lengths on decode rows."""
+
+    mm_req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None
+    """PrefixLM bidirectional ranges for multimodal tokens. Maps
+    request index to list of (start, end) token position ranges
+    where bidirectional attention should apply. None for text-only
+    batches or non-PrefixLM models."""
+
+    rswa_prefix_lens: torch.Tensor | None = None
+    """(batch_size,) per-request prefix length (prompt/image token count) for
+    Reference Sliding Window Attention (R-SWA). Tokens with logical index below
+    this stay globally visible; later (generated) tokens additionally see a
+    fixed sliding window. None disables R-SWA. The attention backend copies this
+    into its own persistent buffer and reads ``rswa_window`` from model config."""
 
     # WARNING: Deprecated fields. Will be removed in a future release (v0.15.0)
     _seq_lens_cpu: torch.Tensor | None = None
@@ -489,7 +536,9 @@ class CommonAttentionMetadata:
             max_seq_len=self.max_seq_len,
             block_table_tensor=self.block_table_tensor[:num_actual_reqs],
             slot_mapping=self.slot_mapping[:num_actual_tokens],
-            causal=self.causal,
+            causal=self.causal[:num_actual_reqs]
+            if isinstance(self.causal, torch.Tensor)
+            else self.causal,
             logits_indices_padded=self.logits_indices_padded,
             num_logits_indices=self.num_logits_indices,
             encoder_seq_lens=maybe_slice_reqs(self.encoder_seq_lens),
@@ -497,6 +546,7 @@ class CommonAttentionMetadata:
             dcp_local_seq_lens=maybe_slice_reqs(self.dcp_local_seq_lens),
             dcp_local_seq_lens_cpu=maybe_slice_reqs(self.dcp_local_seq_lens_cpu),
             is_prefilling=maybe_slice_reqs(self.is_prefilling),
+            rswa_prefix_lens=maybe_slice_reqs(self.rswa_prefix_lens),
         )
 
 
@@ -889,6 +939,7 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         attn_metadata: T,
         k_scale: torch.Tensor,
         output: torch.Tensor,
+        output_scale: torch.Tensor | None = None,
     ) -> None:
         """MHA-style prefill forward pass."""
         raise NotImplementedError

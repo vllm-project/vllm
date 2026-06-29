@@ -1042,49 +1042,6 @@ def load_phi4siglip(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
-def load_qwen_vl_chat(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "Qwen/Qwen-VL-Chat"
-    engine_args = EngineArgs(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=1024,
-        max_num_seqs=2,
-        hf_overrides={"architectures": ["QwenVLForConditionalGeneration"]},
-        limit_mm_per_prompt={"image": len(image_urls)},
-    )
-    placeholders = "".join(
-        f"Picture {i}: <img></img>\n" for i, _ in enumerate(image_urls, start=1)
-    )
-
-    # This model does not have a chat_template attribute on its tokenizer,
-    # so we need to explicitly pass it. We use ChatML since it's used in the
-    # generation utils of the model:
-    # https://huggingface.co/Qwen/Qwen-VL-Chat/blob/main/qwen_generation_utils.py#L265
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-
-    # Copied from: https://huggingface.co/docs/transformers/main/en/chat_templating
-    chat_template = "{% if not add_generation_prompt is defined %}{% set add_generation_prompt = false %}{% endif %}{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"  # noqa: E501
-
-    messages = [{"role": "user", "content": f"{placeholders}\n{question}"}]
-    prompt = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
-        chat_template=chat_template,
-    )
-
-    stop_tokens = ["<|endoftext|>", "<|im_start|>", "<|im_end|>"]
-    stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        stop_token_ids=stop_token_ids,
-        image_data=[fetch_image(url) for url in image_urls],
-        chat_template=chat_template,
-    )
-
-
 def load_qwen2_vl(question: str, image_urls: list[str]) -> ModelRequestData:
     try:
         from qwen_vl_utils import smart_resize
@@ -1544,7 +1501,6 @@ model_example_map = {
     "phi4_mm": load_phi4mm,
     "phi4_siglip": load_phi4siglip,
     "pixtral_hf": load_pixtral_hf,
-    "qwen_vl_chat": load_qwen_vl_chat,
     "qwen2_vl": load_qwen2_vl,
     "qwen2_5_vl": load_qwen2_5_vl,
     "rvl": load_r_vl,

@@ -35,14 +35,11 @@ arctic-inference==0.1.1
     # via -r requirements/test/cuda.in
 argcomplete==3.5.1
     # via datamodel-code-generator
-arrow==1.3.0
-    # via isoduration
 attrs==24.2.0
     # via
     #   aiohttp
     #   hypothesis
     #   jsonschema
-    #   pytest-subtests
     #   referencing
 audioread==3.0.1
     # via librosa
@@ -57,9 +54,7 @@ azure-identity==1.25.2
 azure-storage-blob==12.28.0
     # via runai-model-streamer-azure
 backoff==2.2.1
-    # via
-    #   -r requirements/test/cuda.in
-    #   schemathesis
+    # via -r requirements/test/cuda.in
 bitsandbytes==0.49.2
     # via -r requirements/test/cuda.in
 black==24.10.0
@@ -106,11 +101,12 @@ click==8.1.7
     #   schemathesis
     #   typer
     #   uvicorn
+cohere-melody==0.9.0
+    # via -r requirements/test/cuda.in
 colorama==0.4.6
     # via
     #   perceptron
     #   sacrebleu
-    #   schemathesis
 colorful==0.5.6
     # via ray
 colorlog==6.10.1
@@ -183,7 +179,7 @@ et-xmlfile==2.0.0
     # via openpyxl
 evaluate==0.4.3
     # via lm-eval
-fastapi==0.128.0
+fastapi==0.136.3
     # via
     #   -c requirements/common.txt
     #   gpt-oss
@@ -206,8 +202,6 @@ filelock==3.16.1
     #   virtualenv
 fonttools==4.55.0
     # via matplotlib
-fqdn==1.5.1
-    # via jsonschema
 frozendict==2.4.6
     # via einx
 frozenlist==1.5.0
@@ -269,7 +263,7 @@ h11==0.14.0
     #   uvicorn
 h2==4.3.0
     # via httpx
-harfile==0.3.0
+harfile==0.5.0
     # via schemathesis
 hf-xet==1.4.3
     # via huggingface-hub
@@ -309,7 +303,7 @@ hypothesis==6.131.0
     #   hypothesis-graphql
     #   hypothesis-jsonschema
     #   schemathesis
-hypothesis-graphql==0.11.1
+hypothesis-graphql==0.13.0
     # via schemathesis
 hypothesis-jsonschema==0.23.1
     # via schemathesis
@@ -318,7 +312,6 @@ idna==3.10
     #   anyio
     #   email-validator
     #   httpx
-    #   jsonschema
     #   requests
     #   yarl
 imagehash==4.3.2
@@ -335,8 +328,6 @@ instanttensor==0.1.5
     # via -r requirements/test/cuda.in
 isodate==0.7.2
     # via azure-storage-blob
-isoduration==20.11.0
-    # via jsonschema
 isort==5.13.2
     # via datamodel-code-generator
 jinja2==3.1.6
@@ -356,14 +347,14 @@ joblib==1.4.2
     #   librosa
     #   nltk
     #   scikit-learn
-jsonpointer==3.0.0
-    # via jsonschema
 jsonschema==4.23.0
     # via
+    #   -c requirements/common.txt
     #   hypothesis-jsonschema
     #   mistral-common
     #   ray
-    #   schemathesis
+jsonschema-rs==0.46.5
+    # via schemathesis
 jsonschema-specifications==2024.10.1
     # via jsonschema
 junit-xml==1.9
@@ -409,7 +400,7 @@ mbstrdecoder==1.1.3
     #   typepy
 mdurl==0.1.2
     # via markdown-it-py
-mistral-common==1.11.3
+mistral-common==1.11.5
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/cuda.in
@@ -714,18 +705,20 @@ pydantic-core==2.41.1
 pydantic-extra-types==2.10.5
     # via mistral-common
 pygments==2.18.0
-    # via rich
+    # via
+    #   pytest
+    #   rich
 pyjwt==2.11.0
     # via msal
 pyparsing==3.2.0
     # via matplotlib
-pyrate-limiter==3.7.0
+pyrate-limiter==4.4.0
     # via schemathesis
 pystemmer==3.0.0
     # via mteb
 pytablewriter==1.2.0
     # via lm-eval
-pytest==8.3.5
+pytest==9.1.0
     # via
     #   -r requirements/test/cuda.in
     #   buildkite-test-collector
@@ -736,10 +729,9 @@ pytest==8.3.5
     #   pytest-mock
     #   pytest-rerunfailures
     #   pytest-shard
-    #   pytest-subtests
     #   pytest-timeout
     #   schemathesis
-pytest-asyncio==0.24.0
+pytest-asyncio==1.4.0
     # via -r requirements/test/cuda.in
 pytest-cov==6.3.0
     # via -r requirements/test/cuda.in
@@ -751,13 +743,10 @@ pytest-rerunfailures==14.0
     # via -r requirements/test/cuda.in
 pytest-shard==0.1.2
     # via -r requirements/test/cuda.in
-pytest-subtests==0.14.1
-    # via schemathesis
 pytest-timeout==2.3.1
     # via -r requirements/test/cuda.in
 python-dateutil==2.9.0.post0
     # via
-    #   arrow
     #   botocore
     #   matplotlib
     #   pandas
@@ -828,15 +817,12 @@ requests==2.32.3
     #   tiktoken
 responses==0.25.3
     # via genai-perf
-rfc3339-validator==0.1.4
-    # via jsonschema
-rfc3987==1.3.8
-    # via jsonschema
 rich==13.9.4
     # via
     #   genai-perf
     #   mteb
     #   perceptron
+    #   schemathesis
     #   typer
 rouge-score==0.1.2
     # via lm-eval
@@ -867,7 +853,7 @@ safetensors==0.7.0
     #   segmentation-models-pytorch
     #   timm
     #   transformers
-schemathesis==3.39.15
+schemathesis==4.21.6
     # via -r requirements/test/cuda.in
 scikit-image==0.25.2
     # via albumentations
@@ -911,7 +897,6 @@ six==1.16.0
     #   junit-xml
     #   opencensus
     #   python-dateutil
-    #   rfc3339-validator
     #   rouge-score
 smart-open==7.1.0
     # via ray
@@ -937,10 +922,10 @@ sqlalchemy==2.0.41
     #   optuna
 sqlitedict==2.1.0
     # via lm-eval
-starlette==0.50.0
+starlette==1.3.1
     # via
+    #   -c requirements/common.txt
     #   fastapi
-    #   schemathesis
     #   starlette-testclient
 starlette-testclient==0.4.1
     # via schemathesis
@@ -965,6 +950,7 @@ tenacity==9.1.2
     #   gpt-oss
     #   lm-eval
     #   plotly
+    #   schemathesis
 tensorizer==2.10.1
     # via -r requirements/test/cuda.in
 termcolor==3.1.0
@@ -989,10 +975,6 @@ tokenizers==0.22.2
     #   -c requirements/common.txt
     #   -r requirements/test/cuda.in
     #   transformers
-tomli==2.2.1
-    # via schemathesis
-tomli-w==1.2.0
-    # via schemathesis
 torch==2.11.0+cu130
     # via
     #   -c requirements/cuda.txt
@@ -1065,8 +1047,6 @@ typer==0.15.2
     #   huggingface-hub
     #   perceptron
     #   transformers
-types-python-dateutil==2.9.0.20241206
-    # via arrow
 typing-extensions==4.15.0
     # via
     #   -c requirements/common.txt
@@ -1091,6 +1071,8 @@ typing-extensions==4.15.0
     #   pydantic
     #   pydantic-core
     #   pydantic-extra-types
+    #   pytest-asyncio
+    #   schemathesis
     #   sentence-transformers
     #   sqlalchemy
     #   starlette
@@ -1098,11 +1080,11 @@ typing-extensions==4.15.0
     #   typer
     #   typing-inspection
 typing-inspection==0.4.2
-    # via pydantic
+    # via
+    #   fastapi
+    #   pydantic
 tzdata==2024.2
     # via pandas
-uri-template==1.3.0
-    # via jsonschema
 urllib3==2.2.3
     # via
     #   blobfile
@@ -1121,8 +1103,6 @@ vocos==0.1.0
     # via -r requirements/test/cuda.in
 wcwidth==0.2.13
     # via ftfy
-webcolors==24.11.1
-    # via jsonschema
 werkzeug==3.1.3
     # via schemathesis
 word2number==1.1
@@ -1134,8 +1114,6 @@ xxhash==3.5.0
     #   datasets
     #   evaluate
 yarl==1.17.1
-    # via
-    #   aiohttp
-    #   schemathesis
+    # via aiohttp
 zipp==3.23.0
     # via importlib-metadata

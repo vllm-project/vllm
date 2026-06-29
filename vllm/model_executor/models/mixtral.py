@@ -512,7 +512,6 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts):
             self.model.make_empty_intermediate_tensors
         )
 
-        self.expert_weights = []
         self.moe_layers = []
         example_moe = None
 

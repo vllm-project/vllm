@@ -40,13 +40,15 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/serve
+  - tests/entrypoints/scale_out
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc
+  - pytest -v -s entrypoints/scale_out
   mirror:
     amd:
-      device: mi300_1
+      device: mi325_1
       depends_on:
       - image-build-amd
 
@@ -63,7 +65,7 @@ steps:
   - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
   mirror:
     amd:
-      device: mi300_1
+      device: mi325_1
       timeout_in_minutes: 80
       depends_on:
       - image-build-amd
@@ -82,7 +84,7 @@ steps:
   - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
   mirror:
     amd:
-      device: mi300_1
+      device: mi325_1
       timeout_in_minutes: 80
       depends_on:
       - image-build-amd
@@ -104,7 +106,7 @@ steps:
   - pytest -v -s entrypoints/anthropic
   mirror:
     amd:
-      device: mi300_1
+      device: mi325_1
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
@@ -165,7 +167,7 @@ steps:
   - pytest -s entrypoints/openai/correctness/
   mirror:
     amd:
-      device: mi300_1
+      device: mi325_1
       depends_on:
       - image-build-amd
       source_file_dependencies:

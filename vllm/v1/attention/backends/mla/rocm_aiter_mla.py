@@ -828,6 +828,9 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             attn_metadata.fp8_prefill_reduce_final_map,
             attn_metadata.fp8_prefill_reduce_partial_map,
             tile_q,
+            # num_kv_splits added by ROCm/aiter#3391; 0 selects the kernel
+            # default max(cu_num, 0) == cu_num, matching pre-#3391 behavior.
+            0,
             out_3d,
             final_lse,
         )
@@ -841,6 +844,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         attn_metadata: MLACommonMetadata,
         k_scale: torch.Tensor,
         output: torch.Tensor,
+        output_scale: torch.Tensor | None = None,
     ) -> None:
         """Dispatch prefill to the FP8 ASM kernel when available.
 
@@ -866,6 +870,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 attn_metadata,
                 k_scale,
                 output,
+                output_scale,
             )
 
         assert attn_metadata.prefill is not None
@@ -881,7 +886,12 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 attn_metadata,
                 k_scale,
                 output,
+                output_scale,
             )
+
+        assert output_scale is None, (
+            "fused FP8 output not supported by the AITER FP8 MLA prefill path"
+        )
 
         kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
             -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim

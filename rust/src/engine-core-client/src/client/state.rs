@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::{mpsc, oneshot};
@@ -7,9 +7,9 @@ use tracing::trace;
 use crate::EngineId;
 use crate::client::stream::EngineCoreStreamOutput;
 use crate::error::{Error, Result};
-use crate::protocol::EngineCoreOutput;
 use crate::protocol::stats::SchedulerStats;
 use crate::protocol::utility::UtilityOutput;
+use crate::protocol::{EngineCoreEventType, EngineCoreFinishReason, EngineCoreOutput};
 use crate::transport::ConnectedEngine;
 
 pub type OutputSender = mpsc::UnboundedSender<Result<EngineCoreStreamOutput>>;
@@ -21,6 +21,25 @@ pub type UtilityReceiver = oneshot::Receiver<Result<UtilityOutput>>;
 struct TrackedRequest {
     sender: OutputSender,
     engine_id: EngineId,
+    lora: Option<LoraRequestState>,
+}
+
+/// Frontend-side view of one LoRA request's scheduling phase.
+///
+/// The engine's `SchedulerStats` does not carry adapter names, so
+/// `vllm:lora_requests_info` must be derived from per-request lifecycle events
+/// observed by this client, mirroring `LoRARequestStates` in the Python
+/// frontend (`vllm/v1/engine/output_processor.py`).
+#[derive(Debug)]
+struct LoraRequestState {
+    adapter_name: String,
+    phase: LoraPhase,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoraPhase {
+    Waiting,
+    Running,
 }
 
 /// The latest real scheduler-side load snapshot observed from one engine.
@@ -105,6 +124,7 @@ impl RequestRegistry {
     pub fn register(
         &mut self,
         request_id: String,
+        lora_name: Option<String>,
         data_parallel_rank: Option<u32>,
     ) -> Result<(EngineId, OutputReceiver)> {
         if self.requests.contains_key(&request_id) {
@@ -118,6 +138,10 @@ impl RequestRegistry {
             TrackedRequest {
                 sender: tx,
                 engine_id: engine_id.clone(),
+                lora: lora_name.map(|adapter_name| LoraRequestState {
+                    adapter_name,
+                    phase: LoraPhase::Waiting,
+                }),
             },
         );
 
@@ -171,6 +195,7 @@ impl RequestRegistry {
     /// Obtain the stream sender for one output. If it indicates the request is
     /// finished, it will be removed from the registry.
     pub fn sender_for_output(&mut self, output: &EngineCoreOutput) -> Option<OutputSender> {
+        self.apply_lora_events(output);
         if output.finished() {
             self.remove(output.request_id.as_str()).map(|tracked| tracked.0)
         } else {
@@ -178,6 +203,43 @@ impl RequestRegistry {
                 .get(output.request_id.as_str())
                 .map(|tracked| tracked.sender.clone())
         }
+    }
+
+    /// Advance the request's LoRA scheduling phase from the engine-core events
+    /// attached to one output, mirroring the Python frontend's
+    /// `LoRARequestStates.update_from_events`.
+    fn apply_lora_events(&mut self, output: &EngineCoreOutput) {
+        let Some(events) = output.events.as_ref() else {
+            return;
+        };
+        let Some(lora) = self
+            .requests
+            .get_mut(output.request_id.as_str())
+            .and_then(|tracked| tracked.lora.as_mut())
+        else {
+            return;
+        };
+        for event in events {
+            lora.phase = match event.r#type {
+                EngineCoreEventType::Queued | EngineCoreEventType::Preempted => LoraPhase::Waiting,
+                EngineCoreEventType::Scheduled => LoraPhase::Running,
+            };
+        }
+    }
+
+    /// Snapshot the adapter names of tracked LoRA requests as
+    /// (running, waiting) sets. Feeds the `vllm:lora_requests_info` gauge.
+    pub fn lora_adapter_states(&self) -> (BTreeSet<String>, BTreeSet<String>) {
+        let mut running = BTreeSet::new();
+        let mut waiting = BTreeSet::new();
+        for lora in self.requests.values().filter_map(|tracked| tracked.lora.as_ref()) {
+            let set = match lora.phase {
+                LoraPhase::Running => &mut running,
+                LoraPhase::Waiting => &mut waiting,
+            };
+            set.insert(lora.adapter_name.clone());
+        }
+        (running, waiting)
     }
 
     /// Obtain stream senders for a whole engine output batch under one
@@ -225,6 +287,34 @@ impl RequestRegistry {
             .into_values()
             .map(|tracked| tracked.sender)
             .collect()
+    }
+
+    /// Finalize client-initiated aborts: remove each request and push a
+    /// terminal output with `finish_reason = Abort` down its stream before the
+    /// sender drops. Returns the request ids that were still active.
+    pub fn abort_many<'a>(
+        &mut self,
+        request_ids: impl IntoIterator<Item = &'a String>,
+        timestamp: f64,
+    ) -> Vec<String> {
+        let mut aborted = Vec::new();
+        for request_id in request_ids {
+            let Some((sender, engine_id)) = self.remove(request_id) else {
+                continue;
+            };
+            let output = EngineCoreStreamOutput {
+                engine_index: engine_id.engine_index().unwrap_or(0),
+                timestamp,
+                output: EngineCoreOutput {
+                    request_id: request_id.clone(),
+                    finish_reason: Some(EngineCoreFinishReason::Abort),
+                    ..EngineCoreOutput::default()
+                },
+            };
+            let _ = sender.send(Ok(output));
+            aborted.push(request_id.clone());
+        }
+        aborted
     }
 
     /// Remove one request from the local registry. Returns the tracked entry if
@@ -336,11 +426,16 @@ impl UtilityRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::{EngineRoutingState, RequestRegistry, UtilityRegistry};
+    use std::collections::BTreeSet;
+
     use crate::EngineId;
-    use crate::client::state::EngineLoadSnapshot;
+    use crate::client::state::{
+        EngineLoadSnapshot, EngineRoutingState, RequestRegistry, UtilityRegistry,
+    };
     use crate::mock_engine::default_ready_response;
-    use crate::protocol::{EngineCoreFinishReason, EngineCoreOutput};
+    use crate::protocol::{
+        EngineCoreEvent, EngineCoreEventType, EngineCoreFinishReason, EngineCoreOutput,
+    };
     use crate::transport::ConnectedEngine;
 
     fn connected_engine(engine_id: EngineId) -> ConnectedEngine {
@@ -350,11 +445,36 @@ mod tests {
         }
     }
 
+    fn output_with_events(
+        request_id: &str,
+        events: &[EngineCoreEventType],
+        finish_reason: Option<EngineCoreFinishReason>,
+    ) -> EngineCoreOutput {
+        EngineCoreOutput {
+            request_id: request_id.to_string(),
+            events: Some(
+                events
+                    .iter()
+                    .map(|event_type| EngineCoreEvent {
+                        r#type: *event_type,
+                        timestamp: 0.0,
+                    })
+                    .collect(),
+            ),
+            finish_reason,
+            ..Default::default()
+        }
+    }
+
+    fn adapter_names(values: &[&str]) -> BTreeSet<String> {
+        values.iter().map(|name| (*name).to_string()).collect()
+    }
+
     #[test]
     fn registry_rejects_duplicate_request_ids() {
         let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
-        registry.register("req-1".to_string(), None).unwrap();
-        let error = registry.register("req-1".to_string(), None).unwrap_err();
+        registry.register("req-1".to_string(), None, None).unwrap();
+        let error = registry.register("req-1".to_string(), None, None).unwrap_err();
         assert!(matches!(
             error,
             crate::error::Error::DuplicateRequestId { request_id } if request_id == "req-1"
@@ -364,7 +484,7 @@ mod tests {
     #[test]
     fn registry_removes_finished_request_on_output() {
         let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
-        registry.register("req-1".to_string(), None).unwrap();
+        registry.register("req-1".to_string(), None, None).unwrap();
 
         let sender = registry.sender_for_output(&EngineCoreOutput {
             request_id: "req-1".to_string(),
@@ -377,10 +497,103 @@ mod tests {
     }
 
     #[test]
+    fn registry_tracks_lora_phases_from_engine_events() {
+        let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
+        registry
+            .register("req-lora".to_string(), Some("adapter-a".to_string()), None)
+            .unwrap();
+        registry.register("req-plain".to_string(), None, None).unwrap();
+
+        // Registered but not yet scheduled: counted as waiting. The non-LoRA
+        // request never shows up.
+        assert_eq!(
+            registry.lora_adapter_states(),
+            (adapter_names(&[]), adapter_names(&["adapter-a"]))
+        );
+
+        // Queued then scheduled in one output: running.
+        drop(registry.sender_for_output(&output_with_events(
+            "req-lora",
+            &[EngineCoreEventType::Queued, EngineCoreEventType::Scheduled],
+            None,
+        )));
+        assert_eq!(
+            registry.lora_adapter_states(),
+            (adapter_names(&["adapter-a"]), adapter_names(&[]))
+        );
+
+        // Preempted: back to waiting.
+        drop(registry.sender_for_output(&output_with_events(
+            "req-lora",
+            &[EngineCoreEventType::Preempted],
+            None,
+        )));
+        assert_eq!(
+            registry.lora_adapter_states(),
+            (adapter_names(&[]), adapter_names(&["adapter-a"]))
+        );
+
+        // Finished: dropped from tracking entirely.
+        drop(registry.sender_for_output(&output_with_events(
+            "req-lora",
+            &[EngineCoreEventType::Scheduled],
+            Some(EngineCoreFinishReason::Stop),
+        )));
+        assert_eq!(
+            registry.lora_adapter_states(),
+            (adapter_names(&[]), adapter_names(&[]))
+        );
+    }
+
+    #[test]
+    fn registry_unions_lora_adapters_across_requests() {
+        let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
+        registry
+            .register("req-a1".to_string(), Some("adapter-a".to_string()), None)
+            .unwrap();
+        registry
+            .register("req-a2".to_string(), Some("adapter-a".to_string()), None)
+            .unwrap();
+        registry
+            .register("req-b".to_string(), Some("adapter-b".to_string()), None)
+            .unwrap();
+
+        // One of adapter-a's requests starts running while the other waits:
+        // the adapter appears in both sets.
+        drop(registry.sender_for_output(&output_with_events(
+            "req-a1",
+            &[EngineCoreEventType::Scheduled],
+            None,
+        )));
+        assert_eq!(
+            registry.lora_adapter_states(),
+            (
+                adapter_names(&["adapter-a"]),
+                adapter_names(&["adapter-a", "adapter-b"])
+            )
+        );
+    }
+
+    #[test]
+    fn registry_drops_lora_tracking_on_abort() {
+        let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
+        registry
+            .register("req-lora".to_string(), Some("adapter-a".to_string()), None)
+            .unwrap();
+
+        drop(registry.finish_many(&["req-lora".to_string()]));
+
+        assert_eq!(
+            registry.lora_adapter_states(),
+            (adapter_names(&[]), adapter_names(&[]))
+        );
+    }
+
+    #[test]
     fn registry_closes_all_requests_on_failure() {
         let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
-        registry.register("req-1".to_string(), None).unwrap();
-        registry.register("req-2".to_string(), None).unwrap();
+        registry.register("req-1".to_string(), None, None).unwrap();
+        registry.register("req-2".to_string(), None, None).unwrap();
 
         let senders = registry.close();
 
@@ -396,9 +609,9 @@ mod tests {
             connected_engine(engine_0.clone()),
             connected_engine(engine_1.clone()),
         ]);
-        let (chosen_0, _) = registry.register("req-1".to_string(), None).unwrap();
-        let (chosen_1, _) = registry.register("req-2".to_string(), None).unwrap();
-        let (chosen_0_again, _) = registry.register("req-3".to_string(), None).unwrap();
+        let (chosen_0, _) = registry.register("req-1".to_string(), None, None).unwrap();
+        let (chosen_1, _) = registry.register("req-2".to_string(), None, None).unwrap();
+        let (chosen_0_again, _) = registry.register("req-3".to_string(), None, None).unwrap();
 
         assert_eq!(chosen_0, engine_0);
         assert_eq!(chosen_1, engine_1);
@@ -425,9 +638,9 @@ mod tests {
             connected_engine(engine_1.clone()),
         ]);
 
-        let (chosen_0, _) = registry.register("req-1".to_string(), None).unwrap();
-        let (chosen_1, _) = registry.register("req-2".to_string(), None).unwrap();
-        let (chosen_0_again, _) = registry.register("req-3".to_string(), None).unwrap();
+        let (chosen_0, _) = registry.register("req-1".to_string(), None, None).unwrap();
+        let (chosen_1, _) = registry.register("req-2".to_string(), None, None).unwrap();
+        let (chosen_0_again, _) = registry.register("req-3".to_string(), None, None).unwrap();
 
         assert_eq!(chosen_0, engine_0);
         assert_eq!(chosen_1, engine_1);
@@ -494,7 +707,7 @@ mod tests {
             }
         ));
 
-        let (chosen, _) = registry.register("req-stats".to_string(), None).unwrap();
+        let (chosen, _) = registry.register("req-stats".to_string(), None, None).unwrap();
         assert_eq!(chosen, engine_1);
     }
 
@@ -510,15 +723,15 @@ mod tests {
         ]);
 
         // Explicitly target rank 2 (third engine).
-        let (chosen, _) = registry.register("req-1".to_string(), Some(2)).unwrap();
+        let (chosen, _) = registry.register("req-1".to_string(), None, Some(2)).unwrap();
         assert_eq!(chosen, engine_2);
 
         // Explicitly target rank 0 (first engine).
-        let (chosen, _) = registry.register("req-2".to_string(), Some(0)).unwrap();
+        let (chosen, _) = registry.register("req-2".to_string(), None, Some(0)).unwrap();
         assert_eq!(chosen, engine_0);
 
         // Explicitly target rank 1.
-        let (chosen, _) = registry.register("req-3".to_string(), Some(1)).unwrap();
+        let (chosen, _) = registry.register("req-3".to_string(), None, Some(1)).unwrap();
         assert_eq!(chosen, engine_1);
     }
 
@@ -532,11 +745,11 @@ mod tests {
         ]);
 
         // Load-balance: first two go to engine_0 and engine_1.
-        registry.register("req-lb-0".to_string(), None).unwrap();
+        registry.register("req-lb-0".to_string(), None, None).unwrap();
 
         // Now engine_0 has 1 in-flight. Without dp_rank, next would go to engine_1.
         // But with dp_rank=0, it should still go to engine_0.
-        let (chosen, _) = registry.register("req-dp".to_string(), Some(0)).unwrap();
+        let (chosen, _) = registry.register("req-dp".to_string(), None, Some(0)).unwrap();
         assert_eq!(chosen, engine_0);
     }
 
@@ -547,7 +760,7 @@ mod tests {
             connected_engine(EngineId::from_engine_index(1)),
         ]);
 
-        let error = registry.register("req-1".to_string(), Some(2)).unwrap_err();
+        let error = registry.register("req-1".to_string(), None, Some(2)).unwrap_err();
         assert!(matches!(
             error,
             crate::error::Error::InvalidDataParallelRank {
@@ -562,10 +775,10 @@ mod tests {
         let engine_0 = EngineId::from_engine_index(0);
         let mut registry = RequestRegistry::new(&[connected_engine(engine_0.clone())]);
 
-        let (chosen, _) = registry.register("req-ok".to_string(), Some(0)).unwrap();
+        let (chosen, _) = registry.register("req-ok".to_string(), None, Some(0)).unwrap();
         assert_eq!(chosen, engine_0);
 
-        let error = registry.register("req-bad".to_string(), Some(1)).unwrap_err();
+        let error = registry.register("req-bad".to_string(), None, Some(1)).unwrap_err();
         assert!(matches!(
             error,
             crate::error::Error::InvalidDataParallelRank {
