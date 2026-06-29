@@ -1,11 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU-only unit tests for ExampleHiddenStatesConnector KV-cache-group logic.
-
-These exercise the hybrid-model fix: the hidden-states group must be located by
-spec type and its block size read from that group's spec (not the global
-``cache_config.block_size``, which vLLM bumps for hybrid verifiers).
-"""
+"""CPU-only unit tests for ExampleHiddenStatesConnector KV-cache-group logic."""
 
 from types import SimpleNamespace
 
@@ -15,10 +10,13 @@ import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.example_hidden_states_connector import (  # noqa: E501
     ExampleHiddenStatesConnector,
 )
+from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     HiddenStateCacheSpec,
     KVCacheGroupSpec,
+    MLAAttentionSpec,
+    SlidingWindowMLASpec,
 )
 
 
@@ -84,9 +82,7 @@ def test_find_group_id_raises_when_multiple_hidden_groups():
 
 
 def test_get_block_size_reads_hidden_group_spec_not_global():
-    # The hidden-states group keeps its own (smaller) block size (22), while the
-    # global cache_config.block_size is bumped to a common multiple (528) for
-    # hybrid models. The connector must read the group's value.
+    # Hidden group keeps block size 22; the global is bumped to 528 for hybrids.
     vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=528))
     cfg = _config(_full(528), _hidden(22))
     block_size = ExampleHiddenStatesConnector._get_cache_block_size(
@@ -103,16 +99,28 @@ def test_get_block_size_falls_back_to_cache_config_when_no_kv_cache_config():
     assert block_size == 16
 
 
-# ---- _cache_block_ids -------------------------------------------------------
+# ---- MLA-verifier absorption ------------------------------------------------
 
 
-def test_cache_block_ids_selects_correct_group():
-    stub = SimpleNamespace(_cache_kv_group_id=2)
-    block_ids = ([10], [20], [30, 31])
-    assert ExampleHiddenStatesConnector._cache_block_ids(stub, block_ids) == [30, 31]
-
-
-def test_cache_block_ids_raises_when_group_out_of_range():
-    stub = SimpleNamespace(_cache_kv_group_id=5)
-    with pytest.raises(ValueError, match="out of range"):
-        ExampleHiddenStatesConnector._cache_block_ids(stub, ([10], [20]))
+def test_find_group_id_errors_clearly_when_absorbed_by_mla_swa_verifier():
+    # HiddenStateCacheSpec subclasses MLAAttentionSpec, so an MLA + sliding-
+    # window MLA verifier absorbs it into the MLA group instead of isolating it.
+    dt = torch.bfloat16
+    spec = {
+        "layers.0.mla": MLAAttentionSpec(
+            block_size=64, num_kv_heads=1, head_size=576, dtype=dt
+        ),
+        "layers.1.swa": SlidingWindowMLASpec(
+            block_size=64, num_kv_heads=1, head_size=576, dtype=dt, sliding_window=512
+        ),
+        "cache_only_layers.61": _hidden(64),
+    }
+    vllm_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
+        speculative_config=None,
+    )
+    groups = get_kv_cache_groups(vllm_config, spec)
+    assert not any(isinstance(g.kv_cache_spec, HiddenStateCacheSpec) for g in groups)
+    cfg = SimpleNamespace(kv_cache_groups=groups)
+    with pytest.raises(ValueError, match="MLA verifiers are unsupported"):
+        ExampleHiddenStatesConnector._find_cache_kv_group_id(cfg)
