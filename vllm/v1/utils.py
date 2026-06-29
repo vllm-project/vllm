@@ -365,19 +365,23 @@ class RustFrontendProcessManager:
             cmd.extend(["--coordinator-address", stats_update_address])
         from vllm.entrypoints.serve.utils.api_utils import jsonify_non_default_args
 
-        args_json = json.dumps(
-            jsonify_non_default_args(
-                args,
-                exclude={
-                    "api_server_count",
-                    # Python passes the bootstrapped engine range explicitly.
-                    "data_parallel_rank",
-                    "data_parallel_external_lb",
-                    "data_parallel_hybrid_lb",
-                },
-            ),
-            sort_keys=True,
+        args_dict = jsonify_non_default_args(
+            args,
+            exclude={
+                "api_server_count",
+                # Python passes the bootstrapped engine range explicitly.
+                "data_parallel_rank",
+                "data_parallel_external_lb",
+                "data_parallel_hybrid_lb",
+            },
         )
+        # The Rust `frontend` subcommand parses --args-json via serde_json,
+        # which bypasses clap and therefore ignores any `#[arg(env = ...)]`
+        # declarations on SharedRuntimeArgs fields. Forward the env-driven
+        # ready timeout explicitly so VLLM_ENGINE_READY_TIMEOUT_S behaves the
+        # same on both Python and Rust frontends.
+        args_dict["engine_ready_timeout_secs"] = envs.VLLM_ENGINE_READY_TIMEOUT_S
+        args_json = json.dumps(args_dict, sort_keys=True)
         cmd.extend(["--args-json", args_json])
 
         logger.info("Launching Rust frontend: %s", " ".join(cmd))

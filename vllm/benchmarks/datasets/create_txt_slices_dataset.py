@@ -30,7 +30,6 @@ The resulting JSONL file can then be used with the serving benchmark::
 
 from __future__ import annotations
 
-import argparse
 import json
 import logging
 import random
@@ -40,6 +39,7 @@ import numpy as np
 from transformers import AutoTokenizer
 
 from vllm.benchmarks.datasets.utils import RangeRatio, get_sampling_params
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +121,7 @@ def create_txt_slices_jsonl(
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(
+    parser = FlexibleArgumentParser(
         description="Convert a plain-text file into a JSONL dataset "
         "for CustomDataset (--dataset-name custom).",
     )

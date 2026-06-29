@@ -1074,6 +1074,7 @@ def test_propose_stores_probabilistic_draft_probs(attn_backend, monkeypatch):
 
     sampling_metadata = mock.MagicMock()
     sampling_metadata.all_greedy = False
+    sampling_metadata.temperature = torch.ones(batch_size, device=device)
 
     result = proposer.propose(
         num_speculative_tokens=num_speculative_tokens,
