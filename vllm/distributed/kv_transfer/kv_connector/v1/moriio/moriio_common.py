@@ -453,6 +453,7 @@ class ReqMeta:
     remote_engine_id: str
     tp_size: int
     remote_dp_size: int
+    remote_dp_rank: int = 0
     # Ordered list of all prefill-instance host IPs for multi-node TP.
     # Each decode worker picks remote_hosts[tp_rank // ranks_per_node] as its
     # actual peer host for handshake + post-transfer notify. None or len<=1
