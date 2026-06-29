@@ -463,6 +463,22 @@ def test_diffusion_gemma_keeps_flashinfer_blocker(
         DiffusionGemmaModelForBlockDiffusionConfig.verify_and_update_config(vllm_config)
 
 
+def test_diffusion_gemma_auto_uses_triton_when_fa4_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _patch_fa_version_supported(monkeypatch, lambda version: False)
+    vllm_config = _make_gemma4_vllm_config()
+    vllm_config.diffusion_config = object()
+    vllm_config.scheduler_config = None
+    vllm_config.model_config.hf_config = SimpleNamespace(canvas_length=256)
+    vllm_config.model_config.override_generation_config = {}
+
+    DiffusionGemmaModelForBlockDiffusionConfig.verify_and_update_config(vllm_config)
+
+    assert vllm_config.attention_config.backend == AttentionBackendEnum.TRITON_ATTN
+    assert vllm_config.attention_config.flash_attn_version is None
+
+
 @pytest.mark.skipif(CudaPlatform is None, reason="CudaPlatform not available")
 def test_cuda_auto_selects_flashinfer_for_gemma4_nvfp4_without_fa4(
     monkeypatch: pytest.MonkeyPatch,
