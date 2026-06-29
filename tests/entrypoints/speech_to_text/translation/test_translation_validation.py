@@ -37,13 +37,13 @@ def _get_rocm_attention_config(model_name):
 
     if "whisper" in model_name.lower():
         try:
-            from vllm.platforms.rocm import _ON_MI3XX
+            from vllm.platforms.rocm import _on_mi3or4
 
-            if _ON_MI3XX:
+            if _on_mi3or4():
                 return {"backend": "ROCM_AITER_UNIFIED_ATTN"}
         except ImportError:
             logger.warning(
-                "Could not import _ON_MI3XX from rocm platform, "
+                "Could not import _on_mi3or4 from rocm platform, "
                 "falling back to TRITON_ATTN for Whisper."
             )
         return {"backend": "TRITON_ATTN"}

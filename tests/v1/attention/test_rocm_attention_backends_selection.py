@@ -35,9 +35,9 @@ def mock_on_gfx9():
 
 
 @pytest.fixture
-def mock_on_mi3xx():
-    """Mock mi3xx arch detection to return True."""
-    with patch("vllm.platforms.rocm.on_mi3xx", return_value=True):
+def mock_on_mi3or4():
+    """Mock mi3or4 arch detection to return True."""
+    with patch("vllm.platforms.rocm.on_mi3or4", return_value=True):
         yield
 
 
@@ -112,7 +112,7 @@ def test_standard_attention_backend_selection(
     expected_backend_path,
     mock_vllm_config,
     mock_on_gfx9,
-    mock_on_mi3xx,
+    mock_on_mi3or4,
     monkeypatch,
 ):
     """Test standard attention backend selection with various configurations."""
@@ -308,9 +308,9 @@ def test_aiter_fa_requires_mi3xx(mock_vllm_config):
     """Test that ROCM_AITER_FA requires mi3xx architecture."""
     from vllm.platforms.rocm import RocmPlatform
 
-    # Mock on_mi3xx to return False (used by supports_compute_capability)
+    # Mock on_mi3or4 to return False (used by supports_compute_capability)
     with (
-        patch("vllm.platforms.rocm.on_mi3xx", return_value=False),
+        patch("vllm.platforms.rocm.on_mi3or4", return_value=False),
         pytest.raises(
             ValueError,
             match="compute capability not supported",

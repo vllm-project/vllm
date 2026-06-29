@@ -17,9 +17,9 @@ from vllm.utils.torch_utils import set_random_seed
 
 _SKIP_NON_MI3XX = True
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import on_mi3xx
+    from vllm.platforms.rocm import on_mi3or4
 
-    _SKIP_NON_MI3XX = not on_mi3xx()
+    _SKIP_NON_MI3XX = not on_mi3or4()
 
 pytestmark = [
     pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific tests"),
