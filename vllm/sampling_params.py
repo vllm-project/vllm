@@ -387,18 +387,28 @@ class SamplingParams(
         if logit_bias is not None:
             # Convert token_id to integer
             # Clamp the bias between -100 and 100 per OpenAI API spec
-            try:
-                logit_bias = {
-                    int(token): min(100.0, max(-100.0, bias))
-                    for token, bias in logit_bias.items()
-                }
-            except (ValueError, TypeError) as e:
-                raise VLLMValidationError(
-                    f"logit_bias must map integer token IDs to numeric bias "
-                    f"values, got: {e}",
-                    parameter="logit_bias",
-                    value=logit_bias,
-                ) from e
+            converted_logit_bias = {}
+            for token, bias in logit_bias.items():
+                try:
+                    token_id = int(token)
+                except (ValueError, TypeError) as e:
+                    raise VLLMValidationError(
+                        f"logit_bias key {token!r} is not a valid integer "
+                        f"token ID: {e}",
+                        parameter="logit_bias",
+                        value=token,
+                    ) from e
+                try:
+                    bias_value = min(100.0, max(-100.0, bias))
+                except TypeError as e:
+                    raise VLLMValidationError(
+                        f"logit_bias value {bias!r} for token {token_id} "
+                        f"is not a valid number: {e}",
+                        parameter="logit_bias",
+                        value=bias,
+                    ) from e
+                converted_logit_bias[token_id] = bias_value
+            logit_bias = converted_logit_bias
 
         return SamplingParams(
             n=1 if n is None else n,

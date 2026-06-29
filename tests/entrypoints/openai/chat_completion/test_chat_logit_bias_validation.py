@@ -96,3 +96,22 @@ async def test_chat_logit_bias_non_integer_key(client):
     assert error.status_code == 400
     assert "not_a_token_id" in error_message
     assert "logit_bias" in error_message
+
+
+@pytest.mark.asyncio
+async def test_chat_logit_bias_non_numeric_value(client):
+    """Test that a non-numeric logit_bias value is rejected with a message
+    that names the specific offending token, not just a generic TypeError."""
+    with pytest.raises(openai.BadRequestError) as excinfo:
+        await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "Testing invalid logit bias value"}],
+            max_tokens=5,
+            logit_bias={"1": "not_a_number"},
+        )
+
+    error = excinfo.value
+    error_message = str(error)
+
+    assert error.status_code == 400
+    assert "logit_bias" in error_message
