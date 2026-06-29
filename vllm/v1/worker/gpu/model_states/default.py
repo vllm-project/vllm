@@ -156,7 +156,11 @@ class DefaultModelState(ModelState):
         else:
             max_seq_len = seq_lens_cpu_upper_bound[:num_reqs].max().item()
         req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None
-        if self.encoder_cache is not None and self.model_config.is_mm_prefix_lm:
+        if (
+            self.supports_mm_inputs
+            and self.encoder_cache is not None
+            and self.model_config.is_mm_prefix_lm
+        ):
             req_doc_ranges = compute_mm_prefix_ranges(
                 req_ids=input_batch.req_ids,
                 mm_features=self.encoder_cache.mm_features,
