@@ -350,17 +350,18 @@ class ParallelConfig:
 
     """
     dcp_comm_backend: DCPCommBackend = "ag_rs"
-    dcp_sparse_indexer_mode: DCPSparseIndexerMode = "union"
-    """How the sparse-MLA indexer picks top-k under DCP: ``union`` (each rank
-    picks top-k over its local KV shard, reconciled by the LSE merge -- cheap,
-    the prior default) or ``exact`` (ranks all-gather local top-k candidates and
-    recompute a single global top-k identical to the non-DCP result)."""
     """Communication backend for Decode Context Parallel (DCP).
     - "ag_rs": AllGather + ReduceScatter (default, existing behavior)
     - "a2a": All-to-All exchange of partial outputs + LSE, then
       combine with Triton kernel. Reduces NCCL calls from 3 to 2
       per layer for MLA models.
     """
+    dcp_sparse_indexer_mode: DCPSparseIndexerMode = "exact"
+    """How the sparse-MLA indexer picks top-k under DCP: ``exact`` (ranks
+    all-gather local top-k candidates and recompute a single global top-k
+    identical to the non-DCP result -- the default) or ``union`` (each rank
+    picks top-k over its local KV shard, reconciled by the LSE merge -- cheaper
+    but approximate)."""
 
     cp_kv_cache_interleave_size: int = 1
     """Interleave size of kv_cache storage while using DCP or PCP.
