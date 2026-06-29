@@ -649,12 +649,18 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 common_attn_metadata.query_start_loc_cpu[: num_decodes + 1]
             )
 
+            # Under DCP the per-token decode bounds must be localized AFTER the
+            # per-token expansion below, not before. Expanding from a
+            # request-level localized length subtracts decode offsets in local
+            # space and yields too-short bounds (e.g. world=2, rank=1, global
+            # per-token bounds [8, 9, 10] -> [3, 4, 5] instead of [4, 4, 5]), so
+            # the first decode token would run top-k against too short a local KV
+            # range and miss valid tokens. Keep the global seq_lens here and
+            # localize the expanded bounds further down.
             global_seq_lens_for_decode: torch.Tensor | None = None
             if dcp_local_seq_lens is not None:
                 global_seq_lens_for_decode = common_attn_metadata.seq_lens[:num_decodes]
-                seq_lens = dcp_local_seq_lens[:num_decodes]
-            else:
-                seq_lens = common_attn_metadata.seq_lens[:num_decodes]
+            seq_lens = common_attn_metadata.seq_lens[:num_decodes]
             block_table = common_attn_metadata.block_table_tensor[:num_decodes, ...]
 
             max_decode_len = int(decode_lens_cpu.max().item())
@@ -689,6 +695,14 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             seq_lens_is_buffer_view = (use_native and next_n > 1) or (
                 not use_native and max_decode_len > 1
             )
+
+            # DCP: localize the now-expanded per-token global bounds to this
+            # rank's owned KV. Done here (after expansion) so each token's global
+            # causal length is localized individually; see the comment above.
+            if dcp_local_seq_lens is not None:
+                seq_lens = self._dcp_localize_decode_seq_lens(
+                    seq_lens, num_decodes, seq_lens_is_buffer_view
+                )
 
             # For DeepseekV4 (compress_ratio > 1), the indexer KV cache stores
             # compressed tokens. Convert uncompressed seq_lens to compressed.
