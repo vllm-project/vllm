@@ -6,7 +6,6 @@ import os
 import subprocess
 from pathlib import Path
 
-
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[2]
     / ".github/workflows/scripts/sync_benchmark_snapshots_to_github.sh"
