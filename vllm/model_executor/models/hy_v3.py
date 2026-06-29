@@ -235,6 +235,7 @@ class HYV3Attention(nn.Module):
         dual_chunk_attention_config: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
+        self.dtype = torch.get_default_dtype()
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -338,7 +339,7 @@ class HYV3Attention(nn.Module):
             # written into the paged cache by the fused op.
             q = self.hpc_rope_norm(qkv, self.attn.layer_name)
             q = q.view(-1, self.num_heads * self.head_dim)
-            attn_output = self.attn(q, k, v, output_shape)
+            attn_output = self.attn(q, k, v, output_shape, self.dtype)
         else:
             if self.use_qk_norm:
                 q_by_head = q.view(

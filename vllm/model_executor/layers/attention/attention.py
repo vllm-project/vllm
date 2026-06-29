@@ -444,6 +444,7 @@ class Attention(nn.Module, AttentionLayerBase):
         # shape does not match the query shape, so we optionally let the model
         # definition specify the output tensor shape.
         output_shape: torch.Size | None = None,
+        output_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         """
         The KV cache is stored inside this class and is accessed via
@@ -458,7 +459,8 @@ class Attention(nn.Module, AttentionLayerBase):
             torch.ops.vllm.maybe_calc_kv_scales(
                 query, key, value, _encode_layer_name(self.layer_name)
             )
-        output_dtype = query.dtype
+        if output_dtype is None:
+            output_dtype = query.dtype
         if self.query_quant is not None:
             # quantizing with a simple torch operation enables
             # torch.compile to fuse this into previous ops
@@ -470,13 +472,6 @@ class Attention(nn.Module, AttentionLayerBase):
             # check if query quantization is supported
             if self.impl.supports_quant_query_input:
                 query, _ = self.query_quant(query, self._q_scale)
-
-        # HPC kernels always produce bf16 output regardless of input dtype.
-        # HpcRopeNorm quantizes query to FP8 *before* Attention.forward(),
-        # so query.dtype would be FP8 here, but allocating an FP8 output
-        # buffer would corrupt the attention results.  Force bf16 for HPC.
-        if self.backend == AttentionBackendEnum.HPC_ATTN:
-            output_dtype = self.dtype
 
         if output_shape is None:
             # Handle both 2D [num_tokens, hidden] and
