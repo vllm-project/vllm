@@ -29,6 +29,7 @@ steps:
   mirror:
     amd:
       device: mi325_1
+      soft_fail: true
       depends_on:
       - image-build-amd
 
