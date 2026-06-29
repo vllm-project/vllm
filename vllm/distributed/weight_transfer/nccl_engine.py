@@ -184,6 +184,7 @@ class NCCLWeightTransferEngine(
                 post_unpack_func=self.model.load_weights,
                 buffer_size_bytes=update_info.packed_buffer_size_bytes,
                 num_buffers=update_info.packed_num_buffers,
+                device=self.device,
             )
         else:
             # Use simple one-by-one broadcasting
@@ -191,7 +192,7 @@ class NCCLWeightTransferEngine(
                 update_info.names, update_info.dtype_names, update_info.shapes
             ):
                 dtype = getattr(torch, dtype_name)
-                weight = torch.empty(shape, dtype=dtype, device="cuda")
+                weight = torch.empty(shape, dtype=dtype, device=self.device)
                 self.model_update_group.broadcast(
                     weight, src=0, stream=torch.cuda.current_stream()
                 )
