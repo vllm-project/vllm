@@ -81,7 +81,7 @@ mori_available = importlib.util.find_spec("mori") is not None
 
 pytestmark = pytest.mark.skipif(
     not (current_platform.is_rocm() and mori_available),
-    reason="MoRIIOs are only available on ROCm with aiter package installed",
+    reason="MoRIIO tests require ROCm with the mori package installed",
 )
 
 

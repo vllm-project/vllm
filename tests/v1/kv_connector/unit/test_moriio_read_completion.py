@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Dependency-light MoRIIO worker and scheduler state-machine tests.
+
+This module must not instantiate real MoRI/MoRIIO engines. Tests that need the
+real `mori` package belong in `test_moriio_connector.py` behind its ROCm+MoRI
+collection skip.
+"""
+
 import queue
 import threading
 from collections import defaultdict
@@ -437,54 +444,6 @@ def test_read_mode_extra_config_overrides_env(monkeypatch: pytest.MonkeyPatch) -
     assert get_moriio_mode(make_config({"read_mode": "off"})) == MoRIIOMode.WRITE
     assert get_moriio_mode(make_config({"read_mode": None})) == MoRIIOMode.WRITE
     assert get_moriio_mode(make_config({})) == MoRIIOMode.WRITE
-
-
-def test_requires_piecewise_for_cudagraph_rejects_allow_full() -> None:
-    for extra_config in (
-        {"allow_full_cudagraph": True},
-        {"allow_full_cudagraph": "true"},
-        {"allow_full_cudagraph": "1"},
-    ):
-        with pytest.raises(ValueError, match="allow_full_cudagraph"):
-            MoRIIOConnector.requires_piecewise_for_cudagraph(extra_config)
-
-
-def test_add_new_req_uses_remote_zmq_address_without_embedded_request_id() -> None:
-    metadata = MoRIIOConnectorMetadata()
-
-    metadata.add_new_req(
-        request_id="plain-request-id",
-        local_block_ids=[10, 11],
-        kv_transfer_params={
-            "transfer_id": "tx-1",
-            "remote_block_ids": [0, 1],
-            "remote_engine_id": "engine-A",
-            "remote_zmq_address": "host:prefill.example,handshake:1234,notify:2345",
-            "remote_hosts": ["prefill-a", "prefill-b"],
-        },
-    )
-
-    req_meta = next(iter(metadata.reqs_to_recv.values()))
-    assert req_meta.remote_host == "prefill.example"
-    assert req_meta.remote_handshake_port == 1234
-    assert req_meta.remote_notify_port == 2345
-    assert req_meta.remote_hosts == ["prefill-a", "prefill-b"]
-
-
-def test_add_new_req_rejects_remote_hosts_without_zmq_ports() -> None:
-    metadata = MoRIIOConnectorMetadata()
-
-    with pytest.raises(ValueError, match="remote_zmq_address"):
-        metadata.add_new_req(
-            request_id="plain-request-id",
-            local_block_ids=[10, 11],
-            kv_transfer_params={
-                "transfer_id": "tx-1",
-                "remote_block_ids": [0, 1],
-                "remote_engine_id": "engine-A",
-                "remote_hosts": ["prefill-a", "prefill-b"],
-            },
-        )
 
 
 def test_write_remote_blocks_uses_remote_zmq_address_without_embedded_request_id():
