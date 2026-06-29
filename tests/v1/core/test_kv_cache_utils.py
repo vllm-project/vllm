@@ -1851,6 +1851,45 @@ def test_get_kv_cache_config_one_worker():
     )
 
 
+def test_get_kv_cache_config_does_not_share_incompatible_layouts():
+    model_config = ModelConfig(max_model_len=16)
+    vllm_config = VllmConfig(model_config=model_config)
+
+    mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2
+    kv_cache_specs = {
+        "rocm_native_attn": new_kv_cache_spec(indexes_kv_by_block_stride=False),
+        "triton_attn": new_sliding_window_spec(indexes_kv_by_block_stride=True),
+    }
+
+    kv_cache_config = get_kv_cache_configs(
+        vllm_config, [kv_cache_specs], [mem_per_block_per_layer * 2 * 32]
+    )[0]
+
+    assert kv_cache_config == KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=mem_per_block_per_layer * 32,
+                shared_by=["rocm_native_attn"],
+            ),
+            KVCacheTensor(
+                size=mem_per_block_per_layer * 32,
+                shared_by=["triton_attn"],
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["rocm_native_attn"],
+                new_kv_cache_spec(indexes_kv_by_block_stride=False),
+            ),
+            KVCacheGroupSpec(
+                ["triton_attn"],
+                new_sliding_window_spec(indexes_kv_by_block_stride=True),
+            ),
+        ],
+    )
+
+
 def test_get_kv_cache_configs_attention_free():
     kv_cache_specs: dict[str, KVCacheSpec] = {}
     vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=16))
