@@ -157,7 +157,13 @@ class KimiK2Parser(ParserEngine):
         **kwargs,
     ) -> None:
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
-        self.thinking_enabled = bool(chat_kwargs.get("thinking", True))
+        thinking = chat_kwargs.get("thinking", None)
+        enable_thinking = chat_kwargs.get("enable_thinking", None)
+        self.thinking_enabled = (
+            True
+            if thinking is None and enable_thinking is None
+            else bool(thinking) or bool(enable_thinking)
+        )
         kwargs.setdefault(
             "parser_engine_config",
             kimi_k2_config(thinking=self.thinking_enabled),
@@ -178,7 +184,7 @@ class KimiK2Parser(ParserEngine):
             return None, None
 
         tool_id = match.group("id").strip()
-        tool_name = tool_id.split(":")[0].split(".")[-1]
+        tool_name = tool_id.split(":")[0].removeprefix("functions.")
         return tool_id, tool_name
 
     def _emit_name_delta(
