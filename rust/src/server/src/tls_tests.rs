@@ -1,5 +1,5 @@
 //! TLS tests: `build_server_config` unit checks plus end-to-end OpenSSL handshakes
-//! through the production `serve_listener` path, with a trivial router since TLS
+//! through the production listener/connection path, with a trivial router since TLS
 //! terminates below the app.
 
 use std::pin::Pin;
@@ -23,8 +23,8 @@ use tokio_openssl::SslStream;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{HttpListenerMode, TlsConfig};
-use crate::listener::Listener;
-use crate::{ConnectionTimeouts, serve_listener, tls};
+use crate::listener::{Listener, MaybeTlsListener};
+use crate::{ConnectionTimeouts, serve_connections, tls};
 
 // ============================================================================
 // Test infrastructure
@@ -261,9 +261,8 @@ async fn spawn_server(tls_config: Option<TlsConfig>) -> (String, CancellationTok
 }
 
 /// Bind an ephemeral listener and serve a trivial router via the production
-/// `serve_listener`, optionally with TLS. The listener is bound (and thus
-/// accepting into the backlog) before returning, so a client may connect
-/// immediately without a sleep.
+/// listener/connection path. The listener is bound (and thus accepting into the
+/// backlog) before returning, so a client may connect immediately without a sleep.
 async fn spawn_server_with_timeouts(
     tls_config: Option<TlsConfig>,
     timeouts: ConnectionTimeouts,
@@ -274,7 +273,7 @@ async fn spawn_server_with_timeouts(
     })
     .await
     .expect("bind listener");
-    let addr = listener.local_addr().expect("local addr");
+    let addr = listener.local_addr_display().expect("local addr");
 
     let server_config =
         tls_config.map(|cfg| tls::build_server_config(&cfg).expect("build server config"));
@@ -282,12 +281,16 @@ async fn spawn_server_with_timeouts(
     let shutdown = CancellationToken::new();
     let server_shutdown = shutdown.clone();
     tokio::spawn(async move {
-        let _ = serve_listener(
+        let listener = match server_config {
+            Some(context) => MaybeTlsListener::tls(listener, context, timeouts.handshake),
+            None => MaybeTlsListener::plain(listener),
+        };
+        let _ = serve_connections(
             listener,
-            server_config,
             app,
             server_shutdown.cancelled_owned(),
-            timeouts,
+            timeouts.header_read,
+            timeouts.keep_alive_enabled,
         )
         .await;
     });
