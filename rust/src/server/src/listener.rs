@@ -101,6 +101,7 @@ impl Listener {
     }
 }
 
+/// Allow the unified listener to plug directly into tonic's gRPC server.
 impl Connected for ListenerIo {
     type ConnectInfo = TcpConnectInfo;
 
@@ -174,24 +175,26 @@ impl AsyncAccept for Listener {
         }
     }
 }
-
 impl AsyncListener for Listener {
     fn local_addr(&self) -> Result<Self::Address> {
         self.local_addr()
     }
 }
 
+/// A listener that may be either a plain TCP/UDS listener or a TLS listener over it.
 pub enum MaybeTlsListener {
     Plain(Listener),
     Tls(tls_listener::TlsListener<Listener, SslContext>),
 }
 
 impl MaybeTlsListener {
-    pub(crate) fn plain(listener: Listener) -> Self {
+    /// Create a plain listener without TLS.
+    pub fn plain(listener: Listener) -> Self {
         Self::Plain(listener)
     }
 
-    pub(crate) fn tls(listener: Listener, context: SslContext) -> Self {
+    /// Create a TLS listener over the given plain listener.
+    pub fn tls(listener: Listener, context: SslContext) -> Self {
         Self::Tls(
             tls_listener::builder(context)
                 .handshake_timeout(tls::TLS_HANDSHAKE_TIMEOUT)
@@ -200,6 +203,7 @@ impl MaybeTlsListener {
     }
 }
 
+/// Listener I/O type that may be either a plain TCP/UDS stream or a TLS stream over it.
 #[derive(Debug)]
 #[enum_derive(tokio1::AsyncRead, tokio1::AsyncWrite)]
 pub enum MaybeTlsStream {
@@ -207,6 +211,7 @@ pub enum MaybeTlsStream {
     Tls(tokio_openssl::SslStream<ListenerIo>),
 }
 
+/// Allow the maybe-TLS listener to plug directly into `axum::serve(...)`.
 impl axum::serve::Listener for MaybeTlsListener {
     type Addr = ListenerAddr;
     type Io = MaybeTlsStream;
@@ -232,6 +237,7 @@ impl axum::serve::Listener for MaybeTlsListener {
     }
 }
 
+/// Allow the maybe-TLS listener to plug directly into tonic's gRPC server.
 impl Connected for MaybeTlsStream {
     type ConnectInfo = TcpConnectInfo;
 
@@ -243,7 +249,7 @@ impl Connected for MaybeTlsStream {
     }
 }
 
-/// Allow the unified listener to be adaptable to tonic's incoming stream shape.
+/// Allow the maybe-TLS listener to be adaptable to tonic's incoming stream shape.
 impl futures::Stream for MaybeTlsListener {
     type Item = std::io::Result<MaybeTlsStream>;
 
