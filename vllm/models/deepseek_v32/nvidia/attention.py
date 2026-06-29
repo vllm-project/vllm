@@ -266,6 +266,13 @@ class DeepseekV32Attention(MLAAttention):
         self.qk_head_dim = qk_head_dim
         self.indexer = indexer
         self.topk_indices_buffer = topk_indices_buffer
+        # Lazily-built fused weights for input-sharing GEMMs (occupancy + single
+        # HBM ramp-up vs two skinny back-to-back GEMMs). All bf16 (excluded from
+        # quant). Built on first forward, reused thereafter (cudagraph-safe).
+        self._qb_wqb_weight: torch.Tensor | None = None
+        self._q_b_out_dim = num_local_heads * qk_head_dim
+        self._qkva_wk_weight: torch.Tensor | None = None
+        self._qkva_dim = q_lora_rank + kv_lora_rank + qk_rope_head_dim
         # Runtime toggle for index_share_for_mtp_iteration: MTP draft step 0
         # computes the top-k, steps 1+ set this True to reuse it.
         self.skip_topk = False
@@ -335,18 +342,29 @@ class DeepseekV32Attention(MLAAttention):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         # Captured: A-projections (+ indexer A-GEMM on indexer layers).
-        qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
-        q_c, kv_c, k_pe = qkv_lora.split(
-            [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
-        )
-
+        # Fuse fused_qkv_a_proj + indexer.wk_weights_proj when both run (both
+        # read hidden_states, both bf16) into one larger-N GEMM.
         if self.indexer is not None and not self.skip_topk:
-            kw = self.indexer.wk_weights_proj(hidden_states)[0]
+            if self._qkva_wk_weight is None:
+                self._qkva_wk_weight = torch.cat(
+                    [
+                        self.fused_qkv_a_proj.weight,
+                        self.indexer.wk_weights_proj.weight,
+                    ],
+                    dim=0,
+                )
+            fused = torch.nn.functional.linear(hidden_states, self._qkva_wk_weight)
+            qkv_lora = fused[:, : self._qkva_dim]
+            kw = fused[:, self._qkva_dim :]
             index_k = kw[:, : self.indexer.head_dim]
             index_weights = kw[:, self.indexer.head_dim :]
         else:
+            qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
             index_k = None
             index_weights = None
+        q_c, kv_c, k_pe = qkv_lora.split(
+            [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+        )
 
         num_tokens = hidden_states.shape[0]
         output = torch.empty(
@@ -441,16 +459,26 @@ class DeepseekV32Attention(MLAAttention):
             index_rope_interleave=self._index_rope_interleave,
         )
 
-        q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+        if self.indexer is not None:
+            # Fuse q_b_proj + indexer.wq_b (both read q_c, both bf16) into one
+            # larger-N GEMM instead of two skinny ones.
+            if self._qb_wqb_weight is None:
+                self._qb_wqb_weight = torch.cat(
+                    [self.q_b_proj.weight, self.indexer.wq_b.weight], dim=0
+                )
+            qb_out = torch.nn.functional.linear(q_c, self._qb_wqb_weight)
+            q = qb_out[:, : self._q_b_out_dim].view(
+                -1, self.num_local_heads, self.qk_head_dim
+            )
+            index_q = qb_out[:, self._q_b_out_dim :].view(
+                -1, self.indexer.n_head, self.indexer.head_dim
+            )
+        else:
+            q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
+            index_q = None
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         q_nope = q_nope.transpose(0, 1)
         ql_nope = torch.bmm(q_nope, self.W_UK_T).transpose(0, 1)
-
-        if self.indexer is not None:
-            index_q = self.indexer.wq_b(q_c)[0]
-            index_q = index_q.view(-1, self.indexer.n_head, self.indexer.head_dim)
-        else:
-            index_q = None
 
         index_q_fp8, index_weights_out, mqa_q = fused_q(
             positions,
