@@ -8,10 +8,11 @@ Regression guard for stride computation bugs in the offloading worker
 cache data corruption during CPU offloading.
 
 Covers both KV offloading connectors (OffloadingConnector and
-SimpleCPUOffloadConnector) across three architecture families:
-  - Hybrid SSM (NemotronH: attention + Mamba layers)
-  - Dense transformer (Gemma 4)
-  - MoE (DeepSeek-V4-Flash)
+SimpleCPUOffloadConnector) across four architecture families:
+  - Hybrid Mamba (NemotronH: attention + Mamba)
+  - Heterogeneous head dim (Gemma 4)
+  - Hybrid GDN (Qwen 3.5: attention + GatedDeltaNet)
+  - Compressed attention (DeepSeek-V4-Flash: CSA)
 
 Usage:
     pytest -s -v evals/gsm8k/test_gsm8k_offloading.py
@@ -90,6 +91,15 @@ MODELS = [
         accuracy_threshold=0.55,
     ),
     OffloadingModelConfig(
+        id="offloading-qwen3.5-35b",
+        model="Qwen/Qwen3.5-35B-A3B",
+        connector="OffloadingConnector",
+        accuracy_threshold=0.75,
+        extra_server_args=[
+            "--enable-expert-parallel",
+        ],
+    ),
+    OffloadingModelConfig(
         id="offloading-deepseek-v4-flash",
         model="deepseek-ai/DeepSeek-V4-Flash",
         connector="OffloadingConnector",
@@ -119,6 +129,15 @@ MODELS = [
         model="google/gemma-4-E4B-it",
         connector="SimpleCPUOffloadConnector",
         accuracy_threshold=0.55,
+    ),
+    OffloadingModelConfig(
+        id="simple-qwen3.5-35b",
+        model="Qwen/Qwen3.5-35B-A3B",
+        connector="SimpleCPUOffloadConnector",
+        accuracy_threshold=0.75,
+        extra_server_args=[
+            "--enable-expert-parallel",
+        ],
     ),
 ]
 
