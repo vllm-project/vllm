@@ -180,6 +180,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
                 gemm1_clamp_limit=self.gemm1_clamp_limit,
             )
         assert self.fused_moe_impl is not None
+
         self.fused_moe_impl.apply(
             output=output,
             hidden_states=hidden_states,
@@ -260,6 +261,42 @@ class XPUExpertsBlockFp8(XPUExperts):
             num_dispatchers,
         )
         self.is_block_fp8 = True
+
+    def apply(
+        self,
+        output,
+        hidden_states,
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
+        activation,
+        global_num_experts,
+        expert_map,
+        a1q_scale,
+        a2_scale,
+        workspace13,
+        workspace2,
+        expert_tokens_meta,
+        apply_router_weight_on_input,
+    ):
+        return super().apply(
+            output,
+            hidden_states,
+            w1,
+            w2,
+            topk_weights,
+            topk_ids,
+            activation,
+            global_num_experts,
+            expert_map,
+            a1q_scale,
+            a2_scale,
+            workspace13,
+            workspace2,
+            expert_tokens_meta,
+            apply_router_weight_on_input,
+        )
 
     @staticmethod
     def _supports_quant_scheme(

@@ -12,15 +12,15 @@ from vllm.model_executor.layers.fused_moe.fused_moe import try_get_optimal_moe_c
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import next_power_of_2
 
-_lora_aux_cuda_stream: torch.cuda.Stream | None = None
+_lora_aux_cuda_stream: torch.Stream | None = None
 
 
-def _get_lora_aux_cuda_stream() -> torch.cuda.Stream | None:
+def _get_lora_aux_cuda_stream() -> torch.Stream | None:
     if not envs.VLLM_LORA_ENABLE_DUAL_STREAM:
         return None
     global _lora_aux_cuda_stream
     if _lora_aux_cuda_stream is None and current_platform.is_cuda_alike():
-        _lora_aux_cuda_stream = torch.cuda.Stream()
+        _lora_aux_cuda_stream = torch.Stream()
     return _lora_aux_cuda_stream
 
 

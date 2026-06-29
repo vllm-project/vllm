@@ -125,7 +125,7 @@ class BatchMemcpyParams(NamedTuple):
 def build_params(
     src_caches: dict[str, torch.Tensor],
     dst_caches: dict[str, torch.Tensor],
-    stream: torch.cuda.Stream,
+    stream: torch.Stream,
     src_access_order: int = CU_MEMCPY_SRC_ACCESS_ORDER_ANY,
 ) -> BatchMemcpyParams:
     global _batch_memcpy_fn
@@ -154,7 +154,7 @@ def build_params(
         attrs=attrs,
         attrs_idx=ctypes.c_size_t(0),
         fail_idx=ctypes.c_size_t(0),
-        stream_handle=stream.cuda_stream,
+        stream_handle=stream.native_handle,
     )
 
 

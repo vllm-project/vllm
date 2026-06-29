@@ -28,8 +28,8 @@ class DmaCopyBackend:
     def __init__(self) -> None:
         self._store_params: BatchMemcpyParams | None = None
         self._load_params: BatchMemcpyParams | None = None
-        self._load_stream: torch.cuda.Stream | None = None
-        self._store_stream: torch.cuda.Stream | None = None
+        self._load_stream: torch.Stream | None = None
+        self._store_stream: torch.Stream | None = None
         self._queue: queue.SimpleQueue | None = None
         self._thread: threading.Thread | None = None
         self._shutdown: bool = False
@@ -39,8 +39,8 @@ class DmaCopyBackend:
         gpu_caches: dict[str, torch.Tensor],
         cpu_caches: dict[str, torch.Tensor],
         device: torch.device,
-        load_stream: torch.cuda.Stream,
-        store_stream: torch.cuda.Stream,
+        load_stream: torch.Stream,
+        store_stream: torch.Stream,
     ) -> None:
         self._load_stream = load_stream
         self._store_stream = store_stream
@@ -104,8 +104,8 @@ class DmaCopyBackend:
     def _copy_loop(
         q: queue.SimpleQueue,
         device: torch.device,
-        load_stream: torch.cuda.Stream,
-        store_stream: torch.cuda.Stream,
+        load_stream: torch.Stream,
+        store_stream: torch.Stream,
     ) -> None:
         current_platform.set_device(device)
         while True:

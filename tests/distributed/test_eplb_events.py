@@ -11,8 +11,8 @@ from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
 
 def test_wait_blocks_until_record():
     event = CpuGpuEvent()
-    record_stream = torch.cuda.Stream()
-    wait_stream = torch.cuda.Stream()
+    record_stream = torch.Stream()
+    wait_stream = torch.Stream()
     wait_returned = threading.Event()
 
     def waiter():
@@ -33,8 +33,8 @@ def test_wait_blocks_until_record():
 
 def test_reuse_across_multiple_cycles():
     wrapper = CpuGpuEvent()
-    record_stream = torch.cuda.Stream()
-    wait_stream = torch.cuda.Stream()
+    record_stream = torch.Stream()
+    wait_stream = torch.Stream()
     NUM_CYCLES = 8
     completed_cycles = []
     barriers = [threading.Barrier(2) for _ in range(NUM_CYCLES)]
@@ -61,7 +61,7 @@ def test_producer_consumer():
     This test uses the CpuGpuEvent to synchronize reads and writes to/from a shared GPU
     tensor on multiple CPU threads.
     """
-    worker_stream = torch.cuda.Stream()
+    worker_stream = torch.Stream()
     # Create a single element counter that will be shared between two threads
     buf = torch.zeros(1, device="cuda")
     NUM_ROUNDS = 5

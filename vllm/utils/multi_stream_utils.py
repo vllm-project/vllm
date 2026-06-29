@@ -22,7 +22,7 @@ def maybe_execute_in_parallel(
     fn1: Callable[[], Any],
     event0: torch.cuda.Event,
     event1: torch.cuda.Event,
-    aux_stream: torch.cuda.Stream | None = None,
+    aux_stream: torch.Stream | None = None,
 ) -> tuple[Any, Any]:
     """Run two functions potentially in parallel on separate CUDA streams.
 
@@ -63,7 +63,7 @@ def execute_in_parallel(
     aux_fns: list[Callable[[], Any] | None],
     start_event: torch.cuda.Event,
     done_events: list[torch.cuda.Event],
-    aux_streams: list[torch.cuda.Stream] | None = None,
+    aux_streams: list[torch.Stream] | None = None,
     enable: bool = False,
 ) -> tuple[Any, list[Any]]:
     """Run default_fn on the current stream and aux_fns concurrently on

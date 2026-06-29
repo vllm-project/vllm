@@ -32,7 +32,7 @@ def start_async_worker(
     def thread_target() -> None:
         assert device_index is not None
         torch.accelerator.set_device_index(device_index)
-        cuda_stream = torch.cuda.Stream(device=device_index)
+        cuda_stream = torch.Stream(device=device_index)
         try:
             transfer_run_periodically(
                 state=state,
@@ -51,7 +51,7 @@ def run_rebalance_experts(
     model_state: "EplbModelState",
     eplb_state: "EplbState",
     physical_to_logical_map_cpu: torch.Tensor,
-    cuda_stream: torch.cuda.Stream,
+    cuda_stream: torch.Stream,
 ) -> torch.Tensor:
     assert model_state.eplb_stats is not None
     eplb_stats = model_state.eplb_stats
@@ -75,7 +75,7 @@ def run_rebalance_experts(
 
 def transfer_run_periodically(
     state: "EplbState",
-    cuda_stream: torch.cuda.Stream,
+    cuda_stream: torch.Stream,
     is_profile: bool = False,
 ) -> None:
     while True:

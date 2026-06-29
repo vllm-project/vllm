@@ -38,5 +38,5 @@ def test_swap_blocks_batch_default_stream():
 )
 def test_swap_blocks_batch_dedicated_stream():
     # A dedicated non-default stream exercises the cuMemcpyBatchAsync fast path.
-    with torch.cuda.stream(torch.cuda.Stream()):
+    with torch.cuda.stream(torch.Stream()):
         _run_batch([8, 4096, 8192])

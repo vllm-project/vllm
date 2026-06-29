@@ -132,7 +132,7 @@ class Bench:
 
         self.args_iterator.reset()
         args_it = self.args_iterator.__next__()
-        stream = torch.cuda.Stream()
+        stream = torch.Stream()
         with torch.cuda.stream(stream):
             g = torch.cuda.CUDAGraph()
             with torch.cuda.graph(g):
