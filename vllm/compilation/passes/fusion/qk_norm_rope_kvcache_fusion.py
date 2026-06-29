@@ -69,6 +69,11 @@ def fused_qk_norm_rope_and_unified_kv_cache_update_impl(
             kv_cache,
             layer_slot_mapping,
         )
+    else:
+        # Profiling/dummy run: kernel is skipped but q_out/k_out feed attention,
+        # so zero them instead of leaving torch.empty uninitialized.
+        q_out.zero_()
+        k_out.zero_()
 
     return torch.empty(0, device=qkv.device, dtype=qkv.dtype)
 
