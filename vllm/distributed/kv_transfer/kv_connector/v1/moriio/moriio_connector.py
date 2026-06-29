@@ -138,6 +138,7 @@ def _read_completion_quorum(
         return 0
     return ((remote_decode_tp_size - 1 - producer_tp_rank) // producer_tp_size) + 1
 
+
 try:
     from mori.io import (
         BackendType,
@@ -651,8 +652,7 @@ class MoRIIOConnectorScheduler:
         serialized_data = msgpack.dumps(data, use_bin_type=True)
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
-                "MoRIIO remote_blocks send: path=%s transfer_id=%s req_id=%s "
-                "blocks=%d",
+                "MoRIIO remote_blocks send: path=%s transfer_id=%s req_id=%s blocks=%d",
                 path,
                 transfer_id,
                 req_id,
@@ -1003,9 +1003,7 @@ class MoRIIOConnectorScheduler:
         # Consumer mappings can be removed once KV transfer has completed.
         # Producer mappings stay until the block-free notification arrives.
         if not self.is_producer:
-            mapping_was_never_created = bool(
-                params and params.get("do_remote_prefill")
-            )
+            mapping_was_never_created = bool(params and params.get("do_remote_prefill"))
             self.unmap_request_id(
                 request_id,
                 warn_missing=not mapping_was_never_created,
@@ -1320,9 +1318,9 @@ class MoRIIOConnectorWorker:
         self.dst_num_blocks: dict[EngineId, int] = {}
         # In-progress READ transfers: per request, keyed by layer name.
         self._recving_transfers: defaultdict[ReqId, dict[str, Any]] = defaultdict(dict)
-        self._pending_read_plans: defaultdict[
-            ReqId, dict[str, LayerTransferPlan]
-        ] = defaultdict(dict)
+        self._pending_read_plans: defaultdict[ReqId, dict[str, LayerTransferPlan]] = (
+            defaultdict(dict)
+        )
         # Values are (remote_host, remote_notify_port, transfer_id).
         self._recving_transfers_callback_addr: dict[ReqId, tuple[str, str, str]] = {}
         self._recving_transfer_local_block_ids: dict[ReqId, set[int]] = {}
@@ -2278,9 +2276,7 @@ class MoRIIOConnectorWorker:
     def _active_read_layers_for_req_locked(self, req_id: ReqId) -> int:
         status_by_layer = self._recving_transfers.get(req_id, {})
         return sum(
-            1
-            for status in status_by_layer.values()
-            if self._read_status_active(status)
+            1 for status in status_by_layer.values() if self._read_status_active(status)
         )
 
     def _per_transfer_read_cap(self) -> int:
@@ -2366,9 +2362,7 @@ class MoRIIOConnectorWorker:
             _backoff = min(_backoff * 2, 0.05)
 
         with self.moriio_wrapper.lock:
-            self._recving_transfers[plan.request_id][plan.layer_name] = (
-                transfer_status
-            )
+            self._recving_transfers[plan.request_id][plan.layer_name] = transfer_status
 
     def _dispatch_pending_reads(self, layer_name: str | None = None) -> None:
         while True:
@@ -2593,9 +2587,7 @@ class MoRIIOConnectorWorker:
     def get_engine_name_with_dp(self, engine_name, dp_rank):
         return f"{engine_name}_dp{dp_rank}"
 
-    def _eager_handshake_all_dp_ranks(
-        self, metadata: MoRIIOConnectorMetadata
-    ) -> None:
+    def _eager_handshake_all_dp_ranks(self, metadata: MoRIIOConnectorMetadata) -> None:
         """Handshake remote prefill DP ranks uniformly across local TP workers.
 
         Decode forward issues per-layer TP collectives, so handshake state needs
@@ -2676,12 +2668,8 @@ class MoRIIOConnectorWorker:
                 all_ok,
                 self.tp_rank,
             )
-            vote = torch.tensor(
-                [1 if all_ok else 0], device="cpu", dtype=torch.int32
-            )
-            dist.all_reduce(
-                vote, group=self.tp_group.cpu_group, op=dist.ReduceOp.MIN
-            )
+            vote = torch.tensor([1 if all_ok else 0], device="cpu", dtype=torch.int32)
+            dist.all_reduce(vote, group=self.tp_group.cpu_group, op=dist.ReduceOp.MIN)
             if int(vote.item()) == 0:
                 raise HandshakeError(
                     f"Eager MoRIIO handshake failed for {remote_engine_id} on "
@@ -2722,8 +2710,8 @@ class MoRIIOConnectorWorker:
             if transfer_id in freed_transfer_ids:
                 continue
             self.transfer_id_to_remote_tp_size[transfer_id] = remote_tp_size
-            self.transfer_id_to_completion_count[transfer_id] = (
-                _read_completion_quorum(remote_tp_size, self.tp_size, self.tp_rank)
+            self.transfer_id_to_completion_count[transfer_id] = _read_completion_quorum(
+                remote_tp_size, self.tp_size, self.tp_rank
             )
         self._reqs_to_send.update(
             {

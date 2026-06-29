@@ -213,6 +213,7 @@ def resolve_host_ip(extra_config: dict) -> str:
     """
     return extra_config.get("host_ip") or get_ip()
 
+
 def _normalize_node_hosts(value: Any, config_key: str) -> list[str]:
     if value is None:
         return []
@@ -601,6 +602,7 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         remote_host = kv_transfer_params.get("remote_host")
         remote_handshake_port = kv_transfer_params.get("remote_handshake_port")
         remote_notify_port = kv_transfer_params.get("remote_notify_port")
+        remote_host_source = "kv_transfer_params.remote_host"
         # Parse host/ports from request_id. The router normally embeds both
         # zmq_addresses there. If the embedded address is absent, fall back to
         # `kv_transfer_params.remote_zmq_address`, which carries the same
@@ -610,7 +612,6 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
             kv_transfer_params.get("remote_hosts"),
             "kv_transfer_params['remote_hosts']",
         )
-        used_remote_zmq_fallback = False
         if (
             remote_host is None
             or remote_handshake_port is None
@@ -623,18 +624,14 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
                 remote_host, remote_handshake_port, remote_notify_port = (
                     parse_moriio_zmq_address(peer_zmq)
                 )
+                remote_host_source = "request_id"
             except ValueError:
                 peer_zmq = kv_transfer_params.get("remote_zmq_address")
                 if peer_zmq:
                     remote_host, remote_handshake_port, remote_notify_port = (
                         parse_moriio_zmq_address(peer_zmq)
                     )
-                    used_remote_zmq_fallback = True
-                    validate_moriio_trusted_host(
-                        remote_host,
-                        trusted_remote_hosts,
-                        "kv_transfer_params.remote_zmq_address",
-                    )
+                    remote_host_source = "kv_transfer_params.remote_zmq_address"
                 elif not remote_hosts:
                     raise ValueError(
                         f"MoRIIO add_new_req: could not resolve peer host/ports "
@@ -648,7 +645,12 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
                         f"forward remote_zmq_address with the host list"
                     ) from None
 
-        if used_remote_zmq_fallback:
+        if trusted_remote_hosts is not None:
+            validate_moriio_trusted_host(
+                remote_host,
+                trusted_remote_hosts,
+                remote_host_source,
+            )
             for remote_hosts_entry in remote_hosts:
                 validate_moriio_trusted_host(
                     remote_hosts_entry,

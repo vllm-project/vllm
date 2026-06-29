@@ -276,7 +276,11 @@ def create_vllm_config(
         kv_connector="MoRIIOConnector",
         kv_role=role,
         enable_permute_local_kv=enable_permute_local_kv,
-        kv_connector_extra_config={"read_mode": read_mode, "backend": "xgmi"},
+        kv_connector_extra_config={
+            "read_mode": read_mode,
+            "backend": "xgmi",
+            "trusted_remote_hosts": ["127.0.0.1"],
+        },
     )
     return VllmConfig(
         scheduler_config=scheduler_config,
@@ -516,6 +520,7 @@ def test_send_transfer_release_sends_structured_release_message():
         "transfer_id": "xfer-7",
     }
 
+
 def test_read_mode_trims_remote_blocks_not_local_blocks():
     """Read mode rejects mismatched block counts and preserves block id sides."""
 
@@ -753,6 +758,42 @@ def test_add_new_req_rejects_untrusted_remote_zmq_address():
                 "remote_hosts": ["prefill-a"],
             },
             trusted_remote_hosts={"prefill-a"},
+        )
+
+
+def test_add_new_req_rejects_untrusted_request_id_host():
+    metadata = MoRIIOConnectorMetadata()
+
+    with pytest.raises(ValueError, match="request_id host"):
+        metadata.add_new_req(
+            request_id=_request_id_with_zmq(host="untrusted.example"),
+            local_block_ids=[10, 11],
+            kv_transfer_params={
+                "transfer_id": "tx-1",
+                "remote_block_ids": [0, 1],
+                "remote_engine_id": "engine-A",
+            },
+            trusted_remote_hosts={"prefill-a"},
+        )
+
+
+def test_add_new_req_rejects_untrusted_explicit_remote_hosts():
+    metadata = MoRIIOConnectorMetadata()
+
+    with pytest.raises(ValueError, match="remote_hosts"):
+        metadata.add_new_req(
+            request_id="plain-request-id",
+            local_block_ids=[10, 11],
+            kv_transfer_params={
+                "transfer_id": "tx-1",
+                "remote_block_ids": [0, 1],
+                "remote_engine_id": "engine-A",
+                "remote_host": "prefill.example",
+                "remote_handshake_port": 1234,
+                "remote_notify_port": 2345,
+                "remote_hosts": ["untrusted.example"],
+            },
+            trusted_remote_hosts={"prefill.example"},
         )
 
 

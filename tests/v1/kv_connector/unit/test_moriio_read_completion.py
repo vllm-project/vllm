@@ -14,6 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOConfig,
     MoRIIOConnectorMetadata,
     MoRIIOMode,
+    MoRIIOTransferAck,
     ReqMeta,
     get_moriio_mode,
     get_port_offset,
@@ -68,14 +69,17 @@ class FakeWrapper:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.notifies: list[tuple[str, str, str | int]] = []
-        self.done_req_ids: list[str] = []
+        self.done_req_ids: list[MoRIIOTransferAck] = []
         self.done_remote_allocate_req_dict: dict[str, object] = {}
         self.read_error: Exception | None = None
         self.read_results: list[FakeStatus | Exception] = []
         self.notify_error: Exception | None = None
         self.waited_for_transfer = False
+        self._terminal_transfer_ids: set[str] = set()
 
-    def send_notify(self, transfer_id: str, host: str, port: str) -> None:
+    def send_notify(
+        self, transfer_id: str, host: str, port: str | int, **_kwargs
+    ) -> None:
         if self.notify_error is not None:
             error = self.notify_error
             self.notify_error = None
@@ -98,8 +102,23 @@ class FakeWrapper:
             raise self.read_error
         return FakeStatus()
 
-    def waiting_for_transfer_complete(self) -> None:
+    def waiting_for_transfer_complete(self, *_args) -> None:
         self.waited_for_transfer = True
+
+    def _is_transfer_terminal_locked(self, transfer_id: str) -> bool:
+        return transfer_id in self._terminal_transfer_ids
+
+    def _mark_transfer_terminal_locked(self, transfer_id: str) -> None:
+        self._terminal_transfer_ids.add(transfer_id)
+
+    def _handle_remote_blocks_message(self, data: dict) -> None:
+        MoRIIOWrapper._handle_remote_blocks_message(self, data)
+
+    def _handle_write_done_message(self, data: dict) -> None:
+        MoRIIOWrapper._handle_write_done_message(self, data)
+
+    def _handle_release_message(self, data: dict) -> None:
+        MoRIIOWrapper._handle_release_message(self, data)
 
     def shutdown(self) -> None:
         pass
@@ -133,8 +152,11 @@ def make_worker() -> MoRIIOConnectorWorker:
     worker._reqs_to_send = {}
     worker.tp_rank = 0
     worker.tp_size = 1
+    worker.world_size = 1
     worker._pending_unmapped_done_tids = {}
     worker._unmatched_write_completions = set()
+    worker._consumer_notification_counts = {}
+    worker._completed_consumer_notifications = set()
     worker.transfer_id_to_request_id = {}
     worker.request_id_to_transfer_id = {}
     worker.transfer_id_to_remote_tp_size = {}
@@ -235,6 +257,7 @@ def test_consumer_request_finished_does_not_warn_for_unscheduled_read(
 ) -> None:
     connector = object.__new__(MoRIIOConnectorScheduler)
     connector.is_producer = False
+    connector.mode = MoRIIOMode.READ
     connector.transfer_id_to_request_id = {}
     connector.request_id_to_transfer_id = {}
     connector._reqs_need_recv = {}
@@ -477,6 +500,7 @@ def test_write_remote_blocks_uses_remote_zmq_address_without_embedded_request_id
     scheduler._pending_transfer_id_to_request_id = {}
     scheduler.transfer_id_to_remote_tp_size = {}
     scheduler._pending_transfer_id_to_remote_tp_size = {}
+    scheduler.trusted_remote_hosts = ["prefill.example", "prefill-a", "prefill-b"]
     sent_notifies = []
     scheduler.send_notify_block = lambda **kwargs: sent_notifies.append(kwargs)
     scheduler._trim_block_ids_to_token_span = lambda block_ids, _tokens: block_ids
@@ -664,18 +688,21 @@ def test_write_finalize_reports_request_id_locally_and_transfer_id_remotely() ->
     worker.tp_size = 8
     worker.moriio_wrapper.done_remote_allocate_req_dict["transfer0"] = object()
     writer = MoRIIOWriter(worker)
-    task = SimpleNamespace(
-        request_id="req0",
-        transfer_id="transfer0",
-        remote_notify_port=61005,
-        remote_ip="10.0.0.2",
+    request_info = SimpleNamespace(
+        writes_done=1,
+        writes_expected=1,
+        completion_notified=False,
+        completion_request_id="req0",
+        completion_remote_notify_port=61005,
+        completion_remote_ip="10.0.0.2",
+        transfer_statuses=[],
+        decode_dp_rank=1,
     )
-    request_info = SimpleNamespace(writes_done=0, decode_dp_rank=1)
 
-    writer._finalize_if_complete(task, request_info)
+    writer._finalize_if_complete("transfer0", request_info)
 
     assert worker.moriio_wrapper.notifies == [("transfer0", "10.0.0.2", 61015)]
-    assert worker.moriio_wrapper.done_req_ids == ["req0"]
+    assert worker.moriio_wrapper.done_req_ids == [MoRIIOTransferAck("transfer0")]
     assert "transfer0" not in worker.moriio_wrapper.done_remote_allocate_req_dict
     assert worker.moriio_wrapper.waited_for_transfer is True
 
@@ -704,7 +731,7 @@ def test_write_deferred_expiry_reports_request_id(
     writer._process_deferred_tasks()
 
     assert writer._deferred_tasks == []
-    assert worker.moriio_wrapper.done_req_ids == ["req0"]
+    assert worker.moriio_wrapper.done_req_ids == [MoRIIOTransferAck("transfer0")]
     assert "transfer0" not in worker.moriio_wrapper.done_remote_allocate_req_dict
 
 
@@ -769,7 +796,7 @@ def test_remote_allocation_keys_ready_and_cleanup(
 
     writer._mark_request_done(request_id, transfer_id)
 
-    assert worker.moriio_wrapper.done_req_ids == [request_id]
+    assert worker.moriio_wrapper.done_req_ids == [MoRIIOTransferAck(transfer_id)]
     assert transfer_id not in allocation_by_key
     assert request_id not in allocation_by_key
     assert stripped_request_id not in allocation_by_key
@@ -857,7 +884,11 @@ def test_read_blocks_respects_layer_dispatch_window() -> None:
         ["session0", "session1", "session2"],
         SimpleNamespace(num_blocks=1, block_len=1),
     )
-    worker._compute_block_transfer_offsets = lambda *_args: ([0], [0], [1])
+    worker._compute_block_transfer_offsets = lambda *_args, **_kwargs: (
+        [0],
+        [0],
+        [1],
+    )
     worker.moriio_wrapper.read_results = [FakeStatus(), FakeStatus(), FakeStatus()]
 
     worker._read_blocks(
@@ -924,7 +955,11 @@ def test_read_blocks_respects_global_active_layer_window() -> None:
         ["session0", "session1", "session2"],
         SimpleNamespace(num_blocks=1, block_len=1),
     )
-    worker._compute_block_transfer_offsets = lambda *_args: ([0], [0], [1])
+    worker._compute_block_transfer_offsets = lambda *_args, **_kwargs: (
+        [0],
+        [0],
+        [1],
+    )
     worker.moriio_wrapper.read_results = [FakeStatus(), FakeStatus()]
 
     worker._read_blocks(
@@ -1050,6 +1085,7 @@ def test_failed_read_marks_local_blocks_invalid() -> None:
 def test_read_blocks_partial_setup_exception_marks_local_blocks_invalid() -> None:
     worker = make_worker()
     worker.tp_rank = 2
+    worker.world_size = 16
     worker.dp_rank = 0
     worker.kv_caches = {"layer0": FakeTensor(), "layer1": FakeTensor()}
     worker.layer_name_to_local_kv_cache_metadata = {"layer0": [], "layer1": []}
@@ -1057,7 +1093,11 @@ def test_read_blocks_partial_setup_exception_marks_local_blocks_invalid() -> Non
         ["session0", "session1"],
         SimpleNamespace(num_blocks=1, block_len=1),
     )
-    worker._compute_block_transfer_offsets = lambda *_args: ([0], [0], [1])
+    worker._compute_block_transfer_offsets = lambda *_args, **_kwargs: (
+        [0],
+        [0],
+        [1],
+    )
     worker.moriio_wrapper.read_results = [
         FakeStatus(succeeded=True),
         RuntimeError("layer1 setup failed"),
@@ -1086,6 +1126,7 @@ def test_read_blocks_partial_setup_exception_marks_local_blocks_invalid() -> Non
 def test_read_blocks_setup_exception_notifies_without_invalid_blocks() -> None:
     worker = make_worker()
     worker.tp_rank = 2
+    worker.world_size = 16
     worker.dp_rank = 0
     worker.kv_caches = {"layer0": FakeTensor()}
     worker.layer_name_to_local_kv_cache_metadata = {"layer0": []}
@@ -1093,7 +1134,11 @@ def test_read_blocks_setup_exception_notifies_without_invalid_blocks() -> None:
         ["session0"],
         SimpleNamespace(num_blocks=1, block_len=1),
     )
-    worker._compute_block_transfer_offsets = lambda *_args: ([0], [0], [1])
+    worker._compute_block_transfer_offsets = lambda *_args, **_kwargs: (
+        [0],
+        [0],
+        [1],
+    )
     worker.moriio_wrapper.read_error = RuntimeError("setup failed")
 
     with pytest.raises(RuntimeError, match="setup failed"):

@@ -269,9 +269,7 @@ class MoRIIOWriter:
             wrapper._mark_transfer_terminal_locked(transfer_id)
         self._clear_transfer_state(transfer_id)
 
-    def _remote_alloc_info_for_task(
-        self, task: WriteTask
-    ) -> RemoteAllocInfo | None:
+    def _remote_alloc_info_for_task(self, task: WriteTask) -> RemoteAllocInfo | None:
         wrapper = self.worker.moriio_wrapper
         stripped_request_id = _strip_vllm_request_suffix(task.request_id)
         key_sample: list[tuple[str, str]] | None = None
@@ -494,7 +492,9 @@ class MoRIIOWriter:
         self.worker.moriio_wrapper.waiting_for_transfer_complete(transfer_statuses)
 
         remote_port = remote_notify_port + get_port_offset(
-            request_info.decode_dp_rank, self.worker.tp_rank
+            request_info.decode_dp_rank,
+            self.worker.tp_rank,
+            self.worker.tp_size,
         )
         # Consider using RDMA immediate data in decode side
         # to eliminate the need for this notification.
@@ -762,9 +762,7 @@ class MoRIIOWrapper:
         msg_str = repr(msg)
         handled = False
         try:
-            data = self._normalize_structured_message(
-                msgpack.loads(msg, raw=False)
-            )
+            data = self._normalize_structured_message(msgpack.loads(msg, raw=False))
             if data is not None and (
                 data.get("type") == "remote_blocks" or "transfer_id" in data
             ):

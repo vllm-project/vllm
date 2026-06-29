@@ -51,9 +51,7 @@ def _proxy_import_stubs():
     class _MoRIIOConstants:
         TRANSFER_PREFIX = "moriio-transfer"
 
-    common_name = (
-        "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common"
-    )
+    common_name = "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common"
     stubs = {
         "aiohttp": _module("aiohttp"),
         "msgpack": _module("msgpack"),
@@ -67,9 +65,7 @@ def _proxy_import_stubs():
         ),
         "vllm": _package("vllm"),
         "vllm.distributed": _package("vllm.distributed"),
-        "vllm.distributed.kv_transfer": _package(
-            "vllm.distributed.kv_transfer"
-        ),
+        "vllm.distributed.kv_transfer": _package("vllm.distributed.kv_transfer"),
         "vllm.distributed.kv_transfer.kv_connector": _package(
             "vllm.distributed.kv_transfer.kv_connector"
         ),
@@ -145,9 +141,8 @@ def test_decode_dp1_omits_header_and_keeps_prefill_remote_rank(proxy_module):
 
     assert selected_prefill_rank == 1
     assert selected_decode_rank is None
-    assert (
-        "X-data-parallel-rank"
-        not in proxy_module.make_request_headers("request-id", selected_decode_rank)
+    assert "X-data-parallel-rank" not in proxy_module.make_request_headers(
+        "request-id", selected_decode_rank
     )
 
     kv_transfer_params = {}
@@ -197,6 +192,7 @@ def test_prefill_request_omits_decode_dp_rank_for_dp1(proxy_module):
     )
     assert "remote_dp_rank" not in kv_transfer_params
 
+
 @pytest.mark.parametrize(
     ("request_number", "decode_dp_size", "expected_decode_rank"),
     [
@@ -233,9 +229,9 @@ def test_decode_header_rank_is_separate_from_prefill_remote_rank(proxy_module):
     assert selected_prefill_rank == 3
     assert selected_decode_rank == 1
     assert (
-        proxy_module.make_request_headers(
-            "request-id", selected_decode_rank
-        )["X-data-parallel-rank"]
+        proxy_module.make_request_headers("request-id", selected_decode_rank)[
+            "X-data-parallel-rank"
+        ]
         == "1"
     )
 
