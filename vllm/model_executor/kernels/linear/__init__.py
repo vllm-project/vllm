@@ -88,10 +88,14 @@ from vllm.model_executor.kernels.linear.mxfp8.emulation import (
     EmulationMxfp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
+    FlashInferCutedslMxfp8LinearKernel,
     FlashInferCutlassMxfp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.mxfp8.marlin import (
     MarlinMxfp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+    RocmDotScaledMxfp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.mxfp8.xpu import (
     XPUMxFp8LinearKernel,
@@ -112,6 +116,7 @@ from vllm.model_executor.kernels.linear.nvfp4.fbgemm import (
 from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
     FlashInferB12xNvFp4LinearKernel,
     FlashInferCudnnNvFp4LinearKernel,
+    FlashInferCuteDslNvFp4LinearKernel,
     FlashInferCutlassNvFp4LinearKernel,
     FlashInferTrtllmNvFp4LinearKernel,
 )
@@ -205,6 +210,10 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         FlashInferCutlassMxfp8LinearKernel,
         FlashInferCutlassNvFp4LinearKernel,
         FlashInferMxFp4LinearKernel,
+    },
+    "flashinfer_cutedsl": {
+        FlashInferCuteDslNvFp4LinearKernel,
+        FlashInferCutedslMxfp8LinearKernel,
     },
     "flashinfer_trtllm": {
         FlashInferTrtllmNvFp4LinearKernel,
@@ -378,11 +387,15 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
 # in priority/performance order (when available)
 _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
     PlatformEnum.CUDA: [
+        FlashInferCutedslMxfp8LinearKernel,
         FlashInferCutlassMxfp8LinearKernel,
         MarlinMxfp8LinearKernel,
         EmulationMxfp8LinearKernel,
     ],
     PlatformEnum.ROCM: [
+        # Native CDNA4 (gfx950) MX linear; is_supported() gates to gfx95x and
+        # falls through to BF16 emulation (hipBLASLt) elsewhere / on regression.
+        RocmDotScaledMxfp8LinearKernel,
         EmulationMxfp8LinearKernel,
     ],
     PlatformEnum.XPU: [
@@ -393,6 +406,7 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
 
 _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
     PlatformEnum.CUDA: [
+        FlashInferCuteDslNvFp4LinearKernel,
         # FlashInferB12xNvFp4LinearKernel excluded from auto-selection until
         # upstream CUTLASS SM121 MMA op guard is resolved; use
         # --linear-backend flashinfer_b12x to opt in explicitly.
@@ -1025,6 +1039,7 @@ __all__ = [
     "MxFp4LinearLayerConfig",
     "FlashInferMxFp4LinearKernel",
     "MarlinMxFp4LinearKernel",
+    "FlashInferCutedslMxfp8LinearKernel",
     "FlashInferCutlassMxfp8LinearKernel",
     "MarlinMxfp8LinearKernel",
     "XPUMxFp8LinearKernel",
@@ -1032,6 +1047,7 @@ __all__ = [
     "CutlassNvFp4LinearKernel",
     "EmulationNvFp4LinearKernel",
     "FbgemmNvFp4LinearKernel",
+    "FlashInferCuteDslNvFp4LinearKernel",
     "FlashInferB12xNvFp4LinearKernel",
     "FlashInferCutlassNvFp4LinearKernel",
     "FlashInferTrtllmNvFp4LinearKernel",

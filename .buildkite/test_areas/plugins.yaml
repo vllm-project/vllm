@@ -27,6 +27,10 @@ steps:
   - pip install -e ./plugins/bge_m3_sparse_plugin
   - pytest -v -s plugins_tests/test_bge_m3_sparse_io_processor_plugins.py
   - pip uninstall bge_m3_sparse_plugin -y
+  # test colbert_query io_processor plugin
+  - pip install -e ./plugins/colbert_query_plugin
+  - pytest -v -s plugins_tests/test_colbert_query_io_processor_plugins.py
+  - pip uninstall colbert_query_plugin -y
   # end io_processor plugins test
   # begin stat_logger plugins test
   - pip install -e ./plugins/vllm_add_dummy_stat_logger

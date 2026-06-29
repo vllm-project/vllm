@@ -17,7 +17,12 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import torch
 
-from vllm.v1.kv_offload.base import OffloadKey, ReqContext, make_offload_key
+from vllm.v1.kv_offload.base import (
+    LookupResult,
+    OffloadKey,
+    ReqContext,
+    make_offload_key,
+)
 from vllm.v1.kv_offload.tiering.base import JobMetadata, JobResult
 from vllm.v1.kv_offload.tiering.obj.manager import ObjectStoreSecondaryTierManager
 
@@ -37,6 +42,7 @@ def _make_vllm_config():
             decode_context_parallel_size=1,
             rank=0,
         ),
+        use_v2_model_runner=False,
     )
 
 
@@ -235,19 +241,19 @@ class TestMockObjTierBasic:
         self.tier, self.agent = _make_tier(num_blocks=4)
 
     def test_lookup_empty_tier(self):
-        assert lookup_and_wait(self.tier, [key(1)]) == [False]
+        assert lookup_and_wait(self.tier, [key(1)]) == [LookupResult.MISS]
 
     def test_store_and_lookup(self):
         self.tier.submit_store(make_job(1, [key(1)], [0]))
         results = drain(self.tier)
         assert len(results) == 1
         assert results[0].success
-        assert lookup_and_wait(self.tier, [key(1)]) == [True]
+        assert lookup_and_wait(self.tier, [key(1)]) == [LookupResult.HIT]
 
     def test_lookup_unrelated_key_returns_false(self):
         self.tier.submit_store(make_job(1, [key(1)], [0]))
         drain(self.tier)
-        assert lookup_and_wait(self.tier, [key(999)]) == [False]
+        assert lookup_and_wait(self.tier, [key(999)]) == [LookupResult.MISS]
 
     def test_store_then_load_roundtrip(self):
         self.tier.submit_store(make_job(1, [key(1), key(2)], [0, 1]))
@@ -290,6 +296,33 @@ class TestMockObjTierBasic:
         assert len(results) == 1
         assert results[0].success
 
+    def test_drain_jobs_polls_until_transfers_complete(self):
+        """drain_jobs must keep polling check_xfer_state until every
+        in-flight transfer finishes. A buggy implementation that only
+        polled once would return with _transfers still populated.
+        """
+        call_count = [0]
+        original = self.agent.check_xfer_state
+
+        def delayed(h):
+            call_count[0] += 1
+            # Stay in PROC for the first 2 polls, then DONE.
+            return "PROC" if call_count[0] < 3 else original(h)
+
+        self.agent.check_xfer_state = delayed
+
+        self.tier.submit_store(make_job(1, [key(1)], [0]))
+        assert self.tier._transfers  # in flight
+
+        self.tier.drain_jobs()
+
+        assert not self.tier._transfers  # fully drained
+        assert call_count[0] >= 3  # polled past the initial PROC responses
+        # Result is buffered for the next get_finished_jobs() call.
+        results = list(self.tier.get_finished_jobs())
+        assert len(results) == 1
+        assert results[0].success
+
 
 class TestMockObjTierMultiBlock:
     def test_store_multiple_blocks(self):
@@ -299,13 +332,17 @@ class TestMockObjTierMultiBlock:
         results = drain(tier)
         assert len(results) == 1
         assert results[0].success
-        assert lookup_and_wait(tier, keys) == [True] * 8
+        assert lookup_and_wait(tier, keys) == [LookupResult.HIT] * 8
 
     def test_partial_block_lookup(self):
         tier, _ = _make_tier(num_blocks=4)
         tier.submit_store(make_job(1, [key(0), key(1)], [0, 1]))
         drain(tier)
-        assert lookup_and_wait(tier, [key(0), key(1), key(2)]) == [True, True, False]
+        assert lookup_and_wait(tier, [key(0), key(1), key(2)]) == [
+            LookupResult.HIT,
+            LookupResult.HIT,
+            LookupResult.MISS,
+        ]
 
 
 class TestMockObjTierFailures:
@@ -314,7 +351,7 @@ class TestMockObjTierFailures:
         agent.query_memory = lambda *a, **k: (_ for _ in ()).throw(
             RuntimeError("backend error")
         )
-        assert lookup_and_wait(tier, [key(1)]) == [False]
+        assert lookup_and_wait(tier, [key(1)]) == [LookupResult.MISS]
 
     def test_submit_store_register_memory_failure_reported_in_get_finished(self):
         tier, agent = _make_tier(num_blocks=4)
