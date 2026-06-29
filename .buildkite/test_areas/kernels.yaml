@@ -345,5 +345,6 @@ steps:
   - vllm/distributed/device_communicators/
   - vllm/config
   commands:
+    - echo "=== NCCL GIN Diagnostics ===" && (ibstat 2>/dev/null || echo "no ibstat") && (lspci | grep -i mellanox || echo "no mellanox NICs") && (ofed_info -s 2>/dev/null || echo "no OFED info") && (lsmod | grep nvidia_peermem || echo "no nvidia-peermem") && uname -r && (ls -la /dev/infiniband/ 2>/dev/null || echo "no /dev/infiniband") && (env | grep -i NCCL || echo "no NCCL env vars") || true
     - pytest -v -s kernels/moe/test_moe_layer.py
     - pytest -v -s kernels/moe/test_deepep_v2_moe.py
