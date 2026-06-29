@@ -57,13 +57,8 @@ on:
         required: false
         type: string
         default: "4"
-      input_length:
-        description: Optional logical input length recorded in exported metadata
-        required: false
-        type: string
-        default: ""
-      output_length:
-        description: Optional logical output length recorded in exported metadata
+      metadata_lengths:
+        description: Optional logical input/output lengths recorded in exported metadata, formatted as input,output
         required: false
         type: string
         default: ""
@@ -283,8 +278,9 @@ jobs:
       BENCH_RANDOM_OUTPUT_LEN: ${{ (github.event_name == 'pull_request' || github.event_name == 'issue_comment') && '16' || '256' }}
       BENCH_REQUEST_RATE: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.request_rate || (github.event_name == 'workflow_dispatch' && inputs.request_rate || '1') }}
       BENCH_MAX_CONCURRENCY: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.max_concurrency || (github.event_name == 'workflow_dispatch' && inputs.max_concurrency || '4') }}
-      BENCH_INPUT_LEN: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.input_length || (github.event_name == 'workflow_dispatch' && inputs.input_length || '') }}
-      BENCH_OUTPUT_LEN: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.output_length || (github.event_name == 'workflow_dispatch' && inputs.output_length || '') }}
+      BENCH_INPUT_LEN: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.input_length || '' }}
+      BENCH_OUTPUT_LEN: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.output_length || '' }}
+      BENCH_METADATA_LENGTHS: ${{ github.event_name == 'workflow_dispatch' && inputs.metadata_lengths || '' }}
       INPUT_BENCHMARK_SCENARIO: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.benchmark_scenario || (github.event_name == 'workflow_dispatch' && inputs.benchmark_scenario || '') }}
       PR_LABELS: ${{ github.event_name == 'pull_request' && toJson(github.event.pull_request.labels) || '[]' }}
       SOC_VERSION: ascend910b3
@@ -322,6 +318,34 @@ jobs:
       VLLM_USE_PRECOMPILED: "0"
 
     steps:
+      - name: Resolve workflow dispatch metadata lengths
+        if: ${{ github.event_name == 'workflow_dispatch' && env.BENCH_METADATA_LENGTHS != '' }}
+        shell: bash
+        run: |
+          metadata_lengths="$(printf '%s' "$BENCH_METADATA_LENGTHS" | tr -d '[:space:]')"
+          if [[ "$metadata_lengths" != *,* ]]; then
+            echo "metadata_lengths must be formatted as input,output; got: $BENCH_METADATA_LENGTHS" >&2
+            exit 1
+          fi
+
+          input_len="${metadata_lengths%%,*}"
+          output_len="${metadata_lengths#*,}"
+          if [[ -z "$input_len" || -z "$output_len" || "$output_len" == *,* ]]; then
+            echo "metadata_lengths must contain exactly two values formatted as input,output; got: $BENCH_METADATA_LENGTHS" >&2
+            exit 1
+          fi
+          if [[ ! "$input_len" =~ ^[0-9]+$ || ! "$output_len" =~ ^[0-9]+$ ]]; then
+            echo "metadata_lengths values must be positive integers; got: $BENCH_METADATA_LENGTHS" >&2
+            exit 1
+          fi
+          if [[ "$input_len" -le 0 || "$output_len" -le 0 ]]; then
+            echo "metadata_lengths values must be positive integers; got: $BENCH_METADATA_LENGTHS" >&2
+            exit 1
+          fi
+
+          echo "BENCH_INPUT_LEN=$input_len" >> "$GITHUB_ENV"
+          echo "BENCH_OUTPUT_LEN=$output_len" >> "$GITHUB_ENV"
+
       - name: Detect runner user and Ascend devices
         shell: bash
         run: |

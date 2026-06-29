@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
+
 WORKFLOW_PATH = (
     Path(__file__).resolve().parents[2]
     / ".github/workflows/ascend-benchmark-leaderboard.yml"
@@ -12,6 +14,19 @@ WORKFLOW_PATH = (
 
 def workflow_text() -> str:
     return WORKFLOW_PATH.read_text(encoding="utf-8")
+
+
+def workflow_yaml() -> dict:
+    return yaml.safe_load(workflow_text())
+
+
+def test_workflow_dispatch_input_count_stays_within_github_limit():
+    inputs = workflow_yaml()[True]["workflow_dispatch"]["inputs"]
+
+    assert len(inputs) <= 10
+    assert "metadata_lengths" in inputs
+    assert "input_length" not in inputs
+    assert "output_length" not in inputs
 
 
 def test_pr_comment_update_job_has_job_level_issues_write_permission():
@@ -261,6 +276,19 @@ def test_workflow_dispatch_publish_inputs_are_split():
         "github.event_name == 'workflow_dispatch' && inputs.publish_to_hf)) "
         "&& '1' || '0'" not in text
     )
+
+
+def test_workflow_dispatch_metadata_lengths_are_parsed_from_single_input():
+    text = workflow_text()
+
+    assert "metadata_lengths:" in text
+    assert "BENCH_METADATA_LENGTHS:" in text
+    assert "inputs.metadata_lengths" in text
+    assert "Resolve workflow dispatch metadata lengths" in text
+    assert "BENCH_INPUT_LEN=$input_len" in text
+    assert "BENCH_OUTPUT_LEN=$output_len" in text
+    assert "inputs.input_length" not in text
+    assert "inputs.output_length" not in text
 
 
 def test_l3_benchmark_publish_preflight_runs_before_benchmark():
