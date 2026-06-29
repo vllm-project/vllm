@@ -32,13 +32,11 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.multimodal.inputs import NestedTensors
-from vllm.platforms import current_platform
 from vllm.transformers_utils.config import set_default_rope_theta
 from vllm.v1.attention.backend import AttentionType
 
 from .qwen2 import Qwen2MLP as Qwen3MLP
 from .qwen3 import Qwen3ForCausalLM
-
 from .utils import (
     AutoWeightsLoader,
     get_draft_quant_config,
@@ -47,15 +45,6 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
-
-
-def _linear_bias_or_none(
-    bias: torch.Tensor | None,
-    expected_size: int,
-) -> torch.Tensor | None:
-    if bias is None or bias.numel() != expected_size:
-        return None
-    return bias
 
 
 class DFlashQwen3Attention(nn.Module):
@@ -307,11 +296,7 @@ class DFlashQwen3Model(nn.Module):
         """
         layers_attn = [layer.self_attn for layer in self.layers]
         attn0 = layers_attn[0]
-        qkv_biases = [
-            _linear_bias_or_none(a.qkv_proj.bias, a.q_size + 2 * a.kv_size)
-            for a in layers_attn
-        ]
-        has_bias = any(bias is not None for bias in qkv_biases)
+        has_bias = attn0.qkv_proj.bias is not None
 
         self._hidden_norm_weight = self.hidden_norm.weight.data
 
@@ -319,14 +304,7 @@ class DFlashQwen3Model(nn.Module):
         kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
         self._fused_kv_weight = torch.cat(kv_weights, dim=0)
         if has_bias:
-            assert all(bias is not None for bias in qkv_biases), (
-                "DFlash QKV projection bias must be present for all layers or none."
-            )
-            kv_biases = [
-                bias[a.q_size :]
-                for a, bias in zip(layers_attn, qkv_biases)
-                if bias is not None
-            ]
+            kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
             self._fused_kv_bias: torch.Tensor | None = torch.cat(kv_biases, dim=0)
         else:
             self._fused_kv_bias = None
@@ -447,27 +425,18 @@ class DFlashQwen3Model(nn.Module):
         if context_slot_mapping is None:
             return
 
-        # --- Per-layer context K/V insert ---
+        # --- Per-layer cache insert ---
         all_k_final = all_k_flat.view(L, num_ctx, nkv, hd)
         for i in range(L):
             attn = self._attn_layers[i]
             kv_cache = attn.kv_cache
-            if current_platform.is_cpu():
-                # do_kv_cache_update splits K/V with chunk(2, dim=2), which
-                # requires the cache reshaped to
-                # (num_blocks, num_kv_heads, block_size*2, head_size) — the same
-                # contract forward() uses. The CPU cache is stored as
-                # (num_blocks, num_kv_heads, block_size, 2*head_size), so reshape
-                # it here (forward() does the equivalent view before its call).
-                nb, nkvh, bs, _ = kv_cache.shape
-                kv_cache = kv_cache.view(nb, nkvh, bs * 2, -1)
             attn.impl.do_kv_cache_update(
                 attn,
                 all_k_final[i],
                 all_v[i],
                 kv_cache,
                 context_slot_mapping,
-                )
+            )
 
     def forward(
         self,
@@ -488,7 +457,6 @@ class DFlashQwen3Model(nn.Module):
                 residual=residual,
             )
         hidden_states, _ = self.norm(hidden_states, residual)
-
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
