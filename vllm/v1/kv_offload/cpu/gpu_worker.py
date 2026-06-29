@@ -23,11 +23,14 @@ from vllm.v1.kv_offload.base import (
     OffloadingWorker,
     TransferResult,
 )
+from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.swap_blocks_triton import (
     THRESHOLD_BYTES,
     swap_blocks_batch,
 )
+from vllm.v1.kv_offload.tiering.fs.common import FileSystemLoadStoreSpec
+from vllm.v1.kv_offload.tiering.fs.worker import FileSystemWorkerTransferHandler
 
 logger = init_logger(__name__)
 
@@ -479,14 +482,18 @@ class CPUOffloadingWorker(OffloadingWorker):
         block_size_factor: int,
         num_cpu_blocks: int,
         mmap_region: SharedOffloadRegion | None = None,
+        parallel_rank: int | None = None,
     ):
         pin_memory = PIN_MEMORY
         logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
+        self._mmap_region = mmap_region
+        self._parallel_rank = parallel_rank
+        self._fs_transfer_handler: FileSystemWorkerTransferHandler | None = None
         if mmap_region is not None and pin_memory:
             pin_mmap_region(mmap_region)
 
         gpu_tensors: list[torch.Tensor] = []
-        cpu_tensors: list[torch.Tensor] = []
+        self.cpu_tensors: list[torch.Tensor] = []
         for kv_cache_tensor in kv_caches.tensors:
             gpu_page_size_bytes = kv_cache_tensor.page_size_bytes
             gpu_tensor = kv_cache_tensor.tensor.view(torch.int8).view(
@@ -513,11 +520,11 @@ class CPUOffloadingWorker(OffloadingWorker):
                 )
 
             gpu_tensors.append(gpu_tensor)
-            cpu_tensors.append(cpu_tensor)
+            self.cpu_tensors.append(cpu_tensor)
 
         self._store_handler = SingleDirectionOffloadingHandler(
             gpu_tensors=gpu_tensors,
-            cpu_tensors=cpu_tensors,
+            cpu_tensors=self.cpu_tensors,
             block_size_factor=block_size_factor,
             kv_cache_groups_data_refs=kv_caches.group_data_refs,
             gpu_to_cpu=True,
@@ -526,11 +533,29 @@ class CPUOffloadingWorker(OffloadingWorker):
 
         self._load_handler = SingleDirectionOffloadingHandler(
             gpu_tensors=gpu_tensors,
-            cpu_tensors=cpu_tensors,
+            cpu_tensors=self.cpu_tensors,
             block_size_factor=block_size_factor,
             kv_cache_groups_data_refs=kv_caches.group_data_refs,
             gpu_to_cpu=False,
         )
+
+    def _get_fs_transfer_handler(self) -> FileSystemWorkerTransferHandler:
+        if self._fs_transfer_handler is None:
+            rank = (
+                self._parallel_rank
+                if self._parallel_rank is not None
+                else self._mmap_region.rank if self._mmap_region is not None else None
+            )
+            if self._mmap_region is None or rank is None:
+                raise RuntimeError(
+                    "Filesystem worker transfers require a ranked shared "
+                    "CPU offload region."
+                )
+            self._fs_transfer_handler = FileSystemWorkerTransferHandler(
+                cpu_tensors=self.cpu_tensors,
+                rank=rank,
+            )
+        return self._fs_transfer_handler
 
     def submit_store(
         self, job_id: int, src_spec: GPULoadStoreSpec, dst_spec: LoadStoreSpec
@@ -544,13 +569,38 @@ class CPUOffloadingWorker(OffloadingWorker):
         """Async CPU -> GPU."""
         return self._load_handler.transfer_async(job_id, src_spec, dst_spec)
 
+    def submit_transfer(
+        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec
+    ) -> bool:
+        if isinstance(src_spec, CPULoadStoreSpec) and isinstance(
+            dst_spec, FileSystemLoadStoreSpec
+        ):
+            return self._get_fs_transfer_handler().submit_store(
+                job_id, src_spec, dst_spec
+            )
+        if isinstance(src_spec, FileSystemLoadStoreSpec) and isinstance(
+            dst_spec, CPULoadStoreSpec
+        ):
+            return self._get_fs_transfer_handler().submit_load(
+                job_id, src_spec, dst_spec
+            )
+        return super().submit_transfer(job_id, src_spec, dst_spec)
+
     def get_finished(self) -> list[TransferResult]:
-        return self._store_handler.get_finished() + self._load_handler.get_finished()
+        results = self._store_handler.get_finished() + self._load_handler.get_finished()
+        if self._fs_transfer_handler is not None:
+            results += self._fs_transfer_handler.get_finished()
+        return results
 
     def wait(self, job_ids: set[int]) -> None:
         self._store_handler.wait(job_ids)
         self._load_handler.wait(job_ids)
+        if self._fs_transfer_handler is not None:
+            self._fs_transfer_handler.wait(job_ids)
 
     def shutdown(self) -> None:
+        if self._fs_transfer_handler is not None:
+            self._fs_transfer_handler.shutdown()
+            self._fs_transfer_handler = None
         self._store_handler.shutdown()
         self._load_handler.shutdown()

@@ -32,8 +32,6 @@ Example configuration:
 """
 
 from typing import Any
-
-import torch
 from typing_extensions import override
 
 from vllm.config import VllmConfig
@@ -188,7 +186,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
     @override
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
-        rank = torch.accelerator.current_device_index()
+        rank = self.vllm_config.parallel_config.rank
         worker_mmap = SharedOffloadRegion(
             instance_id=self.vllm_config.instance_id,
             num_blocks=self.num_blocks,
@@ -200,5 +198,6 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             kv_caches=kv_caches,
             block_size_factor=self.block_size_factor,
             num_cpu_blocks=self.num_blocks,
+            parallel_rank=self.vllm_config.parallel_config.rank,
             mmap_region=worker_mmap,
         )

@@ -55,7 +55,8 @@ vllm serve <model> \
           "type": "fs",
           "root_dir": "/mnt/kv_cache",
           "n_read_threads": 32,
-          "n_write_threads": 16
+          "n_write_threads": 16,
+          "worker_transfers": false
         }
       ]
     }
@@ -91,8 +92,21 @@ The filesystem tier (`type: "fs"`) writes blocks to a directory on local storage
 | `root_dir` | yes | — | Base directory; vLLM creates subdirectories beneath it (see [On-Disk Layout](#on-disk-layout)). |
 | `n_read_threads` | no | `16` | Read-priority I/O threads (load path). |
 | `n_write_threads` | no | `16` | Write-priority I/O threads (store path). |
+| `worker_transfers` | no | `false` | When `true`, the scheduler still owns lookup, promotion, and lifecycle decisions, but workers copy their rank-local CPU shard to/from the shared filesystem. Use this for multi-node TP setups where a scheduler process cannot directly read every worker's local CPU mmap. |
 
 Each thread group prefers its own queue but pulls from the other when its primary queue is empty, so a write-heavy or read-heavy burst won't leave the off-priority queue waiting. Size the totals to your storage's effective concurrency.
+
+When `worker_transfers` is enabled, a filesystem lookup is reported as a hit
+only after every rank's file exists. Promotion remains scheduler-orchestrated:
+the scheduler allocates CPU slots and sends workers typed transfer specs, and
+each worker reads only its own rank slice from the shared filesystem.
+
+!!! warning
+    `root_dir` must resolve to the same shared filesystem from every worker
+    process when `worker_transfers` is enabled. Node-local paths such as
+    `~/.cache/vllm/...` are not sufficient in multi-node deployments because
+    the scheduler must be able to observe every rank's files before committing
+    a store.
 
 #### On-Disk Layout
 
