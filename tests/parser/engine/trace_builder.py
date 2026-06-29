@@ -34,6 +34,7 @@ from vllm.parser.engine.registered_adapters import (
     MinimaxM2Parser,
     NemotronV3Parser,
     Qwen3Parser,
+    SeedOssParser,
 )
 
 # ── Data structures ──────────────────────────────────────────────────
@@ -587,6 +588,61 @@ def _build_nemotron_v3(scenario: Scenario, validate: bool = True) -> Sample:
     )
 
 
+# ── Seed-OSS (Qwen3 XML grammar with Seed wrapper tokens) ────────────
+
+_SEED_OSS_VOCAB: dict[str, int] = {
+    "<seed:think>": 50,
+    "</seed:think>": 51,
+    "<seed:tool_call>": 60,
+    "</seed:tool_call>": 61,
+}
+
+
+def _seed_oss_tool_segments(tc: ToolCallSpec) -> list[tuple[str, bool]]:
+    parts = [f"\n<function={tc.name}>"]
+    for key, value in tc.arguments.items():
+        parts.append(f"\n<parameter={key}>{_qwen3_arg_value(value)}</parameter>")
+    parts.append("\n</function>\n")
+    return [
+        ("<seed:tool_call>", True),
+        ("".join(parts), False),
+        ("</seed:tool_call>", True),
+    ]
+
+
+def _seed_oss_segments(scenario: Scenario) -> list[tuple[str, bool]]:
+    segs: list[tuple[str, bool]] = []
+    if scenario.reasoning is not None:
+        segs.append((scenario.reasoning, False))
+    if scenario.content is not None or scenario.tool_calls is not None:
+        segs.append(("</seed:think>", True))
+    if scenario.tool_calls is not None and not scenario.tool_calls:
+        segs.append(("<seed:tool_call>", True))
+        segs.append(("</seed:tool_call>", True))
+    if scenario.content is not None:
+        segs.append((scenario.content, False))
+    if scenario.tool_calls:
+        for tc in scenario.tool_calls:
+            segs.extend(_seed_oss_tool_segments(tc))
+    return segs
+
+
+def _build_seed_oss(scenario: Scenario, validate: bool = True) -> Sample:
+    sample = _make_sample(
+        sample_id=f"seed_oss-{scenario.id}",
+        description=scenario.description,
+        vocab=_SEED_OSS_VOCAB,
+        segments=_seed_oss_segments(scenario),
+        expected_reasoning=scenario.reasoning if scenario.reasoning is not None else "",
+        expected_content=_qwen3_expected_content(scenario),
+        expected_tool_calls=_expected_tc(scenario),
+        tools=_expected_tools(scenario),
+    )
+    if validate:
+        _validate_sample(sample, SeedOssParser)
+    return sample
+
+
 # ── GLM-4.7 MoE (XML tool format, starts in REASONING) ──────────────
 
 _GLM47_MOE_VOCAB: dict[str, int] = {
@@ -668,6 +724,7 @@ _BUILDERS: dict[str, Any] = {
     "gemma4": _build_gemma4,
     "minimax_m2": _build_minimax_m2,
     "nemotron_v3": _build_nemotron_v3,
+    "seed_oss": _build_seed_oss,
     "glm47_moe": _build_glm47_moe,
 }
 

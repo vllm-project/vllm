@@ -3,7 +3,7 @@
 import numpy as np
 import torch
 
-from vllm.model_executor.models.interfaces import SupportsMultiModal
+from vllm.model_executor.models.interfaces import SupportsMultiModal, supports_realtime
 from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.multimodal.utils import get_mm_features_in_window, group_and_batch_mm_kwargs
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
@@ -27,6 +27,7 @@ class EncoderRunner:
         self.dtype = dtype
         self.device = device
         self.encoder_cudagraph_manager: EncoderCudaGraphManager
+        self.is_realtime = supports_realtime(model)
 
         self.inputs_embeds = torch.zeros(
             max_num_tokens, hidden_size, dtype=dtype, device=device
@@ -86,30 +87,32 @@ class EncoderRunner:
         num_scheduled_tokens: np.ndarray,
         query_start_loc: np.ndarray,
         prefill_lens: np.ndarray,
-        computed_prefill_lens: np.ndarray,
+        num_computed_tokens: np.ndarray,
         draft_lookahead: int = 0,
     ) -> tuple[list[torch.Tensor], torch.Tensor]:
         if draft_lookahead:
-            computed_prefill_lens = computed_prefill_lens + draft_lookahead
+            num_computed_tokens = num_computed_tokens + draft_lookahead
 
-        is_prefilling_np = computed_prefill_lens < prefill_lens
-        if not is_prefilling_np.any():
-            # All decode requests, so no need to gather any embeddings.
-            return [], torch.zeros(
-                total_num_scheduled_tokens, dtype=torch.bool, device=self.device
-            )
-
-        is_prefilling = is_prefilling_np.tolist()
-        query_start = computed_prefill_lens.tolist()
-        query_end = (computed_prefill_lens + num_scheduled_tokens).tolist()
-
-        mm_embeds: list[torch.Tensor] = []
         is_mm_embed = torch.zeros(
             total_num_scheduled_tokens, dtype=torch.bool, device="cpu"
         )
+
+        # Whether to gather media embeddings this step.
+        exclude_embeddings: list[bool] | None = None
+        if not self.is_realtime:
+            # Non-realtime models only have media embeddings within the prompt.
+            is_decode = num_computed_tokens >= prefill_lens
+            if is_decode.all():
+                # All decode requests, so no need to gather any embeddings.
+                return [], is_mm_embed
+            exclude_embeddings = is_decode.tolist()
+
+        query_start = num_computed_tokens.tolist()
+        query_end = (num_computed_tokens + num_scheduled_tokens).tolist()
+
+        mm_embeds: list[torch.Tensor] = []
         for i, req_id in enumerate(req_ids):
-            if not is_prefilling[i]:
-                # OPTIMIZATION: Skip decode requests.
+            if exclude_embeddings is not None and exclude_embeddings[i]:
                 continue
 
             cur_query_start = query_start[i]

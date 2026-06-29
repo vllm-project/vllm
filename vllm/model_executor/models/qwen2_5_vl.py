@@ -1583,11 +1583,11 @@ class Qwen2_5_VLForConditionalGeneration(
 
     def recompute_mrope_positions(
         self,
-        input_ids: list[int],
-        multimodal_embeddings: tuple[torch.Tensor, ...],
+        input_ids: list[int] | torch.Tensor,
+        multimodal_embeddings: Sequence[torch.Tensor],
         mrope_positions: torch.LongTensor,
         num_computed_tokens: int,
-    ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor, int]:
+    ) -> tuple[Sequence[torch.Tensor], torch.Tensor, int]:
         """
         Update part of input mrope positions (starting with
         num_computed_tokens index). Original mrope_positions are computed
@@ -1618,8 +1618,12 @@ class Qwen2_5_VLForConditionalGeneration(
             else mrope_positions.device
         )
 
-        # Tensors.
-        input_ids_t = async_tensor_h2d(input_ids, dtype=torch.long, device=device)
+        # Tensors. input_ids may already be a (device-side) tensor.
+        if isinstance(input_ids, torch.Tensor):
+            assert input_ids.device == device
+            input_ids_t = input_ids.to(torch.long)
+        else:
+            input_ids_t = async_tensor_h2d(input_ids, dtype=torch.long, device=device)
 
         mm_embeddings_out = [mm[:, :-4] for mm in multimodal_embeddings]
         mm_embeddings_pos = [
@@ -1636,7 +1640,7 @@ class Qwen2_5_VLForConditionalGeneration(
             video_token_id,
         )
 
-        return tuple(mm_embeddings_out), positions, mrope_positions_delta
+        return mm_embeddings_out, positions, mrope_positions_delta
 
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
         mm_input_by_modality = {}

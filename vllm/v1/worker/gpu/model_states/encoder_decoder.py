@@ -13,7 +13,6 @@ from vllm.v1.kv_cache_interface import CrossAttentionSpec, KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
-from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.model_states.interface import (
     ModelSpecificAttnMetadata,
     ModelState,
@@ -53,25 +52,8 @@ class EncoderDecoderModelState(ModelState):
         encoder_cache: EncoderCache | None,
         device: torch.device,
     ) -> None:
-        self.vllm_config = vllm_config
-        self.model_config = vllm_config.model_config
-        self.scheduler_config = vllm_config.scheduler_config
-        self.model = model
-        self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
-        self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
-        self.max_model_len = self.model_config.max_model_len
-        self.device = device
-
         assert encoder_cache is not None
-        self.encoder_cache = encoder_cache
-        self.encoder_runner = EncoderRunner(
-            model=self.model,
-            max_num_tokens=self.max_num_tokens,
-            hidden_size=self.model_config.get_inputs_embeds_size(),
-            encoder_cache=self.encoder_cache,
-            dtype=self.model_config.dtype,
-            device=self.device,
-        )
+        super().__init__(vllm_config, model, encoder_cache, device)
 
         self.max_encoder_len = getattr(
             self.model_config.hf_config,
@@ -85,7 +67,10 @@ class EncoderDecoderModelState(ModelState):
         self.encoder_outputs: list[torch.Tensor] = []
 
     def get_mm_embeddings(
-        self, scheduled_encoder_inputs: dict[str, list[int]], input_batch: InputBatch
+        self,
+        scheduled_encoder_inputs: dict[str, list[int]],
+        input_batch: InputBatch,
+        req_states: RequestState,
     ) -> None:
         # Ensure encoder inputs are ordered consistently with input_batch.req_ids.
         encoder_inputs: dict[str, list[int]] = {}
@@ -161,6 +146,7 @@ class EncoderDecoderModelState(ModelState):
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
             model_specific_attn_metadata=enc_dec_attn_metadata,
             for_cudagraph_capture=for_capture,
+            rswa_prefix_lens=input_batch.rswa_prefix_lens,
         )
         return attn_metadata
 
