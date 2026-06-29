@@ -239,10 +239,17 @@ class Worker(WorkerBase):
             self._sleep_saved_buffers = {}
 
         # Restore draft model parameters saved during level-2 sleep.
+        # Use direct copy_ instead of load_weights: the saved names are vLLM's
+        # internal fused-param names (e.g. qkv_proj.weight), which load_weights
+        # does not recognise (it expects checkpoint-side unfused names).
         if self._sleep_saved_draft_params:
             draft = self.get_draft_model()
             if draft is not None:
-                draft.load_weights(iter(self._sleep_saved_draft_params.items()))
+                named_params = dict(draft.named_parameters())
+                for name, saved in self._sleep_saved_draft_params.items():
+                    param = named_params.get(name)
+                    if param is not None:
+                        param.data.copy_(saved)
             self._sleep_saved_draft_params = {}
 
         if tags is None or "kv_cache" in tags:
