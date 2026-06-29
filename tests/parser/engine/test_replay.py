@@ -18,12 +18,14 @@ from typing import NamedTuple
 import pytest
 
 from tests.parser.engine.replay_harness import (
+    DUMMY_TOOLS,
     MockTokenizer,
     _test_request,
     assert_no_terminal_leakage,
     assert_parse_output,
     collect_output,
     make_mock_tokenizer,
+    parse_non_streaming,
     replay_streaming,
     replay_with_text_holdback,
 )
@@ -323,14 +325,6 @@ def _tool_suppression_expectations(
     return (reasoning, after_reasoning)
 
 
-_DUMMY_TOOLS = [
-    {
-        "type": "function",
-        "function": {"name": "stub", "parameters": {"type": "object"}},
-    }
-]
-
-
 @pytest.mark.parametrize("chunk_size", [1, 5, None], ids=lambda c: f"chunk{c}")
 @pytest.mark.parametrize(
     "mode",
@@ -360,7 +354,7 @@ class TestToolCallFilteringReplay:
         parser = parser_cls(tokenizer, **kwargs)
 
         request = _test_request()
-        request.tools = _DUMMY_TOOLS
+        request.tools = DUMMY_TOOLS
         if mode == "skip_tool_parsing":
             parser.skip_tool_parsing = True
         else:
@@ -409,6 +403,52 @@ class TestToolCallFilteringReplay:
         )
 
 
+@pytest.mark.parametrize(
+    "parser_cls,sample,think_end,tool_start",
+    _TOOL_CALL_SAMPLES,
+    ids=lambda v: v.id if hasattr(v, "id") else getattr(v, "__name__", ""),
+)
+class TestToolCallFilteringNonStreaming:
+    """Non-streaming parse() with tool_choice='none' must suppress tool
+    calls and not leak special tokens into content."""
+
+    def test_parse(self, parser_cls, sample, think_end, tool_start):
+        tokenizer = make_mock_tokenizer(sample)
+        kwargs = {}
+        if sample.chat_template_kwargs:
+            kwargs["chat_template_kwargs"] = sample.chat_template_kwargs
+        parser = parser_cls(tokenizer, **kwargs)
+
+        request = _test_request()
+        request.tools = DUMMY_TOOLS
+        request.tool_choice = "none"
+
+        output = parse_non_streaming(parser, sample, request)
+
+        expected_reasoning, expected_content = _tool_suppression_expectations(
+            sample, think_end, tool_start, include_tool_block=False
+        )
+        # Non-streaming _single_pass_parse defers whitespace-only content
+        # (finished defaults to False), so whitespace-only expected content
+        # becomes empty.
+        if expected_content and not expected_content.strip():
+            expected_content = ""
+
+        assert output.reasoning == expected_reasoning, (
+            f"Reasoning mismatch:\n"
+            f"  expected: {expected_reasoning!r}\n"
+            f"  actual:   {output.reasoning!r}"
+        )
+        assert output.tool_calls == [], (
+            f"Expected no tool calls but got {output.tool_calls}"
+        )
+        assert output.content == expected_content, (
+            f"Content mismatch:\n"
+            f"  expected: {expected_content!r}\n"
+            f"  actual:   {output.content!r}"
+        )
+
+
 _DROP_TOKENS = {"<bos>": 99990, "<eos>": 99991}
 
 
@@ -452,17 +492,39 @@ class TestDropTokenReplay:
             )
             output = collect_output(results)
 
-            for drop_text in _DROP_TOKENS:
-                assert drop_text not in output.reasoning, (
-                    f"{drop_text!r} leaked into reasoning "
-                    f"(parser={parser_info.name}, chunk={chunk_size})"
-                )
-                assert drop_text not in output.content, (
-                    f"{drop_text!r} leaked into content "
-                    f"(parser={parser_info.name}, chunk={chunk_size})"
-                )
-
+            assert_no_terminal_leakage(
+                output,
+                list(_DROP_TOKENS.keys()),
+                context=f"parser={parser_info.name}, chunk={chunk_size}",
+            )
             assert_parse_output(output, sample)
+
+
+class TestDropTokenNonStreaming:
+    """Non-streaming parse() must also strip unconfigured special tokens."""
+
+    @pytest.mark.parametrize(
+        "parser_info",
+        _PARSERS,
+        ids=[p.name for p in _PARSERS],
+    )
+    def test_drop_tokens_removed_from_output(self, parser_info):
+        for sample in parser_info.samples:
+            injected = _inject_drop_tokens(sample)
+            tokenizer = make_mock_tokenizer(injected)
+            parser = parser_info.parser_cls(
+                tokenizer,
+                tools=sample.tools,
+            )
+
+            request = _test_request(tools=sample.tools)
+            output = parse_non_streaming(parser, injected, request)
+
+            assert_no_terminal_leakage(
+                output,
+                list(_DROP_TOKENS.keys()),
+                context=f"parser={parser_info.name}",
+            )
 
 
 class TestAdapterReferences:

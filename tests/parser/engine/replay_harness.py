@@ -127,6 +127,37 @@ def _test_request(
     )
 
 
+DUMMY_TOOLS = [
+    {
+        "type": "function",
+        "function": {"name": "stub", "parameters": {"type": "object"}},
+    },
+]
+
+
+def parse_non_streaming(
+    parser,
+    sample: Sample,
+    request: ChatCompletionRequest,
+) -> ParseOutput:
+    """Run ``parser.parse()`` and return a :class:`ParseOutput`."""
+    full_text = "".join(text for _, text in sample.tokens)
+    reasoning, content, tool_calls = parser.parse(
+        full_text,
+        request,
+        enable_auto_tools=True,
+    )
+    tc_list: list[dict] = []
+    if tool_calls:
+        for tc in tool_calls:
+            tc_list.append({"name": tc.name, "arguments": tc.arguments})
+    return ParseOutput(
+        reasoning=reasoning or "",
+        content=content or "",
+        tool_calls=tc_list,
+    )
+
+
 def replay_streaming(
     parser,
     tokens: list[tuple[int, str]],
