@@ -25,6 +25,12 @@ from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
     flashinfer_sparse_mla_decode_autotune_warmup,
 )
 from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
+from vllm.model_executor.warmup.sparse_mla_triton_warmup import (
+    sparse_mla_triton_warmup_if_needed,
+)
+from vllm.model_executor.warmup.v1_block_table_warmup import (
+    warm_v1_block_table_kernels,
+)
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer
@@ -41,6 +47,12 @@ def kernel_warmup(worker: "Worker"):
         minimax_m3_msa_warmup,
     )
 
+    # Pooling models do not use the generation slot-mapping path.
+    if not worker.use_v2_model_runner and not worker.model_runner.is_pooling_model:
+        warm_v1_block_table_kernels(
+            getattr(worker.model_runner, "device", torch.device("cuda")),
+            worker.scheduler_config.max_num_batched_tokens,
+        )
     qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
 
     # DSv4 mHC TileLang kernels (hc_pre/hc_post/hc_head_op) run every decoder
@@ -55,6 +67,7 @@ def kernel_warmup(worker: "Worker"):
     )
 
     # Run next so input-prep kernels JIT against pristine runner state.
+    sparse_mla_triton_warmup_if_needed(worker)
     flashinfer_sparse_mla_decode_autotune_warmup(worker)
     deepseek_v4_sparse_mla_attention_warmup(worker)
 
