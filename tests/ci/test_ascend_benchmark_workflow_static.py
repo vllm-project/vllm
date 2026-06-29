@@ -317,6 +317,19 @@ def test_l3_benchmark_publish_preflight_runs_before_benchmark():
     assert "GITHUB_SNAPSHOT_SYNC_VERIFIED_COMMIT" in text[summary_step:]
 
 
+def test_ascend_torch_stack_is_installed_before_preinstall_preflight():
+    text = workflow_text()
+
+    install_step = text.index("      - name: Install Ascend torch stack for preflight")
+    preinstall_preflight_step = text.index(
+        "      - name: Runner health preflight (before install)"
+    )
+
+    assert install_step < preinstall_preflight_step
+    assert '"torch==2.9.0" "torch-npu==2.9.0"' in text
+    assert "import torch, torch_npu" in text
+
+
 def test_l2_targeted_scenario_registry_is_covered_by_parser_tests():
     parser_script = (
         Path(__file__).resolve().parents[2]
