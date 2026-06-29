@@ -70,8 +70,7 @@ def fused_qk_norm_rope_and_unified_kv_cache_update_impl(
             layer_slot_mapping,
         )
     else:
-        # Profiling/dummy run: kernel is skipped but q_out/k_out feed attention,
-        # so zero them instead of leaving torch.empty uninitialized.
+        # Profiling/dummy run: define q_out/k_out (consumed by attention).
         q_out.zero_()
         k_out.zero_()
 
@@ -453,6 +452,16 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
                     "(supported: %s). Falling back to the unfused path.",
                     layer.head_size,
                     SUPPORTED_FUSED_QK_NORM_ROPE_KVCACHE_HEAD_DIMS,
+                )
+                continue
+            if layer.head_size_v != layer.head_size:
+                # The fused kernel uses a single head_dim for q/k/v.
+                logger.warning_once(
+                    "QK Norm+RoPE+KVCache fusion not enabled for a layer: "
+                    "head_size_v=%d differs from head_size=%d, which the fused "
+                    "kernel does not support. Falling back to the unfused path.",
+                    layer.head_size_v,
+                    layer.head_size,
                 )
                 continue
             for epsilon in [1e-5, 1e-6]:
