@@ -5,6 +5,7 @@ import pytest
 import torch
 from transformers import AutoModelForTokenClassification
 
+from tests.models.registry import HF_EXAMPLE_MODELS
 from tests.models.utils import softmax
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
@@ -136,6 +137,9 @@ def test_openai_privacy_filter(
     model: str,
     dtype: str,
 ) -> None:
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
+    model_info.check_transformers_version(on_fail="skip")
+
     with vllm_runner(model, max_model_len=None, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.token_classify(PRIVACY_FILTER_PROMPTS)
 
