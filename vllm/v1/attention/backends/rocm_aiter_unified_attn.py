@@ -252,7 +252,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             seqused_k=seqused_k,
             max_seqlen_k=max_seqlen_k,
             softmax_scale=softmax_scale,
-            causal=True,
+            causal=attn_metadata.causal,
             alibi_slopes=self.alibi_slopes,
             window_size=self.sliding_window,
             block_table=block_table,
