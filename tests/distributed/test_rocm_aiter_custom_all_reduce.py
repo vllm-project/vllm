@@ -13,8 +13,10 @@ from vllm.envs import disable_envs_cache
 from vllm.platforms import current_platform
 
 from ..utils import (
+    assert_rocm_custom_allreduce_backend_state,
     ensure_model_parallel_initialized,
     init_test_distributed_environment,
+    multi_gpu_test,
     multi_process_parallel,
 )
 
@@ -41,19 +43,6 @@ def _configure_aiter_custom_ar_env(monkeypatch: pytest.MonkeyPatch) -> None:
     rocm_aiter_ops.refresh_env_variables()
 
 
-def _assert_aiter_custom_ar_selected() -> None:
-    device_communicator = get_tp_group().device_communicator
-    aiter_ar_comm = device_communicator.aiter_ar_comm
-    assert aiter_ar_comm is not None, "AITER CustomAllreduce was not initialized."
-    assert not aiter_ar_comm.disabled, "AITER CustomAllreduce is disabled."
-    assert device_communicator.ca_comm is None, (
-        "vLLM CustomAllreduce should not be initialized when AITER CA is used."
-    )
-    assert (
-        device_communicator.qr_comm is None or device_communicator.qr_comm.disabled
-    ), "QuickReduce should be disabled in this AITER CA test."
-
-
 def _assert_aiter_handles_input(inp: torch.Tensor) -> None:
     aiter_ar_comm = get_tp_group().device_communicator.aiter_ar_comm
     assert aiter_ar_comm is not None
@@ -77,7 +66,7 @@ def graph_allreduce(
         torch.accelerator.set_device_index(device)
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
         ensure_model_parallel_initialized(tp_size, pp_size)
-        _assert_aiter_custom_ar_selected()
+        assert_rocm_custom_allreduce_backend_state(True, "NONE")
         group = get_tp_group().device_group
 
         # A small all_reduce for warmup.
@@ -121,7 +110,7 @@ def eager_allreduce(
         torch.accelerator.set_device_index(device)
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
         ensure_model_parallel_initialized(tp_size, pp_size)
-        _assert_aiter_custom_ar_selected()
+        assert_rocm_custom_allreduce_backend_state(True, "NONE")
 
         for shape, dtype in test_cases:
             inp = torch.ones(shape, dtype=dtype, device=device)
@@ -132,6 +121,7 @@ def eager_allreduce(
 
 
 @pytest.mark.skipif(not is_aiter_found(), reason="AITER is not installed")
+@multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("tp_size", [2])
 @pytest.mark.parametrize("pipeline_parallel_size", [1])
 @pytest.mark.parametrize("test_target", [eager_allreduce, graph_allreduce])
@@ -141,7 +131,4 @@ def test_rocm_aiter_custom_allreduce(
     pipeline_parallel_size,
     test_target,
 ):
-    world_size = tp_size * pipeline_parallel_size
-    if world_size > torch.accelerator.device_count():
-        pytest.skip("Not enough GPUs to run the test.")
     multi_process_parallel(monkeypatch, tp_size, pipeline_parallel_size, test_target)
