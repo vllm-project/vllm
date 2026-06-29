@@ -15,7 +15,6 @@ steps:
       - bash .buildkite/scripts/rocm/refresh-base-image.sh
     env:
       DOCKER_BUILDKIT: "1"
-      PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
     retry:
       automatic:
         - exit_status: -1  # Agent was lost
