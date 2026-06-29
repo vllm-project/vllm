@@ -139,7 +139,12 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         enforce_eager: Whether to enforce eager execution. If True, we will
             disable CUDA graph and always execute the model in eager mode.
             If False, we will use CUDA graph and eager execution in hybrid.
-        enable_return_routed_experts: Whether to return routed experts.
+        enable_return_routed_experts: Whether to capture and return the
+            logical expert IDs selected by the MoE router for every token
+            at every layer. The data is returned as a base64-encoded
+            ``.npy`` byte stream. See
+            [Routed Experts Capture](../../features/routed_experts.md)
+            for details and limitations.
         disable_custom_all_reduce: See
             [ParallelConfig][vllm.config.ParallelConfig].
         hf_token: The token to use as HTTP bearer authorization for remote files

@@ -188,6 +188,7 @@ class GenerateResponseChoice(BaseModel):
     #   np.load(io.BytesIO(base64.b64decode(s)))
     # ``None`` if (a) the request was aborted before any forward pass,
     # or (b) ``enable_return_routed_experts`` is off server-side.
+    # See: https://docs.vllm.ai/en/latest/features/routed_experts.md
     routed_experts: str | None = None
 
 
