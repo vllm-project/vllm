@@ -1,10 +1,17 @@
+// This module is shared by multiple benchmark targets.
+// There could be false positives for unused code or imports, and fixing them would lead to some other benchmarks failing to compile.
 #![allow(dead_code)]
+#![allow(unused_imports)]
+
+mod adapter;
 
 use futures::FutureExt as _;
 use openai_protocol::common::{Function as OpenAiFunction, Tool as OpenAiTool};
 use tool_parser::traits::ToolParser as ExternalToolParser;
 use vllm_parser::tool::test_utils::collect_stream;
 use vllm_parser::tool::{Tool, ToolParser};
+
+pub(super) use adapter::UnifiedToolParserAdapter;
 
 pub(super) fn openai_tools(tools: &[Tool]) -> Vec<OpenAiTool> {
     tools
