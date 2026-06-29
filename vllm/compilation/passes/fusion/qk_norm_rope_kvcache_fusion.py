@@ -31,6 +31,10 @@ logger = init_logger(__name__)
 
 P = ParamSpec("P")
 
+# Head sizes the fused kernel fused_qk_norm_rope_cache_pts_quant_shuffle() supports
+# Other sizes hard-abort, so skip those layers.
+SUPPORTED_FUSED_QK_NORM_ROPE_KVCACHE_HEAD_DIMS: tuple[int, ...] = (64, 128, 256)
+
 
 # ---------------------------------------------------------------------------
 # Custom op: fused QK-norm + RoPE + KV cache update
@@ -435,6 +439,16 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
 
         for _, layer in attn_layers.items():
             if not layer.impl.fused_qk_norm_rope_kvcache_supported():
+                continue
+            if layer.head_size not in SUPPORTED_FUSED_QK_NORM_ROPE_KVCACHE_HEAD_DIMS:
+                logger.warning_once(
+                    "QK Norm+RoPE+KVCache fusion not enabled for a layer: "
+                    "head_size=%d is not supported by the "
+                    "fused_qk_norm_rope_cache_pts_quant_shuffle kernel "
+                    "(supported: %s). Falling back to the unfused path.",
+                    layer.head_size,
+                    SUPPORTED_FUSED_QK_NORM_ROPE_KVCACHE_HEAD_DIMS,
+                )
                 continue
             for epsilon in [1e-5, 1e-6]:
                 for neox in [True, False]:
