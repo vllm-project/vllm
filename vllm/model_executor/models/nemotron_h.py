@@ -788,6 +788,11 @@ class NemotronHForCausalLM(
     # Relevant only if self.has_moe is True
     is_non_gated_moe: bool = True
 
+    # For MoE LoRA weight loading: routed-expert LoRA is saved/served in the 3D
+    # stacked layout handled by FusedMoE3DWithLoRA (mirrors qwen3_5 / gpt_oss /
+    # qwen3_vl_moe). Without this, expert LoRA routes to the 2D wrapper and fails.
+    is_3d_moe_weight: bool = True
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"backbone": "model"},
         orig_to_new_substr={"A_log": "A", "embeddings": "embed_tokens"},
