@@ -7,7 +7,7 @@
 #include "torch_utils.h"
 
 #ifndef USE_ROCM
-  #include "../persistent_topk.cuh"
+  #include "persistent_topk.cuh"
 #endif
 
 namespace {

@@ -30,6 +30,8 @@ from vllm.entrypoints.openai.engine.protocol import (
     StructuralTagResponseFormat,
     ToolCall,
     UsageInfo,
+    validate_structural_tag_response_format,
+    validate_structured_outputs_structural_tag,
 )
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
@@ -63,6 +65,13 @@ class ChatMessage(OpenAIBaseModel):
 
     # vLLM-specific fields that are not in OpenAI spec
     reasoning: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        data = handler(self)
+        if len(data.get("tool_calls", [])) == 0:
+            data.pop("tool_calls", None)
+        return data
 
 
 class ChatCompletionLogProb(OpenAIBaseModel):
@@ -376,6 +385,21 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "need to map generated text back to input tokens."
         ),
     )
+    return_token_offsets: bool | None = Field(
+        default=False,
+        description=(
+            "If true, return char-level (start, end) offsets for each "
+            "token relative to the tokenized source string in the "
+            "`token_offsets` field of the rendered response. Only "
+            "supported on the `/v1/completions/render` and "
+            "`/v1/chat/completions/render` endpoints; ignored on regular "
+            "generation endpoints. Honored only for Fast (Rust-backed) "
+            "tokenizers; otherwise `token_offsets` is null. For chat "
+            "requests, offsets are relative to the templated prompt "
+            "string (after applying the chat template). Multimodal "
+            "inputs and pre-tokenized inputs always yield null."
+        ),
+    )
     return_prompt_text: bool | None = Field(
         default=None,
         description=(
@@ -383,6 +407,18 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "prompt string produced by chat templating. In streaming mode it "
             "is sent only on the first chunk. This is useful for inspecting "
             "exactly what was fed into the model."
+        ),
+    )
+
+    return_assistant_tokens_mask: bool = Field(
+        default=False,
+        description=(
+            "If true, the /render response will include an "
+            "``assistant_tokens_mask`` field — a per-token list of 0/1 "
+            "values indicating which tokens were assistant-generated. "
+            "Requires the chat template to use ``{% generation %}`` "
+            "tags.  When the template does not support it, "
+            "``assistant_tokens_mask`` will be ``null``."
         ),
     )
 
@@ -506,6 +542,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 extra_kwargs,
             ),
             media_io_kwargs=self.media_io_kwargs,
+            return_assistant_tokens_mask=bool(self.return_assistant_tokens_mask),
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
@@ -525,6 +562,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             needs_detokenization=bool(self.echo and not self.return_token_ids),
             max_total_tokens_param="max_model_len",
             max_output_tokens_param=max_output_tokens_param,
+            return_token_offsets=bool(self.return_token_offsets),
         )
 
     # Default sampling parameters for chat completion requests
@@ -684,6 +722,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     parameter="response_format",
                 )
 
+        if rf_type == "structural_tag":
+            validate_structural_tag_response_format(response_format)
+
         return data
 
     @model_validator(mode="before")
@@ -753,20 +794,21 @@ class ChatCompletionRequest(OpenAIBaseModel):
         )
         # you can only use one kind of constraints for structured outputs
         if count > 1:
-            raise ValueError(
+            raise VLLMValidationError(
                 "You can only use one kind of constraints for structured "
-                "outputs ('json', 'regex' or 'choice')."
+                "outputs ('json', 'regex' or 'choice').",
             )
         # you can only either use structured outputs or tools, not both
-        if count > 1 and data.get("tool_choice", "none") not in (
+        if count > 0 and data.get("tool_choice", "none") not in (
             "none",
             "auto",
             "required",
         ):
-            raise ValueError(
+            raise VLLMValidationError(
                 "You can only either use constraints for structured outputs "
-                "or tools, not both."
+                "or tools, not both.",
             )
+        validate_structured_outputs_structural_tag(structured_outputs_kwargs)
         return data
 
     @model_validator(mode="before")
@@ -797,17 +839,21 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if "tool_choice" in data and data["tool_choice"] is not None:
             # ensure that if "tool choice" is specified, tools are present
             if "tools" not in data or data["tools"] is None:
-                raise ValueError("When using `tool_choice`, `tools` must be set.")
+                raise VLLMValidationError(
+                    "When using `tool_choice`, `tools` must be set.",
+                    parameter="tool_choice",
+                )
 
             # make sure that tool choice is either a named tool
             # OR that it's set to "auto" or "required"
             if data["tool_choice"] not in ["auto", "required"] and not isinstance(
                 data["tool_choice"], dict
             ):
-                raise ValueError(
+                raise VLLMValidationError(
                     f"Invalid value for `tool_choice`: {data['tool_choice']}! "
                     'Only named tools, "none", "auto" or "required" '
-                    "are supported."
+                    "are supported.",
+                    parameter="tool_choice",
                 )
 
             # ensure that if "tool_choice" is specified as an object,
@@ -820,29 +866,33 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 valid_tool = False
                 function = data["tool_choice"].get("function")
                 if not isinstance(function, dict):
-                    raise ValueError(
+                    raise VLLMValidationError(
                         f"Invalid value for `function`: `{function}` in "
-                        f"`tool_choice`! {correct_usage_message}"
+                        f"`tool_choice`! {correct_usage_message}",
+                        parameter="tool_choice.function",
                     )
                 if "name" not in function:
-                    raise ValueError(
+                    raise VLLMValidationError(
                         f"Expected field `name` in `function` in "
-                        f"`tool_choice`! {correct_usage_message}"
+                        f"`tool_choice`! {correct_usage_message}",
+                        parameter="tool_choice.function.name",
                     )
                 function_name = function["name"]
                 if not isinstance(function_name, str) or len(function_name) == 0:
-                    raise ValueError(
+                    raise VLLMValidationError(
                         f"Invalid `name` in `function`: `{function_name}`"
-                        f" in `tool_choice`! {correct_usage_message}"
+                        f" in `tool_choice`! {correct_usage_message}",
+                        parameter="tool_choice.function.name",
                     )
                 for tool in data["tools"]:
                     if tool["function"]["name"] == function_name:
                         valid_tool = True
                         break
                 if not valid_tool:
-                    raise ValueError(
+                    raise VLLMValidationError(
                         "The tool specified in `tool_choice` does not match any"
-                        " of the specified `tools`"
+                        " of the specified `tools`",
+                        parameter="tool_choice",
                     )
         return data
 
@@ -850,9 +900,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @classmethod
     def check_generation_prompt(cls, data):
         if data.get("continue_final_message") and data.get("add_generation_prompt"):
-            raise ValueError(
+            raise VLLMValidationError(
                 "Cannot set both `continue_final_message` and "
-                "`add_generation_prompt` to True."
+                "`add_generation_prompt` to True.",
             )
         return data
 
@@ -862,8 +912,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if data.get("cache_salt") is not None and (
             not isinstance(data["cache_salt"], str) or not data["cache_salt"]
         ):
-            raise ValueError(
-                "Parameter 'cache_salt' must be a non-empty string if provided."
+            raise VLLMValidationError(
+                "Parameter 'cache_salt' must be a non-empty string if provided.",
+                parameter="cache_salt",
             )
         return data
 
@@ -953,6 +1004,8 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     temperature: float | None = 0.7
     top_p: float | None = 1.0
     user: str | None = None
+    tool_choice: Literal["none"] | None = "none"
+    include_reasoning: bool = True
 
     # vLLM extensions
     best_of: int | None = None
@@ -983,6 +1036,16 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
                 "Batch chat completions do not support beam search. "
                 "Please set `use_beam_search` to False."
             )
+        response_format = data.get("response_format")
+        rf_type = (
+            response_format.get("type")
+            if isinstance(response_format, dict)
+            else getattr(response_format, "type", None)
+        )
+        if rf_type == "structural_tag":
+            validate_structural_tag_response_format(response_format)
+        if (structured_outputs := data.get("structured_outputs")) is not None:
+            validate_structured_outputs_structural_tag(structured_outputs)
         n = data.get("n", 1)
         if n is not None and n != 1:
             raise ValueError(

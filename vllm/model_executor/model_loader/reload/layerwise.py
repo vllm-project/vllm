@@ -123,15 +123,19 @@ def initialize_online_processing(layer: torch.nn.Module):
     Called by either `initialize_layerwise_reload` or an online quantization scheme,
     prevents double wrapping in the case of online quantization + reloading
 
-    :param layer: layer whose parameter weight loaders will be wrapped
+    Args:
+        layer: layer whose parameter weight loaders will be wrapped
     """
     info = get_layerwise_info(layer)
 
     # Track loading progress to determine when to process/copy
     info.load_numel = 0
     info.load_numel_total = get_layer_size(layer)
+    _wrap_parameters_weight_loader(layer)
 
-    # Wrap each parameter's weight loader
+
+def _wrap_parameters_weight_loader(layer: torch.nn.Module) -> None:
+    """Wrap each parameter's weight loader."""
     # Note that nested wrapping will occur for shared tensors
     for name, tensor in get_layer_tensors(layer).items():
         if name in SKIP_TENSORS:
@@ -166,6 +170,12 @@ def make_online_process_loader(layer: torch.nn.Module, param_name: str) -> Calla
             # see Limitations(4)
             logger.debug("%s: Excessive loading", layer.__class__.__name__)
             return
+
+        # Re-run on each load: layers may register parameters later (e.g., `bias`).
+        # Wrap late parameters and refresh `load_numel_total` so processing waits
+        # until all parameters are loaded.
+        info.load_numel_total = get_layer_size(layer)
+        _wrap_parameters_weight_loader(layer)
 
         # Bind and normalize arguments
         bound_args = loader_signature.bind(*args, **kwargs)
@@ -222,8 +232,9 @@ def finalize_layerwise_processing(model: torch.nn.Module, model_config: ModelCon
     This function should be applied after `initialize_layerwise_reload` is applied
     unwrap the layerwise weight loaders.
 
-    :param model: model to finalize processing for
-    :param model_config: config needed for applying processing to attention layers
+    Args:
+        model: model to finalize processing for
+        model_config: config needed for applying processing to attention layers
     """
     if hasattr(model, "_original_do_torchao_reload"):
         model._do_torchao_reload = model._original_do_torchao_reload

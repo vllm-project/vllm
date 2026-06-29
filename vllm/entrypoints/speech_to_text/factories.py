@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from starlette.datastructures import State
 
     from vllm.engine.protocol import EngineClient
-    from vllm.entrypoints.logger import RequestLogger
+    from vllm.entrypoints.serve.utils.request_logger import RequestLogger
     from vllm.tasks import SupportedTask
 else:
     RequestLogger = object

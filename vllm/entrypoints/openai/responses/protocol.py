@@ -378,8 +378,6 @@ class ResponsesRequest(OpenAIBaseModel):
         if (frequency_penalty := self.frequency_penalty) is None:
             frequency_penalty = default_sampling_params.get("frequency_penalty", 0.0)
 
-        stop_token_ids = default_sampling_params.get("stop_token_ids")
-
         # Structured output
         structured_outputs = self.structured_outputs
 
@@ -417,7 +415,6 @@ class ResponsesRequest(OpenAIBaseModel):
             top_k=top_k,
             max_tokens=max_tokens,
             logprobs=self.top_logprobs if self.is_include_output_logprobs() else None,
-            stop_token_ids=stop_token_ids,
             stop=stop,
             frequency_penalty=frequency_penalty,
             presence_penalty=presence_penalty,
@@ -536,23 +533,30 @@ class ResponsesRequest(OpenAIBaseModel):
                     processed_input.append(item)
 
             elif item_type == "message" and item.get("role") == "assistant":
+                content = item.get("content")
+                if not isinstance(content, list):
+                    # String content is a valid EasyInputMessageParam,
+                    # do not coerce it to ResponseOutputMessage
+                    processed_input.append(item)
+                    continue
+
+                original_item = item
                 item = dict(item)
                 if "id" not in item:
                     item["id"] = f"msg_{random_uuid()}"
                 if "status" not in item:
                     item["status"] = "completed"
                 # ResponseOutputText requires annotations
-                if isinstance(item.get("content"), list):
-                    new_content = []
-                    for c in item["content"]:
-                        if (
-                            isinstance(c, dict)
-                            and c.get("type") == "output_text"
-                            and "annotations" not in c
-                        ):
-                            c = {**c, "annotations": []}
-                        new_content.append(c)
-                    item["content"] = new_content
+                new_content = []
+                for c in content:
+                    if (
+                        isinstance(c, dict)
+                        and c.get("type") == "output_text"
+                        and "annotations" not in c
+                    ):
+                        c = {**c, "annotations": []}
+                    new_content.append(c)
+                item["content"] = new_content
                 try:
                     processed_input.append(ResponseOutputMessage(**item))
                 except ValidationError:
@@ -560,7 +564,7 @@ class ResponsesRequest(OpenAIBaseModel):
                         "Failed to parse assistant message to ResponseOutputMessage, "
                         "leaving for Pydantic validation"
                     )
-                    processed_input.append(item)
+                    processed_input.append(original_item)
 
             else:
                 processed_input.append(item)

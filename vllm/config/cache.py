@@ -29,6 +29,7 @@ CacheDType = Literal[
     "turboquant_4bit_nc",
     "turboquant_k3v4_nc",
     "turboquant_3bit_nc",
+    "int4_per_token_head",
     "int8_per_token_head",
     "fp8_per_token_head",
     "nvfp4",
@@ -146,6 +147,14 @@ class CacheConfig:
     num_cpu_blocks: int | None = field(default=None, init=False)
     """The number of blocks to allocate for CPU memory."""
 
+    # Set after KV cache initialization.
+    kv_cache_size_tokens: int | None = field(default=None, init=False)
+    """Per-DP-engine KV cache capacity in tokens (group-aware). Uses
+    group-aware capacity since num_gpu_blocks * block_size can be wrong
+    for hybrid models where requests occupy multiple KV cache groups."""
+    kv_cache_max_concurrency: float | None = field(default=None, init=False)
+    """Per-DP-engine maximum concurrency at max_model_len tokens."""
+
     kv_sharing_fast_prefill: bool = False
     """This feature is work in progress and no prefill optimization takes place
     with this flag enabled currently.
@@ -204,6 +213,8 @@ class CacheConfig:
             # Post-init/derived counters
             "num_gpu_blocks",
             "num_cpu_blocks",
+            "kv_cache_size_tokens",
+            "kv_cache_max_concurrency",
             # WIP feature toggle not impacting compiled graph shape
             "kv_sharing_fast_prefill",
         }

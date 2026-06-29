@@ -8,8 +8,8 @@ from vllm.model_executor.kernels.mhc.tilelang import (
     _tilelang_hc_prenorm_gemm,
     _torch_hc_prenorm_gemm,
 )
+from vllm.model_executor.layers.mhc import HAS_TILELANG_MHC
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_tilelang
 from vllm.utils.torch_utils import set_random_seed
 
 DEVICE = current_platform.device_type
@@ -97,8 +97,8 @@ def hc_head_ref(
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_cuda_alike() and has_tilelang()),
-    reason="CUDA or ROCm and tilelang required",
+    not HAS_TILELANG_MHC,
+    reason="TileLang MHC support required",
 )
 @pytest.mark.parametrize("num_tokens", [1, 4, 8, 128])
 @pytest.mark.parametrize("hidden_size", [4096, 7168])
@@ -150,8 +150,8 @@ def test_mhc_pre_tilelang(num_tokens, hidden_size, hc_mult):
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_cuda_alike() and has_tilelang()),
-    reason="CUDA or ROCm and tilelang required",
+    not HAS_TILELANG_MHC,
+    reason="TileLang MHC support required",
 )
 @pytest.mark.parametrize(
     ("num_tokens", "hidden_size"),
@@ -190,8 +190,8 @@ def test_hc_prenorm_gemm_tilelang(num_tokens, hidden_size):
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_cuda_alike() and has_tilelang()),
-    reason="CUDA or ROCm and tilelang required",
+    not HAS_TILELANG_MHC,
+    reason="TileLang MHC support required",
 )
 @pytest.mark.parametrize("num_tokens", [1, 4, 8, 128])
 @pytest.mark.parametrize("hidden_size", [4096, 7168])
@@ -217,8 +217,8 @@ def test_mhc_post_tilelang(num_tokens, hidden_size, hc_mult):
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_cuda_alike() and has_tilelang()),
-    reason="CUDA or ROCm and tilelang required",
+    not HAS_TILELANG_MHC,
+    reason="TileLang MHC support required",
 )
 @pytest.mark.parametrize("num_tokens", [1, 4, 8, 128])
 @pytest.mark.parametrize("hidden_size", [4096, 7168])
@@ -324,8 +324,8 @@ def test_hc_head_triton(num_tokens, hidden_size, hc_mult):
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_cuda_alike() and has_tilelang()),
-    reason="CUDA or ROCm and tilelang required",
+    not HAS_TILELANG_MHC,
+    reason="TileLang MHC support required",
 )
 @pytest.mark.parametrize("num_tokens", [1, 4, 8, 128])
 @pytest.mark.parametrize("hidden_size", [4096, 7168])
@@ -340,22 +340,17 @@ def test_hc_head_tilelang(num_tokens, hidden_size, hc_mult):
     hc_base = torch.randn((hc_mult,), dtype=torch.float32) * 0.1
     rms_eps = hc_eps = 1e-6
 
-    out = torch.empty((num_tokens, hidden_size), dtype=torch.bfloat16)
-    out.fill_(float("nan"))
-
-    result = torch.ops.vllm.hc_head_fused_kernel_tilelang(
+    out = torch.ops.vllm.hc_head_fused_kernel_tilelang(
         residual,
         fn,
         hc_scale,
         hc_base,
-        out,
-        hidden_size,
         rms_eps,
         hc_eps,
-        hc_mult,
     )
 
-    assert result is None
+    assert out.shape == (num_tokens, hidden_size)
+    assert out.dtype == torch.bfloat16
     assert not torch.isnan(out).any()
 
     out_ref = hc_head_ref(residual, fn, hc_scale, hc_base, rms_eps, hc_eps)
