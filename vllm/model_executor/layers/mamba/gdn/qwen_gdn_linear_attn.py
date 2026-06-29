@@ -437,6 +437,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         vllm_config: VllmConfig,
         prefix: str = "",
         gqa_interleaved_layout=False,
+        reduce_results: bool = True,
     ) -> None:
         super().__init__(config, vllm_config, prefix)
 
@@ -547,6 +548,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self.hidden_size,
             bias=False,
             input_is_parallel=True,
+            reduce_results=reduce_results,
             quant_config=self.quant_config,
             prefix=f"{prefix}.out_proj",
         )
