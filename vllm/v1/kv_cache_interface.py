@@ -360,6 +360,27 @@ class TQFullAttentionSpec(FullAttentionSpec):
 
 
 @dataclass(frozen=True, kw_only=True)
+class OscarFullAttentionSpec(FullAttentionSpec):
+    """FullAttentionSpec with OSCAR-aware page size."""
+
+    oscar_slot_size: int = 0
+
+    @property
+    def real_page_size_bytes(self) -> int:
+        if self.oscar_slot_size > 0:
+            return self.block_size * self.num_kv_heads * self.oscar_slot_size
+        return super().real_page_size_bytes
+
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        merged = super().merge(specs)
+        assert all(s.oscar_slot_size == specs[0].oscar_slot_size for s in specs), (
+            "All OSCAR layers in the same KV cache group must use the same oscar_slot_size."
+        )
+        return replace(merged, oscar_slot_size=specs[0].oscar_slot_size)
+
+
+@dataclass(frozen=True, kw_only=True)
 class MLAAttentionSpec(FullAttentionSpec):
     # TODO(Lucas/Chen): less hacky way to do this
     cache_dtype_str: str | None = None
