@@ -305,7 +305,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 block_ids=block_ids,
             )
         )
-        logger.info(
+        logger.debug(
             "P2P %s: parked submit_store kv_request_id=%s job_id=%d blocks=%d",
             self._local_id,
             kv_request_id,
