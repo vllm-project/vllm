@@ -412,12 +412,12 @@ class MomeAttentionMetadataBuilder(AttentionMetadataBuilder[MomeAttentionMetadat
             state_indices_tensor_d, non_blocking=True
         )
 
+        num_computed_tokens_d = metadata.num_computed_tokens_d
         block_idx_last_scheduled_token_d = metadata.block_idx_last_scheduled_token_d
         block_idx_last_computed_token_d = metadata.block_idx_last_computed_token_d
+        block_idx_first_scheduled_token_d = metadata.block_idx_first_scheduled_token_d
         assert block_idx_last_scheduled_token_d is not None
         assert block_idx_last_computed_token_d is not None
-        num_computed_tokens_d = metadata.num_computed_tokens_d
-        block_idx_first_scheduled_token_d = metadata.block_idx_first_scheduled_token_d
         assert num_computed_tokens_d is not None
         assert block_idx_first_scheduled_token_d is not None
 
@@ -456,9 +456,9 @@ class MomeAttentionMetadataBuilder(AttentionMetadataBuilder[MomeAttentionMetadat
 
         num_accepted_tokens = metadata.num_accepted_tokens
         query_start_loc_d = metadata.query_start_loc_d
+        assert query_start_loc_d is not None
+        query_start_loc_d = query_start_loc_d[: padded_bs + 1]
         if self.use_spec_decode and num_accepted_tokens is not None:
-            assert query_start_loc_d is not None
-            query_start_loc_d = query_start_loc_d[: padded_bs + 1]
             self.decode_num_accepted_tokens[: metadata.num_decodes].copy_(
                 num_accepted_tokens, non_blocking=True
             )
