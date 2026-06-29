@@ -58,7 +58,9 @@ class RoutedExperts(PluggableLayer):
         moe_config: FusedMoEConfig,
         quant_config: QuantizationConfig | None,
         expert_map_manager: ExpertMapManager,
-        expert_mapping: list[tuple[str, str, int, str]] | None = None,
+        ckpt_gate_proj_name: str = "gate_proj",
+        ckpt_down_proj_name: str = "down_proj",
+        ckpt_up_proj_name: str = "up_proj",
         #
         # Extra params that are needed by quant_methods, pass along for now
         # Prefer getting these from other sources, e.g. moe_config or
@@ -81,7 +83,9 @@ class RoutedExperts(PluggableLayer):
         self.layer_name = layer_name
         self.moe_config = moe_config
         self.quant_config = quant_config
-        self.expert_mapping = expert_mapping
+        self.ckpt_gate_proj_name = ckpt_gate_proj_name
+        self.ckpt_down_proj_name = ckpt_down_proj_name
+        self.ckpt_up_proj_name = ckpt_up_proj_name
         self.expert_map_manager = expert_map_manager
         self.hidden_size = moe_config.hidden_dim
         self.global_num_experts = moe_config.num_experts
@@ -166,6 +170,8 @@ class RoutedExperts(PluggableLayer):
             )
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
+
+        self.lora_base_layer_prefix = ""
 
     # TODO(bnell): Temporary hack. Get rid of this.
     def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
@@ -863,11 +869,7 @@ class RoutedExperts(PluggableLayer):
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
-        if (expert_mapping := self.expert_mapping) is None:
-            raise ValueError(
-                "`self.expert_mapping` must be provided to "
-                "load weights using `self.load_weights`."
-            )
+        expert_mapping = self.get_expert_mapping()
         unpadded_hidden = self.moe_config.hidden_dim_unpadded
         for expert_name, loaded_weight in weights:
             qual_name = f"{self.layer_name}.{expert_name}"
@@ -923,6 +925,24 @@ class RoutedExperts(PluggableLayer):
                         )
                         yield param_name
 
+    def get_expert_mapping(
+        self,
+        ckpt_gate_proj_name: str | None = None,
+        ckpt_down_proj_name: str | None = None,
+        ckpt_up_proj_name: str | None = None,
+    ) -> list[tuple[str, str, int, str]]:
+        moe_config = self.moe_config
+        num_redundant_experts = moe_config.num_experts - moe_config.num_logical_experts
+        return self.build_expert_params_mapping(
+            ckpt_gate_proj_name or self.ckpt_gate_proj_name,
+            ckpt_down_proj_name or self.ckpt_down_proj_name,
+            ckpt_up_proj_name or self.ckpt_up_proj_name,
+            num_experts=moe_config.num_logical_experts,
+            num_redundant_experts=num_redundant_experts,
+            routed_experts_prefix="",
+            base_layer=self.lora_base_layer_prefix,
+        )
+
     @staticmethod
     def make_expert_params_mapping(
         model: torch.nn.Module,
@@ -932,6 +952,35 @@ class RoutedExperts(PluggableLayer):
         num_experts: int,
         num_redundant_experts: int = 0,
         routed_experts_prefix: str = "routed_experts",
+    ) -> list[tuple[str, str, int, str]]:
+        """Build the expert mapping, detecting the LoRA `base_layer.` prefix by
+        scanning `model`'s parameters.
+
+        Legacy entry point for models that still hand-roll `load_weights`; the
+        `RoutedExperts` weight loader uses `get_expert_mapping` /
+        `build_expert_params_mapping` instead (which take the prefix directly).
+        See `build_expert_params_mapping` for the returned tuple format.
+        """
+        has_base_layer = any(".base_layer." in n for n, _ in model.named_parameters())
+        return RoutedExperts.build_expert_params_mapping(
+            ckpt_gate_proj_name,
+            ckpt_down_proj_name,
+            ckpt_up_proj_name,
+            num_experts,
+            num_redundant_experts,
+            routed_experts_prefix,
+            "base_layer." if has_base_layer else "",
+        )
+
+    @staticmethod
+    def build_expert_params_mapping(
+        ckpt_gate_proj_name: str,
+        ckpt_down_proj_name: str,
+        ckpt_up_proj_name: str,
+        num_experts: int,
+        num_redundant_experts: int = 0,
+        routed_experts_prefix: str = "routed_experts",
+        base_layer: str = "",
     ) -> list[tuple[str, str, int, str]]:
         """
         Create expert parameter mapping for weight loading with redundant experts.
@@ -944,12 +993,12 @@ class RoutedExperts(PluggableLayer):
         entries. The fused entries do not affect the loading of per-expert checkpoints.
 
         Args:
-            model: The model containing the MoE layer
             ckpt_gate_proj_name: Name of gate projection in checkpoint
             ckpt_down_proj_name: Name of down projection in checkpoint
             ckpt_up_proj_name: Name of up projection in checkpoint
             num_experts: Number of logical (non-redundant) experts
             num_redundant_experts: Number of redundant experts
+            base_layer: Prefix to add if this layer is a LoRA base layer
 
         Returns:
             List of tuples (param_name, weight_name, expert_id, shard_id)
@@ -969,12 +1018,6 @@ class RoutedExperts(PluggableLayer):
             EplbState.build_initial_global_physical_to_logical_map(
                 num_experts, num_redundant_experts
             )
-        )
-
-        base_layer = (
-            "base_layer."
-            if any(".base_layer." in name for name, _ in model.named_parameters())
-            else ""
         )
 
         if routed_experts_prefix != "":
