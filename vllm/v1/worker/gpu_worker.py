@@ -151,6 +151,7 @@ class Worker(WorkerBase):
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
         self._sleep_saved_draft_params: dict[str, torch.Tensor] = {}
+        self._sleep_saved_draft_buffers: dict[str, torch.Tensor] = {}
 
         # Weight transfer engine is created in `load_model` once the model
         # is available, since the engine needs a reference to the model.
@@ -205,8 +206,14 @@ class Worker(WorkerBase):
                     for name, param in draft.named_parameters()
                     if not param.is_meta
                 }
+                self._sleep_saved_draft_buffers = {
+                    name: buf.cpu().clone()
+                    for name, buf in draft.named_buffers()
+                    if not buf.is_meta
+                }
             else:
                 self._sleep_saved_draft_params = {}
+                self._sleep_saved_draft_buffers = {}
 
         self._get_sleep_mode_backend().suspend(level)
 
@@ -238,19 +245,27 @@ class Worker(WorkerBase):
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
 
-        # Restore draft model parameters saved during level-2 sleep.
+        # Restore draft model parameters and buffers saved during level-2 sleep.
         # Use direct copy_ instead of load_weights: the saved names are vLLM's
         # internal fused-param names (e.g. qkv_proj.weight), which load_weights
         # does not recognise (it expects checkpoint-side unfused names).
-        if self._sleep_saved_draft_params:
+        if self._sleep_saved_draft_params or self._sleep_saved_draft_buffers:
             draft = self.get_draft_model()
             if draft is not None:
-                named_params = dict(draft.named_parameters())
-                for name, saved in self._sleep_saved_draft_params.items():
-                    param = named_params.get(name)
-                    if param is not None:
-                        param.data.copy_(saved)
+                if self._sleep_saved_draft_params:
+                    named_params = dict(draft.named_parameters())
+                    for name, saved in self._sleep_saved_draft_params.items():
+                        param = named_params.get(name)
+                        if param is not None:
+                            param.data.copy_(saved)
+                if self._sleep_saved_draft_buffers:
+                    named_bufs = dict(draft.named_buffers())
+                    for name, saved in self._sleep_saved_draft_buffers.items():
+                        buf = named_bufs.get(name)
+                        if buf is not None:
+                            buf.data.copy_(saved)
             self._sleep_saved_draft_params = {}
+            self._sleep_saved_draft_buffers = {}
 
         if tags is None or "kv_cache" in tags:
             self.model_runner.post_kv_cache_wake_up()
