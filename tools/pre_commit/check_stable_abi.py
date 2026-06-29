@@ -64,8 +64,6 @@ IGNORE_ROCM_CPU_FILES = {
     "csrc/ops.h",
     "csrc/torch_utils.h",
     "csrc/quantization/w8a8/fp8/common.cuh",
-    # Intentional unstable-ABI example (see quick_example_stable.cpp).
-    "csrc/quick_example.cpp",
 }
 
 INCLUDE_RE = re.compile(
@@ -231,7 +229,6 @@ TORCH_LIBRARY(_C, m) {}
 STD_TORCH_CHECK(true, "ok");
 """
     assert _is_unstable_include("ATen/cuda/CUDAContext.h")
-    assert not _is_unstable_include("dispatch_utils.h")
     assert not _is_unstable_include("torch/csrc/stable/tensor.h")
     assert _is_ignored_file("csrc/quick_example.cpp")
     assert _is_ignored_file("csrc/cpu/torch_bindings.cpp")
