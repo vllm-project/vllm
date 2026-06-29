@@ -198,6 +198,9 @@ class CPUModelRunner(GPUModelRunner):
         self, scheduler_output: "SchedulerOutput", zeros_only: bool = False
     ) -> None:
         """CPU-safe version: no async copy needed, tensors already on CPU."""
+        draft_ids = self._draft_token_ids
+        if isinstance(draft_ids, torch.Tensor):
+            self.prev_num_spec_tokens = draft_ids.shape[1]
         if self.use_async_scheduling and not (
             scheduler_output.has_structured_output_requests
             or self.input_batch.sampling_metadata.output_token_ids
@@ -210,9 +213,12 @@ class CPUModelRunner(GPUModelRunner):
             return
 
         num_reqs = draft_token_ids.shape[0]
+        num_spec_tokens = draft_token_ids.shape[1]
         if self.draft_token_ids_cpu is not None:
             if not zeros_only:
-                self.draft_token_ids_cpu[:num_reqs].copy_(draft_token_ids)
+                self.draft_token_ids_cpu[:num_reqs, :num_spec_tokens].copy_(
+                    draft_token_ids
+                )
             else:
                 self.draft_token_ids_cpu[:num_reqs] = 0
 
@@ -224,7 +230,10 @@ class CPUModelRunner(GPUModelRunner):
         if req_ids is None:
             return [], []
         if self.draft_token_ids_cpu is not None:
-            return self.draft_token_ids_cpu[: len(req_ids)].tolist(), req_ids
+            num_spec_tokens = self.prev_num_spec_tokens
+            return self.draft_token_ids_cpu[
+                : len(req_ids), :num_spec_tokens
+            ].tolist(), req_ids
         return [], []
 
     def _copy_valid_sampled_token_count(
