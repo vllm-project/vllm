@@ -721,6 +721,58 @@ def _support_torch_compile(
     return cls
 
 
+def _make_cudagraph_partition_wrapper(vllm_config: VllmConfig) -> Callable[..., Any]:
+    """Build the customized Inductor graph-partition wrapper that wraps each
+    partition with vLLM's PIECEWISE static cudagraph wrapper. Shared by the
+    VLLM_COMPILE decorator path and the STOCK_TORCH_COMPILE graph-partition path so
+    the two cannot diverge on the per-partition cudagraph options.
+    """
+    from torch._inductor.utils import CUDAGraphWrapperMetadata
+
+    from vllm.compilation.cuda_graph import CUDAGraphOptions
+    from vllm.config import CUDAGraphMode
+    from vllm.platforms import current_platform
+
+    static_graph_wrapper_class = resolve_obj_by_qualname(
+        current_platform.get_static_graph_wrapper_cls()
+    )
+
+    def customized_cudagraph_wrapper(
+        f: Callable[..., Any], metadata: CUDAGraphWrapperMetadata
+    ) -> Any:
+        partition_id = metadata.partition_index
+        num_partitions = metadata.num_partitions
+        return static_graph_wrapper_class(
+            runnable=f,
+            vllm_config=vllm_config,
+            runtime_mode=CUDAGraphMode.PIECEWISE,
+            cudagraph_options=CUDAGraphOptions(
+                debug_log_enable=partition_id == 0,
+                gc_disable=partition_id != 0,
+                weak_ref_output=partition_id == num_partitions - 1,
+            ),
+        )
+
+    return customized_cudagraph_wrapper
+
+
+def install_cudagraph_partition_wrapper(vllm_config: VllmConfig) -> None:
+    """Persistently install the graph-partition cudagraph wrapper for the
+    engine-global STOCK_TORCH_COMPILE path. Stock torch.compile is lazy (the real
+    Inductor compile + post_compile partition wrapping run on the first forward),
+    so a scoped context manager cannot bracket it the way VLLM_COMPILE does -- the
+    install must outlive this call. Stock mode is engine-global and compiles the
+    target once. It is never unset: any later graph_partition compile would also be
+    wrapped, but the wrapper is a no-op pass-through unless a PIECEWISE forward
+    context dispatches to it (see CUDAGraphWrapper.__call__), so a stray compile is
+    not wrongly captured. A scoped unset (around the capture phase) is a possible
+    future hardening once a clean hook exists.
+    """
+    torch._inductor.utils.set_customized_partition_wrappers(
+        _make_cudagraph_partition_wrapper(vllm_config)
+    )
+
+
 @contextlib.contextmanager
 def maybe_use_cudagraph_partition_wrapper(
     vllm_config: VllmConfig,
@@ -735,40 +787,13 @@ def maybe_use_cudagraph_partition_wrapper(
     graph wrapper class to maintain more control over static graph
     capture and replay.
     """
-    from vllm.config import CUDAGraphMode
-
     compilation_config = vllm_config.compilation_config
     if (
         compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
         and compilation_config.use_inductor_graph_partition
     ):
-        from torch._inductor.utils import CUDAGraphWrapperMetadata
-
-        from vllm.compilation.cuda_graph import CUDAGraphOptions
-        from vllm.platforms import current_platform
-
-        static_graph_wrapper_class = resolve_obj_by_qualname(
-            current_platform.get_static_graph_wrapper_cls()
-        )
-
-        def customized_cudagraph_wrapper(
-            f: Callable[..., Any], metadata: CUDAGraphWrapperMetadata
-        ) -> Any:
-            partition_id = metadata.partition_index
-            num_partitions = metadata.num_partitions
-            return static_graph_wrapper_class(
-                runnable=f,
-                vllm_config=vllm_config,
-                runtime_mode=CUDAGraphMode.PIECEWISE,
-                cudagraph_options=CUDAGraphOptions(
-                    debug_log_enable=partition_id == 0,
-                    gc_disable=partition_id != 0,
-                    weak_ref_output=partition_id == num_partitions - 1,
-                ),
-            )
-
         torch._inductor.utils.set_customized_partition_wrappers(
-            customized_cudagraph_wrapper
+            _make_cudagraph_partition_wrapper(vllm_config)
         )
 
     yield

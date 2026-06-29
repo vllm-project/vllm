@@ -5286,13 +5286,13 @@ class GPUModelRunner(
             self.vllm_config.compilation_config.mode
             == CompilationMode.STOCK_TORCH_COMPILE
         ):
-            from vllm.env_override import _apply_constrain_to_fx_strides_patch
-
-            _apply_constrain_to_fx_strides_patch()
-            backend = self.vllm_config.compilation_config.init_backend(self.vllm_config)
-            compilation_counter.stock_torch_compile_count += 1
-            self.model.compile(fullgraph=True, backend=backend)
-            return
+            self._compile_model_stock()
+            if not self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+                return
+            # else: fall through to attach vLLM's external FULL cudagraph wrapper
+            # over the vanilla-compiled model (Inductor for codegen only, no
+            # Inductor cudagraphs). Driven by cudagraph_mode, which config sets to
+            # FULL_DECODE_ONLY for migrated stock models.
         # for other compilation modes, cudagraph behavior is controlled by
         # CudagraphWrapper and CudagraphDispatcher of vllm.
 
@@ -5328,6 +5328,113 @@ class GPUModelRunner(
                 )
 
         get_offloader().post_init()
+
+    def _compile_model_stock(self) -> None:
+        """Compile self.model with stock torch.compile (Inductor codegen) for
+        STOCK_TORCH_COMPILE mode. Shared by load_model and the elastic-EP rescale
+        path so the two compile sites cannot diverge on options / pass registration.
+        """
+        from vllm.env_override import _apply_constrain_to_fx_strides_patch
+
+        _apply_constrain_to_fx_strides_patch()
+        backend = self.vllm_config.compilation_config.init_backend(self.vllm_config)
+        compilation_counter.stock_torch_compile_count += 1
+        options = self._stock_inductor_options()
+        if options is not None and backend != "inductor":
+            raise ValueError(
+                "STOCK_TORCH_COMPILE with active fusion passes requires "
+                f"backend='inductor', but got backend={backend!r}. vLLM fusion "
+                "passes are registered through Inductor's custom-pass hooks and "
+                "have no effect on other backends; disable fusion or use inductor."
+            )
+        options = self._maybe_enable_stock_graph_partition(options, backend)
+        self.model.compile(fullgraph=True, backend=backend, options=options)
+
+    def _maybe_enable_stock_graph_partition(
+        self, options: dict[str, Any] | None, backend: str
+    ) -> dict[str, Any] | None:
+        """Step 2 of the VllmBackend migration: recover piecewise cudagraphs on the
+        stock path. For STOCK_TORCH_COMPILE + use_inductor_graph_partition, tell
+        Inductor to partition at the attention ops (via the scoped compile options)
+        and route each partition's capture through vLLM's external PIECEWISE cudagraph
+        wrapper; the whole decode forward is still captured by the FULL wrapper
+        (FULL_AND_PIECEWISE). The partition wrapper is installed persistently because
+        stock torch.compile is lazy (the real compile runs on the first forward).
+        """
+        cc = self.compilation_config
+        if not (
+            cc.cudagraph_mode.has_piecewise_cudagraphs()
+            and cc.use_inductor_graph_partition
+        ):
+            return options
+        if backend != "inductor":
+            raise ValueError(
+                "STOCK_TORCH_COMPILE piecewise cudagraphs require backend='inductor' "
+                f"(Inductor graph partition), but got backend={backend!r}."
+            )
+        from vllm.compilation.decorators import install_cudagraph_partition_wrapper
+
+        options = dict(options or {})
+        options["graph_partition"] = True
+        options["custom_should_partition_ops"] = list(cc.splitting_ops or [])
+        install_cudagraph_partition_wrapper(self.vllm_config)
+        return options
+
+    def _stock_inductor_options(self) -> dict[str, Any] | None:
+        """torch.compile options for STOCK_TORCH_COMPILE mode.
+
+        When the model has active fusion passes (quantized / TP-collective models),
+        register vLLM's PostGradPassManager (rms+quant / act+quant / allreduce+rmsnorm
+        / sequence-parallel fusions) and the pre-grad vLLM-IR functionalization pass
+        via Inductor's standard custom-pass hooks, so they keep their fusions without
+        the custom VllmBackend. For dense bf16 (no active fusion) we leave the stock
+        compile untouched: registering the pass manager there only adds its default
+        IR/cleanup passes, which both buy nothing and measurably regress perf.
+        """
+        import torch._inductor.config as inductor_config
+
+        from vllm.compilation.passes.inductor_pass import set_pass_context
+        from vllm.compilation.passes.ir.inplace_functionalization import (
+            VllmIRInplaceFunctionalizationPass,
+        )
+        from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
+        from vllm.config.utils import Range
+        from vllm.utils.import_utils import resolve_obj_by_qualname
+
+        pass_manager = resolve_obj_by_qualname(
+            current_platform.get_pass_manager_cls()
+        )()
+        pass_manager.configure(self.vllm_config)
+
+        # Gate registration on whether configure() produced a real fusion/IR pass,
+        # not a hand-maintained flag list that drifts from PostGradPassManager (the
+        # old list had already dropped enable_qk_norm_rope_fusion). NoOp elimination
+        # is always registered (eliminate_noops defaults True) but on its own buys
+        # nothing for dense bf16 and registering the manager there measurably
+        # regresses perf, so it does not count as active fusion.
+        has_fusion = any(
+            not isinstance(p, NoOpEliminationPass) for p in pass_manager.passes
+        )
+        if not has_fusion:
+            return None
+
+        # The vLLM passes (pre/post-grad) and PostGradPassManager.uuid() read
+        # get_pass_context(); torch.compile here is lazy (the real Inductor compile +
+        # passes run during a later forward) and STOCK mode is engine-global, so we
+        # install a persistent full-range pass context instead of scoping a context
+        # manager. The range is intentionally FULL: stock is a single lazy compile
+        # covering every shape (no per-range piecewise recompile), so a finite range
+        # could only drop range-gated passes, never grant specialization.
+        set_pass_context(Range(start=0, end=2**31 - 1))
+
+        options = dict(self.compilation_config.inductor_compile_config)
+        pre_grad_key = "pre_grad_custom_pass"
+        options[pre_grad_key] = VllmIRInplaceFunctionalizationPass(self.vllm_config)
+        options["_cache_config_ignore_prefix"] = (
+            inductor_config._cache_config_ignore_prefix + [pre_grad_key]
+        )
+        options[current_platform.pass_key] = pass_manager
+        return options
 
     def _setup_eagle3_aux_hidden_state_outputs(self) -> None:
         if not self.use_aux_hidden_state_outputs:

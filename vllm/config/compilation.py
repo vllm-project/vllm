@@ -430,7 +430,8 @@ class CompilationConfig:
     model.
 
     - None: If None, we will select the default compilation mode.
-      For V1 engine this is 3.
+      For V1 engine this is 3 (VLLM_COMPILE) for most architectures; architectures
+      declaring SupportsStockCompile default to 1 (STOCK_TORCH_COMPILE).
     - 0: NONE: No torch.compile compilation is applied, model runs in fully
          eager pytorch mode. The model runs as-is.
     - 1: STOCK_TORCH_COMPILE: The standard `torch.compile` compilation pipeline.
@@ -1100,7 +1101,25 @@ class CompilationConfig:
         # To compatible with OOT hardware plugin platform (for example vllm-ascend)
         # which currently only supports sequence parallelism in eager mode.
         if self.mode != CompilationMode.VLLM_COMPILE:
-            if self.splitting_ops is None:
+            # STOCK_TORCH_COMPILE recovers piecewise cudagraphs through Inductor graph
+            # partition (step 2 of the VllmBackend migration): Inductor partitions at
+            # the attention ops and routes each partition's capture through the
+            # external wrapper, so splitting_ops must name the attention ops exactly as
+            # the VLLM_COMPILE partition path does. Without graph partition the stock
+            # path is whole-graph (FULL_DECODE_ONLY / no piecewise), so splitting_ops
+            # stays empty.
+            if (
+                self.mode == CompilationMode.STOCK_TORCH_COMPILE
+                and self.use_inductor_graph_partition
+            ):
+                # Partition on -> always partition at the attention ops, populating
+                # even when the user passed an explicit empty list: an empty
+                # splitting_ops would otherwise leave FULL_AND_PIECEWISE with zero
+                # piecewise partitions (no piecewise capture, attention wrongly inside
+                # the cudagraph) and emit no warning.
+                if not self.splitting_ops:
+                    self.splitting_ops = list(self._attention_ops)
+            elif self.splitting_ops is None:
                 self.splitting_ops = []
             return
 
