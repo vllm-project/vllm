@@ -5,8 +5,6 @@
 import torch
 from compressed_tensors.quantization import (
     QuantizationArgs,
-    QuantizationStrategy,
-    QuantizationType,
 )
 
 from vllm.logger import init_logger
@@ -64,31 +62,6 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
             weight_quant.group_size if (weight_quant.group_size is not None) else -1
         )
 
-        # check weight quantization strategy and type
-        supported_weight_strategy = weight_quant.strategy in (
-            QuantizationStrategy.GROUP,
-            QuantizationStrategy.CHANNEL,
-        )
-        if not (
-            weight_quant.num_bits == 4
-            and weight_quant.type == QuantizationType.INT
-            and supported_weight_strategy
-            and not weight_quant.dynamic
-            and weight_quant.symmetric
-        ):
-            raise ValueError(
-                "W4A8-int MoE needs static symmetric INT4 channel/group weights."
-            )
-        # check weight quantization strategy and type
-        if not (
-            input_quant.num_bits == 8
-            and input_quant.type == QuantizationType.INT
-            and input_quant.strategy == QuantizationStrategy.TOKEN
-            and input_quant.dynamic
-        ):
-            raise ValueError(
-                "W4A8-int MoE needs dynamic per-token INT8 activation quantization."
-            )
         # make sure group size is valid
         if self.group_size != -1 and (
             moe.hidden_dim % self.group_size != 0

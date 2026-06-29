@@ -59,7 +59,7 @@ torch::Tensor dynamic_4bit_int_moe_cpu(
     x_c = x_c.to(at::kFloat);
   }
   auto ids_c = topk_ids.contiguous();
-  auto gates_c = topk_weights.to(at::kFloat).contiguous();
+  auto gates_c = topk_weights.to(x_c.scalar_type()).contiguous();
 
   // bucketing tokens -> experts
   c10::SmallVector<int64_t, 64> counts(
@@ -75,33 +75,40 @@ torch::Tensor dynamic_4bit_int_moe_cpu(
   c10::SmallVector<int64_t, 65> offsets(E + 1, 0);  // ( E +1 )
   for (int64_t e = 0; e < E; ++e) offsets[e + 1] = offsets[e] + counts[e];
 
+  // expert_tokens = [tokens indices for expert 0, ...]
+  // expert_gates = [router weights for tokens assigned to expert 0, ...]
   auto expert_tokens = at::empty({offsets[E]}, ids_c.options());
   auto expert_gates = at::empty({offsets[E]}, gates_c.options());
   {
     c10::SmallVector<int64_t, 64> cursor(E, 0);
-    const auto* ids_ptr = ids_c.data_ptr<int64_t>();
-    const auto* gts_ptr = gates_c.data_ptr<float>();
-    auto* tok_ptr = expert_tokens.data_ptr<int64_t>();
-    auto* gate_ptr = expert_gates.data_ptr<float>();
+    AT_DISPATCH_FLOATING_TYPES_AND2(
+        at::ScalarType::BFloat16, at::ScalarType::Half, gates_c.scalar_type(),
+        "bucket_expert_tokens_and_gates", [&] {
+          const auto* ids_ptr = ids_c.data_ptr<int64_t>();
+          const auto* gts_ptr = gates_c.data_ptr<scalar_t>();
+          auto* tok_ptr = expert_tokens.data_ptr<int64_t>();
+          auto* gate_ptr = expert_gates.data_ptr<scalar_t>();
 
-    for (int64_t t = 0; t < T; ++t) {
-      const int64_t base = t * K;
-      for (int64_t k = 0; k < K; ++k) {
-        const int64_t idx = base + k;
-        const int64_t e = ids_ptr[idx];
-        const int64_t p = offsets[e] + (cursor[e]++);
-        tok_ptr[p] = t;
-        gate_ptr[p] = gts_ptr[idx];
-      }
-    }
+          for (int64_t t = 0; t < T; ++t) {
+            const int64_t base = t * K;
+            for (int64_t k = 0; k < K; ++k) {
+              const int64_t idx = base + k;
+              const int64_t e = ids_ptr[idx];
+              const int64_t p = offsets[e] + (cursor[e]++);
+              tok_ptr[p] = t;
+              gate_ptr[p] = gts_ptr[idx];
+            }
+          }
+        });
   }
 
   const int64_t g_eff_13 = (group_size != -1) ? group_size : hidden_size;
   const int64_t g_eff_2 = (group_size != -1) ? group_size : intermediate_size;
 
+  // X_all [num_tokens * K, hidden_size]
   auto X_all = x_c.index_select(/*dim=*/0, expert_tokens);
   if (apply_router_weight_on_input) {
-    X_all = X_all.mul(expert_gates.unsqueeze(1).to(X_all.scalar_type()));
+    X_all = X_all.mul(expert_gates.unsqueeze(1));
   }
   auto Y_all = at::empty({offsets[E], hidden_size}, x_c.options());
 
@@ -151,7 +158,7 @@ torch::Tensor dynamic_4bit_int_moe_cpu(
   });
 
   if (!apply_router_weight_on_input) {
-    Y_all = Y_all.mul(expert_gates.unsqueeze(1).to(Y_all.scalar_type()));
+    Y_all = Y_all.mul(expert_gates.unsqueeze(1));
   }
   if (Y_all.scalar_type() != output_dtype) {
     Y_all = Y_all.to(output_dtype);
