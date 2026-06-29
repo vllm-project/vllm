@@ -16,6 +16,8 @@ from cachetools import LRUCache
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
+from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -42,6 +44,111 @@ logger = init_logger(__name__)
 _T = TypeVar("_T")
 
 CACHE = None
+_BITMASK_BIT_OFFSETS: dict[tuple[str, int | None], torch.Tensor] = {}
+
+
+def _get_bitmask_bit_offsets(device: torch.device) -> torch.Tensor:
+    device = torch.device(device)
+    key = (device.type, device.index)
+    bit_offsets = _BITMASK_BIT_OFFSETS.get(key)
+    if bit_offsets is None:
+        bit_offsets = torch.arange(32, dtype=torch.int32, device=device)
+        _BITMASK_BIT_OFFSETS[key] = bit_offsets
+    return bit_offsets
+
+
+def _apply_grammar_bitmask_torch(
+    logits: torch.Tensor,
+    grammar_bitmask: torch.Tensor,
+    out_indices: list[int],
+    skip_out_indices: bool,
+) -> None:
+    """Apply packed xgrammar bitmasks with PyTorch tensor ops."""
+    if skip_out_indices:
+        selected_logits = logits
+        selected_bitmask = grammar_bitmask
+        index_tensor = None
+    else:
+        if not out_indices:
+            return
+        index_tensor = torch.tensor(out_indices, dtype=torch.long, device=logits.device)
+        selected_logits = logits.index_select(0, index_tensor)
+        selected_bitmask = grammar_bitmask.index_select(0, index_tensor)
+
+    bit_offsets = _get_bitmask_bit_offsets(logits.device)
+    disallowed = (((selected_bitmask[..., None] >> bit_offsets) & 1) == 0).reshape(
+        selected_bitmask.shape[0], -1
+    )
+    selected_logits.masked_fill_(disallowed[:, : logits.shape[-1]], -float("inf"))
+
+    if index_tensor is not None:
+        logits.index_copy_(0, index_tensor, selected_logits)
+
+
+@triton.jit
+def _apply_grammar_bitmask_kernel(
+    logits_ptr,
+    bitmask_ptr,
+    indices_ptr,
+    vocab_size,
+    logits_stride,
+    bitmask_stride,
+    HAS_INDICES: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+) -> None:
+    block_id = tl.program_id(0)
+    row_id = tl.program_id(1)
+    logits_row = row_id
+    if HAS_INDICES:
+        logits_row = tl.load(indices_ptr + row_id)
+
+    offsets = block_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    bitmask_offsets = block_id * (BLOCK_SIZE // 32) + tl.arange(0, BLOCK_SIZE // 32)
+    packed_bitmask = tl.load(
+        bitmask_ptr + row_id * bitmask_stride + bitmask_offsets,
+        mask=bitmask_offsets < bitmask_stride,
+        other=0,
+    )
+    disallowed = ((packed_bitmask[:, None] >> (tl.arange(0, 32)[None, :])) & 1) == 0
+    disallowed = disallowed.reshape(BLOCK_SIZE)
+
+    tl.store(
+        logits_ptr + logits_row * logits_stride + offsets,
+        -float("inf"),
+        mask=(offsets < vocab_size) & disallowed,
+    )
+
+
+def _apply_grammar_bitmask_triton(
+    logits: torch.Tensor,
+    grammar_bitmask: torch.Tensor,
+    logits_indices: torch.Tensor | None = None,
+) -> None:
+    vocab_size = min(logits.shape[-1], grammar_bitmask.shape[-1] * 32)
+    num_rows = grammar_bitmask.shape[0]
+    if num_rows == 0:
+        return
+
+    block_size = 4096
+    props = torch.cuda.get_device_properties(logits.device)
+    arch = getattr(props, "gcnArchName", "")
+    # AMD CDNA wavefronts use 64 lanes. Keep this in sync with xgrammar's
+    # Triton bitmask kernel configuration.
+    warp_size = 64 if torch.version.hip is not None and "gfx1" not in arch else 32
+
+    grid = (triton.cdiv(vocab_size, block_size), num_rows)
+    _apply_grammar_bitmask_kernel[grid](
+        logits,
+        grammar_bitmask,
+        logits_indices,
+        vocab_size,
+        logits.stride(0),
+        grammar_bitmask.stride(0),
+        logits_indices is not None,
+        block_size,
+        num_warps=block_size // warp_size // (16 // logits.element_size()),
+        num_stages=3,
+    )
 
 
 def compile_regex_with_timeout(fn: Callable[[str], _T], pattern: str) -> _T:
@@ -119,7 +226,52 @@ def apply_grammar_bitmask(
         if req_id in struct_out_req_ids:
             struct_out_req_batch_indices[req_id] = logit_index
 
-    out_indices = []
+    out_indices: list[int] = []
+    bitmask_indices: list[int] = []
+
+    cumulative_index = 0
+    for req_id in grammar_output.structured_output_request_ids:
+        num_spec_tokens = len(spec_tokens.get(req_id, ()))
+        if (logit_idx := struct_out_req_batch_indices.get(req_id)) is not None:
+            for i in range(1 + num_spec_tokens):
+                bitmask_index = logit_idx + i
+                out_indices.append(bitmask_index)
+                bitmask_indices.append(cumulative_index + i)
+        cumulative_index += 1 + num_spec_tokens
+
+    if not out_indices:
+        return
+
+    if not logits.is_cpu and current_platform.is_rocm() and HAS_TRITON:
+        # Keep the ROCm path compact: one bitmask row per row that will be
+        # masked, plus an optional logits-row mapping for sparse batches.
+        paired_indices = sorted(zip(out_indices, bitmask_indices))
+        out_indices = [logit_idx for logit_idx, _ in paired_indices]
+        bitmask_indices = [bitmask_idx for _, bitmask_idx in paired_indices]
+
+        compact_bitmask_tensor = torch.empty(
+            (len(bitmask_indices), grammar_bitmask.shape[1]),
+            dtype=torch.from_numpy(grammar_bitmask[:0]).dtype,
+            pin_memory=PIN_MEMORY,
+        )
+        compact_bitmask = compact_bitmask_tensor.numpy()
+        for row, bitmask_idx in enumerate(bitmask_indices):
+            compact_bitmask[row] = grammar_bitmask[bitmask_idx]
+
+        grammar_bitmask_tensor = compact_bitmask_tensor.to(
+            logits.device, non_blocking=True
+        )
+        logits_indices = None
+        if out_indices != list(range(logits.shape[0])):
+            logits_indices = async_tensor_h2d(
+                out_indices, dtype=torch.int32, device=logits.device
+            )
+        _apply_grammar_bitmask_triton(
+            logits,
+            grammar_bitmask_tensor,
+            logits_indices,
+        )
+        return
 
     # Reorder the bitmask to match the order of the requests in the batch.
     sorted_bitmask_tensor = torch.full(
@@ -129,15 +281,8 @@ def apply_grammar_bitmask(
         pin_memory=PIN_MEMORY,
     )
     sorted_bitmask = sorted_bitmask_tensor.numpy()
-    cumulative_index = 0
-    for req_id in grammar_output.structured_output_request_ids:
-        num_spec_tokens = len(spec_tokens.get(req_id, ()))
-        if (logit_idx := struct_out_req_batch_indices.get(req_id)) is not None:
-            for i in range(1 + num_spec_tokens):
-                bitmask_index = logit_idx + i
-                sorted_bitmask[bitmask_index] = grammar_bitmask[cumulative_index + i]
-                out_indices.append(bitmask_index)
-        cumulative_index += 1 + num_spec_tokens
+    for logit_idx, bitmask_idx in zip(out_indices, bitmask_indices):
+        sorted_bitmask[logit_idx] = grammar_bitmask[bitmask_idx]
 
     # Copy async to device.
     grammar_bitmask = sorted_bitmask_tensor.to(logits.device, non_blocking=True)
@@ -148,6 +293,18 @@ def apply_grammar_bitmask(
     skip_out_indices = len(out_indices) == logits.shape[0]
 
     if not logits.is_cpu:
+        if current_platform.is_rocm():
+            # xgrammar auto-dispatches HIP tensors to its Triton bitmask
+            # kernel because PyTorch reports them as cuda tensors. Recent
+            # ROCm CI failures in structured-output generation point at that
+            # kernel being JITed during inference, so keep xgrammar for
+            # grammar compilation/matching. If Triton is unavailable, fall
+            # back to PyTorch with the full reordered bitmask.
+            _apply_grammar_bitmask_torch(
+                logits, grammar_bitmask, out_indices, skip_out_indices
+            )
+            return
+
         index_tensor = None
         if not skip_out_indices:
             # xgrammar expects a python list of indices but it will actually work with
