@@ -948,15 +948,8 @@ class MooncakeConnectorWorker:
         # and draft model may use different attention backends with different
         # physical block sizes. Pick the common (smallest) block size so that
         # KV-cache registration and transfer work correctly for both models.
-        #
-        # Some attention backends (e.g. MLA / DSA-indexer caches on ROCm) lay
-        # the KV cache out at a finer kernel-block granularity than the logical
-        # (cache_config) block size -- in the extreme the kernel block size is
-        # 1, so the cache tensor's leading dim is in per-token units. The
-        # scheduler still addresses KV by *logical* block id, so remember how
-        # many physical (kernel) blocks pack into one logical block and rescale
-        # num_blocks / block_len accordingly in register_kv_caches(). This
-        # mirrors NixlConnectorWorker._physical_blocks_per_logical_kv_block.
+        # Track how many physical (kernel) blocks pack into one logical block so
+        # register_kv_caches() can rescale; mirrors NixlConnectorWorker.
         self._physical_blocks_per_logical_kv_block = 1
         backends = get_current_attn_backends(self.vllm_config)
         kernel_block_size = select_common_block_size(self.block_size, backends)
@@ -1503,15 +1496,8 @@ class MooncakeConnectorWorker:
 
         split_k_and_v = self.transfer_topo.split_k_and_v
 
-        # Folding `ratio` physical blocks into one logical block (below) assumes
-        # a whole logical block is transferred as a single contiguous unit. That
-        # holds for the MLA / DSA-indexer per-token layouts where ratio > 1
-        # actually occurs (KV replicated across TP, no in-block K/V split). It
-        # does NOT hold for a blocks-first, K/V-interleaved layout: there the
-        # K/V split (block_len // 2) and the heterogeneous-TP head offsets are
-        # derived from block_len, so folding would slice them incorrectly. Fail
-        # closed on that (currently unreached) combination rather than silently
-        # corrupting KV addressing.
+        # Block folding (below) assumes a logical block is one contiguous unit,
+        # which is false for K/V-split layouts. Fail closed on that combination.
         assert (
             self._physical_blocks_per_logical_kv_block == 1
             or not self.transfer_topo.virtually_split_kv_in_blocks
@@ -1539,12 +1525,9 @@ class MooncakeConnectorWorker:
 
                 seen_base_addresses.append(base_addr)
 
-                # The cache tensor's leading dim is in physical (kernel) block
-                # units, while the scheduler addresses KV by logical block id.
-                # When they differ (e.g. MLA / DSA-indexer per-token layout,
-                # ratio > 1) collapse `ratio` physical blocks into one logical
-                # block so `base + logical_block_id * block_len` lands on real
-                # data. ratio == 1 (the common case) is a byte-for-byte no-op.
+                # Collapse `ratio` physical blocks into one logical block so the
+                # leading dim matches the scheduler's logical block ids
+                # (ratio == 1 is a no-op).
                 ratio = self._physical_blocks_per_logical_kv_block
                 assert cache.shape[0] % ratio == 0, (
                     "kv cache leading dim must be a multiple of "
@@ -1558,12 +1541,9 @@ class MooncakeConnectorWorker:
                     "All kv cache tensors must have the same number of blocks"
                 )
 
-                # Use stride-based block length so RDMA reaches the last
-                # block's padding (e.g. DeepseekV4 MLA alignment). stride(0)
-                # reflects the actual byte distance between consecutive
-                # blocks in GPU memory, which matches or exceeds the
-                # shape-based size. Scale by `ratio` so one descriptor spans a
-                # whole logical block.
+                # Stride-based length so RDMA reaches the last block's padding
+                # (e.g. DeepseekV4 MLA alignment); scale by `ratio` so one
+                # descriptor spans a whole logical block.
                 block_len = cache.stride(0) * cache.element_size() * ratio
 
                 self.block_len_per_layer.append(block_len)
