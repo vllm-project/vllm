@@ -928,10 +928,15 @@ class MooncakeConnectorWorker:
         protocol = kv_transfer_config.kv_connector_extra_config.get(  # type: ignore[union-attr]
             "mooncake_protocol", "rdma"
         )
+        device_name = kv_transfer_config.kv_connector_extra_config.get(  # type: ignore[union-attr]
+            "device_name", ""
+        )
         logger.info(
             "The Mooncake Transfer Engine is using %s as its protocol.", protocol
         )
-        ret_value = self.engine.initialize(self.hostname, "P2PHANDSHAKE", protocol, "")
+        ret_value = self.engine.initialize(
+            self.hostname, "P2PHANDSHAKE", protocol, device_name
+        )
         if ret_value != 0:
             raise RuntimeError("Mooncake Transfer Engine initialization failed.")
 
@@ -1653,6 +1658,7 @@ class MooncakeConnectorWorker:
         kv_data_ptrs: list[int] = []
         kv_data_lens: list[int] = []
         region_base_addresses: list[int] = []
+        seen_storage_ptrs: set[int] = set()
         self.block_len_per_layer = []
         self.kv_block_len_per_layer = []
         self.registered_layer_names = []
@@ -1685,16 +1691,17 @@ class MooncakeConnectorWorker:
             for cache in cache_list:
                 self._log_debug_cache_registration(layer_name, cache)
                 base_addr = cache.data_ptr()
+                block_len = cache.stride(0) * cache.element_size()
                 region_base_addresses.append(base_addr)
 
-                kv_block_len = layer_spec.page_size_bytes
                 if isinstance(layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)):
-                    # MLA cache entries are transferred as page-sized regions.
-                    block_len = kv_block_len
+                    kv_block_len = layer_spec.page_size_bytes
+                elif self.transfer_topo.virtually_split_kv_in_blocks and not isinstance(
+                    layer_spec, MambaSpec
+                ):
+                    kv_block_len = block_len // 2
                 else:
-                    # Non-MLA tensors use the real memory stride between blocks.
-                    block_len = cache.stride(0) * cache.element_size()
-                region_len = cache.shape[0] * block_len
+                    kv_block_len = block_len
                 self.block_len_per_layer.append(block_len)
                 self.kv_block_len_per_layer.append(kv_block_len)
                 self.registered_layer_names.append(layer_name)
@@ -1702,15 +1709,12 @@ class MooncakeConnectorWorker:
                 self.registered_group_indices.append(
                     self._layer_group_indices[layer_name]
                 )
-                if base_addr in kv_data_ptrs:
-                    registered_index = kv_data_ptrs.index(base_addr)
-                    kv_data_lens[registered_index] = max(
-                        kv_data_lens[registered_index],
-                        region_len,
-                    )
-                else:
-                    kv_data_ptrs.append(base_addr)
-                    kv_data_lens.append(region_len)
+                storage = cache.untyped_storage()
+                storage_addr = storage.data_ptr()
+                if storage_addr not in seen_storage_ptrs:
+                    seen_storage_ptrs.add(storage_addr)
+                    kv_data_ptrs.append(storage_addr)
+                    kv_data_lens.append(storage.nbytes())
 
         self.kv_caches_base_addr = region_base_addresses
         self.seen_base_addresses = kv_data_ptrs
