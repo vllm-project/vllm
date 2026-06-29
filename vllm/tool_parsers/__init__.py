@@ -99,8 +99,8 @@ _TOOL_PARSERS_TO_REGISTER = {
         "Lfm2ToolParser",
     ),
     "kimi_k2": (
-        "kimi_k2_tool_parser",
-        "KimiK2ToolParser",
+        "kimi_k2_engine_tool_parser",
+        "KimiK2EngineToolParser",
     ),
     "llama3_json": (
         "llama_tool_parser",
