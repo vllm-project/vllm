@@ -684,12 +684,13 @@ class CompressedTensorsConfig(QuantizationConfig):
         return is_intN_weight and (is_static_int8_in and is_static_int8_out)
 
     @staticmethod
-    def _is_wNa8_int(
+    def _is_wNaM_int(
         weight_quant: QuantizationArgs,
         input_quant: QuantizationArgs | None,
         format: str | None,
     ) -> bool:
-        """Weight N-bit INT with INT8 activation quant via Humming kernel."""
+        """Weight N-bit INT with symmetric dynamic INT activation quant
+        via Humming kernel."""
         if input_quant is None:
             return False
         is_pack_format = format == CompressionFormat.pack_quantized.value
@@ -700,9 +701,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         is_int_N_weight = (
             weight_quant.type == QuantizationType.INT and not weight_quant.dynamic
         )
-        is_int8_input = (
-            input_quant.type == QuantizationType.INT and input_quant.num_bits == 8
-        )
+        is_int_input = input_quant.type == QuantizationType.INT
         is_symmetric_input = input_quant.symmetric
         is_dynamic_input = input_quant.dynamic
         is_per_token_or_group_input = input_quant.strategy in (
@@ -713,43 +712,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             is_int_N_weight
             and is_channel_group
             and is_pack_format
-            and is_int8_input
-            and is_symmetric_input
-            and is_dynamic_input
-            and is_per_token_or_group_input
-        )
-
-    @staticmethod
-    def _is_wNa4_int(
-        weight_quant: QuantizationArgs,
-        input_quant: QuantizationArgs | None,
-        format: str | None,
-    ) -> bool:
-        """Weight N-bit INT with INT4 activation quant via Humming kernel."""
-        if input_quant is None:
-            return False
-        is_pack_format = format == CompressionFormat.pack_quantized.value
-        is_channel_group = weight_quant.strategy in (
-            QuantizationStrategy.CHANNEL.value,
-            QuantizationStrategy.GROUP.value,
-        )
-        is_int_N_weight = (
-            weight_quant.type == QuantizationType.INT and not weight_quant.dynamic
-        )
-        is_int4_input = (
-            input_quant.type == QuantizationType.INT and input_quant.num_bits == 4
-        )
-        is_symmetric_input = input_quant.symmetric
-        is_dynamic_input = input_quant.dynamic
-        is_per_token_or_group_input = input_quant.strategy in (
-            QuantizationStrategy.TOKEN.value,
-            QuantizationStrategy.GROUP.value,
-        )
-        return (
-            is_int_N_weight
-            and is_channel_group
-            and is_pack_format
-            and is_int4_input
+            and is_int_input
             and is_symmetric_input
             and is_dynamic_input
             and is_per_token_or_group_input
@@ -806,8 +769,8 @@ class CompressedTensorsConfig(QuantizationConfig):
                 quant_format=format,
             )
 
-        if self._is_wNa8_int(weight_quant, input_quant, format):
-            return CompressedTensorsWNA8Int(
+        if self._is_wNaM_int(weight_quant, input_quant, format):
+            wNaM_int_kwargs = dict(
                 num_bits=weight_quant.num_bits,
                 strategy=weight_quant.strategy,
                 group_size=weight_quant.group_size,
@@ -816,17 +779,10 @@ class CompressedTensorsConfig(QuantizationConfig):
                 layer_name=layer_name,
                 quant_format=format,
             )
-
-        if self._is_wNa4_int(weight_quant, input_quant, format):
-            return CompressedTensorsWNA4Int(
-                num_bits=weight_quant.num_bits,
-                strategy=weight_quant.strategy,
-                group_size=weight_quant.group_size,
-                input_quant=input_quant,
-                output_quant=output_quant,
-                layer_name=layer_name,
-                quant_format=format,
-            )
+            if input_quant.num_bits == 8:
+                return CompressedTensorsWNA8Int(**wNaM_int_kwargs)
+            if input_quant.num_bits == 4:
+                return CompressedTensorsWNA4Int(**wNaM_int_kwargs)
 
         if self._is_wNa16_group_channel(weight_quant, input_quant) and (
             format == CompressionFormat.pack_quantized.value
