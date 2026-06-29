@@ -33,7 +33,6 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     AudioItem,
@@ -710,6 +709,15 @@ class MossAudioEncoder(nn.Module):
 
 
 class GatedMLP(nn.Module):
+    # up_proj before gate_proj: the merged "gate_up_proj" name contains
+    # "up_proj", so the gate_proj rename must run last to avoid re-matching.
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            "up_proj": ("gate_up_proj", 1),
+            "gate_proj": ("gate_up_proj", 0),
+        }
+    )
+
     def __init__(
         self,
         input_size: int,
@@ -743,35 +751,8 @@ class GatedMLP(nn.Module):
         return x
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            target_name = name
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                components = target_name.split(".")
-                if weight_name not in components:
-                    continue
-
-                target_name = ".".join(
-                    param_name if component == weight_name else component
-                    for component in components
-                )
-                param = params_dict[target_name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                param = params_dict[target_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-
-            loaded_params.add(target_name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 @support_torch_compile(
