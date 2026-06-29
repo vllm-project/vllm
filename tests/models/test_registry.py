@@ -16,11 +16,11 @@ from vllm.model_executor.models.adapters import (
     as_seq_cls_model,
 )
 from vllm.model_executor.models.registry import (
-    _LazyRegisteredModel,
     _MULTIMODAL_MODELS,
     _SPECULATIVE_DECODING_MODELS,
     _TEXT_GENERATION_MODELS,
     ModelRegistry,
+    _LazyRegisteredModel,
 )
 from vllm.platforms import current_platform
 
