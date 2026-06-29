@@ -194,7 +194,7 @@ run_tests_for_model() {
 
   # Start the proxy server
   echo "Starting proxy server on port 8192"
-  python3 "${GIT_ROOT}/tests/v1/kv_connector/mooncake_integration/toy_proxy_server.py" \
+  python3 "${GIT_ROOT}/examples/disaggregated/mooncake_connector/mooncake_connector_proxy.py" \
     --port 8192 "${PROXY_ARGS[@]}" &
 
   # Wait for the proxy to start

@@ -50,3 +50,27 @@ for package_name in ("nixl", "nixl-cu12", "nixl-cu13"):
         version = "not installed"
     print(f"{package_name}: {version}")
 PY
+
+# Env diagnostics + import canary. Surfaces the real reason mooncake can't load
+# (instead of the silent "Mooncake is not available" at engine startup) and, on
+# failure, runs ldd on the compiled extension to name the unresolved library.
+echo "=== KV connector env diagnostics ==="
+echo "python: $(command -v python3)"
+python3 -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda)"
+echo "--- relevant packages ---"
+uv pip list 2>/dev/null | grep -iE 'mooncake|nixl|cupy|lmcache' || true
+echo "--- libcudart on disk ---"
+ls -l /usr/local/cuda/lib64/libcudart.so* 2>/dev/null || true
+ldconfig -p 2>/dev/null | grep -i libcudart || true
+
+if ! python3 -c "import mooncake.engine; print('mooncake.engine import OK')"; then
+    echo "=== mooncake import failed; ldd on the package's shared objects ==="
+    MOONCAKE_DIR=$(python3 -c "import importlib.util, os.path; \
+spec = importlib.util.find_spec('mooncake'); \
+print(os.path.dirname(spec.origin) if spec and spec.origin else '')" 2>/dev/null || true)
+    if [ -n "${MOONCAKE_DIR}" ]; then
+        echo "package dir: ${MOONCAKE_DIR}"
+        find "${MOONCAKE_DIR}" -name '*.so' -print -exec ldd {} \; || true
+    fi
+    exit 1
+fi
