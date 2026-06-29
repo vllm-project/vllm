@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
-from typing import TYPE_CHECKING, Any, Final, Literal, get_args
+from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import Field, SkipValidation, field_validator, model_validator
 from typing_extensions import Self
@@ -69,7 +69,6 @@ SpeculativeMethod = Literal[
 ]
 RejectionSampleMethod = Literal["standard", "synthetic", "block"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]
-MAX_RELAX_TOP_K: Final = 32
 
 
 @config
@@ -139,11 +138,6 @@ class SpeculativeConfig:
     non-tree speculation."""
     relaxed_thinking: bool = False
     """Enable relaxed speculative acceptance inside reasoning spans."""
-    relax_ratio: float = 1.0
-    """Accept a thinking draft token when its target probability is at least
-    this ratio of the target argmax probability."""
-    relax_top_k: int = 1
-    """Only consider this many target candidates for relaxed acceptance."""
 
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)
@@ -1062,28 +1056,10 @@ class SpeculativeConfig:
                 f"than zero ({self.num_speculative_tokens})."
             )
 
-        if self.relaxed_thinking:
-            if not (0 < self.relax_ratio <= 1):
-                raise ValueError(
-                    "relax_ratio must be in (0, 1] when relaxed_thinking is "
-                    f"enabled, got {self.relax_ratio}."
-                )
-            if self.relax_top_k < 1:
-                raise ValueError(
-                    "relax_top_k must be >= 1 when relaxed_thinking is "
-                    f"enabled, got {self.relax_top_k}."
-                )
-            if self.relax_top_k > MAX_RELAX_TOP_K:
-                raise ValueError(
-                    "relax_top_k must be <= "
-                    f"{MAX_RELAX_TOP_K} when relaxed_thinking is enabled, "
-                    f"got {self.relax_top_k}."
-                )
-            if self.rejection_sample_method == "synthetic":
-                raise ValueError(
-                    "relaxed_thinking is only supported with standard "
-                    "rejection sampling."
-                )
+        if self.relaxed_thinking and self.rejection_sample_method == "synthetic":
+            raise ValueError(
+                "relaxed_thinking is only supported with standard rejection sampling."
+            )
 
         if self.rejection_sample_method == "synthetic":
             # Consolidate to per-position rates

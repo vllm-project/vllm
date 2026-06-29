@@ -6,7 +6,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import torch
 import torch.nn as nn
@@ -34,6 +34,8 @@ GREEDY_TEMPERATURE: tl.constexpr = 0
 # Maximum number of speculative draft tokens allowed per request in a single
 # step. This value is chosen to be large enough to handle typical use cases.
 MAX_SPEC_LEN = 128
+RELAXED_THINKING_RATIO: Final = 0.5
+RELAXED_THINKING_TOP_K: Final = 3
 
 
 class RejectionSampler(nn.Module):
@@ -75,12 +77,8 @@ class RejectionSampler(nn.Module):
             spec_config is not None
             and getattr(spec_config, "relaxed_thinking", False) is True
         )
-        self.relax_ratio = (
-            getattr(spec_config, "relax_ratio", 1.0) if self.relaxed_thinking else 1.0
-        )
-        self.relax_top_k = (
-            getattr(spec_config, "relax_top_k", 1) if self.relaxed_thinking else 1
-        )
+        self.relax_ratio = RELAXED_THINKING_RATIO
+        self.relax_top_k = RELAXED_THINKING_TOP_K
 
         self.synthetic_conditional_rates: torch.Tensor | None = None
         if (
@@ -430,8 +428,8 @@ def rejection_sample(
     synthetic_mode: bool = False,
     synthetic_conditional_rates: torch.Tensor | None = None,
     relaxed_thinking: bool = False,
-    relax_ratio: float = 1.0,
-    relax_top_k: int = 1,
+    relax_ratio: float = RELAXED_THINKING_RATIO,
+    relax_top_k: int = RELAXED_THINKING_TOP_K,
     thinking_states: torch.Tensor | None = None,
     think_start_token_id: int | None = None,
     think_end_token_id: int | None = None,

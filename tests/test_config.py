@@ -30,7 +30,6 @@ from vllm.config import (
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
-from vllm.config.speculative import MAX_RELAX_TOP_K
 from vllm.config.utils import get_field
 from vllm.config.vllm import (
     OPTIMIZATION_LEVEL_TO_CONFIG,
@@ -317,40 +316,7 @@ def _relaxed_thinking_spec_config() -> SpeculativeConfig:
         method="ngram_gpu",
         num_speculative_tokens=1,
         relaxed_thinking=True,
-        relax_ratio=0.7,
-        relax_top_k=3,
     )
-
-
-@pytest.mark.parametrize("relax_ratio", [0, -0.1, 1.1])
-def test_relaxed_thinking_rejects_invalid_ratio(relax_ratio):
-    with pytest.raises(ValueError, match="relax_ratio"):
-        SpeculativeConfig(
-            method="ngram_gpu",
-            num_speculative_tokens=1,
-            relaxed_thinking=True,
-            relax_ratio=relax_ratio,
-        )
-
-
-def test_relaxed_thinking_rejects_invalid_top_k():
-    with pytest.raises(ValueError, match="relax_top_k"):
-        SpeculativeConfig(
-            method="ngram_gpu",
-            num_speculative_tokens=1,
-            relaxed_thinking=True,
-            relax_top_k=0,
-        )
-
-
-def test_relaxed_thinking_rejects_excessive_top_k():
-    with pytest.raises(ValueError, match=f"<= {MAX_RELAX_TOP_K}"):
-        SpeculativeConfig(
-            method="ngram_gpu",
-            num_speculative_tokens=1,
-            relaxed_thinking=True,
-            relax_top_k=MAX_RELAX_TOP_K + 1,
-        )
 
 
 def test_relaxed_thinking_rejects_synthetic_rejection_sampling():
