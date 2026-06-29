@@ -114,6 +114,14 @@ void cutlass_scaled_fp4_mm(torch::stable::Tensor& D,
                            torch::stable::Tensor const& B_sf,
                            torch::stable::Tensor const& alpha);
 
+void cutlass_scaled_fp4_quant_mm(torch::stable::Tensor& D,
+                                 torch::stable::Tensor const& input,
+                                 torch::stable::Tensor const& B,
+                                 torch::stable::Tensor const& input_scale,
+                                 torch::stable::Tensor const& B_sf,
+                                 torch::stable::Tensor const& alpha,
+                                 bool is_sf_swizzled_layout, int64_t padded_n);
+
 void cutlass_fp4_group_mm(torch::stable::Tensor& output,
                           const torch::stable::Tensor& a,
                           const torch::stable::Tensor& b,

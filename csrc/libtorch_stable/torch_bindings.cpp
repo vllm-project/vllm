@@ -190,6 +190,15 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "                      Tensor block_scale_a, Tensor block_scale_b,"
       "                      Tensor alpha) -> ()");
 
+  // CUTLASS nvfp4 dynamic activation quantization + block scaled GEMM.
+  // This is one C++ entrypoint that launches the existing quantization and
+  // GEMM CUDA kernels on the same stream.
+  ops.def(
+      "cutlass_scaled_fp4_quant_mm(Tensor! out, Tensor input, Tensor b,"
+      "                            Tensor input_scale, Tensor block_scale_b,"
+      "                            Tensor alpha, bool is_sf_swizzled_layout,"
+      "                            int padded_n) -> ()");
+
   // cutlass nvfp4 block scaled group GEMM
   ops.def(
       "cutlass_fp4_group_mm(Tensor! out, Tensor a, Tensor b,"
@@ -655,6 +664,8 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
 
   // FP4/NVFP4 ops
   ops.impl("cutlass_scaled_fp4_mm", TORCH_BOX(&cutlass_scaled_fp4_mm));
+  ops.impl("cutlass_scaled_fp4_quant_mm",
+           TORCH_BOX(&cutlass_scaled_fp4_quant_mm));
   ops.impl("scaled_fp4_quant", TORCH_BOX(&scaled_fp4_quant_func));
   ops.impl("scaled_fp4_quant.out", TORCH_BOX(&scaled_fp4_quant_out));
   ops.impl("scaled_fp4_experts_quant", TORCH_BOX(&scaled_fp4_experts_quant));
