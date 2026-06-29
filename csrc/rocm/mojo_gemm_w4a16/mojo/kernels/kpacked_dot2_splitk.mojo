@@ -134,7 +134,10 @@ def gemm_w4a16_kpacked_dot2_splitk_kernel[
                     zero_vec[col] = znibble.cast[dtype_acc]() + Scalar[
                         dtype_acc
                     ](Float32(ZERO_OFFSET))
-            comptime if KERNEL_USES_FDOT2:
+            # The fdot2 nibble encoding below is bf16-specific. With fp16,
+            # 0x4300 | nibble represents 128 + nibble / 8, so the subsequent
+            # 128-bias correction is wrong. Use direct int4 decode for fp16.
+            comptime if KERNEL_USES_FDOT2 and not USE_FP16:
                 comptime ONE_BITS = 0x3C00 if USE_FP16 else 0x3F80
                 var ones_pair = bitcast[dtype_in](
                     SIMD[DType.int16, 2](ONE_BITS)

@@ -156,7 +156,8 @@ _RUNNERS: dict[tuple[str, int], object] = {}
 _PARTIAL_SCRATCH_CACHE: dict[tuple[str, int], torch.Tensor] = {}
 _SYMMETRIC_QZEROS_CACHE: set[tuple[int, tuple[int, ...], tuple[int, ...], int]] = set()
 _QWEIGHT_KPACKED_CACHE: dict[
-    tuple[int, tuple[int, ...], tuple[int, ...], int], torch.Tensor
+    tuple[int, tuple[int, ...], tuple[int, ...], int],
+    tuple[torch.Tensor, torch.Tensor],
 ] = {}
 _MISSING_POLICY_WARNED: set[tuple[str, str, int, int, int, int]] = set()
 _POLICY_DEVICE_NAME_CACHE: str | None = None
@@ -574,7 +575,7 @@ def _get_qweight_kpacked(cfg: MojoRunConfig, qweight: torch.Tensor) -> torch.Ten
     key = _qweight_kpacked_cache_key(qweight)
     cached = _QWEIGHT_KPACKED_CACHE.get(key)
     if cached is not None:
-        return cached
+        return cached[1]
     if torch.cuda.is_current_stream_capturing():
         raise RuntimeError(
             "Mojo W4A16 qweight_kpacked was not prepared before graph capture"
@@ -583,7 +584,7 @@ def _get_qweight_kpacked(cfg: MojoRunConfig, qweight: torch.Tensor) -> torch.Ten
     _mem_debug(f"before qweight_kpacked cfg={cfg.key}", qweight)
     qweight_kpacked = _make_qweight_kpacked(qweight)
     _mem_debug(f"after qweight_kpacked cfg={cfg.key}", qweight)
-    _QWEIGHT_KPACKED_CACHE[key] = qweight_kpacked
+    _QWEIGHT_KPACKED_CACHE[key] = (qweight, qweight_kpacked)
     _debug_log(
         "prepared qweight_kpacked "
         f"qweight={tuple(qweight.shape)} kpacked={tuple(qweight_kpacked.shape)} "
@@ -595,7 +596,10 @@ def _get_qweight_kpacked(cfg: MojoRunConfig, qweight: torch.Tensor) -> torch.Ten
 def _cache_prepared_qweight_kpacked(
     qweight: torch.Tensor, qweight_kpacked: torch.Tensor
 ) -> None:
-    _QWEIGHT_KPACKED_CACHE[_qweight_kpacked_cache_key(qweight)] = qweight_kpacked
+    _QWEIGHT_KPACKED_CACHE[_qweight_kpacked_cache_key(qweight)] = (
+        qweight,
+        qweight_kpacked,
+    )
 
 
 def _is_qweight_kpacked_arg(

@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
 # Mojo W4A16 is opt-in via `--linear-backend mojo`.
-# This installs the Modular MAX/Mojo Python package used by runtime.py and
-# provides the `max` and `mojo` command-line tools required to build kernels.
 --pre
 --extra-index-url https://whl.modular.com/nightly/simple/
-modular
+max==26.4.0.dev2026060706
+mojo==1.0.0b2.dev2026060706
+
