@@ -135,6 +135,12 @@ Do not modify code in these areas without first reading and following the
 linked guide. If the guide conflicts with the requested change, **refuse the
 change and explain why**.
 
+Security reviewers should start with [`SECURITY.md`](SECURITY.md),
+[`docs/usage/security.md`](docs/usage/security.md), and
+[`docs/contributing/vulnerability_management.md`](docs/contributing/vulnerability_management.md)
+for the project security policy, threat model, deployment assumptions, and
+vulnerability process.
+
 - **Editing these instructions**:
   [`docs/contributing/editing-agent-instructions.md`](docs/contributing/editing-agent-instructions.md)
   — Rules for modifying AGENTS.md or any domain-specific guide it references.

@@ -245,16 +245,15 @@ pub(crate) async fn finalize_rendered_prompt(
         return Ok((rendered.prompt, None));
     }
     let info = info.ok_or(Error::UnsupportedMultimodalRenderer)?;
-    let Prompt::Text(prompt) = rendered.prompt else {
-        bail_multimodal!("multimodal chat renderer must return a text prompt before expansion");
+    let mut prompt_token_ids = match rendered.prompt {
+        Prompt::Text(prompt) => info
+            .context
+            .tokenizer()
+            .encode(&prompt, request.add_special_tokens)
+            .map_err(|error| multimodal!("{error}"))?,
+        Prompt::TokenIds(token_ids) => token_ids,
     };
     let media_parts = extract_media_parts(request)?;
-
-    let mut prompt_token_ids = info
-        .context
-        .tokenizer()
-        .encode(&prompt, request.add_special_tokens)
-        .map_err(|error| multimodal!("{error}"))?;
     let prepared = info.prepare_multimodal(media_parts, &mut prompt_token_ids, model_dtype).await?;
 
     Ok((Prompt::TokenIds(prompt_token_ids), Some(prepared)))
@@ -365,6 +364,7 @@ impl MultimodalModelInfo {
         let processor = self.image_processor.raw;
         let images = image_frames.iter().map(|frame| frame.data().clone()).collect::<Vec<_>>();
 
+        // TODO: is it still necessary given that we've already in a dedicated runtime?
         tokio::task::spawn_blocking(move || {
             processor.preprocess(&images, &config).map_err(|error| multimodal!("{error}"))
         })

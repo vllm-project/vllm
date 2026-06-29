@@ -581,7 +581,14 @@ class Attention(nn.Module, AttentionLayerBase):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         # Block size may get updated after model loading, refresh it
         block_size = vllm_config.cache_config.block_size
-        # Should not be called for enc-dec or encoder-only attention.
+        # Encoder-only attention is prefill-only and keeps no autoregressive KV
+        # cache. In hybrid models (e.g. Qwen3.5 / ColQwen3.5: GatedDeltaNet
+        # linear_attention interleaved with full_attention) the runner iterates
+        # every attention module to build the KV-cache spec, so an ENCODER_ONLY
+        # full_attention layer reaches here; it contributes no KV cache group.
+        if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
+            return None
+        # Should not be called for enc-dec attention.
         assert self.attn_type == AttentionType.DECODER
         quant_mode = get_kv_quant_mode(self.kv_cache_dtype)
         if self.sliding_window is not None:

@@ -12,6 +12,7 @@ enum-as-inner.workspace = true
 futures.workspace = true
 hf-hub.workspace = true
 itertools.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_with.workspace = true

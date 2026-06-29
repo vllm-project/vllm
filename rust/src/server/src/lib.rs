@@ -7,6 +7,7 @@ mod listener;
 mod lora;
 mod middleware;
 mod routes;
+mod runtime;
 mod server_info;
 mod state;
 mod utils;
@@ -157,6 +158,9 @@ where
             .with_context(|| format!("failed to bind gRPC listener on {grpc_host}:{grpc_port}"))?;
         let addr = grpc_listener.local_addr()?;
         let svc = grpc::GenerateServer::new(grpc::GenerateServiceImpl::new(state.clone()));
+        let svc = TonicServer::builder()
+            .layer(middleware::request_runtime_layer(state.clone()))
+            .add_service(svc);
         info!(%addr, "starting gRPC server");
         Some((grpc_listener, svc))
     } else {
@@ -238,7 +242,7 @@ where
                 shutdown.cancelled().await;
                 return Ok(());
             };
-            let server = TonicServer::builder().add_service(svc).serve_with_incoming_shutdown(
+            let server = svc.serve_with_incoming_shutdown(
                 TcpListenerStream::new(grpc_listener),
                 shutdown.cancelled_owned(),
             );
