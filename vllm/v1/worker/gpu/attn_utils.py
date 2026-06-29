@@ -13,7 +13,6 @@ from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,
-    PrefillContextParallelMetadata,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -394,7 +393,6 @@ def build_attn_metadata(
     seq_lens_cpu_upper_bound: torch.Tensor | None = None,
     dcp_local_seq_lens: torch.Tensor | None = None,
     positions: torch.Tensor | None = None,
-    prefill_context_parallel_metadata: PrefillContextParallelMetadata | None = None,
     model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     for_cudagraph_capture: bool = False,
     causal: bool = True,
@@ -430,7 +428,6 @@ def build_attn_metadata(
             causal=causal,
             dcp_local_seq_lens=dcp_local_seq_lens,
             positions=positions,
-            prefill_context_parallel_metadata=prefill_context_parallel_metadata,
             **common_attn_metadata_extra_kwargs,
         )
 

@@ -8,7 +8,6 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.tasks import GenerationTask
-from vllm.v1.attention.backend import PrefillContextParallelMetadata
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
@@ -161,7 +160,6 @@ class DefaultModelState(ModelState):
         slot_mappings: torch.Tensor,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
-        prefill_context_parallel_metadata: PrefillContextParallelMetadata | None = None,
         for_capture: bool = False,
     ) -> dict[str, Any]:
         if cudagraph_mode == CUDAGraphMode.FULL:
@@ -195,7 +193,6 @@ class DefaultModelState(ModelState):
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
             positions=input_batch.positions,
-            prefill_context_parallel_metadata=prefill_context_parallel_metadata,
             for_cudagraph_capture=for_capture,
         )
         return attn_metadata

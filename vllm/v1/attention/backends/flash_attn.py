@@ -717,17 +717,17 @@ class FlashAttentionImpl(AttentionImpl):
             and vllm_config.parallel_config.decode_context_parallel_size > 1
             and vllm_config.parallel_config.dcp_comm_backend == "a2a"
         )
-        # Case 1 (dcp == pcp): Q is replicated across the DCP ranks, so the
-        # partial attentions are combined with an all-reduce (every rank ends
-        # with the full output) instead of the gathered-Q + reduce-scatter used
-        # by Case 2.
-        self.dcp_case1 = (
+        # When DCP shares the PCP ranks (dcp == pcp), Q is replicated across the
+        # DCP ranks, so the partial attentions are combined with an all-reduce
+        # (every rank ends with the full output) instead of the gathered-Q +
+        # reduce-scatter used when DCP reuses the TP ranks.
+        self.dcp_shares_pcp_ranks = (
             vllm_config is not None
             and vllm_config.parallel_config.decode_context_parallel_size > 1
             and vllm_config.parallel_config.decode_context_parallel_size
             == vllm_config.parallel_config.prefill_context_parallel_size
         )
-        if self.dcp_case1:
+        if self.dcp_shares_pcp_ranks:
             self.dcp_combine = cp_lse_ag_out_ar
         else:
             self.dcp_combine = dcp_a2a_lse_reduce if dcp_a2a else cp_lse_ag_out_rs
@@ -1043,10 +1043,11 @@ class FlashAttentionImpl(AttentionImpl):
         block_table = attn_metadata.block_table
 
         query = query.contiguous()
-        # Case 1 (dcp == pcp): Q is replicated across the DCP ranks, so attend
-        # directly with the local heads and combine via all-reduce. Case 2
-        # gathers Q across heads and reduce-scatters the result.
-        if self.dcp_case1:
+        # When DCP shares the PCP ranks (dcp == pcp), Q is replicated across the
+        # DCP ranks, so attend directly with the local heads and combine via
+        # all-reduce. Otherwise Q is gathered across heads and the result is
+        # reduce-scattered.
+        if self.dcp_shares_pcp_ranks:
             query_for_context = query
             context_num_heads = self.num_heads
         else:

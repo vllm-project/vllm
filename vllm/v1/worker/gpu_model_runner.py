@@ -43,7 +43,6 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.parallel_state import (
     get_dcp_group,
-    get_pcp_group,
     get_pp_group,
     get_tp_group,
     graph_capture,
@@ -196,7 +195,6 @@ from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
 from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.cp_utils import (
-    PCPManager,
     check_attention_cp_compatibility,
     get_total_cp_world_size,
 )
@@ -466,17 +464,8 @@ class GPUModelRunner(
         self.calculate_kv_scales = self.cache_config.calculate_kv_scales
         self.dcp_world_size = self.parallel_config.decode_context_parallel_size
         self.dcp_rank = 0 if self.dcp_world_size <= 1 else get_dcp_group().rank_in_group
-        self.pcp_world_size = self.parallel_config.prefill_context_parallel_size
-        self.pcp_rank = 0 if self.pcp_world_size <= 1 else get_pcp_group().rank_in_group
-        self.use_cp = self.pcp_world_size * self.dcp_world_size > 1
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
-        self.max_buffer_num_tokens = self.max_num_tokens
-        if self.pcp_world_size > 1:
-            self.max_model_len += 2 * self.pcp_world_size * self.max_num_reqs
-            model_config.max_model_len = self.max_model_len
-        if self.use_cp:
-            self.max_buffer_num_tokens += self.max_num_reqs * 2 * self.pcp_world_size
 
         # Broadcast PP output for external_launcher (torchrun)
         # to make sure we are synced across pp ranks
@@ -728,11 +717,9 @@ class GPUModelRunner(
         self._encoder_timing_lock = threading.Lock()
 
         # Persistent buffers for CUDA graphs.
-        self.input_ids = self._make_buffer(
-            self.max_buffer_num_tokens, dtype=torch.int32
-        )
+        self.input_ids = self._make_buffer(self.max_num_tokens, dtype=torch.int32)
         self.positions = torch.zeros(
-            self.max_buffer_num_tokens, dtype=torch.int64, device=self.device
+            self.max_num_tokens, dtype=torch.int64, device=self.device
         )
         self.query_start_loc = self._make_buffer(
             self.max_num_reqs + 1, dtype=torch.int32
@@ -749,9 +736,7 @@ class GPUModelRunner(
         self.prev_num_draft_tokens = self._make_buffer(
             self.max_num_reqs, dtype=torch.int32
         )
-        self.req_indices = self._make_buffer(
-            self.max_buffer_num_tokens, dtype=torch.int64
-        )
+        self.req_indices = self._make_buffer(self.max_num_tokens, dtype=torch.int64)
         # Maps current batch position -> previous batch position (-1 for new reqs)
         self.prev_positions = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
         self.num_scheduled_tokens = self._make_buffer(
@@ -767,14 +752,9 @@ class GPUModelRunner(
         # version of this tensor, avoid a RuntimeError by not creating a
         # numpy buffer.
         self.inputs_embeds = self._make_buffer(
-            self.max_buffer_num_tokens,
-            self.inputs_embeds_size,
-            dtype=self.dtype,
-            numpy=False,
+            self.max_num_tokens, self.inputs_embeds_size, dtype=self.dtype, numpy=False
         )
-        self.is_token_ids = self._make_buffer(
-            self.max_buffer_num_tokens, dtype=torch.bool
-        )
+        self.is_token_ids = self._make_buffer(self.max_num_tokens, dtype=torch.bool)
         self.discard_request_mask = self._make_buffer(
             self.max_num_reqs, dtype=torch.bool
         )
@@ -798,15 +778,14 @@ class GPUModelRunner(
             # 1D-RoPE.
             # See page 5 of https://arxiv.org/abs/2409.12191
             self.mrope_positions = self._make_buffer(
-                (3, self.max_buffer_num_tokens + 1), dtype=torch.int64
+                (3, self.max_num_tokens + 1), dtype=torch.int64
             )
 
         # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
         if self.uses_xdrope_dim > 0:
             # Similar to mrope but use assigned dimension number for RoPE, 4 as default.
             self.xdrope_positions = self._make_buffer(
-                (self.uses_xdrope_dim, self.max_buffer_num_tokens + 1),
-                dtype=torch.int64,
+                (self.uses_xdrope_dim, self.max_num_tokens + 1), dtype=torch.int64
             )
 
         # None in the first PP rank. The rest are set after load_model.
@@ -816,24 +795,10 @@ class GPUModelRunner(
         # every step. Keep in int64 to avoid overflow with long context.
         # - arange_np: immutable [0, 1, 2, ...] used as source for batched computation
         # - query_pos: CpuGpuBuffer for the computed batched arange result
-        arange_size = max(self.max_num_reqs + 1, self.max_buffer_num_tokens)
+        arange_size = max(self.max_num_reqs + 1, self.max_num_tokens)
         self.arange_np = np.arange(arange_size, dtype=np.int64)
         self.query_pos = self._make_buffer(arange_size, dtype=torch.int64)
         self._arange_scratch = np.empty(arange_size, dtype=np.int64)
-
-        if self.use_cp:
-            self.pcp_manager = PCPManager(
-                self.pcp_world_size,
-                self.pcp_rank,
-                self.dcp_world_size,
-                self.dcp_rank,
-                self.max_buffer_num_tokens,
-                self.max_num_reqs,
-                self.device,
-                self.vllm_config,
-                bool(self.use_async_scheduling),
-                self.pin_memory,
-            )
 
         # Layer pairings for cross-layer KV sharing.
         # If an Attention layer `layer_name` is in the keys of this dict, it
@@ -1953,69 +1918,6 @@ class GPUModelRunner(
             self.input_batch.num_computed_tokens_cpu[req_indices]
             + self.query_pos.np[: cu_num_tokens[-1]]
         )
-        tokens_original: list[int] | None = None
-
-        if self.pcp_world_size > 1:
-            pre_pcp_positions = torch.from_numpy(
-                positions_np[:total_num_scheduled_tokens]
-            ).to(self.device)
-            pre_pcp_query_start_loc = torch.zeros(
-                num_reqs + 1, dtype=torch.int32, device=self.device
-            )
-            pre_pcp_query_start_loc[1 : num_reqs + 1] = torch.from_numpy(
-                cu_num_tokens
-            ).to(dtype=torch.int32, device=self.device)
-            self.input_batch.block_table.compute_slot_mapping(
-                num_reqs, pre_pcp_query_start_loc, pre_pcp_positions
-            )
-
-        if self.use_cp:
-            self.pcp_manager.init_batch_info(num_scheduled_tokens, num_reqs)
-
-        if self.speculative_config and self.use_cp:
-            with_prefill = bool(
-                np.any(
-                    num_scheduled_tokens[:num_reqs] > self.pcp_manager.decode_threshold
-                )
-            )
-            self.pcp_manager.generate_pcp_mtp_input(
-                total_num_scheduled_tokens,
-                scheduler_output.num_scheduled_tokens,
-                with_prefill,
-                self.input_batch,
-                self.arange_np,
-                req_indices,
-                positions_np,
-                cu_num_tokens,
-                self._draft_token_ids,
-                scheduler_output,
-                self.num_spec_tokens,
-            )
-
-        if self.pcp_world_size > 1:
-            tokens_original = num_scheduled_tokens[:num_reqs].tolist()
-            num_scheduled_tokens[:num_reqs], position_pcp = (
-                self.pcp_manager.update_tokens_for_pcp(
-                    num_scheduled_tokens[:num_reqs], self.arange_np
-                )
-            )
-            total_num_scheduled_tokens = int(num_scheduled_tokens[:num_reqs].sum())
-            req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
-            cu_num_tokens = self._get_cumsum_and_arange(
-                num_scheduled_tokens, self.query_pos.np
-            )
-            positions_np = (
-                self.input_batch.num_computed_tokens_cpu[req_indices]
-                + position_pcp[:total_num_scheduled_tokens]
-            )
-
-        if self.pcp_world_size > 1 and self.pcp_manager.pcp_use_hybrid_attn:
-            assert self.pcp_manager.num_scheduled_tokens_padded is not None
-            self.query_lens = torch.from_numpy(
-                self.pcp_manager.num_scheduled_tokens_padded
-            )
-        else:
-            self.query_lens = torch.from_numpy(num_scheduled_tokens)
 
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -2045,17 +1947,6 @@ class GPUModelRunner(
             token_indices_tensor,
             out=self.input_ids.cpu[:total_num_scheduled_tokens],
         )
-        if self.pcp_world_size > 1:
-            # PCP pad tokens' positions fall in [seq_len, padded_seq_len),
-            # which index stale cells of token_ids_cpu. A reused row only has
-            # its [:prompt_len] overwritten (gpu_input_batch), so the tail may
-            # hold -1 (the output-token placeholder sentinel from a previously
-            # freed request). At TP==1 the embedding gather is unmasked, so a
-            # -1 index trips "ind >= 0". Token ids are always non-negative, so
-            # clamp(min=0) only touches these stale -1 cells; the rows are
-            # dropped by pcp_unpad_mask before attention, so their value is
-            # irrelevant to correctness.
-            self.input_ids.cpu[:total_num_scheduled_tokens].clamp_(min=0)
         if self.enable_prompt_embeds:
             is_token_ids = self.input_batch.is_token_ids_tensor.flatten()
             torch.index_select(
@@ -2084,19 +1975,6 @@ class GPUModelRunner(
                     continue
 
                 req_embeds = self.input_batch.req_prompt_embeds[req_idx]
-                if self.pcp_world_size > 1:
-                    req_positions_np = positions_np[output_idx : output_idx + num_sched]
-                    dst_slice = self.inputs_embeds.cpu[
-                        output_idx : output_idx + num_sched
-                    ]
-                    self.pcp_manager.fill_prompt_embeds_for_pcp(
-                        req_embeds=req_embeds,
-                        req_positions_np=req_positions_np,
-                        dst_slice=dst_slice,
-                    )
-                    output_idx += num_sched
-                    continue
-
                 start_pos = self.input_batch.num_computed_tokens_cpu[req_idx]
 
                 # Skip if trying to read beyond available embeddings
@@ -2146,17 +2024,9 @@ class GPUModelRunner(
 
         # Record which requests should not be sampled,
         # so that we could clear the sampled tokens before returning
-        if self.pcp_world_size > 1:
-            assert tokens_original is not None
-            original_seq_lens_np = self.input_batch.num_computed_tokens_cpu[
-                :num_reqs
-            ] + np.array(tokens_original, dtype=np.int32)
-            discard_request_mask = original_seq_lens_np < num_tokens_np
-        else:
-            discard_request_mask = (
-                self.optimistic_seq_lens_cpu[:num_reqs].numpy() < num_tokens_np
-            )
-        self.discard_request_mask.np[:num_reqs] = discard_request_mask
+        self.discard_request_mask.np[:num_reqs] = (
+            self.optimistic_seq_lens_cpu[:num_reqs].numpy() < num_tokens_np
+        )
         self.discard_request_mask.copy_to_gpu(num_reqs)
 
         # Sync num_accepted_tokens from CPU (set by
@@ -2232,29 +2102,20 @@ class GPUModelRunner(
         self.num_scheduled_tokens.np[:num_reqs] = num_scheduled_tokens
         self.num_scheduled_tokens.copy_to_gpu(num_reqs)
         num_scheduled_tokens_gpu = self.num_scheduled_tokens.gpu[:num_reqs]
-        if self.pcp_world_size > 1:
-            self.positions[:total_num_scheduled_tokens].copy_(
-                torch.from_numpy(positions_np[:total_num_scheduled_tokens]).to(
-                    self.device
-                ),
-                non_blocking=True,
-            )
-        else:
-            self.positions[:total_num_scheduled_tokens] = (
-                self.num_computed_tokens[req_indices_gpu].to(torch.int64)
-                + self.query_pos.gpu[:total_num_scheduled_tokens]
-            )
+        self.positions[:total_num_scheduled_tokens] = (
+            self.num_computed_tokens[req_indices_gpu].to(torch.int64)
+            + self.query_pos.gpu[:total_num_scheduled_tokens]
+        )
         self.seq_lens[:num_reqs] = (
             self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
         )
         self.seq_lens[num_reqs:].fill_(0)
 
-        if self.pcp_world_size <= 1:
-            self.input_batch.block_table.compute_slot_mapping(
-                num_reqs,
-                self.query_start_loc.gpu[: num_reqs + 1],
-                self.positions[:total_num_scheduled_tokens],
-            )
+        self.input_batch.block_table.compute_slot_mapping(
+            num_reqs,
+            self.query_start_loc.gpu[: num_reqs + 1],
+            self.positions[:total_num_scheduled_tokens],
+        )
 
         # Copy the tensors to the GPU.
         self._prepare_input_ids(
@@ -2265,15 +2126,6 @@ class GPUModelRunner(
         )
 
         if self.uses_mrope:
-            if self.pcp_world_size > 1:
-                self.pcp_manager.remap_mrope_positions_for_pcp(
-                    positions_np,
-                    num_scheduled_tokens,
-                    num_reqs,
-                    self.input_batch,
-                    self.requests,
-                    self.mrope_positions,
-                )
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             self.mrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
                 self.mrope_positions.cpu[:, :total_num_scheduled_tokens],
@@ -2301,13 +2153,7 @@ class GPUModelRunner(
             # from these partial requests, we do so for simplicity.
             # We will ignore the sampled tokens from the partial requests.
             # TODO: Support prompt logprobs.
-            if self.use_cp:
-                logits_indices = self.pcp_manager.get_logits_indices(
-                    cu_num_tokens, num_reqs, tokens_original
-                )
-                logits_indices = logits_indices.to(self.device, non_blocking=True)
-            else:
-                logits_indices = query_start_loc[1:] - 1
+            logits_indices = query_start_loc[1:] - 1
             spec_decode_metadata = None
             num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
         else:
@@ -2349,8 +2195,6 @@ class GPUModelRunner(
             self.set_active_loras(
                 self.input_batch, num_scheduled_tokens, num_sampled_tokens
             )
-
-        self._local_num_scheduled_tokens = total_num_scheduled_tokens
 
         return (
             logits_indices,
@@ -2512,21 +2356,6 @@ class GPUModelRunner(
             cm_base.dcp_local_seq_lens_cpu = self.dcp_local_seq_lens.cpu[
                 :num_reqs_padded
             ]
-
-        if self.use_cp:
-            long_seq_metadata, block_table_gid_0 = (
-                self.pcp_manager.generate_pcp_metadata(
-                    num_tokens,
-                    self.query_lens,
-                    self.input_batch,
-                    self.num_scheduled_tokens.np[:num_reqs].copy(),
-                    block_table_gid_0,
-                    num_reqs_padded,
-                    num_reqs,
-                )
-            )
-            cm_base.prefill_context_parallel_metadata = long_seq_metadata
-            cm_base.block_table_tensor = block_table_gid_0
 
         if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:
             cm_base.num_logits_indices = logits_indices.size(0)
@@ -3603,11 +3432,7 @@ class GPUModelRunner(
         dict[str, Any],
         ECConnectorOutput | None,
     ]:
-        num_scheduled_tokens = getattr(
-            self,
-            "_local_num_scheduled_tokens",
-            scheduler_output.total_num_scheduled_tokens,
-        )
+        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         is_first_rank = get_pp_group().is_first_rank
         is_encoder_decoder = self.model_config.is_encoder_decoder
 
@@ -4145,33 +3970,6 @@ class GPUModelRunner(
                 )
             else:
                 blk_table = self.input_batch.block_table[kv_cache_gid]
-                if self.pcp_world_size > 1:
-                    total_num_pcp_pads = int(
-                        self.pcp_manager.num_pcp_pads_cpu[
-                            : self.input_batch.num_reqs
-                        ].sum()
-                    )
-                    if self.pcp_manager.pcp_use_hybrid_attn:
-                        num_scheduled_tokens_padded = (
-                            self.pcp_manager.num_scheduled_tokens_padded
-                        )
-                        assert num_scheduled_tokens_padded is not None
-                        num_pcp_full_tokens = (
-                            int(num_scheduled_tokens_padded.sum()) * self.pcp_world_size
-                            - total_num_pcp_pads
-                        )
-                    else:
-                        num_pcp_full_tokens = (
-                            num_tokens_unpadded * self.pcp_world_size
-                            - total_num_pcp_pads
-                        )
-                    slot_mapping = blk_table.slot_mapping.gpu[:num_pcp_full_tokens]
-                    return self.pcp_manager.get_padded_slot_mapping(
-                        num_tokens_unpadded,
-                        num_tokens_padded,
-                        slot_mapping,
-                        kv_cache_gid,
-                    )
                 slot_mapping = blk_table.slot_mapping.gpu[:num_tokens_padded]
 
             # Fill unused with -1. Needed for reshape_and_cache in full cuda
@@ -4300,9 +4098,6 @@ class GPUModelRunner(
                 scheduler_output,
                 num_scheduled_tokens_np,
             )
-            if self.pcp_world_size > 1:
-                num_tokens_unpadded = int(num_scheduled_tokens_np[:num_reqs].sum())
-                max_num_scheduled_tokens = int(num_scheduled_tokens_np[:num_reqs].max())
 
             cascade_attn_prefix_lens = None
             # Disable cascade attention when using microbatching (DBO)
@@ -4525,31 +4320,11 @@ class GPUModelRunner(
                         kv_connector_output,
                     )
 
-                if self.pcp_world_size > 1:
-                    hidden_states = self.pcp_manager.get_restore_hidden_states(
-                        hidden_states
-                    )
-                    if aux_hidden_states is not None:
-                        aux_hidden_states = [
-                            self.pcp_manager.get_restore_hidden_states(t)
-                            for t in aux_hidden_states
-                        ]
-
                 sample_hidden_states = hidden_states[logits_indices]
                 logits = self.model.compute_logits(sample_hidden_states)
             else:
                 # Rare case.
                 assert not self.is_pooling_model
-
-                if self.pcp_world_size > 1:
-                    hidden_states = self.pcp_manager.get_restore_hidden_states(
-                        hidden_states
-                    )
-                    if aux_hidden_states is not None:
-                        aux_hidden_states = [
-                            self.pcp_manager.get_restore_hidden_states(t)
-                            for t in aux_hidden_states
-                        ]
 
                 sample_hidden_states = hidden_states[logits_indices]
                 if not get_pp_group().is_last_rank:
@@ -5950,21 +5725,6 @@ class GPUModelRunner(
         assert len(num_scheduled_tokens_list) == num_reqs
         num_scheduled_tokens = np.array(num_scheduled_tokens_list, dtype=np.int32)
         num_tokens_unpadded = int(num_scheduled_tokens.sum())
-        if self.use_cp:
-            self.pcp_manager.init_batch_info(num_scheduled_tokens, num_reqs)
-            if self.pcp_world_size > 1:
-                num_scheduled_tokens, _ = self.pcp_manager.update_tokens_for_pcp(
-                    num_scheduled_tokens, self.arange_np
-                )
-                num_tokens_unpadded = int(num_scheduled_tokens.sum())
-                max_query_len = int(num_scheduled_tokens.max())
-            if self.pcp_world_size > 1 and self.pcp_manager.pcp_use_hybrid_attn:
-                assert self.pcp_manager.num_scheduled_tokens_padded is not None
-                self.query_lens = torch.from_numpy(
-                    self.pcp_manager.num_scheduled_tokens_padded
-                )
-            else:
-                self.query_lens = torch.from_numpy(num_scheduled_tokens)
 
         num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
 

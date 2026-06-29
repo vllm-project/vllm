@@ -359,42 +359,6 @@ T = TypeVar("T", bound=AttentionMetadata)
 
 
 @dataclass
-class PrefillContextParallelMetadata:
-    """Metadata for prefill context parallelism."""
-
-    pcp_allgather_restore_idx: torch.Tensor | None = None
-    num_actual_tokens_pcp_padded: int = 0
-    num_computed_tokens_of_pcp_dcp: np.ndarray | None = None
-    q_head_idx_tensor: torch.Tensor | None = None
-    q_tail_idx_tensor: torch.Tensor | None = None
-    kv_with_q_head_nomask_idx_tensor: torch.Tensor | None = None
-    kv_with_q_head_mask_idx_tensor: torch.Tensor | None = None
-    kv_with_q_tail_nomask_idx_tensor: torch.Tensor | None = None
-    kv_with_q_tail_mask_idx_tensor: torch.Tensor | None = None
-    kv_tail_proj_idx_tensor: torch.Tensor | None = None
-    kv_with_q_head_attn_idx_in_tail_tensor: torch.Tensor | None = None
-    kv_with_q_tail_attn_idx_in_tail_tensor: torch.Tensor | None = None
-    attn_mask_seqlens: list[int] | None = None
-    head_attn_nomask_seqlens: list[int] | None = None
-    tail_attn_nomask_seqlens: list[int] | None = None
-    head_actual_seq_lengths_kv: list[int] | None = None
-    tail_actual_seq_lengths_kv: list[int] | None = None
-    q_full_idx: torch.Tensor | None = None
-    query_lens_pcp_full_cpu: torch.Tensor | None = None
-    max_query_len_pcp_full: int = 0
-    pcp_use_hybrid_attn: bool = False
-    pcp_unpad_mask: torch.Tensor | None = None
-    pcp_fa_query_idx: torch.Tensor | None = None
-    pcp_enter_fa_restore_idx: torch.Tensor | None = None
-    pcp_exit_fa_scatter_idx: torch.Tensor | None = None
-    pcp_padded_tokens_fla: int = 0
-    max_num_tokens_across_pcp: int = 0
-    total_num_scheduled_tokens: int = 0
-    attn_chunk_seqlens: torch.Tensor | None = None
-    dcp_mtp_attn_mask: torch.Tensor | None = None
-
-
-@dataclass
 class CommonAttentionMetadata:
     """
     Per-batch attention metadata, shared across layers and backends.
@@ -436,8 +400,6 @@ class CommonAttentionMetadata:
     dcp_local_seq_lens: torch.Tensor | None = None
     dcp_local_seq_lens_cpu: torch.Tensor | None = None
     """Sequence lengths of the local rank in decode context parallelism world"""
-
-    prefill_context_parallel_metadata: PrefillContextParallelMetadata | None = None
 
     positions: torch.Tensor | None = None
     """(num_actual_tokens,) token positions.  Optional; set when the caller
@@ -544,7 +506,6 @@ class CommonAttentionMetadata:
             encoder_seq_lens_cpu=maybe_slice_reqs(self.encoder_seq_lens_cpu),
             dcp_local_seq_lens=maybe_slice_reqs(self.dcp_local_seq_lens),
             dcp_local_seq_lens_cpu=maybe_slice_reqs(self.dcp_local_seq_lens_cpu),
-            prefill_context_parallel_metadata=(self.prefill_context_parallel_metadata),
             is_prefilling=maybe_slice_reqs(self.is_prefilling),
         )
 

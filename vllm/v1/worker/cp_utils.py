@@ -55,10 +55,9 @@ def get_total_cp_world_size():
     except AssertionError:
         # DCP might not be initialized in testing
         dcp_world_size = 1
-    # Case 1 (dcp == pcp): the DCP ranks coincide with the PCP ranks and the KV
-    # is sharded only by DCP (PCP does not shard the KV in pure-DCP mode). So the
-    # KV shard count is dcp, not dcp*pcp. Otherwise (orthogonal PCP+DCP) the
-    # shard count is the product.
+    # When DCP shares the PCP ranks (dcp == pcp), the KV is sharded only by DCP
+    # (PCP does not shard the KV), so the shard count is dcp, not dcp*pcp.
+    # Otherwise (orthogonal PCP+DCP) the shard count is the product.
     if dcp_world_size > 1 and dcp_world_size == pcp_world_size:
         return dcp_world_size
     return dcp_world_size * pcp_world_size
