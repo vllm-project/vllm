@@ -3,7 +3,7 @@
 """Unit tests for the token-offsets request/response protocol wiring:
 the request flag flowing into ``TokenizeParams`` and the ``GenerateRequest``
 serialization boundary. End-to-end behavior is covered by
-``tests/entrypoints/serve/render/test_render.py``; plain Pydantic field
+``tests/entrypoints/scale_out/render/test_render.py``; plain Pydantic field
 storage is not retested here.
 """
 
