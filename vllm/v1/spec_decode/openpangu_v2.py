@@ -50,7 +50,7 @@ class OpenPanguV2MTPProposer(EagleProposer):
             dtype=torch.int32,
             device=device,
         )
-        self.fix_multi_mtp_kvcache = True
+        self.fix_multi_mtp_kvcache = self.use_multi_mtp_heads
 
     def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode) -> None:
         if self.use_multi_mtp_heads:
