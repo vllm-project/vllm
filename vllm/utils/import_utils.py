@@ -500,7 +500,9 @@ def has_triton_kernels() -> bool:
 @cache
 def has_tilelang() -> bool:
     """Whether the optional `tilelang` package is available."""
-    return _has_module("tilelang")
+    from vllm.platforms.rocm import on_gfx1250
+
+    return _has_module("tilelang") and not on_gfx1250()
 
 
 def has_arctic_inference() -> bool:

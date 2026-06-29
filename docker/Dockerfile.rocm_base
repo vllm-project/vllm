@@ -1,9 +1,13 @@
-ARG BASE_IMAGE=registry-sc-harbor.amd.com/framework/therock-npi:pytorch-2.10.0-rocm7.14.0a20260605.a0-7.14.0a20260605-a0-nightly-ubuntu24.04-gfx1250
-ARG ROCM_WHEEL_INDEX=https://rocm.genesis.amd.com/whl/gfx1250
-ARG TORCH_VERSION=2.10.0+rocm7.14.0a20260605.a0
-ARG TORCHVISION_VERSION=0.28.0a0+rocm7.14.0a20260605
-ARG TORCHAUDIO_VERSION=2.11.0a0+rocm7.14.0a20260605
-ARG ROCM_SDK_VERSION=7.14.0a20260605
+ARG BASE_IMAGE=ubuntu:24.04
+ARG ROCM_WHEEL_INDEX=https://rocm.devreleases.amd.com/whl-multi-arch/
+ARG ROCM_SDK_VERSION=7.14.0a20260623
+ARG TORCH_VERSION=2.11.0+rocm7.14.0a20260623
+ARG TORCHVISION_VERSION=0.26.0+rocm7.14.0a20260623
+ARG TORCHAUDIO_VERSION=2.11.0+rocm7.14.0a20260623
+ARG TRITON_VERSION=3.7.1+git110cd8e2.rocm7.14.0a20260623
+ARG APEX_VERSION=1.11.0+rocm7.14.0a20260623
+
+
 ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
 ARG AITER_BRANCH="jpvillam/gfx1250_0604"
@@ -83,25 +87,35 @@ RUN if [ "$USE_SCCACHE" = "1" ]; then \
     && sccache --version; \
     fi
 
-###
-### Install PyTorch w/ Triton + ROCM_SDK from ROCM wheel index
-###
-#ARG ROCM_WHEEL_INDEX
-#ARG TORCH_VERSION
-#ARG TORCHVISION_VERSION
-#ARG TORCHAUDIO_VERSION
-#ARG ROCM_SDK_VERSION
-## torch/torchvision/torchaudio must be pinned to mutually-consistent builds
-## (same +rocm... suffix) or the C++ ops break at import (ABI skew). The rocm
-## sdk version is derived from torch's own dependency pin unless overridden,
-## which keeps the set consistent and avoids pip backtracking.
-#RUN pip install --pre --index-url "${ROCM_WHEEL_INDEX}" \
-#        "torch==${TORCH_VERSION}" \
-#        "torchvision==${TORCHVISION_VERSION}" \
-#        "torchaudio==${TORCHAUDIO_VERSION}" \
-#        "rocm[libraries,devel]==${ROCM_SDK_VERSION}" && \
-#    rocm-sdk init
+##
+## Install PyTorch w/ Triton + ROCM_SDK from ROCM wheel index
+##
+ARG ROCM_WHEEL_INDEX
+ARG TORCH_VERSION
+ARG TORCHVISION_VERSION
+ARG TORCHAUDIO_VERSION
+ARG ROCM_SDK_VERSION
+ARG APEX_VERSION
+# torch/torchvision/torchaudio must be pinned to mutually-consistent builds
+# (same +rocm... suffix) or the C++ ops break at import (ABI skew). The rocm
+# sdk version is derived from torch's own dependency pin unless overridden,
+# which keeps the set consistent and avoids pip backtracking.
+RUN pip install --pre --index-url "${ROCM_WHEEL_INDEX}" \
+    "torch==${TORCH_VERSION}" \
+    "torchvision==${TORCHVISION_VERSION}" \
+    "torchaudio==${TORCHAUDIO_VERSION}" \
+    "apex==${APEX_VERSION}" \
+    "rocm[libraries,devel]==${ROCM_SDK_VERSION}" && \
+    rocm-sdk init
 
+### Install triton from upstream for AITER Deps TODO: (JPVILLAM) If possible to get this on whls it would be better
+RUN pip3 uninstall triton && \
+    git clone https://github.com/triton-lang/triton.git && \
+    cd triton && \
+    git checkout c517f38c && \
+    TRITON_APPEND_CMAKE_ARGS="-DCMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH=FALSE" pip3 install .
+
+ 
 # Torch runtime deps that may not be published on the ROCm wheel index;
 # install them from PyPI afterwards.
 RUN pip install filelock "typing-extensions>=4.10.0" "sympy>=1.13.3" \
