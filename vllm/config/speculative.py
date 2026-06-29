@@ -166,6 +166,22 @@ class SpeculativeConfig:
     inclusive batch-size range.
     """
 
+    # Adaptive K: dynamically select speculation length per step using
+    # per-position conditional acceptance rates and a goodput cost model.
+    enable_adaptive_k: bool = False
+    """Enable adaptive K selection per scheduling step."""
+    adaptive_k_ema_alpha: float = Field(default=0.3, ge=0.0, le=1.0)
+    """EMA smoothing factor for per-position acceptance rates."""
+    adaptive_k_c_draft: float = Field(default=0.1144, gt=0.0)
+    """Draft:target cost ratio (profiled on target hardware)."""
+    adaptive_k_bs_penalty: float = Field(default=0.002, ge=0.0)
+    """Per-request verification cost coefficient."""
+    adaptive_k_min_tokens: int = Field(default=0, ge=0)
+    """Minimum number of speculative tokens (0 = may disable speculation)."""
+    adaptive_k_cooldown_steps: int = Field(default=2, ge=0)
+    """Steps to wait after a K change before recomputing."""
+    adaptive_k_alpha_prior: float = Field(default=0.85, ge=0.0, le=1.0)
+    """Prior conditional acceptance rate for untracked positions."""
     # params generated in the post-init stage
     draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """The configuration of the draft model initialized internal."""

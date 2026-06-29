@@ -247,6 +247,26 @@ class Scheduler(SchedulerInterface):
                 # decoding instead of standard next-token sampling, so it has a query
                 # for the last sampled token plus queries for each draft token.
                 self.num_lookahead_tokens = self.num_spec_tokens + 1
+        # Adaptive K: per-position EMA acceptance tracking and cost model.
+        if speculative_config is not None and speculative_config.enable_adaptive_k:
+            self._enable_adaptive_k = True
+            self._adaptive_k_ema_alpha = speculative_config.adaptive_k_ema_alpha
+            self._adaptive_k_c_draft = speculative_config.adaptive_k_c_draft
+            self._adaptive_k_min_tokens = speculative_config.adaptive_k_min_tokens
+            self._adaptive_k_bs_penalty = speculative_config.adaptive_k_bs_penalty
+            self._adaptive_k_cooldown_steps = (
+                speculative_config.adaptive_k_cooldown_steps
+            )
+            self._adaptive_k_alpha_prior = speculative_config.adaptive_k_alpha_prior
+        else:
+            self._enable_adaptive_k = False
+        # Lazy-init per-position tracking (allocated on first spec decode step).
+        self._pos_accepted: list[int] | None = None
+        self._pos_reached: list[int] | None = None
+        self._per_position_ema: list[float] | None = None
+        self._adaptive_k_cooldown: int = 0
+        self._previous_adaptive_k: int = self.num_spec_tokens
+        self._adaptive_k_steps_since_ema: int = 0
 
         # Create the KV cache manager.
         if hash_block_size is None:
@@ -1073,12 +1093,19 @@ class Scheduler(SchedulerInterface):
             else None
         )
 
+        # Adaptive K: dynamic speculation length from acceptance rates.
+        _adaptive_k_step = self._compute_adaptive_k(max_k=self.num_spec_tokens)
+
         # Dynamic speculative decoding: compute optimal K
         num_spec_tokens_to_schedule = self.num_spec_tokens
         if self.dynamic_sd_lookup is not None and len(num_scheduled_tokens) > 0:
             num_spec_tokens_to_schedule = self.dynamic_sd_lookup[
                 len(num_scheduled_tokens)
             ]
+
+        # Cap adaptive K to DSD batch-size bound.
+        _adaptive_k_step = min(_adaptive_k_step, num_spec_tokens_to_schedule)
+        num_spec_tokens_to_schedule = _adaptive_k_step
 
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
@@ -1089,15 +1116,25 @@ class Scheduler(SchedulerInterface):
             scheduled_encoder_inputs=scheduled_encoder_inputs,
             num_common_prefix_blocks=num_common_prefix_blocks,
             preempted_req_ids={req.request_id for req in preempted_reqs},
-            # finished_req_ids is an existing state in the scheduler,
+            num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
+            adaptive_k_for_step=(_adaptive_k_step if self._enable_adaptive_k else None),
             # instead of being newly scheduled in this step.
             # It contains the request IDs that are finished in between
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
-            num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
         )
+        # Adaptive K: invalidate extra spec slots when K is reduced.
+        if (
+            self._enable_adaptive_k
+            and _adaptive_k_step < self.num_spec_tokens
+            and num_scheduled_tokens
+        ):
+            num_invalid = self.num_spec_tokens - _adaptive_k_step
+            scheduler_output.num_invalid_spec_tokens = {
+                req_id: num_invalid for req_id in num_scheduled_tokens
+            }
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
@@ -1578,6 +1615,24 @@ class Scheduler(SchedulerInterface):
                 num_draft_tokens = len(scheduled_spec_token_ids)
                 num_sampled = self.num_sampled_tokens_per_step
                 num_accepted = max(len(generated_token_ids) - num_sampled, 0)
+                # Adaptive K: per-position acceptance tracking.
+                if self._enable_adaptive_k:
+                    if self._pos_accepted is None:
+                        self._pos_accepted = [0] * self.num_spec_tokens
+                        self._pos_reached = [0] * self.num_spec_tokens
+                    actual_k = min(
+                        scheduler_output.adaptive_k_for_step or self.num_spec_tokens,
+                        num_draft_tokens,
+                        self.num_spec_tokens,
+                    )
+                    limit = min(actual_k, num_accepted + 1)
+                    assert self._pos_reached is not None
+                    assert self._pos_accepted is not None
+                    for j in range(limit):
+                        self._pos_reached[j] += 1
+                        if j < num_accepted:
+                            self._pos_accepted[j] += 1
+                    self._adaptive_k_steps_since_ema += 1
                 num_rejected = num_draft_tokens - num_accepted
                 # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled
@@ -1823,6 +1878,26 @@ class Scheduler(SchedulerInterface):
                 # outputs this step.
                 engine_core_outputs[0] = eco = EngineCoreOutputs()
             eco.scheduler_stats = stats
+        # Adaptive K: update per-position EMA every N steps.
+        if (
+            self._enable_adaptive_k
+            and self._pos_accepted is not None
+            and self._pos_reached is not None
+            and self._adaptive_k_steps_since_ema >= 10
+        ):
+            if self._per_position_ema is None:
+                self._per_position_ema = [
+                    self._adaptive_k_alpha_prior
+                ] * self.num_spec_tokens
+            for j in range(self.num_spec_tokens):
+                if self._pos_reached[j] > 0:
+                    raw = self._pos_accepted[j] / self._pos_reached[j]
+                    self._per_position_ema[j] += self._adaptive_k_ema_alpha * (
+                        raw - self._per_position_ema[j]
+                    )
+                self._pos_accepted[j] = 0
+                self._pos_reached[j] = 0
+            self._adaptive_k_steps_since_ema = 0
 
         return engine_core_outputs
 
@@ -2575,6 +2650,58 @@ class Scheduler(SchedulerInterface):
                 affected_req_ids.add(request.request_id)
 
         return affected_req_ids, total_affected_tokens, blocks_to_evict
+
+    def _compute_adaptive_k(self, max_k: int | None = None) -> int:
+        """Select K maximising goodput = E_acc(K) / ITL(K, BS).
+
+        When DSD is active, max_k is DSD's batch-size K. K=0 disables
+        speculation when expected goodput falls below 1.0.
+        """
+        alphas = self._per_position_ema
+        if alphas is None or not self._enable_adaptive_k:
+            return max_k if max_k is not None else self.num_spec_tokens
+
+        prev_k = self._previous_adaptive_k
+
+        # Cooldown: skip recomputation after a change.
+        if self._adaptive_k_cooldown > 0:
+            self._adaptive_k_cooldown -= 1
+            return max(0, prev_k)
+
+        draft_cost_per_token = self._adaptive_k_c_draft
+        verify_overhead = self._adaptive_k_bs_penalty * len(self.running)
+        min_k = self._adaptive_k_min_tokens
+        max_k = max_k if max_k is not None else self.num_spec_tokens
+
+        prod = 1.0
+        e_total = 1.0
+        best_k = 0  # K=0 baseline (no speculation)
+        best_goodput = 1.0
+
+        for k in range(1, max_k + 1):
+            if k - 1 < len(alphas):
+                a = max(0.001, min(0.999, alphas[k - 1]))
+            else:
+                a = self._adaptive_k_alpha_prior
+            prod *= a
+            e_total += prod
+
+            if k < min_k:
+                continue
+
+            itl = k * draft_cost_per_token + 1.0 + verify_overhead
+            goodput = e_total / itl
+            if goodput >= best_goodput:
+                best_goodput = goodput
+                best_k = k
+
+        if min_k > 0 and best_k == 0:
+            best_k = min_k
+
+        self._previous_adaptive_k = best_k
+        if abs(best_k - prev_k) > 1:
+            self._adaptive_k_cooldown = self._adaptive_k_cooldown_steps
+        return best_k
 
     def _handle_invalid_blocks(
         self, invalid_block_ids: set[int], num_scheduled_tokens: dict[str, int]
