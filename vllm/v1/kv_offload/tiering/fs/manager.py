@@ -21,6 +21,13 @@ import os
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
+try:
+    from vllm.fs_io_C import batch_lookup as batch_lookup_C
+
+    _HAS_BATCH_LOOKUP_C = True
+except ImportError:
+    _HAS_BATCH_LOOKUP_C = False
+
 from typing_extensions import override
 
 from vllm.logger import init_logger
@@ -56,7 +63,11 @@ class FsAsyncLookupManager(AsyncLookupManager):
     def batch_lookup(
         self, keys: list[OffloadKey], req_context: ReqContext
     ) -> Iterable[bool]:
-        return (os.path.exists(self._tier.file_mapper.get_file_name(k)) for k in keys)
+        paths = [self._tier.file_mapper.get_file_name(k) for k in keys]
+        if _HAS_BATCH_LOOKUP_C:
+            # C extension: GIL released for the entire faccessat() batch.
+            return batch_lookup_C(paths)
+        return (os.path.exists(p) for p in paths)
 
 
 class FileSystemTierManager(SecondaryTierManager):
