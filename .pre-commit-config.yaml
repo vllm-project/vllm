@@ -256,6 +256,13 @@ repos:
     entry: python tools/pre_commit/check_boolean_context_manager.py
     language: python
     types: [python]
+  - id: check-stable-abi
+    name: Check libtorch stable ABI
+    entry: python tools/pre_commit/check_stable_abi.py
+    language: python
+    types_or: [c++, cuda]
+    files: ^csrc/
+    additional_dependencies: [regex]
   # Rust hooks. These shell out to `cargo`; tools/pre_commit/rust-check.sh
   # skips with a warning when cargo is not installed.
   - id: rust-cargo-autoinherit
