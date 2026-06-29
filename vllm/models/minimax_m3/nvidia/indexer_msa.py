@@ -2,16 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MSA (SM100/Blackwell) indexer impl for MiniMax M3.
 
-Prefill scores with ``fmha_sm100``'s score-only (``OnlyScore``) path then selects
-top-k blocks with the Triton ``minimax_m3_index_topk`` kernel -- fmha is much
-faster than Triton for the wide prefill score (benchmarked ~3-5x).
+Both sides write block scores into one unified token-major buffer
+``[total_q, H, max_k_tiles]``, then a single ``fmha_sm100.sparse_topk_select``
+selects the top-k blocks for the whole batch (decode ``[:nd]`` + prefill
+``[nd:]``) into the shared ``topk_indices_buffer``. It bounds each row by its
+causal page count and force-includes the init/local blocks, so the unwritten
+tail of the buffer is pre-filled with ``-inf``.
 
-Decode uses the Triton fused ``minimax_m3_index_decode`` (the same kernel the
-Triton indexer impl uses): for q_len==1 it is a purpose-built vector x matrix
-score (no wasted tensor-core tiles) with a 256-way split-K and a fused split-K
-top-k, which beats fmha's OnlyScore (wasted MMA on a single query, 64-split cap)
-by ~1.1-3.7x. It is cudagraph-safe by construction (shape-constant split grids)
-and writes the shared ``topk_indices_buffer`` via ``out=``.
+Prefill scores with ``fmha_sm100``'s score-only (``OnlyScore``) path (much faster
+than Triton for the wide prefill score, benchmarked ~3-5x), writing its
+``max_score`` straight into the buffer's prefill region (stride-aware, no copy).
+
+Decode scores with the Triton split-K ``minimax_m3_index_decode_score`` (a
+purpose-built vector x matrix score, no wasted tensor-core tiles, 256-way
+split-K, cudagraph-safe by shape-constant grids), writing into the decode
+region. Its tuning heuristics are kept; only the top-k is shared with prefill.
 
 ``fmha_sm100`` imports are function-local so this module is import-safe on
 AMD / non-SM100.
@@ -31,8 +36,7 @@ from vllm.models.minimax_m3.common.indexer import (
     MiniMaxM3IndexerMetadataBuilder,
 )
 from vllm.models.minimax_m3.common.ops.index_topk import (
-    minimax_m3_index_decode,
-    minimax_m3_index_topk,
+    minimax_m3_index_decode_score,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -43,6 +47,10 @@ from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 
 # Page size == sparse block size == index-K block; fmha tile id == M3 block id.
 PAGE_SIZE = 128
+
+# Fill for unwritten score tiles: -inf so they never win the top-k (score kernels
+# only write causally-valid blocks).
+_SCORE_SENTINEL = float("-inf")
 
 
 class MiniMaxM3IndexerMSABackend(MiniMaxM3IndexerBackend):
@@ -71,6 +79,22 @@ class MiniMaxM3IndexerMSAMetadata(MiniMaxM3IndexerMetadata):
     (the base ``prefill`` field is unused on this path)."""
 
     prefill_msa: MiniMaxM3IndexerMSAPrefillMetadata | None = None
+    # Tile (KV-block) dim of the unified [total_q, H, max_k_tiles] score buffer
+    # shared by decode and prefill. fmha's convention:
+    # round_up(cdiv(max_seq_len, 128), 128). When prefill is present this is
+    # forced as the fmha plan's ``max_k_tiles`` so prefill writes its max_score
+    # straight into the shared buffer.
+    max_k_tiles: int = 0
+    # Batch-wide inputs for the single top-k over the unified buffer (decode +
+    # prefill in one call). ``cu_seqlens_q`` is the per-request query-start
+    # offsets (== query_start_loc, a stable view for cudagraph); ``prefix_lens``
+    # is the per-request context length (== context_lens).
+    topk_cu_seqlens_q: torch.Tensor | None = None
+    topk_prefix_lens: torch.Tensor | None = None
+    topk_max_query_len: int = 0
+    # Per-token causal page count cdiv(seq_pos+1, PAGE_SIZE), [total_q] int32:
+    # drives sparse_topk_select force_end_blocks + -1 out-of-range clamp.
+    topk_num_valid_pages: torch.Tensor | None = None
 
 
 class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
@@ -106,6 +130,18 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
         context_lens.copy_(
             common_attn_metadata.compute_num_computed_tokens(), non_blocking=True
         )
+
+        # Per-token causal page count for the top-k, into the stable cg buffer.
+        positions = common_attn_metadata.positions
+        assert positions is not None
+        num_valid_pages = self.num_valid_pages_buffer[:num_tokens]
+        num_valid_pages.copy_(positions[:num_tokens] // PAGE_SIZE + 1)
+
+        # Tile dim of the unified score buffer (fmha tile convention:
+        # round_up(cdiv(max_seq_len, 128), 128)); covers both decode and prefill
+        # since it is taken over the whole-batch max_seq_len.
+        nblocks = (common_attn_metadata.max_seq_len + PAGE_SIZE - 1) // PAGE_SIZE
+        max_k_tiles = ((nblocks + PAGE_SIZE - 1) // PAGE_SIZE) * PAGE_SIZE
 
         decode: MiniMaxM3IndexerDecodeMetadata | None = None
         if num_decodes > 0:
@@ -148,6 +184,11 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                 causal=True,
                 num_kv_splits=1,
             )
+            # Force the plan's tile dim to the unified buffer's so prefill writes
+            # its max_score straight into unified[:, :, nd:] (the stride-aware
+            # binding shape-matches the tile dim exactly). max_k_tiles >= the
+            # plan's natural value, so the extra tiles are simply never written.
+            plan["max_k_tiles"] = max_k_tiles
             cols = torch.arange(block_table.shape[1], device=block_table.device)
             valid = cols[None, :] < nvp[lo:hi].to(block_table.device)[:, None]
             prefill = MiniMaxM3IndexerMSAPrefillMetadata(
@@ -171,6 +212,11 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
             num_prefill_tokens=num_prefill_tokens,
             decode=decode,
             prefill_msa=prefill,
+            max_k_tiles=max_k_tiles,
+            topk_cu_seqlens_q=query_start_loc[: num_reqs + 1],
+            topk_prefix_lens=context_lens,
+            topk_max_query_len=common_attn_metadata.max_query_len,
+            topk_num_valid_pages=num_valid_pages,
         )
 
 
@@ -195,36 +241,52 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
             -1, self.num_index_heads, self.index_head_dim
         )
         kv = self.index_cache.kv_cache
-        # Both sides write into the single shared persistent topk_indices_buffer:
-        # decode at [:, :nd], prefill at [:, nd:] (each kernel writes [:, :total_q]).
+        # Shared persistent top-k output buffer; the unified top-k below writes
+        # the selected block ids into buf[:num_tokens].
         buf = self.topk_indices_buffer
+        assert buf is not None
 
-        decode_topk: torch.Tensor | None = None
+        # Unified token-major score buffer [total_q, H, max_k_tiles]: the tile
+        # dim is innermost/contiguous, so both fmha writes (native [T,H,K]) and
+        # the block-iterating top-k reads hit contiguous tiles. Each side gets a
+        # contiguous slice on dim 0: decode [:nd], prefill [nd:]; the kernels
+        # read/write by strides. Pre-filled with the sentinel so the top-k never
+        # picks an unwritten tile (the score kernels only write valid blocks).
+        unified_scores = torch.full(
+            (num_tokens, self.num_index_heads, md.max_k_tiles),
+            _SCORE_SENTINEL,
+            dtype=torch.float32,
+            device=index_q.device,
+        )
+
+        # Decode scores -> unified[:nd] (transposed [H, nd, MK] view; the kernel
+        # writes by strides). Top-k is deferred to the single unified call below.
         if md.decode is not None:
             d = md.decode
-            decode_topk = minimax_m3_index_decode(
+            minimax_m3_index_decode_score(
                 index_q[:nd],
                 kv,
                 d.block_table,
                 d.seq_lens,
                 d.max_seq_len,
-                self.topk_blocks,
                 self.init_blocks,
                 self.local_blocks,
                 self.num_kv_heads,
                 d.decode_query_len,
                 d.max_decode_query_len,
-                out=buf,
+                score_out=unified_scores[:nd].transpose(0, 1),
             )
 
-        prefill_topk: torch.Tensor | None = None
         if md.prefill_msa is not None:
             from vllm.third_party.fmha_sm100.api import _fmha_sm100
 
             p = md.prefill_msa
             # Index-K cache (num_blocks, 128, D) -> paged MQA (num_blocks,1,128,D).
             k_pages = kv.view(kv.shape[0], 1, PAGE_SIZE, self.index_head_dim)
-            _, max_score = _fmha_sm100(
+            # fmha writes its max_score natively as [nnz_p, H, max_k_tiles] into
+            # the prefill region (stride-aware; plan max_k_tiles forced to
+            # md.max_k_tiles so the shape matches exactly -> no copy).
+            _fmha_sm100(
                 index_q[nd:],
                 k_pages,
                 k_pages,  # V placeholder; not read in OnlyScore
@@ -233,19 +295,24 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
                 output_o=False,
                 output_maxscore=True,
                 sm_scale=self.scale,
-            )
-            # Triton top-k wants [num_index_heads, num_tokens, max_block]; the
-            # transpose is a strided view (the kernel reads via strides).
-            out = buf[:, nd:, :] if buf is not None else None
-            prefill_topk = minimax_m3_index_topk(
-                max_score.transpose(1, 2),
-                p.cu_seqlens_q,
-                p.prefix_lens,
-                p.max_query_len,
-                self.topk_blocks,
-                self.init_blocks,
-                self.local_blocks,
-                out=out,
+                max_score=unified_scores[nd:],
             )
 
-        return decode_topk, prefill_topk
+        # Single top-k over the unified buffer via fmha_sm100 sparse_topk_select
+        # (THK, no transpose) into ``buf``. num_valid_pages drives force_end_blocks
+        # (always keep each token's local block; fmha OnlyScore won't) + the -1
+        # out-of-range clamp.
+        from vllm.third_party.fmha_sm100.api import sparse_topk_select
+
+        sparse_topk_select(
+            unified_scores,
+            self.topk_blocks,
+            num_valid_pages=md.topk_num_valid_pages,
+            force_begin_blocks=self.init_blocks,
+            force_end_blocks=self.local_blocks,
+            output=buf[:num_tokens],
+            max_score_layout="THK",
+        )
+
+        # The attend reads ``buf`` directly; this return is vestigial.
+        return None, None
