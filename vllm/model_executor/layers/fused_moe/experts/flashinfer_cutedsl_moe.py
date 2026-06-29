@@ -13,6 +13,9 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    activation_to_flashinfer_int,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kNvfp4Dynamic,
@@ -22,6 +25,7 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_cute_dsl_fused_moe_nvfp4,
     has_flashinfer_cutedsl_moe_nvfp4,
+    has_flashinfer_cutedsl_moe_nvfp4_activation_type,
 )
 
 
@@ -56,6 +60,21 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
         self.global_num_experts = moe_config.num_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
         self.local_expert_offset = self.ep_rank * self.local_num_experts
+        self.gemm1_alpha = (
+            float(quant_config.gemm1_alpha)
+            if quant_config.gemm1_alpha is not None
+            else 1.702
+        )
+        self.gemm1_beta = (
+            float(quant_config.gemm1_beta)
+            if quant_config.gemm1_beta is not None
+            else 1.0
+        )
+        self.gemm1_clamp_limit = (
+            float(quant_config.gemm1_clamp_limit)
+            if quant_config.gemm1_clamp_limit is not None
+            else 7.0
+        )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
@@ -76,7 +95,7 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        return False
+        return has_flashinfer_cutedsl_moe_nvfp4_activation_type()
 
     @staticmethod
     def _supports_quant_scheme(
@@ -90,7 +109,13 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation == MoEActivation.SILU
+        if activation == MoEActivation.SILU:
+            return True
+        return activation in (
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            MoEActivation.RELU2_NO_MUL,
+        ) and has_flashinfer_cutedsl_moe_nvfp4_activation_type()
 
     @staticmethod
     def _supports_parallel_config(
@@ -145,6 +170,52 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
         # a1q_scale is (M, K//16) float8_e4m3fn from fp4_quantize.
         # The functional API expects x_sf with trailing dim: (M, K//16, 1).
         x_sf = a1q_scale.unsqueeze(-1)
+        activation_kwargs: dict[str, object] = {}
+        has_activation_type = has_flashinfer_cutedsl_moe_nvfp4_activation_type()
+        if has_activation_type:
+            activation_kwargs["activation_type"] = activation_to_flashinfer_int(
+                activation
+            )
+        elif activation != MoEActivation.SILU:
+            raise RuntimeError(
+                "FlashInfer CuteDSL NvFP4 MoE does not support "
+                "activation_type kwargs."
+            )
+
+        swiglu_params: tuple[float, float, float] | None = None
+        if activation == MoEActivation.SILU:
+            if self.quant_config.gemm1_clamp_limit is not None:
+                swiglu_params = (
+                    1.0,
+                    0.0,
+                    float(self.quant_config.gemm1_clamp_limit),
+                )
+        elif activation in (
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        ):
+            swiglu_params = (
+                self.gemm1_alpha,
+                self.gemm1_beta,
+                self.gemm1_clamp_limit,
+            )
+        elif activation != MoEActivation.RELU2_NO_MUL:
+            raise ValueError(f"Unsupported FlashInfer CuteDSL activation: {activation}")
+
+        if swiglu_params is not None:
+            if not has_activation_type:
+                raise RuntimeError(
+                    "FlashInfer CuteDSL NvFP4 MoE does not support activation_type "
+                    "and SwiGLU parameter kwargs."
+                )
+            swiglu_alpha, swiglu_beta, swiglu_limit = swiglu_params
+            activation_kwargs.update(
+                {
+                    "swiglu_alpha": swiglu_alpha,
+                    "swiglu_beta": swiglu_beta,
+                    "swiglu_limit": swiglu_limit,
+                }
+            )
 
         flashinfer_cute_dsl_fused_moe_nvfp4(
             x=hidden_states,
@@ -163,4 +234,5 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
             num_local_experts=self.local_num_experts,
             local_expert_offset=self.local_expert_offset,
             moe_output=output,
+            **activation_kwargs,
         )

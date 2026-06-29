@@ -31,6 +31,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
+from vllm.utils.flashinfer import has_flashinfer_cutedsl_moe_nvfp4_activation_type
 
 logger = init_logger(__name__)
 
@@ -175,6 +176,8 @@ def select_nvfp4_moe_backend(
     NVFP4_BACKENDS_WITH_CLAMP = {
         NvFp4MoeBackend.FLASHINFER_TRTLLM,
     }
+    if has_flashinfer_cutedsl_moe_nvfp4_activation_type():
+        NVFP4_BACKENDS_WITH_CLAMP.add(NvFp4MoeBackend.FLASHINFER_CUTEDSL)
 
     if config.swiglu_limit is not None:
         AVAILABLE_BACKENDS = [
@@ -238,11 +241,16 @@ def select_nvfp4_moe_backend(
             config.swiglu_limit is not None
             and requested_backend not in NVFP4_BACKENDS_WITH_CLAMP
         ):
+            cutedsl_hint = (
+                " or flashinfer_cutedsl"
+                if has_flashinfer_cutedsl_moe_nvfp4_activation_type()
+                else ""
+            )
             raise ValueError(
                 f"Model sets swiglu_limit={config.swiglu_limit}, but the "
                 f"explicitly requested moe_backend={runner_backend!r} does "
-                f"not apply the SwiGLU clamp. Use 'flashinfer_trtllm' or "
-                f"'flashinfer_cutlass' instead."
+                "not apply the SwiGLU clamp. Use "
+                f"'flashinfer_trtllm'{cutedsl_hint} instead."
             )
         return _return_or_raise(
             requested_backend, config, weight_key, activation_key, activation_format
@@ -416,6 +424,8 @@ def make_nvfp4_moe_quant_config(
     a13_scale: torch.Tensor,
     a2_scale: torch.Tensor,
     swiglu_limit: float | None = None,
+    swiglu_alpha: float | None = None,
+    swiglu_beta: float | None = None,
 ) -> FusedMoEQuantConfig:
     if backend == NvFp4MoeBackend.MARLIN:
         return nvfp4_w4a16_moe_quant_config(
@@ -432,6 +442,8 @@ def make_nvfp4_moe_quant_config(
             a2_gscale=a2_scale,
             w1_scale=w13_scale,
             w2_scale=w2_scale,
+            gemm1_alpha=swiglu_alpha,
+            gemm1_beta=swiglu_beta,
             gemm1_clamp_limit=swiglu_limit,
         )
 
@@ -456,6 +468,8 @@ def make_nvfp4_moe_quant_config(
                 NvFp4MoeBackend.FLASHINFER_CUTEDSL,
             )
         ),
+        gemm1_alpha=swiglu_alpha,
+        gemm1_beta=swiglu_beta,
         gemm1_clamp_limit=swiglu_limit,
     )
 

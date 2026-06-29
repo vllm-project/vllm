@@ -64,6 +64,36 @@ def interleave_linear_and_gate(
     return x
 
 
+def reorder_w13_for_flashinfer_cutedsl(
+    layer: "RoutedExperts",
+    w13: torch.Tensor,
+    w13_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Normalize gated w13 rows to the [up; gate] order used by FlashInfer."""
+    if not layer.activation.is_gated:
+        return w13, w13_scale
+
+    activation_value = getattr(getattr(layer, "activation", None), "value", None)
+    if activation_value == "swigluoai":
+        # GPT-OSS stores w13 as [gate0, up0, gate1, up1, ...].  The
+        # FlashInfer CuTe DSL kernel expects the accumulator order [up, gate]
+        # before its group-64 interleave transform.
+        gate, up = w13[:, 0::2], w13[:, 1::2]
+        gate_scale, up_scale = w13_scale[:, 0::2], w13_scale[:, 1::2]
+        return (
+            torch.cat([up, gate], dim=1).contiguous(),
+            torch.cat([up_scale, gate_scale], dim=1).contiguous(),
+        )
+
+    # Standard gated layout, including swigluoai_uninterleave, is packed
+    # [gate; up].  Convert to [up; gate] for FlashInfer.
+    half = w13.shape[1] // 2
+    return (
+        torch.cat([w13[:, half:], w13[:, :half]], dim=1).contiguous(),
+        torch.cat([w13_scale[:, half:], w13_scale[:, :half]], dim=1).contiguous(),
+    )
+
+
 def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
     layer: "RoutedExperts",
     w13: torch.Tensor,
@@ -86,8 +116,8 @@ def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
 ]:
     """Prepare weights for the CuteDSL wrapper-based NvFP4 MoE backend.
 
-    Converts weight scale factors to MMA layout expected by CuteDslMoEWrapper,
-    and interleaves w13 gate/linear rows.
+    Converts weight scale factors to MMA layout expected by CuteDslMoEWrapper.
+    For gated activations, also interleaves w13 gate/linear rows.
     """
     from flashinfer.cute_dsl.utils import convert_sf_to_mma_layout
 
@@ -96,13 +126,12 @@ def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
     a13_scale = a13_scale.max().to(torch.float32).expand(num_experts)
     a2_scale = a2_scale.max().to(torch.float32).expand(num_experts)
 
-    half = w13.shape[1] // 2
-    w13 = torch.cat([w13[:, half:], w13[:, :half]], dim=1)
-    w13_scale = torch.cat([w13_scale[:, half:], w13_scale[:, :half]], dim=1)
+    if layer.activation.is_gated:
+        w13, w13_scale = reorder_w13_for_flashinfer_cutedsl(layer, w13, w13_scale)
 
-    # Interleave up/gate rows for w13 weights and scales.
-    w13 = interleave_linear_and_gate(w13, group_size=64, dim=1)
-    w13_scale = interleave_linear_and_gate(w13_scale, group_size=64, dim=1)
+        # Interleave up/gate rows for w13 weights and scales.
+        w13 = interleave_linear_and_gate(w13, group_size=64, dim=1)
+        w13_scale = interleave_linear_and_gate(w13_scale, group_size=64, dim=1)
 
     # Convert w13 scale factors: linear → swizzled → MMA layout.
     w13_scale = swizzle_blockscale(w13_scale)
