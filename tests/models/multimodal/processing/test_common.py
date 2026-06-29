@@ -107,11 +107,9 @@ def _get_model_ids_to_test(model_arch_list: AbstractSet[str]):
     model_ids = list(_iter_model_ids_to_test(model_arch_list))
 
     if current_platform.is_xpu():
-        model_ids = [
-            model_id
-            for model_id in model_ids
-            if model_id not in _XPU_EXCLUDED_MODEL_IDS
-        ]
+        for excluded_model_id in _XPU_EXCLUDED_MODEL_IDS:
+            while excluded_model_id in model_ids:
+                model_ids.remove(excluded_model_id)
 
     return model_ids
 
