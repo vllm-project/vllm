@@ -70,6 +70,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 
 class DeepseekV4MLP(nn.Module):
@@ -464,6 +465,11 @@ class DeepseekV4MegaMoEExperts(nn.Module):
                 logical_to_physical_map=eplb_state.logical_to_physical_map,
                 logical_replica_count=eplb_state.logical_replica_count,
                 record_enabled=eplb_state.should_record_tensor,
+                num_unpadded_tokens=eplb_state.num_unpadded_tokens_tensors[
+                    dbo_current_ubatch_id()
+                ]
+                if eplb_state.num_unpadded_tokens_tensors is not None
+                else None,
             )
 
         prepare_megamoe_inputs(
