@@ -1067,6 +1067,18 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
     """
 
     @staticmethod
+    def supports_swiglu_clamp_limit(activation: MoEActivation) -> bool:
+        """`activation()` consumes `quant_config.gemm1_clamp_limit` on
+        both the SWIGLUOAI branch (forwarded to `_C.swigluoai_and_mul`)
+        and the SILU branch (via `swiglu_limit_func`). SWIGLUSTEP falls
+        through to `super().activation()` and does NOT consume the clamp.
+        LoRA from LoRAExpertsMixin is merged into the activation input
+        via `apply_w13_lora` BEFORE `self.activation()` runs (see
+        `apply`), so the clamp path does not bypass LoRA.
+        """
+        return activation in (MoEActivation.SILU, MoEActivation.SWIGLUOAI)
+
+    @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
         return activation in [
             MoEActivation.SILU,
