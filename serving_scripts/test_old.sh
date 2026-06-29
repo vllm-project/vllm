@@ -17,37 +17,30 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="arc-ray-qwen3-30b-a3b-r32-sp128-sd128-tp4-pp2-raytmp-gated-nsys-v2"
-
-# -----------------------------------------------------------------------------
-# Debug / timeout knobs
-# -----------------------------------------------------------------------------
+SCRIPT_VERSION="arc-ray-qwen3-30b-a3b-r32-sp128-sd128-tp4-pp2-raytmp-logready-v3"
 
 DEBUG_SLURM_SCRIPT="${DEBUG_SLURM_SCRIPT:-0}"
 NSYS_COPY_DEBUG="${NSYS_COPY_DEBUG:-0}"
 
 SRUN_COPY_TIMEOUT="${SRUN_COPY_TIMEOUT:-480s}"
 SERVER_SHUTDOWN_TIMEOUT_S="${SERVER_SHUTDOWN_TIMEOUT_S:-420}"
-
 HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-1200}"
+
 export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-2400}"
 
 RAY_CLIENT_PORT="${RAY_CLIENT_PORT:-10001}"
 RAY_TCP_PREFLIGHT_TIMEOUT_S="${RAY_TCP_PREFLIGHT_TIMEOUT_S:-360}"
-RAY_HEAD_START_SLEEP_S="${RAY_HEAD_START_SLEEP_S:-30}"
-RAY_WORKER_START_SLEEP_S="${RAY_WORKER_START_SLEEP_S:-30}"
-
 RAY_CLUSTER_READY_TIMEOUT_S="${RAY_CLUSTER_READY_TIMEOUT_S:-600}"
 RAY_CLUSTER_READY_POLL_S="${RAY_CLUSTER_READY_POLL_S:-10}"
+RAY_HEAD_START_SLEEP_S="${RAY_HEAD_START_SLEEP_S:-60}"
+RAY_WORKER_START_SLEEP_S="${RAY_WORKER_START_SLEEP_S:-45}"
+RAY_STOP_GRACE_S="${RAY_STOP_GRACE_S:-180}"
 
 WORKER_NSYS_LIVE_COPY_INTERVAL="${WORKER_NSYS_LIVE_COPY_INTERVAL:-2}"
-WORKER_NSYS_FINALIZE_WAIT_S="${WORKER_NSYS_FINALIZE_WAIT_S:-900}"
+WORKER_NSYS_FINALIZE_WAIT_S="${WORKER_NSYS_FINALIZE_WAIT_S:-600}"
 WORKER_NSYS_FINALIZE_POLL_S="${WORKER_NSYS_FINALIZE_POLL_S:-5}"
+WORKER_NSYS_FLUSH_WAIT_S="${WORKER_NSYS_FLUSH_WAIT_S:-120}"
 MIN_WORKER_NSYS_REP_BYTES="${MIN_WORKER_NSYS_REP_BYTES:-1024}"
-
-# -----------------------------------------------------------------------------
-# Workload knobs
-# -----------------------------------------------------------------------------
 
 SP="${SP:-128}"
 SD="${SD:-128}"
@@ -73,38 +66,17 @@ RESULT_ROOT="${RESULT_ROOT:-}"
 RESULT_DIR="${RESULT_DIR:-}"
 RESULT_FILENAME="${RESULT_FILENAME:-}"
 
-# -----------------------------------------------------------------------------
-# Profiling / runtime env
-# -----------------------------------------------------------------------------
-
 export NSYS_ENABLE="${NSYS_ENABLE:-1}"
 export NSYS_PROFILE_WORKERS="${NSYS_PROFILE_WORKERS:-1}"
 export NSYS_PROFILE_RAY="${NSYS_PROFILE_RAY:-0}"
 
 export RAY_USAGE_STATS_ENABLED="${RAY_USAGE_STATS_ENABLED:-1}"
-export RAY_DEDUP_LOGS="${RAY_DEDUP_LOGS:-0}"
 
+export VLLM_WORKER_MULTIPROC_METHOD="${VLLM_WORKER_MULTIPROC_METHOD:-spawn}"
 export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-DEBUG}"
 export VLLM_LOG_STATS_INTERVAL="${VLLM_LOG_STATS_INTERVAL:-1}"
 export TORCH_DISTRIBUTED_DEBUG="${TORCH_DISTRIBUTED_DEBUG:-DETAIL}"
-
-# Needed for vLLM/Ray/Nsight multiprocessing behavior.
-export VLLM_WORKER_MULTIPROC_METHOD="${VLLM_WORKER_MULTIPROC_METHOD:-spawn}"
-
-# Ray temp layout:
-# Ray sees a short path:
-#   /tmp/vray-${SLURM_JOB_ID}-${node}
-# that points to real job-local Slurm tmp:
-#   /tmp/slurm-${SLURM_JOB_ID}/tmp/ray-${SLURM_JOB_ID}-${node}
-RAY_TMP_LINK_PARENT="${RAY_TMP_LINK_PARENT:-/tmp}"
-RAY_TMP_PREFIX="${RAY_TMP_PREFIX:-vray-${SLURM_JOB_ID}}"
-
-RAY_PLASMA_DIRECTORY="${RAY_PLASMA_DIRECTORY:-/dev/shm}"
-RAY_OBJECT_STORE_MEMORY="${RAY_OBJECT_STORE_MEMORY:-200000000000}"
-
-# -----------------------------------------------------------------------------
-# Small helpers
-# -----------------------------------------------------------------------------
+export RAY_DEDUP_LOGS="${RAY_DEDUP_LOGS:-0}"
 
 slurm_debug() {
   if [ "${DEBUG_SLURM_SCRIPT}" = "1" ]; then
@@ -155,10 +127,6 @@ wait_for_pid_or_kill() {
 
   wait "${pid}" 2>/dev/null || true
 }
-
-# -----------------------------------------------------------------------------
-# Network helpers
-# -----------------------------------------------------------------------------
 
 resolve_host_ip() {
   local nodename="$1"
@@ -225,6 +193,8 @@ network_debug_snapshot() {
   echo "HEAD_NODE=${HEAD_NODE:-}"
   echo "WORKER_NODES=${WORKER_NODES:-}"
   echo "HEAD_NODE_IP=${HEAD_NODE_IP:-}"
+  echo "WORKER_NODE_IPS=${WORKER_NODE_IPS:-}"
+  echo "RAY_EXPECTED_NODE_IPS=${RAY_EXPECTED_NODE_IPS:-}"
   echo "VLLM_HOST_IP=${VLLM_HOST_IP:-}"
   echo "HOST=${HOST:-}"
   echo "PORT=${PORT:-}"
@@ -237,16 +207,13 @@ network_debug_snapshot() {
   echo "NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-}"
   echo "NCCL_NET=${NCCL_NET:-}"
   echo "NCCL_IB_HCA=${NCCL_IB_HCA:-}"
+  echo "RAY_TMPDIR=${RAY_TMPDIR:-}"
   echo "--- ip -o -4 addr show ---"
   ip -o -4 addr show 2>/dev/null || true
   echo "--- nvidia-smi -L ---"
   nvidia-smi -L 2>/dev/null || true
   echo "=== end network debug: ${label} ==="
 }
-
-# -----------------------------------------------------------------------------
-# Ray tmp helpers
-# -----------------------------------------------------------------------------
 
 discover_arc_node_tmp_parent() {
   local slurm_tmp_with_tmp="/tmp/slurm-${SLURM_JOB_ID}/tmp"
@@ -303,12 +270,9 @@ ensure_ray_tmp_for_node() {
   echo "[ray-tmp] TMPDIR=${TMPDIR}"
   echo "[ray-tmp] RAY_PLASMA_DIRECTORY=${RAY_PLASMA_DIRECTORY}"
   echo "[ray-tmp] RAY_OBJECT_STORE_MEMORY=${RAY_OBJECT_STORE_MEMORY}"
+
   df -h /tmp "${parent}" "${root}" "${link}" "${RAY_PLASMA_DIRECTORY}" 2>/dev/null || true
 }
-
-# -----------------------------------------------------------------------------
-# Nsight copy helpers
-# -----------------------------------------------------------------------------
 
 copy_ray_nsight_locally_once() {
   set +e
@@ -357,7 +321,8 @@ ${d}"
     /tmp/vray-${SLURM_JOB_ID}-${node}/session_latest/logs/nsight \
     /tmp/slurm-${SLURM_JOB_ID}/tmp/ray-${SLURM_JOB_ID}-${node}/session_*/logs/nsight \
     /tmp/slurm-${SLURM_JOB_ID}/tmp/ray-${SLURM_JOB_ID}-${node}/session_latest/logs/nsight \
-    /tmp/ray/session_*/logs/nsight; do
+    /tmp/ray/session_*/logs/nsight \
+    /tmp/slurm-${SLURM_JOB_ID}/tmp/ray/session_*/logs/nsight; do
     [ -d "${d}" ] && candidate_dirs="${candidate_dirs}
 ${d}"
   done
@@ -414,7 +379,6 @@ ${d}"
 
 copy_ray_nsight_locally_final() {
   set +e
-
   local node
   node="$(hostname -s 2>/dev/null || hostname)"
   local dest="${TRACE_RUN_DIR}/ray_worker_nsight/${node}"
@@ -475,8 +439,74 @@ nsight_summarize_dest() {
   fi
 }
 
+copy_ray_nsight_from_node_procroot() {
+  local NODE="$1"
+  local dest="${TRACE_RUN_DIR}/ray_worker_nsight/${NODE}"
+
+  nsight_copy_msg "=== proc-root copy start: ${NODE} -> ${dest} ==="
+
+  ssh "${NODE}" "
+    set +e
+    mkdir -p '${dest}'
+
+    RAYPID=\$(ps -u '$USER' -o pid=,args= | awk '/ray start --block/ && !/awk/ {print \$1; exit}')
+    SHORT=\$(hostname -s)
+    JOB='${SLURM_JOB_ID}'
+
+    echo '[nsight-copy] node='\"\${SHORT}\"' RAYPID='\"\${RAYPID}\"
+
+    if [ -z \"\${RAYPID}\" ]; then
+      echo '[nsight-copy] no Ray pid on '\${SHORT}
+      exit 0
+    fi
+
+    ROOT=/proc/\${RAYPID}/root/tmp/slurm-\${JOB}/tmp/ray-\${JOB}-\${SHORT}
+    echo '[nsight-copy] ROOT='\"\${ROOT}\"
+
+    candidate_dirs=''
+    for d in \${ROOT}/session_*/logs/nsight \${ROOT}/session_latest/logs/nsight; do
+      [ -d \"\$d\" ] && candidate_dirs=\"\${candidate_dirs}
+\$d\"
+    done
+
+    candidate_dirs=\$(printf '%s\n' \"\${candidate_dirs}\" | sed '/^$/d' | sort -u)
+
+    if [ -n \"\${candidate_dirs}\" ]; then
+      while read -r d; do
+        [ -d \"\$d\" ] || continue
+
+        find \"\$d\" -maxdepth 1 -type f \
+          \( \
+            \( -name '*.nsys-rep' ! -name 'empty.nsys-rep' ! -name '*_empty.nsys-rep' ! -name '*empty*' -size +${MIN_WORKER_NSYS_REP_BYTES}c \) \
+            -o \
+            \( -name '*.qdstrm' ! -name '*empty*' -size +0c \) \
+          \) \
+          -print0 2>/dev/null |
+          while IFS= read -r -d '' f; do
+            base=\$(basename \"\$f\")
+            session=\$(echo \"\$f\" | sed -n 's#^.*/\(session_[^/]*\)/logs/nsight/.*#\1#p')
+            [ -n \"\$session\" ] || session=unknown_session
+
+            out='${dest}'/\"\${SHORT}_\${session}_\${base}\"
+            tmpout=\"\${out}.tmp\"
+
+            cp -f \"\$f\" \"\$tmpout\" 2>/dev/null &&
+              mv -f \"\$tmpout\" \"\$out\" 2>/dev/null ||
+              rm -f \"\$tmpout\" 2>/dev/null || true
+          done
+      done <<< \"\${candidate_dirs}\"
+    fi
+
+    find '${dest}' -maxdepth 1 -type f \( -name '*.nsys-rep' -o -name '*.qdstrm' \) \
+      -printf '[nsight-copy]   %p %s bytes\n' 2>/dev/null | sort || true
+  " || true
+
+  nsight_copy_msg "=== proc-root copy end: ${NODE} ==="
+  nsight_summarize_dest "${NODE}"
+}
+
 wait_for_real_worker_nsys_reports() {
-  local timeout_s="${1:-300}"
+  local timeout_s="${1:-180}"
   local poll_s="${2:-5}"
   local elapsed=0
 
@@ -493,6 +523,8 @@ wait_for_real_worker_nsys_reports() {
     local missing_nodes=""
 
     for node in ${HEAD_NODE} ${WORKER_NODES}; do
+      copy_ray_nsight_from_node_procroot "${node}" >/dev/null 2>&1 || true
+
       local dest="${TRACE_RUN_DIR}/ray_worker_nsight/${node}"
 
       if ! find "${dest}" -maxdepth 1 -type f \
@@ -528,245 +560,124 @@ wait_for_real_worker_nsys_reports() {
 
 copy_ray_nsight_from_node() {
   local NODE="$1"
-  local dest="${TRACE_RUN_DIR}/ray_worker_nsight/${NODE}"
-  local session_record="${TRACE_RUN_DIR}/ray_session_names/${NODE}.txt"
-  local srun_status=0
 
-  nsight_copy_msg "=== fallback copy start: ${NODE} -> ${dest} ==="
+  copy_ray_nsight_from_node_procroot "${NODE}" || true
+}
 
-  set +e
-  run_with_timeout "${SRUN_COPY_TIMEOUT}" \
-    srun \
-      --overlap \
-      --nodelist "${NODE}" \
-      --nodes=1 \
-      --ntasks=1 \
-      --ntasks-per-node=1 \
-      --cpus-per-task=1 \
-      --mem=1G \
-      bash -lc "
+wait_for_ray_cluster_ready_from_logs() {
+  local timeout_s="${1:-600}"
+  local poll_s="${2:-10}"
+  local deadline=$((SECONDS + timeout_s))
+  local expected_gpu_units
+  expected_gpu_units=$((GPUS_PER_NODE * 10000))
+
+  echo "=== Waiting for Ray cluster readiness from raylet logs ==="
+  echo "Expected nodes: ${HEAD_NODE} ${WORKER_NODES}"
+  echo "Expected node IPs: ${RAY_EXPECTED_NODE_IPS}"
+  echo "Expected GPU units per node in Ray debug dump: ${expected_gpu_units}"
+  echo "This intentionally avoids ray.init(), ray status, and Ray Client."
+
+  while [ "${SECONDS}" -lt "${deadline}" ]; do
+    local ok=1
+
+    for NODE in ${HEAD_NODE} ${WORKER_NODES}; do
+      echo "[ray-ready] inspecting ${NODE}..."
+
+      if ! ssh "${NODE}" "
         set +e
-        mkdir -p '${dest}'
 
-        node=\$(hostname -s 2>/dev/null || hostname)
-        echo '[nsight-copy] fallback on '\${node}' expected ${NODE}'
-        echo '[nsight-copy] dest=${dest}'
+        RAYPID=\$(ps -u '$USER' -o pid=,args= | awk '/ray start --block/ && !/awk/ {print \$1; exit}')
+        SHORT=\$(hostname -s)
+        JOB='${SLURM_JOB_ID}'
+        EXPECTED_IPS='${RAY_EXPECTED_NODE_IPS}'
+        EXPECTED_GPU_UNITS='${expected_gpu_units}'
 
-        candidate_dirs=''
+        if [ -z \"\$RAYPID\" ]; then
+          echo '[ray-ready] no ray start pid on' \$SHORT
+          exit 1
+        fi
 
-        for d in \
-          /tmp/vray-${SLURM_JOB_ID}-${NODE}/session_*/logs/nsight \
-          /tmp/vray-${SLURM_JOB_ID}-${NODE}/session_latest/logs/nsight \
-          /tmp/slurm-${SLURM_JOB_ID}/tmp/ray-${SLURM_JOB_ID}-${NODE}/session_*/logs/nsight \
-          /tmp/slurm-${SLURM_JOB_ID}/tmp/ray-${SLURM_JOB_ID}-${NODE}/session_latest/logs/nsight \
-          /tmp/ray/session_*/logs/nsight; do
-          [ -d \"\$d\" ] && candidate_dirs=\"\${candidate_dirs}
-\$d\"
+        ROOT=/proc/\${RAYPID}/root/tmp/slurm-\${JOB}/tmp/ray-\${JOB}-\${SHORT}
+
+        if [ ! -d \"\$ROOT\" ]; then
+          echo '[ray-ready] missing ROOT on' \$SHORT ':' \$ROOT
+          exit 1
+        fi
+
+        if ! ls \"\$ROOT\"/session_*/logs/raylet.out >/dev/null 2>&1; then
+          echo '[ray-ready] no raylet.out yet on' \$SHORT
+          exit 1
+        fi
+
+        for ip in \${EXPECTED_IPS}; do
+          if ! {
+            cat \"\$ROOT\"/session_*/logs/debug_state.txt 2>/dev/null
+            tail -n 2000 \"\$ROOT\"/session_*/logs/raylet.out 2>/dev/null
+          } | grep \"node:\${ip}\" | grep -q \"GPU: \${EXPECTED_GPU_UNITS}\"; then
+            echo '[ray-ready]' \$SHORT 'does not yet see node:'\${ip}' with GPU:'\${EXPECTED_GPU_UNITS}
+            exit 1
+          fi
         done
 
-        vray_real=\$(readlink -f /tmp/vray-${SLURM_JOB_ID}-${NODE} 2>/dev/null || true)
-        if [ -n \"\${vray_real}\" ]; then
-          for d in \"\${vray_real}\"/session_*/logs/nsight \"\${vray_real}\"/session_latest/logs/nsight; do
-            [ -d \"\$d\" ] && candidate_dirs=\"\${candidate_dirs}
-\$d\"
-          done
-        fi
+        echo '[ray-ready]' \$SHORT 'sees all expected nodes and GPUs'
+        exit 0
+      "; then
+        ok=0
+      fi
+    done
 
-        if [ -f '${session_record}' ]; then
-          while read -r s; do
-            [ -n \"\$s\" ] || continue
-            [ -d \"/tmp/ray/\${s}/logs/nsight\" ] && candidate_dirs=\"\${candidate_dirs}
-/tmp/ray/\${s}/logs/nsight\"
-            [ -d \"/tmp/vray-${SLURM_JOB_ID}-${NODE}/\${s}/logs/nsight\" ] && candidate_dirs=\"\${candidate_dirs}
-/tmp/vray-${SLURM_JOB_ID}-${NODE}/\${s}/logs/nsight\"
-            [ -d \"/tmp/slurm-${SLURM_JOB_ID}/tmp/ray-${SLURM_JOB_ID}-${NODE}/\${s}/logs/nsight\" ] && candidate_dirs=\"\${candidate_dirs}
-/tmp/slurm-${SLURM_JOB_ID}/tmp/ray-${SLURM_JOB_ID}-${NODE}/\${s}/logs/nsight\"
-          done < '${session_record}'
-        fi
+    if [ "${ok}" = "1" ]; then
+      echo "Ray cluster is ready: all nodes visible and GPUs registered."
+      return 0
+    fi
 
-        candidate_dirs=\$(printf '%s\n' \"\${candidate_dirs}\" | sed '/^$/d' | sort -u)
+    echo "Ray cluster not ready yet; sleeping ${poll_s}s..."
+    sleep "${poll_s}"
+  done
 
-        echo '[nsight-copy] fallback candidate dirs:'
-        if [ -n \"\${candidate_dirs}\" ]; then
-          printf '%s\n' \"\${candidate_dirs}\" | sed 's/^/[nsight-copy]   /'
-        else
-          echo '[nsight-copy]   none'
-        fi
-
-        if [ -n \"\${candidate_dirs}\" ]; then
-          while read -r d; do
-            [ -d \"\$d\" ] || continue
-
-            find \"\$d\" -maxdepth 1 -type f \
-              \( \
-                \( -name '*.nsys-rep' ! -name 'empty.nsys-rep' ! -name '*_empty.nsys-rep' ! -name '*empty*' -size +${MIN_WORKER_NSYS_REP_BYTES}c \) \
-                -o \
-                \( -name '*.qdstrm' ! -name '*empty*' -size +0c \) \
-              \) \
-              -print0 2>/dev/null |
-              while IFS= read -r -d '' f; do
-                base=\$(basename \"\$f\")
-                session=\$(echo \"\$f\" | sed -n 's#^.*/\(session_[^/]*\)/logs/nsight/.*#\1#p')
-                [ -n \"\$session\" ] || session=unknown_session
-
-                out='${dest}'/\"\${node}_\${session}_\${base}\"
-                tmpout=\"\${out}.tmp\"
-
-                cp -f \"\$f\" \"\$tmpout\" 2>/dev/null &&
-                  mv -f \"\$tmpout\" \"\$out\" 2>/dev/null ||
-                  rm -f \"\$tmpout\" 2>/dev/null || true
-              done
-          done <<< \"\${candidate_dirs}\"
-        fi
-
-        echo '[nsight-copy] dest after fallback copy:'
-        find '${dest}' -maxdepth 1 -type f \( -name '*.nsys-rep' -o -name '*.qdstrm' \) \
-          -printf '[nsight-copy]   %p %s bytes\n' 2>/dev/null | sort || true
-      "
-  srun_status=$?
-  set -e
-
-  nsight_copy_msg "=== fallback copy end: ${NODE} srun_status=${srun_status} ==="
-  nsight_summarize_dest "${NODE}"
+  echo "ERROR: Ray cluster did not become ready from raylet logs." >&2
+  return 1
 }
 
-# -----------------------------------------------------------------------------
-# Ray readiness / shutdown helpers
-# -----------------------------------------------------------------------------
-
-wait_for_ray_cluster_ready() {
-  local expected_nodes="$1"
-  local expected_gpus="$2"
-  local timeout_s="${3:-600}"
-  local poll_s="${4:-10}"
-
-  echo "=== Waiting for Ray cluster readiness ==="
-  echo "Expected alive nodes: ${expected_nodes}"
-  echo "Expected GPUs:        ${expected_gpus}"
-  echo "RAY_ADDRESS=${RAY_ADDRESS}"
-
-  export RAY_TMPDIR
-  RAY_TMPDIR="$(ray_tmp_link_for_node "${HEAD_NODE}")"
-  export TMPDIR="${RAY_TMPDIR}/py_tmp"
-  mkdir -p "${TMPDIR}" 2>/dev/null || true
-
-  echo "Ray readiness driver RAY_TMPDIR=${RAY_TMPDIR} -> $(readlink -f "${RAY_TMPDIR}" 2>/dev/null || echo MISSING)"
-  echo "Ray readiness driver TMPDIR=${TMPDIR}"
-
-  EXPECTED_RAY_NODES="${expected_nodes}" \
-  EXPECTED_RAY_GPUS="${expected_gpus}" \
-  RAY_READY_TIMEOUT_S="${timeout_s}" \
-  RAY_READY_POLL_S="${poll_s}" \
-  python -u <<'PY'
-import os
-import sys
-import time
-import ray
-
-address = os.environ["RAY_ADDRESS"]
-expected_nodes = int(os.environ["EXPECTED_RAY_NODES"])
-expected_gpus = float(os.environ["EXPECTED_RAY_GPUS"])
-timeout_s = int(os.environ["RAY_READY_TIMEOUT_S"])
-poll_s = int(os.environ["RAY_READY_POLL_S"])
-
-deadline = time.time() + timeout_s
-last = None
-
-while time.time() < deadline:
-    try:
-        ray.init(address=address, ignore_reinit_error=True)
-        nodes = [n for n in ray.nodes() if n.get("Alive")]
-        resources = ray.cluster_resources()
-        available = ray.available_resources()
-
-        print("Ray readiness check:", flush=True)
-        print(f"  alive_nodes={len(nodes)}/{expected_nodes}", flush=True)
-        print(f"  cluster_resources={resources}", flush=True)
-        print(f"  available_resources={available}", flush=True)
-
-        for n in nodes:
-            print(
-                f"  node={n.get('NodeManagerAddress')} "
-                f"resources={n.get('Resources')}",
-                flush=True,
-            )
-
-        gpu_count = float(resources.get("GPU", 0.0))
-        if len(nodes) >= expected_nodes and gpu_count >= expected_gpus:
-            print("Ray cluster is ready.", flush=True)
-            ray.shutdown()
-            sys.exit(0)
-
-        last = f"alive_nodes={len(nodes)}, gpu_count={gpu_count}"
-
-    except Exception as e:
-        last = repr(e)
-        print(f"Ray readiness error: {last}", flush=True)
-
-    try:
-        ray.shutdown()
-    except Exception:
-        pass
-
-    time.sleep(poll_s)
-
-print(f"ERROR: Ray cluster did not become ready. Last state: {last}", file=sys.stderr)
-sys.exit(1)
-PY
-}
-
-stop_ray_cleanly_on_node() {
+stop_ray_start_process_on_node() {
   local NODE="$1"
-  local node_tmp
 
-  node_tmp="$(ray_tmp_link_for_node "${NODE}")"
+  echo "=== stopping Ray start process on ${NODE} ==="
 
-  echo "=== stopping Ray cleanly on ${NODE} ==="
+  ssh "${NODE}" "
+    set +e
 
-  set +e
-  run_with_timeout 240s \
-    srun \
-      --overlap \
-      --nodelist "${NODE}" \
-      --nodes=1 \
-      --ntasks=1 \
-      --ntasks-per-node=1 \
-      --cpus-per-task=2 \
-      --mem=4G \
-      bash -lc "
-        set +e
-        source '${VENV_DIR}/bin/activate'
+    RAYPID=\$(ps -u '$USER' -o pid=,args= | awk '/ray start --block/ && !/awk/ {print \$1; exit}')
+    SHORT=\$(hostname -s)
 
-        export RAY_TMPDIR='${node_tmp}'
-        export TMPDIR='${node_tmp}/py_tmp'
-        mkdir -p \"\${TMPDIR}\" 2>/dev/null || true
+    echo '[ray-stop] node='\"\${SHORT}\"' RAYPID='\"\${RAYPID}\"
 
-        echo '[ray-stop] on '\$(hostname)
-        echo '[ray-stop] RAY_TMPDIR='\"\${RAY_TMPDIR}\"
-        echo '[ray-stop] before:'
-        ps -u '$USER' -f | egrep 'nsys|ray::|raylet|gcs_server|worker_process|vllm|EngineCore' | grep -v grep || true
+    if [ -z \"\${RAYPID}\" ]; then
+      echo '[ray-stop] no ray start pid found'
+      exit 0
+    fi
 
-        ray stop || true
+    echo '[ray-stop] before:'
+    ps -u '$USER' -f | egrep 'nsys|ray::|raylet|gcs_server|worker_process|vllm|EngineCore' | grep -v grep || true
 
-        echo '[ray-stop] sleeping 90s for Nsight export...'
-        sleep 90
+    kill -TERM \"\${RAYPID}\" 2>/dev/null || true
 
-        ray stop --force || true
+    waited=0
+    while kill -0 \"\${RAYPID}\" 2>/dev/null && [ \"\${waited}\" -lt '${RAY_STOP_GRACE_S}' ]; do
+      sleep 5
+      waited=\$((waited + 5))
+      echo '[ray-stop] waiting for ray start to exit on' \${SHORT} \${waited}'/'${RAY_STOP_GRACE_S}'s'
+    done
 
-        echo '[ray-stop] after:'
-        ps -u '$USER' -f | egrep 'nsys|ray::|raylet|gcs_server|worker_process|vllm|EngineCore' | grep -v grep || true
+    if kill -0 \"\${RAYPID}\" 2>/dev/null; then
+      echo '[ray-stop] ray start still alive; KILL on' \${SHORT}
+      kill -KILL \"\${RAYPID}\" 2>/dev/null || true
+    fi
 
-        echo '[ray-stop] nsight files:'
-        find '${node_tmp}'/session_*/logs/nsight '${node_tmp}'/session_latest/logs/nsight \
-          -maxdepth 1 -type f \( -name '*.nsys-rep' -o -name '*.qdstrm' \) \
-          -printf '%p %s bytes\n' 2>/dev/null | sort || true
-      "
-  set -e
+    echo '[ray-stop] after:'
+    ps -u '$USER' -f | egrep 'nsys|ray::|raylet|gcs_server|worker_process|vllm|EngineCore' | grep -v grep || true
+  " || true
 }
-
-# -----------------------------------------------------------------------------
-# Main setup
-# -----------------------------------------------------------------------------
 
 export HEAD_NODE
 HEAD_NODE="$(scontrol show hostnames "$SLURM_NODELIST" | head -n1)"
@@ -791,20 +702,35 @@ if [ -z "${HEAD_NODE_IP}" ]; then
   exit 1
 fi
 
+export WORKER_NODE_IPS=""
+for WORKER in ${WORKER_NODES}; do
+  WORKER_IP="$(resolve_host_ip "${WORKER}")"
+  if [ -z "${WORKER_IP}" ]; then
+    echo "Error: could not resolve IPv4 address for worker node ${WORKER}." >&2
+    exit 1
+  fi
+  WORKER_NODE_IPS="${WORKER_NODE_IPS} ${WORKER_IP}"
+done
+WORKER_NODE_IPS="$(printf '%s\n' "${WORKER_NODE_IPS}" | xargs)"
+
+export RAY_EXPECTED_NODE_IPS
+RAY_EXPECTED_NODE_IPS="$(printf '%s %s\n' "${HEAD_NODE_IP}" "${WORKER_NODE_IPS}" | xargs)"
+
 echo "HEAD_NODE_IP=${HEAD_NODE_IP}"
+echo "WORKER_NODE_IPS=${WORKER_NODE_IPS}"
+echo "RAY_EXPECTED_NODE_IPS=${RAY_EXPECTED_NODE_IPS}"
 
 module purge
 module load Anaconda3/2025.06-1
 module load CUDA/12.9.0
 
-TRACE_BASE="${TRACE_BASE:-/data/engs-glass/catz0932/inference-traces/vllm/results}"
+TRACE_BASE="/data/engs-glass/catz0932/inference-traces/vllm/results"
 TRACE_RUN_DIR="${TRACE_BASE}/${SLURM_JOB_ID}"
 
 mkdir -p "${TRACE_RUN_DIR}/nsight"
 mkdir -p "${TRACE_RUN_DIR}/nccl_logs"
 mkdir -p "${TRACE_RUN_DIR}/ray_worker_nsight"
 mkdir -p "${TRACE_RUN_DIR}/ray_session_names"
-mkdir -p "${TRACE_RUN_DIR}/ray_logs"
 
 export NSYS_DIR="${TRACE_RUN_DIR}/nsight"
 export NSYS_TRACE="${NSYS_TRACE:-cuda,nvtx,osrt,cudnn,cublas}"
@@ -821,8 +747,17 @@ export NCCL_DEBUG_FILE="${TRACE_RUN_DIR}/nccl_logs/nccl_%h_%p.log"
 export RAY_PORT="${RAY_PORT:-6378}"
 export RAY_ADDRESS="${HEAD_NODE_IP}:${RAY_PORT}"
 
+export RAY_TMP_LINK_PARENT="${RAY_TMP_LINK_PARENT:-/tmp}"
+export RAY_TMP_PREFIX="${RAY_TMP_PREFIX:-vray-${SLURM_JOB_ID}}"
+export RAY_PLASMA_DIRECTORY="${RAY_PLASMA_DIRECTORY:-/dev/shm}"
+export RAY_OBJECT_STORE_MEMORY="${RAY_OBJECT_STORE_MEMORY:-200000000000}"
+
 echo "RAY_PORT=${RAY_PORT} RAY_ADDRESS=${RAY_ADDRESS}"
 echo "RAY_CLIENT_PORT=${RAY_CLIENT_PORT}"
+echo "RAY_TMP_LINK_PARENT=${RAY_TMP_LINK_PARENT}"
+echo "RAY_TMP_PREFIX=${RAY_TMP_PREFIX}"
+echo "RAY_PLASMA_DIRECTORY=${RAY_PLASMA_DIRECTORY}"
+echo "RAY_OBJECT_STORE_MEMORY=${RAY_OBJECT_STORE_MEMORY}"
 echo "TRACE_RUN_DIR=${TRACE_RUN_DIR}"
 echo "NSYS_DIR=${NSYS_DIR}"
 echo "NCCL_DEBUG_FILE=${NCCL_DEBUG_FILE}"
@@ -838,10 +773,6 @@ echo "VLLM_ENGINE_READY_TIMEOUT_S=${VLLM_ENGINE_READY_TIMEOUT_S}"
 echo "HEALTH_TIMEOUT_S=${HEALTH_TIMEOUT_S}"
 echo "TORCH_DISTRIBUTED_DEBUG=${TORCH_DISTRIBUTED_DEBUG}"
 echo "RAY_USAGE_STATS_ENABLED=${RAY_USAGE_STATS_ENABLED}"
-echo "RAY_TMP_LINK_PARENT=${RAY_TMP_LINK_PARENT}"
-echo "RAY_TMP_PREFIX=${RAY_TMP_PREFIX}"
-echo "RAY_PLASMA_DIRECTORY=${RAY_PLASMA_DIRECTORY}"
-echo "RAY_OBJECT_STORE_MEMORY=${RAY_OBJECT_STORE_MEMORY}"
 echo "nsys path: $(command -v nsys || echo '<not found>')"
 nsys --version || true
 
@@ -961,6 +892,8 @@ echo "=== runtime knobs ==="
 echo "MODEL_ID=${MODEL_ID} HOST=${HOST} PORT=${PORT} TP=${TP} PP=${PP} EP=${EP}"
 echo "GPUS_PER_NODE=${GPUS_PER_NODE} NUM_NODES=${NUM_NODES} CPUS_PER_TASK=${CPUS_PER_TASK}"
 echo "MAX_MODEL_LEN=${MAX_MODEL_LEN}"
+echo "VLLM_ENGINE_READY_TIMEOUT_S=${VLLM_ENGINE_READY_TIMEOUT_S}"
+echo "HEALTH_TIMEOUT_S=${HEALTH_TIMEOUT_S}"
 echo "NCCL_IB_DISABLE=${NCCL_IB_DISABLE} NCCL_NET=${NCCL_NET} NCCL_IB_HCA=${NCCL_IB_HCA}"
 echo "NCCL_SOCKET_FAMILY=${NCCL_SOCKET_FAMILY} NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME}"
 echo "GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME} VLLM_HOST_IP=${VLLM_HOST_IP}"
@@ -999,10 +932,19 @@ WORKER_RAY_PIDS=""
 cleanup() {
   set +e
 
+  echo "=== cleanup handler ==="
+
   if [ -n "${SERVER_STEP_PID}" ] && kill -0 "${SERVER_STEP_PID}" 2>/dev/null; then
-    kill "${SERVER_STEP_PID}" 2>/dev/null || true
+    echo "cleanup: stopping vLLM server pid=${SERVER_STEP_PID}"
+    kill -INT "${SERVER_STEP_PID}" 2>/dev/null || true
+    sleep 10
+    kill -TERM "${SERVER_STEP_PID}" 2>/dev/null || true
     wait "${SERVER_STEP_PID}" 2>/dev/null || true
   fi
+
+  for NODE in ${HEAD_NODE:-} ${WORKER_NODES:-}; do
+    copy_ray_nsight_from_node_procroot "${NODE}" || true
+  done
 
   if [ -n "${HEAD_RAY_PID}" ] && kill -0 "${HEAD_RAY_PID}" 2>/dev/null; then
     kill "${HEAD_RAY_PID}" 2>/dev/null || true
@@ -1017,10 +959,6 @@ cleanup() {
   done
 }
 trap cleanup EXIT
-
-# -----------------------------------------------------------------------------
-# Start Ray head
-# -----------------------------------------------------------------------------
 
 echo "=== Ray head (background srun) ==="
 echo "Starting head node ${HEAD_NODE}..."
@@ -1042,6 +980,8 @@ source \"${VENV_DIR}/bin/activate\"
 export HEAD_NODE='${HEAD_NODE}'
 export WORKER_NODES='${WORKER_NODES}'
 export HEAD_NODE_IP='${HEAD_NODE_IP}'
+export WORKER_NODE_IPS='${WORKER_NODE_IPS}'
+export RAY_EXPECTED_NODE_IPS='${RAY_EXPECTED_NODE_IPS}'
 export HOST='${HOST}'
 export PORT='${PORT}'
 export RAY_PORT='${RAY_PORT}'
@@ -1129,16 +1069,11 @@ srun \
   --output="${TRACE_RUN_DIR}/slurm_ray_head_${HEAD_NODE}.out" \
   --error="${TRACE_RUN_DIR}/slurm_ray_head_${HEAD_NODE}.err" \
   bash -lc "${RAY_HEAD_CMD}" &
-
 HEAD_RAY_PID=$!
 
 echo "HEAD_RAY_PID=${HEAD_RAY_PID}"
-echo "Sleeping ${RAY_HEAD_START_SLEEP_S}s to let Ray head start..."
+echo "Sleeping ${RAY_HEAD_START_SLEEP_S}s to let Ray head open GCS/Ray Client ports..."
 sleep "${RAY_HEAD_START_SLEEP_S}"
-
-# -----------------------------------------------------------------------------
-# Start Ray workers
-# -----------------------------------------------------------------------------
 
 if [ -n "${WORKER_NODES}" ]; then
   echo "=== Ray workers ==="
@@ -1171,6 +1106,8 @@ source \"${VENV_DIR}/bin/activate\"
 export HEAD_NODE='${HEAD_NODE}'
 export WORKER_NODES='${WORKER_NODES}'
 export HEAD_NODE_IP='${HEAD_NODE_IP}'
+export WORKER_NODE_IPS='${WORKER_NODE_IPS}'
+export RAY_EXPECTED_NODE_IPS='${RAY_EXPECTED_NODE_IPS}'
 export HOST='${HOST}'
 export PORT='${PORT}'
 export RAY_PORT='${RAY_PORT}'
@@ -1261,16 +1198,12 @@ fi"
     echo "Worker Ray step pid: $! (WORKER_RAY_PIDS=${WORKER_RAY_PIDS})"
   done
 
-  echo "Sleeping ${RAY_WORKER_START_SLEEP_S}s to let Ray workers start..."
+  echo "Sleeping ${RAY_WORKER_START_SLEEP_S}s to let Ray worker join..."
   sleep "${RAY_WORKER_START_SLEEP_S}"
 fi
 
-# -----------------------------------------------------------------------------
-# Ray TCP preflight + hard readiness gate
-# -----------------------------------------------------------------------------
-
 echo "=== Ray TCP preflight ==="
-echo "Waiting for Ray head/GCS TCP port."
+echo "Waiting for Ray head/GCS TCP port only; log gate below proves cluster resources."
 
 export HEAD_NODE_IP RAY_PORT RAY_CLIENT_PORT RAY_TCP_PREFLIGHT_TIMEOUT_S
 
@@ -1291,13 +1224,13 @@ def wait_tcp(host, port, label, timeout_s):
     while time.time() < deadline:
         try:
             with socket.create_connection((host, port), timeout=5):
-                print(f"{label} is reachable: {host}:{port}")
+                print(f"{label} is reachable: {host}:{port}", flush=True)
                 return True
         except Exception as e:
             last_error = repr(e)
-            print(f"{label} not ready yet at {host}:{port}: {last_error}")
+            print(f"{label} not ready yet at {host}:{port}: {last_error}", flush=True)
             time.sleep(5)
-    print(f"WARNING: {label} never became reachable at {host}:{port}; last_error={last_error}")
+    print(f"WARNING: {label} never became reachable at {host}:{port}; last_error={last_error}", flush=True)
     return False
 
 gcs_ok = wait_tcp(head_ip, ray_port, "Ray head/GCS port", timeout_s)
@@ -1308,26 +1241,17 @@ if not gcs_ok:
     sys.exit(1)
 
 if not client_ok:
-    print("WARNING: Ray Client port is not reachable, but continuing because vLLM uses RAY_ADDRESS.")
+    print("WARNING: Ray Client port is not reachable, but continuing because vLLM uses RAY_ADDRESS.", flush=True)
 
-print("Ray TCP preflight passed.")
+print("Ray TCP preflight passed.", flush=True)
 PY
 
-EXPECTED_RAY_NODES="${NUM_NODES}"
-EXPECTED_RAY_GPUS="$((GPUS_PER_NODE * NUM_NODES))"
-
-wait_for_ray_cluster_ready \
-  "${EXPECTED_RAY_NODES}" \
-  "${EXPECTED_RAY_GPUS}" \
+wait_for_ray_cluster_ready_from_logs \
   "${RAY_CLUSTER_READY_TIMEOUT_S}" \
   "${RAY_CLUSTER_READY_POLL_S}"
 
 echo "=== Ray process snapshot before vLLM ==="
 ps -ef | egrep 'ray start|gcs_server|raylet|ray::|dashboard|client.server' | grep -v grep || true
-
-# -----------------------------------------------------------------------------
-# Start vLLM
-# -----------------------------------------------------------------------------
 
 echo "=== vLLM api_server (background process; no outer nsys wrapper) ==="
 echo "Starting vLLM server on head node WITHOUT outer Nsight wrapper..."
@@ -1344,27 +1268,18 @@ fi
 echo "API_SERVER_OUTER_NSYS_WRAPPER=0"
 if [ "${NSYS_ENABLE}" = "1" ] && [ "${NSYS_PROFILE_WORKERS}" = "1" ]; then
   nsight_copy_msg "worker Nsight enabled via --ray-workers-use-nsight"
-  nsight_copy_msg "live sidecar copies from Ray per-node temp dirs"
+  nsight_copy_msg "live sidecar copies current-job Slurm tmp and /tmp/vray sessions"
   nsight_copy_msg "empty.nsys-rep and zero-byte reports are ignored"
 fi
 
 export RAY_ADDRESS="${HEAD_NODE_IP}:${RAY_PORT}"
 export VLLM_HOST_IP="${HEAD_NODE_IP}"
 
-export RAY_TMPDIR
-RAY_TMPDIR="$(ray_tmp_link_for_node "${HEAD_NODE}")"
-export RAY_SPILL_DIR="${RAY_TMPDIR}/spill"
-export TMPDIR="${RAY_TMPDIR}/py_tmp"
-mkdir -p "${RAY_SPILL_DIR}" "${TMPDIR}" 2>/dev/null || true
-
 echo "Launching vLLM with RAY_ADDRESS=${RAY_ADDRESS}"
 echo "Launching vLLM with VLLM_HOST_IP=${VLLM_HOST_IP}"
 echo "Launching vLLM with VLLM_ENGINE_READY_TIMEOUT_S=${VLLM_ENGINE_READY_TIMEOUT_S}"
 echo "Launching vLLM with GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME}"
 echo "Launching vLLM with NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME}"
-echo "API_SERVER_RAY_TMPDIR=${RAY_TMPDIR} -> $(readlink -f "${RAY_TMPDIR}" 2>/dev/null || echo MISSING)"
-echo "API_SERVER_TMPDIR=${TMPDIR}"
-echo "VLLM_WORKER_MULTIPROC_METHOD=${VLLM_WORKER_MULTIPROC_METHOD}"
 
 python -m vllm.entrypoints.openai.api_server \
   --model "${MODEL_ID}" \
@@ -1396,10 +1311,16 @@ until curl -fsS "http://${HEAD_NODE_IP}:${PORT}/health" >/dev/null 2>&1; do
     echo "ERROR: timed out waiting for http://${HEAD_NODE_IP}:${PORT}/health after ${HEALTH_TIMEOUT_S}s" >&2
     echo "Recent Ray/vLLM processes:" >&2
     ps -ef | egrep 'vllm|api_server|EngineCore|ray::|worker_process|raylet' | grep -v grep >&2 || true
-    echo "Recent Ray logs from per-node tmp:" >&2
-    find /tmp/vray-${SLURM_JOB_ID}-*/session_*/logs -maxdepth 1 -type f \
-      \( -name '*.err' -o -name '*.out' -o -name '*.log' \) \
-      -print 2>/dev/null | head -100 >&2 || true
+    echo "Recent node-local Ray log errors through proc-root:" >&2
+    for NODE in ${HEAD_NODE} ${WORKER_NODES}; do
+      ssh "${NODE}" "
+        RAYPID=\$(ps -u '$USER' -o pid=,args= | awk '/ray start --block/ && !/awk/ {print \$1; exit}')
+        SHORT=\$(hostname -s)
+        ROOT=/proc/\${RAYPID}/root/tmp/slurm-${SLURM_JOB_ID}/tmp/ray-${SLURM_JOB_ID}-\${SHORT}
+        echo '--- '\${SHORT}' ROOT='\${ROOT}' ---'
+        grep -R 'ERROR\|Traceback\|Exception\|NCCL\|CUDA\|Qwen\|pipeline\|placement' \${ROOT}/session_*/logs 2>/dev/null | tail -120 || true
+      " >&2 || true
+    done
     exit 1
   fi
 
@@ -1416,14 +1337,9 @@ done
 unset _health_wait_n
 unset _health_deadline
 
-# -----------------------------------------------------------------------------
-# Run benchmark
-# -----------------------------------------------------------------------------
-
 echo "Server is healthy. Running ${SERVE_SCRIPT} ..."
 echo "SP=${SP} SD=${SD} NUM_PROMPTS=${NUM_PROMPTS} REQUEST_RATE=${REQUEST_RATE}"
 
-set +e
 HOST="${HEAD_NODE_IP}" \
 PORT="${PORT}" \
 MODEL_ID="${MODEL_ID}" \
@@ -1450,18 +1366,6 @@ GPUS_PER_NODE="${GPUS_PER_NODE}" \
 CPUS_PER_TASK="${CPUS_PER_TASK}" \
 RAY_PORT="${RAY_PORT}" \
 bash "${SERVE_SCRIPT}" "${SLURM_JOB_ID}" "${HEAD_NODE}"
-BENCH_STATUS=$?
-set -e
-
-echo "Benchmark exit status: ${BENCH_STATUS}"
-if [ "${BENCH_STATUS}" != "0" ]; then
-  echo "ERROR: benchmark failed." >&2
-  exit "${BENCH_STATUS}"
-fi
-
-# -----------------------------------------------------------------------------
-# Clean shutdown and trace collection
-# -----------------------------------------------------------------------------
 
 echo "Workload finished. Stopping vLLM server process cleanly..."
 
@@ -1475,49 +1379,44 @@ fi
 echo "NSYS_DIR after server shutdown:"
 ls -la "${NSYS_DIR}/" 2>/dev/null || true
 
-echo "Copying any live Nsight files before Ray shutdown..."
-copy_ray_nsight_from_node "${HEAD_NODE}"
-for WORKER in ${WORKER_NODES}; do
-  copy_ray_nsight_from_node "${WORKER}"
+echo "Copying any available worker Nsight files while Ray is still alive..."
+for NODE in ${HEAD_NODE} ${WORKER_NODES}; do
+  copy_ray_nsight_from_node_procroot "${NODE}" || true
 done
 
-echo "Stopping Ray cleanly so Nsight worker processes can exit and export reports..."
-
-for WORKER in ${WORKER_NODES}; do
-  stop_ray_cleanly_on_node "${WORKER}"
-done
-stop_ray_cleanly_on_node "${HEAD_NODE}"
-
-echo "Copying Nsight files after clean Ray stop..."
-copy_ray_nsight_from_node "${HEAD_NODE}"
-for WORKER in ${WORKER_NODES}; do
-  copy_ray_nsight_from_node "${WORKER}"
-done
-
-echo "Waiting for finalized worker Nsight reports after Ray stop..."
+echo "Keeping Ray alive so worker Nsight can finalize real reports..."
 wait_for_real_worker_nsys_reports "${WORKER_NSYS_FINALIZE_WAIT_S}" "${WORKER_NSYS_FINALIZE_POLL_S}" || true
 
-echo "Final Nsight copy after finalize wait..."
-copy_ray_nsight_from_node "${HEAD_NODE}"
-for WORKER in ${WORKER_NODES}; do
-  copy_ray_nsight_from_node "${WORKER}"
+echo "Stopping Ray cleanly by terminating ray start --block processes on each node..."
+for NODE in ${WORKER_NODES}; do
+  stop_ray_start_process_on_node "${NODE}" || true
 done
+stop_ray_start_process_on_node "${HEAD_NODE}" || true
 
-echo "Terminating background Ray srun wrappers if still alive..."
+echo "Waiting for Ray background srun steps to exit..."
 
 if [ -n "${HEAD_RAY_PID}" ] && kill -0 "${HEAD_RAY_PID}" 2>/dev/null; then
-  kill -TERM "${HEAD_RAY_PID}" 2>/dev/null || true
-  wait "${HEAD_RAY_PID}" 2>/dev/null || true
+  wait_for_pid_or_kill "${HEAD_RAY_PID}" "Ray head srun wrapper" 240
 fi
 HEAD_RAY_PID=""
 
 for pid in ${WORKER_RAY_PIDS}; do
   if kill -0 "${pid}" 2>/dev/null; then
-    kill -TERM "${pid}" 2>/dev/null || true
-    wait "${pid}" 2>/dev/null || true
+    wait_for_pid_or_kill "${pid}" "Ray worker srun wrapper ${pid}" 240
   fi
 done
 WORKER_RAY_PIDS=""
+
+echo "Waiting ${WORKER_NSYS_FLUSH_WAIT_S}s for Ray/Nsight files to flush..."
+sleep "${WORKER_NSYS_FLUSH_WAIT_S}"
+
+echo "Running final Ray worker Nsight proc-root copy if any Ray pids remain..."
+mkdir -p "${TRACE_RUN_DIR}/ray_worker_nsight"
+
+copy_ray_nsight_from_node "${HEAD_NODE}"
+for WORKER in ${WORKER_NODES}; do
+  copy_ray_nsight_from_node "${WORKER}"
+done
 
 nsight_copy_msg "=== final Nsight artifact summary ==="
 nsight_copy_msg "API server trace dir, expected empty/no api-server nsys in this variant: ${NSYS_DIR}"
@@ -1527,15 +1426,7 @@ for NODE in ${HEAD_NODE} ${WORKER_NODES}; do
   nsight_summarize_dest "${NODE}"
 done
 
-echo "NCCL logs:"
-find "${TRACE_RUN_DIR}/nccl_logs" -type f -printf "%p %s bytes\n" 2>/dev/null | sort || true
-
-echo "Ray srun logs:"
-find "${TRACE_RUN_DIR}" -maxdepth 1 -type f \
-  \( -name 'slurm_ray_head_*.out' -o -name 'slurm_ray_head_*.err' -o -name 'slurm_ray_worker_*.out' -o -name 'slurm_ray_worker_*.err' \) \
-  -printf "%p %s bytes\n" 2>/dev/null | sort || true
-
 echo "Trace files:"
-find "${TRACE_RUN_DIR}" -maxdepth 5 -type f -printf "%p %s bytes\n" 2>/dev/null | sort || true
+find "${TRACE_RUN_DIR}" -maxdepth 5 -type f -printf "%p %s bytes\n" 2>/dev/null || true
 
 echo "Done."
