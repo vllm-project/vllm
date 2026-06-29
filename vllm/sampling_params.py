@@ -393,26 +393,36 @@ class SamplingParams(
                     for token, bias in logit_bias.items()
                 }
             except (ValueError, TypeError):
+                invalid_keys = []
+                invalid_values = []
+                converted_logit_bias = {}
                 for token, bias in logit_bias.items():
                     try:
                         token_id = int(token)
-                    except (ValueError, TypeError) as e:
-                        raise VLLMValidationError(
-                            f"logit_bias key {token!r} is not a valid integer "
-                            f"token ID: {e}",
-                            parameter="logit_bias",
-                            value=token,
-                        ) from e
+                    except (ValueError, TypeError):
+                        invalid_keys.append(token)
+                        continue
                     try:
-                        min(100.0, max(-100.0, bias))
-                    except TypeError as e:
-                        raise VLLMValidationError(
-                            f"logit_bias value {bias!r} for token {token_id} "
-                            f"is not a valid number: {e}",
-                            parameter="logit_bias",
-                            value=bias,
-                        ) from e
-                raise
+                        converted_logit_bias[token_id] = min(100.0, max(-100.0, bias))
+                    except TypeError:
+                        invalid_values.append((token_id, bias))
+                if invalid_keys or invalid_values:
+                    parts = []
+                    if invalid_keys:
+                        parts.append(
+                            f"key(s) that cannot be converted to integer "
+                            f"token IDs: {invalid_keys!r}"
+                        )
+                    if invalid_values:
+                        parts.append(
+                            f"value(s) that are not valid numbers: {invalid_values!r}"
+                        )
+                    raise VLLMValidationError(
+                        "logit_bias contains " + "; ".join(parts),
+                        parameter="logit_bias",
+                        value=invalid_keys + [v for _, v in invalid_values],
+                    ) from None
+                logit_bias = converted_logit_bias
 
         return SamplingParams(
             n=1 if n is None else n,

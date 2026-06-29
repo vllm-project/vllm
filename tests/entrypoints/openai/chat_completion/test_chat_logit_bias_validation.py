@@ -115,3 +115,21 @@ async def test_chat_logit_bias_non_numeric_value(client):
 
     assert error.status_code == 400
     assert "logit_bias" in error_message
+
+
+@pytest.mark.asyncio
+async def test_chat_logit_bias_multiple_non_integer_keys(client):
+    """Test that ALL invalid logit_bias keys are reported together,
+    not just the first one encountered."""
+    with pytest.raises(openai.BadRequestError) as excinfo:
+        await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "Testing multiple bad keys"}],
+            max_tokens=5,
+            logit_bias={"bad1": 50.0, "bad2": 20.0},
+        )
+
+    error_message = str(excinfo.value)
+    assert excinfo.value.status_code == 400
+    assert "bad1" in error_message
+    assert "bad2" in error_message
