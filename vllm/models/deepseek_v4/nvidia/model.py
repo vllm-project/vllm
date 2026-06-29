@@ -8,6 +8,7 @@ import regex as re
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_ep_group,
@@ -16,6 +17,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.kernels.mhc.tilelang import (
     hc_head_fused_kernel_tilelang,
     mhc_fused_post_pre_tilelang,
@@ -60,12 +62,15 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
     DeepseekV4FlashInferMLAAttention,
+    DeepseekV4FlashInferSM120Attention,
 )
 from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLAAttention
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 
 class DeepseekV4MLP(nn.Module):
@@ -440,6 +445,11 @@ class DeepseekV4MegaMoEExperts(nn.Module):
 
         symm_buffer = self.get_symm_buffer()
         num_tokens = hidden_states.shape[0]
+        is_padding = None
+        if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
+            is_padding = get_forward_context().is_padding
+            if is_padding is not None:
+                is_padding = is_padding[:num_tokens]
 
         # EPLB: map logical expert IDs to physical replicas and record load.
         eplb_state = self.eplb_state
@@ -447,12 +457,19 @@ class DeepseekV4MegaMoEExperts(nn.Module):
             assert eplb_state.expert_load_view is not None
             assert eplb_state.logical_replica_count is not None
             assert eplb_state.should_record_tensor is not None
+            if is_padding is not None:
+                topk_ids = torch.where(is_padding.unsqueeze(1), -1, topk_ids)
             topk_ids = eplb_map_to_physical_and_record(
                 topk_ids=topk_ids,
                 expert_load_view=eplb_state.expert_load_view,
                 logical_to_physical_map=eplb_state.logical_to_physical_map,
                 logical_replica_count=eplb_state.logical_replica_count,
                 record_enabled=eplb_state.should_record_tensor,
+                num_unpadded_tokens=eplb_state.num_unpadded_tokens_tensors[
+                    dbo_current_ubatch_id()
+                ]
+                if eplb_state.num_unpadded_tokens_tensors is not None
+                else None,
             )
 
         prepare_megamoe_inputs(
@@ -463,6 +480,7 @@ class DeepseekV4MegaMoEExperts(nn.Module):
             symm_buffer.x_sf[:num_tokens],
             symm_buffer.topk_idx[:num_tokens],
             symm_buffer.topk_weights[:num_tokens],
+            is_padding=is_padding,
         )
 
         # This method must have been already called during the weight loading phase.
@@ -736,14 +754,34 @@ class DeepseekV4MoE(nn.Module):
 def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
     """Pick the CUDA sparse-MLA attention class for the configured backend.
 
-    An explicit ``--attention-backend FLASHINFER_MLA_SPARSE_DSV4`` selects the
-    FlashInfer TRTLLM-gen path; otherwise the FlashMLA path is used.
+    The generic CUDA backend selector does not instantiate DSv4 layers directly,
+    so map generic sparse-MLA choices to the DSv4-specialized attention class.
+    Without an explicit backend, SM12 defaults to FlashInfer while the other
+    CUDA arches keep the FlashMLA path.
     """
-    if (
-        vllm_config.attention_config.backend
-        == AttentionBackendEnum.FLASHINFER_MLA_SPARSE_DSV4
+    backend = vllm_config.attention_config.backend
+    device_capability = current_platform.get_device_capability()
+    if backend in (
+        AttentionBackendEnum.FLASHINFER_MLA_SPARSE,
+        AttentionBackendEnum.FLASHINFER_MLA_SPARSE_SM120,
     ):
+        raise ValueError(
+            f"{backend.name} is not a DeepSeek V4 attention backend. "
+            "Use FLASHINFER_MLA_SPARSE_DSV4 for DeepSeek V4 FlashInfer "
+            "sparse MLA."
+        )
+    if backend == AttentionBackendEnum.FLASHINFER_MLA_SPARSE_DSV4:
+        if device_capability is not None and device_capability.major == 12:
+            return DeepseekV4FlashInferSM120Attention
         return DeepseekV4FlashInferMLAAttention
+    if backend in (
+        AttentionBackendEnum.FLASHMLA_SPARSE,
+        AttentionBackendEnum.FLASHMLA_SPARSE_DSV4,
+    ):
+        return DeepseekV4FlashMLAAttention
+
+    if device_capability is not None and device_capability.major == 12:
+        return DeepseekV4FlashInferSM120Attention
     return DeepseekV4FlashMLAAttention
 
 
