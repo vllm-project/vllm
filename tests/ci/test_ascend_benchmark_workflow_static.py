@@ -8,6 +8,14 @@ WORKFLOW_PATH = (
     Path(__file__).resolve().parents[2]
     / ".github/workflows/ascend-benchmark-leaderboard.yml"
 )
+ASCEND_SMOKE_WORKFLOW_PATH = (
+    Path(__file__).resolve().parents[2]
+    / ".github/workflows/linux-ascend-inference-smoke.yml"
+)
+ASCEND_REGRESSION_WORKFLOW_PATH = (
+    Path(__file__).resolve().parents[2]
+    / ".github/workflows/linux-ascend-inference-regression.yml"
+)
 
 
 def workflow_text() -> str:
@@ -98,6 +106,16 @@ def test_pr_checkout_urls_use_https_without_publish_ssh_key():
     ) in text
     assert "https://github.com/vLLM-HUST/vllm-hust-benchmark.git" in text
     assert "https://github.com/vLLM-HUST/vllm-ascend-hust.git" in text
+
+
+def test_ascend_e2e_pr_checkout_urls_use_https_without_ssh_key():
+    for workflow_path in (ASCEND_SMOKE_WORKFLOW_PATH, ASCEND_REGRESSION_WORKFLOW_PATH):
+        text = workflow_path.read_text(encoding="utf-8")
+
+        assert "format('https://github.com/{0}.git', github.repository)" in text
+        assert "format('git@github.com:{0}.git', github.repository)" in text
+        assert "https://github.com/vLLM-HUST/vllm-ascend-hust.git" in text
+        assert "https://github.com/vLLM-HUST/ascend-runtime-manager.git" in text
 
 
 def test_main_benchmark_defaults_match_ascend_main_config():
