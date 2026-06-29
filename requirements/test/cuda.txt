@@ -101,6 +101,8 @@ click==8.1.7
     #   schemathesis
     #   typer
     #   uvicorn
+cohere-melody==0.9.0
+    # via -r requirements/test/cuda.in
 colorama==0.4.6
     # via
     #   perceptron
