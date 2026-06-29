@@ -70,17 +70,20 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
         assert generated_texts[i].startswith(EXPECTED_LORA_OUTPUT[i])
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason=(
-        "Mxfp4 LoRA on ROCm is blocked by a spawn compatibility issue. "
-        "The fused_moe_lora Triton kernel crashes in spawned subprocesses, "
-        "and vLLM forces spawn mode when HIP is initialized before "
-        "multiprocessing. Fixing this requires either making the LoRA "
-        "Triton kernel spawn-safe or pre-warming the kernel cache."
-    ),
+# TODO: make the Mxfp4MoeBackend.TRITON spawn-safe.
+# For now just use TRITON_UNFUSED kernel
+@pytest.mark.parametrize(
+    "mxfp4_use_marlin",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm(), reason="marlin not supported"
+            ),
+        ),
+    ],
 )
-@pytest.mark.parametrize("mxfp4_use_marlin", [True, False])
 @pytest.mark.parametrize("specialize_active_lora", [True, False])
 def test_gpt_oss_lora(
     gptoss20b_lora_files,
@@ -109,7 +112,18 @@ def test_gpt_oss_lora(
 
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("fully_sharded_loras", [False, True])
-@pytest.mark.parametrize("mxfp4_use_marlin", [True, False])
+@pytest.mark.parametrize(
+    "mxfp4_use_marlin",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm(), reason="marlin not supported"
+            ),
+        ),
+    ],
+)
 def test_gpt_oss_lora_tp2(
     gptoss20b_lora_files,
     fully_sharded_loras,

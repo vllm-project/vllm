@@ -202,6 +202,38 @@ class AttentionBackend(ABC):
         return min(s.base if isinstance(s, MultipleOf) else s for s in supported_sizes)
 
     @classmethod
+    def indexes_kv_by_block_stride(cls) -> bool:
+        """Whether the backend reads KV pages by the runtime block stride.
+
+        True when ``num_blocks`` is the outermost physical dimension of the KV
+        cache, so the backend tolerates a non-contiguous block dim. This gates
+        page size padding and cross-layer uniform KV layout.
+
+        Returns:
+            True if the backend's physical KV layout is num-blocks-first. False
+            otherwise, including when the backend does not define a layered
+            stride order.
+        """
+        try:
+            kv_cache_stride_order = cls.get_kv_cache_stride_order(
+                include_num_layers_dimension=False
+            )
+            layered_kv_cache_stride_order = cls.get_kv_cache_stride_order(
+                include_num_layers_dimension=True
+            )
+        except (AttributeError, NotImplementedError):
+            return False
+
+        # Check that attention backend includes a layers dimension.
+        if len(layered_kv_cache_stride_order) != len(kv_cache_stride_order) + 1:
+            return False
+
+        # stride_order[0] == 0 means num_layers stays first in physical
+        # layout (identity permutation), so indexing by block stride is
+        # not supported.
+        return layered_kv_cache_stride_order[0] != 0
+
+    @classmethod
     def is_mla(cls) -> bool:
         return False
 
@@ -404,7 +436,7 @@ class CommonAttentionMetadata:
     positions: torch.Tensor | None = None
     """(num_actual_tokens,) token positions.  Optional; set when the caller
     has positions available so that builders can pre-compute position-dependent
-    metadata (e.g. C128A topk indices for DeepSeek V4)."""
+    sparse metadata for DeepSeek V4 C128A layers."""
 
     is_prefilling: torch.Tensor | None = None
     """(batch_size,) bool tensor: True if request is still in prefill phase
@@ -422,6 +454,13 @@ class CommonAttentionMetadata:
     request index to list of (start, end) token position ranges
     where bidirectional attention should apply. None for text-only
     batches or non-PrefixLM models."""
+
+    rswa_prefix_lens: torch.Tensor | None = None
+    """(batch_size,) per-request prefix length (prompt/image token count) for
+    Reference Sliding Window Attention (R-SWA). Tokens with logical index below
+    this stay globally visible; later (generated) tokens additionally see a
+    fixed sliding window. None disables R-SWA. The attention backend copies this
+    into its own persistent buffer and reads ``rswa_window`` from model config."""
 
     # WARNING: Deprecated fields. Will be removed in a future release (v0.15.0)
     _seq_lens_cpu: torch.Tensor | None = None
@@ -507,6 +546,7 @@ class CommonAttentionMetadata:
             dcp_local_seq_lens=maybe_slice_reqs(self.dcp_local_seq_lens),
             dcp_local_seq_lens_cpu=maybe_slice_reqs(self.dcp_local_seq_lens_cpu),
             is_prefilling=maybe_slice_reqs(self.is_prefilling),
+            rswa_prefix_lens=maybe_slice_reqs(self.rswa_prefix_lens),
         )
 
 
