@@ -57,6 +57,40 @@ if has_triton_kernels():
         )
 
 
+def _pack_deepgemm_mxfp4_scales(
+    w13_weight: torch.Tensor,
+    w2_weight: torch.Tensor,
+    w13_weight_scale: torch.Tensor,
+    w2_weight_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        deepgemm_post_process_weight_scale_block,
+    )
+
+    num_experts = w13_weight.shape[0]
+    intermediate_size_2 = w13_weight.shape[1]  # = intermediate*2
+    hidden_size = w13_weight.shape[2] * 2  # weight is FP4-packed
+    intermediate_size = w2_weight.shape[2] * 2  # weight is FP4-packed
+    block_shape = (1, 32)  # MXFP4 block (per-row, K=32)
+
+    return (
+        deepgemm_post_process_weight_scale_block(
+            ws=w13_weight_scale.data,
+            mn=intermediate_size_2,
+            k=hidden_size,
+            quant_block_shape=block_shape,
+            num_groups=num_experts,
+        ),
+        deepgemm_post_process_weight_scale_block(
+            ws=w2_weight_scale.data,
+            mn=hidden_size,
+            k=intermediate_size,
+            quant_block_shape=block_shape,
+            num_groups=num_experts,
+        ),
+    )
+
+
 class Mxfp4MoeBackend(Enum):
     NONE = "None"
     # DeepGEMM FP8xFP4 backend (SM100+)
@@ -285,6 +319,7 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
         Mxfp4MoeBackend.MARLIN,
         Mxfp4MoeBackend.BATCHED_MARLIN,
         Mxfp4MoeBackend.XPU,
+        Mxfp4MoeBackend.EMULATION,
     ]
     return _AVAILABLE_BACKENDS
 
@@ -503,14 +538,23 @@ def select_mxfp4_moe_backend(
             activation_format,
         )
 
-    if current_platform.is_cuda() or current_platform.is_rocm():
+    if current_platform.is_rocm():
+        backend = Mxfp4MoeBackend.TRITON_UNFUSED
+        logger.info_once(_make_log_backend(backend))
+        return _return_or_raise(
+            Mxfp4MoeBackend.TRITON_UNFUSED,
+            config,
+            kMxfp4Static,
+            None,
+            activation_format,
+        )
+
+    if current_platform.is_cuda():
         raise NotImplementedError(
             "No MXFP4 MoE backend supports the deployment configuration. "
             f"weight_key=kMxfp4Static, activation_key={activation_key}. "
             "Native backends require specific hardware. "
             "Set `VLLM_LOGGING_LEVEL=DEBUG` to see detailed unsupported reasons. "
-            "To use the emulation backend for research/debugging, pass "
-            "--moe-backend emulation."
         )
 
     return Mxfp4MoeBackend.NONE, None
@@ -629,6 +673,8 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     w2_weight_scale: torch.Tensor,
     w13_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
+    w13_input_scale: torch.Tensor | None = None,
+    w2_input_scale: torch.Tensor | None = None,
     _cache_permute_indices: dict[torch.Size, torch.Tensor] | None = None,
 ) -> tuple[
     torch.Tensor,
@@ -641,15 +687,18 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     """Convert loaded weights into backend-specific kernel format."""
 
     if mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
-        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-            _upcast_e8m0_to_fp32,
+        w13_weight_scale, w2_weight_scale = _pack_deepgemm_mxfp4_scales(
+            w13_weight,
+            w2_weight,
+            w13_weight_scale,
+            w2_weight_scale,
         )
 
         return (
             w13_weight.data,
             w2_weight.data,
-            _upcast_e8m0_to_fp32(w13_weight_scale.data),
-            _upcast_e8m0_to_fp32(w2_weight_scale.data),
+            w13_weight_scale,
+            w2_weight_scale,
             w13_bias,
             w2_bias,
         )
@@ -1096,8 +1145,13 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             weight_scale=w2_scale, flex_ctx=FlexCtx(rhs_data=w2_flex)
         )
 
+        # The original mxfp4 block scales have been swizzled into the
+        # precision configs above and are no longer read by the kernel, so
+        # drop the now-dead weight/scale Parameters to free their memory.
         del layer.w13_weight
         del layer.w2_weight
+        del layer.w13_weight_scale
+        del layer.w2_weight_scale
 
         return (
             w13_weight,
@@ -1143,8 +1197,29 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             w2_bias,
         )
     elif mxfp4_backend == Mxfp4MoeBackend.EMULATION:
-        # No additional transformation needed for emulation backend,
-        # weights are dequantized on the fly in the experts class.
+        w13_has_per_expert_scale = (
+            w13_input_scale is not None
+            and w13_input_scale.ndim == 1
+            and not all_close_1d(w13_input_scale)
+        )
+        w2_has_per_expert_scale = (
+            w2_input_scale is not None
+            and w2_input_scale.ndim == 1
+            and not all_close_1d(w2_input_scale)
+        )
+        if w13_has_per_expert_scale or w2_has_per_expert_scale:
+            logger.warning_once(
+                "Found input_scales that are not equal for OCP MX MoE "
+                "emulation. Using the maximum across experts for each layer."
+            )
+        if w13_input_scale is not None:
+            layer.w13_input_scale = torch.nn.Parameter(
+                w13_input_scale.max().to(torch.float32), requires_grad=False
+            )
+        if w2_input_scale is not None:
+            layer.w2_input_scale = torch.nn.Parameter(
+                w2_input_scale.max().to(torch.float32), requires_grad=False
+            )
         return (
             w13_weight,
             w2_weight,
@@ -1184,17 +1259,18 @@ def convert_weight_to_mxfp4_moe_kernel_format(
     """
 
     if mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
-        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-            _upcast_e8m0_to_fp32,
+        w13_weight_scale, w2_weight_scale = _pack_deepgemm_mxfp4_scales(
+            w13_weight,
+            w2_weight,
+            w13_weight_scale,
+            w2_weight_scale,
         )
 
-        # Weights stay as uint8 packed FP4 — no layout change needed.
-        # Convert E8M0 uint8 scales to float32.
         return (
             w13_weight.data,
             w2_weight.data,
-            _upcast_e8m0_to_fp32(w13_weight_scale.data),
-            _upcast_e8m0_to_fp32(w2_weight_scale.data),
+            w13_weight_scale,
+            w2_weight_scale,
             w13_bias,
             w2_bias,
         )
@@ -1352,38 +1428,51 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         )
 
     elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16:
-        from vllm._aiter_ops import rocm_aiter_ops  # noqa: F401
+        # Initially introduced for DeepSeekV4
 
         if w13_bias is not None:
             w13_bias = w13_bias.data.to(torch.float32)
         if w2_bias is not None:
             w2_bias = w2_bias.data.to(torch.float32)
 
-        e, n, k = w13_weight.shape
+        import os
 
-        # No de-interleave: standard _load_w13 already produces
-        # [gate_all, up_all] layout.  Use aiter-native shuffle functions
-        # (matching aiter/ops/flydsl/test_flydsl_moe_a4w4.py pattern).
+        from aiter.ops.shuffle import shuffle_scale as _shuf_s
         from aiter.ops.shuffle import shuffle_weight as _shuf_w
-        from aiter.utility.fp4_utils import e8m0_shuffle as _e8m0_shuf
 
-        # w13 (gate+up, stage1): shuffle_weight with layout (16,16)
+        # TODO: Remove this once AITER is fixed
+        # Necessary for AITER side from crashing
+        os.environ["AITER_BF16_FP8_MOE_BOUND"] = "0"
+
         w13_weight = torch.nn.Parameter(
-            _shuf_w(w13_weight.data.view(torch.float4_e2m1fn_x2), (16, 16)),
+            _shuf_w(
+                w13_weight.data.view(torch.float4_e2m1fn_x2),
+                is_guinterleave=True,
+                gate_up=True,
+            ),
             requires_grad=False,
         )
-        shuffled_w13_scale = _e8m0_shuf(
-            w13_weight_scale.view(-1, w13_weight_scale.shape[-1])
+        shuffled_w13_scale = _shuf_s(
+            w13_weight_scale.reshape(-1, w13_weight_scale.shape[-1]),
+            num_experts,
+            True,
+            True,
         )
 
-        # w2 (down-proj, stage2): same shuffle as w13 for a4w4 fp4x2
-        # (tuning script uses shuffle_weight((16,16)) + e8m0_shuffle for both)
         w2_weight = torch.nn.Parameter(
-            _shuf_w(w2_weight.data.view(torch.float4_e2m1fn_x2), (16, 16)),
+            _shuf_w(
+                w2_weight.data.view(torch.float4_e2m1fn_x2),
+                is_guinterleave=True,
+                gate_up=False,
+            ),
             requires_grad=False,
         )
-        shuffled_w2_scale = _e8m0_shuf(
-            w2_weight_scale.view(-1, w2_weight_scale.shape[-1])
+        # use_gu_interleave
+        shuffled_w2_scale = _shuf_s(
+            w2_weight_scale.reshape(-1, w2_weight_scale.shape[-1]),
+            num_experts,
+            True,
+            False,
         )
 
         return (
@@ -1436,8 +1525,13 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             weight_scale=w2_scale, flex_ctx=FlexCtx(rhs_data=w2_flex)
         )
 
+        # The original mxfp4 block scales have been swizzled into the
+        # precision configs above and are no longer read by the kernel, so
+        # drop the now-dead weight/scale Parameters to free their memory.
         del layer.w13_weight
         del layer.w2_weight
+        del layer.w13_weight_scale
+        del layer.w2_weight_scale
 
         return (
             w13_weight,

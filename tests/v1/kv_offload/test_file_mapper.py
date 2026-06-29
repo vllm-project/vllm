@@ -64,6 +64,7 @@ def make_mapper_from_offloading_spec(**kwargs) -> FileMapper:
         "dcp_size", 1
     )
     mock_vllm_config.parallel_config.rank = kwargs.get("rank", 0)
+    mock_vllm_config.use_v2_model_runner = kwargs.get("use_v2_model_runner", False)
 
     mock_kv_cache_config = MagicMock()
     mock_kv_cache_config.kv_cache_groups = kwargs.get("kv_cache_groups", [])
@@ -207,6 +208,19 @@ def test_parallel_agnostic_excludes_mla():
     )
     fm = make_mapper_from_offloading_spec(
         tp_size=2, rank=1, kv_cache_groups=[group], parallel_agnostic=True
+    )
+    assert fm.fields["tp_size"] == 2
+    assert fm.rank == 1
+
+
+def test_parallel_agnostic_disabled_on_v2_model_runner():
+    # V2's KV layout is not known to be parallelism-invariant: don't collapse.
+    fm = make_mapper_from_offloading_spec(
+        tp_size=2,
+        rank=1,
+        kv_cache_groups=[_full_attention_group()],
+        use_v2_model_runner=True,
+        parallel_agnostic=True,
     )
     assert fm.fields["tp_size"] == 2
     assert fm.rank == 1

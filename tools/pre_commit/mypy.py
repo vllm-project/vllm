@@ -25,16 +25,12 @@ import regex as re
 # from "skip" to "silent", remove its directory from SEPARATE_GROUPS.
 SEPARATE_GROUPS = [
     "tests",
-    # v0 related
-    "vllm/lora",
 ]
 
 # TODO(woosuk): Include the code from Megatron and HuggingFace.
 EXCLUDE = [
     "vllm/model_executor/models",
     "vllm/model_executor/layers/fla/ops",
-    # TODO: Remove these entries after fixing mypy errors.
-    "vllm/benchmarks",
 ]
 
 

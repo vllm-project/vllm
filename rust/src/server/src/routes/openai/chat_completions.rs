@@ -53,13 +53,6 @@ pub async fn chat_completions(
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let lora_resolution = state.resolve_model_with_loras(Some(&body.model)).await;
 
-    if let Err(err) = validate::validate_token_id_ranges(
-        &body,
-        state.tokenizer_vocab_size(),
-        state.model_vocab_size(),
-    ) {
-        return err.into_response();
-    }
     let prepared = match prepare_chat_request(body, &lora_resolution, request_context) {
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),

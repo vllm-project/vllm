@@ -756,6 +756,34 @@ def set_functorch_config() -> None:
         setattr(torch._functorch.config, k, v)
 
 
+def trigger_inductor_lazy_init(device: torch.device | None = None) -> None:
+    """Eagerly trigger inductor's once-per-process lazy inits (SFDP pattern
+    matcher, pad_mm, misc patterns).
+
+    These normally fire on the first torch.compile invocation and include
+    CUDA syncs. If warmup hits the on-disk compile cache, no compile actually
+    runs so these never fire during warmup, and they'd blow up on the first
+    real-request cache miss once the sync-check gate is on.
+
+    Private torch API; best-effort. Newer torch versions take an
+    `input_device` argument and cache per-device, so pass the current CUDA
+    device to ensure the cache key matches later compile calls.
+    """
+    try:
+        import inspect
+
+        from torch._inductor.fx_passes.joint_graph import (
+            lazy_init as _inductor_lazy_init,
+        )
+
+        if inspect.signature(_inductor_lazy_init).parameters:
+            _inductor_lazy_init(device)
+        else:
+            _inductor_lazy_init()
+    except Exception as e:  # noqa: BLE001
+        logger.info("Skipping inductor lazy_init pre-trigger: %s", e)
+
+
 class EagerAdaptor(CompilerInterface):
     name = "eager"
 
