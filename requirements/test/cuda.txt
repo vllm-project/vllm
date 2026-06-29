@@ -101,6 +101,8 @@ click==8.1.7
     #   schemathesis
     #   typer
     #   uvicorn
+cohere-melody==0.9.0
+    # via -r requirements/test/cuda.in
 colorama==0.4.6
     # via
     #   perceptron
@@ -398,7 +400,7 @@ mbstrdecoder==1.1.3
     #   typepy
 mdurl==0.1.2
     # via markdown-it-py
-mistral-common==1.11.3
+mistral-common==1.11.5
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/cuda.in

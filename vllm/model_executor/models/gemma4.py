@@ -1562,7 +1562,6 @@ class Gemma4ForCausalLM(
         )
 
         # --- MixtureOfExperts protocol ---
-        self.expert_weights: list[list[torch.Tensor]] = []
         self.moe_layers: list[nn.Module] = []
         example_moe: Gemma4MoE | None = None
 
