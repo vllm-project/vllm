@@ -15,6 +15,7 @@ from tests.quantization.utils import is_quant_method_supported
 from vllm import _custom_ops as ops
 from vllm.config.model import ModelConfig
 from vllm.model_executor.kernels.linear.scaled_mm import (
+    CutlassFP8ScaledMMLinearKernel,
     MarlinFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -41,6 +42,28 @@ MODELS = [
         marks=pytest.mark.skip(reason="Checkpoint removed from HF."),
     ),
 ]
+
+
+def test_cutlass_fp8_padding_updates_weight_loaders():
+    class Layer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(17, 17))
+            self.weight_scale = torch.nn.Parameter(torch.ones(17, 1))
+
+    layer = Layer()
+    layer.weight.weight_loader = default_weight_loader
+    layer.weight_scale.weight_loader = default_weight_loader
+
+    kernel = CutlassFP8ScaledMMLinearKernel.__new__(CutlassFP8ScaledMMLinearKernel)
+    kernel.layer_param_names = ("weight", "weight_scale", "input_scale", None)
+
+    kernel.process_weights_after_loading(layer)
+
+    assert layer.weight.shape == torch.Size([32, 32])
+    assert layer.weight_scale.shape == torch.Size([32, 1])
+    assert layer.weight.weight_loader == kernel.padded_weight_loader
+    assert layer.weight_scale.weight_loader == kernel.padded_weight_loader
 
 
 @pytest.mark.skipif(
