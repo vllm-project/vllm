@@ -56,3 +56,11 @@ def get_total_cp_world_size():
         # DCP might not be initialized in testing
         dcp_world_size = 1
     return dcp_world_size * pcp_world_size
+
+
+def get_dcp_world_size():
+    try:
+        return get_dcp_group().world_size
+    except AssertionError:
+        # DCP might not be initialized in testing
+        return 1

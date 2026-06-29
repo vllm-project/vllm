@@ -1319,6 +1319,20 @@ def _init_stateless_group(
     )
 
 
+def _build_dcp_group_ranks(
+    all_ranks: torch.Tensor,
+    decode_context_model_parallel_size: int | None,
+) -> list[list[int]]:
+    dcp_size = decode_context_model_parallel_size or 1
+    if dcp_size > 1:
+        # DCP spans PCP first, then TP. For TP=2, PCP=2, DCP=2 with
+        # all_ranks laid out as [[0, 1], [2, 3]], this creates
+        # [0, 2] and [1, 3]. For DCP=4, it creates [0, 2, 1, 3].
+        all_ranks = all_ranks.transpose(-1, -2)
+    group_ranks = all_ranks.reshape(-1, dcp_size).unbind(0)
+    return [x.tolist() for x in group_ranks]
+
+
 def _replace_active_groups(
     *,
     world: GroupCoordinator | None,
@@ -1757,7 +1771,7 @@ def initialize_model_parallel(
             get_world_group().device_group
         )
 
-    # the layout order is: ExternalDP x DP x PP x TP
+    # the layout order is: ExternalDP x DP x PP x PCP x TP
     # ExternalDP is the data parallel group that is not part of the model,
     # every dp rank can generate independently (in verl integration).
     # DP is the data parallel group that is part of the model,
@@ -1794,17 +1808,10 @@ def initialize_model_parallel(
     # Build the DCP model-parallel groups.
     global _DCP
     assert _DCP is None, "decode context model parallel group is already initialized"
-    # Note(hc): In the current implementation of decode context parallel,
-    # dcp_size must not exceed tp_size, because the world size does not
-    # change by DCP, it simply reuses the GPUs of TP group, and split one
-    # TP group into tp_size//dcp_size DCP groups.
-    group_ranks = all_ranks.reshape(-1, decode_context_model_parallel_size).unbind(0)
-    group_ranks = [x.tolist() for x in group_ranks]
-    if enable_elastic_ep:
-        group_ranks = local_all_ranks.reshape(
-            -1, decode_context_model_parallel_size
-        ).unbind(0)
-        group_ranks = [x.tolist() for x in group_ranks]
+    group_ranks = _build_dcp_group_ranks(
+        all_ranks if not enable_elastic_ep else local_all_ranks,
+        decode_context_model_parallel_size,
+    )
     _DCP = init_model_parallel_group(
         group_ranks,
         get_world_group().local_rank,
@@ -1977,6 +1984,13 @@ def ensure_model_parallel_initialized(
         "prefill context parallel group already initialized, but of unexpected size: "
         f"{pcp_world_size=} vs. "
         f"{prefill_context_model_parallel_size=}"
+    )
+    dcp_world_size = get_dcp_group().world_size
+    dcp_model_parallel_size = decode_context_model_parallel_size or 1
+    assert dcp_world_size == dcp_model_parallel_size, (
+        "decode context parallel group already initialized, but of unexpected size: "
+        f"{dcp_world_size=} vs. "
+        f"{dcp_model_parallel_size=}"
     )
 
 

@@ -301,6 +301,56 @@ def prepare_pos_seq_lens(
 
 
 @triton.jit
+def _prepare_pos_seq_lens_with_start_pos_kernel(
+    pos_ptr,
+    seq_lens_ptr,
+    query_start_loc_ptr,
+    virtual_start_pos_ptr,
+    max_num_reqs,
+    BLOCK_SIZE: tl.constexpr,
+):
+    req_id = tl.program_id(0)
+    num_reqs = tl.num_programs(0) - 1
+    if req_id == num_reqs:
+        # Pad unused seq_lens as 0 for full CUDA graphs.
+        for i in tl.range(num_reqs, max_num_reqs, BLOCK_SIZE):
+            block = i + tl.arange(0, BLOCK_SIZE)
+            mask = block < max_num_reqs
+            tl.store(seq_lens_ptr + block, 0, mask=mask)
+        return
+
+    start_pos = tl.load(virtual_start_pos_ptr + req_id)
+    start = tl.load(query_start_loc_ptr + req_id)
+    end = tl.load(query_start_loc_ptr + req_id + 1)
+    query_len = end - start
+
+    seq_len = start_pos + query_len
+    tl.store(seq_lens_ptr + req_id, seq_len)
+
+    for i in tl.range(0, query_len, BLOCK_SIZE):
+        block = i + tl.arange(0, BLOCK_SIZE)
+        mask = block < query_len
+        tl.store(pos_ptr + start + block, start_pos + block, mask=mask)
+
+
+def prepare_pos_seq_lens_with_start_pos(
+    query_start_loc: torch.Tensor,
+    virtual_start_pos: torch.Tensor,
+    pos: torch.Tensor,
+    seq_lens: torch.Tensor,
+) -> None:
+    num_reqs = virtual_start_pos.shape[0]
+    _prepare_pos_seq_lens_with_start_pos_kernel[(num_reqs + 1,)](
+        pos,
+        seq_lens,
+        query_start_loc,
+        virtual_start_pos,
+        seq_lens.shape[0],
+        BLOCK_SIZE=1024,
+    )
+
+
+@triton.jit
 def _combine_sampled_and_draft_tokens_kernel(
     input_ids_ptr,
     idx_mapping_ptr,

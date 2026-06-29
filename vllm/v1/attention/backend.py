@@ -998,6 +998,10 @@ class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     They do not support prefill (MHA-style) attention.
     """
 
+    # MRV2 PCP updates sparse MLA caches by gathering the latent MLA cache
+    # payload (`kv_c` plus RoPE key), not expanded K/V tensors.
+    supports_pcp: bool = True
+
     def fused_output_quant_supported(self, quant_key: "QuantKey"):
         """
         Does this attention implementation support fused output quantization.
