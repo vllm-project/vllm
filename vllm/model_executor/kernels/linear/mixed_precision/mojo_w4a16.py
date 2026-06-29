@@ -173,7 +173,7 @@ def mojo_w4a16_gemm(
 
 
 class MojoW4A16LinearKernel(TritonW4A16LinearKernel):
-    """Experimental Mojo W4A16 GEMM for ROCm RDNA.
+    """Mojo W4A16 GEMM for ROCm RDNA.
 
     Weight preprocessing is inherited from ``TritonW4A16LinearKernel``. Kernel
     selection is explicit via ``--linear-backend mojo``.

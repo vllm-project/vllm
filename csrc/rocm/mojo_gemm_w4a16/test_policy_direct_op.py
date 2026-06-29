@@ -11,6 +11,10 @@ import torch
 from vllm.model_executor.kernels.linear.mixed_precision import mojo_w4a16
 
 
+def _accelerator_device() -> torch.device:
+    return torch.accelerator.current_accelerator()
+
+
 def _make_inputs(
     *,
     m: int,
@@ -20,15 +24,16 @@ def _make_inputs(
     dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     torch.manual_seed(123)
-    a = torch.randn((m, k), device="cuda", dtype=dtype)
+    device = _accelerator_device()
+    a = torch.randn((m, k), device=device, dtype=dtype)
     qweight = torch.randint(
         -(1 << 31),
         (1 << 31) - 1,
         (k, n // 8),
-        device="cuda",
+        device=device,
         dtype=torch.int32,
     )
-    scales = torch.randn((k // group_size, n), device="cuda", dtype=dtype)
+    scales = torch.randn((k // group_size, n), device=device, dtype=dtype)
     return a, qweight, scales
 
 
