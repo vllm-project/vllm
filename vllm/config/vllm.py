@@ -951,7 +951,7 @@ class VllmConfig:
                 raise ValueError(
                     "Async scheduling is not compatible with ROCm DeepEP "
                     "high-throughput DBO. Please use --no-async-scheduling or "
-                    "--all2all-backend=deepep_low_latency."
+                    "select a different all2all backend."
                 )
             if self.speculative_config is not None:
                 if (
