@@ -67,6 +67,9 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
+from vllm.model_executor.layers.quantization.utils.quant_fusion import (
+    get_mla_attn_quant_params,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     scaled_dequantize,
@@ -1148,7 +1151,18 @@ class DeepseekV2MLAAttention(nn.Module):
         hidden_states: torch.Tensor,
         llama_4_scaling: torch.Tensor | None,
     ) -> torch.Tensor:
-        return self.mla_attn(positions, hidden_states, llama_4_scaling)
+        # Get quantization parameters if fused attention + quant is enabled
+        output_scale, output_block_scale, quant_group_size = get_mla_attn_quant_params(
+            self.mla_attn, self.o_proj
+        )
+        return self.mla_attn(
+            positions,
+            hidden_states,
+            llama_4_scaling,
+            output_scale=output_scale,
+            output_block_scale=output_block_scale,
+            quant_group_size=quant_group_size,
+        )
 
 
 class DeepseekV2DecoderLayer(nn.Module):
