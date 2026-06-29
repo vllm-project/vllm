@@ -707,6 +707,10 @@ _TOKEN_CLASSIFICATION_EXAMPLE_MODELS = {
     "ModernBertForTokenClassification": _HfExamplesInfo(
         "disham993/electrical-ner-ModernBERT-base"
     ),
+    "OpenAIPrivacyFilterForTokenClassification": _HfExamplesInfo(
+        "openai/privacy-filter",
+        min_transformers_version="5.6.0.dev0",
+    ),
 }
 
 _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
