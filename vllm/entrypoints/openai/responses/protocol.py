@@ -52,6 +52,7 @@ from pydantic import (
     Field,
     ValidationError,
     field_serializer,
+    model_serializer,
     model_validator,
 )
 
@@ -116,6 +117,95 @@ def serialize_messages(msgs):
     Serializes multiple messages
     """
     return [serialize_message(msg) for msg in msgs] if msgs else None
+
+
+_OPENAI_RESPONSE_TOP_LEVEL_OMIT_IF_NONE_KEYS = frozenset(
+    {
+        # Optional but non-nullable in the OpenAI OpenAPI schema. If vLLM has
+        # no value for these fields, omit them rather than serializing null.
+        "text",
+        "user",
+        # vLLM extensions. Keep them when populated, but do not expose nulls
+        # on the OpenAI-compatible response surface.
+        "kv_transfer_params",
+        "input_messages",
+        "output_messages",
+    }
+)
+_OPENAI_RESPONSE_OUTPUT_ITEM_OMIT_IF_NONE_KEYS = frozenset(
+    {
+        "status",
+        "namespace",
+    }
+)
+_OPENAI_RESPONSE_TOOL_OMIT_IF_NONE_KEYS = frozenset({"defer_loading"})
+
+
+def _omit_none_keys(data: dict[str, Any], keys: frozenset[str]) -> dict[str, Any]:
+    for key in keys:
+        if data.get(key) is None:
+            data.pop(key, None)
+    return data
+
+
+def _sanitize_response_output_item(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    return _omit_none_keys(
+        dict(value), _OPENAI_RESPONSE_OUTPUT_ITEM_OMIT_IF_NONE_KEYS
+    )
+
+
+def _sanitize_response_tool(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    return _omit_none_keys(dict(value), _OPENAI_RESPONSE_TOOL_OMIT_IF_NONE_KEYS)
+
+
+def _sanitize_response_dict(value: dict[str, Any]) -> dict[str, Any]:
+    data = dict(value)
+
+    output = data.get("output")
+    if isinstance(output, list):
+        data["output"] = [_sanitize_response_output_item(item) for item in output]
+
+    tools = data.get("tools")
+    if isinstance(tools, list):
+        data["tools"] = [_sanitize_response_tool(tool) for tool in tools]
+
+    return _omit_none_keys(data, _OPENAI_RESPONSE_TOP_LEVEL_OMIT_IF_NONE_KEYS)
+
+
+def _omit_openai_response_non_nullable_nulls(value: Any) -> Any:
+    """Drop nulls at exact OpenAI response positions that are not nullable.
+
+    This is intentionally narrower than ``exclude_none=True`` because many
+    Responses API fields are explicitly nullable and should remain present as
+    null in OpenAI-compatible responses. It is also position-aware so arbitrary
+    nested payloads such as tool JSON schemas are preserved verbatim.
+    """
+    if not isinstance(value, dict):
+        return value
+
+    data = dict(value)
+
+    # Streaming lifecycle events wrap a full response object under "response".
+    response = data.get("response")
+    if isinstance(response, dict):
+        data["response"] = _sanitize_response_dict(response)
+        return data
+
+    # Output item events wrap a single output item under "item".
+    item = data.get("item")
+    if isinstance(item, dict):
+        data["item"] = _sanitize_response_output_item(item)
+        return data
+
+    # Non-streaming responses are serialized directly as response objects.
+    if data.get("object") == "response":
+        return _sanitize_response_dict(data)
+
+    return data
 
 
 class ResponseRawMessageAndToken(OpenAIBaseModel):
@@ -614,6 +704,7 @@ class ResponsesResponse(OpenAIBaseModel):
     metadata: Metadata | None = None
     model: str
     object: Literal["response"] = "response"
+    error: Any | None = None
     output: list[ResponseOutputItem]
     parallel_tool_calls: bool
     temperature: float
@@ -688,6 +779,10 @@ class ResponsesResponse(OpenAIBaseModel):
     @field_serializer("input_messages", when_used="json")
     def serialize_input_messages(self, msgs, _info):
         return serialize_messages(msgs)
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        return _omit_openai_response_non_nullable_nulls(handler(self))
 
     @classmethod
     def from_request(
