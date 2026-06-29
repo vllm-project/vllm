@@ -515,8 +515,8 @@ class RocmPlatform(Platform):
 
         vllm_config = get_current_vllm_config_or_none()
         is_encoder_decoder = (
-            vllm_config is not None
-            and vllm_config.model_config.attn_type == "encoder_decoder"
+            getattr(getattr(vllm_config, "model_config", None), "attn_type", None)
+            == "encoder_decoder"
         )
         # ROCM_ATTN still uses a legacy attention layout (KV is the outer
         # dimension) that is incompatible with the encoder backend layouts. The
