@@ -31,6 +31,8 @@ class MemAllocator(Protocol):
 
     def get_current_usage(self) -> int: ...
 
+    def release_pools(self) -> None: ...
+
 
 def get_mem_allocator_instance() -> MemAllocator:
     if current_platform.is_cuda_alike():
