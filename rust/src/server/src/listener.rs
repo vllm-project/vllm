@@ -10,7 +10,6 @@ use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::net::UnixListener as StdUnixListener;
 use std::pin::Pin;
 use std::task::{Context, Poll, ready};
-use std::time::Duration;
 
 use auto_enums::enum_derive;
 use openssl::ssl::SslContext;
@@ -20,7 +19,7 @@ use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tonic::transport::server::{Connected, TcpConnectInfo};
 use tracing::trace;
 
-use crate::HttpListenerMode;
+use crate::{HttpListenerMode, tls};
 
 /// Runtime listener type used by the OpenAI-compatible HTTP or gRPC server,
 /// which is either a TCP listener or a Unix-domain listener.
@@ -192,14 +191,10 @@ impl MaybeTlsListener {
         Self::Plain(listener)
     }
 
-    pub(crate) fn tls(
-        listener: Listener,
-        context: SslContext,
-        handshake_timeout: Duration,
-    ) -> Self {
+    pub(crate) fn tls(listener: Listener, context: SslContext) -> Self {
         Self::Tls(
             tls_listener::builder(context)
-                .handshake_timeout(handshake_timeout)
+                .handshake_timeout(tls::TLS_HANDSHAKE_TIMEOUT)
                 .listen(listener),
         )
     }

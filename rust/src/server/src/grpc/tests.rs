@@ -318,8 +318,7 @@ async fn grpc_tls_test_server(
     let addr = listener.local_addr().expect("local addr").to_string();
 
     let server_task = tokio::spawn(async move {
-        let incoming =
-            MaybeTlsListener::tls(Listener::Tcp(listener), context, tls::TLS_HANDSHAKE_TIMEOUT);
+        let incoming = MaybeTlsListener::tls(Listener::Tcp(listener), context);
         TonicServer::builder()
             .add_service(svc)
             .serve_with_incoming(incoming)

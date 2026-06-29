@@ -251,7 +251,6 @@ where
     // silent client cannot hold the connection open.
     let keep_alive_timeout = config.keep_alive_timeout;
     let timeouts = ConnectionTimeouts {
-        handshake: tls::TLS_HANDSHAKE_TIMEOUT,
         header_read: if keep_alive_timeout.is_zero() {
             DEFAULT_KEEP_ALIVE_TIMEOUT
         } else {
@@ -266,16 +265,10 @@ where
         let force_shutdown = force_shutdown.clone();
         async move {
             let listener = match tls_config {
-                Some(context) => MaybeTlsListener::tls(listener, context, timeouts.handshake),
+                Some(context) => MaybeTlsListener::tls(listener, context),
                 None => MaybeTlsListener::plain(listener),
             };
-            let server = serve_connections(
-                listener,
-                app,
-                shutdown.cancelled_owned(),
-                timeouts.header_read,
-                timeouts.keep_alive_enabled,
-            );
+            let server = serve_connections(listener, app, shutdown.cancelled_owned(), timeouts);
 
             let result = tokio::select! {
                 result = server => {
@@ -304,9 +297,7 @@ where
                 return Ok(());
             };
             let incoming = match grpc_tls {
-                Some(context) => {
-                    MaybeTlsListener::tls(grpc_listener, context, tls::TLS_HANDSHAKE_TIMEOUT)
-                }
+                Some(context) => MaybeTlsListener::tls(grpc_listener, context),
                 None => MaybeTlsListener::plain(grpc_listener),
             };
             let server = svc.serve_with_incoming_shutdown(incoming, shutdown.cancelled_owned());
@@ -339,8 +330,6 @@ where
 /// Per-connection timeouts applied while serving HTTP/HTTPS.
 #[derive(Clone, Copy)]
 pub(crate) struct ConnectionTimeouts {
-    /// Max time for a client to complete the TLS handshake (TLS path only).
-    pub(crate) handshake: Duration,
     /// HTTP/1 header-read timeout (bounds idle keep-alive and the head read).
     pub(crate) header_read: Duration,
     /// Whether HTTP/1 keep-alive is enabled; `false` closes after each response.
@@ -353,8 +342,7 @@ async fn serve_connections<L>(
     mut listener: L,
     app: Router,
     shutdown: impl Future<Output = ()> + Send,
-    header_read: Duration,
-    keep_alive_enabled: bool,
+    timeouts: ConnectionTimeouts,
 ) -> Result<()>
 where
     L: axum::serve::Listener,
@@ -371,8 +359,8 @@ where
             app.clone().map_request(|req: Request<Incoming>| req.map(Body::new)),
         );
         let mut builder = http1::Builder::new();
-        builder.timer(TokioTimer::new()).header_read_timeout(header_read);
-        if !keep_alive_enabled {
+        builder.timer(TokioTimer::new()).header_read_timeout(timeouts.header_read);
+        if !timeouts.keep_alive_enabled {
             builder.keep_alive(false);
         }
         let connection = builder.serve_connection(TokioIo::new(io), service);
