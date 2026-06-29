@@ -109,33 +109,6 @@ steps:
     pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py  --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/processing &&
     pytest models/multimodal/generation/test_memory_leak.py -m core_model &&
     cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model'
-- label: Multi-Modal Processor (CPU)
-  depends_on:
-  - image-build-cpu
-  timeout_in_minutes: 60
-  device: intel_gpu
-  no_plugin: true
-  working_dir: .
-  env:
-    REGISTRY: public.ecr.aws/q9t5s3a7
-    REPO: vllm-ci-test-repo
-    VLLM_TEST_DEVICE: xpu
-  agent_tags:
-    label: debug
-    gpu: 1+
-  _raw_old_commands:
-  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-  - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py
-  source_file_dependencies:
-  - vllm/
-  - tests/models/multimodal
-  - tests/models/registry.py
-  commands:
-  - >-
-    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'cd tests && 
-    pip install git+https://github.com/TIGER-AI-Lab/Mantis.git &&
-    pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py'
 - label: Multi-Modal Processor
   timeout_in_minutes: 60
   device: intel_gpu
@@ -198,7 +171,7 @@ steps:
     gpu: 1+
   _raw_old_commands:
   - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-  - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py
+  - pytest -v -s models/multimodal/generation -m "not core_model" --ignore models/multimodal/generation/test_common.py
   - pytest -v -s models/multimodal/test_mapping.py
   source_file_dependencies:
   - vllm/
@@ -209,7 +182,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests && 
     pip install git+https://github.com/TIGER-AI-Lab/Mantis.git &&
-    pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py &&
+    pytest -v -s models/multimodal/generation -m "not core_model" --ignore models/multimodal/generation/test_common.py &&
     pytest -v -s models/multimodal/test_mapping.py'
 - label: Multi-Modal Models (Extended Generation 2)
   device: intel_gpu
@@ -234,7 +207,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests && 
     pip install git+https://github.com/TIGER-AI-Lab/Mantis.git &&
-    pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model''
+    pytest -v -s models/multimodal/generation/test_common.py -m "split(group=0) and not core_model"'
 - label: Multi-Modal Models (Extended Generation 3)
   device: intel_gpu
   optional: true
@@ -258,7 +231,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests && 
     pip install git+https://github.com/TIGER-AI-Lab/Mantis.git &&
-    pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model''
+    pytest -v -s models/multimodal/generation/test_common.py -m "split(group=1) and not core_model"'
 - label: Multi-Modal Models (Extended Pooling)
   optional: true
   device: intel_gpu
@@ -280,4 +253,4 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests && 
-    pytest -v -s models/multimodal/pooling -m 'not core_model''
+    pytest -v -s models/multimodal/pooling -m "not core_model"'
