@@ -1655,6 +1655,7 @@ def test_cp_block_size_scaling(dcp_world_size: int, pcp_world_size: int) -> None
     expected_cp = dcp_world_size * pcp_world_size
     assert sched.cp_world_size == expected_cp
     assert sched.block_size == BLOCK_SIZE * expected_cp
+    assert sched.fa_block_size == BLOCK_SIZE * expected_cp
 
 
 # ---------------------------------------------------------------------------
@@ -1732,6 +1733,86 @@ def test_cp_eager_store_and_load_roundtrip(
     assert meta2.load_event >= 0, "Expected a load event"
     assert len(meta2.load_gpu_blocks) == num_blocks
     assert len(meta2.load_cpu_blocks) == num_blocks
+
+
+# ---------------------------------------------------------------------------
+# Test 18: CP store and load use effective block size
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "dcp_world_size, pcp_world_size",
+    [
+        (2, 1),
+        (1, 2),
+        (2, 2),
+    ],
+)
+def test_cp_effective_block_size_store_and_load(
+    dcp_world_size: int, pcp_world_size: int
+) -> None:
+    """Verify ready_blocks_g (store) and n_take_g (load) use the effective
+    (physical * cp) block size, not the per-rank physical size."""
+    fix = _make_cp_scheduler(
+        dcp_world_size=dcp_world_size, pcp_world_size=pcp_world_size
+    )
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+    cp = dcp_world_size * pcp_world_size
+    vbs = BLOCK_SIZE * cp
+
+    # Store: allocate 2 blocks, confirm only 1. Without the fix,
+    # ready_blocks_g = vbs / BLOCK_SIZE = 2, storing both blocks.
+    req = _make_cp_request(num_blocks=2, virtual_block_size=vbs)
+    gpu_blocks = _allocate_cp_gpu_blocks(gpu_pool, req, 2, vbs)
+    kv = KVCacheBlocks(blocks=(gpu_blocks,))
+    req.num_computed_tokens = vbs
+    sched.update_state_after_alloc(req, kv, num_external_tokens=0)
+    m1 = sched.build_connector_meta(
+        make_scheduler_output(
+            {req.request_id: vbs},
+            new_reqs={req.request_id: kv.get_block_ids()},
+        )
+    )
+    assert len(m1.store_gpu_blocks) == 1
+    assert len(m1.store_cpu_blocks) == 1
+    simulate_store_completion(sched, m1.store_event)
+
+    # Load: store 2 blocks from a second request, accept only 1 as external.
+    # Without the fix, n_take_g = vbs / BLOCK_SIZE = 2, loading both.
+    req2 = _make_cp_request(num_blocks=2, virtual_block_size=vbs)
+    kv2 = KVCacheBlocks(blocks=(_allocate_cp_gpu_blocks(gpu_pool, req2, 2, vbs),))
+    req2.num_computed_tokens = 2 * vbs
+    sched.update_state_after_alloc(req2, kv2, num_external_tokens=0)
+    m2 = sched.build_connector_meta(
+        make_scheduler_output(
+            {req2.request_id: 2 * vbs},
+            new_reqs={req2.request_id: kv2.get_block_ids()},
+        )
+    )
+    simulate_store_completion(sched, m2.store_event)
+
+    req3 = Request(
+        request_id="req-cp-partial-load",
+        prompt_token_ids=req2.prompt_token_ids,
+        sampling_params=req2.sampling_params,
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=req2._block_hasher,
+    )
+    hit, _ = sched.get_num_new_matched_tokens(req3, num_computed_tokens=0)
+    assert hit == 2 * vbs
+
+    kv3 = KVCacheBlocks(blocks=(gpu_pool.get_new_blocks(2),))
+    sched.update_state_after_alloc(req3, kv3, num_external_tokens=vbs)
+    m3 = sched.build_connector_meta(
+        make_scheduler_output(
+            {req3.request_id: vbs},
+            new_reqs={req3.request_id: kv3.get_block_ids()},
+        )
+    )
+    assert m3.load_event >= 0
+    assert len(m3.load_gpu_blocks) == 1
+    assert len(m3.load_cpu_blocks) == 1
+    assert m3.load_gpu_blocks == [kv3.get_block_ids()[0][0]]
 
 
 # ---------------------------------------------------------------------------
