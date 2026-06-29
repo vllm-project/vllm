@@ -38,7 +38,8 @@ BLOCK_SIZE=${BLOCK_SIZE:-128}
 ATTENTION_BACKEND=${ATTENTION_BACKEND:-}
 VLLM_SERVE_EXTRA_ARGS=${VLLM_SERVE_EXTRA_ARGS:-}
 
-GIT_ROOT=$(git rev-parse --show-toplevel)
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+GIT_ROOT="${GIT_ROOT:-$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)}"
 SMI_BIN=$(which nvidia-smi || which rocm-smi || echo "")
 
 # ── KV transfer configs ─────────────────────────────────────────────────

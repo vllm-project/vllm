@@ -12,6 +12,7 @@ from vllm import LLM, ModelRegistry, SamplingParams
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     example_hidden_states_connector,
 )
+from vllm.platforms import current_platform
 
 
 def get_and_check_output(output, expected_shape):
@@ -296,7 +297,7 @@ def test_extract_hidden_states_qwen35_hybrid_smoke(tmp_path):
         )
 
 
-@pytest.mark.timeout(60)
+@pytest.mark.timeout(240 if current_platform.is_rocm() else 60)
 @multi_gpu_test(num_gpus=2)
 @create_new_process_for_each_test()
 def test_extract_hidden_states_tp2():

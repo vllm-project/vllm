@@ -405,7 +405,11 @@ HF_MOUNT="/root/.cache/huggingface"
 # Prefer VLLM_TEST_COMMANDS (preserves all inner quoting intact).
 # Fall back to $* for backward compatibility, but warn that inner
 # double-quotes will have been stripped by the calling shell.
-if [[ -n "${VLLM_TEST_COMMANDS:-}" ]]; then
+if [[ "${VLLM_CI_EXECUTION_MODE:-}" == "multi-node" ]]; then
+  commands=""
+  commands_source="env-multi-node"
+  echo "Commands sourced from VLLM_NODE_COMMAND_*"
+elif [[ -n "${VLLM_TEST_COMMANDS:-}" ]]; then
   commands="${VLLM_TEST_COMMANDS}"
   commands_source="env"
   echo "Commands sourced from VLLM_TEST_COMMANDS (quoting preserved)"
@@ -426,7 +430,11 @@ else
   echo "  bash $0"
 fi
 
-echo "Raw commands: $commands"
+if [[ "$commands_source" == "env-multi-node" ]]; then
+  echo "Node command count: ${VLLM_NODE_COMMAND_COUNT:-${NUM_NODES:-0}}"
+else
+  echo "Raw commands: $commands"
+fi
 
 # Only try to repair stripped pytest -m/-k quoting in legacy argv mode.
 # VLLM_TEST_COMMANDS preserves inner quoting already, and re-quoting that path
@@ -434,11 +442,20 @@ echo "Raw commands: $commands"
 if [[ "$commands_source" == "argv" ]]; then
   commands=$(re_quote_pytest_markers "$commands")
   echo "After re-quoting: $commands"
+elif [[ "$commands_source" == "env-multi-node" ]]; then
+  echo "Skipping re-quoting for VLLM_NODE_COMMAND_* input"
 else
   echo "Skipping re-quoting for VLLM_TEST_COMMANDS input"
 fi
 
-echo "Final commands: $commands"
+if [[ "$commands_source" == "env-multi-node" ]]; then
+  for ((i = 0; i < ${VLLM_NODE_COMMAND_COUNT:-${NUM_NODES:-0}}; i++)); do
+    var="VLLM_NODE_COMMAND_${i}"
+    echo "Final node ${i} command: ${!var:-}"
+  done
+else
+  echo "Final commands: $commands"
+fi
 
 # The ROCm test image often ships /vllm-workspace without .git (artifact tarball unpack).
 # tests/standalone_tests/python_only_compile.sh uses merge-base(HEAD, origin/main) for
@@ -487,7 +504,41 @@ else
 fi
 
 # --- Route: multi-node vs single-node ---
-if is_multi_node "$commands"; then
+if [[ "${VLLM_CI_EXECUTION_MODE:-}" == "multi-node" ]]; then
+  echo "--- Multi-node job detected"
+  node_count="${NUM_NODES:-${VLLM_NODE_COMMAND_COUNT:-0}}"
+  command_count="${VLLM_NODE_COMMAND_COUNT:-${node_count}}"
+  gpus_per_node="${VLLM_NUM_GPUS_PER_NODE:-1}"
+
+  if [[ "$node_count" -lt 2 ]]; then
+    echo "Multi-node mode requires NUM_NODES >= 2, got ${node_count}" >&2
+    exit 111
+  fi
+  if [[ "$command_count" -ne "$node_count" ]]; then
+    echo "VLLM_NODE_COMMAND_COUNT (${command_count}) must match NUM_NODES (${node_count})" >&2
+    exit 111
+  fi
+
+  node_commands=()
+  for ((i = 0; i < command_count; i++)); do
+    var="VLLM_NODE_COMMAND_${i}"
+    if [[ -z "${!var:-}" ]]; then
+      echo "Missing ${var} for multi-node job" >&2
+      exit 111
+    fi
+    node_commands+=("${!var}")
+  done
+
+  ./.buildkite/scripts/run-multi-node-test.sh \
+    /vllm-workspace/tests \
+    "$node_count" \
+    "$gpus_per_node" \
+    "$image_name" \
+    "${node_commands[@]}"
+  exit_code=$?
+  cleanup_network
+  handle_pytest_exit "$exit_code"
+elif is_multi_node "$commands"; then
   echo "--- Multi-node job detected"
   export DCKR_VER=$(docker --version | sed 's/Docker version \(.*\), build .*/\1/')
 
