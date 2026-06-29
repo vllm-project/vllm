@@ -215,11 +215,11 @@ def _insert_context_kv(
     cos_sin_cache = attn.rotary_emb.cos_sin_cache
     cache_dtype = swa_cache.dtype
     n_ctx = kv.shape[0]
-    dummy_q = torch.empty(
+    dummy_q = torch.zeros(
         (n_ctx, attn.n_local_heads, attn.head_dim),
         dtype=kv.dtype,
         device=kv.device,
-    )  # TODO(ben): sanitize this for NaNs
+    )
     if cache_dtype == torch.uint8:
         # fp8_ds_mla UE8M0 paged layout
         swa_2d = swa_cache.view(swa_cache.shape[0], -1)
@@ -249,7 +249,7 @@ def _insert_context_kv(
     else:  # per-tensor fp8 (torch.float8_e4m3fn)
         # TODO(ben): double-check if this is being dispatched correctly for FI backend
         swa_3d = swa_cache.view(-1, block_size, attn.head_dim)
-        dummy_q_fp8 = torch.empty_like(dummy_q, dtype=torch.float8_e4m3fn)
+        dummy_q_fp8 = torch.zeros_like(dummy_q, dtype=torch.float8_e4m3fn)
         torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
             dummy_q,
             kv,
