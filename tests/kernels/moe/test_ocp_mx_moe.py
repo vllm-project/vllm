@@ -9,6 +9,7 @@ import pytest
 import torch
 from packaging import version
 
+from tests.kernels.moe.utils import check_accuracy
 from vllm._aiter_ops import is_aiter_found
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
@@ -515,29 +516,6 @@ def tg_mxfp4_moe(
     return tg_result
 
 
-def check_accuracy(a, b, atol, rtol, percent):
-    """Allow a mismatch percentage of 1 - percent."""
-    if torch.any(torch.isnan(a)):
-        raise Exception("NaN in reference output")
-    if torch.any(torch.isnan(b)):
-        raise Exception("NaN in actual output")
-    if torch.any(torch.isinf(a)):
-        raise Exception("Inf in reference output")
-    if torch.any(torch.isinf(b)):
-        raise Exception("Inf in actual output")
-    assert a.shape == b.shape, f"Shape mismatch: {a.shape} vs {b.shape}"
-
-    left = torch.abs(a - b)
-    right = atol + rtol * torch.abs(b)
-    count = torch.sum(left > right)
-    mismatch_percent = count / a.numel()
-    if mismatch_percent > 1 - percent:
-        raise Exception(
-            f"Mismatch percentage is {mismatch_percent:.4f} for rtol {rtol} "
-            f"(threshold: {1 - percent:.4f})"
-        )
-
-
 @pytest.mark.parametrize("topk", [1, 4])
 @pytest.mark.parametrize("num_experts", [32, 128])
 @pytest.mark.parametrize("num_tokens", [1, 128, 1024])
@@ -681,19 +659,6 @@ def test_trtllm_gen_mxfp4_fused_moe(
     check_accuracy(ref_result, tg_result, atol=0, rtol=0.3, percent=0.8)
 
 
-def _interleave_scales_lastdim_by4(scales: torch.Tensor) -> torch.Tensor:
-    """Interleave scales on the last dimension by groups of 4, matching
-    the transformation in mxfp4.py's BF16 (Hopper) path."""
-    s = scales.to(torch.uint8)
-    s_shape = s.shape
-    assert s_shape[-1] % 4 == 0
-    s = s.reshape(*s_shape[:-1], s_shape[-1] // 4, 4)
-    # Move the 4-group dimension before the row dimension
-    permuted = s.permute(0, 2, 1, 3)
-    # Merge the row dim with the 4-group dim
-    return permuted.reshape(s_shape[0], s_shape[-1] // 4, s_shape[1] * 4)
-
-
 @pytest.mark.parametrize("topk", [1, 4])
 @pytest.mark.parametrize("num_experts", [32])
 @pytest.mark.parametrize("num_tokens", [1, 128])
@@ -793,13 +758,25 @@ def test_flashinfer_cutlass_mxfp4_fused_moe(
     w1_w, w3_w = torch.chunk(w13_q, 2, dim=1)
     w13_q_swapped = torch.cat([w3_w, w1_w], dim=1)
 
+    # SM90 mixed-input GEMM expects weights/scales in an interleaved layout;
+    # without it the FP4->BF16 LUT reads bytes from wrong positions for K>128.
+    from flashinfer.fused_moe import (
+        interleave_moe_scales_for_sm90_mixed_gemm,
+        interleave_moe_weights_for_sm90_mixed_gemm,
+    )
+
+    w13_q_swapped = interleave_moe_weights_for_sm90_mixed_gemm(
+        w13_q_swapped, quant_type="fp4"
+    )
+    w2_q = interleave_moe_weights_for_sm90_mixed_gemm(w2_q, quant_type="fp4")
+
     b1, b3 = torch.chunk(bias13.to(torch.float32), 2, dim=-1)
     w13_b = torch.cat([b3, b1], dim=-1).to(torch.bfloat16)
 
     w1_s, w3_s = torch.chunk(w13_scale, 2, dim=1)
     w13_s = torch.cat([w3_s, w1_s], dim=1)
-    w13_s_inter = _interleave_scales_lastdim_by4(w13_s)
-    w2_s_inter = _interleave_scales_lastdim_by4(w2_scale)
+    w13_s_inter = interleave_moe_scales_for_sm90_mixed_gemm(w13_s)
+    w2_s_inter = interleave_moe_scales_for_sm90_mixed_gemm(w2_scale)
 
     routing_weights = torch.nn.functional.softmax(
         router_logits, dim=1, dtype=torch.float32

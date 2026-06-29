@@ -109,17 +109,21 @@ class ModelState(ABC):
     ) -> torch.Tensor | None:
         raise NotImplementedError
 
+    def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor | None:
+        """Pre-allocated inputs_embeds buffer for dummy runs (contents unused)."""
+        return None
+
     def gather_mm_embeddings(
         self, input_batch: InputBatch, draft_lookahead: int = 0
     ) -> tuple[list[torch.Tensor], torch.Tensor]:
-        """Gather cached multimodal embeddings for a speculator's draft forward."""
+        """Gather cached multimodal embeddings."""
         return self.encoder_runner.gather_mm_embeddings(
             input_batch.req_ids,
             input_batch.num_tokens,
             input_batch.num_scheduled_tokens,
             input_batch.query_start_loc_np,
             input_batch.prefill_len_np,
-            input_batch.num_computed_prefill_tokens_np,
+            input_batch.num_computed_tokens_np,
             draft_lookahead=draft_lookahead,
         )
 

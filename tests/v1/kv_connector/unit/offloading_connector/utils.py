@@ -41,6 +41,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheTensor,
 )
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
@@ -241,9 +242,18 @@ class RequestRunner:
                 )
             ]
 
+        kv_cache_tensors = [
+            KVCacheTensor(
+                size=group.kv_cache_spec.page_size_bytes * num_gpu_blocks,
+                shared_by=[layer_name],
+            )
+            for group in kv_cache_groups
+            for layer_name in group.layer_names
+        ]
+
         kv_cache_config = KVCacheConfig(
             num_blocks=num_gpu_blocks,
-            kv_cache_tensors=[],
+            kv_cache_tensors=kv_cache_tensors,
             kv_cache_groups=kv_cache_groups,
         )
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
