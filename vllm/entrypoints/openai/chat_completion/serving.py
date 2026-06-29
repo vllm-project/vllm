@@ -85,30 +85,42 @@ from vllm.utils.mistral import mt as _mt
 logger = init_logger(__name__)
 
 
-def _eos_suffix_for_log(
-    tokenizer,
-    finish_reason: str | None,
-    stop_reason,
-    last_token_id: int | None,
-) -> str:
-    """Return the string form of the model-emitted EOS token for the
-    request-log ``raw_output_texts`` capture, or ``""`` if generation
-    didn't end on a natural EOS.
+def _decode_raw_output(tokenizer, token_ids) -> str:
+    """Decode the full output token-id sequence into the pristine model
+    text for the request-log ``raw_output_texts`` capture.
 
-    We only append when ``finish_reason == "stop"`` *and* ``stop_reason``
-    is ``None`` — i.e. the engine stopped because the model emitted an
-    EOS token (not because a user-supplied stop string matched, not
-    because of length, not because of a tool-call extraction). The
-    actual emitted token is decoded directly so models with multiple
-    EOS variants (e.g. Qwen's ``<|im_end|>`` vs ``<|endoftext|>``)
-    record the one the model really used.
+    Decoding the ids in one shot — instead of concatenating the
+    incremental detokenizer's per-step ``output.text`` deltas — avoids the
+    spurious spaces that ``spaces_between_special_tokens`` inserts around
+    added/special tokens such as ``</think>``, ``<tool_call>`` and
+    ``<function=...>``. Those spaces are an artifact of vLLM's incremental
+    detokenization, not part of what the model emitted.
+
+    We force ``skip_special_tokens=False`` and
+    ``spaces_between_special_tokens=False`` so the captured text matches the
+    raw generation exactly, including the end-of-turn marker: the
+    model-emitted EOS token id is already part of ``token_ids`` (the engine
+    appends it even when its text is suppressed), so models with multiple
+    EOS variants (e.g. Qwen's ``<|im_end|>`` vs ``<|endoftext|>``) record
+    the one actually used, while length-/stop-string-terminated generations
+    correctly carry no EOS.
     """
-    if finish_reason != "stop" or stop_reason is not None:
+    if tokenizer is None or not token_ids:
         return ""
-    if last_token_id is None or tokenizer is None:
-        return ""
+    ids = list(token_ids)
     try:
-        return tokenizer.decode([last_token_id], skip_special_tokens=False)
+        return tokenizer.decode(
+            ids,
+            skip_special_tokens=False,
+            spaces_between_special_tokens=False,
+        )
+    except TypeError:
+        # Tokenizers without a ``spaces_between_special_tokens`` kwarg
+        # (e.g. Mistral / Grok) — fall back to the basic decode.
+        try:
+            return tokenizer.decode(ids, skip_special_tokens=False)
+        except Exception:
+            return ""
     except Exception:
         return ""
 
@@ -721,15 +733,11 @@ class OpenAIServingChat(OpenAIServing):
         # Always track previous_texts for comprehensive output logging
         previous_texts = [""] * num_choices
         # Pristine model output (pre-parser) per choice, for the
-        # request-log hub. We accumulate as a list of fragments and
-        # ``"".join`` once at the end to avoid O(n²) string realloc on
-        # very long generations.
-        raw_output_fragments: list[list[str]] = [[] for _ in range(num_choices)]
-        # Trackers used at end-of-stream to optionally append the
-        # model-emitted EOS to ``raw_output_texts`` (see _eos_suffix_for_log).
-        raw_last_token_ids: list[int | None] = [None] * num_choices
-        raw_finish_reasons: list[str | None] = [None] * num_choices
-        raw_stop_reasons: list[Any] = [None] * num_choices
+        # request-log hub. We accumulate the raw output token ids and decode
+        # them in one shot at end-of-stream (see ``_decode_raw_output``) so
+        # the captured text is free of the spurious spaces the incremental
+        # detokenizer inserts around special tokens.
+        raw_output_token_ids: list[list[int]] = [[] for _ in range(num_choices)]
 
         # Only one of these will be used, thus previous_texts and
         # all_previous_token_ids will not be used twice in the same iteration.
@@ -862,16 +870,13 @@ class OpenAIServingChat(OpenAIServing):
                 for output in res.outputs:
                     i = output.index
                     tool_parser = tool_parsers[i]
-                    # Accumulate the raw, unparsed model output. Done
-                    # here (before any parser branch) so the captured
-                    # text is independent of reasoning / tool extraction.
-                    if output.text:
-                        raw_output_fragments[i].append(output.text)
+                    # Accumulate the raw, unparsed model output token ids.
+                    # Done here (before any parser branch) so the captured
+                    # output is independent of reasoning / tool extraction.
+                    # Streaming uses RequestOutputKind.DELTA, so token_ids
+                    # are per-chunk deltas we extend onto the running list.
                     if output.token_ids:
-                        raw_last_token_ids[i] = output.token_ids[-1]
-                    if output.finish_reason is not None:
-                        raw_finish_reasons[i] = output.finish_reason
-                        raw_stop_reasons[i] = output.stop_reason
+                        raw_output_token_ids[i].extend(output.token_ids)
 
                     if (
                         reasoning_parser
@@ -1393,13 +1398,7 @@ class OpenAIServingChat(OpenAIServing):
             # final stream chunk (when the caller asked for it) AND get
             # written to request_metadata for the request-log hub.
             raw_output_texts = [
-                "".join(raw_output_fragments[i])
-                + _eos_suffix_for_log(
-                    tokenizer,
-                    raw_finish_reasons[i],
-                    raw_stop_reasons[i],
-                    raw_last_token_ids[i],
-                )
+                _decode_raw_output(tokenizer, raw_output_token_ids[i])
                 for i in range(num_choices)
             ]
             request_metadata.raw_output_texts = raw_output_texts
@@ -1504,18 +1503,15 @@ class OpenAIServingChat(OpenAIServing):
         assert final_res is not None
 
         # Capture raw model output before any parser strips/rewrites it,
-        # so the request-log hub can persist the pristine generation.
-        # Append the EOS token's literal form when the model stopped
-        # naturally so the saved record ends with the same end-of-turn
-        # marker the model emitted.
+        # so the request-log hub can persist the pristine generation. We
+        # decode the full output token-id sequence in one shot (rather than
+        # using ``output.text``, which carries the incremental
+        # detokenizer's spurious spaces around special tokens). The
+        # model-emitted EOS token id is already part of ``token_ids``, so
+        # the saved record ends with the same end-of-turn marker the model
+        # emitted when it stopped naturally.
         request_metadata.raw_output_texts = [
-            output.text
-            + _eos_suffix_for_log(
-                tokenizer,
-                output.finish_reason,
-                output.stop_reason,
-                output.token_ids[-1] if output.token_ids else None,
-            )
+            _decode_raw_output(tokenizer, output.token_ids)
             for output in final_res.outputs
         ]
 
