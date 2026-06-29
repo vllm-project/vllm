@@ -17,8 +17,6 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
-    get_history_tool_calls_cnt,
-    get_tool_call_id_type,
     make_tool_call_id,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -170,8 +168,6 @@ class OpenAIServingChat(OpenAIServing):
             if mc.generation_config not in ("auto", "vllm")
             else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
         )
-        self.tool_call_id_type = get_tool_call_id_type(self.model_config)
-
         # NOTE(woosuk): While OpenAI's chat completion API supports browsing
         # for some models, currently vLLM doesn't support it. Please use the
         # Responses API instead.
@@ -261,6 +257,7 @@ class OpenAIServingChat(OpenAIServing):
                 tokenizer,
                 request.tools,
                 chat_template_kwargs=chat_template_kwargs,
+                model_config=self.model_config,
             )
         result = await self.render_chat_request(request)
         if isinstance(result, ErrorResponse):
@@ -433,11 +430,6 @@ class OpenAIServingChat(OpenAIServing):
         else:
             tool_choice_function_name = None
 
-        if self.tool_call_id_type == "kimi_k2":
-            history_tool_call_cnt = get_history_tool_calls_cnt(conversation)
-        else:
-            history_tool_call_cnt = 0
-
         previous_texts = [""] * num_choices
 
         try:
@@ -451,14 +443,10 @@ class OpenAIServingChat(OpenAIServing):
                         tokenizer,
                         request.tools,
                         chat_template_kwargs=chat_template_kwargs,
+                        model_config=self.model_config,
                     )
                     for _ in range(num_choices)
                 ]
-                for p in parsers:
-                    if p is not None:
-                        # NOTE: HarmonyParser ignores _stream_state (uses its own FSM).
-                        p._stream_state.tool_call_id_type = self.tool_call_id_type
-                        p._stream_state.history_tool_call_cnt = history_tool_call_cnt
             else:
                 parsers = [None] * num_choices
         except Exception as e:
@@ -842,10 +830,6 @@ class OpenAIServingChat(OpenAIServing):
             )
 
         choices: list[ChatCompletionResponseChoice] = []
-        if self.tool_call_id_type == "kimi_k2":
-            history_tool_call_cnt = get_history_tool_calls_cnt(conversation)
-        else:
-            history_tool_call_cnt = 0
 
         role = self.get_chat_request_role(request)
         tool_parser_cls = (
@@ -885,54 +869,26 @@ class OpenAIServingChat(OpenAIServing):
                 tool_calls = []
 
             auto_tools_called = False
+            is_named_tool_choice = (
+                request.tool_choice is not None
+                and type(request.tool_choice) is ChatCompletionNamedToolChoiceParam
+            )
+            is_required_tool_choice = request.tool_choice == "required"
 
             if (not self.enable_auto_tools or not tool_parser_cls) and (
-                not isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
-                and request.tool_choice != "required"
+                not is_named_tool_choice and not is_required_tool_choice
             ):
                 message = ChatMessage(role=role, reasoning=reasoning, content=content)
 
-            elif (
-                request.tool_choice
-                and type(request.tool_choice) is ChatCompletionNamedToolChoiceParam
-            ):
-                tool_call_items = []
-                tool_calls = tool_calls or []
-                for tc in tool_calls:
-                    if not tc.id:
-                        tc.id = make_tool_call_id(
-                            id_type=self.tool_call_id_type,
-                            func_name=tc.name,
-                            idx=history_tool_call_cnt,
-                        )
-                    tool_call_items.append(ToolCall(id=tc.id, function=tc))
-                    history_tool_call_cnt += 1
+            elif is_named_tool_choice or is_required_tool_choice:
                 message = ChatMessage(
                     role=role,
                     reasoning=reasoning,
                     content=content or "",
-                    tool_calls=tool_call_items,
-                )
-
-            elif request.tool_choice and request.tool_choice == "required":
-                tool_call_items = []
-                tool_calls = tool_calls or []
-                for tool_call in tool_calls:
-                    if not tool_call.id:
-                        tool_call.id = make_tool_call_id(
-                            id_type=self.tool_call_id_type,
-                            func_name=tool_call.name,
-                            idx=history_tool_call_cnt,
-                        )
-                    tool_call_items.append(
-                        ToolCall(id=tool_call.id, function=tool_call)
-                    )
-                    history_tool_call_cnt += 1
-                message = ChatMessage(
-                    role=role,
-                    content=content or "",
-                    tool_calls=tool_call_items,
-                    reasoning=reasoning,
+                    tool_calls=[
+                        ToolCall(id=tc.id or make_tool_call_id(), function=tc)
+                        for tc in (tool_calls or [])
+                    ],
                 )
 
             # if the request doesn't use tool choice
@@ -949,21 +905,14 @@ class OpenAIServingChat(OpenAIServing):
             ):
                 auto_tools_called = tool_calls is not None and len(tool_calls) > 0
                 if tool_calls:
-                    tool_call_items = []
-                    for tc in tool_calls:
-                        if not tc.id:
-                            tc.id = make_tool_call_id(
-                                id_type=self.tool_call_id_type,
-                                func_name=tc.name,
-                                idx=history_tool_call_cnt,
-                            )
-                        tool_call_items.append(ToolCall(id=tc.id, function=tc))
-                        history_tool_call_cnt += 1
                     message = ChatMessage(
                         role=role,
                         reasoning=reasoning,
                         content=content,
-                        tool_calls=tool_call_items,
+                        tool_calls=[
+                            ToolCall(id=tc.id or make_tool_call_id(), function=tc)
+                            for tc in tool_calls
+                        ],
                     )
 
                 else:
