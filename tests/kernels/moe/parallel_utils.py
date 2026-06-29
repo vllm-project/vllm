@@ -240,9 +240,7 @@ def make_deepep_v2_a2a(
 
     gin_type = query_nccl_gin_type(pg)
     if gin_type is not None and gin_type == 0:
-        raise GINNotAvailableError(
-            "NCCL GIN not available (no IBGDA-capable hardware)"
-        )
+        raise GINNotAvailableError("NCCL GIN not available (no IBGDA-capable hardware)")
 
     buffer = deep_ep.ElasticBuffer(
         group=pg,
