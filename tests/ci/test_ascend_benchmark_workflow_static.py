@@ -100,7 +100,10 @@ def test_benchmark_repo_default_ref_is_main():
     text = workflow_text()
 
     assert "feature/perfgate-two-stage" not in text
-    assert "BENCHMARK_REPO_REF: ${{ vars.VLLM_HUST_BENCHMARK_REPO_REF || 'main' }}" in text
+    assert (
+        "BENCHMARK_REPO_REF: ${{ vars.VLLM_HUST_BENCHMARK_REPO_REF || "
+        "'main' }}"
+    ) in text
 
 
 def test_pr_checkout_urls_use_https_without_publish_ssh_key():
@@ -119,7 +122,10 @@ def test_main_benchmark_defaults_match_ascend_main_config():
     text = workflow_text()
 
     assert "default: Qwen/Qwen2.5-14B-Instruct" in text
-    assert "github.event_name == 'pull_request' || github.event_name == 'issue_comment'" in text
+    assert (
+        "github.event_name == 'pull_request' || "
+        "github.event_name == 'issue_comment'"
+    ) in text
     assert "&& '3B' || '14B'" in text
     assert "&& 'BF16' || 'FP16'" in text
     assert 'MAX_MODEL_LEN: ""' in text
@@ -186,7 +192,8 @@ def test_benchmark_run_id_and_summary_use_target_repo_sha():
         in text
     )
     assert (
-        "ci-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}-${targetRepoSha}"
+        "ci-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}-"
+        "${targetRepoSha}"
         in text
     )
     assert "f'- Commit: `{target_repo_sha}`'" in text

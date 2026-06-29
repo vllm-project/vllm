@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
 import os
@@ -11,13 +13,17 @@ SCRIPT_PATH = (
 )
 
 
-def run_preflight(tmp_path: Path, extra_env: dict[str, str]) -> tuple[subprocess.CompletedProcess[str], str]:
+def run_preflight(
+    tmp_path: Path, extra_env: dict[str, str]
+) -> tuple[subprocess.CompletedProcess[str], str]:
     github_env = tmp_path / "github-env"
     env = os.environ.copy()
-    env.update({
-        "GITHUB_ENV": str(github_env),
-        "BENCHMARK_REPO_SLUG": "vLLM-HUST/vllm-hust-benchmark",
-    })
+    env.update(
+        {
+            "GITHUB_ENV": str(github_env),
+            "BENCHMARK_REPO_SLUG": "vLLM-HUST/vllm-hust-benchmark",
+        }
+    )
     env.update(extra_env)
 
     result = subprocess.run(

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
 import os
@@ -11,7 +13,9 @@ SCRIPT_PATH = (
 )
 
 
-def run(cmd: list[str], cwd: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+def run(
+    cmd: list[str], cwd: Path, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
         cmd,
         cwd=cwd,
@@ -44,7 +48,9 @@ def write_fake_python(tmp_path: Path) -> Path:
     fake_python.write_text(
         """#!/bin/bash
 set -euo pipefail
-if [[ "$1" != "-m" || "$2" != "vllm_hust_benchmark.cli" || "$3" != "publish-website" ]]; then
+if [[ "$1" != "-m" \
+  || "$2" != "vllm_hust_benchmark.cli" \
+  || "$3" != "publish-website" ]]; then
   echo "unexpected fake python invocation: $*" >&2
   exit 2
 fi
@@ -86,28 +92,34 @@ def test_sync_benchmark_snapshots_verifies_published_commit(tmp_path):
     run(["git", "config", "user.name", "Test"], benchmark_repo)
     run(["git", "config", "user.email", "test@example.com"], benchmark_repo)
     (website_repo / "scripts").mkdir(parents=True)
-    (website_repo / "scripts/aggregate_results.py").write_text("# fake\n", encoding="utf-8")
+    (website_repo / "scripts/aggregate_results.py").write_text(
+        "# fake\n", encoding="utf-8"
+    )
     vllm_hust_repo.mkdir()
-    (vllm_hust_repo / "pyproject.toml").write_text("[project]\nname='fake'\n", encoding="utf-8")
+    (vllm_hust_repo / "pyproject.toml").write_text(
+        "[project]\nname='fake'\n", encoding="utf-8"
+    )
     submission.mkdir()
     (submission / "leaderboard_manifest.json").write_text("{}\n", encoding="utf-8")
     (submission / "run_leaderboard.json").write_text("{}\n", encoding="utf-8")
 
     env = os.environ.copy()
-    env.update({
-        "ALLOW_LOCAL_GIT_RESET": "1",
-        "BENCHMARK_REPO_DIR": str(benchmark_repo),
-        "BENCHMARK_REPO_REMOTE": "origin",
-        "BENCHMARK_REPO_SLUG": "local/benchmark",
-        "CURRENT_SUBMISSION_DIR": str(submission),
-        "GITHUB_ENV": str(github_env),
-        "LOCAL_SNAPSHOT_OUTPUT_DIR": str(tmp_path / "local-snapshots"),
-        "PYTHON_BIN": str(fake_python),
-        "RUN_ID": "ci-test",
-        "SNAPSHOT_TARGET_BRANCH": "main",
-        "VLLM_HUST_REPO_DIR": str(vllm_hust_repo),
-        "WEBSITE_REPO_DIR": str(website_repo),
-    })
+    env.update(
+        {
+            "ALLOW_LOCAL_GIT_RESET": "1",
+            "BENCHMARK_REPO_DIR": str(benchmark_repo),
+            "BENCHMARK_REPO_REMOTE": "origin",
+            "BENCHMARK_REPO_SLUG": "local/benchmark",
+            "CURRENT_SUBMISSION_DIR": str(submission),
+            "GITHUB_ENV": str(github_env),
+            "LOCAL_SNAPSHOT_OUTPUT_DIR": str(tmp_path / "local-snapshots"),
+            "PYTHON_BIN": str(fake_python),
+            "RUN_ID": "ci-test",
+            "SNAPSHOT_TARGET_BRANCH": "main",
+            "VLLM_HUST_REPO_DIR": str(vllm_hust_repo),
+            "WEBSITE_REPO_DIR": str(website_repo),
+        }
+    )
 
     result = subprocess.run(
         ["bash", str(SCRIPT_PATH)],
