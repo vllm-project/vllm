@@ -15,6 +15,8 @@ Even for shared features (for example, different parallelism modes), keep the
 complexity out of this path. The less common the feature, the more it should be
 hidden. Prefer utility functions defined elsewhere and call them from here,
 instead of embedding feature-specific logic directly.
+
+NOTE: KV cache sharing is not supported for MRv2 (v2 model runner).
 """
 
 import functools
