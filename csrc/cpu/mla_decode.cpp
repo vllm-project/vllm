@@ -251,7 +251,7 @@ void mla_decode_kvcache_cpu_impl(
   constexpr int QK_NUM_ELEM = qk_vec_type::VEC_ELEM_NUM;
 
   // shared across threads
-  const int max_threads = omp_get_max_threads();
+  const int max_threads = cpu_utils::get_max_threads();
   const int acc_out_nbytes =
       max_threads * num_heads * V_HEAD_DIM * sizeof(float);
   float* acc_out = static_cast<float*>(std::aligned_alloc(64, acc_out_nbytes));
