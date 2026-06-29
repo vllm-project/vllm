@@ -69,6 +69,7 @@ def test_inject_into_mm_cache(
     image_urls,
     mm_processor_cache_type,
     caplog_vllm,
+    multimodal_llm_factory,
 ):
     """Test that inject_into_mm_cache() injects pre-processed mm_kwargs into
     the processor cache and MM cache hit metrics are updated correctly.
@@ -78,7 +79,7 @@ def test_inject_into_mm_cache(
     2. Extract cached kwargs, call inject_into_mm_cache with a new hash,
        then generate with a pre-rendered input -> verifies injection works
     """
-    llm = LLM(
+    llm = multimodal_llm_factory(
         model="llava-hf/llava-1.5-7b-hf",
         max_model_len=4096,
         max_num_seqs=5,
@@ -145,11 +146,12 @@ def test_inject_into_mm_cache(
 def test_inject_into_mm_cache_without_cache(
     num_gpus_available,
     image_urls,
+    multimodal_llm_factory,
 ):
     """Test that inject_into_mm_cache works gracefully when processor cache
     is disabled (mm_processor_cache_gb=0). Should not crash.
     """
-    llm = LLM(
+    llm = multimodal_llm_factory(
         model="llava-hf/llava-1.5-7b-hf",
         max_model_len=4096,
         max_num_seqs=5,
