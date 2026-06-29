@@ -101,5 +101,6 @@ def test_traces(
             assert attributes.get(SpanAttributes.GEN_AI_LATENCY_E2E) > 0
         finally:
             if llm is not None:
-                llm.llm_engine.engine_core.shutdown()
+                shutdown_timeout = 60.0 if current_platform.is_rocm() else 5.0
+                llm.llm_engine.engine_core.shutdown(timeout=shutdown_timeout)
             cleanup_dist_env_and_memory()
