@@ -31,10 +31,8 @@ def rms_norm(
 ) -> Tensor:
     assert variance_size is None
     if weight is None:
-        # Weightless _C ops are CUDA-only; native skips the multiply on XPU.
-        return ir.ops.rms_norm.impls["native"].impl_fn(
-            x, weight, epsilon, variance_size
-        )
+        # Kernel requires weight tensor, pass ones
+        weight = torch.ones(x.shape[-1], device=x.device, dtype=x.dtype)
     output = torch.empty(x.shape, device=x.device, dtype=x.dtype)
     torch.ops._C.rms_norm(output, x, weight, epsilon)
     return output
@@ -61,12 +59,7 @@ def fused_add_rms_norm(
 ) -> tuple[Tensor, Tensor]:
     assert variance_size is None
     if weight is None:
-        # Weightless _C ops are CUDA-only; native skips the multiply on XPU.
-        output, residual = ir.ops.fused_add_rms_norm.impls["native"].impl_fn(
-            x, x_residual, weight, epsilon, variance_size
-        )
-        x.copy_(output)
-        x_residual.copy_(residual)
-        return x, x_residual
+        # Kernel requires weight tensor, pass ones
+        weight = torch.ones(x.shape[-1], device=x.device, dtype=x.dtype)
     torch.ops._C.fused_add_rms_norm(x, x_residual, weight, epsilon)
     return x, x_residual
