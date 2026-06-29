@@ -380,13 +380,15 @@ class OffloadingConnectorScheduler:
         self._pending_store_events: list[OffloadingEvent] = []
 
     @property
-    def _emit_stored_events(self) -> bool:
-        """Whether to capture metadata and emit a Stored event for this
-        manager: KV events are enabled and the manager reports a wire medium.
-        Used as a single gate for both record_store (prepare_store) and the
-        Stored emission (complete_store) so a manager that reports no medium
-        never leaves uncleaned tracker metadata behind."""
-        return self._emit_kv_events and self.manager.medium() is not None
+    def _stored_event_medium(self) -> str | None:
+        """The wire medium to tag this manager's Stored KV events with, or None
+        when no Stored event should be emitted (KV events disabled, or the
+        manager reports no medium). Used by both the prepare_store metadata
+        capture and the complete_store emission, so a manager that reports no
+        medium never leaves uncleaned tracker metadata behind."""
+        if not self._emit_kv_events:
+            return None
+        return self.manager.medium()
 
     def _generate_job_id(self) -> int:
         job_id = self._job_counter
@@ -948,7 +950,7 @@ class OffloadingConnectorScheduler:
             self._touch(req_status)
 
             keys_to_store = set(store_output.keys_to_store)
-            emit_stored_events = self._emit_stored_events
+            stored_event_medium = self._stored_event_medium
 
             group_sizes: list[int] = []
             block_indices: list[int] = []
@@ -975,9 +977,9 @@ class OffloadingConnectorScheduler:
                     offloaded_block_idx = start_block_idx + idx
 
                     # Capture metadata only when a Stored event will actually be
-                    # emitted (same gate as complete_store); otherwise the
+                    # emitted (same medium as complete_store); otherwise the
                     # snapshot is never consumed and leaks.
-                    if emit_stored_events:
+                    if stored_event_medium is not None:
                         self._events_tracker.record_store(
                             req, group_config, offloaded_block_idx, offload_key
                         )
@@ -1154,8 +1156,7 @@ class OffloadingConnectorScheduler:
                 stored_keys = self.manager.complete_store(
                     job_status.keys, req_status.req_context
                 )
-                # Evaluate the manager medium once (same gate as record_store).
-                medium = self.manager.medium() if self._emit_kv_events else None
+                medium = self._stored_event_medium
                 if medium is not None and stored_keys:
                     self._pending_store_events.append(
                         OffloadingEvent(
