@@ -140,9 +140,6 @@ fake_passwd="$WORKDIR/fake-passwd-prepopulated"
 printf 'vllm:x:%s:%s:vllm:/home/vllm:/bin/bash\n' "$current_uid" "$current_gid" > "$fake_passwd"
 out="$WORKDIR/case6.out"
 run_wrapper "$out" "HOME=$case5_home" "VLLM_PASSWD_FILE=$fake_passwd" -- --model foo
-line_count="$(wc -l < "$fake_passwd")"
-# NOTE: wc may count 0 or 1 depending on trailing newline; accept 1.
-# More robust: count lines matching our UID.
 uid_lines="$(grep -c ":${current_uid}:" "$fake_passwd" || true)"
 [ "$uid_lines" = "1" ] \
     || { echo "FAIL: case6: expected exactly one entry for UID $current_uid, got $uid_lines"; cat "$fake_passwd"; exit 1; }
