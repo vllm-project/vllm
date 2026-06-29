@@ -108,14 +108,6 @@ RUN pip install --pre --index-url "${ROCM_WHEEL_INDEX}" \
     "apex==${APEX_VERSION}" \
     "rocm[libraries,devel]==${ROCM_SDK_VERSION}" && \
     rocm-sdk init
-
-### Install triton from upstream for AITER Deps TODO: (JPVILLAM) If possible to get this on whls it would be better
-RUN pip3 uninstall triton && \
-    git clone https://github.com/triton-lang/triton.git && \
-    cd triton && \
-    git checkout c517f38c && \
-    TRITON_APPEND_CMAKE_ARGS="-DCMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH=FALSE" pip3 install .
-
  
 # Torch runtime deps that may not be published on the ROCm wheel index;
 # install them from PyPI afterwards.
