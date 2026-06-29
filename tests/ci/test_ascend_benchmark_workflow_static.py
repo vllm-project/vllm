@@ -54,7 +54,18 @@ def test_main_baseline_store_has_spec_file_and_benchmark_repo_checkout():
     text = workflow_text()
     store_job = text[text.index("  store-main-perfgate-baseline:") :]
 
-    assert "PERFGATE_SPEC_FILE:" in store_job
+    assert "TARGET_REPO_SHA: ${{ github.sha }}" in store_job
+    assert (
+        "RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-"
+        "${{ env.TARGET_REPO_SHA }}"
+    ) in store_job
+    assert (
+        "RESULT_ROOT: ${{ github.workspace }}/.benchmarks/ci/ci-"
+        "${{ github.run_id }}-${{ github.run_attempt }}-"
+        "${{ env.TARGET_REPO_SHA }}"
+    ) in store_job
+    assert "PERFGATE_SPEC_FILE:" not in store_job
+    assert "MAIN_SAME_SPEC_SPEC_FILE:" not in store_job
     assert (
         "BENCHMARK_REPO_URL: https://github.com/vLLM-HUST/vllm-hust-benchmark.git"
         in store_job
@@ -62,7 +73,33 @@ def test_main_baseline_store_has_spec_file_and_benchmark_repo_checkout():
     assert "BENCHMARK_REPO_REF:" in store_job
     assert "Checkout benchmark repo" in store_job
     assert "git@github.com:vLLM-HUST/vllm-hust-benchmark.git" not in store_job
-    assert "vllm-hust-benchmark/${{ env.PERFGATE_SPEC_FILE }}" in store_job
+    assert (
+        "vllm-hust-benchmark/${{ vars.VLLM_HUST_SAME_SPEC_SPEC_FILE || "
+        "vars.VLLM_HUST_MAIN_SAME_SPEC_SPEC_FILE || "
+        "'docs/official-baselines/official-ascend-jan-2026-v0180-random-online-"
+        "qwen25-14b-910b2.json' }}"
+    ) in store_job
+
+
+def test_benchmark_repo_default_ref_is_main():
+    text = workflow_text()
+
+    assert "feature/perfgate-two-stage" not in text
+    assert "BENCHMARK_REPO_REF: ${{ vars.VLLM_HUST_BENCHMARK_REPO_REF || 'main' }}" in text
+
+
+def test_main_benchmark_defaults_match_ascend_main_config():
+    text = workflow_text()
+
+    assert "default: Qwen/Qwen2.5-14B-Instruct" in text
+    assert "github.event_name == 'pull_request' || github.event_name == 'issue_comment'" in text
+    assert "&& '3B' || '14B'" in text
+    assert "&& 'BF16' || 'FP16'" in text
+    assert "&& '256' || '1024'" in text
+    assert "&& '64' || '1024'" in text
+    assert "&& '16' || '256'" in text
+    assert "perfgate-ascend-qwen25-3b-910b3.json" in text
+    assert "official-ascend-jan-2026-v0180-random-online-qwen25-14b-910b2.json" in text
 
 
 def test_issue_comment_uses_ubuntu_gate_before_self_hosted_runner():

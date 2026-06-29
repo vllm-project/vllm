@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shlex
 import sys
@@ -151,7 +152,7 @@ def _parse_request_rate(value: str) -> str:
         parsed = float(value)
     except ValueError as exc:
         raise ValueError("--request-rate must be 'inf' or a positive number") from exc
-    if parsed <= 0 or parsed > MAX_COMMENT_REQUEST_RATE:
+    if not math.isfinite(parsed) or parsed <= 0 or parsed > MAX_COMMENT_REQUEST_RATE:
         raise ValueError(
             "--request-rate must be 'inf' or between 0 and "
             f"{MAX_COMMENT_REQUEST_RATE:g}"

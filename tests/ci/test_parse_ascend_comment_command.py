@@ -143,6 +143,10 @@ def test_parse_rejects_resource_limits_above_preview_bounds():
     for body, expected in [
         ("/ascend benchmark random --num-prompts 33", "--num-prompts"),
         ("/ascend benchmark random --request-rate 4.1", "--request-rate"),
+        ("/ascend benchmark random --request-rate nan", "--request-rate"),
+        ("/ascend benchmark random --request-rate NaN", "--request-rate"),
+        ("/ascend benchmark random --request-rate Infinity", "--request-rate"),
+        ("/ascend benchmark random --request-rate -inf", "--request-rate"),
         ("/ascend benchmark random --max-concurrency 5", "--max-concurrency"),
         ("/ascend benchmark random --input-length 4097", "--input-length"),
         ("/ascend benchmark random --output-length 4097", "--output-length"),
