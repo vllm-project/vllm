@@ -361,7 +361,6 @@ mod tests {
 
         expect![[r#"
             template_alpaca.jinja                              => String
-            template_baichuan.jinja                            => String
             template_chatglm.jinja                             => String
             template_chatglm2.jinja                            => String
             template_chatml.jinja                              => String

@@ -200,6 +200,7 @@ if TYPE_CHECKING:
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
     VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
     VLLM_MOONCAKE_STORE_TIER_LOG: bool = False
+    VLLM_MOONCAKE_LOAD_RECV_THREADS: int = 1
     VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO: float = 0.9
     MOONCAKE_PREFERRED_SEGMENT: str | None = None
     MOONCAKE_REQUESTER_LOCAL_HOSTNAME: str | None = None
@@ -210,7 +211,6 @@ if TYPE_CHECKING:
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
     VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS: int = 5
     VLLM_KV_CACHE_LAYOUT: Literal["NHD", "HND"] | None = None
-    VLLM_USE_PACKED_HMA_KV_CACHE: bool = False
     VLLM_SSM_CONV_STATE_LAYOUT: Literal["SD", "DS"] | None = None
     VLLM_COMPUTE_NANS_IN_LOGITS: bool = False
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: Literal[
@@ -1532,6 +1532,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MOONCAKE_STORE_TIER_LOG": lambda: (
         os.getenv("VLLM_MOONCAKE_STORE_TIER_LOG", "False").lower() in ("true", "1")
     ),
+    # Number of parallel KV-load receive threads per worker rank. Lets the
+    # per-request control overhead (Python prep + master key lookup) of one
+    # request overlap with the RDMA transfer of another, keeping the transfer
+    # engine's queue pairs busy. Helps when that overhead is significant or
+    # per-request batches are too small to saturate the link on their own.
+    "VLLM_MOONCAKE_LOAD_RECV_THREADS": lambda: int(
+        os.getenv("VLLM_MOONCAKE_LOAD_RECV_THREADS", "1")
+    ),
     # Fraction of the owner's DirectIO staging buffer to fill per GET batch.
     "VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO": lambda: float(
         os.getenv("VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO", "0.9")
@@ -1613,11 +1621,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # implement and support a subset of all possible layouts.
     "VLLM_KV_CACHE_LAYOUT": env_with_choices(
         "VLLM_KV_CACHE_LAYOUT", None, ["NHD", "HND"]
-    ),
-    # Opt into packed per-block KV cache allocation for multi-group
-    # attention-only HMA models (e.g. gpt-oss, Gemma 3/4).
-    "VLLM_USE_PACKED_HMA_KV_CACHE": lambda: bool(
-        int(os.getenv("VLLM_USE_PACKED_HMA_KV_CACHE", "0"))
     ),
     # SSM conv state layout used for Mamba models.
     # - SD: (state_len, dim) — dim contiguous (default)

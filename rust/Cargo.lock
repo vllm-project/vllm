@@ -5733,10 +5733,9 @@ dependencies = [
  "uuid",
  "vllm-engine-core-client",
  "vllm-llm",
- "vllm-reasoning-parser",
+ "vllm-parser",
  "vllm-text",
  "vllm-tokenizer",
- "vllm-tool-parser",
  "xgrammar-structural-tag",
  "zeromq",
 ]
@@ -5872,11 +5871,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "vllm-reasoning-parser"
+name = "vllm-parser"
 version = "0.1.0"
 dependencies = [
+ "criterion",
+ "easy-ext",
+ "expect-test",
+ "futures",
+ "openai-protocol",
+ "serde",
+ "serde_json",
  "thiserror 2.0.18",
+ "thiserror-ext",
+ "tool-parser",
  "vllm-tokenizer",
+ "winnow",
+ "xgrammar-structural-tag",
 ]
 
 [[package]]
@@ -5979,24 +5989,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "vllm-tool-parser"
-version = "0.1.0"
-dependencies = [
- "criterion",
- "easy-ext",
- "expect-test",
- "futures",
- "openai-protocol",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "thiserror-ext",
- "tool-parser",
- "winnow",
- "xgrammar-structural-tag",
-]
-
-[[package]]
 name = "vllm-tool-parser-py"
 version = "0.1.0"
 dependencies = [
@@ -6004,7 +5996,7 @@ dependencies = [
  "pythonize",
  "serde_json",
  "thiserror-ext",
- "vllm-tool-parser",
+ "vllm-parser",
 ]
 
 [[package]]

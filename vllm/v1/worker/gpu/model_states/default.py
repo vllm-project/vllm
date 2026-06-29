@@ -15,6 +15,7 @@ from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.mm.rope import get_rope_state
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.model_states.mm_pruning import maybe_create_mm_pruner
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -61,6 +62,11 @@ class DefaultModelState(ModelState):
             device=self.device,
         )
 
+        # Pruner is used for multimodal embedding pruning (EVS).
+        self.mm_pruner = maybe_create_mm_pruner(
+            self.model_config, model, self.rope_state, encoder_cache
+        )
+
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         if self.rope_state is not None:
             assert new_req_data.prefill_token_ids is not None
@@ -79,6 +85,7 @@ class DefaultModelState(ModelState):
         self,
         scheduled_encoder_inputs: dict[str, list[int]],
         input_batch: InputBatch,
+        req_states: RequestState,
     ) -> torch.Tensor:
         mm_hashes, mm_kwargs = self.encoder_runner.prepare_mm_inputs(
             scheduled_encoder_inputs
@@ -89,14 +96,13 @@ class DefaultModelState(ModelState):
             # Cache the encoder outputs by mm_hash
             self.encoder_cache.encoder_outputs.update(zip(mm_hashes, encoder_outputs))
 
-        mm_embeds, is_mm_embed = self.encoder_runner.gather_mm_embeddings(
-            input_batch.req_ids,
-            input_batch.num_tokens,
-            input_batch.num_scheduled_tokens,
-            input_batch.query_start_loc_np,
-            input_batch.prefill_len_np,
-            input_batch.num_computed_prefill_tokens_np,
-        )
+        mm_embeds, is_mm_embed = super().gather_mm_embeddings(input_batch)
+        if self.mm_pruner is not None and mm_embeds:
+            # EVS: recompute mrope positions for pruned media.
+            mm_embeds = self.mm_pruner.recompute(mm_embeds, input_batch, req_states)
+            # We must flush the staged rope updates for prepare_inputs() to pick up.
+            self.apply_staged_writes()
+
         # Use unpadded input_ids to match is_mm_embed size (num_tokens).
         # input_batch.input_ids may be padded for CUDA graphs.
         input_ids_unpadded = input_batch.input_ids[: input_batch.num_tokens]
@@ -104,6 +110,17 @@ class DefaultModelState(ModelState):
             input_ids_unpadded, mm_embeds, is_mm_embed
         )
         return inputs_embeds[: input_batch.num_tokens_after_padding]
+
+    def gather_mm_embeddings(
+        self, input_batch: InputBatch, draft_lookahead: int = 0
+    ) -> tuple[list[torch.Tensor], torch.Tensor]:
+        mm_embeds, is_mm_embed = super().gather_mm_embeddings(
+            input_batch, draft_lookahead
+        )
+        if self.mm_pruner is not None:
+            # EVS: strip the appended mrope-position channels.
+            mm_embeds = self.mm_pruner.strip(mm_embeds)
+        return mm_embeds, is_mm_embed
 
     def prepare_inputs(
         self, input_batch: InputBatch, req_states: RequestState

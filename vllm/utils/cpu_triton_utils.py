@@ -5,6 +5,7 @@
 Contains replacement functions to fallback Triton usages in CPU backend
 """
 
+import ctypes
 from collections.abc import Callable
 
 import torch
@@ -336,3 +337,12 @@ rejection_greedy_sample_kernel = _FuncWrapper(_rejection_greedy_sample_kernel_im
 rejection_random_sample_kernel = _FuncWrapper(_rejection_random_sample_kernel_impl)
 expand_kernel = _FuncWrapper(_expand_kernel_impl)
 sample_recovered_tokens_kernel = _FuncWrapper(_sample_recovered_tokens_kernel_impl)
+
+
+def _batch_memcpy_impl(src_ptrs, dst_ptrs, sizes, BLOCK_SIZE=None):
+    # BLOCK_SIZE is unused; kept for signature parity with the Triton kernel.
+    for src, dst, size in zip(src_ptrs.tolist(), dst_ptrs.tolist(), sizes.tolist()):
+        ctypes.memmove(dst, src, size)
+
+
+batch_memcpy_kernel = _FuncWrapper(_batch_memcpy_impl)

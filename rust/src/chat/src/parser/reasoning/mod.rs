@@ -2,7 +2,7 @@
 
 use std::sync::LazyLock;
 
-pub use vllm_reasoning_parser::{
+pub use vllm_parser::reasoning::{
     CohereCmdReasoningParser, DeepSeekR1ReasoningParser, DeepSeekV3ReasoningParser,
     DeepSeekV4ReasoningParser, Gemma4ReasoningParser, Glm45ReasoningParser, KimiK2ReasoningParser,
     KimiReasoningParser, MiniMaxM2ReasoningParser, MiniMaxM3ReasoningParser,
@@ -34,7 +34,7 @@ pub mod names {
 
 /// Constructor signature for one registered reasoning parser implementation.
 type ReasoningParserCreator =
-    fn(DynTokenizer) -> vllm_reasoning_parser::Result<Box<dyn ReasoningParser>>;
+    fn(DynTokenizer) -> vllm_parser::reasoning::Result<Box<dyn ReasoningParser>>;
 
 /// Registry and model matcher for reasoning parsers.
 pub type ReasoningParserFactory = ParserFactory<ReasoningParserCreator>;

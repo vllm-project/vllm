@@ -14,8 +14,10 @@ DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE = 16 * 1024 * 1024
 SafetensorsLoadStrategy: TypeAlias = Literal["lazy", "eager", "prefetch", "torchao"]
 
 if TYPE_CHECKING:
+    from vllm.model_executor.model_loader import LoadFormats
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 else:
+    LoadFormats = str
     TensorizerConfig = Any
 
 logger = init_logger(__name__)
@@ -25,7 +27,7 @@ logger = init_logger(__name__)
 class LoadConfig:
     """Configuration for loading the model weights."""
 
-    load_format: str = "auto"
+    load_format: str | LoadFormats = "auto"
     """
     The format of the model weights to load.
 

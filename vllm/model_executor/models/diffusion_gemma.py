@@ -49,10 +49,12 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor, async_copy_to_gpu
+from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.penalties import use_penalty
+from vllm.v1.worker.gpu.states import RequestState
 
 from .interfaces import (
     SupportsMultiModal,
@@ -869,7 +871,12 @@ class DiffusionGemmaModelState(ModelState):
         if idx is not None:
             self.diffusion_states.remove_request(idx)
 
-    def get_mm_embeddings(self, scheduled_encoder_inputs, input_batch):
+    def get_mm_embeddings(
+        self,
+        scheduled_encoder_inputs: dict[str, list[int]],
+        input_batch: InputBatch,
+        req_states: RequestState,
+    ) -> torch.Tensor:
         if not self.supports_mm_inputs:
             return None
 
@@ -880,14 +887,7 @@ class DiffusionGemmaModelState(ModelState):
             encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
             self.encoder_cache.encoder_outputs.update(zip(mm_hashes, encoder_outputs))
 
-        mm_embeds, is_mm_embed = self.encoder_runner.gather_mm_embeddings(
-            input_batch.req_ids,
-            input_batch.num_tokens,
-            input_batch.num_scheduled_tokens,
-            input_batch.query_start_loc_np,
-            input_batch.prefill_len_np,
-            input_batch.num_computed_prefill_tokens_np,
-        )
+        mm_embeds, is_mm_embed = self.gather_mm_embeddings(input_batch)
 
         if not mm_embeds:
             # No MM tokens in this batch (e.g. all-decode step).

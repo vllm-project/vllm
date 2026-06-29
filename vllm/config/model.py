@@ -69,7 +69,7 @@ else:
     me_models = LazyLoader("model_executor", globals(), "vllm.model_executor.models")
     LoadConfig = Any
     ParallelConfig = Any
-    QuantizationMethods = Any
+    QuantizationMethods = str
     LogitsProcessor = Any
 
 logger = init_logger(__name__)

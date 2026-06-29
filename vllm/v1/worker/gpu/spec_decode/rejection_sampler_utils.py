@@ -79,14 +79,14 @@ def _compute_block_stats_kernel(
     BLOCK_SIZE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
 ):
-    logit_idx = tl.program_id(0)
+    logit_idx = tl.program_id(0).to(tl.int64)
     draft_step_idx = tl.load(expanded_local_pos_ptr + logit_idx)
 
     if draft_step_idx >= num_speculative_steps:
         # Bonus token. Max/argmax and summed exponentials are not needed.
         return
 
-    req_state_idx = tl.load(expanded_idx_mapping_ptr + logit_idx)
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + logit_idx).to(tl.int64)
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
 
     block_idx = tl.program_id(1)
@@ -206,8 +206,8 @@ def _rejection_kernel(
     SYNTHETIC_MODE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
-    req_state_idx = tl.load(idx_mapping_ptr + req_idx)
-    start_idx = tl.load(cu_num_logits_ptr + req_idx)
+    req_state_idx = tl.load(idx_mapping_ptr + req_idx).to(tl.int64)
+    start_idx = tl.load(cu_num_logits_ptr + req_idx).to(tl.int64)
     end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
     num_tokens = end_idx - start_idx
     seed = tl.load(seed_ptr + req_state_idx)
@@ -245,7 +245,8 @@ def _rejection_kernel(
                     pos = tl.load(pos_ptr + logit_idx)
                     u = tl_rand64(seed, pos, includes_zero=False)
                     rate = tl.load(synthetic_conditional_rates_ptr + i)
-                    accepted &= u < rate
+                    # -1 is used for padded draft token ids that should be rejected.
+                    accepted &= (u < rate) & (draft_sampled >= 0)
                 else:
                     accepted &= target_argmax == draft_sampled
                 tl.store(
@@ -253,6 +254,10 @@ def _rejection_kernel(
                     draft_sampled if accepted else target_argmax,
                 )
             else:
+                # -1 is used for padded draft token ids that should be rejected.
+                is_valid_draft = draft_sampled >= 0
+                # Avoid possible OOB ptr access.
+                draft_sampled = tl.maximum(0, draft_sampled)
                 target_logit = tl.load(
                     target_logits_ptr + logit_idx * target_logits_stride + draft_sampled
                 ).to(tl.float32)
@@ -296,6 +301,7 @@ def _rejection_kernel(
                     # Probability ratio test: p(x) > u * q(x)
                     # Equivalent log form: log_p(x) > log(u) + log_q(x)
                     accepted &= target_log_prob > tl.log(u) + draft_log_prob
+                accepted &= is_valid_draft
                 tl.store(sampled_ptr + req_idx * sampled_stride + i, draft_sampled)
             rejected_step += accepted
     tl.store(rejected_steps_ptr + req_idx, rejected_step)
@@ -343,10 +349,10 @@ def _resample_kernel(
 ):
     req_idx = tl.program_id(0)
     resample_idx = tl.load(rejected_step_ptr + req_idx)
-    start_idx = tl.load(cu_num_logits_ptr + req_idx)
+    start_idx = tl.load(cu_num_logits_ptr + req_idx).to(tl.int64)
     end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
     resample_token_idx = start_idx + resample_idx
-    req_state_idx = tl.load(expanded_idx_mapping_ptr + resample_token_idx)
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + resample_token_idx).to(tl.int64)
 
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
     is_bonus = resample_token_idx == end_idx - 1

@@ -2657,11 +2657,11 @@ class Qwen3VLForConditionalGeneration(
 
     def recompute_mrope_positions(
         self,
-        input_ids: list[int],
-        multimodal_embeddings: MultiModalEmbeddings,
+        input_ids: list[int] | torch.Tensor,
+        multimodal_embeddings: Sequence[torch.Tensor],
         mrope_positions: torch.LongTensor,
         num_computed_tokens: int,
-    ) -> tuple[MultiModalEmbeddings, torch.Tensor, int]:
+    ) -> tuple[Sequence[torch.Tensor], torch.Tensor, int]:
         """
         Update part of input mrope positions (starting with
         num_computed_tokens index). Original mrope_positions are computed
@@ -2672,7 +2672,7 @@ class Qwen3VLForConditionalGeneration(
         Args:
             input_ids: (N,) All input tokens of the prompt containing
                 entire sequence.
-            multimodal_embeddings: Tuple of multimodal embeddings that
+            multimodal_embeddings: Sequence of multimodal embeddings that
                 fits into the prefill chunk that is being processed.
             mrope_positions: Existing mrope positions (3, N) for entire
                 sequence
@@ -2694,14 +2694,14 @@ class Qwen3VLForConditionalGeneration(
 
     @staticmethod
     def _recompute_mrope_positions(
-        input_ids: list[int],
-        multimodal_embeddings: MultiModalEmbeddings,
+        input_ids: list[int] | torch.Tensor,
+        multimodal_embeddings: Sequence[torch.Tensor],
         mrope_positions: torch.LongTensor,
         num_computed_tokens: int,
         vision_start_token_id: int,
         image_token_id: int,
         video_token_id: int,
-    ) -> tuple[MultiModalEmbeddings, torch.Tensor, int]:
+    ) -> tuple[Sequence[torch.Tensor], torch.Tensor, int]:
         # Device
         device = (
             multimodal_embeddings[0].device
@@ -2709,8 +2709,12 @@ class Qwen3VLForConditionalGeneration(
             else mrope_positions.device
         )
 
-        # Tensors
-        input_ids_t = async_tensor_h2d(input_ids, device=device, dtype=torch.long)
+        # Tensors. input_ids may already be a (device-side) tensor.
+        if isinstance(input_ids, torch.Tensor):
+            assert input_ids.device == device
+            input_ids_t = input_ids.to(dtype=torch.long)
+        else:
+            input_ids_t = async_tensor_h2d(input_ids, device=device, dtype=torch.long)
 
         mm_embeddings_out = []
         mm_embeddings_pos = []
@@ -2738,7 +2742,7 @@ class Qwen3VLForConditionalGeneration(
             video_token_id,
         )
 
-        return tuple(mm_embeddings_out), positions, mrope_positions_delta
+        return mm_embeddings_out, positions, mrope_positions_delta
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)

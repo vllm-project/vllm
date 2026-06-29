@@ -1146,8 +1146,13 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             weight_scale=w2_scale, flex_ctx=FlexCtx(rhs_data=w2_flex)
         )
 
+        # The original mxfp4 block scales have been swizzled into the
+        # precision configs above and are no longer read by the kernel, so
+        # drop the now-dead weight/scale Parameters to free their memory.
         del layer.w13_weight
         del layer.w2_weight
+        del layer.w13_weight_scale
+        del layer.w2_weight_scale
 
         return (
             w13_weight,
@@ -1508,8 +1513,13 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             weight_scale=w2_scale, flex_ctx=FlexCtx(rhs_data=w2_flex)
         )
 
+        # The original mxfp4 block scales have been swizzled into the
+        # precision configs above and are no longer read by the kernel, so
+        # drop the now-dead weight/scale Parameters to free their memory.
         del layer.w13_weight
         del layer.w2_weight
+        del layer.w13_weight_scale
+        del layer.w2_weight_scale
 
         return (
             w13_weight,

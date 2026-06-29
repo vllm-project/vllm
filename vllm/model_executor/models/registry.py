@@ -77,10 +77,6 @@ _TEXT_GENERATION_MODELS = {
     "ArceeForCausalLM": ("arcee", "ArceeForCausalLM"),
     "ArcticForCausalLM": ("arctic", "ArcticForCausalLM"),
     "AXK1ForCausalLM": ("AXK1", "AXK1ForCausalLM"),
-    # baichuan-7b, upper case 'C' in the class name
-    "BaiChuanForCausalLM": ("baichuan", "BaiChuanForCausalLM"),
-    # baichuan-13b, lower case 'c' in the class name
-    "BaichuanForCausalLM": ("baichuan", "BaichuanForCausalLM"),
     "BailingMoeForCausalLM": ("bailing_moe", "BailingMoeForCausalLM"),
     "BailingMoeV2ForCausalLM": ("bailing_moe", "BailingMoeV2ForCausalLM"),
     "BailingMoeV2_5ForCausalLM": ("bailing_moe_linear", "BailingMoeV25ForCausalLM"),
@@ -500,6 +496,7 @@ _MULTIMODAL_MODELS = {
     "MolmoForCausalLM": ("molmo", "MolmoForCausalLM"),
     "Molmo2ForConditionalGeneration": ("molmo2", "Molmo2ForConditionalGeneration"),
     "Moondream3ForCausalLM": ("moondream3", "Moondream3ForCausalLM"),
+    "MossAudioModel": ("moss_audio", "MossAudioModel"),
     "HfMoondream": ("moondream3", "Moondream3ForCausalLM"),
     "NemotronH_Nano_VL_V2": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
     "NemotronH_Nano_Omni_Reasoning_V3": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
@@ -732,6 +729,8 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "MiniMaxText01ForCausalLM": "0.23.0",
     "MiniMaxM1ForCausalLM": "0.23.0",
     "MiniMaxVL01ForConditionalGeneration": "0.23.0",
+    "BaiChuanForCausalLM": "0.23.0",
+    "BaichuanForCausalLM": "0.23.0",
 }
 
 _OOT_SUPPORTED_MODELS = {

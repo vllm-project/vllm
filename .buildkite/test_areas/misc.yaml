@@ -252,9 +252,10 @@ steps:
   - pytest -v -s v1/tracing
   mirror:
     amd:
-      device: mi300_2
+      device: mi325_2
       depends_on:
       - image-build-amd
+      optional: true
 
 - label: Python-only Installation
   key: python-only-installation
