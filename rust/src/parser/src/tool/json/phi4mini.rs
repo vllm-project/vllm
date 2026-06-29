@@ -87,8 +87,8 @@ mod tests {
         let mut parser = Phi4MiniJsonToolParser::new(&test_tools());
         let result = parser.parse_complete("Hello, world!").unwrap();
 
-        assert_eq!(result.normal_text, "Hello, world!");
-        assert!(result.calls.is_empty());
+        assert_eq!(result.normal_text(), "Hello, world!");
+        assert!(result.calls().is_empty());
     }
 
     #[test]
@@ -99,10 +99,10 @@ mod tests {
             .parse_complete(&wrap(&[build_call("get_weather", "arguments", arguments)]))
             .unwrap();
 
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].tool_index, 0);
-        assert_eq!(result.calls[0].name.as_deref(), Some("get_weather"));
-        assert_eq!(result.calls[0].arguments, arguments);
+        assert_eq!(result.calls().len(), 1);
+        assert_eq!(result.calls()[0].tool_index, 0);
+        assert_eq!(result.calls()[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(result.calls()[0].arguments, arguments);
     }
 
     #[test]
@@ -113,9 +113,9 @@ mod tests {
             .parse_complete(&wrap(&[build_call("get_weather", "parameters", arguments)]))
             .unwrap();
 
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].name.as_deref(), Some("get_weather"));
-        assert_eq!(result.calls[0].arguments, arguments);
+        assert_eq!(result.calls().len(), 1);
+        assert_eq!(result.calls()[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(result.calls()[0].arguments, arguments);
     }
 
     #[test]
@@ -130,22 +130,25 @@ mod tests {
 
         expect![[r#"
             ToolParserOutput {
-                normal_text: "",
-                calls: [
-                    ToolCallDelta {
-                        tool_index: 0,
-                        name: Some(
-                            "get_weather",
-                        ),
-                        arguments: "{\"location\":\"Shanghai\"}",
-                    },
-                    ToolCallDelta {
-                        tool_index: 1,
-                        name: Some(
-                            "add",
-                        ),
-                        arguments: "{\"x\":1,\"y\":2}",
-                    },
+                events: [
+                    ToolCall(
+                        ToolCallDelta {
+                            tool_index: 0,
+                            name: Some(
+                                "get_weather",
+                            ),
+                            arguments: "{\"location\":\"Shanghai\"}",
+                        },
+                    ),
+                    ToolCall(
+                        ToolCallDelta {
+                            tool_index: 1,
+                            name: Some(
+                                "add",
+                            ),
+                            arguments: "{\"x\":1,\"y\":2}",
+                        },
+                    ),
                 ],
             }
         "#]]
@@ -162,8 +165,8 @@ mod tests {
             .parse_complete(&wrap(&[build_call("convert", "arguments", arguments)]))
             .unwrap();
 
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].arguments, arguments);
+        assert_eq!(result.calls().len(), 1);
+        assert_eq!(result.calls()[0].arguments, arguments);
     }
 
     /// Preface text before a tool call is preserved as normal_text, consistent
@@ -182,8 +185,8 @@ mod tests {
 
         let result = parser.parse_complete(&input).unwrap();
 
-        assert_eq!(result.normal_text, "Let me check.\n");
-        assert_eq!(result.calls.len(), 1);
+        assert_eq!(result.normal_text(), "Let me check.\n");
+        assert_eq!(result.calls().len(), 1);
     }
 
     #[test]
@@ -194,7 +197,7 @@ mod tests {
             .parse_complete(&wrap(&[build_call("get_weather", "arguments", arguments)]))
             .unwrap();
 
-        assert_eq!(result.calls[0].arguments, arguments);
+        assert_eq!(result.calls()[0].arguments, arguments);
     }
 
     /// The bundled `tool_chat_template_phi4_mini.jinja` emits objects with
@@ -208,9 +211,9 @@ mod tests {
 
         let result = parser.parse_complete(input).unwrap();
 
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].name.as_deref(), Some("get_weather"));
-        assert_eq!(result.calls[0].arguments, r#"{"location": "Tokyo"}"#);
+        assert_eq!(result.calls().len(), 1);
+        assert_eq!(result.calls()[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(result.calls()[0].arguments, r#"{"location": "Tokyo"}"#);
     }
 
     /// Argument deltas are streamed through the shared JSON core.
@@ -230,10 +233,10 @@ mod tests {
 
         let result = collect_stream(&mut parser, &chunks);
 
-        assert_eq!(result.normal_text, "preface  suffix");
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].name.as_deref(), Some("get_weather"));
-        assert_eq!(result.calls[0].arguments, r#"{"location":"Beijing"}"#);
+        assert_eq!(result.normal_text(), "preface  suffix");
+        assert_eq!(result.calls().len(), 1);
+        assert_eq!(result.calls()[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(result.calls()[0].arguments, r#"{"location":"Beijing"}"#);
     }
 
     #[test]
@@ -251,9 +254,9 @@ mod tests {
 
         let result = collect_stream(&mut parser, &chunks);
 
-        assert_eq!(result.normal_text, "hello ");
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].arguments, r#"{"location":"Tokyo"}"#);
+        assert_eq!(result.normal_text(), "hello ");
+        assert_eq!(result.calls().len(), 1);
+        assert_eq!(result.calls()[0].arguments, r#"{"location":"Tokyo"}"#);
     }
 
     #[test]
@@ -287,9 +290,9 @@ mod tests {
             .parse_complete(&wrap(&[build_call("convert", "arguments", arguments)]))
             .unwrap();
 
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].name.as_deref(), Some("convert"));
-        assert_eq!(result.calls[0].arguments, arguments);
+        assert_eq!(result.calls().len(), 1);
+        assert_eq!(result.calls()[0].name.as_deref(), Some("convert"));
+        assert_eq!(result.calls()[0].arguments, arguments);
     }
 
     /// The chat template emits parallel calls as `},\n  {` (comma + newline +
@@ -307,9 +310,9 @@ mod tests {
 
         let result = parser.parse_complete(input).unwrap();
 
-        assert_eq!(result.calls.len(), 2);
-        assert_eq!(result.calls[0].name.as_deref(), Some("get_weather"));
-        assert_eq!(result.calls[1].name.as_deref(), Some("add"));
+        assert_eq!(result.calls().len(), 2);
+        assert_eq!(result.calls()[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(result.calls()[1].name.as_deref(), Some("add"));
     }
 
     /// The shared core requires an object after the start marker.

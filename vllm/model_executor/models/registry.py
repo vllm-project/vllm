@@ -72,8 +72,6 @@ _TEXT_GENERATION_MODELS = {
     # [Decoder-only]
     "AfmoeForCausalLM": ("afmoe", "AfmoeForCausalLM"),
     "ApertusForCausalLM": ("apertus", "ApertusForCausalLM"),
-    "AquilaModel": ("llama", "LlamaForCausalLM"),
-    "AquilaForCausalLM": ("llama", "LlamaForCausalLM"),  # AquilaChat2
     "ArceeForCausalLM": ("arcee", "ArceeForCausalLM"),
     "ArcticForCausalLM": ("arctic", "ArcticForCausalLM"),
     "AXK1ForCausalLM": ("AXK1", "AXK1ForCausalLM"),
@@ -126,8 +124,6 @@ _TEXT_GENERATION_MODELS = {
     "GraniteMoeHybridForCausalLM": ("granitemoehybrid", "GraniteMoeHybridForCausalLM"),
     "GraniteMoeSharedForCausalLM": ("granitemoeshared", "GraniteMoeSharedForCausalLM"),
     "GritLM": ("gritlm", "GritLM"),
-    "Grok1ModelForCausalLM": ("grok1", "GrokForCausalLM"),
-    "Grok1ForCausalLM": ("grok1", "GrokForCausalLM"),
     "HrmTextForCausalLM": ("hrm_text", "HrmTextForCausalLM"),
     "HunYuanMoEV1ForCausalLM": ("hunyuan_v1", "HunYuanMoEV1ForCausalLM"),
     "HunYuanDenseV1ForCausalLM": ("hunyuan_v1", "HunYuanDenseV1ForCausalLM"),
@@ -295,6 +291,10 @@ _TOKEN_CLASSIFICATION_MODELS = {
         "modernbert",
         "ModernBertForTokenClassification",
     ),
+    "OpenAIPrivacyFilterForTokenClassification": (
+        "openai_privacy_filter",
+        "OpenAIPrivacyFilterForTokenClassification",
+    ),
     "Qwen3ASRForcedAlignerForTokenClassification": (
         "qwen3_asr_forced_aligner",
         "Qwen3ASRForcedAlignerForTokenClassification",
@@ -362,6 +362,7 @@ _MULTIMODAL_MODELS = {
     "DeepseekVLV2ForCausalLM": ("deepseek_vl2", "DeepseekVLV2ForCausalLM"),
     "DeepseekOCRForCausalLM": ("deepseek_ocr", "DeepseekOCRForCausalLM"),
     "DeepseekOCR2ForCausalLM": ("deepseek_ocr2", "DeepseekOCR2ForCausalLM"),
+    "UnlimitedOCRForCausalLM": ("unlimited_ocr", "UnlimitedOCRForCausalLM"),
     "DotsOCRForCausalLM": ("dots_ocr", "DotsOCRForCausalLM"),
     "Eagle2_5_VLForConditionalGeneration": (
         "eagle2_5_vl",
@@ -731,6 +732,10 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "MiniMaxVL01ForConditionalGeneration": "0.23.0",
     "BaiChuanForCausalLM": "0.23.0",
     "BaichuanForCausalLM": "0.23.0",
+    "AquilaModel": "0.24.0",
+    "AquilaForCausalLM": "0.24.0",
+    "Grok1ModelForCausalLM": "0.24.0",
+    "Grok1ForCausalLM": "0.24.0",
 }
 
 _OOT_SUPPORTED_MODELS = {

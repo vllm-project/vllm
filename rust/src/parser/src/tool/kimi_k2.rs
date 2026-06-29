@@ -81,7 +81,7 @@ impl KimiK2ToolParser {
     fn apply_event(&mut self, event: KimiK2Event, output: &mut ToolParserOutput) -> Result<()> {
         match event {
             KimiK2Event::Text { len: consumed_len } => {
-                output.normal_text.push_str(&self.buffer[..consumed_len]);
+                output.push_text(&self.buffer[..consumed_len]);
             }
             KimiK2Event::ToolCallsStart => self.mode = KimiK2Mode::ToolBlock,
             KimiK2Event::ToolCallStart => self.mode = KimiK2Mode::Header,
@@ -96,7 +96,7 @@ impl KimiK2ToolParser {
                     json_scan: JsonObjectScanState::default(),
                 };
                 self.call_ids.insert(tool_index, tool_call_id);
-                output.calls.push(ToolCallDelta {
+                output.push_call(ToolCallDelta {
                     tool_index,
                     name: Some(function_name),
                     arguments: String::new(),
@@ -108,7 +108,7 @@ impl KimiK2ToolParser {
                         "Kimi K2 arguments without an active tool call"
                     ));
                 };
-                output.calls.push(ToolCallDelta {
+                output.push_call(ToolCallDelta {
                     tool_index,
                     name: None,
                     arguments: self.buffer[..consumed_len].to_string(),
@@ -171,7 +171,7 @@ impl ToolParser for KimiK2ToolParser {
     fn finish(&mut self) -> Result<ToolParserOutput> {
         let mut output = ToolParserOutput::default();
         match &self.mode {
-            KimiK2Mode::Text => output.normal_text.push_str(&self.buffer),
+            KimiK2Mode::Text => output.push_text(&self.buffer),
             KimiK2Mode::ToolBlock | KimiK2Mode::Done => {}
             KimiK2Mode::Header | KimiK2Mode::Arguments { .. } => {
                 return Err(parsing_failed!("incomplete Kimi K2 tool call"));
@@ -357,8 +357,8 @@ mod tests {
         let mut parser = KimiK2ToolParser::new(&test_tools());
         let output = parser.parse_complete("Hello, world!").unwrap();
 
-        assert_eq!(output.normal_text, "Hello, world!");
-        assert!(output.calls.is_empty());
+        assert_eq!(output.normal_text(), "Hello, world!");
+        assert!(output.calls().is_empty());
     }
 
     #[test]
@@ -372,11 +372,11 @@ mod tests {
             ))
             .unwrap();
 
-        assert_eq!(output.normal_text, "Checking. ");
-        assert_eq!(output.calls.len(), 1);
-        assert_eq!(output.calls[0].tool_index, 0);
-        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
-        assert_eq!(output.calls[0].arguments, arguments);
+        assert_eq!(output.normal_text(), "Checking. ");
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(output.calls()[0].tool_index, 0);
+        assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(output.calls()[0].arguments, arguments);
     }
 
     #[test]
@@ -391,7 +391,7 @@ mod tests {
             )]))
             .unwrap();
 
-        assert_eq!(output.calls[0].arguments, arguments);
+        assert_eq!(output.calls()[0].arguments, arguments);
     }
 
     #[test]
@@ -414,7 +414,7 @@ mod tests {
         for chunk in chunks {
             let next = parser.parse_chunk(chunk).unwrap();
             observed_arguments.extend(
-                next.calls
+                next.calls()
                     .iter()
                     .filter(|call| call.name.is_none())
                     .map(|call| call.arguments.clone()),
@@ -424,8 +424,8 @@ mod tests {
         output.append(parser.finish().unwrap());
 
         assert_eq!(observed_arguments, ["{\"location\":", "\"Paris\"", "}"]);
-        let output = output.coalesce_calls();
-        assert_eq!(output.calls[0].arguments, r#"{"location":"Paris"}"#);
+        let output = output.coalesce();
+        assert_eq!(output.calls()[0].arguments, r#"{"location":"Paris"}"#);
     }
 
     #[test]
@@ -445,9 +445,9 @@ mod tests {
 
         let output = collect_stream(&mut parser, &chunks);
 
-        assert_eq!(output.normal_text, "hello ");
-        assert_eq!(output.calls.len(), 1);
-        assert_eq!(output.calls[0].arguments, r#"{"location":"NYC"}"#);
+        assert_eq!(output.normal_text(), "hello ");
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(output.calls()[0].arguments, r#"{"location":"NYC"}"#);
     }
 
     #[test]
@@ -458,8 +458,8 @@ mod tests {
 
         let output = parser.parse_complete(&input).unwrap();
 
-        assert_eq!(output.calls.len(), 1);
-        assert_eq!(output.calls[0].arguments, arguments);
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(output.calls()[0].arguments, arguments);
     }
 
     #[test]
@@ -478,9 +478,9 @@ mod tests {
 
         let output = collect_stream(&mut parser, &chunks);
 
-        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.calls().len(), 1);
         assert_eq!(
-            output.calls[0].arguments,
+            output.calls()[0].arguments,
             r#"{"text":"literal <|tool_call_end|> inside"}"#
         );
     }
@@ -498,22 +498,25 @@ mod tests {
 
         expect![[r#"
             ToolParserOutput {
-                normal_text: "",
-                calls: [
-                    ToolCallDelta {
-                        tool_index: 0,
-                        name: Some(
-                            "get_weather",
-                        ),
-                        arguments: "{\"location\":\"Shanghai\"}",
-                    },
-                    ToolCallDelta {
-                        tool_index: 1,
-                        name: Some(
-                            "add",
-                        ),
-                        arguments: "{\"x\":1,\"y\":2}",
-                    },
+                events: [
+                    ToolCall(
+                        ToolCallDelta {
+                            tool_index: 0,
+                            name: Some(
+                                "get_weather",
+                            ),
+                            arguments: "{\"location\":\"Shanghai\"}",
+                        },
+                    ),
+                    ToolCall(
+                        ToolCallDelta {
+                            tool_index: 1,
+                            name: Some(
+                                "add",
+                            ),
+                            arguments: "{\"x\":1,\"y\":2}",
+                        },
+                    ),
                 ],
             }
         "#]]
@@ -546,12 +549,12 @@ mod tests {
             "{TOOL_CALLS_START}{TOOL_CALL_START}api.tools.search:42{TOOL_CALL_ARGUMENT_START}{{}}{TOOL_CALL_END}{TOOL_CALLS_END}"
         );
 
-        let output = parser.parse_chunk(&input).unwrap().coalesce_calls();
+        let output = parser.parse_chunk(&input).unwrap().coalesce();
 
-        assert_eq!(output.calls[0].tool_index, 42);
+        assert_eq!(output.calls()[0].tool_index, 42);
         assert_eq!(parser.tool_call_id(42), Some("api.tools.search:42"));
-        assert_eq!(output.calls[0].name.as_deref(), Some("search"));
-        assert_eq!(output.calls[0].arguments, "{}");
+        assert_eq!(output.calls()[0].name.as_deref(), Some("search"));
+        assert_eq!(output.calls()[0].arguments, "{}");
     }
 
     #[test]
