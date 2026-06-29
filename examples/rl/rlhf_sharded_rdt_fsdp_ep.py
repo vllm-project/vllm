@@ -224,9 +224,10 @@ from dataclasses import asdict
 import ray
 import torch
 import torch.distributed as dist
-from huggingface_hub import snapshot_download
+from ray.util.placement_group import placement_group, placement_group_table
+from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from torch.distributed.fsdp import fully_shard
-from transformers import AutoModelForCausalLM
+from transformers import AutoConfig, AutoModelForCausalLM
 
 import vllm
 from vllm import SamplingParams
@@ -239,7 +240,7 @@ from vllm.distributed.weight_transfer.sharded_rdt_engine import (
     ShardedRDTWeightTransferInitInfo,
     ShardedRDTWeightTransferUpdateInfo,
 )
-from vllm.utils.network_utils import get_ip, get_open_port
+from vllm.utils.network_utils import get_open_port
 from vllm.v1.executor import Executor
 
 MODEL_NAME = "Qwen/Qwen3-30B-A3B"
@@ -266,9 +267,9 @@ WARMUP = os.environ.get("RDT_WARMUP", "0") == "1"
 # replays it on subsequent syncs, so use >=2 to observe the replay speedup.
 SYNC_ITERS = int(os.environ.get("RDT_SYNC_ITERS", "3"))
 
-FSDP_WORLD_SIZE = 4
+FSDP_WORLD_SIZE = 8
 INFERENCE_TP_SIZE = 1
-INFERENCE_DP_SIZE = 4
+INFERENCE_DP_SIZE = 8
 # vLLM workers in the inference EP group; each one calls
 # rdt_produce_weights_batched once per layer. Used only to size the actor
 # threadpool (one concurrent produce call per worker, plus gather).
@@ -332,6 +333,108 @@ def _layerwise_groups(names: list[str]) -> list[list[str]]:
     return groups
 
 
+def _load_sharded_from_disk(model, model_name: str, config) -> None:
+    """Stream each FSDP rank's local shard directly from the on-disk safetensors.
+
+    The whole model is NEVER materialized on any single GPU. This replaces the
+    ``from_pretrained`` path, which loaded the full model on EVERY rank before
+    ``fully_shard`` -- fine for models that fit on one GPU, but OOMs for ones that
+    don't (e.g. Kimi-K2). Call after ``fully_shard`` + ``model.to_empty('cuda')``.
+
+    Three cases:
+      * Normal params: FSDP2 shards them ``Shard(dim=0)``, so each rank reads only
+        its rows ``disk[name][offset : offset + local_rows]`` (a partial
+        safetensors read -- never the whole tensor).
+      * MoE experts: FUSED in the model (``experts.gate_up_proj`` [E, 2*I, H] and
+        ``experts.down_proj`` [E, H, I]) but stored PER-EXPERT on disk. The fused
+        dim 0 is the expert dim, so each rank loads only its local experts'
+        individual gate/up/down and fuses them (``gate_up = cat([gate, up], 0)``,
+        verified against from_pretrained; down copied directly).
+      * Buffers (rotary ``inv_freq``): not in the checkpoint and garbage after
+        ``to_empty``; recomputed from config via ``ROPE_INIT_FUNCTIONS``.
+    """
+    import glob
+    import json
+    import os
+    import re
+
+    from huggingface_hub import snapshot_download
+    from safetensors import safe_open
+    from torch.distributed.tensor._utils import compute_local_shape_and_global_offset
+
+    snap = snapshot_download(model_name)  # already cached -> local dir, no download
+    index = os.path.join(snap, "model.safetensors.index.json")
+    if os.path.exists(index):
+        weight_map = json.load(open(index))["weight_map"]
+    else:
+        weight_map = {}
+        for f in glob.glob(os.path.join(snap, "*.safetensors")):
+            with safe_open(f, framework="pt") as sf:
+                for k in sf.keys():
+                    weight_map[k] = os.path.basename(f)
+
+    handles: dict = {}
+
+    def handle(key: str):
+        fn = weight_map[key]
+        h = handles.get(fn)
+        if h is None:
+            h = safe_open(os.path.join(snap, fn), framework="pt", device="cuda:0")
+            handles[fn] = h
+        return h
+
+    expert_re = re.compile(r"^(.*\.experts)\.(gate_up_proj|down_proj)$")
+
+    # no_grad + detach: params have requires_grad=True, and writing in-place into
+    # the autograd view returned by ``to_local()`` is forbidden by autograd. We
+    # only fill storage (never train here), so detach and disable grad tracking.
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            local = param.to_local().detach()  # this rank's shard storage
+            lshape, goff = compute_local_shape_and_global_offset(
+                param.shape, param.device_mesh, param.placements
+            )
+            local.zero_()  # zero first so any FSDP padding rows stay zero
+            n0 = lshape[0]  # real rows this rank owns along the sharded dim
+            if n0 == 0:
+                continue
+            m = expert_re.match(name)
+            if m:
+                prefix, kind = m.group(1), m.group(2)
+                e0 = goff[0]
+                for i in range(n0):
+                    e = e0 + i
+                    if kind == "gate_up_proj":
+                        gk = f"{prefix}.{e}.gate_proj.weight"
+                        uk = f"{prefix}.{e}.up_proj.weight"
+                        g = handle(gk).get_tensor(gk)
+                        u = handle(uk).get_tensor(uk)
+                        local[i].copy_(torch.cat([g, u], dim=0))
+                    else:  # down_proj: stored per-expert directly, no fusion
+                        dk = f"{prefix}.{e}.down_proj.weight"
+                        local[i].copy_(handle(dk).get_tensor(dk))
+            else:
+                if name not in weight_map:
+                    raise RuntimeError(
+                        f"param {name!r} is not in the checkpoint and is not a "
+                        f"fused expert param (tied weights not handled here)."
+                    )
+                sliced = handle(name).get_slice(name)
+                local[:n0].copy_(sliced[goff[0] : goff[0] + n0])
+
+    # Recompute the rotary inv_freq buffers: non-persistent, not in the
+    # checkpoint, and garbage after to_empty(). Re-instantiate the rotary module
+    # (its __init__ computes inv_freq from config) -- version- and rope-type-
+    # agnostic, so this also works for scaled rope (yarn/longrope) on other models.
+    rot = model.model.rotary_emb
+    fresh = type(rot)(config=config, device=torch.device("cuda"))
+    rot.inv_freq = fresh.inv_freq.to("cuda")
+    if hasattr(rot, "original_inv_freq"):
+        rot.original_inv_freq = rot.inv_freq
+    if hasattr(fresh, "attention_scaling"):
+        rot.attention_scaling = fresh.attention_scaling
+
+
 # max_concurrency=8 lets each rank service inbound ``gather_layer`` calls AND
 # the concurrent ``rdt_produce_weights_batched`` calls from the vLLM workers it
 # serves, on separate threads in the actor's threadpool. With static 1:1 load
@@ -368,13 +471,18 @@ class FSDPTrainWorker:
         dist.init_process_group(backend="nccl", rank=rank, world_size=fsdp_world_size)
         torch.accelerator.set_device_index(0)
 
-        model = AutoModelForCausalLM.from_pretrained(
-            model_name, torch_dtype=torch.bfloat16
-        )
+        # Memory-scalable load: build on META (zero allocation), shard, then stream
+        # each rank's shard directly from the on-disk safetensors. The whole model
+        # is NEVER materialized on any single GPU. (The old ``from_pretrained``
+        # path put the full model on EVERY rank before sharding, which OOMs for
+        # models that don't fit on one GPU, e.g. Kimi-K2.)
+        config = AutoConfig.from_pretrained(model_name)
+        with torch.device("meta"):
+            model = AutoModelForCausalLM.from_config(config, dtype=torch.bfloat16)
 
         # Capture metadata BEFORE fully_shard so we have stable names/dtypes
-        # /shapes to hand to vLLM's update_info. After sharding, params
-        # become DTensors but keep the same names.
+        # /shapes to hand to vLLM's update_info. Valid on the meta model. After
+        # sharding, params become DTensors but keep the same names.
         self.weight_names = [n for n, _ in model.named_parameters()]
         self.weight_dtype_names = [
             str(p.dtype).split(".")[-1] for _, p in model.named_parameters()
@@ -384,6 +492,10 @@ class FSDPTrainWorker:
         for layer in model.model.layers:
             fully_shard(layer)
         fully_shard(model)
+
+        # Allocate ONLY the local shards (empty) on GPU, then fill from disk.
+        model.to_empty(device="cuda")
+        _load_sharded_from_disk(model, model_name, config)
 
         self.model = model
         # Post-sharding lookup. Each entry is a DTensor with full_tensor()
@@ -406,6 +518,18 @@ class FSDPTrainWorker:
         # this so workers don't hang waiting on a layer that will never
         # arrive.
         self._gather_error: BaseException | None = None
+
+        # EXPERIMENT (no-clone / pre-registered serve): persistent per-name GPU
+        # buffers that hold the all-gathered full tensor. Allocated + registered
+        # with NIXL ONCE (register_nixl_memory pins the registration for the
+        # process lifetime); every sync re-gathers in place via copy_ into the
+        # SAME buffer, so the NIXL memory region is reused and never re-registered.
+        # rdt_produce_weights_batched then serves *views* into these (no clone),
+        # so the per-pull register_memory cost (the multi-node bottleneck) drops
+        # out of the steady state. Bounded at ~one full-model copy per rank
+        # (vs. naively registering each fresh full_tensor(), which would pin a new
+        # full-model copy every iter and OOM).
+        self._persistent: dict[str, torch.Tensor] = {}
 
         # ---- Trainer-side profiling counters (rank 0 only) ----
         # Guarded by its own lock because rdt_produce_weights_batched runs
@@ -433,6 +557,11 @@ class FSDPTrainWorker:
         from vllm.distributed.weight_transfer._nixl_profile import install_nixl_timing
 
         install_nixl_timing()
+
+        # Pre-register API used by gather_layer for the no-clone serve path.
+        from ray.experimental import register_nixl_memory
+
+        self._register_nixl_memory = register_nixl_memory
 
     def get_rank(self):
         return self.rank
@@ -484,8 +613,20 @@ class FSDPTrainWorker:
             for name in names:
                 param = self._param_lookup[name]
                 full = param.full_tensor()
+                # Gather into a PERSISTENT, NIXL-pre-registered buffer (allocated
+                # + registered once per name, reused every sync). Serving views of
+                # this in rdt_produce_weights_batched avoids the per-pull clone and
+                # the per-pull NIXL registration. ``full_tensor()`` still allocates
+                # a transient full tensor; we copy_ it in and let it free.
+                buf = self._persistent.get(name)
+                if buf is None or buf.shape != full.shape or buf.dtype != full.dtype:
+                    buf = torch.empty_like(full).contiguous()
+                    self._persistent[name] = buf
+                    self._register_nixl_memory(buf)
+                buf.copy_(full)
+                del full
                 with self._cache_cond:
-                    self._cache[name] = full
+                    self._cache[name] = buf
                     self._cache_cond.notify_all()
         except BaseException as e:
             with self._cache_cond:
@@ -540,13 +681,13 @@ class FSDPTrainWorker:
                 self._cache_cond.wait()
         wait_seconds = time.perf_counter() - _t_wait0
 
-        # Time the slice production: replaying each op chain (pure views,
-        # cheap) plus the contiguous clone (the real GPU work — a fresh
-        # allocation + copy that NIXL then ships). cuda.synchronize() before
-        # stopping the clock so the clones' async GPU time is actually
-        # captured rather than just the enqueue cost; this is the "slicing"
-        # the trainer does, isolated from the NIXL transport that happens
-        # after this method returns (during the worker's ray.get).
+        # Time the slice production. EXPERIMENT: serve VIEWS into the persistent,
+        # NIXL-pre-registered buffer with NO clone. The slice's storage is inside
+        # the already-registered buffer, so NIXL reuses the registration and there
+        # is NO per-pull clone or registration. We ASSERT each served slice is
+        # contiguous: the slices are expected to be contiguous narrow/offset views,
+        # so if one is not, fail loudly (naming it) rather than silently shipping
+        # the wrong bytes -- that tells us we have a non-contiguous case to handle.
         _t_slice0 = time.perf_counter()
         out: list[torch.Tensor] = []
         nbytes = 0
@@ -560,7 +701,13 @@ class FSDPTrainWorker:
                     )
                 kwargs = dict(kwargs_items)
                 tensor = getattr(tensor, op_name)(*args, **kwargs)
-            sl = tensor.clone(memory_format=torch.contiguous_format)
+            sl = tensor  # no clone: view into the pre-registered persistent buffer
+            if not sl.is_contiguous():
+                raise RuntimeError(
+                    f"[no-clone serve] slice for {name!r} is NON-contiguous "
+                    f"(shape={tuple(sl.shape)}, stride={tuple(sl.stride())}); "
+                    f"the no-clone view path needs a contiguous slice."
+                )
             out.append(sl)
             nbytes += sl.element_size() * sl.nelement()
         torch.accelerator.synchronize()
@@ -663,17 +810,53 @@ async def main():
     # (a fresh start trips Ray's "object store exceeds /dev/shm" guard, and
     # object_store_memory must not be passed when connecting to an existing
     # cluster).
-    ray.init(
-        address="auto",
-        runtime_env=runtime_env,
-        namespace=RAY_NAMESPACE,
+    # When launched as a Ray task on a GPU node (so the driver can detect the
+    # CUDA platform — the head node has no GPU), Ray is already initialized; only
+    # init here when run directly as a top-level driver.
+    if not ray.is_initialized():
+        ray.init(
+            address="auto",
+            runtime_env=runtime_env,
+            namespace=RAY_NAMESPACE,
+        )
+
+    # Multi-node: no shared filesystem, so we don't snapshot_download on the
+    # (GPU-less) driver. Each GPU node has the model pre-cached in its local HF
+    # cache; passing the bare repo id lets the trainer (from_pretrained) and the
+    # vLLM workers (config only, since load_format="dummy") resolve it from the
+    # node-local cache without a driver-side 60GB download.
+    local_model_path = MODEL_NAME
+    print(f"[init] Using model id {local_model_path} (pre-cached on each node)")
+
+    # Pin all FSDP ranks to a SINGLE node (STRICT_PACK) so the trainer NCCL
+    # all-gather stays intra-node (NVLink) and the "all trainer ranks
+    # co-located" requirement holds. Filling one 8-GPU node with the trainer
+    # also forces vLLM's 8 inference workers onto the *other* 8-GPU node (the
+    # only remaining GPU capacity), which co-locates inference as well.
+    trainer_pg = placement_group(
+        [{"GPU": 1, "CPU": 1}] * FSDP_WORLD_SIZE, strategy="STRICT_PACK"
+    )
+    ray.get(trainer_pg.ready())
+
+    # The FSDP rank-0 TCP-store rendezvous runs on the trainer node, so
+    # MASTER_ADDR must be that node's IP (not the driver's). Resolve the node
+    # the placement group landed on, and pick a port that is free *there*.
+    pg_node_id = next(iter(placement_group_table(trainer_pg)["bundles_to_node_id"].values()))
+    fsdp_master_addr = next(
+        n["NodeManagerAddress"] for n in ray.nodes() if n["NodeID"] == pg_node_id
     )
 
-    local_model_path = snapshot_download(MODEL_NAME)
-    print(f"[init] Model downloaded to {local_model_path}")
+    @ray.remote(
+        num_cpus=0,
+        scheduling_strategy=PlacementGroupSchedulingStrategy(
+            placement_group=trainer_pg
+        ),
+    )
+    def _free_port_on_trainer_node():
+        return get_open_port()
 
-    fsdp_master_addr = get_ip()
-    fsdp_master_port = get_open_port()
+    fsdp_master_port = ray.get(_free_port_on_trainer_node.remote())
+    print(f"[init] FSDP group on node {fsdp_master_addr}:{fsdp_master_port}")
 
     # Every rank is a named RDT producer so inference workers can spread their
     # pulls across all ranks (static 1:1). Rank 0 keeps the canonical name for
@@ -688,9 +871,13 @@ async def main():
             fsdp_master_addr,
             fsdp_master_port,
         )
-        handle = FSDPTrainWorker.options(name=trainer_actor_name(rank)).remote(
-            *common_args
-        )
+        handle = FSDPTrainWorker.options(
+            name=trainer_actor_name(rank),
+            scheduling_strategy=PlacementGroupSchedulingStrategy(
+                placement_group=trainer_pg,
+                placement_group_bundle_index=rank,
+            ),
+        ).remote(*common_args)
         fsdp_workers.append(handle)
     producer_names = [trainer_actor_name(r) for r in range(FSDP_WORLD_SIZE)]
     ray.get([w.get_rank.remote() for w in fsdp_workers])

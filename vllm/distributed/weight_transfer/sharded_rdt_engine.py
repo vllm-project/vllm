@@ -530,6 +530,21 @@ class ShardedRDTWeightTransferEngine(
         # fallback can rebuild lazies from just the gathered names.
         self._name_meta: dict[str, tuple[str, list[int]]] = {}
 
+        # ---- Consumer-side pre-registered receive arena (no per-pull register) --
+        # The baked source slice metadata, so _replay can size receive views:
+        #   src FetchKey -> produced slice shape / torch dtype.
+        self._src_shapes: dict[FetchKey, tuple[int, ...]] = {}
+        self._src_dtypes: dict[FetchKey, torch.dtype] = {}
+        # A single persistent receive buffer (1-D, the transferred dtype). We
+        # register its STORAGE once with NIXL (register_nixl_memory) and carve a
+        # contiguous view per slice as the set_target_for_ref target. Because the
+        # registration cache (_add_tensor_descs) is keyed by
+        # untyped_storage().data_ptr() and registers the full storage, every view
+        # into this arena is a cache hit -> the recv path never re-registers or
+        # deregisters. Grown (and re-registered) only if a pull needs more than it
+        # currently holds; steady state does zero registration.
+        self._dest_arena: torch.Tensor | None = None
+
     def init_transfer_engine(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
         """Resolve the trainer actor and bind its batched producer method."""
         try:
@@ -789,6 +804,70 @@ class ShardedRDTWeightTransferEngine(
             )
         return dict(zip(keys, tensors))
 
+    def _pull_into_registered(self, keys: list[FetchKey]) -> dict[FetchKey, torch.Tensor]:
+        """Batched NIXL pull that reads each slice straight into a persistent,
+        pre-registered receive arena -- eliminating the per-pull dest allocation
+        and registration that the default recv path does.
+
+        How it avoids registration: ``register_nixl_memory(arena)`` registers the
+        arena's full storage once (the registration cache ``_add_tensor_descs`` is
+        keyed by ``untyped_storage().data_ptr()`` and pins the refcount so it is
+        never deregistered). Each per-slice TARGET is a view INTO that arena, so it
+        shares the same storage data_ptr -> every recv is a cache hit and does no
+        register/deregister. ``set_target_for_ref`` routes the transfer into our
+        views instead of letting Ray allocate fresh (unregistered) buffers.
+
+        The arena is reused across all groups and syncs (calls are serialized by
+        the driver's await-previous-update_weights). It grows (and re-registers)
+        only if a call needs more than it currently holds; steady state is zero
+        registration. The returned views alias the arena and MUST be consumed
+        (scatter-copied into params) before the next call -- ``_replay`` syncs at
+        the end of its scatter loop to guarantee that.
+        """
+        if not keys:
+            return {}
+        import ray
+        from ray.experimental import register_nixl_memory, set_target_for_ref
+
+        # Single transferred dtype (the trainer's weight dtype). Lay slices out
+        # contiguously in element units, lightly aligned so each view is well
+        # aligned for RDMA.
+        dtypes = {self._src_dtypes[k] for k in keys}
+        if len(dtypes) != 1:
+            raise RuntimeError(
+                f"Pre-registered receive arena assumes a single dtype; got {dtypes}."
+            )
+        dtype = next(iter(dtypes))
+
+        offsets: list[int] = []
+        off = 0
+        for k in keys:
+            offsets.append(off)
+            n = prod(self._src_shapes[k]) or 1
+            off += (n + 7) & ~7  # 8-element alignment
+        total = off
+
+        arena = self._dest_arena
+        if arena is None or arena.numel() < total or arena.dtype != dtype:
+            arena = torch.empty(total, dtype=dtype, device=self.device)
+            # One-time (per growth) registration of the whole storage; pinned for
+            # the process lifetime so views never trigger register/deregister.
+            register_nixl_memory(arena)
+            self._dest_arena = arena
+
+        # Carve a contiguous view per slice. Held in ``targets`` (strong refs)
+        # through the ray.get below -- set_target_for_ref stores only weakrefs.
+        targets: list[torch.Tensor] = []
+        for k, o in zip(keys, offsets):
+            shape = self._src_shapes[k]
+            n = prod(shape) or 1
+            targets.append(arena[o : o + n].reshape(shape))
+
+        ref = self._produce_method.remote(keys)  # type: ignore[union-attr]
+        set_target_for_ref(ref, targets)
+        ray.get(ref)  # NIXL reads each slice directly into its arena view
+        return dict(zip(keys, targets))
+
     # ---------------- Bake (dry run, at init) / replay ----------------
 
     def _load_unbaked(
@@ -901,6 +980,13 @@ class ShardedRDTWeightTransferEngine(
                 group = _BakedGroup(layer=module, copies=copies)
                 for c in copies:
                     self._name_to_group[c.src[0]] = group
+                    # Record the produced slice's shape/dtype so _replay can size
+                    # pre-registered receive views. The produced slice matches the
+                    # destination region (c.shape); its dtype is the source name's.
+                    self._src_shapes[c.src] = tuple(c.shape)
+                    self._src_dtypes[c.src] = _dtype_from_name(
+                        self._name_meta[c.src[0]][0]
+                    )
             self._restore_after_dry_run(model)
 
         n_groups = len({id(g) for g in self._name_to_group.values()})
@@ -1018,7 +1104,16 @@ class ShardedRDTWeightTransferEngine(
 
         _nixl_before = _nixl_profile.snapshot()
         _t_pull = time.perf_counter()
-        results = self._pull({c.src for g in groups for c in g.copies})
+        # De-duplicated, ORDER-STABLE source keys: the producer returns slices in
+        # this order, and set_target_for_ref requires the target list to match.
+        keys: list[FetchKey] = []
+        seen_keys: set[FetchKey] = set()
+        for g in groups:
+            for c in g.copies:
+                if c.src not in seen_keys:
+                    seen_keys.add(c.src)
+                    keys.append(c.src)
+        results = self._pull_into_registered(keys)
         pull_seconds = time.perf_counter() - _t_pull
         _nixl_delta = _nixl_profile.delta(_nixl_before, _nixl_profile.snapshot())
 
@@ -1051,6 +1146,10 @@ class ShardedRDTWeightTransferEngine(
                 _copy_and_restore_kernel_tensors(layer, info)
             # Reset so finalize_layerwise_reload skips this (already-loaded) layer.
             info.reset()
+        # The receive arena is reused by the NEXT _replay's NIXL read, which is
+        # not ordered against this stream's scatter copies that READ from it.
+        # Sync so those reads finish before the arena can be overwritten.
+        torch.cuda.synchronize()
         process_seconds = time.perf_counter() - _t_proc
         self._log_timing(
             "replay",
@@ -1122,6 +1221,11 @@ class ShardedRDTWeightTransferEngine(
         # Drop strong references to baked modules so the model can be freed.
         self._name_to_group.clear()
         self._name_meta.clear()
+        self._src_shapes.clear()
+        self._src_dtypes.clear()
+        # Release the receive arena (its NIXL registration is pinned for the
+        # process lifetime; freeing the tensor just drops our strong ref).
+        self._dest_arena = None
 
     @staticmethod
     def trainer_send_weights(
