@@ -29,7 +29,7 @@ def init_render_state(
         request_logger=request_logger,
     )
 
-    state.serving_derenderer = ServingDerender(
+    state.serving_derender = ServingDerender(
         state.openai_serving_models,
         state.online_derenderer,
         request_logger=request_logger,
