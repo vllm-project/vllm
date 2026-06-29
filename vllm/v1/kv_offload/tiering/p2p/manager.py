@@ -251,6 +251,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 return LookupResult.MISS
             return LookupResult.RETRY
 
+        # PD consumer (we are the decoder): all kv blocks should be on the
+        # prefiller side. Return HIT immediately.
         return LookupResult.HIT
 
     @override
