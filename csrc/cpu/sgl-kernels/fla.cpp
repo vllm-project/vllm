@@ -1700,7 +1700,13 @@ at::Tensor fused_sigmoid_gating_delta_rule_update_spec_cpu(
   CHECK_INPUT_SHAPE_DTYPE<true>(cu_seqlens, {batch_size + 1}, at::kInt);
   CHECK_EQ(v_num_heads % num_heads, 0);
   TORCH_CHECK(A_log.sizes() == at::IntArrayRef({v_num_heads}));
-  TORCH_CHECK(initial_state_source.scalar_type() == at::kFloat);
+  CHECK_INPUT_SHAPE_DTYPE<true>(
+      initial_state_source,
+      {initial_state_source.size(0), v_num_heads, head_dim, v_head_dim},
+      at::kFloat);
+  TORCH_CHECK(initial_state_source.size(0) >= batch_size,
+      "initial_state_source capacity too small: size(0)=",
+      initial_state_source.size(0), ", batch_size=", batch_size);
 
   int64_t q_strideT = q.stride(0);
   int64_t q_strideH = q.stride(1);
