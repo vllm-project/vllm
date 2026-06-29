@@ -1354,6 +1354,7 @@ def test_spec_decode_padding_first_decode_step():
     # r2 is padded to the 1 + num_spec shape with placeholder (-1) drafts.
     assert out.num_scheduled_tokens[r2.request_id] == 1 + num_spec
     assert out.scheduled_spec_decode_tokens[r2.request_id] == [-1] * num_spec
+    assert out.num_invalid_spec_tokens == {r2.request_id: num_spec}
 
 
 def test_spec_decode_padding_skipped_with_prefill_in_batch():
@@ -1396,6 +1397,7 @@ def test_spec_decode_padding_skipped_with_prefill_in_batch():
     assert r_long.request_id in out.num_scheduled_tokens
     assert out.num_scheduled_tokens[r_candidate.request_id] == 1
     assert r_candidate.request_id not in out.scheduled_spec_decode_tokens
+    assert out.num_invalid_spec_tokens is None
 
 
 def test_scheduler_stats_waiting_queues():

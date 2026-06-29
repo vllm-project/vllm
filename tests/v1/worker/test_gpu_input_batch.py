@@ -435,6 +435,35 @@ def test_pooling_prompt_lens_not_aliased(device: str):
     )
 
 
+def test_placeholder_spec_token_ids_not_used_as_model_input():
+    input_batch = InputBatch(
+        max_num_reqs=1,
+        max_model_len=8,
+        max_num_batched_tokens=8,
+        device=torch.device("cpu"),
+        vocab_size=VOCAB_SIZE,
+        block_sizes=[16],
+        kernel_block_sizes=[16],
+    )
+    req = CachedRequestState(
+        req_id="req",
+        prompt_token_ids=[10, 11],
+        mm_features=[],
+        sampling_params=None,
+        block_ids=([],),
+        generator=None,
+        num_computed_tokens=3,
+        output_token_ids=[12],
+    )
+    input_batch.add_request(req)
+
+    input_batch.token_ids_cpu[0, 2] = -1
+    input_batch.update_req_spec_token_ids(req, {"req": [-1, 13, -1]})
+
+    assert input_batch.spec_token_ids[0] == [-1, 13, -1]
+    assert input_batch.token_ids_cpu[0, 3:6].tolist() == [0, 13, 0]
+
+
 @pytest.mark.parametrize(
     ("pooling_params", "expect_device_prompt_token_ids", "expect_cpu_prompt_token_ids"),
     [

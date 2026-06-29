@@ -504,8 +504,29 @@ class InputBatch:
         # _prepare_input_ids.
         start_index = self.num_tokens_no_spec[req_index]
         end_token_index = start_index + num_spec_tokens
-        self.token_ids_cpu[req_index, start_index:end_token_index] = spec_token_ids
+
+        # Negative IDs are scheduler-side placeholders. Keep them in
+        # spec_token_ids for rejection sampling, but never expose them to the
+        # model embedding lookup.
+        safe_spec_token_ids = np.asarray(
+            spec_token_ids,
+            dtype=self.token_ids_cpu.dtype,
+        )
+        invalid_token_mask = safe_spec_token_ids < 0
+        if invalid_token_mask.any():
+            backup_token_id = (
+                int(self.token_ids_cpu[req_index, start_index - 1])
+                if start_index > 0
+                else 0
+            )
+            backup_token_id = max(backup_token_id, 0)
+            safe_spec_token_ids = safe_spec_token_ids.copy()
+            safe_spec_token_ids[invalid_token_mask] = backup_token_id
+
+        self.token_ids_cpu[req_index, start_index:end_token_index] = safe_spec_token_ids
         self.is_token_ids[req_index, start_index:end_token_index] = True
+
+        # Preserve the original values, including -1 placeholders.
         cur_spec_token_ids.extend(spec_token_ids)
 
     def remove_request(self, req_id: str) -> int | None:
