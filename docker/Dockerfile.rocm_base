@@ -46,7 +46,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Install Python and other dependencies
 RUN apt-get update -y \
-    && apt-get install -y software-properties-common git curl sudo vim less libgfortran5 libopenmpi-dev libpci-dev liblzma-dev pkg-config \
+    && apt-get install -y software-properties-common git curl sudo vim less libgfortran5 libopenmpi-dev libpci-dev liblzma-dev pkg-config g++ \
     && for i in 1 2 3; do \
     add-apt-repository -y ppa:deadsnakes/ppa && break || \
     { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
@@ -101,6 +101,7 @@ ARG APEX_VERSION
 # sdk version is derived from torch's own dependency pin unless overridden,
 # which keeps the set consistent and avoids pip backtracking.
 RUN pip install --pre --index-url "${ROCM_WHEEL_INDEX}" \
+    --extra-index-url https://pypi.org/simple \
     "torch==${TORCH_VERSION}" \
     "torchvision==${TORCHVISION_VERSION}" \
     "torchaudio==${TORCHAUDIO_VERSION}" \
@@ -164,6 +165,13 @@ ENV SCCACHE_BUCKET=${USE_SCCACHE:+${SCCACHE_BUCKET_NAME}}
 ENV SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION_NAME}}
 ENV SCCACHE_S3_NO_CREDENTIALS=${USE_SCCACHE:+${SCCACHE_S3_NO_CREDENTIALS}}
 ENV SCCACHE_IDLE_TIMEOUT=${USE_SCCACHE:+0}
+
+### Install triton from upstream for AITER Deps TODO: (JPVILLAM) If possible to get this on whls it would be better
+RUN pip3 uninstall -y triton && \
+    git clone https://github.com/triton-lang/triton.git && \
+    cd triton && \
+    git checkout c517f38c && \
+    TRITON_APPEND_CMAKE_ARGS="-DCMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH=FALSE" pip3 install .
 
 ###
 ### AMD SMI Build
