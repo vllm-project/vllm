@@ -18,7 +18,6 @@ import pytest
 import torch
 
 from tests.conftest import VllmRunner
-from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k
 from tests.utils import (
     RemoteOpenAIServer,
     create_new_process_for_each_test,

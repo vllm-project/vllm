@@ -618,7 +618,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             cache_dtype_str=self.kv_cache_dtype,
             alignment=576 if uses_fp8_ds_mla_layout else None,
             model_version="deepseek_v4",
-            supports_context_parallel=is_flashmla,
+            supports_context_parallel=uses_fp8_ds_mla_layout,
         )
 
 

@@ -96,7 +96,7 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
             cache_dtype_str=self.cache_config.cache_dtype,
             alignment=576 if uses_fp8_ds_mla_layout else None,
             model_version="deepseek_v4",
-            supports_context_parallel=is_flashmla,
+            supports_context_parallel=uses_fp8_ds_mla_layout,
         )
 
     def forward(self): ...
