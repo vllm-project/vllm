@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from dataclasses import replace
 from typing import Any
 
@@ -11,6 +12,7 @@ from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 from vllm.v1.spec_decode.utils import (
     copy_and_expand_dflash_inputs_kernel,
@@ -18,6 +20,12 @@ from vllm.v1.spec_decode.utils import (
 )
 
 logger = init_logger(__name__)
+
+_DCUT_FALLBACK_RATIO = 3 / 4
+_DCUT_RATIO_NUMS = (1, 2, 3, 4)
+_DCUT_PROFILE_SEQ_LEN = 2048
+_DCUT_PROFILE_WARMUPS = 3
+_DCUT_PROFILE_STEPS = 5
 
 
 class DFlashProposer(SpecDecodeBaseProposer):
@@ -35,6 +43,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
             pass_hidden_states_to_model=True,
             runner=runner,
         )
+        self._runner = runner
 
         # Only next_token_ids and mask tokens are query tokens, all other context is K/V
         self.max_query_tokens = self.max_batch_size * (1 + self.num_speculative_tokens)
@@ -71,6 +80,8 @@ class DFlashProposer(SpecDecodeBaseProposer):
         self.parallel_drafting_hidden_state_tensor = None
 
         self.dflash_causal = self.dflash_config.get("causal", False)
+        self._dcut_keep_lens_cache: torch.Tensor | None = None
+        self._dcut_costs_by_bs: dict[int, torch.Tensor] = {}
 
     @override
     def _create_draft_vllm_config(self) -> VllmConfig:
@@ -92,6 +103,153 @@ class DFlashProposer(SpecDecodeBaseProposer):
     def _warn_if_multimodal(self):
         # Override to allow multimodal inputs since DFlash supports Qwen3.5 models
         pass
+
+    @override
+    def _sample_draft_tokens(
+        self,
+        hidden_states: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        self._dcut_keep_lens_cache = None
+        if self.speculative_config.dflash_dcut_mode == "off":
+            return super()._sample_draft_tokens(hidden_states, sampling_metadata)
+
+        logits = self.model.compute_logits(hidden_states)
+        draft_token_ids, draft_probs = self._sample_from_logits(
+            logits, sampling_metadata
+        )
+        token_logprobs = (
+            logits.gather(1, draft_token_ids.unsqueeze(1)).squeeze(1).float()
+            - torch.logsumexp(logits, dim=-1).float()
+            if draft_probs is None
+            else torch.log(
+                draft_probs.gather(1, draft_token_ids.unsqueeze(1)).squeeze(1)
+            )
+        )
+
+        self._dcut_keep_lens_cache = self._select_dcut_keep_lens(
+            token_logprobs.view(-1, self.num_speculative_tokens)
+        )
+        return draft_token_ids, draft_probs
+
+    def _select_dcut_keep_lens(self, logprobs: torch.Tensor) -> torch.Tensor:
+        bs, num_draft_tokens = logprobs.shape
+        cumlogprobs = logprobs.cumsum(dim=1).flatten()
+        profile_bs = min((x for x in self._dcut_costs_by_bs if x >= bs), default=None)
+        if profile_bs is None:
+            dcut = self.speculative_config.dflash_dcut
+            if dcut == "auto":
+                logger.warning_once(
+                    "DFlash D-Cut selector has no profiled cost for bs=%d; "
+                    "fallback ratio %.2f.",
+                    bs,
+                    _DCUT_FALLBACK_RATIO,
+                )
+                dcut = _DCUT_FALLBACK_RATIO
+            num_keep_draft_tokens = self._get_dcut_keep_count(
+                bs, num_draft_tokens, float(dcut)
+            )
+            _, top_indices = torch.topk(cumlogprobs, k=num_keep_draft_tokens)
+            updates = torch.ones_like(top_indices, dtype=torch.int32)
+        else:
+            keep_counts = self._dcut_keep_counts[bs]
+            costs = self._dcut_costs_by_bs[profile_bs]
+            sorted_logprobs, top_indices = torch.sort(cumlogprobs, descending=True)
+            prefix_scores = torch.cumsum(torch.exp(sorted_logprobs), dim=0)
+            candidate_scores = torch.zeros_like(costs)
+            valid = keep_counts > 0
+            candidate_scores[valid] = prefix_scores[keep_counts[valid] - 1]
+            num_keep_draft_tokens = keep_counts[torch.argmax(candidate_scores / costs)]
+            updates = (
+                torch.arange(bs * num_draft_tokens, device=self.device)
+                < num_keep_draft_tokens
+            ).to(torch.int32)
+        keep_lens = torch.zeros((bs,), dtype=torch.int32, device=self.device)
+        keep_lens.scatter_add_(0, top_indices // num_draft_tokens, updates)
+        return keep_lens
+
+    @staticmethod
+    def _get_dcut_keep_count(bs: int, num_draft_tokens: int, ratio: float) -> int:
+        return max(0, math.ceil(bs * (num_draft_tokens + 1) * ratio) - bs)
+
+    def take_dcut_keep_lens(self) -> torch.Tensor | None:
+        return self._dcut_keep_lens_cache
+
+    def profile_dcut_cost_table(self) -> None:
+        costs_by_bs: dict[int, list[tuple[int, float]]] = {}
+        max_bs = min(self.max_batch_size, self._runner.max_num_reqs)
+        bs_range = torch.arange(max_bs + 1, device=self.device, dtype=torch.long)[
+            :, None
+        ]
+        ratio_nums = torch.tensor(
+            _DCUT_RATIO_NUMS, device=self.device, dtype=torch.long
+        )
+        keep_counts = torch.div(
+            bs_range * (self.num_speculative_tokens + 1) * ratio_nums + 3,
+            4,
+            rounding_mode="floor",
+        )
+        self._dcut_keep_counts = torch.clamp(keep_counts - bs_range, min=0)
+        for bs in self._get_dcut_profile_batch_sizes():
+            entries: list[tuple[int, float]] = []
+            full_draft_tokens = bs * (1 + self.num_speculative_tokens)
+            self._dcut_costs_by_bs[bs] = torch.ones(
+                len(_DCUT_RATIO_NUMS), dtype=torch.float32, device=self.device
+            )
+            for keep_count in self._dcut_keep_counts[bs].tolist():
+                target_tokens = bs + keep_count
+                cost = self._profile_dcut_full_cost_ms(
+                    bs=bs,
+                    target_tokens=target_tokens,
+                    draft_tokens=full_draft_tokens,
+                )
+                entries.append((keep_count, cost))
+            costs_by_bs[bs] = entries
+            self._dcut_costs_by_bs[bs] = torch.tensor(
+                [x[1] for x in entries], dtype=torch.float32, device=self.device
+            )
+        if costs_by_bs:
+            logger.info("DFlash D-Cut warmup full-cost table: %s", costs_by_bs)
+
+    def _get_dcut_profile_batch_sizes(self) -> tuple[int, ...]:
+        full_tokens_per_req = 1 + self.num_speculative_tokens
+        max_bs = min(self.max_batch_size, self._runner.max_num_reqs)
+        capture_sizes = self.compilation_config.cudagraph_capture_sizes or []
+        sizes = [
+            capture_size // full_tokens_per_req
+            for capture_size in capture_sizes
+            if capture_size % full_tokens_per_req == 0
+            and 0 < capture_size // full_tokens_per_req <= max_bs
+        ]
+        sizes.append(max_bs)
+        return tuple(sorted(set(sizes)))
+
+    def _profile_dcut_full_cost_ms(
+        self, *, bs: int, target_tokens: int, draft_tokens: int
+    ) -> float:
+        profile_seq_lens = min(
+            _DCUT_PROFILE_SEQ_LEN,
+            self._runner.max_model_len,
+        )
+        dummy_run_kwargs = dict(
+            force_attention=True,
+            allow_microbatching=False,
+            skip_eplb=True,
+            is_profile=False,
+            dcut_profile_num_reqs=bs,
+            drafter_dummy_num_tokens=draft_tokens,
+            profile_seq_lens=profile_seq_lens,
+        )
+        for _ in range(_DCUT_PROFILE_WARMUPS):
+            self._runner._dummy_run(target_tokens, **dummy_run_kwargs)
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        for _ in range(_DCUT_PROFILE_STEPS):
+            self._runner._dummy_run(target_tokens, **dummy_run_kwargs)
+        end.record()
+        torch.cuda.synchronize()
+        return start.elapsed_time(end) / _DCUT_PROFILE_STEPS
 
     @override
     def set_inputs_first_pass(
@@ -206,6 +364,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
         use_cudagraphs: bool = True,
         is_graph_capturing: bool = False,
         slot_mappings: dict[str, torch.Tensor] | None = None,
+        num_query_tokens: int | None = None,
     ) -> None:
         """
         Key differences to default dummy_run:
@@ -215,7 +374,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
         - max_query_tokens is quite small, DFlash only sees spec tokens as queries
         - Multimodal inputs are not currently supported
         """
-        num_query_tokens = min(num_tokens, self.max_query_tokens)
+        num_query_tokens = min(num_query_tokens or num_tokens, self.max_query_tokens)
         cudagraph_runtime_mode, num_input_tokens, num_tokens_across_dp = (
             self._determine_batch_execution_and_padding(
                 num_query_tokens, use_cudagraphs=use_cudagraphs
