@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig, ParallelConfig, SpeculativeConfig
 from vllm.transformers_utils.model_arch_config_convertor import (
@@ -112,6 +113,22 @@ def _assert_model_config_methods(
 
     if check_head_size:
         assert model_config.get_head_size() == expected["head_size"]
+
+
+def test_head_size_falls_back_when_head_dim_is_zero():
+    """Regression test for configs that materialize missing head_dim as 0."""
+    hf_config = PretrainedConfig(
+        model_type="deepseek_vl_v2",
+        hidden_size=1280,
+        num_attention_heads=10,
+        num_key_value_heads=10,
+        head_dim=0,
+        kv_lora_rank=None,
+    )
+
+    convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
+
+    assert convertor.get_head_size() == 128
 
 
 @pytest.mark.parametrize("model", BASE_MODELS_TO_TEST)
