@@ -1,28 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import time
 from typing import cast
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-    ChatCompletionResponse,
-)
-from vllm.entrypoints.openai.completion.protocol import (
-    CompletionRequest,
-    CompletionResponse,
-)
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-    UsageInfo,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.serving import (
     OpenAIModelRegistry,
     OpenAIServingModels,
 )
-from vllm.entrypoints.serve.disagg.mm_serde import encode_mm_kwargs_item
-from vllm.entrypoints.serve.disagg.protocol import (
-    DerenderChatRequest,
-    DerenderCompletionRequest,
+from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import encode_mm_kwargs_item
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateRequest,
     MultiModalFeatures,
     PlaceholderRangeInfo,
@@ -41,7 +29,6 @@ from vllm.renderers.inputs.preprocess import (
     extract_prompt_components,
     extract_prompt_len,
 )
-from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.utils import random_uuid
 
@@ -53,7 +40,6 @@ class ServingRender(BaseServing):
         self,
         models: OpenAIServingModels | OpenAIModelRegistry,
         online_renderer: "OnlineRenderer",
-        online_derenderer: "OnlineDerenderer",
         *,
         request_logger: RequestLogger | None = None,
     ) -> None:
@@ -64,7 +50,6 @@ class ServingRender(BaseServing):
         )
 
         self.online_renderer = online_renderer
-        self.online_derenderer = online_derenderer
 
         self.default_sampling_params = (
             online_renderer.model_config.get_diff_sampling_param()
@@ -127,11 +112,33 @@ class ServingRender(BaseServing):
         )
         params = request.to_sampling_params(max_tokens, self.default_sampling_params)
 
+        assistant_tokens_mask: list[int] | None = engine_input.get(  # type: ignore[assignment]
+            "assistant_tokens_mask"
+        )
+        if assistant_tokens_mask is not None and len(assistant_tokens_mask) != len(
+            token_ids
+        ):
+            logger.warning(
+                "assistant_tokens_mask length (%d) != token_ids length (%d); "
+                "this can happen with multimodal inputs where "
+                "placeholder expansion changes the token count. "
+                "The mask may be positionally misaligned.",
+                len(assistant_tokens_mask),
+                len(token_ids),
+            )
+            if len(assistant_tokens_mask) < len(token_ids):
+                assistant_tokens_mask.extend(
+                    [0] * (len(token_ids) - len(assistant_tokens_mask))
+                )
+            else:
+                assistant_tokens_mask = assistant_tokens_mask[: len(token_ids)]
+
         request_id = f"chatcmpl-{random_uuid()}"
 
         return GenerateRequest(
             request_id=request_id,
             token_ids=token_ids,
+            assistant_tokens_mask=assistant_tokens_mask,
             features=self._extract_mm_features(engine_input),
             sampling_params=params,
             model=request.model,
@@ -200,117 +207,6 @@ class ServingRender(BaseServing):
             )
 
         return generate_requests
-
-    async def derender_chat_response(
-        self,
-        request: DerenderChatRequest,
-    ) -> ChatCompletionResponse | ErrorResponse:
-        """Postprocess a GenerateResponse into a ChatCompletionResponse.
-
-        Non-streaming only: expects the complete GenerateResponse with all
-        token IDs present.  Uses ``parser.parse()`` for one-shot extraction.
-
-        When ``request.chat_request`` is provided, the parser splits the
-        output into (reasoning, content, tool_calls).  Otherwise falls
-        back to plain detokenization.
-        """
-        error_check_ret = await self._check_model(request)
-        if error_check_ret is not None:
-            return error_check_ret
-
-        try:
-            choices = await self.online_derenderer.derender_chat(
-                request.generate_response, request.chat_request
-            )
-        except ValueError as exc:
-            return self.create_error_response(str(exc))
-
-        prompt_tokens = (
-            request.prompt_tokens if request.prompt_tokens is not None else 0
-        )
-        gen = request.generate_response
-        completion_tokens = sum(len(ch.token_ids) for ch in gen.choices if ch.token_ids)
-        usage = UsageInfo(
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=prompt_tokens + completion_tokens,
-        )
-
-        logger.debug(
-            "derender_chat request_id=%s model=%s choices=%d completion_tokens=%d",
-            gen.request_id,
-            request.model,
-            len(choices),
-            completion_tokens,
-        )
-        return ChatCompletionResponse(
-            id=gen.request_id,
-            model=request.model,
-            created=int(time.time()),
-            choices=choices,
-            usage=usage,
-            prompt_logprobs=gen.prompt_logprobs,
-            kv_transfer_params=gen.kv_transfer_params,
-        )
-
-    async def derender_completion_response(
-        self,
-        request: DerenderCompletionRequest,
-    ) -> CompletionResponse | ErrorResponse:
-        """Postprocess a list of GenerateResponses into a CompletionResponse.
-
-        Non-streaming only.  Mirrors the multi-prompt completions case: one
-        GenerateResponse per prompt, parallel to the list[GenerateRequest]
-        from /v1/completions/render.
-        """
-        error_check_ret = await self._check_model(request)
-        if error_check_ret is not None:
-            return error_check_ret
-
-        (
-            choices,
-            total_prompt_tokens,
-            total_completion_tokens,
-        ) = await self.online_derenderer.derender_completion(
-            request.generate_responses, request.prompt_tokens
-        )
-
-        if not request.generate_responses:
-            return self.create_error_response("generate_responses must not be empty")
-
-        first = request.generate_responses[0]
-        kv_params = first.kv_transfer_params
-        if any(
-            r.kv_transfer_params != kv_params for r in request.generate_responses[1:]
-        ):
-            logger.warning(
-                "derender_completion: kv_transfer_params differ across responses; "
-                "setting to None on the aggregated response"
-            )
-            kv_params = None
-
-        usage = UsageInfo(
-            prompt_tokens=total_prompt_tokens,
-            completion_tokens=total_completion_tokens,
-            total_tokens=total_prompt_tokens + total_completion_tokens,
-        )
-
-        logger.debug(
-            "derender_completion request_id=%s model=%s choices=%d"
-            " completion_tokens=%d",
-            first.request_id,
-            request.model,
-            len(choices),
-            total_completion_tokens,
-        )
-        return CompletionResponse(
-            id=first.request_id,
-            model=request.model,
-            created=int(time.time()),
-            choices=choices,
-            usage=usage,
-            kv_transfer_params=kv_params,
-        )
 
     @staticmethod
     def _extract_mm_features(

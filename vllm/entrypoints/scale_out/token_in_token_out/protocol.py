@@ -75,6 +75,14 @@ class GenerateRequest(BaseModel):
     token_ids: list[int] = Field(min_length=1)
     """The token ids to generate text from."""
 
+    assistant_tokens_mask: list[int] | None = None
+    """Per-token mask (1 = assistant-generated, 0 = not).
+
+    Only populated when the render request sets ``return_assistant_tokens_mask=True``
+    and the chat template supports ``{% generation %}``.
+    ``None`` when the mask was not requested or could not be computed.
+    """
+
     @field_validator("token_ids")
     @classmethod
     def validate_token_ids(cls, v: list[int]) -> list[int]:
