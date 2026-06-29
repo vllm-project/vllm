@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --nodelist=htc-g[059-060]
-#SBATCH --job-name=r128_sp512_sd128_pp2_tp4_qwen3-235b
+#SBATCH --job-name=r32_sp128_sd512_pp2_tp4_qwen3-235b
 #SBATCH --nodes=2
 #SBATCH --partition=short
 #SBATCH --gres=gpu:h100:4
@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="arc-ray-qwen3-235b-a22b-r128-sp512-sd128-tp4-pp2-from-test-ip-v1"
+SCRIPT_VERSION="arc-ray-qwen3-235b-a22b-r32-sp128-sd512-tp4-pp2-from-test-ip-v1"
 
 DEBUG_SLURM_SCRIPT="${DEBUG_SLURM_SCRIPT:-0}"
 NSYS_COPY_DEBUG="${NSYS_COPY_DEBUG:-0}"
@@ -46,10 +46,10 @@ MIN_WORKER_NSYS_REP_BYTES="${MIN_WORKER_NSYS_REP_BYTES:-1024}"
 
 # Benchmark/workload knobs owned by this host Slurm file.
 # These are passed into serving_scripts/serve_ShareGPT_multi_node.sh below.
-SP="${SP:-512}"
-SD="${SD:-128}"
+SP="${SP:-128}"
+SD="${SD:-512}"
 
-NUM_PROMPTS="${NUM_PROMPTS:-128}"
+NUM_PROMPTS="${NUM_PROMPTS:-32}"
 REQUEST_RATE="${REQUEST_RATE:-1}"
 BURSTINESS="${BURSTINESS:-1.0}"
 SEED="${SEED:-100}"
