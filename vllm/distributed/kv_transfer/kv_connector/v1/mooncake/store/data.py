@@ -169,6 +169,15 @@ class ChunkedTokenDatabase:
             )
         self.kv_caches_base_addr: list[int] = []
         self.block_len: list[int] = []
+        # Per-segment memory kind ("host" for CPU/pinned, "device" for GPU),
+        # parallel to ``kv_caches_base_addr`` / ``block_len``. Empty (the
+        # default) means a homogeneous registration where the kind is
+        # irrelevant — preserving byte-identical behavior for the common
+        # all-GPU path. HiSparse populates this so a single block's value can
+        # span host-resident MLA segments and GPU indexer segments; Mooncake's
+        # Transfer Engine resolves each registered buffer's device per segment,
+        # so the mixed list is transferred in one multi-buffer call.
+        self.segment_mem_kinds: list[str] = []
 
     def _make_key_by_hash(self, chunk_hash: str) -> PoolKey:
         return PoolKey(self.metadata, chunk_hash)
@@ -178,6 +187,21 @@ class ChunkedTokenDatabase:
 
     def set_block_len(self, block_len: list[int]):
         self.block_len = block_len
+
+    def set_segment_mem_kinds(self, segment_mem_kinds: list[str]):
+        if segment_mem_kinds and len(segment_mem_kinds) != len(
+            self.kv_caches_base_addr
+        ):
+            raise ValueError(
+                f"segment_mem_kinds length ({len(segment_mem_kinds)}) must match "
+                f"the number of segments ({len(self.kv_caches_base_addr)})."
+            )
+        self.segment_mem_kinds = segment_mem_kinds
+
+    @property
+    def has_mixed_memory(self) -> bool:
+        """Whether segments span more than one memory kind (host + device)."""
+        return len(set(self.segment_mem_kinds)) > 1
 
     def prepare_value(
         self, start: int, end: int, block_ids: list[int]

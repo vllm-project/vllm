@@ -619,6 +619,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 zip(starts, ends, group_indices, strict=True)
             ):
                 db = self.token_databases[g_idx]
+                # ``addr``/``size`` carry every segment of the block, in
+                # registration order. For HiSparse this spans host MLA and
+                # device indexer segments; each address resolves to its
+                # registered buffer's device, so Mooncake transfers the mixed
+                # list in one ``batch_put_from_multi_buffers`` call.
                 addr, size, _ = db.prepare_value(s, e, block_ids_per_group[g_idx])
                 addrs.append(addr)
                 sizes.append(size)
@@ -781,6 +786,10 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 chunk_idx = start // db.block_size
                 if chunk_idx >= len(mask) or not mask[chunk_idx]:
                     continue
+                # ``addr``/``size`` span every segment of the block. For
+                # HiSparse the load scatters host MLA segments into pinned host
+                # memory and device indexer segments into GPU memory within a
+                # single ``batch_get_into_multi_buffers`` call.
                 addr, size, block_id = db.prepare_value(
                     start, end, req_meta.block_ids[g_idx]
                 )
@@ -954,6 +963,15 @@ class MooncakeStoreWorker:
             "load_async", True
         )
         self.cache_config = vllm_config.cache_config
+        # HiSparse keeps MLA KV in pinned host memory while the indexer KV
+        # stays on the GPU, so the connector must register and address a mix of
+        # host and device segments. ``enable_hisparse`` implies the
+        # host-resident path (the public ``host_resident`` knob was removed).
+        attention_config = getattr(vllm_config, "attention_config", None)
+        self._hisparse_enabled = bool(
+            attention_config is not None
+            and getattr(attention_config, "enable_hisparse", False)
+        )
         self.block_size, self.hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
         )
@@ -1127,6 +1145,17 @@ class MooncakeStoreWorker:
         existing stride-based logic in register_kv_caches() produces
         the correct single-segment result (block_len = page_size * num_layers).
         """
+        if self._hisparse_enabled:
+            # HiSparse splits layers across memory kinds (host MLA + device
+            # indexer); a single packed cross-layer tensor cannot represent
+            # both, so cross-layer block packing is incompatible.
+            raise ValueError(
+                "HiSparse host-resident KV is incompatible with "
+                "enable_cross_layers_blocks: MLA layers live in pinned host "
+                "memory while indexer layers stay on the GPU, so they cannot "
+                "share one packed cross-layer tensor. Disable "
+                "enable_cross_layers_blocks for HiSparse deployments."
+            )
         self.register_kv_caches({"__cross_layer__": kv_cache})
 
     def register_kv_caches(
@@ -1152,6 +1181,11 @@ class MooncakeStoreWorker:
         seen_ptrs: set[int] = set()
         addrs: list[int] = []
         block_lens: list[int] = []
+        # Per-segment memory kind, parallel to ``addrs`` / ``block_lens``. CPU
+        # (pinned) tensors register as host segments and GPU tensors as device
+        # segments. For HiSparse this is mixed (host MLA + device indexer); for
+        # every other model it is uniformly "device".
+        mem_kinds: list[str] = []
 
         for value in kv_caches.values():
             cache = _repr_tensor(value)
@@ -1161,13 +1195,15 @@ class MooncakeStoreWorker:
                 continue
             seen_ptrs.add(base_addr)
             region_len = cache_storage.nbytes()
+            mem_kind = "host" if cache.device.type == "cpu" else "device"
 
             ret = self.store.register_buffer(base_addr, region_len)
             if ret != 0:
                 logger.error(
-                    "register_buffer failed for addr %#x len %d: %d",
+                    "register_buffer failed for addr %#x len %d (%s): %d",
                     base_addr,
                     region_len,
+                    mem_kind,
                     ret,
                 )
 
@@ -1184,23 +1220,40 @@ class MooncakeStoreWorker:
                 # Blocks-first layout (FlashInfer / MLA): one segment.
                 addrs.append(base_addr)
                 block_lens.append(page_size_bytes)
+                mem_kinds.append(mem_kind)
             else:
                 # K/V-first layout (FlashAttn / ROCm): split segments.
                 seg_stride = cache.stride(outer_dims[0]) * el
                 for idx in range(cache.shape[outer_dims[0]]):
                     addrs.append(base_addr + idx * seg_stride)
                     block_lens.append(seg_stride // self.num_blocks)
+                    mem_kinds.append(mem_kind)
 
+        num_host = sum(1 for kind in mem_kinds if kind == "host")
+        num_device = len(mem_kinds) - num_host
         logger.info(
-            "Registered KV caches: num_groups=%d, num_segments=%d, num_blocks=%d",
+            "Registered KV caches: num_groups=%d, num_segments=%d "
+            "(host=%d, device=%d), num_blocks=%d",
             len(self.token_dbs),
             len(addrs),
+            num_host,
+            num_device,
             self.num_blocks,
         )
+        if num_host and num_device:
+            logger.info(
+                "Mooncake will transfer mixed host/device KV (HiSparse): a "
+                "block's value spans %d host MLA segment(s) and %d device "
+                "indexer segment(s); each segment resolves to its registered "
+                "buffer's device in a single multi-buffer transfer.",
+                num_host,
+                num_device,
+            )
 
         for db in self.token_dbs:
             db.set_kv_caches_base_addr(addrs)
             db.set_block_len(block_lens)
+            db.set_segment_mem_kinds(list(mem_kinds))
 
         # Start transfer threads
         if self.kv_role in ["kv_producer", "kv_both"]:

@@ -1124,6 +1124,102 @@ class GPUModelRunner(
             self.async_output_copy_stream = stream
         return stream
 
+    def _hisparse_host_resident_layers(self) -> set[str]:
+        """Layer names whose KV tensors live in pinned host memory."""
+        attention_config = self.vllm_config.attention_config
+        if (
+            attention_config is None
+            or not attention_config.enable_hisparse
+        ):
+            return set()
+        layers = set()
+        for name, layer in self.compilation_config.static_forward_context.items():
+            impl = getattr(layer, "impl", None)
+            if getattr(impl, "hisparse_coordinator", None) is not None:
+                layers.add(name)
+        return layers
+
+    def _hisparse_invalidate_new_request_blocks(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> None:
+        """Drop HiSparse state for blocks assigned to incoming requests."""
+        attention_config = self.vllm_config.attention_config
+        if attention_config is None or not attention_config.enable_hisparse:
+            return
+
+        block_ids: list[int] = []
+        for new_req in scheduler_output.scheduled_new_reqs:
+            block_ids.extend(new_req.block_ids[0])
+        cached_reqs = scheduler_output.scheduled_cached_reqs
+        for i, req_id in enumerate(cached_reqs.req_ids):
+            if req_id in cached_reqs.resumed_req_ids:
+                new_block_ids = cached_reqs.new_block_ids[i]
+                if new_block_ids is not None:
+                    block_ids.extend(new_block_ids[0])
+        if not block_ids:
+            return
+
+        from vllm.v1.attention.backends.mla.hisparse import invalidate_blocks
+
+        invalidate_blocks(
+            self.compilation_config.static_forward_context,
+            block_ids,
+            self.kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size,
+        )
+
+    def _hisparse_reset_batch_rows(self, row_ids: list[int]) -> None:
+        """Reset hot-buffer state for persistent-batch rows being assigned."""
+        attention_config = self.vllm_config.attention_config
+        if attention_config is None or not attention_config.enable_hisparse:
+            return
+        if not row_ids:
+            return
+
+        from vllm.v1.attention.backends.mla.hisparse import reset_rows
+
+        reset_rows(self.compilation_config.static_forward_context, row_ids)
+
+    def _hisparse_set_num_real_reqs(self, num_reqs: int) -> None:
+        """Publish the real (unpadded) request count for the swap-in kernel.
+
+        The HiSparse swap-in kernel skips CUDA-graph padding rows by reading
+        this count from device memory, so it must be set before every (real or
+        dummy) forward — graph replays observe the per-step value.
+        """
+        attention_config = self.vllm_config.attention_config
+        if attention_config is None or not attention_config.enable_hisparse:
+            return
+
+        from vllm.v1.attention.backends.mla.hisparse import set_num_real_reqs
+
+        set_num_real_reqs(num_reqs)
+
+    def _hisparse_finished_recv_rows(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> list[int]:
+        """Persistent-batch rows admitted after async KV receive.
+
+        Connector-agnostic: it reads ``finished_recving_kv_req_ids``, which the
+        scheduler fills from any connector's ``finished_recving`` signal. This
+        covers NixlConnector direct-to-host RDMA and MooncakeStoreConnector
+        async store loads alike — both admit a request only after its host MLA
+        (and GPU indexer) KV is in place, so the hot rows must be reset before
+        the first decode reads the loaded host pool.
+        """
+        attention_config = self.vllm_config.attention_config
+        if attention_config is None or not attention_config.enable_hisparse:
+            return []
+        recv_ids = scheduler_output.finished_recving_kv_req_ids
+        if not recv_ids:
+            return []
+        rows = []
+        for req_id in recv_ids:
+            row = self.input_batch.req_id_to_index.get(req_id)
+            if row is not None:
+                rows.append(row)
+        return rows
+
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
         """Update the cached states and the persistent batch with the scheduler
         output.
@@ -1141,6 +1237,7 @@ class GPUModelRunner(
         self.late_interaction_runner.on_requests_finished(
             scheduler_output.finished_req_ids
         )
+        self._hisparse_invalidate_new_request_blocks(scheduler_output)
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
         # scheduled_req_ids overlap. This happens when a request is aborted and
@@ -1437,9 +1534,16 @@ class GPUModelRunner(
 
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
+        hisparse_new_rows: list[int] = []
         for request in reqs_to_add:
             self.input_batch.add_request(request)
+            req_index = self.input_batch.req_id_to_index.get(request.req_id)
+            if req_index is not None:
+                hisparse_new_rows.append(req_index)
             self.input_batch.update_req_spec_token_ids(request, scheduled_spec_tokens)
+        self._hisparse_reset_batch_rows(
+            hisparse_new_rows + self._hisparse_finished_recv_rows(scheduler_output)
+        )
 
         # Condense the batched states if there are gaps left by removed requests
         self.input_batch.condense()
@@ -4306,6 +4410,10 @@ class GPUModelRunner(
             self.model_config.is_encoder_decoder and num_encoder_reqs > 0
         )
 
+        # Publish the real request count so the HiSparse swap-in kernel skips
+        # CUDA-graph padding rows (no-op unless HiSparse is enabled).
+        self._hisparse_set_num_real_reqs(num_reqs)
+
         # Run the model.
         # Use persistent buffers for CUDA graphs.
         # When spec decode is enabled, defer connector finalization
@@ -5943,6 +6051,10 @@ class GPUModelRunner(
                 if num_tokens_across_dp is not None:
                     num_tokens_across_dp[:] = num_tokens_padded
 
+            # Match the real forward: only the dummy run's real rows are valid
+            # for the HiSparse swap-in kernel (the rest are graph padding).
+            self._hisparse_set_num_real_reqs(num_reqs)
+
             with (
                 self.maybe_randomize_inputs(input_ids, inputs_embeds),
                 set_forward_context(
@@ -7039,10 +7151,22 @@ class GPUModelRunner(
             dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
         """
+        host_resident_layers = self._hisparse_host_resident_layers()
+        host_bytes = 0
         kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
         packed_backing: torch.Tensor | None = None
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            if kv_cache_tensor.block_stride > 0:
+            if bool(host_resident_layers) and all(
+                name in host_resident_layers for name in kv_cache_tensor.shared_by
+            ):
+                tensor = torch.zeros(
+                    kv_cache_tensor.size,
+                    dtype=torch.int8,
+                    device="cpu",
+                    pin_memory=True,
+                )
+                host_bytes += kv_cache_tensor.size
+            elif kv_cache_tensor.block_stride > 0:
                 # Allocate once; all packed tensors alias the same backing.
                 if packed_backing is None:
                     packed_backing = torch.zeros(
@@ -7057,6 +7181,13 @@ class GPUModelRunner(
                 )
             for layer_name in kv_cache_tensor.shared_by:
                 kv_cache_raw_tensors[layer_name] = tensor
+        if host_bytes:
+            logger.info(
+                "HiSparse host-resident KV: allocated %.1f GiB pinned host "
+                "memory for %d MLA layers.",
+                host_bytes / 2**30,
+                len(host_resident_layers),
+            )
 
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:

@@ -1315,6 +1315,47 @@ def _get_kv_cache_config_packed(
 _get_kv_cache_config_deepseek_v4 = _get_kv_cache_config_packed
 
 
+def _is_hisparse_host_layer(layer_name: str) -> bool:
+    """Whether a layer's KV tensor moves to pinned host memory."""
+    return ".indexer" not in layer_name
+
+
+def _hisparse_host_pool_bytes(
+    vllm_config: VllmConfig, available_memory: int
+) -> int | None:
+    """Per-rank pinned host budget for HiSparse host-resident KV.
+
+    Two ways to size it (``host_pool_gib`` takes precedence):
+      - ``host_pool_gib``: explicit per-rank GiB. Recommended -- sizes the host
+        pool from host RAM directly, independent of GPU memory.
+      - ``host_to_device_ratio``: multiplier on the GPU KV budget
+        (``available_memory``), matching SGLang's "host = device_pool x ratio"
+        semantics (SGLang: ~5 for 1TB host, ~10 for 2TB).
+    The two knobs are parsed and validated by ``HiSparseConfig.from_vllm_config``
+    -- the single source of truth shared with the per-layer coordinator -- so
+    sizing here cannot drift from the decode path.
+
+    NOTE: the resulting block count is still capped by the GPU indexer budget in
+    ``get_kv_cache_config_from_groups`` (a single shared ``num_blocks``), so for
+    large host pools prefer ``host_pool_gib``. SGLang avoids this cap with
+    separate host/device paged allocators + an index map; fully decoupling the
+    fork's host/device block counts is the remaining alignment gap.
+    """
+    from vllm.v1.attention.backends.mla.hisparse import HiSparseConfig
+
+    attention_config = vllm_config.attention_config
+    if attention_config is None or not attention_config.enable_hisparse:
+        return None
+    config = HiSparseConfig.from_vllm_config(
+        vllm_config, vllm_config.model_config.hf_config.index_topk
+    )
+    if config is None:
+        return None
+    if config.host_pool_gib is not None:
+        return int(config.host_pool_gib * 2**30)
+    return config.host_to_device_ratio * available_memory
+
+
 def get_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
@@ -1347,10 +1388,48 @@ def get_kv_cache_config_from_groups(
         # Special case: all layers have the same type of KV cache but with
         # different hidden sizes. Allocate different amount of memory for each
         # layer based on its hidden size.
-        num_blocks = (
-            available_memory // kv_cache_groups[0].kv_cache_spec.page_size_bytes
+        hisparse_host_budget = _hisparse_host_pool_bytes(
+            vllm_config, available_memory
         )
-        num_blocks = may_override_num_blocks(vllm_config, num_blocks)
+        if hisparse_host_budget is not None:
+            specs = kv_cache_groups[0].kv_cache_spec.kv_cache_specs
+            host_page = sum(
+                spec.page_size_bytes
+                for name, spec in specs.items()
+                if _is_hisparse_host_layer(name)
+            )
+            gpu_page = sum(
+                spec.page_size_bytes
+                for name, spec in specs.items()
+                if not _is_hisparse_host_layer(name)
+            )
+            assert host_page > 0, (
+                "HiSparse host-resident mode requires MLA KV layers."
+            )
+            num_blocks = hisparse_host_budget // host_page
+            if gpu_page > 0:
+                num_blocks = min(num_blocks, available_memory // gpu_page)
+            num_blocks = may_override_num_blocks(vllm_config, num_blocks)
+            if num_blocks <= 0:
+                raise ValueError(
+                    "HiSparse host-resident KV has no allocatable blocks. "
+                    f"host_budget={hisparse_host_budget / 2**30:.2f} GiB, "
+                    f"host_page={host_page / 2**20:.2f} MiB, "
+                    f"gpu_page={gpu_page / 2**20:.2f} MiB."
+                )
+            logger.info(
+                "HiSparse host-resident KV: %.1f GiB pinned host per rank for "
+                "MLA layers, %.1f GiB GPU for indexer layers (%d logical "
+                "blocks).",
+                num_blocks * host_page / 2**30,
+                num_blocks * gpu_page / 2**30,
+                num_blocks,
+            )
+        else:
+            num_blocks = (
+                available_memory // kv_cache_groups[0].kv_cache_spec.page_size_bytes
+            )
+            num_blocks = may_override_num_blocks(vllm_config, num_blocks)
         per_layer_specs = kv_cache_groups[0].kv_cache_spec.kv_cache_specs
         kv_cache_tensors = [
             KVCacheTensor(

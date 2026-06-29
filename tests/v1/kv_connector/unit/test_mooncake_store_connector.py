@@ -90,6 +90,50 @@ def test_scheduler_role_initializes_store_scheduler_only():
     assert connector.connector_worker is None
 
 
+def _make_hisparse_vllm_config():
+    """A MooncakeStoreConnector config with HiSparse host-resident MLA enabled.
+
+    ``kv_role='kv_both'`` is a KV consumer, satisfying the HiSparse PD-decode
+    requirement. ``enable_hisparse`` is set after construction so VllmConfig's
+    one-time HiSparse validation (which runs in __post_init__) does not need a
+    fully-wired DSA model config here.
+    """
+    cfg = create_vllm_config(
+        kv_connector="MooncakeStoreConnector",
+        kv_role="kv_both",
+    )
+    cfg.attention_config.enable_hisparse = True
+    cfg.attention_config.hisparse_config = {
+        "top_k": 64,
+        "device_buffer_size": 128,
+        "host_to_device_ratio": 4,
+    }
+    return cfg
+
+
+def test_hisparse_mooncake_connector_construction_passes_config_to_worker():
+    """HiSparse + MooncakeStoreConnector constructs the worker with the
+    HiSparse-enabled config, from which the worker derives its host/device
+    segment handling."""
+    vllm_config = _make_hisparse_vllm_config()
+    kv_cache_config = _make_kv_cache_config()
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "connector.MooncakeStoreWorker"
+        ) as mock_worker_cls,
+    ):
+        connector = mooncake_store_connector.MooncakeStoreConnector(
+            vllm_config, KVConnectorRole.WORKER, kv_cache_config
+        )
+
+    mock_worker_cls.assert_called_once_with(vllm_config, kv_cache_config)
+    assert connector.connector_worker is mock_worker_cls.return_value
+    assert vllm_config.attention_config.enable_hisparse is True
+
+
 def test_worker_methods_delegate_to_store_worker():
     vllm_config = _make_vllm_config()
     kv_cache_config = _make_kv_cache_config()

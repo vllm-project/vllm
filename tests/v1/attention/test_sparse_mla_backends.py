@@ -20,7 +20,7 @@ from tests.v1.attention.utils import (
     create_vllm_config,
 )
 from vllm import _custom_ops as ops
-from vllm.config import set_current_vllm_config
+from vllm.config import KVTransferConfig, set_current_vllm_config
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.platforms import current_platform
 
@@ -41,6 +41,14 @@ from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     FlashMLASparseBackend,
     triton_convert_req_index_to_global_index,
+)
+from vllm.v1.attention.backends.mla.hisparse import (
+    HiSparseConfig,
+    HiSparseCoordinator,
+    _has_hisparse_ops,
+    create_hisparse_coordinator,
+    is_hisparse_decode_batch,
+    validate_hisparse_decode_batch,
 )
 from vllm.v1.attention.backends.mla.indexer import split_indexer_prefill_chunks
 from vllm.v1.attention.backends.utils import split_prefill_chunks
@@ -855,3 +863,586 @@ def test_triton_convert_returns_valid_counts():
     )
     assert isinstance(result_only, torch.Tensor)
     torch.testing.assert_close(result_only, result, rtol=0, atol=0)
+
+
+def _make_hisparse_vllm_config(index_topk: int = 128):
+    return SimpleNamespace(
+        attention_config=SimpleNamespace(
+            enable_hisparse=True,
+            hisparse_config={
+                "top_k": index_topk,
+                "device_buffer_size": 256,
+                "host_to_device_ratio": 2,
+            },
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="P2pNcclConnector",
+            kv_role="kv_consumer",
+        ),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                architectures=["GlmMoeDsaForCausalLM"],
+                index_topk=index_topk,
+            )
+        ),
+        scheduler_config=SimpleNamespace(max_num_seqs=256),
+        speculative_config=None,
+    )
+
+
+def test_hisparse_config_validation():
+    vllm_config = _make_hisparse_vllm_config()
+
+    cfg = HiSparseConfig.from_vllm_config(vllm_config, model_top_k=128)
+
+    assert cfg == HiSparseConfig(
+        top_k=128,
+        device_buffer_size=256,
+        host_to_device_ratio=2,
+        host_pool_gib=None,
+    )
+    coordinator = create_hisparse_coordinator(
+        vllm_config,
+        model_top_k=128,
+        row_width=64,
+        kv_dtype=torch.float32,
+        device=DEVICE_TYPE,
+    )
+    assert coordinator is not None
+    # One reserved newest slot, padded so any kernel page size (<= 128) works.
+    assert coordinator.region_stride % 64 == 0
+    assert coordinator.region_stride > cfg.device_buffer_size
+
+
+def test_hisparse_host_pool_config_option():
+    vllm_config = _make_hisparse_vllm_config()
+    vllm_config.attention_config.hisparse_config = {
+        "top_k": 128,
+        "device_buffer_size": 256,
+        "host_to_device_ratio": 2,
+        "host_pool_gib": 3.5,
+    }
+
+    cfg = HiSparseConfig.from_vllm_config(vllm_config, model_top_k=128)
+
+    assert cfg == HiSparseConfig(
+        top_k=128,
+        device_buffer_size=256,
+        host_to_device_ratio=2,
+        host_pool_gib=3.5,
+    )
+
+
+def test_hisparse_disabled_without_flag():
+    vllm_config = _make_hisparse_vllm_config()
+    vllm_config.attention_config.enable_hisparse = False
+    vllm_config.attention_config.hisparse_config = {
+        "top_k": 128,
+        "device_buffer_size": 256,
+        "host_to_device_ratio": 2,
+    }
+    # hisparse_config alone must not enable HiSparse.
+    assert HiSparseConfig.from_vllm_config(vllm_config, model_top_k=128) is None
+
+
+def test_hisparse_works_without_connector():
+    # Option A: HiSparse is no longer PD-only. A unified / no-connector instance
+    # still builds the coordinator (decode uses the hot buffer; prefill gathers
+    # KV from the host pool). The PD-decode consumer path stays the fast default.
+    vllm_config = _make_hisparse_vllm_config()
+    vllm_config.kv_transfer_config = None
+
+    coordinator = create_hisparse_coordinator(
+        vllm_config,
+        model_top_k=128,
+        row_width=64,
+        kv_dtype=torch.float32,
+        device=DEVICE_TYPE,
+    )
+
+    assert coordinator is not None
+
+
+def test_hisparse_decode_batch_validation():
+    assert is_hisparse_decode_batch(
+        max_query_len=1,
+        num_reqs=8,
+        num_actual_tokens=8,
+    )
+
+    with pytest.raises(NotImplementedError, match="pure decode"):
+        validate_hisparse_decode_batch(
+            max_query_len=2,
+            num_reqs=8,
+            num_actual_tokens=16,
+        )
+
+    with pytest.raises(NotImplementedError, match="pure decode"):
+        validate_hisparse_decode_batch(
+            max_query_len=1,
+            num_reqs=8,
+            num_actual_tokens=9,
+        )
+
+
+def _make_hisparse_coordinator(
+    *,
+    top_k: int = 4,
+    device_buffer_size: int = 4,
+    max_num_reqs: int = 2,
+    row_width: int = 8,
+) -> HiSparseCoordinator:
+    return HiSparseCoordinator(
+        config=HiSparseConfig(
+            top_k=top_k,
+            device_buffer_size=device_buffer_size,
+            host_to_device_ratio=2,
+        ),
+        max_num_reqs=max_num_reqs,
+        row_width=row_width,
+        kv_dtype=torch.float32,
+        device=DEVICE_TYPE,
+    )
+
+
+def _mirror_block_slots(coordinator, kv_cache, block_ids, block_size):
+    device = kv_cache.device
+    slots = torch.cat(
+        [torch.arange(block_size) + b * block_size for b in block_ids]
+    ).to(device)
+    coordinator.mirror_slots(kv_cache, slots)
+
+
+def _hisparse_state(coordinator: HiSparseCoordinator):
+    return (
+        coordinator.device_global_indices.cpu().clone(),
+        coordinator.lru_slots.cpu().clone(),
+    )
+
+
+def test_hisparse_reset_hot_rows():
+    coordinator = _make_hisparse_coordinator(max_num_reqs=3)
+    coordinator.device_global_indices.fill_(7)
+    coordinator.lru_slots.fill_(2)
+
+    coordinator.reset_hot_rows(torch.tensor([1], device=coordinator.device))
+
+    assert torch.all(coordinator.device_global_indices[0] == 7)
+    assert torch.all(coordinator.device_global_indices[1] == -1)
+    assert torch.all(coordinator.device_global_indices[2] == 7)
+    torch.testing.assert_close(coordinator.lru_slots[1], coordinator._lru_init)
+
+
+def test_hisparse_swap_in_semantics():
+    """Hit/miss/LRU/newest semantics of the swap-in path.
+
+    Runs against whichever path is active (CUDA kernels when compiled, Python
+    reference otherwise); both must implement identical semantics.
+    """
+    device = torch.device(DEVICE_TYPE)
+    block_size = 4
+    row_width = 8
+    num_blocks = 8
+
+    kv_cache = torch.arange(
+        num_blocks * block_size * row_width, dtype=torch.float32, device=device
+    ).view(num_blocks, block_size, row_width)
+    flat_kv = kv_cache.reshape(-1, row_width)
+
+    coordinator = _make_hisparse_coordinator()
+    buf = coordinator.config.device_buffer_size
+    stride = coordinator.region_stride
+
+    # One request at row 0 with 3 blocks; sequence length 9 so position 8
+    # (global slot block_table[0,2]*4 + 0 = 16) is the newest token.
+    block_table = torch.tensor([[2, 0, 4]], dtype=torch.int32, device=device)
+    req_ids = torch.tensor([0], dtype=torch.int32, device=device)
+    newest_global = 4 * block_size + 0  # slot 16
+    slot_mapping = torch.tensor([newest_global], dtype=torch.int64, device=device)
+
+    # Mirror the request's KV into the host cache (as PD-load would).
+    _mirror_block_slots(coordinator, kv_cache, [2, 0, 4], block_size)
+    # Place the newest row into the reserved hot slot (as write_newest_rows
+    # would) and mirror it.
+    newest_hot_slot = 0 * stride + buf
+    coordinator.hot_cache[newest_hot_slot] = flat_kv[newest_global]
+
+    def swap(positions: list[int]) -> torch.Tensor:
+        topk = torch.full((1, 4), -1, dtype=torch.int32, device=device)
+        topk[0, : len(positions)] = torch.tensor(
+            positions, dtype=torch.int32, device=device
+        )
+        hot_cache, hot_indices = coordinator.swap_in(
+            kv_cache=kv_cache,
+            req_id_per_token=req_ids,
+            block_table=block_table,
+            topk_indices=topk,
+            block_size=block_size,
+            slot_mapping=slot_mapping,
+        )
+        assert hot_cache.shape[1:] == (block_size, row_width)
+        return hot_indices
+
+    # Step 1: positions 0, 5, 8 -> global slots 8, 1, 16(newest).
+    hot = swap([0, 5, 8])
+    hot_cpu = hot.cpu().tolist()[0]
+    assert hot_cpu[3] == -1, "padded -1 position must stay invalid"
+    assert hot_cpu[2] == newest_hot_slot, "newest position must map to its slot"
+    assert all(0 <= h < buf for h in hot_cpu[:2]), "misses fill LRU slots"
+    flat_hot = coordinator.hot_cache
+    torch.testing.assert_close(flat_hot[hot_cpu[0]], flat_kv[8])
+    torch.testing.assert_close(flat_hot[hot_cpu[1]], flat_kv[1])
+
+    dgi, lru = _hisparse_state(coordinator)
+    assert set(dgi[0].tolist()) == {8, 1, -1}
+
+    # Step 2: same positions again -> hits, no state change.
+    hot2 = swap([0, 5, 8])
+    assert hot2.cpu().tolist()[0][:3] == hot_cpu[:3]
+    dgi2, lru2 = _hisparse_state(coordinator)
+    torch.testing.assert_close(dgi2, dgi)
+    torch.testing.assert_close(lru2, lru)
+
+    # Step 3: two new positions 1, 2 (slots 9, 10) -> evict the two
+    # least-recently-used slots; hits 8/1 must survive.
+    hot3 = swap([1, 2, 0, 5])
+    dgi3, _ = _hisparse_state(coordinator)
+    assert set(dgi3[0].tolist()) == {8, 1, 9, 10}
+    hot3_cpu = hot3.cpu().tolist()[0]
+    torch.testing.assert_close(flat_hot[hot3_cpu[0]], flat_kv[9])
+    torch.testing.assert_close(flat_hot[hot3_cpu[1]], flat_kv[10])
+    assert hot3_cpu[2] == hot_cpu[0], "hit keeps its slot"
+    assert hot3_cpu[3] == hot_cpu[1], "hit keeps its slot"
+
+    # Step 4: invalidation. Rewriting global slot 8 must turn it into a miss
+    # that re-reads the host mirror.
+    flat_kv[8] += 1000.0
+    coordinator.mirror_slots(kv_cache, torch.tensor([8], device=device))
+    dgi4, _ = _hisparse_state(coordinator)
+    assert 8 not in dgi4[0].tolist()
+    hot4 = swap([0])
+    torch.testing.assert_close(
+        flat_hot[hot4.cpu().tolist()[0][0]], flat_kv[8]
+    )
+
+
+def test_hisparse_write_newest_rows_invalidates_recycled_slots():
+    device = torch.device(DEVICE_TYPE)
+    block_size = 4
+    row_width = 8
+    kv_cache = torch.zeros((4, block_size, row_width), device=device)
+    coordinator = _make_hisparse_coordinator()
+    coordinator.bind_source_cache(kv_cache)
+
+    # Pretend slot 5 is cached in row 0's hot buffer from an old request.
+    coordinator.device_global_indices[0, 2] = 5
+
+    kv_c = torch.randn(1, row_width - 2, device=device)
+    k_pe = torch.randn(1, 1, 2, device=device)
+    slot_mapping = torch.tensor([5], dtype=torch.int64, device=device)
+    coordinator.write_newest_rows(
+        kv_c, k_pe, kv_cache, slot_mapping, "auto", torch.tensor(1.0, device=device)
+    )
+
+    assert 5 not in coordinator.device_global_indices.cpu().tolist()[0]
+    # Newest row landed in the reserved hot slot and the host mirror.
+    newest_slot = coordinator.config.device_buffer_size
+    expected = torch.cat([kv_c[0], k_pe[0, 0]])
+    torch.testing.assert_close(
+        coordinator.hot_cache[newest_slot].cpu(), expected.cpu()
+    )
+    assert coordinator._host_cache_valid[5]
+    torch.testing.assert_close(coordinator._host_cache[5], expected.cpu())
+    # The global cache row stays complete for mixed batches / preemption.
+    torch.testing.assert_close(
+        kv_cache.reshape(-1, row_width)[5].cpu(), expected.cpu()
+    )
+
+
+def test_hisparse_mirror_slots():
+    device = torch.device(DEVICE_TYPE)
+    block_size = 4
+    row_width = 8
+    kv_cache = torch.arange(
+        8 * block_size * row_width, dtype=torch.float32, device=device
+    ).view(8, block_size, row_width)
+    coordinator = _make_hisparse_coordinator()
+
+    _mirror_block_slots(coordinator, kv_cache, [2, 5], block_size)
+
+    assert coordinator._host_cache is not None
+    assert coordinator._host_cache_valid is not None
+    expected_slots = torch.cat(
+        [
+            torch.arange(2 * block_size, 3 * block_size),
+            torch.arange(5 * block_size, 6 * block_size),
+        ]
+    )
+    assert torch.all(coordinator._host_cache_valid[expected_slots])
+    assert not torch.any(
+        coordinator._host_cache_valid[torch.arange(0, 2 * block_size)]
+    )
+    flat = kv_cache.reshape(-1, row_width)
+    torch.testing.assert_close(
+        coordinator._host_cache[expected_slots],
+        flat[expected_slots.to(device=device)].cpu(),
+        rtol=0,
+        atol=0,
+    )
+
+
+@pytest.mark.skipif(
+    not _has_hisparse_ops(),
+    reason="HiSparse CUDA ops not compiled (or stale schema)",
+)
+def test_hisparse_kernel_matches_fallback():
+    """Fuzz the CUDA swap-in kernel against the Python reference."""
+    device = torch.device(DEVICE_TYPE)
+    torch.manual_seed(0)
+    block_size = 64
+    row_width = 64
+    num_blocks = 64
+    top_k = 128
+    buf = 256
+    num_reqs = 4
+
+    kv_cache = torch.randn(
+        (num_blocks, block_size, row_width), dtype=torch.float32, device=device
+    )
+    flat_kv = kv_cache.reshape(-1, row_width)
+
+    def make(use_cuda: bool) -> HiSparseCoordinator:
+        c = _make_hisparse_coordinator(
+            top_k=top_k,
+            device_buffer_size=buf,
+            max_num_reqs=num_reqs,
+            row_width=row_width,
+        )
+        c._use_cuda_ops = use_cuda
+        _mirror_block_slots(c, kv_cache, list(range(num_blocks)), block_size)
+        return c
+
+    kernel_c = make(True)
+    fallback_c = make(False)
+    if not kernel_c._kernel_path():
+        pytest.skip("pinned host memory unavailable")
+
+    blocks_per_req = num_blocks // num_reqs
+    block_table = (
+        torch.arange(num_blocks, dtype=torch.int32, device=device)
+        .view(num_reqs, blocks_per_req)
+    )
+    req_ids = torch.arange(num_reqs, dtype=torch.int32, device=device)
+    seq_len = blocks_per_req * block_size
+    newest_pos = seq_len - 1
+    slot_mapping = (
+        block_table[:, -1].to(torch.int64) * block_size + (block_size - 1)
+    )
+
+    for step in range(8):
+        topk = torch.stack(
+            [
+                torch.randperm(seq_len, device=device)[:top_k].to(torch.int32)
+                for _ in range(num_reqs)
+            ]
+        )
+        # Sprinkle in padding and the newest position.
+        topk[:, -1] = -1
+        topk[:, 0] = newest_pos
+
+        results = []
+        for c in (kernel_c, fallback_c):
+            hot_cache, hot_indices = c.swap_in(
+                kv_cache=kv_cache,
+                req_id_per_token=req_ids,
+                block_table=block_table,
+                topk_indices=topk.clone(),
+                block_size=block_size,
+                slot_mapping=slot_mapping,
+            )
+            torch.cuda.synchronize()
+            results.append((hot_cache, hot_indices))
+
+        (hot_k, idx_k), (_, idx_f) = results
+        torch.testing.assert_close(idx_k, idx_f, rtol=0, atol=0)
+        torch.testing.assert_close(
+            kernel_c.device_global_indices, fallback_c.device_global_indices,
+            rtol=0, atol=0,
+        )
+        torch.testing.assert_close(
+            kernel_c.lru_slots, fallback_c.lru_slots, rtol=0, atol=0
+        )
+
+        # Data correctness: every valid hot index holds the right KV row.
+        flat_hot = hot_k.reshape(-1, row_width)
+        valid = idx_k >= 0
+        global_ref = _triton_convert_reference_impl(
+            req_ids, block_table, topk, block_size, top_k
+        )
+        newest_mask = topk == newest_pos
+        gathered = flat_hot[idx_k[valid].to(torch.long)]
+        expected = flat_kv[global_ref[valid].to(torch.long)]
+        # Newest rows are served from the reserved slot, which this test
+        # does not populate; exclude them from the data check.
+        data_mask = ~newest_mask[valid]
+        torch.testing.assert_close(gathered[data_mask], expected[data_mask])
+
+
+@pytest.mark.skipif(
+    not _has_hisparse_ops(),
+    reason="HiSparse host-resident mode requires compiled CUDA ops",
+)
+def test_hisparse_host_resident_pool():
+    """Host-resident mode: the pinned KV pool is the only full-size store."""
+    device = torch.device(DEVICE_TYPE)
+    block_size = 4
+    row_width = 8
+    num_blocks = 8
+
+    kv_pool = torch.arange(
+        num_blocks * block_size * row_width, dtype=torch.float32
+    ).view(num_blocks, block_size, row_width).pin_memory()
+    flat_pool = kv_pool.reshape(-1, row_width)
+
+    coordinator = _make_hisparse_coordinator()
+    buf = coordinator.config.device_buffer_size
+    stride = coordinator.region_stride
+
+    coordinator.bind_source_cache(kv_pool)
+    assert coordinator.source_is_host
+    assert coordinator._host_cache.data_ptr() == flat_pool.data_ptr()
+
+    block_table = torch.tensor([[2, 0, 4]], dtype=torch.int32, device=device)
+    req_ids = torch.tensor([0], dtype=torch.int32, device=device)
+    newest_global = 4 * block_size + 0  # position 8 -> slot 16
+    slot_mapping = torch.tensor([newest_global], dtype=torch.int64, device=device)
+
+    # Decode-step write: newest row lands in the reserved hot slot AND in the
+    # host pool at its global slot.
+    kv_c = torch.randn(1, row_width - 2, device=device)
+    k_pe = torch.randn(1, 1, 2, device=device)
+    coordinator.write_newest_rows(
+        kv_c, k_pe, kv_pool, slot_mapping, "auto",
+        torch.tensor(1.0, device=device),
+    )
+    torch.cuda.synchronize()
+    expected_row = torch.cat([kv_c[0], k_pe[0, 0]]).cpu()
+    torch.testing.assert_close(flat_pool[newest_global], expected_row)
+    torch.testing.assert_close(
+        coordinator.hot_cache[buf].cpu(), expected_row
+    )
+
+    # Swap-in: positions 0 and 5 (slots 8, 1) miss -> copied from the host
+    # pool; position 8 is the newest -> reserved slot, no copy.
+    topk = torch.tensor([[0, 5, 8, -1]], dtype=torch.int32, device=device)
+    hot_cache, hot_indices = coordinator.swap_in(
+        kv_cache=kv_pool,
+        req_id_per_token=req_ids,
+        block_table=block_table,
+        topk_indices=topk,
+        block_size=block_size,
+        slot_mapping=slot_mapping,
+    )
+    torch.cuda.synchronize()
+    hot_cpu = hot_indices.cpu().tolist()[0]
+    assert hot_cpu[2] == 0 * stride + buf
+    assert hot_cpu[3] == -1
+    flat_hot = coordinator.hot_cache
+    torch.testing.assert_close(flat_hot[hot_cpu[0]].cpu(), flat_pool[8])
+    torch.testing.assert_close(flat_hot[hot_cpu[1]].cpu(), flat_pool[1])
+
+    # Recycled-slot invalidation: rewriting global slot 8 through
+    # write_newest_rows must drop the stale hot copy and re-miss from the
+    # updated pool.
+    kv_c2 = torch.randn(1, row_width - 2, device=device)
+    k_pe2 = torch.randn(1, 1, 2, device=device)
+    coordinator.write_newest_rows(
+        kv_c2, k_pe2, kv_pool,
+        torch.tensor([8], dtype=torch.int64, device=device),
+        "auto", torch.tensor(1.0, device=device),
+    )
+    torch.cuda.synchronize()
+    assert 8 not in coordinator.device_global_indices.cpu().tolist()[0]
+    hot_cache, hot_indices = coordinator.swap_in(
+        kv_cache=kv_pool,
+        req_id_per_token=req_ids,
+        block_table=block_table,
+        topk_indices=torch.tensor([[0, -1, -1, -1]], dtype=torch.int32,
+                                  device=device),
+        block_size=block_size,
+        slot_mapping=slot_mapping,
+    )
+    torch.cuda.synchronize()
+    idx = hot_indices.cpu().tolist()[0][0]
+    torch.testing.assert_close(
+        flat_hot[idx].cpu(), torch.cat([kv_c2[0], k_pe2[0, 0]]).cpu()
+    )
+
+
+@pytest.mark.skipif(
+    not _has_hisparse_ops(),
+    reason="HiSparse host-resident mode requires compiled CUDA ops",
+)
+def test_hisparse_host_resident_prefill_write_rows():
+    device = torch.device(DEVICE_TYPE)
+    block_size = 4
+    row_width = 8
+    num_blocks = 8
+    kv_pool = torch.zeros(
+        num_blocks, block_size, row_width, dtype=torch.float32
+    ).pin_memory()
+    flat_pool = kv_pool.reshape(-1, row_width)
+    coordinator = _make_hisparse_coordinator(row_width=row_width)
+
+    slots = torch.tensor([3, 7, -1], dtype=torch.int64, device=device)
+    kv_c = torch.randn(3, row_width - 2, device=device)
+    k_pe = torch.randn(3, 1, 2, device=device)
+
+    coordinator.write_rows_to_host(
+        kv_c,
+        k_pe,
+        kv_pool,
+        slots,
+        "auto",
+        torch.tensor(1.0, device=device),
+    )
+    coordinator.wait_for_pending_backup()
+    torch.cuda.synchronize()
+
+    expected = torch.cat([kv_c[:2], k_pe[:2, 0]], dim=-1).cpu()
+    torch.testing.assert_close(flat_pool[torch.tensor([3, 7])], expected)
+
+
+@pytest.mark.skipif(
+    not _has_hisparse_ops(),
+    reason="HiSparse host-resident mode requires compiled CUDA ops",
+)
+def test_hisparse_host_resident_prefill_write_rows_with_padding():
+    device = torch.device(DEVICE_TYPE)
+    block_size = 4
+    row_width = 8
+    kv_pool = torch.zeros(
+        8, block_size, row_width, dtype=torch.float32
+    ).pin_memory()
+    flat_pool = kv_pool.reshape(-1, row_width)
+    coordinator = _make_hisparse_coordinator(row_width=row_width)
+
+    # CUDA graph padding can make the KV tensors longer than slot_mapping.
+    slots = torch.tensor([3, 7, -1], dtype=torch.int64, device=device)
+    kv_c = torch.randn(8, row_width - 2, device=device)
+    k_pe = torch.randn(8, 1, 2, device=device)
+
+    coordinator.write_rows_to_host(
+        kv_c,
+        k_pe,
+        kv_pool,
+        slots,
+        "auto",
+        torch.tensor(1.0, device=device),
+    )
+    coordinator.wait_for_pending_backup()
+    torch.cuda.synchronize()
+
+    expected = torch.cat([kv_c[:2], k_pe[:2, 0]], dim=-1).cpu()
+    torch.testing.assert_close(flat_pool[torch.tensor([3, 7])], expected)
+    torch.testing.assert_close(flat_pool[8], torch.zeros(row_width))

@@ -217,6 +217,10 @@ class SchedulerOutput:
     # Request IDs that are preempted in this step.
     # Only used for v2 model runner.
     preempted_req_ids: set[str] | None = None
+    # Request IDs whose asynchronous KV receive completed before this schedule
+    # step. Model runners can use this as an admission signal for cache-state
+    # that is not represented directly in the block table.
+    finished_recving_kv_req_ids: set[str] | None = None
 
     # Whether any of the scheduled requests use structured output.
     # Set only in async scheduling case.
