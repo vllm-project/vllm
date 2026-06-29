@@ -51,7 +51,7 @@ def _gelu_and_mul(
 # Uses static methods or standalone functions to avoid instantiating CustomOp
 # classes, which would call get_current_vllm_config() before config is set.
 _CPU_MOE_ACT_FN: dict[MoEActivation, Callable[[torch.Tensor], torch.Tensor]] = {
-    MoEActivation.SILU: lambda x: SiluAndMul(compile_native=False).forward_native(x),
+    MoEActivation.SILU: SiluAndMul.forward_native,
     MoEActivation.SWIGLUOAI: _swigluoai_forward_native,
     MoEActivation.GELU: _gelu_and_mul,
     MoEActivation.GELU_TANH: (
