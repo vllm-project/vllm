@@ -1067,6 +1067,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         slot_mappings = self.block_tables.get_dummy_slot_mappings(
             input_batch.num_tokens
         )
+        if self.pcp_manager is not None:
+            slot_mappings = self.pcp_manager.dummy_cache_slot_mappings(slot_mappings)
         return block_tables, slot_mappings
 
     def sample(
@@ -1229,7 +1231,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert slot_mappings is not None
             cache_slot_mappings = (
                 slot_mappings
-                if self.pcp_manager is None or dummy_run
+                if self.pcp_manager is None
                 else self.pcp_manager.cache_slot_mappings(slot_mappings)
             )
             slot_mappings_by_layer = build_slot_mappings_by_layer(

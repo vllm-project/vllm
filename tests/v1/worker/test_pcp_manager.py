@@ -408,6 +408,18 @@ def test_cache_slot_mapping_is_computed_for_gathered_layout() -> None:
     )
 
 
+def test_dummy_cache_slot_mapping_matches_pcp_gathered_tokens() -> None:
+    manager = _manager(rank=0, size=2)
+    local_slot_mapping = torch.full((1, 3), -1, dtype=torch.int64)
+
+    cache_slot_mapping = manager.dummy_cache_slot_mappings(local_slot_mapping)
+
+    torch.testing.assert_close(
+        cache_slot_mapping,
+        torch.full((1, 6), -1, dtype=torch.int64),
+    )
+
+
 def test_padded_allgather_compacts_uneven_rank_tokens(monkeypatch) -> None:
     gathered_payloads: list[tuple[torch.Tensor, ...]] = []
     _patch_fake_pcp_group(monkeypatch, gathered_payloads)

@@ -694,6 +694,23 @@ class PCPManager:
             return slot_mappings
         return self._cache_slot_mappings
 
+    def dummy_cache_slot_mappings(
+        self,
+        slot_mappings: torch.Tensor,
+    ) -> torch.Tensor:
+        full_num_tokens = slot_mappings.shape[1] * self.pcp_world_size
+        if full_num_tokens == slot_mappings.shape[1]:
+            return slot_mappings
+
+        cache_slot_mappings = torch.empty(
+            slot_mappings.shape[0],
+            full_num_tokens,
+            dtype=slot_mappings.dtype,
+            device=slot_mappings.device,
+        )
+        cache_slot_mappings.fill_(PAD_SLOT_ID)
+        return cache_slot_mappings
+
     def restore_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if self._hidden_restore_idx is None or self._per_rank_num_tokens is None:
             return hidden_states
