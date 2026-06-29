@@ -1337,7 +1337,7 @@ word2number==1.1
     # via lm-eval
 wrapt==2.1.2
     # via smart-open
-xgrammar==0.2.1
+xgrammar==0.2.3
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
