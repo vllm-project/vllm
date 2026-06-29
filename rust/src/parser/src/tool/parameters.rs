@@ -166,7 +166,13 @@ impl JsonParamType {
 
         // Typically, these types are already handled by checking the "type" field, but
         // we can also infer them from their characteristic fields if "type" is missing.
-        if schema.contains_key("enum") {
+        if let Some(values) = schema.get("enum").and_then(Value::as_array) {
+            // Enum values are treated as strings, except that a `null` member
+            // makes the parameter nullable (mirrors Python's enum type
+            // inference), so a literal "null" coerces to JSON null.
+            if values.iter().any(Value::is_null) {
+                return Some(Self::one_of(vec![Self::String, Self::Null]));
+            }
             return Some(Self::String);
         }
         if schema.contains_key("items") {
@@ -706,6 +712,25 @@ mod tests {
         // Non-string and schema-less params are unchanged: "null" -> null.
         assert_eq!(params.convert("count", text("null")), json!(null));
         assert_eq!(params.convert("anything", text("null")), json!(null));
+    }
+
+    #[test]
+    fn nullable_enum_param_coerces_literal_null() {
+        // An enum that includes `null` admits a null value, so a literal "null"
+        // must coerce to JSON null (matching Python's `extract_types_from_schema`,
+        // which infers `null` from the enum values), while a non-null enum keeps
+        // "null" as a string.
+        let params = ToolSchema::from_schema(&json!({
+            "type": "object",
+            "properties": {
+                "mode": { "enum": [null, "auto"] },
+                "color": { "enum": ["red", "green"] }
+            }
+        }));
+
+        assert_eq!(params.convert("mode", text("null")), json!(null));
+        assert_eq!(params.convert("mode", text("auto")), json!("auto"));
+        assert_eq!(params.convert("color", text("null")), json!("null"));
     }
 
     #[test]
