@@ -192,7 +192,9 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        return True
+        # B12xMoEWrapper does not yet support expert parallelism: its local
+        # expert count must equal the global expert count.
+        return not moe_parallel_config.use_ep
 
     def supports_expert_map(self) -> bool:
         return False
@@ -275,17 +277,19 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         )
 
         self._ensure_wrapper()
+        wrapper = self._wrapper
+        assert wrapper is not None
 
-        self._wrapper.run(
+        wrapper_output = wrapper.run(
             x=hidden_states,
             w1_weight=w1,
             w1_weight_sf=self.w1_sf_mma,
             w1_alpha=self.g1_alphas,
-            fc2_input_scale=self.a2_gscale,
+            fc2_input_scale=self._fc2_input_scale,
             w2_weight=w2,
             w2_weight_sf=self.w2_sf_mma,
             w2_alpha=self.g2_alphas,
             token_selected_experts=topk_ids.to(torch.int32),
             token_final_scales=topk_weights,
-            out=output,
         )
+        output.copy_(wrapper_output)
