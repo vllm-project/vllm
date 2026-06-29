@@ -1,13 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING
-
 import torch
 
 from vllm.triton_utils import tl, triton
-
-if TYPE_CHECKING:
-    pass
 
 
 def prepare_dcp_local_seq_lens(
