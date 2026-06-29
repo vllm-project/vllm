@@ -257,18 +257,6 @@ def get_moriio_node_hosts(
     if node_hosts:
         return node_hosts
 
-    env_node_hosts = os.environ.get("VLLM_MORIIO_NODE_HOSTS", "").strip()
-    if env_node_hosts:
-        logger.warning_once(
-            "The environment variable %s is deprecated. Set %r inside "
-            "kv_transfer_config.kv_connector_extra_config instead.",
-            "VLLM_MORIIO_NODE_HOSTS",
-            "node_hosts",
-        )
-        node_hosts = _normalize_node_hosts(env_node_hosts, "VLLM_MORIIO_NODE_HOSTS")
-        if node_hosts:
-            return node_hosts
-
     return [default_host]
 
 
