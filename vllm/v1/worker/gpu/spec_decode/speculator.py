@@ -8,6 +8,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -106,6 +107,8 @@ class DraftModelSpeculator(BaseSpeculator):
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
 
+        self.eplb_state: EplbState | None = None
+
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
             max_num_tokens=self.max_num_tokens,
@@ -164,6 +167,18 @@ class DraftModelSpeculator(BaseSpeculator):
             ).keys()
         )
         self.draft_attn_layer_names = all_attn_layers - target_attn_layer_names
+
+    def set_eplb_state(self, eplb_state: EplbState) -> None:
+        """Inject EPLB state after construction."""
+        self.eplb_state = eplb_state
+
+    def _prepare_eplb_forward(self, num_unpadded_tokens: int) -> None:
+        """Call EPLB prepare_forward if EPLB is active for the draft model."""
+        if self.eplb_state is not None:
+            self.eplb_state.prepare_forward(
+                self.speculative_config.draft_model_config,
+                num_unpadded_tokens,
+            )
 
     def set_attn(
         self,
