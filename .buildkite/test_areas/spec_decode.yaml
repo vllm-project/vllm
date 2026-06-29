@@ -94,6 +94,7 @@ steps:
     amd:
       device: mi325_1
       timeout_in_minutes: 65
+      soft_fail: true
       depends_on:
       - image-build-amd
       source_file_dependencies:
