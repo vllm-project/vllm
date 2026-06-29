@@ -14,6 +14,7 @@
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --account=engs-glass
 #SBATCH --qos=priority
+#SBATCH --reservation=engs-glass2
 
 set -euo pipefail
 
