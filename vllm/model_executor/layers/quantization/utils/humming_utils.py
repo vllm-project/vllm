@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import dataclasses
 import json
 from typing import Any
 
@@ -14,7 +15,48 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
-from vllm.utils.humming import BaseWeightSchema, HummingInputSchema, HummingMethod
+from vllm.utils.humming import (
+    BaseWeightSchema,
+    HummingInputSchema,
+    HummingMethod,
+    HummingWeightSchema,
+)
+
+
+def humming_update_schema_hadamard_block_size(
+    weight_schema: HummingWeightSchema,
+    input_schema: HummingInputSchema,
+    shape_k: int,
+) -> HummingWeightSchema:
+    block_size = 256
+    weight_scale_group_size = weight_schema.weight_scale_group_size
+    input_scale_group_size = input_schema.input_scale_group_size
+    if weight_scale_group_size:
+        block_size = min(block_size, weight_scale_group_size)
+    if input_scale_group_size:
+        block_size = min(block_size, input_scale_group_size)
+
+    while shape_k % block_size > 0:
+        block_size = block_size // 2
+
+    return dataclasses.replace(weight_schema, hadamard_block_size=block_size)
+
+
+def humming_choose_hadamard_block_size(
+    weight_scale_group_size: int | None,
+    input_scale_group_size: int | None,
+    shape_k: int,
+) -> int:
+    block_size = 256
+    if weight_scale_group_size:
+        block_size = min(block_size, weight_scale_group_size)
+    if input_scale_group_size:
+        block_size = min(block_size, input_scale_group_size)
+
+    while shape_k % block_size > 0:
+        block_size = block_size // 2
+
+    return block_size
 
 
 def humming_is_layer_skipped(config: dict[str, Any], prefix: str):

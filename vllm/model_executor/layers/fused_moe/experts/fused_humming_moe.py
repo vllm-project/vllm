@@ -75,6 +75,9 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         self.layer = layer
         self.num_experts = self.layer.num_experts
         self.global_num_experts = self.layer.global_num_experts
+        self.w13_hadamard_block_size = getattr(layer, "w13_hadamard_block_size", None)
+        self.w2_hadamard_block_size = getattr(layer, "w2_hadamard_block_size", None)
+
         self.init_humming_moe()
 
         if self.is_batched():
@@ -291,7 +294,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             if "quanted" in key and a_dtype.num_bits == 4:
                 meta["shape"] = meta["shape"][:-1] + (meta["shape"][-1] // 2,)
 
-        if num_bits == 16:
+        if num_bits == 16 and self.w13_hadamard_block_size is None:
             required_buffers = ["gate_up_output", "activation_output", "down_output"]
         else:
             required_buffers = [
@@ -525,9 +528,10 @@ class HummingIndexedExperts(HummingExpertsBase):
             expert_tokens_meta=expert_tokens_meta,
         )
 
-        inputs, input_scale = HummingMethod.may_quant_input(
+        inputs, input_scale = HummingMethod.may_hadamard_quant_input(
             layer=self.layer,
             inputs=hidden_states,
+            hadamard_block_size=self.w13_hadamard_block_size,
             quanted_input=buffers.get("quanted_gate_up_input", None),
             sublayer_name="w13",
         )
@@ -547,9 +551,10 @@ class HummingIndexedExperts(HummingExpertsBase):
             output=buffers["activation_output"],
         )
 
-        inputs, input_scale = HummingMethod.may_quant_input(
+        inputs, input_scale = HummingMethod.may_hadamard_quant_input(
             layer=self.layer,
             inputs=buffers["activation_output"],
+            hadamard_block_size=self.w2_hadamard_block_size,
             quanted_input=buffers.get("quanted_down_input", None),
             sublayer_name="w2",
         )
@@ -613,9 +618,10 @@ class HummingGroupedExperts(HummingExpertsBase):
             scratch=self._get_permute_scratch(),
         )
 
-        inputs, input_scale = HummingMethod.may_quant_input(
+        inputs, input_scale = HummingMethod.may_hadamard_quant_input(
             layer=self.layer,
             inputs=hidden_states,
+            hadamard_block_size=self.w13_hadamard_block_size,
             quanted_input=buffers.get("quanted_gate_up_input", None),
             sublayer_name="w13",
         )
@@ -638,9 +644,10 @@ class HummingGroupedExperts(HummingExpertsBase):
             output=buffers["activation_output"],
         )
 
-        inputs, input_scale = HummingMethod.may_quant_input(
+        inputs, input_scale = HummingMethod.may_hadamard_quant_input(
             layer=self.layer,
             inputs=buffers["activation_output"],
+            hadamard_block_size=self.w2_hadamard_block_size,
             quanted_input=buffers.get("quanted_down_input", None),
             sublayer_name="w2",
         )
@@ -700,9 +707,10 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
             self.layer.activation,
         )
 
-        inputs, input_scale = HummingMethod.may_quant_input(
+        inputs, input_scale = HummingMethod.may_hadamard_quant_input(
             layer=self.layer,
             inputs=hidden_states,
+            hadamard_block_size=self.w13_hadamard_block_size,
             quanted_input=buffers.get("quanted_gate_up_input", None),
             sublayer_name="w13",
         )
@@ -725,9 +733,10 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
             output=buffers["activation_output"],
         )
 
-        inputs, input_scale = HummingMethod.may_quant_input(
+        inputs, input_scale = HummingMethod.may_hadamard_quant_input(
             layer=self.layer,
             inputs=buffers["activation_output"],
+            hadamard_block_size=self.w2_hadamard_block_size,
             quanted_input=buffers.get("quanted_down_input", None),
             sublayer_name="w2",
         )
