@@ -14,5 +14,5 @@ vLLM's examples are organized into the following categories:
 - **[`deployment/`](../../examples/deployment)** – Examples for deploying vLLM in production.
 - **[`ray_serving/`](../../examples/ray_serving)** – Scalable serving using Ray.
 - **[`disaggregated/`](../../examples/disaggregated)** – Examples for Disaggregated P/D (Prefill/Decoding) inference, including various kv cache connectors (LMCache, Mooncake, FlexKV, P2P NCCL) and failure recovery.
-- **[`scale_out/`](../../examples/disaggregated)** – Examples for Token In <> Token Out API Server.
+- **[`scale_out/`](../../examples/scale_out)** – Examples for Token In <> Token Out API Server.
 - **[`observability/`](../../examples/observability)** – Metrics, logging, tracing (OpenTelemetry), and dashboards (Grafana, Perses).
