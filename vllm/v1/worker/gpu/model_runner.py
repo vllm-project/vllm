@@ -223,6 +223,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_tokens=self.max_num_tokens,
             device=self.device,
         )
+        # R-SWA: persistent GPU buffer for per-request prefix lengths (CUDA-graph safe).
+        self.rswa_prefix_lens_buffer: torch.Tensor | None = None
+        if self.model_config.rswa_window is not None:
+            self.rswa_prefix_lens_buffer = torch.zeros(
+                self.max_num_reqs, dtype=torch.int32, device=self.device
+            )
 
         if self.use_pp:
             self.pp_handler = PPHandler(
@@ -985,6 +991,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.use_pp:
             # max_seq_len is only consumed by the PP `compute_need_sampled_mask`
             max_seq_len_np = self.req_states.max_seq_len[idx_mapping_np]
+
+        rswa_prefix_lens = None
+        if self.rswa_prefix_lens_buffer is not None:
+            rswa_prefix_lens = self.rswa_prefix_lens_buffer[:num_reqs_padded]
+            rswa_prefix_lens[:num_reqs] = self.req_states.prompt_len.gpu[
+                idx_mapping[:num_reqs]
+            ]
+            if num_reqs_padded > num_reqs:
+                rswa_prefix_lens[num_reqs:].zero_()
+
         return InputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -1015,6 +1031,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
             has_structured_output_reqs=scheduler_output.has_structured_output_requests,
+            rswa_prefix_lens=rswa_prefix_lens,
         )
 
     def prepare_attn(
@@ -1218,20 +1235,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.supports_mm_inputs and self.is_first_pp_rank:
             # Run MM encoder (if needed) and get multimodal embeddings.
             # Only first PP rank prepares multimodal embeddings.
-            # NOTE(woosuk): We must call get_mm_embeddings even during dummy runs
-            # to obtain inputs_embeds, because the compiled model expects this input.
-            if self.lora_config is not None:
-                set_active_mm_loras(
-                    model=self.model,
-                    lora_manager=self.lora_manager,
-                    encoder_cache=self.encoder_cache,
-                    req_id_to_index=self.req_states.req_id_to_index,
-                    lora_state=self.lora_state,
-                    scheduled_encoder_inputs=scheduler_output.scheduled_encoder_inputs,
+            if dummy_run:
+                # Obtain mm embeddings of correct shape for compiled model.
+                inputs_embeds = self.model_state.dummy_inputs_embeds(
+                    input_batch.num_tokens_after_padding
                 )
-            inputs_embeds = self.model_state.get_mm_embeddings(
-                scheduler_output.scheduled_encoder_inputs, input_batch, self.req_states
-            )
+            else:
+                scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
+                if self.lora_config is not None:
+                    set_active_mm_loras(
+                        model=self.model,
+                        lora_manager=self.lora_manager,
+                        encoder_cache=self.encoder_cache,
+                        req_id_to_index=self.req_states.req_id_to_index,
+                        lora_state=self.lora_state,
+                        scheduled_encoder_inputs=scheduled_encoder_inputs,
+                    )
+                inputs_embeds = self.model_state.get_mm_embeddings(
+                    scheduled_encoder_inputs, input_batch, self.req_states
+                )
             if inputs_embeds is not None and not self.model.requires_raw_input_tokens:
                 input_ids = None
 
@@ -1261,6 +1283,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             }
             model_inputs["intermediate_tensors"] = IntermediateTensors(new_tensors)
             del intermediate_tensors
+
+        # Update the EPLB meta.
+        self.eplb.prepare_forward(self.model_config, input_batch.num_tokens)
 
         # Run model.
         if batch_desc.cg_mode == CUDAGraphMode.FULL:

@@ -7,7 +7,7 @@ use serde_json::Value;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
 use crate::request::{
     ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatTool, ChatToolChoice,
-    GenerationPromptMode,
+    GenerationPromptMode, ReasoningEffort,
 };
 
 /// Options for constructing a [`ChatRequest`] from a fixture file.
@@ -42,6 +42,7 @@ pub(crate) struct FixtureRequest {
     tools: Vec<FixtureTool>,
     messages: Vec<FixtureMessage>,
     add_generation_prompt: Option<bool>,
+    reasoning_effort: Option<ReasoningEffort>,
 }
 
 impl FixtureFile {
@@ -52,6 +53,7 @@ impl FixtureFile {
                 tools: Vec::new(),
                 messages,
                 add_generation_prompt: None,
+                reasoning_effort: None,
             },
         }
     }
@@ -154,6 +156,7 @@ impl FixtureRequest {
         if self.add_generation_prompt == Some(false) {
             request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
         }
+        request.chat_options.reasoning_effort = self.reasoning_effort;
         if options.enable_thinking {
             for key in ["thinking", "enable_thinking"] {
                 request.chat_options.template_kwargs.insert(key.to_string(), Value::Bool(true));

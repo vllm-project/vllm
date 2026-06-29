@@ -133,3 +133,20 @@ def test_clear_override():
 def test_unknown_backend_name_raises():
     with pytest.raises(ValueError, match="Unknown MLA prefill backend"):
         MLAPrefillBackendEnum["NONEXISTENT"]
+
+
+def test_rocm_aiter_fa_registered():
+    """ROCM_AITER_FA is a known backend pointing at the AITER FA class."""
+    assert "ROCM_AITER_FA" in MLAPrefillBackendEnum.__members__
+
+    path = MLAPrefillBackendEnum.ROCM_AITER_FA.get_path()
+    assert path == (
+        "vllm.v1.attention.backends.mla.prefill.aiter_flash_attn."
+        "AiterFlashAttnPrefillBackend"
+    )
+
+    backend_cls = MLAPrefillBackendEnum.ROCM_AITER_FA.get_class()
+    assert backend_cls.get_name() == "ROCM_AITER_FA"
+    # The AITER FA path is the fp16/bf16 generic-varlen prefill path.
+    assert backend_cls.supports_dtype(torch.bfloat16)
+    assert backend_cls.supports_dtype(torch.float16)
