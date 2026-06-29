@@ -404,7 +404,7 @@ class DeepseekV4DecoderLayer(nn.Module):
     ):
         super().__init__()
 
-        # Lazy import to avoid top-level tilelang dependency.
+        # CustomOps must be built inside set_current_vllm_config context.
         from vllm.models.deepseek_v4.hw_agnostic.layers import mhc  # noqa: F401
 
         self.mhc_pre = mhc.MHCPreOp()

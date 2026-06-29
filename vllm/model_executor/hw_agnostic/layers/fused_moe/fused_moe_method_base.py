@@ -48,12 +48,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         # Quant methods on this path own their MK; True once it is built.
         return self.moe_kernel is not None
 
-    @property
-    def mk_can_overlap_shared_experts(self) -> bool:
-        return (
-            self.moe_kernel is not None and self.moe_kernel.can_overlap_shared_experts
-        )
-
     @abstractmethod
     def create_weights(
         self,

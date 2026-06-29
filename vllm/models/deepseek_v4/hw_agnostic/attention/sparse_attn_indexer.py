@@ -1,11 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Sparse Attention Indexer — Triton + PyTorch.
-
-Registered as ``torch.ops.vllm.dsv4_sparse_attn_indexer`` so the agnostic
-op coexists with the HW-specific ``sparse_attn_indexer`` registration of
-the same op family.
-"""
+"""Sparse Attention Indexer (Triton + PyTorch)."""
 
 import torch
 import torch.nn as nn

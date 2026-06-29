@@ -44,9 +44,7 @@ def _get_linear_backend() -> str:
     return "auto"
 
 
-# Triton + native-PyTorch are the only portable kernels on the
-# hw-agnostic path; HW-specific kernel families (FlashInfer/DeepGEMM/
-# Cutlass/Marlin) load CUDA-binary code that an OOT host cannot run.
+# Portable kernels: Triton + native PyTorch.
 _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     "triton": {TritonFp8BlockScaledMMKernel},
     "torch": {ChannelWiseTorchFP8ScaledMMLinearKernel},
@@ -61,9 +59,8 @@ def _filter_kernels_by_backend(
     return [k for k in kernels if k in backend_kernels]
 
 
-# Block-scaled FP8 priority list. CUDA only — the hw-agnostic path always
-# runs on a platform whose ``_enum`` resolves to CUDA (OOT plugins inherit
-# from NvmlCudaPlatform). ChannelWise torch is the portable fallback.
+# Block-scaled FP8 priority list (CUDA enum covers OOT inheritors of
+# NvmlCudaPlatform). ChannelWiseTorch is the portable fallback.
 _POSSIBLE_FP8_BLOCK_KERNELS: dict[
     PlatformEnum, list[type[Fp8BlockScaledMMLinearKernel | FP8ScaledMMLinearKernel]]
 ] = {

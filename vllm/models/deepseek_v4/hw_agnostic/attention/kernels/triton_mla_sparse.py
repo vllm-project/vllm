@@ -194,8 +194,7 @@ def triton_bf16_mla_sparse_interface(
             ``LOG2E`` internally to fuse with the ``exp2`` softmax).
         d_v: value head dim. Currently fixed at 512 — DSv4 latent dim.
         block_dpe: positional-embedding portion of ``dim_qk``. ``0`` for
-            DSv4 (NoPE+RoPE concatenated); ``64`` for the V3.2-style
-            split layout.
+            the concatenated NoPE+RoPE layout used here.
 
     Returns:
         out: [num_tokens, num_heads_q, d_v]

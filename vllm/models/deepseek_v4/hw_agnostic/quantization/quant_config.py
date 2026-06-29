@@ -36,9 +36,9 @@ from vllm.model_executor.hw_agnostic.quantization.quant_keys import (
     is_layer_skipped,
 )
 
-# Only fp8 is supported on the hw-agnostic DSv4 path; FP4 (NVFP4 / MXFP4) is
-# vendor-specific (Cutlass / FlashInfer / TRT-LLM / AITER) with no Triton
-# kernel today.
+# Only fp8 is supported on the hw-agnostic DSv4 path; FP4 (NVFP4 / MXFP4)
+# needs hw-specific kernels (Cutlass / FlashInfer / TRT-LLM / AITER) with no
+# Triton equivalent today.
 _DEEPSEEK_V4_EXPERT_DTYPES = ("fp8",)
 
 if TYPE_CHECKING:
@@ -67,8 +67,8 @@ class DeepseekV4FP8Config(Fp8Config):
                 raise ValueError(
                     f"Unsupported DeepSeek V4 expert_dtype={expert_dtype!r} on the "
                     "hw-agnostic path; expected 'fp8'. FP4 expert dtypes "
-                    "(NVFP4 / MXFP4) require vendor-specific kernels and are "
-                    "only available via the upstream quantization path."
+                    "(NVFP4 / MXFP4) require hw-specific kernels and are "
+                    "only available via the hw-specific quantization path."
                 )
             self._resolved_expert_dtype = expert_dtype
             from vllm.logger import init_logger
@@ -80,7 +80,7 @@ class DeepseekV4FP8Config(Fp8Config):
 
     @classmethod
     def get_name(cls) -> Literal["deepseek_v4_fp8"]:
-        # Inlined literal: avoids a module-level import of upstream's
+        # Inlined literal: avoids a module-level import of vLLM's
         # ``QuantizationMethods`` typing alias.
         return "deepseek_v4_fp8"
 

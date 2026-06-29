@@ -1,10 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Hw-agnostic FP8 weight/scale helpers.
-
-Restricted to pure tensor math so this module does not transitively pull
-HW-specific kernel libraries (Cutlass / DeepGEMM) at import time.
-"""
+"""Hw-agnostic FP8 weight/scale helpers (pure tensor math, import-safe)."""
 
 import torch
 

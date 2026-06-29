@@ -1,14 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Re-export of ``QuantKey`` and friends.
-
-Identity must be preserved: the registry at ``vllm/config/quantization.py``
-performs ``isinstance(v, QuantKey)`` and ``key == kFp8...Sym`` comparisons
-against the canonical class and module-level constants. Re-exporting here
-keeps the lint regex from needing an ``utils.quant_utils`` carve-out
-without breaking isinstance / singleton identity.
-"""
+"""Re-export of ``QuantKey`` and helpers. ``vllm/config/quantization.py`` keys
+off ``isinstance`` and singleton ``kFp8...`` constant identity, so the class
+and constants must be the canonical ones."""
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,

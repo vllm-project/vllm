@@ -41,10 +41,12 @@ def determine_expert_map(
     if ep_size == 1:
         return global_num_experts, None
 
+    # Distribute experts as evenly as possible to each rank.
     base_experts = global_num_experts // ep_size
     remainder = global_num_experts % ep_size
     local_num_experts = base_experts + 1 if ep_rank < remainder else base_experts
 
+    # Create a tensor of size num_experts filled with -1
     expert_map = torch.full((global_num_experts,), -1, dtype=torch.int32)
     start_idx = ep_rank * base_experts + min(ep_rank, remainder)
     expert_map[start_idx : start_idx + local_num_experts] = torch.arange(

@@ -55,8 +55,9 @@ class Fp8LinearMethod(LinearMethodBase):
             )
         else:
             self.weight_quant_key = kFp8StaticTensorSym
-            # Per-tensor for static activation, per-token for dynamic — the
-            # Triton scaled-MM kernel handles both layouts.
+            # Per-tensor for static activation, per-token for dynamic. The
+            # scaled-MM kernel is block-scaled only; non-block layouts run
+            # through the dequant fallback in ``apply``.
             self.activation_quant_key = (
                 kFp8StaticTensorSym if self.act_q_static else kFp8DynamicTokenSym
             )
@@ -174,9 +175,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 assert self.weight_block_size is not None
                 return self.fp8_linear.apply_weights(layer, x, bias)
 
-            # Per-tensor/channel batch-invariant: dequant to BF16, then
-            # GEMM. The hw-agnostic kernel selector has no Cutlass option,
-            # so always take the dequant branch.
+            # Batch-invariant fallback: dequant to BF16, then GEMM.
             weight_fp8 = layer.weight.to(torch.bfloat16)
             weight_scale = layer.weight_scale.to(torch.bfloat16)
             if weight_scale.numel() == 1:

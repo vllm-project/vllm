@@ -88,13 +88,9 @@ class DeepseekV4MLAModules:
 LAYER_NAME = "deepseek_v4_multi_head_latent_attention"
 
 
-# KV-cache writeback on this path happens explicitly inside ``attention_impl``
-# (via ``triton_qnorm_rope_kv_fp8_insert``) and inside the
-# ``dsv4_sparse_attn_indexer`` op (via ``indexer_k_quant_and_cache_triton``).
-# The standard ``AttentionImpl.forward(... kv_cache ...)`` interface and the
-# ``forward_includes_kv_cache_update`` backend hook are NOT used here — the
-# three hw_agnostic backends are spec carriers only; compute is dispatched
-# through ``torch.ops.vllm.deepseek_v4_attention`` directly into Triton.
+# KV-cache writeback is done explicitly inside ``attention_impl`` and the
+# ``dsv4_sparse_attn_indexer`` op; the hw_agnostic backends are spec carriers
+# only and compute is dispatched via ``torch.ops.vllm.deepseek_v4_attention``.
 @PluggableLayer.register(LAYER_NAME)
 class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
     def __init__(
@@ -122,12 +118,9 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         self.head_dim = head_dim
         self.scale = scale
 
-        # padded_heads is the head count of the o_padded / q workspaces that
-        # cross the PluggableLayer boundary. OOT plugins that override
-        # ``attention_impl`` may require h_q in {64, 128}; the agnostic Triton
-        # kernel accepts any count and ignores the padding. Keep the buffer
-        # shape stable so OOT subclasses do not need to special-case head
-        # counts.
+        # OOT plugins that override ``attention_impl`` may require h_q in
+        # {64, 128}; pad the workspace buffer here. The Triton kernel ignores
+        # the extra heads.
         if num_heads <= 64:
             self.padded_heads = 64
         elif num_heads <= 128:
@@ -344,10 +337,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         q: torch.Tensor,
         kv: torch.Tensor,
         positions: torch.Tensor,
-        # Untyped here because ``forward_context.attn_metadata`` carries the
-        # framework's ``AttentionMetadata`` value type, while the runtime
-        # narrow below is to ``DeepseekSparseSWAMetadata``. The cast() is
-        # the real type guard.
+        # Typed Any; the cast() below is the actual type guard.
         attn_metadata: Any,
     ) -> torch.Tensor:
         if not isinstance(attn_metadata, dict):

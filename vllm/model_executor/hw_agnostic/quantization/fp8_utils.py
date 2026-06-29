@@ -27,19 +27,9 @@ from vllm.triton_utils import tl, triton
 logger = init_logger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Misc helpers
-# ---------------------------------------------------------------------------
-
-
 def _get_fp8_min_max() -> tuple[float, float]:
     finfo = torch.finfo(current_platform.fp8_dtype())
     return finfo.min, finfo.max
-
-
-# ---------------------------------------------------------------------------
-# Per-token-group FP8 quantization (Triton fallback + CUDA fast-path)
-# ---------------------------------------------------------------------------
 
 
 @triton.jit
@@ -145,11 +135,6 @@ def per_token_group_quant_fp8(
         num_stages=1,
     )
     return x_q, x_s
-
-
-# ---------------------------------------------------------------------------
-# W8A8 block-scaled MM (Triton)
-# ---------------------------------------------------------------------------
 
 
 @triton.jit
@@ -337,11 +322,6 @@ def w8a8_triton_block_scaled_mm(
     return C
 
 
-# ---------------------------------------------------------------------------
-# Parameter helpers
-# ---------------------------------------------------------------------------
-
-
 def create_fp8_weight_parameter(
     output_size_per_partition: int,
     input_size_per_partition: int,
@@ -459,11 +439,6 @@ def validate_fp8_block_shape(
                 )
 
 
-# ---------------------------------------------------------------------------
-# Weight requantization (linear)
-# ---------------------------------------------------------------------------
-
-
 def _per_tensor_dequantize(
     tensor: torch.Tensor, inv_scale: float | torch.Tensor
 ) -> torch.Tensor:
@@ -478,9 +453,8 @@ def _requantize_with_max_scale(
     """Requantize a fused weight to the max of its per-shard scales."""
     max_w_scale = weight_scale.max()
 
-    # If the on-disk checkpoint had a fused QKV/MLP module, all but the
-    # first scale stay at the float32-min sentinel and we can skip the
-    # requantization (already quantized with the single scale).
+    # Per-shard scales present (non-fused checkpoint): dequant each shard
+    # with its own scale and requantize against the max.
     unfused_module_in_checkpoint = (
         weight_scale.ndim != 0
         and weight_scale[-1] > torch.finfo(torch.float8_e4m3fn).min

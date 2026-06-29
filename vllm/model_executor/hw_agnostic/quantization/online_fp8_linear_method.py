@@ -37,7 +37,8 @@ class Fp8PerTensorOnlineLinearMethod(LinearMethodBase):
         self.input_dtype = get_current_vllm_config().model_config.dtype
         self.block_quant = False
         self.weight_quant_key = kFp8StaticTensorSym
-        # Triton scaled-MM kernel handles per-token activation; pin it.
+        # Per-token dynamic activations; non-block layouts run through the
+        # dequant fallback in ``apply``.
         self.activation_quant_key = kFp8DynamicTokenSym
 
     def create_weights(
@@ -103,8 +104,7 @@ class Fp8PerTensorOnlineLinearMethod(LinearMethodBase):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if envs.VLLM_BATCH_INVARIANT:
-            # Dequantize-then-linear fallback (matches the trimmed Fp8LinearMethod
-            # behaviour: no Cutlass fast path on the hw-agnostic tree).
+            # Batch-invariant fallback: dequant to BF16, then GEMM.
             weight_fp8 = layer.weight.to(torch.bfloat16)
             weight_scale = layer.weight_scale.to(torch.bfloat16)
             if weight_scale.numel() == 1:
