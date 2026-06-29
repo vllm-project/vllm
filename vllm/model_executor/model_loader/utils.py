@@ -15,11 +15,6 @@ from typing_extensions import assert_never
 import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention import (
-    Attention,
-    MLAAttention,
-    MMEncoderAttention,
-)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
@@ -27,6 +22,9 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.model_loader.reload import (
     record_metadata_for_reloading,
     set_torchao_reload_attrs,
+)
+from vllm.model_executor.model_loader.weight_processing import (
+    WeightProcessingFactory,
 )
 from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.tracing import instrument
@@ -117,9 +115,9 @@ def process_weights_after_loading(
     # Initialize post-load attention weights for Attention, MLA, and MM encoder.
     # NOTE: Happens after other modules so we can easily decompress weights.
     for _, module in model.named_modules():
-        if isinstance(
-            module, (Attention, MLAAttention, MMEncoderAttention)
-        ) and hasattr(module, "process_weights_after_loading"):
+        if WeightProcessingFactory.is_registered_module(module) and hasattr(
+            module, "process_weights_after_loading"
+        ):
             # TODO(lucas): see if there is a way to unify the signatures
             # of process_weights_after_loading
             with device_loading_context(module, target_device):
