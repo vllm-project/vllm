@@ -432,7 +432,7 @@ steps:
 #-----------------------------------------------------------  mi250 · docker  ----------------------------------------------------------#
 
 - label: Docker Build Metadata (ROCm) # TBD
-  timeout_in_minutes: 10
+  timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
   no_gpu: true
