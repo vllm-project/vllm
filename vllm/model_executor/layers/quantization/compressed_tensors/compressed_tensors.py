@@ -697,17 +697,26 @@ class CompressedTensorsConfig(QuantizationConfig):
             QuantizationStrategy.CHANNEL.value,
             QuantizationStrategy.GROUP.value,
         )
-        is_static_int_weight = (
+        is_int_N_weight = (
             weight_quant.type == QuantizationType.INT and not weight_quant.dynamic
         )
         is_int8_input = (
             input_quant.type == QuantizationType.INT and input_quant.num_bits == 8
         )
+        is_symmetric_input = input_quant.symmetric
+        is_dynamic_input = input_quant.dynamic
+        is_per_token_or_group_input = input_quant.strategy in (
+            QuantizationStrategy.TOKEN.value,
+            QuantizationStrategy.GROUP.value,
+        )
         return (
-            is_static_int_weight
+            is_int_N_weight
             and is_channel_group
             and is_pack_format
             and is_int8_input
+            and is_symmetric_input
+            and is_dynamic_input
+            and is_per_token_or_group_input
         )
 
     @staticmethod
@@ -724,17 +733,26 @@ class CompressedTensorsConfig(QuantizationConfig):
             QuantizationStrategy.CHANNEL.value,
             QuantizationStrategy.GROUP.value,
         )
-        is_static_int_weight = (
+        is_int_N_weight = (
             weight_quant.type == QuantizationType.INT and not weight_quant.dynamic
         )
         is_int4_input = (
             input_quant.type == QuantizationType.INT and input_quant.num_bits == 4
         )
+        is_symmetric_input = input_quant.symmetric
+        is_dynamic_input = input_quant.dynamic
+        is_per_token_or_group_input = input_quant.strategy in (
+            QuantizationStrategy.TOKEN.value,
+            QuantizationStrategy.GROUP.value,
+        )
         return (
-            is_static_int_weight
+            is_int_N_weight
             and is_channel_group
             and is_pack_format
             and is_int4_input
+            and is_symmetric_input
+            and is_dynamic_input
+            and is_per_token_or_group_input
         )
 
     def _get_scheme_from_parts(

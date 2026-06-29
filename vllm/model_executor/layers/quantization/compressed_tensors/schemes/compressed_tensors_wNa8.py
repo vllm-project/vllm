@@ -3,10 +3,9 @@
 """Weight N-bit INT scheme with symmetric INT8 activation quant via Humming.
 
 Handles compressed-tensors pack-quantized INT weight checkpoints (2-8 bit)
-with INT8 symmetric input activation quantization (dynamic or static,
-per-tensor or per-group). Zero-point / asymmetric activation quantization
-is not supported by the Humming kernel. The activation quant config is
-passed to the Humming kernel which applies it natively.
+with INT8 symmetric dynamic per-token/per-group input activation
+quantization. Static, per-tensor, and asymmetric activation quantization
+are not supported.
 """
 
 import math
@@ -14,7 +13,10 @@ from collections.abc import Callable
 from fractions import Fraction
 
 import torch
-from compressed_tensors.quantization import QuantizationArgs
+from compressed_tensors.quantization import (
+    QuantizationArgs,
+    QuantizationStrategy,
+)
 
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
@@ -70,6 +72,26 @@ class CompressedTensorsWNA8Int(CompressedTensorsScheme):
                 f"supported = {sorted(WNA16_SUPPORTED_TYPES_MAP)}"
             )
         self.quant_type = WNA16_SUPPORTED_TYPES_MAP[num_bits]
+
+        if input_quant is not None:
+            if not input_quant.symmetric:
+                raise ValueError(
+                    "WNA8Int requires symmetric activation quantization, "
+                    f"got symmetric={input_quant.symmetric}"
+                )
+            if not input_quant.dynamic:
+                raise ValueError(
+                    "WNA8Int requires dynamic activation quantization, "
+                    f"got dynamic={input_quant.dynamic}"
+                )
+            if input_quant.strategy not in (
+                QuantizationStrategy.TOKEN.value,
+                QuantizationStrategy.GROUP.value,
+            ):
+                raise ValueError(
+                    "WNA8Int requires per-token or per-group activation "
+                    f"quantization, got strategy={input_quant.strategy}"
+                )
 
     @classmethod
     def get_min_capability(cls) -> int:
