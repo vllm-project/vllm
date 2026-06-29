@@ -209,6 +209,9 @@ These endpoints are **only available when the environment variable `VLLM_SERVER_
 - `/sleep` - Put engine to sleep (causes denial of service)
 - `/wake_up` - Wake engine from sleep
 - `/is_sleeping` - Check if engine is sleeping
+- `/sleep_ep_ranks_tags` - Put selected EP ranks to sleep for selected allocator tags
+- `/wake_up_ep_ranks_tags` - Wake selected EP ranks for selected allocator tags
+- `/flash_epscale` - Trigger fast EP scaling operations
 - `/collective_rpc` - Execute arbitrary RPC methods on the engine (extremely dangerous)
 
 **Profiler endpoints (only when profiling is enabled via `--profiler-config`):**
@@ -228,7 +231,7 @@ An attacker who can reach the vLLM HTTP server can:
 2. **Cause denial of service** by calling `/pause`, `/scale_elastic_ep`, or `/abort_requests` without a token
 3. **Access operational controls** to manipulate server state (e.g., pausing generation, updating model weights via `/update_weights`)
 4. **If `--enable-tokenizer-info-endpoint` is set:** Access sensitive tokenizer configuration including chat templates, which may reveal prompt engineering strategies or other implementation details
-5. **If `VLLM_SERVER_DEV_MODE=1` is set:** Execute arbitrary RPC commands via `/collective_rpc`, reset caches, put the engine to sleep, and access detailed server configuration
+5. **If `VLLM_SERVER_DEV_MODE=1` is set:** Execute arbitrary RPC commands via `/collective_rpc`, reset caches, put the engine to sleep, trigger EP scaling operations, and access detailed server configuration
 
 ### Recommended Security Practices
 

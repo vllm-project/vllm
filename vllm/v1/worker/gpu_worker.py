@@ -74,6 +74,7 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
+from vllm.v1.worker.sleep_tags import WEIGHT_SLEEP_TAGS, expand_weight_sleep_tags
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -169,7 +170,7 @@ class Worker(WorkerBase):
         # pending non-blocking PP send work from the previous iteration
         self._pp_send_work: list[Handle] = []
 
-    def sleep(self, level: int = 1) -> None:
+    def sleep(self, level: int = 1, tags: list[str] | None = None) -> None:
         free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
 
         # Save the buffers before level 2 sleep
@@ -179,8 +180,15 @@ class Worker(WorkerBase):
                 name: buffer.cpu().clone() for name, buffer in model.named_buffers()
             }
 
+        self.model_runner.skip_dummy_model_forward = True
+
         allocator = get_mem_allocator_instance()
-        allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
+        if level == 1:
+            selected_tags = expand_weight_sleep_tags(tags)
+            offload_tags = tuple(selected_tags) if selected_tags else WEIGHT_SLEEP_TAGS
+        else:
+            offload_tags = tuple()
+        allocator.sleep(offload_tags=offload_tags)
         free_bytes_after_sleep, total = torch.cuda.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep
@@ -193,7 +201,7 @@ class Worker(WorkerBase):
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         allocator = get_mem_allocator_instance()
-        allocator.wake_up(tags)
+        allocator.wake_up(expand_weight_sleep_tags(tags))
 
         # Restore the buffers after level 2 sleep
         if len(self._sleep_saved_buffers):
@@ -203,8 +211,15 @@ class Worker(WorkerBase):
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
 
+        self.model_runner.skip_dummy_model_forward = False
         if tags is None or "kv_cache" in tags:
             self.model_runner.post_kv_cache_wake_up()
+
+    def resize_sleep_ep_ranks(self, sleeping_ep_ranks: list[int]) -> None:
+        self.model_runner.resize_sleep_ep_ranks(sleeping_ep_ranks)
+
+    def get_ep_sleep_state(self) -> dict[str, object]:
+        return self.model_runner.get_ep_sleep_state()
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if (
@@ -396,6 +411,115 @@ class Worker(WorkerBase):
                 self.vllm_config.parallel_config,
                 self.model_runner.get_model(),
             )
+
+    def sleep_ep_ranks_by_tags(
+        self,
+        sleeping_ep_ranks: list[int],
+        tags: list[str],
+        level: int = 1,
+    ) -> None:
+        from vllm.distributed.parallel_state import get_ep_group
+
+        if get_ep_group().rank not in sleeping_ep_ranks:
+            return
+
+        selected_tags = list(dict.fromkeys(tags))
+        if not selected_tags:
+            raise ValueError("tags must not be empty")
+
+        if level == 2:
+            eplb = self.model_runner.eplb_state
+            if eplb is None or not eplb.is_logical_sleep_active():
+                raise RuntimeError(
+                    "level=2 sleep requires logical_sleep to be active "
+                    "(experts must have been migrated away first)"
+                )
+            if "weights" in selected_tags:
+                raise ValueError(
+                    "level=2 sleep must not include the 'weights' tag — "
+                    "it would re-enable CPU backup and defeat the purpose"
+                )
+
+        self.sleep(level=level, tags=selected_tags)
+
+    def wake_up_ep_ranks(
+        self,
+        sleeping_ep_ranks: list[int],
+        tags: list[str] | None = None,
+        level: int = 1,
+    ) -> None:
+        from vllm.distributed.parallel_state import get_ep_group
+
+        is_waking = get_ep_group().rank in sleeping_ep_ranks
+        if is_waking:
+            self.wake_up(tags=tags)
+        print("Woke up EP ranks %s with tags %s at level %d", sleeping_ep_ranks, tags, level, flush=True)
+        if level != 2:
+            return
+
+        # L2 wake: vaddrs are preserved by CuMem; refill dense weights
+        # from an active peer in the same DP group. Experts are filled
+        # later by resize_sleep_ep_ranks -> EPLB rearrange.
+        from vllm.distributed.elastic_ep.peer_weight_transfer import (
+            get_max_dp_group,
+            transfer_dense_to_waking_ranks,
+        )
+
+        # Refill EPLB GPU maps on waking ranks (collective, all EP ranks).
+        # L2 sleep wiped their physical pages with no CPU backup, so the
+        # values came back as garbage. Must run before any downstream
+        # collective consumes them (resize_sleep_ep_ranks -> NCCL P2P).
+        eplb = self.model_runner.eplb_state
+        if eplb is not None:
+            eplb.broadcast_eplb_maps_from_active()
+            if is_waking:
+                eplb.reset_load_history_after_l2_wake()
+
+        # Use the always-preserved max DP communicator directly instead of
+        # get_dp_group(): a prior scale_down may have NCCL-split _DP down
+        # to active_ep_size, so the current _DP cannot reach the waking
+        # peers. Reading _DP_MAX avoids mutating any global DP state, so
+        # the subsequent resize_sleep_ep_ranks can manage _DP as usual.
+        dp_group = get_max_dp_group()
+
+        waking_dp_ranks = self._ep_ranks_to_dp_ranks(sleeping_ep_ranks)
+        model = self.model_runner.get_model()
+        transfer_dense_to_waking_ranks(
+            model=model,
+            expert_weights=model.expert_weights,
+            dp_group=dp_group,
+            waking_dp_ranks=waking_dp_ranks,
+        )
+        print("Transferred dense weights to waking EP ranks %s (DP ranks %s)",
+              sleeping_ep_ranks, waking_dp_ranks, flush=True)
+        if is_waking:
+            self._maybe_nixl_eplb_on_l2_wake()
+            print("[L2 wake] done _maybe_nixl_eplb_on_l2_wake", flush=True)
+        print("[L2 wake] wake_up_ep_ranks returning", flush=True)
+
+    def _ep_ranks_to_dp_ranks(self, ep_ranks: list[int]) -> list[int]:
+        """Translate EP ranks into DP-local indices for the current DP group.
+
+        Assumes the standard layout `ep_rank = dp_rank * tp_size + tp_rank`
+        and that logical sleep enforces whole-DP-slice suffixes (i.e.,
+        `len(ep_ranks) % tp_size == 0`).
+        """
+        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        return sorted({ep // tp_size for ep in ep_ranks})
+
+    def _maybe_nixl_eplb_on_l2_wake(self) -> None:
+        """Re-pin EPLB communicator memory after L2 wake. No-op unless
+        the active backend is NIXL."""
+        eplb = self.model_runner.eplb_state
+        if eplb is None:
+            return
+        for ms in eplb.model_states.values():
+            comm = getattr(ms, "communicator", None)
+            if comm is None:
+                continue
+            on_wake = getattr(comm, "on_l2_wake", None)
+            if on_wake is not None:
+                on_wake()
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)

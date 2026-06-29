@@ -16,20 +16,28 @@ logger = init_logger(__name__)
 
 
 def _get_device_and_group(parallel_config: ParallelConfig):
+    dp_group = get_dp_group()
     # Use the actual device assigned to the DP group, not just the device type
-    device = get_dp_group().device
-    group = get_dp_group().device_group
+    device = dp_group.device
+    group = dp_group
 
     # Transferring this tensor from GPU to CPU will introduce a GPU sync
     # point that could adversely affect performance of vllm with asynch
     # scheduling. This environment variable exists to quickly disable
     # this optimization if we run into this case.
     if parallel_config.disable_nccl_for_dp_synchronization:
-        logger.info_once(
-            "Using CPU all reduce to synchronize DP padding between ranks.",
-        )
-        device = "cpu"
-        group = get_dp_group().cpu_group
+        cpu_group = dp_group.cpu_group
+        if dist.get_world_size(cpu_group) != dp_group.world_size:
+            logger.warning_once(
+                "cpu_group out of sync with dp_group after NCCL split; "
+                "falling back to NCCL DP synchronization."
+            )
+        else:
+            logger.info_once(
+                "Using CPU all reduce to synchronize DP padding between ranks.",
+            )
+            device = "cpu"
+            group = cpu_group
     return device, group
 
 
@@ -40,17 +48,19 @@ def _run_ar(
     cudagraph_mode: int,
     parallel_config: ParallelConfig,
 ) -> torch.Tensor:
-    dp_size = parallel_config.data_parallel_size
-    dp_rank = parallel_config.data_parallel_rank
+    dp_group = get_dp_group()
+    dp_size = dp_group.world_size
+    dp_rank = dp_group.rank_in_group
     device, group = _get_device_and_group(parallel_config)
-    # Populate this rank's contribution on CPU to reduce GPU syncs.
-    tensor_cpu = torch.zeros(4, dp_size, dtype=torch.int32)
-    tensor_cpu[0][dp_rank] = orig_num_tokens_per_ubatch
-    tensor_cpu[1][dp_rank] = padded_num_tokens_per_ubatch
-    tensor_cpu[2][dp_rank] = 1 if should_ubatch else 0
-    tensor_cpu[3][dp_rank] = cudagraph_mode
-    tensor = tensor_cpu.to(device, non_blocking=True)
-    dist.all_reduce(tensor, group=group)
+    tensor = torch.zeros(4, dp_size, device=device, dtype=torch.int32)
+    tensor[0][dp_rank] = orig_num_tokens_per_ubatch
+    tensor[1][dp_rank] = padded_num_tokens_per_ubatch
+    tensor[2][dp_rank] = 1 if should_ubatch else 0
+    tensor[3][dp_rank] = cudagraph_mode
+    if device == "cpu":
+        dist.all_reduce(tensor, group=group)
+    else:
+        tensor = group.all_reduce(tensor)
     return tensor
 
 
@@ -194,7 +204,7 @@ def coordinate_batch_across_dp(
     ]
 
     """
-    if parallel_config.data_parallel_size == 1:
+    if get_dp_group().world_size == 1:
         # Early exit.
         return False, None, cudagraph_mode
 

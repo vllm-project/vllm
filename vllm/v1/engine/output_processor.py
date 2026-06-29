@@ -188,6 +188,11 @@ class RequestState:
             deque() if stream_input else None
         )
 
+        # Original EngineCoreRequest, retained so that the request can be
+        # re-issued (e.g. rerouted to a different DP rank during EP scale-down)
+        # without re-running the input processor. Set in from_new_request().
+        self.original_request: EngineCoreRequest | None = None
+
     def apply_streaming_update(self, update: StreamingUpdate) -> None:
         # Apply the update to the request state.
         self.streaming_input = not update.final
@@ -246,7 +251,7 @@ class RequestState:
             output_kind = request.pooling_params.output_kind
 
         assert request.external_req_id is not None
-        return cls(
+        state = cls(
             request_id=request.request_id,
             external_req_id=request.external_req_id,
             parent_req=parent_req,
@@ -268,6 +273,8 @@ class RequestState:
             stream_interval=stream_interval,
             stream_input=request.resumable,
         )
+        state.original_request = request
+        return state
 
     def make_request_output(
         self,
@@ -508,6 +515,30 @@ class OutputProcessor:
                     request_ids_to_abort.extend(child_reqs)
                 self.parent_requests.pop(request_id, None)
         return request_ids_to_abort
+
+    def detach_request_state(self, request_id: str) -> "RequestState | None":
+        """Pop a RequestState without producing an ABORT output.
+
+        Used when the request is being re-issued under a new internal
+        request_id (e.g. EP scale-down reroute). Caller is responsible for
+        re-registering an equivalent RequestState that reuses the same
+        RequestOutputCollector queue.
+        """
+        req_state = self.request_states.pop(request_id, None)
+        if req_state is None:
+            return None
+        external = req_state.external_req_id
+        internal_ids = self.external_req_ids.get(external)
+        if internal_ids is not None:
+            try:
+                internal_ids.remove(request_id)
+            except ValueError:
+                pass
+            if not internal_ids:
+                self.external_req_ids.pop(external, None)
+        # Note: we deliberately do NOT call lora_states.request_finished here,
+        # because the request is being re-issued under a new id below.
+        return req_state
 
     def add_request(
         self,
