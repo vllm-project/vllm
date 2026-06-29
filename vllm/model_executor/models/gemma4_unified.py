@@ -335,7 +335,6 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
                 )
 
         # --- MixtureOfExperts delegation to language_model ---
-        self.expert_weights = self.language_model.expert_weights
         self.moe_layers = self.language_model.moe_layers
         self.num_moe_layers = self.language_model.num_moe_layers
         self.num_logical_experts = self.language_model.num_logical_experts
@@ -345,6 +344,7 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
         self.num_expert_groups = self.language_model.num_expert_groups
         self.num_shared_experts = self.language_model.num_shared_experts
         self.num_redundant_experts = self.language_model.num_redundant_experts
+        self.set_eplb_state = self.language_model.set_eplb_state
 
         gen_cfg = vllm_config.model_config.try_get_generation_config()
         self._suppress_token_ids = gen_cfg.get("suppress_tokens") if gen_cfg else None
