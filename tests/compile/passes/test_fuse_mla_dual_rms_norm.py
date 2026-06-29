@@ -13,7 +13,6 @@ import torch
 import vllm.config
 from tests.compile.backend import TestBackend
 from vllm._aiter_ops import (
-    check_aiter_fused_qk_rmsnorm_per_token_quant,
     is_aiter_found_and_supported,
     rocm_aiter_ops,
 )
@@ -217,12 +216,8 @@ class MLADualRMSNormFp8PerTokenTestModel(torch.nn.Module):
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("hidden_size", [7168])
 @pytest.mark.skipif(
-    not is_aiter_found_and_supported()
-    or not check_aiter_fused_qk_rmsnorm_per_token_quant(),
-    reason=(
-        "Only test on ROCm with AITER (incl. fused_qk_rmsnorm_per_token_quant) "
-        "installed and supported"
-    ),
+    not is_aiter_found_and_supported(),
+    reason="Only test on ROCm with AITER installed and supported",
 )
 def test_fuse_mla_dual_rms_norm_fp8_per_token(
     dtype: torch.dtype,

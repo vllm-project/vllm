@@ -449,31 +449,6 @@ def _rocm_aiter_fused_topk_fake(
 # Cache whether aiter supports FP8 MLA parameters
 _AITER_MLA_SUPPORTS_FP8: bool | None = None
 _AITER_HAS_FUSED_QK_RMSNORM: bool | None = None
-_AITER_HAS_FUSED_QK_RMSNORM_PER_TOKEN_QUANT: bool | None = None
-
-
-def check_aiter_fused_qk_rmsnorm_per_token_quant() -> bool:
-    """Check if aiter provides fused_qk_rmsnorm_per_token_quant.
-
-    This is the fused RMSNorm + FP8 per-token-quant HIP kernel used to fuse the
-    paired q/kv RMSNorm + FP8 per-token quantization in the MLA FP8 attention
-    path.
-
-    TODO(xaguilar-amd): remove this guard once the minimum supported AITER
-    version provides fused_qk_rmsnorm_per_token_quant, as with
-    check_aiter_fused_qk_rmsnorm below.
-    """
-    global _AITER_HAS_FUSED_QK_RMSNORM_PER_TOKEN_QUANT
-    if _AITER_HAS_FUSED_QK_RMSNORM_PER_TOKEN_QUANT is None:
-        try:
-            from aiter.ops.fused_qk_rmsnorm_group_quant import (  # noqa: F401
-                fused_qk_rmsnorm_per_token_quant,
-            )
-
-            _AITER_HAS_FUSED_QK_RMSNORM_PER_TOKEN_QUANT = True
-        except (ImportError, ModuleNotFoundError, AttributeError):
-            _AITER_HAS_FUSED_QK_RMSNORM_PER_TOKEN_QUANT = False
-    return _AITER_HAS_FUSED_QK_RMSNORM_PER_TOKEN_QUANT
 
 
 def check_aiter_fused_qk_rmsnorm() -> bool:
@@ -1395,16 +1370,9 @@ def _fused_mla_dual_rms_norm_per_token_quant_impl(
     ``(M, 1)`` scale). Only the *q* latent is FP8 quantized (it feeds the
     FP8 ``q_b_proj`` GEMM); the *kv* latent is RMS-normed and consumed by attention as bf16.
     """
-    try:
-        from aiter.ops.fused_qk_rmsnorm_group_quant import (
-            fused_qk_rmsnorm_per_token_quant,
-        )
-    except (ImportError, ModuleNotFoundError) as exc:
-        raise ImportError(
-            "fused_qk_rmsnorm_per_token_quant requires a newer AITer version "
-            "(>= ROCm/aiter PR #2958). Please upgrade aiter or disable the "
-            "fuse_mla_dual_rms_norm pass."
-        ) from exc
+    from aiter.ops.fused_qk_rmsnorm_group_quant import (
+        fused_qk_rmsnorm_per_token_quant,
+    )
 
     mq, nq = q.shape
     q_out = torch.empty((mq, nq), dtype=FP8_DTYPE, device=q.device)

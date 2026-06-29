@@ -11,10 +11,7 @@ from torch._inductor.pattern_matcher import PatternMatcherPass
 
 import vllm.ir.ops
 import vllm.model_executor.layers.quantization.utils.fp8_utils  # noqa: F401
-from vllm._aiter_ops import (
-    check_aiter_fused_qk_rmsnorm_per_token_quant,
-    rocm_aiter_ops,
-)
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -1071,7 +1068,4 @@ class MLADualRMSNormFusionPass(VllmFusionPatternMatcherPass):
 
         for epsilon in [1e-5, 1e-6]:
             self.register(MLADualRMSNormPattern(epsilon))
-
-        if check_aiter_fused_qk_rmsnorm_per_token_quant():
-            for epsilon in [1e-5, 1e-6]:
-                self.register(MLADualRMSPerTokenQuantPattern(epsilon))
+            self.register(MLADualRMSPerTokenQuantPattern(epsilon))
