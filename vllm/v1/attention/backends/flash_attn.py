@@ -111,6 +111,12 @@ class FlashAttentionBackend(AttentionBackend):
         fa_version = get_flash_attn_version()
         return fa_version is not None and fa_version >= 3
 
+    @classmethod
+    def supports_packed_kv_cache(cls) -> bool:
+        # FlashAttention block-table kernels require native per-layer page
+        # spacing, even when they support padded pages by block stride.
+        return False
+
     @staticmethod
     def get_impl_cls() -> type["FlashAttentionImpl"]:
         return FlashAttentionImpl

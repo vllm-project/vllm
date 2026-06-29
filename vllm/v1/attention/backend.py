@@ -234,6 +234,11 @@ class AttentionBackend(ABC):
         return layered_kv_cache_stride_order[0] != 0
 
     @classmethod
+    def supports_packed_kv_cache(cls) -> bool:
+        """Whether the backend supports a cross-layer packed KV cache pool."""
+        return cls.indexes_kv_by_block_stride()
+
+    @classmethod
     def is_mla(cls) -> bool:
         return False
 

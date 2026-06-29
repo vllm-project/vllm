@@ -1256,6 +1256,14 @@ def _use_packed_kv_cache_config(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> bool:
+    def supports_packed_cache(spec: KVCacheSpec) -> bool:
+        if isinstance(spec, UniformTypeKVCacheSpecs):
+            return all(
+                supports_packed_cache(layer_spec)
+                for layer_spec in spec.kv_cache_specs.values()
+            )
+        return isinstance(spec, AttentionSpec) and spec.supports_packed_kv_cache
+
     is_dsv4 = all(
         isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
         for group in kv_cache_groups
@@ -1271,7 +1279,17 @@ def _use_packed_kv_cache_config(
     enable_cross_layers = (
         str(extra_config.get("enable_cross_layers_blocks", "False")).lower() == "true"
     )
-    return is_dsv4 or (enable_cross_layers and len(kv_cache_groups) > 1)
+    use_packed_cache = is_dsv4 or (enable_cross_layers and len(kv_cache_groups) > 1)
+    if not use_packed_cache:
+        return False
+    if all(supports_packed_cache(group.kv_cache_spec) for group in kv_cache_groups):
+        return True
+    if enable_cross_layers:
+        logger.warning(
+            "Ignoring enable_cross_layers_blocks because at least one attention "
+            "backend does not support packed KV cache layout."
+        )
+    return False
 
 
 def _get_kv_cache_config_packed(
