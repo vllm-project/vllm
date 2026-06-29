@@ -394,7 +394,6 @@ class SamplingParams(
                 }
             except (ValueError, TypeError):
                 invalid_keys = []
-                invalid_values = []
                 converted_logit_bias = {}
                 for token, bias in logit_bias.items():
                     try:
@@ -402,25 +401,13 @@ class SamplingParams(
                     except (ValueError, TypeError):
                         invalid_keys.append(token)
                         continue
-                    try:
-                        converted_logit_bias[token_id] = min(100.0, max(-100.0, bias))
-                    except TypeError:
-                        invalid_values.append((token_id, bias))
-                if invalid_keys or invalid_values:
-                    parts = []
-                    if invalid_keys:
-                        parts.append(
-                            f"key(s) that cannot be converted to integer "
-                            f"token IDs: {invalid_keys!r}"
-                        )
-                    if invalid_values:
-                        parts.append(
-                            f"value(s) that are not valid numbers: {invalid_values!r}"
-                        )
+                    converted_logit_bias[token_id] = min(100.0, max(-100.0, bias))
+                if invalid_keys:
                     raise VLLMValidationError(
-                        "logit_bias contains " + "; ".join(parts),
+                        f"logit_bias contains key(s) that cannot be "
+                        f"converted to integer token IDs: {invalid_keys!r}",
                         parameter="logit_bias",
-                        value=invalid_keys + [v for _, v in invalid_values],
+                        value=invalid_keys,
                     ) from None
                 logit_bias = converted_logit_bias
 
