@@ -298,6 +298,82 @@ class PrefillStats:
 
 
 @dataclass
+class RequestSpecDecodeStats:
+    """Per-output-sequence speculative-decoding statistics accumulator.
+
+    Accumulates, over one sequence's verify steps, a histogram of accepted
+    draft-token counts (``j``, draft-only) and the total number of proposed
+    draft tokens. When ``detailed`` is requested it also records the ordered
+    per-step accepted/proposed sequences (``summary`` omits them). Tracked per
+    engine ``Request`` (one per sampled sequence, so ``n > 1`` yields one per
+    child), surfaced via ``EngineCoreOutput`` and the response
+    ``choices[].speculative_decoding_stats`` (see ``to_dict``).
+
+    Fields:
+        num_spec_tokens: Configured ``num_speculative_tokens`` (the max ``k``);
+            also the histogram's upper bound.
+        histogram: Dense counts indexed by accepted draft tokens ``j``
+            (length ``num_spec_tokens + 1``).
+        num_draft_tokens: Total proposed draft tokens, after the
+            grammar-invalidated (``num_invalid_spec_tokens``) adjustment.
+        per_step_accepted: Ordered accepted-draft count per verify step
+            (``detailed`` only; empty otherwise).
+        per_step_drafted: Ordered proposed-draft count per verify step
+            (``detailed`` only; empty otherwise).
+    """
+
+    num_spec_tokens: int
+    histogram: list[int] = field(default_factory=list)
+    num_draft_tokens: int = 0
+    per_step_accepted: list[int] = field(default_factory=list)
+    per_step_drafted: list[int] = field(default_factory=list)
+
+    @classmethod
+    def new(cls, num_spec_tokens: int) -> "RequestSpecDecodeStats":
+        return cls(
+            num_spec_tokens=num_spec_tokens,
+            histogram=[0] * (num_spec_tokens + 1),
+        )
+
+    def observe(
+        self, num_draft_tokens: int, num_accepted: int, detailed: bool = False
+    ) -> None:
+        self.histogram[num_accepted] += 1
+        self.num_draft_tokens += num_draft_tokens
+        if detailed:
+            self.per_step_accepted.append(num_accepted)
+            self.per_step_drafted.append(num_draft_tokens)
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-ready payload for the response ``speculative_decoding_stats``.
+
+        Histogram keys are stringified (JSON object keys). ``mean_acceptance
+        _length`` includes the bonus token (``j + 1``); ``draft_acceptance_rate``
+        is draft-only, full precision. Per-step arrays are included only when
+        populated (``detailed`` level).
+        """
+        num_spec_steps = sum(self.histogram)
+        num_accepted = sum(j * count for j, count in enumerate(self.histogram))
+        mean_al = 1.0 + num_accepted / num_spec_steps if num_spec_steps else 1.0
+        rate = num_accepted / self.num_draft_tokens if self.num_draft_tokens else 0.0
+        result: dict[str, Any] = {
+            "mean_acceptance_length": mean_al,
+            "draft_acceptance_rate": rate,
+            "acceptance_histogram": {
+                str(j): count for j, count in enumerate(self.histogram) if count
+            },
+            "num_spec_steps": num_spec_steps,
+            "num_accepted_draft_tokens": num_accepted,
+            "num_draft_tokens": self.num_draft_tokens,
+            "num_spec_tokens": self.num_spec_tokens,
+        }
+        if self.per_step_accepted:
+            result["per_step_accepted"] = self.per_step_accepted
+            result["per_step_drafted"] = self.per_step_drafted
+        return result
+
+
+@dataclass
 class PromptTokenStats:
     """Breakdown of prompt tokens by source.
 
