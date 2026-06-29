@@ -144,6 +144,9 @@ class BaseKVCacheMethod(QuantizeMethodBase):
             layer._v_scale.copy_(v_scale)
             layer._k_scale_float = k_scale
             layer._v_scale_float = v_scale
+            # Sync host (cpu) scale copies read by AITER fused kernels.
+            layer._k_scale_cpu.fill_(k_scale)
+            layer._v_scale_cpu.fill_(v_scale)
             if k_scale == 1.0 and v_scale == 1.0 and "e5m2" not in layer.kv_cache_dtype:
                 logger.warning_once(
                     "Using KV cache scaling factor 1.0 for fp8_e4m3. "

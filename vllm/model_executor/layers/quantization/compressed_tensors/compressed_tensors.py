@@ -1128,6 +1128,10 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         layer._v_scale_float = _to_scalar(layer.v_scale)
         layer._q_scale_float = _to_scalar(layer.q_scale)
 
+        # Sync host (cpu) scale copies read by AITER fused kernels.
+        layer._k_scale_cpu.fill_(layer._k_scale_float)
+        layer._v_scale_cpu.fill_(layer._v_scale_float)
+
         # Discard all placeholders.
         del layer.k_scale
         del layer.v_scale
