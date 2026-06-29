@@ -144,6 +144,11 @@ class _BakeRecorder:
         default_factory=lambda: defaultdict(list)
     )
     current: "tuple[Any, str] | None" = None
+    # Source names whose ``copy_`` actually fired during the bake. Names NOT here
+    # never moved data (e.g. experts owned by another EP rank, whose loader
+    # no-ops) -> ``receive_weights`` can skip them entirely instead of paying the
+    # per-name ``_load_unbaked`` lazy-build + load_weights cost every sync.
+    copied_names: "set[str]" = field(default_factory=set)
 
 
 class _UnsupportedLazyOp(NotImplementedError):
@@ -286,6 +291,9 @@ class LazyRDTTensor(torch.Tensor):
                     # storage. A copy_ with no stamp (ctx.current is None) can't
                     # be attributed — left unrecorded, so its group fails the
                     # coverage gate and takes the plain load.
+                    # Mark this source name as "live" (its copy_ fired), so
+                    # receive_weights can skip names that never copy (no-ops).
+                    ctx.copied_names.add(src._name)
                     if ctx.current is not None:
                         layer, param_name = ctx.current
                         ctx.copies_by_layer[layer].append(
@@ -529,21 +537,26 @@ class ShardedRDTWeightTransferEngine(
         # name -> (dtype_name, shape) for every init name, so the plain-load
         # fallback can rebuild lazies from just the gathered names.
         self._name_meta: dict[str, tuple[str, list[int]]] = {}
+        # Names whose copy_ fired during the bake (live). Residual (unbaked) names
+        # NOT in here never move data (e.g. non-local EP experts), so
+        # receive_weights skips them instead of paying the per-sync _load_unbaked.
+        self._live_names: set[str] = set()
 
         # ---- Consumer-side pre-registered receive arena (no per-pull register) --
         # The baked source slice metadata, so _replay can size receive views:
         #   src FetchKey -> produced slice shape / torch dtype.
         self._src_shapes: dict[FetchKey, tuple[int, ...]] = {}
         self._src_dtypes: dict[FetchKey, torch.dtype] = {}
-        # A single persistent receive buffer (1-D, the transferred dtype). We
-        # register its STORAGE once with NIXL (register_nixl_memory) and carve a
-        # contiguous view per slice as the set_target_for_ref target. Because the
-        # registration cache (_add_tensor_descs) is keyed by
-        # untyped_storage().data_ptr() and registers the full storage, every view
-        # into this arena is a cache hit -> the recv path never re-registers or
-        # deregisters. Grown (and re-registered) only if a pull needs more than it
-        # currently holds; steady state does zero registration.
-        self._dest_arena: torch.Tensor | None = None
+        # Persistent receive arenas, ONE PER DTYPE (1-D). We register each arena's
+        # STORAGE once with NIXL (register_nixl_memory) and carve a contiguous view
+        # per slice as the set_target_for_ref target. Because the registration
+        # cache (_add_tensor_descs) is keyed by untyped_storage().data_ptr() and
+        # registers the full storage, every view into an arena is a cache hit -> the
+        # recv path never re-registers or deregisters. Grown (and re-registered)
+        # only if a pull needs more than it currently holds; steady state does zero
+        # registration. Per-dtype (not one arena) so mixed-dtype groups (e.g. Kimi
+        # fp8 weights + fp32 weight_scale_inv + bf16 norms) still use the arena.
+        self._dest_arenas: dict[torch.dtype, torch.Tensor] = {}
 
     def init_transfer_engine(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
         """Resolve the trainer actor and bind its batched producer method."""
@@ -753,7 +766,12 @@ class ShardedRDTWeightTransferEngine(
         for n in names:
             g = self._name_to_group.get(n)
             if g is None:
-                residual.append(n)
+                # Skip residual names that never copied during the bake -- they
+                # no-op for this worker (e.g. experts owned by another EP rank),
+                # so running _load_unbaked on them just burns CPU building lazies
+                # and re-running load_weights' name-matching every sync.
+                if n in self._live_names:
+                    residual.append(n)
             elif id(g) not in seen:
                 seen.add(id(g))
                 groups.append(g)
@@ -829,39 +847,35 @@ class ShardedRDTWeightTransferEngine(
         import ray
         from ray.experimental import register_nixl_memory, set_target_for_ref
 
-        # Single transferred dtype (the trainer's weight dtype). Lay slices out
-        # contiguously in element units, lightly aligned so each view is well
-        # aligned for RDMA.
-        dtypes = {self._src_dtypes[k] for k in keys}
-        if len(dtypes) != 1:
-            raise RuntimeError(
-                f"Pre-registered receive arena assumes a single dtype; got {dtypes}."
-            )
-        dtype = next(iter(dtypes))
-
-        offsets: list[int] = []
-        off = 0
+        # Lay each slice into the persistent arena FOR ITS DTYPE, so mixed-dtype
+        # groups (Kimi: fp8 weights + fp32 weight_scale_inv + bf16 norms) all use
+        # registered arenas. Per-dtype element offsets, lightly aligned for RDMA.
+        layout: dict[FetchKey, tuple[torch.dtype, int]] = {}
+        totals: dict[torch.dtype, int] = {}
         for k in keys:
-            offsets.append(off)
+            dt = self._src_dtypes[k]
+            off = totals.get(dt, 0)
+            layout[k] = (dt, off)
             n = prod(self._src_shapes[k]) or 1
-            off += (n + 7) & ~7  # 8-element alignment
-        total = off
+            totals[dt] = off + ((n + 7) & ~7)  # 8-element alignment
 
-        arena = self._dest_arena
-        if arena is None or arena.numel() < total or arena.dtype != dtype:
-            arena = torch.empty(total, dtype=dtype, device=self.device)
-            # One-time (per growth) registration of the whole storage; pinned for
-            # the process lifetime so views never trigger register/deregister.
-            register_nixl_memory(arena)
-            self._dest_arena = arena
+        for dt, total in totals.items():
+            arena = self._dest_arenas.get(dt)
+            if arena is None or arena.numel() < total:
+                arena = torch.empty(total, dtype=dt, device=self.device)
+                # One-time (per growth) registration of the whole storage; pinned
+                # for the process lifetime so views never register/deregister.
+                register_nixl_memory(arena)
+                self._dest_arenas[dt] = arena
 
-        # Carve a contiguous view per slice. Held in ``targets`` (strong refs)
-        # through the ray.get below -- set_target_for_ref stores only weakrefs.
+        # Carve a contiguous view per slice (keys order). Held in ``targets``
+        # (strong refs) through the ray.get -- set_target_for_ref stores weakrefs.
         targets: list[torch.Tensor] = []
-        for k, o in zip(keys, offsets):
+        for k in keys:
+            dt, off = layout[k]
             shape = self._src_shapes[k]
             n = prod(shape) or 1
-            targets.append(arena[o : o + n].reshape(shape))
+            targets.append(self._dest_arenas[dt][off : off + n].reshape(shape))
 
         ref = self._produce_method.remote(keys)  # type: ignore[union-attr]
         set_target_for_ref(ref, targets)
@@ -989,12 +1003,18 @@ class ShardedRDTWeightTransferEngine(
                     )
             self._restore_after_dry_run(model)
 
+        # Names whose copy_ fired during the bake (baked + unbaked-but-live).
+        # Residual names not in here no-op for this worker and are skipped.
+        self._live_names = set(recorder.copied_names)
+
         n_groups = len({id(g) for g in self._name_to_group.values()})
         logger.info(
-            "Sharded RDT dry-run baked %d/%d names into %d leaf modules in %.3fs",
+            "Sharded RDT dry-run baked %d/%d names into %d leaf modules "
+            "(%d live) in %.3fs",
             len(self._name_to_group),
             len(names),
             n_groups,
+            len(self._live_names),
             time.perf_counter() - _t0,
         )
 
@@ -1223,9 +1243,10 @@ class ShardedRDTWeightTransferEngine(
         self._name_meta.clear()
         self._src_shapes.clear()
         self._src_dtypes.clear()
-        # Release the receive arena (its NIXL registration is pinned for the
-        # process lifetime; freeing the tensor just drops our strong ref).
-        self._dest_arena = None
+        self._live_names.clear()
+        # Release the receive arenas (their NIXL registration is pinned for the
+        # process lifetime; freeing the tensors just drops our strong refs).
+        self._dest_arenas.clear()
 
     @staticmethod
     def trainer_send_weights(
