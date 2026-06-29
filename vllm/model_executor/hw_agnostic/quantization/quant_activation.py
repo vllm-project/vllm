@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Re-export of upstream ``QuantizedActivation``.
+"""Re-export of ``QuantizedActivation``.
 
-The upstream module performs an ``isinstance(x, QuantizedActivation)``
-check inside ``as_quantized_activation``; a vendored copy would
-silently bypass that check.
+``as_quantized_activation`` performs an ``isinstance(x, QuantizedActivation)``
+check; a separate class here would silently bypass it.
 """
 
 from vllm.model_executor.layers.fusion.quant_activation import (

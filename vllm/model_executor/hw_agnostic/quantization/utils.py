@@ -2,9 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Hw-agnostic FP8 weight/scale helpers.
 
-Vendored from upstream ``layers.quantization.utils.{fp8_utils,w8a8_utils}``
-to avoid pulling the upstream module's transitive Cutlass / DeepGEMM
-imports when the only code we need is pure tensor math.
+Restricted to pure tensor math so this module does not transitively pull
+HW-specific kernel libraries (Cutlass / DeepGEMM) at import time.
 """
 
 import torch

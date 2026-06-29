@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Re-export of upstream ``Attention``."""
+"""Re-export of ``Attention``."""
 
 from vllm.model_executor.layers.attention import Attention
 

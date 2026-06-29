@@ -1,17 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Hw-agnostic FP8 weight + Triton kernel helpers.
-
-Vendored subset of ``vllm.model_executor.layers.quantization.utils.fp8_utils``
-restricted to the pure tensor math + Triton kernels we use on the DSv4
-hw-agnostic path. Compared to upstream:
-
-- No DeepGEMM / Cutlass / Marlin / AITER fast-paths.
-- No e8m0 (UE8M0) / FNUZ branches (those are the FP4 / ROCm-specific paths
-  we removed at the dispatcher).
-- No optional column-major / TMA-aligned scale layouts (DeepGEMM only).
-"""
+"""Hw-agnostic FP8 weight + Triton kernel helpers."""
 
 from __future__ import annotations
 
@@ -243,15 +233,15 @@ def _get_w8a8_block_fp8_configs(
 ) -> dict[int, dict] | None:
     """Load tuned configs for the w8a8 block FP8 kernel if available.
 
-    The config files live next to the upstream module; we point at the same
-    directory so a tuned config drop-in keeps working.
+    Reuses the shared tuned-config directory so drop-in JSON tunings keep
+    working without duplicating them under this tree.
     """
     device_name = current_platform.get_device_name().replace(" ", "_")
     json_file_name = (
         f"N={N},K={K},device_name={device_name},dtype=fp8_w8a8,"
         f"block_shape=[{block_n},{block_k}].json"
     )
-    upstream_configs_dir = os.path.join(
+    configs_dir = os.path.join(
         os.path.dirname(os.path.realpath(__file__)),
         "..",
         "..",
@@ -260,9 +250,7 @@ def _get_w8a8_block_fp8_configs(
         "utils",
         "configs",
     )
-    config_file_path = os.path.normpath(
-        os.path.join(upstream_configs_dir, json_file_name)
-    )
+    config_file_path = os.path.normpath(os.path.join(configs_dir, json_file_name))
     if os.path.exists(config_file_path):
         with open(config_file_path) as f:
             logger.info(
@@ -529,10 +517,5 @@ def process_fp8_weight_block_strategy(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Block-wise FP8 weight processing.
-
-    On the hw-agnostic path this is currently a passthrough: there is no
-    FNUZ / E8M0 conversion to do (those branches live on the upstream
-    ROCm / FP4 paths we don't support here).
-    """
+    """Block-wise FP8 weight processing (passthrough)."""
     return weight, weight_scale

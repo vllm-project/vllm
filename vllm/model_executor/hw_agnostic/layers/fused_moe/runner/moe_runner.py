@@ -208,19 +208,19 @@ def _moe_forward_shared_fake(
     return shared_out, fused_out
 
 
-# Register the forward ops in our own ``vllm_dsv4`` namespace so the op
-# body's ``isinstance(layer, MoERunnerInterface)`` check resolves against
-# the vendored ABC, not upstream's. The ops are opaque-body custom ops:
-# torch.compile sees them as a single boundary, preserving the LoRA
-# dual-stream and shared-experts overlap schedules.
-_VLLM_DSV4_LIB = torch.library.Library("vllm_dsv4", "FRAGMENT")  # noqa: TOR901
+# Register the forward ops in a dedicated ``vllm_hw_agnostic`` namespace
+# so the op body's ``isinstance(layer, MoERunnerInterface)`` check resolves
+# against this MoERunnerInterface, not the hw-specific one. The ops are
+# opaque-body custom ops: torch.compile sees them as a single boundary,
+# preserving the LoRA dual-stream and shared-experts overlap schedules.
+_VLLM_HW_AGNOSTIC_LIB = torch.library.Library("vllm_hw_agnostic", "FRAGMENT")  # noqa: TOR901
 
 direct_register_custom_op(
     op_name="moe_forward",
     op_func=_moe_forward,
     mutates_args=["hidden_states"],
     fake_impl=_moe_forward_fake,
-    target_lib=_VLLM_DSV4_LIB,
+    target_lib=_VLLM_HW_AGNOSTIC_LIB,
     tags=(torch.Tag.needs_fixed_stride_order,),
 )
 
@@ -228,7 +228,7 @@ direct_register_custom_op(
     op_name="moe_forward_shared",
     op_func=_moe_forward_shared,
     fake_impl=_moe_forward_shared_fake,
-    target_lib=_VLLM_DSV4_LIB,
+    target_lib=_VLLM_HW_AGNOSTIC_LIB,
     tags=(torch.Tag.needs_fixed_stride_order,),
 )
 
@@ -301,9 +301,9 @@ class MoERunner(MoERunnerInterface):
 
     def _select_forward(self) -> Callable:
         return (
-            torch.ops.vllm_dsv4.moe_forward
+            torch.ops.vllm_hw_agnostic.moe_forward
             if self._shared_experts is None
-            else torch.ops.vllm_dsv4.moe_forward_shared
+            else torch.ops.vllm_hw_agnostic.moe_forward_shared
         )
 
     @property

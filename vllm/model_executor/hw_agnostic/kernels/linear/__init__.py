@@ -44,10 +44,9 @@ def _get_linear_backend() -> str:
     return "auto"
 
 
-# Trimmed mapping: only the kernels vendored on the hw-agnostic path. The
-# upstream priority list (FlashInfer/DeepGEMM/Cutlass/Marlin) is dropped
-# because those kernels load CUDA-binary-coded code that an OOT host
-# cannot run; the Triton + native-PyTorch fallback are portable.
+# Triton + native-PyTorch are the only portable kernels on the
+# hw-agnostic path; HW-specific kernel families (FlashInfer/DeepGEMM/
+# Cutlass/Marlin) load CUDA-binary code that an OOT host cannot run.
 _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     "triton": {TritonFp8BlockScaledMMKernel},
     "torch": {ChannelWiseTorchFP8ScaledMMLinearKernel},
@@ -64,8 +63,7 @@ def _filter_kernels_by_backend(
 
 # Block-scaled FP8 priority list. CUDA only — the hw-agnostic path always
 # runs on a platform whose ``_enum`` resolves to CUDA (OOT plugins inherit
-# from NvmlCudaPlatform). The Triton kernel handles every shape DSv4
-# exercises; ChannelWise torch is kept as a portable fallback.
+# from NvmlCudaPlatform). ChannelWise torch is the portable fallback.
 _POSSIBLE_FP8_BLOCK_KERNELS: dict[
     PlatformEnum, list[type[Fp8BlockScaledMMLinearKernel | FP8ScaledMMLinearKernel]]
 ] = {
@@ -146,8 +144,8 @@ def init_fp8_linear_kernel(
     """Select an FP8 block-scaled linear kernel."""
     if not activation_quant_key.scale.group_shape.is_per_group():
         raise NotImplementedError(
-            "DSv4 hw-agnostic only supports block-scaled FP8 (per-group "
-            "activation scales). Per-tensor / per-token FP8 is not vendored."
+            "hw-agnostic only supports block-scaled FP8 (per-group "
+            "activation scales); per-tensor / per-token FP8 is not supported."
         )
 
     scaled_mm_linear_kernel_config = FP8ScaledMMLinearLayerConfig(

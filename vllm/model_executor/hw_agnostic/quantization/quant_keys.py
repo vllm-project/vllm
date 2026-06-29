@@ -1,16 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Re-export of upstream ``QuantKey`` and friends.
+"""Re-export of ``QuantKey`` and friends.
 
-The upstream registry at ``vllm/config/quantization.py`` and several
-attention backends do ``isinstance(v, QuantKey)`` and ``key == kFp8...Sym``
-against the upstream class and module-level constants. Vendoring fresh
-copies would either break the isinstance check (different class identity)
-or silently bypass the registry (different singleton identity).
-
-This module exposes the upstream symbols under a hw_agnostic-shaped path
-so the lint regex no longer needs an ``utils.quant_utils`` carve-out.
+Identity must be preserved: the registry at ``vllm/config/quantization.py``
+performs ``isinstance(v, QuantKey)`` and ``key == kFp8...Sym`` comparisons
+against the canonical class and module-level constants. Re-exporting here
+keeps the lint regex from needing an ``utils.quant_utils`` carve-out
+without breaking isinstance / singleton identity.
 """
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (

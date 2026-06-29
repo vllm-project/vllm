@@ -45,7 +45,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     @property
     def supports_internal_mk(self) -> bool:
-        # All vendored quant methods own their MK; True once it is built.
+        # Quant methods on this path own their MK; True once it is built.
         return self.moe_kernel is not None
 
     @property

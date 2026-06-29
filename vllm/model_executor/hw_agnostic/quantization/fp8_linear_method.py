@@ -56,7 +56,7 @@ class Fp8LinearMethod(LinearMethodBase):
         else:
             self.weight_quant_key = kFp8StaticTensorSym
             # Per-tensor for static activation, per-token for dynamic — the
-            # vendored Triton scaled-MM kernel handles both layouts.
+            # Triton scaled-MM kernel handles both layouts.
             self.activation_quant_key = (
                 kFp8StaticTensorSym if self.act_q_static else kFp8DynamicTokenSym
             )
@@ -116,7 +116,8 @@ class Fp8LinearMethod(LinearMethodBase):
                 weight_loader,
                 scale_dtype=(torch.float8_e8m0fnu if self.is_scale_e8m0 else None),
             )
-            # ``weight_scale_inv`` name preserved for DeepseekV3/V4 checkpoints.
+            # ``weight_scale_inv`` parameter name preserved for
+            # checkpoint compatibility with block-quantized FP8 models.
             layer.register_parameter("weight_scale_inv", scale)
 
         if self.act_q_static:
@@ -173,10 +174,9 @@ class Fp8LinearMethod(LinearMethodBase):
                 assert self.weight_block_size is not None
                 return self.fp8_linear.apply_weights(layer, x, bias)
 
-            # Per-tensor/channel batch-invariant: dequant to BF16, then GEMM.
-            # Upstream had a Cutlass fast path here; the trimmed kernel
-            # selector cannot return Cutlass, so we always take the dequant
-            # branch.
+            # Per-tensor/channel batch-invariant: dequant to BF16, then
+            # GEMM. The hw-agnostic kernel selector has no Cutlass option,
+            # so always take the dequant branch.
             weight_fp8 = layer.weight.to(torch.bfloat16)
             weight_scale = layer.weight_scale.to(torch.bfloat16)
             if weight_scale.numel() == 1:

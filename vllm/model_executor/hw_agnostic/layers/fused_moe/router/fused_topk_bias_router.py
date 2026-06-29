@@ -84,8 +84,8 @@ def vllm_topk_softplus_sqrt(
     scores = torch.sqrt(F.softplus(gating_output.float()))
 
     # Bias is used for expert SELECTION only, not for weight computation.
-    # Using biased scores as weights flattens the distribution when the bias
-    # is near-uniform (e.g., DSv4-Flash where all biases ≈ 8.08).
+    # Using biased scores as weights flattens the distribution when the
+    # correction biases are near-uniform across experts.
     if e_score_correction_bias is not None:
         scores_for_choice = scores + e_score_correction_bias.float()
     else:

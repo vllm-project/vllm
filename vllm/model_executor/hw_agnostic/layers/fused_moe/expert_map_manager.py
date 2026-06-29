@@ -88,7 +88,7 @@ class ExpertMapManager:
                 ep_size, ep_rank, backend flags).
             placement_strategy: Only ``"linear"`` is supported on the
                 hw-agnostic path; ``"round_robin"`` is rejected here
-                because it requires a vendor (DeepEP-LL/NIXL) backend.
+                because it requires a HW-specific (DeepEP-LL/NIXL) transport.
         """
         self.global_num_experts = global_num_experts
         self.moe_parallel_config = moe_parallel_config
@@ -96,7 +96,7 @@ class ExpertMapManager:
         self.max_num_batched_tokens = max_num_batched_tokens
 
         # Round-robin needs a DeepEP-LL/NIXL transport, neither of which
-        # is supported on the hw-agnostic path.
+        # is supported on the hw-agnostic path (HW-specific only).
         if placement_strategy != "linear":
             raise NotImplementedError(
                 f"hw-agnostic FusedMoE supports placement_strategy='linear' "
