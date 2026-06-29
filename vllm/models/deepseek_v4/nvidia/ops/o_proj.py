@@ -17,9 +17,11 @@ def compute_fp8_einsum_recipe() -> tuple[tuple[int, int, int], bool]:
     """fp8_einsum recipe + scale layout for the current GPU arch.
 
     SM90: FP32 block scales stay [g, r/128, d/128] → sfb_gran_mn=128.
-    SM100/SM110: INT32 packed scales become [g, r, ...] → sfb_gran_mn=1.
-    SM12x: RTX PRO / GB10 does not expose the same TMA/TCGEN05 path, so keep
-    the legacy FP32 block-scale layout expected by DeepGEMM.
+    SM100: INT32 packed scales become [g, r, ...] → sfb_gran_mn=1.
+    SM12x (and every other arch, including SM110): RTX PRO / GB10 do not expose
+    the same TMA/TCGEN05 path, so keep the legacy FP32 block-scale layout
+    expected by DeepGEMM (this is the ``deepseek_v4_fp8_einsum_config`` else
+    branch — only SM100 takes the packed path).
 
     Returns ``(einsum_recipe, tma_aligned_scales)`` for ``deep_gemm_fp8_o_proj``.
     """

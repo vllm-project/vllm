@@ -21,9 +21,11 @@ from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
     deep_gemm_fp8_o_proj,
 )
 from vllm.models.deepseek_v4.sparse_mla import (
+    _C128A_TOPK_ALIGNMENT,
     DeepseekV4FlashMLABackend,
     DeepseekV4FlashMLAMetadata,
 )
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.sparse_mla_env import (
     is_triton_sparse_mla_enabled,
     is_triton_sparse_mla_enabled_for_platform,
@@ -172,11 +174,24 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             and layer.topk_indices_buffer.ndim > 0
             and layer.topk_indices_buffer.shape[-1] > 0
         ):
-            return int(layer.topk_indices_buffer.shape[-1])
-        indexer_topk = getattr(layer.indexer, "topk_tokens", None)
-        if indexer_topk is not None:
-            return int(indexer_topk)
-        return 2048
+            bound = int(layer.topk_indices_buffer.shape[-1])
+        else:
+            indexer_topk = getattr(layer.indexer, "topk_tokens", None)
+            bound = int(indexer_topk) if indexer_topk is not None else 2048
+        # C128A prefill builds raw candidates over the full compressed region,
+        # so its top-k width grows with max_model_len (independent of
+        # index_topk) up to the c128a_max_compressed that the metadata builder
+        # allocates c128a_prefill_buffer with. Reserve that worst case here so
+        # the locked prefill workspace is sized self-consistently, instead of
+        # depending on the lightning indexer's (much larger, incidental)
+        # reservation to absorb the gap at long context.
+        if layer.compress_ratio == 128:
+            compressed = cdiv(int(layer.max_model_len), layer.compress_ratio)
+            c128a_bound = (
+                cdiv(compressed, _C128A_TOPK_ALIGNMENT) * _C128A_TOPK_ALIGNMENT
+            )
+            bound = max(bound, c128a_bound)
+        return bound
 
     @classmethod
     def _prefill_workspace_reservation_specs(
@@ -892,11 +907,9 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         seq_lens = swa_metadata.prefill_seq_lens
         gather_lens = swa_metadata.prefill_gather_lens
         seq_lens_cpu = swa_metadata.prefill_seq_lens_cpu
-        gather_lens_cpu = swa_metadata.prefill_gather_lens_cpu
         assert seq_lens is not None
         assert gather_lens is not None
         assert seq_lens_cpu is not None
-        assert gather_lens_cpu is not None
 
         # Derive prefill-local token offsets from the full query_start_loc_cpu.
         query_start_loc_cpu = swa_metadata.query_start_loc_cpu

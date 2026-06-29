@@ -23,6 +23,7 @@ from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     write_flashinfer_autotune_cache,
 )
 from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
+    _DEEPSEEK_V4_SPARSE_MLA_BACKENDS,
     deepseek_v4_sparse_mla_attention_warmup,
     flashinfer_sparse_mla_decode_autotune_warmup,
 )
@@ -45,12 +46,10 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-_DEEPSEEK_V4_SPARSE_MLA_BACKENDS = frozenset(
-    {
-        "V4_FLASHMLA_SPARSE",
-        "DEEPSEEK_SPARSE_SWA",
-    }
-)
+# Backend names that mark a DSv4 sparse-MLA attn group as live. Shared with
+# flashinfer_sparse_mla_warmup so the two warmup gates cannot drift on a
+# backend rename (the old local "V4_FLASHMLA_SPARSE" was renamed
+# "FLASHMLA_SPARSE_DSV4" upstream and only kept matching via DEEPSEEK_SPARSE_SWA).
 _DEEPSEEK_V4_SPARSE_MLA_MIXED_WARMUP_TOKENS = 16
 # Cap warmup at the largest single-chunk prefill the scheduler will ever
 # issue (max_num_batched_tokens). 8192 covers the canonical SM12x serve
