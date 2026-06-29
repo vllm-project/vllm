@@ -931,16 +931,28 @@ class VllmConfig:
                     model_type,
                 )
 
+        from vllm.platforms import current_platform
         from vllm.v1.executor.abstract import Executor
 
         executor_backend = self.parallel_config.distributed_executor_backend
         executor_class = Executor.get_class(self)
         executor_supports_async_sched = executor_class.supports_async_scheduling()
+        uses_rocm_deepep_ht_dbo = (
+            current_platform.is_rocm()
+            and self.parallel_config.enable_dbo
+            and self.parallel_config.all2all_backend == "deepep_high_throughput"
+        )
 
         if self.scheduler_config.async_scheduling:
             # Async scheduling explicitly enabled, hard fail any incompatibilities.
             # Currently, async scheduling only support eagle speculative
             # decoding.
+            if uses_rocm_deepep_ht_dbo:
+                raise ValueError(
+                    "Async scheduling is not compatible with ROCm DeepEP "
+                    "high-throughput DBO. Please use --no-async-scheduling or "
+                    "--all2all-backend=deepep_low_latency."
+                )
             if self.speculative_config is not None:
                 if (
                     self.speculative_config.method not in get_args(EagleModelTypes)
@@ -1000,6 +1012,13 @@ class VllmConfig:
                     executor_backend,
                 )
                 self.scheduler_config.async_scheduling = False
+            elif uses_rocm_deepep_ht_dbo:
+                logger.warning_once(
+                    "Async scheduling is disabled for ROCm DeepEP "
+                    "high-throughput DBO because that combination can corrupt "
+                    "DP+EP generation accuracy."
+                )
+                self.scheduler_config.async_scheduling = False
             else:
                 self.scheduler_config.async_scheduling = True
 
@@ -1043,8 +1062,6 @@ class VllmConfig:
                 "torch_shm is known to fail without "
                 "VLLM_WORKER_MULTIPROC_METHOD set to spawn"
             )
-
-        from vllm.platforms import current_platform
 
         if (
             self.model_config is not None
