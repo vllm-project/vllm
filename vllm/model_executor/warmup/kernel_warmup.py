@@ -30,6 +30,7 @@ from vllm.model_executor.warmup.sparse_mla_triton_warmup import (
 from vllm.model_executor.warmup.v1_block_table_warmup import (
     warm_v1_block_table_kernels,
 )
+from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer
@@ -52,6 +53,7 @@ def kernel_warmup(worker: "Worker"):
             getattr(worker.model_runner, "device", torch.device("cuda")),
             worker.scheduler_config.max_num_batched_tokens,
         )
+    qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
 
     # DSv4 mHC TileLang kernels (hc_pre/hc_post/hc_head_op) run every decoder
     # layer per token; warm them across token sizes first so the first real
