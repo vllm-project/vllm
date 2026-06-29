@@ -1263,6 +1263,7 @@ def test_thinking_budget_long_thinking_section_end_marker_found_at_correct_index
 # Regression tests: after budget forces end-of-thinking token sequence,
 # the state machine must detect and enforce budget on subsequent blocks.
 
+
 class TestThinkingBudgetReentry:
     THINK_START = 100
     THINK_END_SINGLE = [200]
@@ -1275,6 +1276,7 @@ class TestThinkingBudgetReentry:
     def _make_holder(end_token_ids: list[int]) -> ThinkingBudgetStateHolder:
         class FakeReasoningConfig:
             reasoning_start_token_ids = [TestThinkingBudgetReentry.THINK_START]
+            reasoning_end_token_ids: list[int] = []
             enabled = True
 
         cfg = FakeReasoningConfig()
