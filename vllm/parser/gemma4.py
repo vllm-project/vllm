@@ -376,6 +376,7 @@ def gemma4_config() -> ParserEngineConfig:
         arg_converter=_gemma4_arg_converter,
         tool_args_json=False,
         arg_structural_chars=frozenset(",:{}[]<"),
+        preserve_tokens=frozenset({STRING_DELIM}),
     )
 
 

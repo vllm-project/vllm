@@ -50,8 +50,10 @@ def _build_drop_info(
     if not special_tokens:
         return None
 
-    configured_texts = set(config.token_id_terminals.values()) | set(
-        config.terminals.values()
+    configured_texts = (
+        set(config.token_id_terminals.values())
+        | set(config.terminals.values())
+        | config.preserve_tokens
     )
 
     extra_token_ids: dict[int, str] = {}
