@@ -161,10 +161,12 @@ class DeepseekOCRProcessor(ProcessorMixin):
         image_size: int = IMAGE_SIZE,
         base_size: int = BASE_SIZE,
         strategy: Literal["v1", "v2"] = "v1",
+        max_crops: int = MAX_CROPS,
         **kwargs,
     ):
         self.image_size = image_size
         self.base_size = base_size
+        self.max_crops = max_crops
 
         # image token calculation strategy for
         # Deepseek-OCR and Deepseek-OCR-2
@@ -332,7 +334,7 @@ class DeepseekOCRProcessor(ProcessorMixin):
                 crop_ratio = [1, 1]
             elif cropping:
                 images_crop_raw, crop_ratio = dynamic_preprocess(
-                    image, image_size=self.image_size
+                    image, image_size=self.image_size, max_num=self.max_crops
                 )
             else:
                 crop_ratio = [1, 1]
