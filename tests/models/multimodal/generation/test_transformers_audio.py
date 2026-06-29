@@ -3,6 +3,7 @@
 
 import json
 import os
+from typing import Any
 
 import pytest
 
@@ -12,7 +13,7 @@ from vllm.envs import disable_envs_cache
 
 AUDIO_ASSET = AudioAsset("mary_had_lamb")
 
-AUDIO_MODEL_SETTINGS = {
+AUDIO_MODEL_SETTINGS: dict[str, dict[str, Any]] = {
     "ibm-granite/granite-speech-3.3-2b": {
         "prompt": (
             "<|start_of_role|>system<|end_of_role|>"
@@ -31,6 +32,9 @@ AUDIO_MODEL_SETTINGS = {
             "<sound>Transcribe the input speech.<|im_end|>\n"
             "<|im_start|>assistant\n"
         ),
+        "llm_kwargs": {
+            "gpu_memory_utilization": 0.85,
+        },
     },
     "microsoft/VibeVoice-ASR-HF": {
         "prompt": (
@@ -44,6 +48,10 @@ AUDIO_MODEL_SETTINGS = {
             "<|im_end|>\n"
             "<|im_start|>assistant\n"
         ),
+        "llm_kwargs": {
+            "max_num_batched_tokens": 2048,
+            "gpu_memory_utilization": 0.85,
+        },
     },
     "zai-org/GLM-ASR-Nano-2512": {
         "prompt": (
@@ -113,6 +121,7 @@ def test_transformers_audio_generation(monkeypatch, model_id):
             max_model_len=2048,
             enforce_eager=True,
             limit_mm_per_prompt={"audio": 1},
+            **settings.get("llm_kwargs", {}),
         )
     except Exception as e:
         pytest.skip(f"Failed to load model {model_id}: {e}")
