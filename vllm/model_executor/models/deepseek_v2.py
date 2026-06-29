@@ -1336,7 +1336,7 @@ class DeepseekV2Model(nn.Module):
         quant_config = vllm_config.quant_config
         self.config = config
         self.device = current_platform.device_type
-        self.hidden_size = self.hidden_size
+        self.hidden_size = config.hidden_size
         self.vocab_size = config.vocab_size
         self.is_v32 = hasattr(config, "index_topk")
         if self.is_v32:
