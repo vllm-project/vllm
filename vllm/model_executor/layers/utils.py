@@ -178,9 +178,8 @@ def rocm_unquantized_gemm_impl(
     use_skinny = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
         and (on_gfx9() or on_gfx1x())
-        # gfx1250 excludes the skinny-GEMM kernels (wvSplitK/LLMM1) from the
         # build (gfx9/gfx11 ISA); fall back to torch GEMM there.
-        and not on_gfx1250()
+        and not on_gfx1250() # TODO GFX1250: Remove once skinny GEMM is supported on gfx1250
         and x.dtype in [torch.float16, torch.bfloat16]
         and k % 8 == 0
     )
