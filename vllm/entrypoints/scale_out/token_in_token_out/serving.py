@@ -28,14 +28,6 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.engine.serving import OpenAIServing, clamp_prompt_logprobs
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.disagg.mm_serde import decode_mm_kwargs_item
-from vllm.entrypoints.serve.disagg.protocol import (
-    GenerateRequest,
-    GenerateResponse,
-    GenerateResponseChoice,
-    GenerateResponseStreamChoice,
-    GenerateStreamResponse,
-)
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import EngineInput, mm_input
@@ -50,6 +42,15 @@ from vllm.outputs import RequestOutput
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.utils.collection_utils import as_list
+
+from .mm_serde import decode_mm_kwargs_item
+from .protocol import (
+    GenerateRequest,
+    GenerateResponse,
+    GenerateResponseChoice,
+    GenerateResponseStreamChoice,
+    GenerateStreamResponse,
+)
 
 logger = init_logger(__name__)
 
