@@ -6,6 +6,7 @@ from typing import ClassVar
 import torch
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
+from vllm.config import get_current_vllm_config_or_none
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
@@ -161,6 +162,13 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
 
+        vllm_config = get_current_vllm_config_or_none()
+        self.trtllm_skip_softmax_decode_threshold_scale_factor: float | None = (
+            vllm_config.attention_config.trtllm_skip_softmax_decode_threshold_scale_factor
+            if vllm_config is not None
+            else None
+        )
+
     def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
@@ -208,6 +216,9 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             max_seq_len=attn_metadata.max_seq_len,
             bmm1_scale=self.bmm1_scale,
             bmm2_scale=self.bmm2_scale,
+            skip_softmax_threshold_scale_factor=(
+                self.trtllm_skip_softmax_decode_threshold_scale_factor
+            ),
         )
 
         # Flatten the output for consistent shape

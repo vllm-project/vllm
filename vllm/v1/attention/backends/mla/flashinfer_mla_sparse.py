@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, ClassVar
 import numpy as np
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config_or_none
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
@@ -401,6 +401,13 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
 
+        vllm_config = get_current_vllm_config_or_none()
+        self.trtllm_skip_softmax_decode_threshold_scale_factor: float | None = (
+            vllm_config.attention_config.trtllm_skip_softmax_decode_threshold_scale_factor
+            if vllm_config is not None
+            else None
+        )
+
         # fp8 query quantization is required when using fp8 kv_cache,
         # as the TRTLLM-GEN sparse MLA kernel requires matching dtypes
         # for query and kv_cache (mixed bf16+fp8 is not supported).
@@ -457,5 +464,8 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
             bmm1_scale=self.bmm1_scale,
             bmm2_scale=self.bmm2_scale,
             sparse_mla_top_k=attn_metadata.topk_tokens,
+            skip_softmax_threshold_scale_factor=(
+                self.trtllm_skip_softmax_decode_threshold_scale_factor
+            ),
         )
         return o.view(-1, o.shape[-2], o.shape[-1]), None

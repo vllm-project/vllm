@@ -59,6 +59,16 @@ class AttentionConfig:
     use_non_causal: bool = False
     """Whether to use non-causal (bidirectional) attention."""
 
+    trtllm_skip_softmax_prefill_threshold_scale_factor: float | None = None
+    """Skip-softmax threshold scale factor for the flashinfer TRT-LLM prefill
+    kernels. `None` disables skip-softmax (standard attention).
+    See https://arxiv.org/abs/2512.12087."""
+
+    trtllm_skip_softmax_decode_threshold_scale_factor: float | None = None
+    """Skip-softmax threshold scale factor for the flashinfer TRT-LLM decode
+    kernels. `None` disables skip-softmax (standard attention).
+    See https://arxiv.org/abs/2512.12087."""
+
     flex_attn_block_m: int | None = None
     """Triton kernel BLOCK_M tile size for flex attention.
     Must be a power of 2 >= 16. If None and VLLM_BATCH_INVARIANT=1,

@@ -1396,10 +1396,23 @@ class FlashInferImpl(AttentionImpl):
 
         self.support_trtllm_attn = can_use_trtllm_attention(num_heads, num_kv_heads)
         vllm_config = get_current_vllm_config_or_none()
+        attention_config = (
+            vllm_config.attention_config if vllm_config is not None else None
+        )
         self.supports_quant_query_input = (
             self.support_trtllm_attn
-            and vllm_config is not None
-            and not vllm_config.attention_config.disable_flashinfer_q_quantization
+            and attention_config is not None
+            and not attention_config.disable_flashinfer_q_quantization
+        )
+        self.trtllm_skip_softmax_prefill_threshold_scale_factor: float | None = (
+            attention_config.trtllm_skip_softmax_prefill_threshold_scale_factor
+            if attention_config is not None
+            else None
+        )
+        self.trtllm_skip_softmax_decode_threshold_scale_factor: float | None = (
+            attention_config.trtllm_skip_softmax_decode_threshold_scale_factor
+            if attention_config is not None
+            else None
         )
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
@@ -1760,6 +1773,9 @@ class FlashInferImpl(AttentionImpl):
                     o_sf_scale=self.o_sf_scale,
                     out=out,
                     kv_cache_sf=prefill_kv_block_scales,
+                    skip_softmax_threshold_scale_factor=(
+                        self.trtllm_skip_softmax_prefill_threshold_scale_factor
+                    ),
                 )
 
                 if needs_fp8_out:
@@ -1898,6 +1914,9 @@ class FlashInferImpl(AttentionImpl):
                     q_len_per_req=q_len_per_req,
                     kv_cache_sf=(
                         nvfp4_kv_block_scales if self.is_kvcache_nvfp4 else None
+                    ),
+                    skip_softmax_threshold_scale_factor=(
+                        self.trtllm_skip_softmax_decode_threshold_scale_factor
                     ),
                 )
 
