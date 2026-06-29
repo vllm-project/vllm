@@ -547,7 +547,7 @@ def compute_mm_prefix_ranges(
     req_doc_ranges: dict[int, list[tuple[int, int]]] = {}
     for req_idx, req_id in enumerate(req_ids):
         image_doc_ranges = []
-        for mm_feature in mm_features.get(req_id, []):
+        for mm_feature in mm_features.get(req_id, ()):
             if mm_feature.modality not in ("image", "video"):
                 continue
             for r in mm_feature.mm_position.extract_embeds_range():
