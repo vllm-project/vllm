@@ -2,15 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from enum import Enum
+from typing import TYPE_CHECKING
 
 import torch
-from torch.nn import Module
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )
@@ -18,11 +19,16 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.oracle.base import MoEKernelOracle
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    align_moe_weights_for_fi,
     convert_moe_weights_to_flashinfer_trtllm_block_layout,
     swap_w13_to_w31,
 )
 from vllm.platforms import current_platform
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 logger = init_logger(__name__)
 
@@ -76,6 +82,14 @@ def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBac
         # Updating the oracle querying logic is out of the scope of this
         # PR. Need to fix the kernel or update structure in follow up.
         if moe_config.moe_parallel_config.dp_size > 1:
+            _move_to_back(_AVAILABLE_BACKENDS, UnquantizedMoeBackend.FLASHINFER_CUTLASS)
+
+        # HACK: unquantized FlashInfer aliases SWIGLUOAI to plain Swiglu
+        # (swiglu_alpha/limit only set on the MXFP4 branch). Route to
+        # Triton's swigluoai_and_mul until that's plumbed through. Same
+        # demotion pattern as the Qwen3.5/dp_size hack above.
+        if moe_config.activation == MoEActivation.SWIGLUOAI:
+            _move_to_back(_AVAILABLE_BACKENDS, UnquantizedMoeBackend.FLASHINFER_TRTLLM)
             _move_to_back(_AVAILABLE_BACKENDS, UnquantizedMoeBackend.FLASHINFER_CUTLASS)
 
     elif current_platform.is_xpu():
@@ -255,7 +269,7 @@ def select_unquantized_moe_backend(
 
 def convert_to_unquantized_kernel_format(
     unquantized_backend: UnquantizedMoeBackend,
-    layer: Module,
+    moe_config: FusedMoEConfig,
     w13_weight: torch.Tensor,
     w2_weight: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -263,17 +277,28 @@ def convert_to_unquantized_kernel_format(
         w13_weight, w2_weight = rocm_aiter_ops.shuffle_weights(w13_weight, w2_weight)
 
     elif unquantized_backend == UnquantizedMoeBackend.FLASHINFER_CUTLASS:
-        if layer.moe_config.is_act_and_mul:
+        if moe_config.is_act_and_mul:
             # Swap halves to arrange as [w3; w1] (kernel expectation)
             # Non-gated MoE: w13 is a single projection, no need to swap.
             w13_weight = swap_w13_to_w31(w13_weight)
 
     elif unquantized_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM:
+        is_act_and_mul = moe_config.is_act_and_mul
+        if not is_act_and_mul:
+            # Kernel requires intermediate_size_per_partition % 128 == 0 (BlockMajorK
+            # weight layout uses block_k=128). Pad along the intermediate dim when
+            # the model + TP split don't satisfy the constraint.
+            w13_weight, w2_weight, padded_intermediate = align_moe_weights_for_fi(
+                w13_weight, w2_weight, is_act_and_mul, min_alignment=128
+            )
+            moe_config.intermediate_size_per_partition = padded_intermediate
+
         _cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
         w13_weight, w2_weight = convert_moe_weights_to_flashinfer_trtllm_block_layout(
             _cache_permute_indices,
             w13_weight,
             w2_weight,
+            is_gated_act_gemm=is_act_and_mul,
         )
 
     return w13_weight.contiguous(), w2_weight.contiguous()
@@ -321,3 +346,71 @@ def make_unquantized_moe_kernel(
     )
 
     return kernel
+
+
+# ---------------------------------------------------------------------------
+# Class-based view (first PR of the #37753 series; see oracle/base.py).
+# Methods delegate to the module-level functions above so behaviour is
+# bit-identical with pre-class code.
+# ---------------------------------------------------------------------------
+
+
+class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
+    """Class-based view of the unquantized MoE kernel oracle.
+
+    Each method delegates to its module-level counterpart so that
+    instantiating and calling this class is bit-identical to calling
+    the standalone functions. Follow-up PRs may move logic from the
+    module-level functions into these methods.
+    """
+
+    def backend_enum_cls(self) -> type[UnquantizedMoeBackend]:
+        return UnquantizedMoeBackend
+
+    def get_priority_backends(
+        self, moe_config: FusedMoEConfig
+    ) -> list[UnquantizedMoeBackend]:
+        return _get_priority_backends(moe_config)
+
+    def backend_to_kernel_cls(
+        self, backend: UnquantizedMoeBackend
+    ) -> type[mk.FusedMoEExperts]:
+        return backend_to_kernel_cls(backend)
+
+    def map_backend(self, runner_backend: MoEBackend) -> UnquantizedMoeBackend:
+        return map_unquantized_backend(runner_backend)
+
+    def select_backend(
+        self,
+        moe_config: FusedMoEConfig,
+        weight_key: "QuantKey | None" = None,
+        activation_key: "QuantKey | None" = None,
+    ) -> tuple[UnquantizedMoeBackend, type[mk.FusedMoEExperts] | None]:
+        assert weight_key is None and activation_key is None, (
+            "Weights and activations will never be quantized for "
+            "UnquantizedMoEKernelOracle"
+        )
+        return select_unquantized_moe_backend(moe_config)
+
+    def convert_to_kernel_format(
+        self,
+        backend: UnquantizedMoeBackend,
+        moe_config: FusedMoEConfig,
+        w13_weight: torch.Tensor,
+        w2_weight: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return convert_to_unquantized_kernel_format(
+            backend, moe_config, w13_weight, w2_weight
+        )
+
+    def make_kernel(
+        self,
+        quant_config: FusedMoEQuantConfig,
+        moe_config: FusedMoEConfig,
+        backend: UnquantizedMoeBackend,
+        experts_cls: type[mk.FusedMoEExperts],
+        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    ) -> mk.FusedMoEKernel:
+        return make_unquantized_moe_kernel(
+            quant_config, moe_config, backend, experts_cls, routing_tables
+        )
