@@ -317,7 +317,7 @@ mod tests {
         where
             Self: Sized + 'static,
         {
-            unreachable!("ScriptedParser is constructed directly in tests")
+            Ok(Box::new(Self::new([])))
         }
 
         fn parse_into(

@@ -14,10 +14,9 @@ from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
 from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.render.serving import ServingRender
+from vllm.entrypoints.scale_out.render.serving import ServingRender
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.hf import HfRenderer
-from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -191,15 +190,8 @@ def _build_serving_render(engine: AsyncLLM) -> ServingRender:
         chat_template=None,
         chat_template_content_format="auto",
     )
-    online_derenderer = OnlineDerenderer(
-        model_config=engine.model_config,
-        renderer=engine.renderer,
-        request_logger=None,
-        chat_template=None,
-        chat_template_content_format="auto",
-    )
 
-    serving_render = ServingRender(models, online_renderer, online_derenderer)
+    serving_render = ServingRender(models, online_renderer)
 
     async def _fake_preprocess_chat(*args, **kwargs):
         # return conversation, engine_inputs

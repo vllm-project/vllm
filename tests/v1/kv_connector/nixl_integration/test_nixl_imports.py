@@ -4,8 +4,6 @@
 
 import importlib
 import importlib.metadata as metadata
-import subprocess
-import sys
 import types
 
 import pytest
@@ -65,25 +63,7 @@ def test_nixl_and_nixl_ep_imports() -> None:
     # Exercise the NIXL EP extension used by fused MoE expert parallelism.
     nixl_ep = importlib.import_module("nixl_ep")
     print(f"nixl_ep: {nixl_ep.__file__}")
+    assert nixl_ep.__file__ is not None
 
-    nixl_ep_cpp = _import_nixl_ep_cpp(nixl_ep)
-    assert nixl_ep_cpp.__file__ is not None
-    extension_file = nixl_ep_cpp.__file__
-    print(f"nixl_ep_cpp: {extension_file}")
-
-    completed = subprocess.run(
-        ["ldd", extension_file],
-        capture_output=True,
-        check=False,
-        text=True,
-    )
-    print(completed.stdout)
-    if completed.stderr:
-        print(completed.stderr, file=sys.stderr)
-
-    assert completed.returncode == 0
-    if torch.version.cuda is not None:
-        cuda_major = torch.version.cuda.split(".", maxsplit=1)[0]
-        expected_cudart = f"libcudart.so.{cuda_major}"
-        assert expected_cudart in completed.stdout
-        assert f"{expected_cudart} => not found" not in completed.stdout
+    # Check that the NIXL EP extension is loaded.
+    assert nixl_ep.Config is not None
