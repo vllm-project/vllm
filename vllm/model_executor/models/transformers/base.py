@@ -640,10 +640,7 @@ class Base(
             return hidden_states, aux_hidden_states
         return hidden_states
 
-    def load_weights(
-        self,
-        weights: Iterable[tuple[str, torch.Tensor]],
-    ) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=self.skip_prefixes,
