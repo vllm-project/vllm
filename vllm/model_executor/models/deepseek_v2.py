@@ -1470,6 +1470,9 @@ class DeepseekV2Model(nn.Module):
                 [self.hidden_size, self.hidden_size], dim=-1
             )
 
+        if self.end_layer in self.aux_hidden_state_layers:
+            aux_hidden_states.append(hidden_states + residual)
+
         hidden_states, _ = self.norm(hidden_states, residual)
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
