@@ -421,7 +421,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Ministral3ForCausalLM": _HfExamplesInfo("mistralai/Ministral-3-3B-Instruct-2512"),
     "MistralForCausalLM": _HfExamplesInfo("mistralai/Mistral-7B-Instruct-v0.1"),
     "MistralLarge3ForCausalLM": _HfExamplesInfo(
-        "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4"
+        "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4",
+        # TODO: revert once figuring out OOM in CI
+        is_available_online=False,
     ),
     "MixtralForCausalLM": _HfExamplesInfo(
         "mistralai/Mixtral-8x7B-Instruct-v0.1",
@@ -1450,6 +1452,9 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         trust_remote_code=True,
         speculative_model="AQ-MedAI/Kimi-K25-eagle3",
         tokenizer="moonshotai/Kimi-K2.5",
+        # CUDA graph capture for the reduced-layer MLA target trips a
+        # decode-only assertion; eager init is enough for this test.
+        enforce_eager=True,
     ),
     "Eagle3LlamaForCausalLM": _HfExamplesInfo(
         "meta-llama/Llama-3.1-8B-Instruct",

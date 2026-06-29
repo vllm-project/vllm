@@ -468,6 +468,10 @@ def dummy_hf_overrides(
     # Kimi uses `num_expert_group` instead of `n_group`.
     if n_group is None:
         n_group = getattr(text_config, "num_expert_group", None)
+    # InternS1Pro groups experts via `router_n_groups`.
+    router_n_groups = getattr(text_config, "router_n_groups", None)
+    if n_group is None:
+        n_group = router_n_groups
     num_experts = n_group * 2 if n_group is not None else 2
 
     # we use three layers for Gemma-3n to check
@@ -514,6 +518,11 @@ def dummy_hf_overrides(
             "EagleLlama4ForCausalLM",
         ):
             num_experts_per_tok = 1
+        # InternS1Pro routes one expert per group, so `num_experts_per_tok`
+        # must be a multiple of `router_n_groups` (otherwise the per-group
+        # top-k is 0 and `num_experts` is not divisible by the group count).
+        elif router_n_groups:
+            num_experts_per_tok = router_n_groups
         update_dict.update(
             {
                 "num_experts": num_experts,
