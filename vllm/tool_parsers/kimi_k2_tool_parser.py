@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from collections.abc import Sequence
 
 import regex as re
@@ -23,7 +24,7 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
-from vllm.tool_parsers.utils import partial_tag_overlap
+from vllm.tool_parsers.utils import _extract_tool_info, partial_tag_overlap
 
 logger = init_logger(__name__)
 
@@ -49,13 +50,12 @@ class KimiK2ToolParser(ToolParser):
 
         # Regex for non-streaming extraction
         self.tool_call_regex = re.compile(
-            r"<\|tool_call_begin\|>\s*(?P<tool_call_id>[^<]+:\d+)\s*"
+            r"<\|tool_call_begin\|>\s*(?P<tool_call_id>[^\s<|]+)\s*"
             r"<\|tool_call_argument_begin\|>\s*"
             r"(?P<function_arguments>(?:(?!<\|tool_call_begin\|>).)*?)\s*"
             r"<\|tool_call_end\|>",
             re.DOTALL,
         )
-
         if not self.model_tokenizer:
             raise ValueError(
                 "The model tokenizer must be passed to the ToolParser "
@@ -96,11 +96,14 @@ class KimiK2ToolParser(ToolParser):
                 tool_calls = []
                 for match in function_call_tuples:
                     function_id, function_args = match
-                    # function_id: functions.get_weather:0 or get_weather:0
-                    function_name = function_id.split(":")[0].split(".")[-1]
+                    tool_id, function_name = self._extract_tool_id_and_name(
+                        function_id, function_args
+                    )
+                    if not tool_id or not function_name:
+                        continue
                     tool_calls.append(
                         ToolCall(
-                            id=function_id,
+                            id=tool_id,
                             type="function",
                             function=FunctionCall(
                                 name=function_name, arguments=function_args
@@ -110,7 +113,7 @@ class KimiK2ToolParser(ToolParser):
 
                 content = model_output[: model_output.find(self.tool_calls_start_token)]
                 return ExtractedToolCallInformation(
-                    tools_called=True,
+                    tools_called=len(tool_calls) > 0,
                     tool_calls=tool_calls,
                     content=content if content else None,
                 )
@@ -168,21 +171,55 @@ class KimiK2ToolParser(ToolParser):
                 break
         return results
 
-    @staticmethod
     def _extract_tool_id_and_name(
+        self,
         header: str | None,
+        tool_args: str | None,
     ) -> tuple[str | None, str | None]:
         """Parse ``(tool_id, tool_name)`` from a header
-        like ``"functions.get_weather:0"``."""
+        like ``"functions.get_weather:0"``.
+
+        Kimi K2.5 may emit a bare numeric counter instead of the tool name. In
+        that case, preserve the native ID and infer the tool name when the
+        request tools make it unambiguous.
+        """
         if header is None:
             return None, None
-        match = re.match(r"(.+:\d+)", header)
-        if not match:
-            return None, None
+        tool_id = header.strip()
+        if tool_id.isdigit():
+            return tool_id, self._infer_tool_name(tool_args)
 
-        tool_id = match.group(1).strip()
-        tool_name = tool_id.split(":")[0].split(".")[-1]
-        return tool_id, tool_name
+        tool_name, sep, tool_index = tool_id.rpartition(":")
+        if sep and tool_name and tool_index.isdigit():
+            return tool_id, tool_name.split(".")[-1]
+        return None, None
+
+    def _infer_tool_name(self, tool_args: str | None) -> str | None:
+        if not self.tools:
+            return None
+        if len(self.tools) == 1:
+            return _extract_tool_info(self.tools[0])[0]
+        if not tool_args:
+            return None
+
+        try:
+            parsed_args = json.loads(tool_args)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(parsed_args, dict) or not parsed_args:
+            return None
+
+        matching_name = None
+        arg_keys = set(parsed_args)
+        for tool in self.tools:
+            tool_name, parameters = _extract_tool_info(tool)
+            properties = (parameters or {}).get("properties", {})
+            if not isinstance(properties, dict) or not arg_keys <= properties.keys():
+                continue
+            if matching_name is not None:
+                return None
+            matching_name = tool_name
+        return matching_name
 
     def _split_tool_call(self, tool_call: str) -> tuple[str | None, str | None]:
         """Split a tool-call body into ``(header, arguments)`` at the argument marker.
@@ -237,7 +274,9 @@ class KimiK2ToolParser(ToolParser):
 
                 # Stream back tool name.
                 if "name" not in self.prev_tool_call_arr[i]:
-                    tool_id, tool_name = self._extract_tool_id_and_name(header)
+                    tool_id, tool_name = self._extract_tool_id_and_name(
+                        header, tool_args
+                    )
                     if not tool_name:
                         # Can't skip to tool i+1 if i isn't ready
                         break

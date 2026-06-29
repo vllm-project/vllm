@@ -3,6 +3,7 @@
 # ruff: noqa: E501
 
 import json
+from collections.abc import Mapping
 from unittest.mock import MagicMock
 
 import pytest
@@ -13,6 +14,8 @@ from tests.tool_parsers.utils import (
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+    ChatCompletionToolsParam,
+    FunctionDefinition,
 )
 from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.kimi_k2_tool_parser import KimiK2ToolParser
@@ -30,6 +33,14 @@ def parser(kimi_k2_tokenizer):
     return KimiK2ToolParser(kimi_k2_tokenizer)
 
 
+@pytest.fixture
+def mock_tokenizer():
+    tokenizer = MagicMock()
+    tokenizer.get_vocab.return_value = {}
+    tokenizer.tokenize.return_value = []
+    return tokenizer
+
+
 SECTION_BEGIN = "<|tool_calls_section_begin|>"
 SECTION_END = "<|tool_calls_section_end|>"
 TOOL_BEGIN = "<|tool_call_begin|>"
@@ -43,6 +54,52 @@ def _tool(tool_id: str, args: str) -> str:
 
 def _wrap(*tool_strs: str) -> str:
     return SECTION_BEGIN + "".join(tool_strs) + SECTION_END
+
+
+WEATHER_TOOL = ChatCompletionToolsParam(
+    type="function",
+    function=FunctionDefinition(
+        name="get_weather",
+        parameters={
+            "type": "object",
+            "properties": {
+                "city": {"type": "string"},
+                "unit": {"type": "string"},
+            },
+        },
+    ),
+)
+READ_FILE_TOOL = ChatCompletionToolsParam(
+    type="function",
+    function=FunctionDefinition(
+        name="read_file",
+        parameters={
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+        },
+    ),
+)
+BOOK_FLIGHT_TOOL = ChatCompletionToolsParam(
+    type="function",
+    function=FunctionDefinition(
+        name="book_flight",
+        parameters={
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+        },
+    ),
+)
+
+
+def _assert_tool_call(
+    tool_call,
+    tool_id: str,
+    name: str,
+    arguments: Mapping[str, object],
+):
+    assert tool_call.id == tool_id
+    assert tool_call.function.name == name
+    assert json.loads(tool_call.function.arguments) == arguments
 
 
 class TestExtractToolCalls:
@@ -209,6 +266,59 @@ class TestExtractToolCalls:
         assert len(turn2_tools) == 1
         assert turn2_tools[0].id == "functions.get_news:0"
 
+    def test_bare_counter(self, mock_tokenizer):
+        """Test that bare numeric counter IDs are accepted."""
+        arguments = {"city": "Tokyo", "unit": "celsius"}
+        parser = KimiK2ToolParser(mock_tokenizer, [WEATHER_TOOL])
+        output = "Let me check. " + _wrap(_tool("0", json.dumps(arguments)))
+
+        content, tool_calls = run_tool_extraction(parser, output, streaming=False)
+
+        assert content == "Let me check. "
+        assert len(tool_calls) == 1
+        _assert_tool_call(tool_calls[0], "0", "get_weather", arguments)
+
+    def test_bare_counter_single_tool_invalid_json_still_extracted(
+        self, mock_tokenizer
+    ):
+        parser = KimiK2ToolParser(mock_tokenizer, [WEATHER_TOOL])
+        output = "Let me check. " + _wrap(_tool("0", '{"city": "Tokyo"'))
+
+        _, tool_calls = run_tool_extraction(parser, output, streaming=False)
+
+        assert len(tool_calls) == 1
+        assert tool_calls[0].id == "0"
+        assert tool_calls[0].function.name == "get_weather"
+        assert tool_calls[0].function.arguments == '{"city": "Tokyo"'
+
+    def test_bare_counter_multiple_tools_infers_by_args(self, mock_tokenizer):
+        arguments = {"city": "Tokyo", "unit": "celsius"}
+        parser = KimiK2ToolParser(mock_tokenizer, [READ_FILE_TOOL, WEATHER_TOOL])
+        output = "Let me check. " + _wrap(_tool("0", json.dumps(arguments)))
+
+        _, tool_calls = run_tool_extraction(parser, output, streaming=False)
+
+        assert len(tool_calls) == 1
+        _assert_tool_call(tool_calls[0], "0", "get_weather", arguments)
+
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            pytest.param({"city": "Tokyo"}, id="ambiguous"),
+            pytest.param('{"city": "Tokyo"', id="malformed_json"),
+        ],
+    )
+    def test_bare_counter_multiple_tools_skips_unsafe_inference(
+        self, mock_tokenizer, arguments
+    ):
+        parser = KimiK2ToolParser(mock_tokenizer, [WEATHER_TOOL, BOOK_FLIGHT_TOOL])
+        args = arguments if isinstance(arguments, str) else json.dumps(arguments)
+        output = "Let me check. " + _wrap(_tool("0", args))
+
+        _, tool_calls = run_tool_extraction(parser, output, streaming=False)
+
+        assert tool_calls == []
+
 
 def _split_tool_output_to_deltas(
     content: str, tool_strs: list[tuple[str, str]]
@@ -268,6 +378,40 @@ class TestStreamingHappyPath:
         assert rec.tool_calls[1].function.name == "get_weather"
         assert rec.tool_calls[1].id == "functions.get_weather:1"
         assert json.loads(rec.tool_calls[1].function.arguments) == {"city": "NYC"}
+
+    def test_bare_counter(self, mock_tokenizer):
+        parser = KimiK2ToolParser(mock_tokenizer, [WEATHER_TOOL])
+        arguments = {"city": "Beijing"}
+        deltas = _split_tool_output_to_deltas(
+            "I'll help. ",
+            [("0", json.dumps(arguments))],
+        )
+
+        rec = run_tool_extraction_streaming(
+            parser,
+            deltas,
+            assert_one_tool_per_delta=False,
+        )
+
+        assert len(rec.tool_calls) == 1
+        _assert_tool_call(rec.tool_calls[0], "0", "get_weather", arguments)
+
+    def test_bare_counter_multiple_tools_infers_by_args(self, mock_tokenizer):
+        parser = KimiK2ToolParser(mock_tokenizer, [READ_FILE_TOOL, WEATHER_TOOL])
+        arguments = {"city": "Beijing", "unit": "celsius"}
+        deltas = _split_tool_output_to_deltas(
+            "I'll help. ",
+            [("0", json.dumps(arguments))],
+        )
+
+        rec = run_tool_extraction_streaming(
+            parser,
+            deltas,
+            assert_one_tool_per_delta=False,
+        )
+
+        assert len(rec.tool_calls) == 1
+        _assert_tool_call(rec.tool_calls[0], "0", "get_weather", arguments)
 
     def test_content_before_tools(self, parser):
         """Content before section is streamed; markers/args don't leak."""
