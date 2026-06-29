@@ -287,16 +287,18 @@ _TOOL_CALL_SAMPLES = [
 ]
 
 
-def _suppressed_expectations(
-    sample, think_end: str, tool_start: str
+def _tool_suppression_expectations(
+    sample, think_end: str, tool_start: str, *, include_tool_block: bool
 ) -> tuple[str, str]:
-    """Compute expected (reasoning, content) when tools are suppressed.
+    """Expected (reasoning, content) when tool calls are not extracted.
 
-    When an explicit reasoning-end delimiter is present, reasoning ends
-    there and the tool call block becomes content.  When reasoning ends
-    implicitly (the tool-start token triggers both REASONING_END and
-    TOOL_CALL_START), reasoning still ends at the tool start and the raw
-    tool call block becomes content text.
+    With ``include_tool_block=True`` (skip_tool_parsing / reasoning
+    adapter first pass), tool terminal text is preserved as content so
+    a second-pass parser can see it.
+
+    With ``include_tool_block=False`` (_suppress_tool_calls /
+    tool_choice='none'), the state machine consumes tool blocks and
+    only non-tool content survives.
     """
     full_text = "".join(text for _, text in sample.tokens)
     reasoning = sample.expected_reasoning
@@ -307,12 +309,18 @@ def _suppressed_expectations(
     if think_end:
         pos = after_reasoning.find(think_end)
         if pos >= 0:
-            return (reasoning, after_reasoning[pos + len(think_end) :])
+            if include_tool_block:
+                return (reasoning, after_reasoning[pos + len(think_end) :])
+            after_reasoning = after_reasoning[pos + len(think_end) :]
     if tool_start:
         pos = after_reasoning.find(tool_start)
         if pos >= 0:
-            return (reasoning, after_reasoning[pos:])
-    return (full_text, "")
+            if include_tool_block:
+                return (reasoning, after_reasoning[pos:])
+            return (reasoning, after_reasoning[:pos])
+    if include_tool_block:
+        return (full_text, "")
+    return (reasoning, after_reasoning)
 
 
 _DUMMY_TOOLS = [
@@ -325,18 +333,26 @@ _DUMMY_TOOLS = [
 
 @pytest.mark.parametrize("chunk_size", [1, 5, None], ids=lambda c: f"chunk{c}")
 @pytest.mark.parametrize(
+    "mode",
+    ["skip_tool_parsing", "suppress_tool_calls"],
+    ids=["skip_tool_parsing", "suppress_tool_calls"],
+)
+@pytest.mark.parametrize(
     "parser_cls,sample,think_end,tool_start",
     _TOOL_CALL_SAMPLES,
     ids=lambda v: v.id if hasattr(v, "id") else getattr(v, "__name__", ""),
 )
-class TestSkipToolParsingReplay:
-    """Replay with skip_tool_parsing=True (tool_choice='none').
+class TestToolCallFilteringReplay:
+    """Replay with tool calls not extracted, in both filtering modes.
 
-    Verifies that reasoning is extracted normally and the raw tool call
-    block appears as content text with no tool calls parsed.
+    ``skip_tool_parsing`` (reasoning adapter first pass): tool terminal
+    text is preserved as content for a second-pass tool parser.
+
+    ``suppress_tool_calls`` (tool_choice='none'): tool call blocks are
+    consumed by the state machine and do not leak into content.
     """
 
-    def test_replay(self, parser_cls, sample, think_end, tool_start, chunk_size):
+    def test_replay(self, parser_cls, sample, think_end, tool_start, mode, chunk_size):
         tokenizer = make_mock_tokenizer(sample)
         kwargs = {}
         if sample.chat_template_kwargs:
@@ -344,8 +360,11 @@ class TestSkipToolParsingReplay:
         parser = parser_cls(tokenizer, **kwargs)
 
         request = _test_request()
-        request.tool_choice = "none"
         request.tools = _DUMMY_TOOLS
+        if mode == "skip_tool_parsing":
+            parser.skip_tool_parsing = True
+        else:
+            request.tool_choice = "none"
 
         all_ids = [tid for tid, _ in sample.tokens]
         all_texts = [text for _, text in sample.tokens]
@@ -370,20 +389,21 @@ class TestSkipToolParsingReplay:
 
         output = collect_output(results)
 
-        expected_reasoning, expected_content = _suppressed_expectations(
-            sample, think_end, tool_start
+        include_block = mode == "skip_tool_parsing"
+        expected_reasoning, expected_content = _tool_suppression_expectations(
+            sample, think_end, tool_start, include_tool_block=include_block
         )
 
         assert output.reasoning == expected_reasoning, (
-            f"Reasoning mismatch:\n"
+            f"Reasoning mismatch (mode={mode}):\n"
             f"  expected: {expected_reasoning!r}\n"
             f"  actual:   {output.reasoning!r}"
         )
         assert output.tool_calls == [], (
-            f"Expected no tool calls but got {output.tool_calls}"
+            f"Expected no tool calls (mode={mode}) but got {output.tool_calls}"
         )
         assert output.content == expected_content, (
-            f"Content mismatch:\n"
+            f"Content mismatch (mode={mode}):\n"
             f"  expected: {expected_content!r}\n"
             f"  actual:   {output.content!r}"
         )
