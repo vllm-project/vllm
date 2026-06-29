@@ -109,10 +109,22 @@ WORKDIR ${COMMON_WORKDIR}
 # wheels. ROCm/pytorch has no release/2.13 source branch yet, so install the
 # prebuilt +rocm7.1 wheels from the test index. Every FROM-base stage inherits
 # this, so vLLM is compiled and run against torch 2.13.
+# The torch +rocm7.1 wheel is ~5.5 GiB (ZIP64). Letting uv stream-download and
+# extract a wheel this large fails behind the CI proxy ("Invalid zip file
+# structure" from a truncated transfer), so fetch each wheel fully to disk with
+# retries and install the local files instead.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system --reinstall \
-    torch==2.13.0+rocm7.1 torchvision==0.28.0+rocm7.1 torchaudio==2.11.0+rocm7.1 \
-    --extra-index-url https://download.pytorch.org/whl/test/rocm7.1
+    set -eux; \
+    pytag="cp$(echo "${PYTHON_VERSION}" | tr -d .)"; \
+    index="https://download.pytorch.org/whl/test/rocm7.1"; \
+    mkdir -p /tmp/rocm_wheels; \
+    for spec in torch-2.13.0 torchvision-0.28.0 torchaudio-2.11.0; do \
+        whl="${spec}+rocm7.1-${pytag}-${pytag}-manylinux_2_28_x86_64.whl"; \
+        curl -fSL --retry 5 --retry-all-errors --retry-delay 5 \
+            -o "/tmp/rocm_wheels/${whl}" "${index}/${spec}%2Brocm7.1-${pytag}-${pytag}-manylinux_2_28_x86_64.whl"; \
+    done; \
+    uv pip install --system --reinstall /tmp/rocm_wheels/*.whl; \
+    rm -rf /tmp/rocm_wheels
 
 
 # -----------------------
