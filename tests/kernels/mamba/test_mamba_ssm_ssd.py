@@ -577,3 +577,43 @@ def test_mamba_chunk_scan_cont_batch_prefill_chunking(chunk_size, seqlens):
             rtol=rtol,
             msg=lambda x, i=i: f"seq{i} state " + x,
         )
+
+
+# TD operand-load path for _bmm_chunk_fwd (CB = C @ B.T), selected via the
+# use_td kwarg. Checks the TD path matches the plain load path.
+@pytest.mark.parametrize("ngroups", [1, 8])
+@pytest.mark.parametrize("causal", [False, True])
+@pytest.mark.parametrize("k", [64, 128])
+def test_bmm_chunk_td_matches_plain(ngroups, causal, k):
+    from vllm.model_executor.layers.mamba.ops.ssd_bmm import _bmm_chunk_fwd
+
+    set_random_seed(0)
+    chunk_size, nchunks = 256, 3
+    seqlen = chunk_size * nchunks
+    a = torch.randn(seqlen, ngroups, k, device=DEVICE, dtype=torch.bfloat16)
+    b = torch.randn(seqlen, ngroups, k, device=DEVICE, dtype=torch.bfloat16)
+    cu_chunk_seqlens = (
+        torch.arange(0, nchunks + 1, device=DEVICE, dtype=torch.int32) * chunk_size
+    )
+
+    def run(use_td):
+        return _bmm_chunk_fwd(
+            a,
+            b,
+            chunk_size,
+            cu_chunk_seqlens,
+            causal=causal,
+            output_dtype=torch.float32,
+            use_td=use_td,
+        )
+
+    out_plain = run(False)
+    out_td = run(True)
+    if causal:
+        # only out[i, j] with j <= i (lower triangle) is defined for causal
+        tri = torch.tril(
+            torch.ones(chunk_size, chunk_size, device=DEVICE, dtype=torch.bool)
+        )
+        out_plain = out_plain * tri
+        out_td = out_td * tri
+    torch.testing.assert_close(out_td, out_plain, atol=1e-3, rtol=1e-3)
