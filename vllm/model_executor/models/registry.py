@@ -332,6 +332,10 @@ _SEQUENCE_CLASSIFICATION_MODELS = {
 
 _MULTIMODAL_MODELS = {
     # [Decoder-only]
+    "ApertusForConditionalGeneration": (
+        "apertus_mm",
+        "ApertusForConditionalGeneration",
+    ),
     "AriaForConditionalGeneration": ("aria", "AriaForConditionalGeneration"),
     "AudioFlamingo3ForConditionalGeneration": (
         "audioflamingo3",

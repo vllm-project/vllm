@@ -59,6 +59,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
+from vllm.logger import init_logger
 
 from .interfaces import (
     EagleModelMixin,
@@ -76,6 +77,8 @@ from .utils import (
     make_layers,
     maybe_prefix,
 )
+
+logger = init_logger(__name__)
 
 
 class ApertusMLP(nn.Module):
@@ -228,6 +231,9 @@ class ApertusAttention(nn.Module):
         quant_config: QuantizationConfig | None,
     ) -> None:
         is_neox_style = True
+        is_gguf = quant_config and quant_config.get_name() == "gguf"
+        if is_gguf and config.model_type == "apertus":
+            is_neox_style = False
 
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -249,6 +255,7 @@ class ApertusDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         # Support abacusai/Smaug-72B-v0.1 with attention_bias
+        # Support internlm/internlm-7b with bias
         attention_bias = getattr(config, "attention_bias", False) or getattr(
             config, "bias", False
         )
@@ -426,6 +433,18 @@ class ApertusModel(nn.Module, EagleModelMixin):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
+            if self.quant_config is not None and (
+                scale_name := self.quant_config.get_cache_scale(name)
+            ):
+                # Loading kv cache quantization scales
+                param = params_dict[scale_name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                loaded_weight = (
+                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
+                )
+                weight_loader(param, loaded_weight)
+                loaded_params.add(scale_name)
+                continue
             if "scale" in name or "zero_point" in name:
                 # Remapping the name of FP8 kv-scale.
                 name = maybe_remap_kv_scale_name(name, params_dict)
@@ -462,7 +481,11 @@ class ApertusModel(nn.Module, EagleModelMixin):
 
 
 class ApertusForCausalLM(
-    nn.Module, SupportsLoRA, SupportsPP, SupportsEagle, SupportsEagle3
+    nn.Module,
+    SupportsLoRA,
+    SupportsPP,
+    SupportsEagle,
+    SupportsEagle3,
 ):
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
@@ -530,7 +553,13 @@ class ApertusForCausalLM(
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
+        if kwargs:
+            raise ValueError(
+                "Unexpected kwargs for Apertus forward: "
+                f"{sorted(kwargs)}"
+            )
         model_output = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
