@@ -31,6 +31,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 )
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
+    BlockIDsLoadStoreSpec,
     LoadStoreSpec,
     LookupResult,
     OffloadingEvent,
@@ -40,6 +41,7 @@ from vllm.v1.kv_offload.base import (
     PrepareStoreOutput,
     ReqContext,
     RequestOffloadingContext,
+    get_offload_group_idx,
 )
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
@@ -86,9 +88,11 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         mmap_region: SharedOffloadRegion,
         cache_policy: str = "lru",
         enable_events: bool = False,
+        num_groups: int = 1,
     ):
         super().__init__(
             num_blocks=num_blocks,
+            num_groups=num_groups,
             cache_policy=cache_policy,  # type: ignore[arg-type]
             enable_events=enable_events,
         )
@@ -117,6 +121,24 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         super().shutdown()
         self._kv_memoryview.release()
         self._mmap_region.cleanup()
+
+
+def _specs_to_key_order_block_ids(
+    keys: Collection[OffloadKey],
+    specs: list[LoadStoreSpec],
+) -> np.ndarray:
+    """Rebuild per key block IDs in key order from per group specs.
+
+    prepare_read() partitions block_ids by KV cache group index. This
+    reassembles them so that block_ids[i] corresponds to keys[i].
+    """
+    assert all(isinstance(s, BlockIDsLoadStoreSpec) for s in specs)
+    block_id_specs = [s for s in specs if isinstance(s, BlockIDsLoadStoreSpec)]
+    group_iters = [iter(spec.block_ids) for spec in block_id_specs]
+    return np.array(
+        [int(next(group_iters[get_offload_group_idx(k)])) for k in keys],
+        dtype=np.int64,
+    )
 
 
 class TieringOffloadingManager(OffloadingManager):
@@ -312,7 +334,10 @@ class TieringOffloadingManager(OffloadingManager):
             # rather than retrying indefinitely.
             return False
 
-        store_spec = primary_write_result.store_spec
+        # prepare_write([key], ...) returns one spec per group. Oonly the group
+        # matching this key's index will be non empty.
+        group_idx = get_offload_group_idx(key)
+        store_spec = primary_write_result.store_specs[group_idx]
         assert isinstance(store_spec, CPULoadStoreSpec)
         # Defer submit_load to on_schedule_end(). Group by (tier, request) so
         # each request's blocks are submitted as one batched job per tier.
@@ -354,7 +379,7 @@ class TieringOffloadingManager(OffloadingManager):
     @override
     def prepare_load(
         self, keys: Collection[OffloadKey], req_context: ReqContext
-    ) -> LoadStoreSpec:
+    ) -> list[LoadStoreSpec]:
         """
         Prepare blocks to be loaded from primary tier to GPU.
 
@@ -369,7 +394,7 @@ class TieringOffloadingManager(OffloadingManager):
             req_context: Per-request context.
 
         Returns:
-            LoadStoreSpec for reading from primary tier.
+            One LoadStoreSpec per KV cache group for reading from primary tier.
         """
         # Process completed promotions to ensure blocks are ready
         self._maybe_process_finished_jobs()
@@ -477,16 +502,12 @@ class TieringOffloadingManager(OffloadingManager):
             return
 
         for tier in request_level_tiers:
-            primary_blocks_spec = self.primary_tier.prepare_read(
-                ready_keys, req_context
-            )
-
+            primary_specs = self.primary_tier.prepare_read(ready_keys, req_context)
             job_id = self._next_job_id()
-            assert isinstance(primary_blocks_spec, CPULoadStoreSpec)
             job_metadata = JobMetadata(
                 job_id=job_id,
                 keys=ready_keys,
-                block_ids=primary_blocks_spec.block_ids,
+                block_ids=_specs_to_key_order_block_ids(ready_keys, primary_specs),
                 is_promotion=False,
                 req_context=req_context,
             )
@@ -528,17 +549,15 @@ class TieringOffloadingManager(OffloadingManager):
             # eviction during the async transfer). One prepare_read() call per
             # secondary tier.
             for tier in self.secondary_tiers:
-                primary_blocks_spec = self.primary_tier.prepare_read(keys, req_context)
+                primary_specs = self.primary_tier.prepare_read(keys, req_context)
 
-                # Submit async store job: primary→secondary
                 job_id = self._next_job_id()
 
                 # Track this store job
-                assert isinstance(primary_blocks_spec, CPULoadStoreSpec)
                 job_metadata = JobMetadata(
                     job_id=job_id,
                     keys=keys,
-                    block_ids=primary_blocks_spec.block_ids,
+                    block_ids=_specs_to_key_order_block_ids(keys, primary_specs),
                     is_promotion=False,
                     req_context=req_context,
                 )

@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorWorkerMetadata,
 )
-from vllm.v1.kv_offload.base import LoadStoreSpec
+from vllm.v1.kv_offload.base import GroupTransfer
 
 ReqId = str
 
@@ -52,16 +53,15 @@ class TransferStats:
 
 @dataclass
 class TransferJob:
-    """A transfer job bundling request context with transfer spec.
+    """A transfer job bundling request context with per group transfer specs.
 
-    Used for both loads and stores, keyed by scheduler-assigned job ID.
+    Used for both loads and stores, keyed by scheduler assigned job ID.
     The worker reports the job ID back when the transfer finishes,
     and the scheduler processes the completion.
     """
 
     req_id: ReqId
-    src_spec: LoadStoreSpec
-    dst_spec: LoadStoreSpec
+    groups: Sequence[GroupTransfer]
 
 
 @dataclass

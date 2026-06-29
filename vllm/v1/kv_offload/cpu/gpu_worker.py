@@ -4,6 +4,7 @@ import functools
 import threading
 import time
 from collections import deque
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -13,14 +14,12 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, triton
-from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.kv_offload.base import (
     BlockIDsLoadStoreSpec,
     CanonicalKVCacheRef,
     CanonicalKVCaches,
-    GPULoadStoreSpec,
-    LoadStoreSpec,
+    GroupTransfer,
     OffloadingWorker,
     TransferResult,
 )
@@ -212,54 +211,17 @@ class SingleDirectionOffloadingHandler:
         # list of pinned descriptor buffer sets available for re-use
         self._buffer_pool: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
 
-    def transfer_async(
-        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec
-    ) -> bool:
-        assert isinstance(src_spec, BlockIDsLoadStoreSpec)
-        assert isinstance(dst_spec, BlockIDsLoadStoreSpec)
+    def transfer_async(self, job_id: int, groups: Sequence[GroupTransfer]) -> bool:
+        # There are 2 types of transfers: GPU->CPU (store) and CPU->GPU (load).
+        # The offloaded (CPU) side may have larger blocks than the GPU side
+        # (block_size_factor > 1). The first offloaded block of each group
+        # may be unaligned: offload_spec.gpu_block_offset % block_size_factor
+        # sub-blocks at the start are skipped.
 
-        src_blocks = src_spec.block_ids
-        dst_blocks = dst_spec.block_ids
-        assert src_blocks.ndim == 1
-        assert dst_blocks.ndim == 1
-
-        num_src_blocks = len(src_blocks)
-        num_dst_blocks = len(dst_blocks)
-
-        # There are 2 types of transfers:
-        # 1. GPU -> CPU
-        # 2. CPU -> GPU
-        #
-        # transfers are also to CPU blocks, EXCEPT MAYBE for the first and last block.
-        # i.e. the first and last CPU blocks in src_blocks can match against
-        # a smaller (byte-wise) set of GPU blocks in dst_blocks.
-        # In such cases, we may need to skip some gpu-sized sub-blocks,
-        # and start reading/writing from the middle of the first CPU block.
-        # If we have multiple KV cache groups (when using HMA with hybrid models),
-        # we may have a partial first/last CPU block per each group.
-        # The group_sizes parameter encodes the size of each group of blocks
-        # in the GPU dst_blocks.
-        # If group_sizes is None, we assume all blocks belong to a single group.
-        # The logical_offset parameter maps each group of blocks to its logical
-        # offset inside the request, counting in GPU blocks.
-        # This allows us to find the correct starting position
-        # in the matching first CPU block.
-
-        # extract group_sizes from the GPU spec
-        gpu_spec = src_spec if self.gpu_to_cpu else dst_spec
-        assert isinstance(gpu_spec, GPULoadStoreSpec)
-        group_sizes = gpu_spec.group_sizes
-        assert len(group_sizes) == len(self.kv_cache_groups_data_refs)
-
-        # extract block indices from the GPU spec
-        block_indices = gpu_spec.block_indices
-        assert len(block_indices) == len(self.kv_cache_groups_data_refs)
-
+        # Pre-compute total copy operations for buffer sizing.
         num_copy_ops = 0
-        for group_size, group_data_refs in zip(
-            group_sizes, self.kv_cache_groups_data_refs
-        ):
-            num_copy_ops += group_size * len(group_data_refs)
+        for group, group_data_refs in zip(groups, self.kv_cache_groups_data_refs):
+            num_copy_ops += len(group.gpu_spec.block_ids) * len(group_data_refs)
 
         # reuse a pooled buffer set, growing it if this transfer needs more room
         batch_src, batch_dst, batch_sizes = (
@@ -277,65 +239,60 @@ class SingleDirectionOffloadingHandler:
         all_dst = dst.numpy()
         all_sizes = sizes.numpy()
 
-        src_offset = 0
-        dst_offset = 0
         op_idx = 0
-        # count total number of bytes copied
         num_transfer_bytes = 0
-        for group_size, block_idx, group_data_refs in zip(
-            group_sizes, block_indices, self.kv_cache_groups_data_refs
-        ):
+        # GPU side always has block_size_factor=1; the offloaded side has
+        # dst_block_size_factor (store) or src_block_size_factor (load).
+        offload_bsf = (
+            self.dst_block_size_factor
+            if self.gpu_to_cpu
+            else self.src_block_size_factor
+        )
+
+        for group, group_data_refs in zip(groups, self.kv_cache_groups_data_refs):
+            gpu_spec = group.gpu_spec
+            offload_spec = group.offload_spec
+            group_size = len(gpu_spec.block_ids)
             if group_size == 0:
                 continue
 
-            src_logical_blocks_to_skip = block_idx % self.src_block_size_factor
-            dst_logical_blocks_to_skip = block_idx % self.dst_block_size_factor
-            src_logical_blocks_count = group_size + src_logical_blocks_to_skip
-            dst_logical_blocks_count = group_size + dst_logical_blocks_to_skip
+            offload_skip = offload_spec.gpu_block_offset % offload_bsf
 
-            dst_blocks_count = cdiv(
-                dst_logical_blocks_count, self.dst_block_size_factor
-            )
-            dst_end_offset = dst_offset + dst_blocks_count
-            assert dst_end_offset <= num_dst_blocks
-
-            src_blocks_count = cdiv(
-                src_logical_blocks_count, self.src_block_size_factor
-            )
-            src_end_offset = src_offset + src_blocks_count
-            assert src_end_offset <= num_src_blocks
-
-            group_src = src_blocks[src_offset:src_end_offset]
-            group_dst = dst_blocks[dst_offset:dst_end_offset]
+            assert isinstance(offload_spec, BlockIDsLoadStoreSpec)
+            src_bsf = self.src_block_size_factor
+            dst_bsf = self.dst_block_size_factor
+            if self.gpu_to_cpu:
+                src_blocks = gpu_spec.block_ids
+                dst_blocks = offload_spec.block_ids
+                src_skip, dst_skip = 0, offload_skip
+            else:
+                src_blocks = offload_spec.block_ids
+                dst_blocks = gpu_spec.block_ids
+                src_skip, dst_skip = offload_skip, 0
 
             for data_ref in group_data_refs:
                 t_idx = data_ref.tensor_idx
                 end_idx = op_idx + group_size
 
                 compute_sub_block_ptrs(
-                    group_src,
-                    self.src_block_size_factor,
+                    src_blocks,
+                    src_bsf,
                     all_src[op_idx:end_idx],
                     self.src_tensors[t_idx],
-                    skip_count=src_logical_blocks_to_skip,
+                    skip_count=src_skip,
                 )
                 compute_sub_block_ptrs(
-                    group_dst,
-                    self.dst_block_size_factor,
+                    dst_blocks,
+                    dst_bsf,
                     all_dst[op_idx:end_idx],
                     self.dst_tensors[t_idx],
-                    skip_count=dst_logical_blocks_to_skip,
+                    skip_count=dst_skip,
                 )
 
                 all_sizes[op_idx:end_idx] = data_ref.page_size_bytes
                 num_transfer_bytes += group_size * data_ref.page_size_bytes
                 op_idx = end_idx
 
-            src_offset = src_end_offset
-            dst_offset = dst_end_offset
-
-        assert src_offset == num_src_blocks
-        assert dst_offset == num_dst_blocks
         assert op_idx == num_copy_ops
 
         stream = (
@@ -583,17 +540,13 @@ class CPUOffloadingWorker(OffloadingWorker):
             time.monotonic() - t0,
         )
 
-    def submit_store(
-        self, job_id: int, src_spec: GPULoadStoreSpec, dst_spec: LoadStoreSpec
-    ) -> bool:
+    def submit_store(self, job_id: int, groups: Sequence[GroupTransfer]) -> bool:
         """Async GPU -> CPU."""
-        return self._store_handler.transfer_async(job_id, src_spec, dst_spec)
+        return self._store_handler.transfer_async(job_id, groups)
 
-    def submit_load(
-        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: GPULoadStoreSpec
-    ) -> bool:
+    def submit_load(self, job_id: int, groups: Sequence[GroupTransfer]) -> bool:
         """Async CPU -> GPU."""
-        return self._load_handler.transfer_async(job_id, src_spec, dst_spec)
+        return self._load_handler.transfer_async(job_id, groups)
 
     def get_finished(self) -> list[TransferResult]:
         return self._store_handler.get_finished() + self._load_handler.get_finished()

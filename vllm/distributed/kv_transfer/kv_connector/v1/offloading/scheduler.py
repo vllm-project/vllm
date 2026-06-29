@@ -35,6 +35,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
+    GroupTransfer,
     LookupResult,
     OffloadingManager,
     OffloadingSpec,
@@ -703,10 +704,9 @@ class OffloadingConnectorScheduler:
         num_cached_tokens = num_locally_computed_tokens + num_external_tokens
 
         keys_to_load: list[OffloadKey] = []
-        dst_block_ids: list[int] = []
-        # per group
-        group_sizes: list[int] = []
-        block_indices: list[int] = []
+        # Per group: GPU destination block IDs and first-block GPU offset
+        per_group_gpu_dst: list[list[int]] = []
+        per_group_gpu_offset: list[int] = []
         for group_config, group_state, group_blocks in zip(
             self.config.kv_group_configs,
             req_status.group_states,
@@ -750,14 +750,15 @@ class OffloadingConnectorScheduler:
                 )
                 keys_to_load.extend(offload_keys[start_block_idx:num_blocks])
 
-            dst_block_ids.extend(
-                block.block_id
-                for block in group_blocks[
-                    num_locally_computed_gpu_blocks:num_gpu_blocks
+            per_group_gpu_dst.append(
+                [
+                    block.block_id
+                    for block in group_blocks[
+                        num_locally_computed_gpu_blocks:num_gpu_blocks
+                    ]
                 ]
             )
-            group_sizes.append(num_pending_gpu_blocks)
-            block_indices.append(num_locally_computed_gpu_blocks)
+            per_group_gpu_offset.append(num_locally_computed_gpu_blocks)
 
             # Skip prefix-hit blocks for block-level policy; for
             # request-level, next_stored_block_idx stays at 0 so all
@@ -765,16 +766,19 @@ class OffloadingConnectorScheduler:
             if req_status.offloading_context.policy == OffloadPolicy.BLOCK_LEVEL:
                 group_state.next_stored_block_idx = num_blocks
 
-        src_spec = self.manager.prepare_load(keys_to_load, req_status.req_context)
-        dst_spec = GPULoadStoreSpec(
-            dst_block_ids, group_sizes=group_sizes, block_indices=block_indices
-        )
+        src_specs = self.manager.prepare_load(keys_to_load, req_status.req_context)
+        groups: list[GroupTransfer] = [
+            GroupTransfer(
+                gpu_spec=GPULoadStoreSpec(per_group_gpu_dst[g]),
+                offload_spec=src_specs[g].set_gpu_block_offset(per_group_gpu_offset[g]),
+            )
+            for g in range(len(src_specs))
+        ]
 
         load_job_id = self._generate_job_id()
         self._current_batch_load_jobs[load_job_id] = TransferJob(
             req_id=request.request_id,
-            src_spec=src_spec,
-            dst_spec=dst_spec,
+            groups=groups,
         )
         # a load can only be issued when no other jobs are pending.
         assert not req_status.transfer_jobs
@@ -935,13 +939,11 @@ class OffloadingConnectorScheduler:
 
             keys_to_store = set(store_output.keys_to_store)
 
-            group_sizes: list[int] = []
-            block_indices: list[int] = []
-            src_block_ids: list[int] = []
+            groups: list[GroupTransfer] = []
             sliding_window_block_ids: list[int] = []
             non_sliding_window_block_ids: list[int] = []
-            for group_config, group_state in zip(
-                self.config.kv_group_configs, req_status.group_states
+            for group_idx, (group_config, group_state) in enumerate(
+                zip(self.config.kv_group_configs, req_status.group_states)
             ):
                 is_sliding_window = (
                     group_config.sliding_window_size_in_blocks is not None
@@ -949,7 +951,7 @@ class OffloadingConnectorScheduler:
                 num_blocks = num_offloadable_tokens // group_config.offloaded_block_size
                 start_block_idx = group_state.next_stored_block_idx
                 block_ids = group_state.block_ids
-                num_group_blocks = 0
+                per_group_src_ids: list[int] = []
                 start_gpu_block_idx: int | None = None
                 for idx, offload_key in enumerate(
                     group_state.offload_keys[start_block_idx:num_blocks]
@@ -970,21 +972,21 @@ class OffloadingConnectorScheduler:
                             continue
                         if start_gpu_block_idx is None:
                             start_gpu_block_idx = gpu_block_idx + i
-                        src_block_ids.append(block_id)
-                        num_group_blocks += 1
+                        per_group_src_ids.append(block_id)
                         if is_sliding_window:
                             sliding_window_block_ids.append(block_id)
                         else:
                             non_sliding_window_block_ids.append(block_id)
 
-                group_sizes.append(num_group_blocks)
-                block_indices.append(start_gpu_block_idx or 0)
+                groups.append(
+                    GroupTransfer(
+                        gpu_spec=GPULoadStoreSpec(per_group_src_ids),
+                        offload_spec=store_output.store_specs[
+                            group_idx
+                        ].set_gpu_block_offset(start_gpu_block_idx or 0),
+                    )
+                )
                 group_state.next_stored_block_idx = num_blocks
-
-            src_spec = GPULoadStoreSpec(
-                src_block_ids, group_sizes=group_sizes, block_indices=block_indices
-            )
-            dst_spec = store_output.store_spec
 
             job_id = self._generate_job_id()
             # a store can only be issued when no load is pending.
@@ -1010,7 +1012,8 @@ class OffloadingConnectorScheduler:
             )
 
             store_jobs[job_id] = TransferJob(
-                req_id=req_id, src_spec=src_spec, dst_spec=dst_spec
+                req_id=req_id,
+                groups=groups,
             )
 
             logger.debug(
