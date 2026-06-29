@@ -326,7 +326,7 @@ class DSparkSpeculator(DFlashSpeculator):
             self.query_cudagraph_manager.run_fullgraph(batch_desc)
         else:
             self._generate_draft(
-                num_reqs_padded,
+                num_reqs,
                 num_tokens_padded,
                 draft_attn_metadata,
                 draft_slot_mappings_by_layer,
@@ -467,7 +467,7 @@ def _prepare_dspark_inputs_kernel(
                 mask = block < pad_end
                 tl.store(out_sample_indices_ptr + block, 0, mask=mask)
                 tl.store(out_sample_pos_ptr + block, 0, mask=mask)
-                tl.store(out_sample_idx_mapping_ptr + block, 0, mask=mask)
+                tl.store(out_sample_idx_mapping_ptr + block, -1, mask=mask)
             q_pad_start = num_reqs * num_query_per_req
             for i in range(q_pad_start, max_num_tokens, BLOCK_SIZE):
                 block = i + tl.arange(0, BLOCK_SIZE)
