@@ -1194,7 +1194,11 @@ void fused_sigmoid_gating_delta_rule_update_spec_kernel_impl(
         continue;
       }
       int64_t acc = (int64_t)num_accepted_ptr[bi];
-      int64_t prev_slot = (int64_t)spec_indices_ptr[bi * spec_stride + (acc - 1)];
+      // Clamp acc-1 to >=0: when num_accepted is 0 the unclamped index reads
+      // out of bounds and yields an arbitrary prev_slot used to index the SSM
+      // state. Mirrors the GPU guard tl.maximum(num_accepted - 1, 0).
+      int64_t prev_slot =
+          (int64_t)spec_indices_ptr[bi * spec_stride + (acc > 0 ? acc - 1 : 0)];
       for (int64_t t = 0; t < q_len; ++t) {
         int64_t cur_slot = (int64_t)spec_indices_ptr[bi * spec_stride + t];
         int64_t token = q_start + t;
