@@ -19,6 +19,6 @@ steps:
   mirror:
     amd:
       device: mi325_1
-      timeout_in_minutes: 40
+      timeout_in_minutes: 50
       depends_on:
       - image-build-amd
