@@ -13,7 +13,7 @@ from typing_extensions import TypeVar
 from vllm.logger import init_logger
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.lora.request import LoRARequest
-from vllm.v1.metrics.stats import RequestStateStats
+from vllm.v1.metrics.stats import RequestSpecDecodeStats, RequestStateStats
 
 logger = init_logger(__name__)
 
@@ -35,6 +35,9 @@ class CompletionOutput:
             to stop, None if the completion finished for some other reason
             including encountering the EOS token.
         lora_request: The LoRA request that was used to generate the output.
+        spec_decode_stats: Per-sequence speculative-decoding acceptance stats,
+            populated on finish when speculative decoding ran and
+            ``--speculative-decoding-stats`` is enabled; None otherwise.
     """
 
     index: int
@@ -46,6 +49,7 @@ class CompletionOutput:
     finish_reason: str | None = None
     stop_reason: int | str | None = None
     lora_request: LoRARequest | None = None
+    spec_decode_stats: RequestSpecDecodeStats | None = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None

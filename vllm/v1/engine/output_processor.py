@@ -34,6 +34,7 @@ from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.stats import (
     IterationStats,
     LoRARequestStates,
+    RequestSpecDecodeStats,
     RequestStateStats,
     SchedulerStats,
 )
@@ -173,6 +174,9 @@ class RequestState:
         self.queue = queue
         self.num_cached_tokens = 0
         self.num_cache_creation_tokens = 0
+        # Per-sequence spec-decode accumulator; arrives once (on finish) via
+        # EngineCoreOutput, then attached to this sequence's CompletionOutput.
+        self.spec_decode_stats: RequestSpecDecodeStats | None = None
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
 
@@ -417,6 +421,7 @@ class RequestState:
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
             finish_reason=str(finish_reason) if finished else None,
             stop_reason=stop_reason if finished else None,
+            spec_decode_stats=self.spec_decode_stats if finished else None,
         )
 
     def _new_pooling_output(self, pooling_output: torch.Tensor) -> PoolingOutput:
@@ -645,6 +650,9 @@ class OutputProcessor:
                         engine_core_output.prefill_stats.num_cache_creation_tokens
                     )
                 req_state.is_prefilling = False
+
+            if engine_core_output.spec_decode_stats is not None:
+                req_state.spec_decode_stats = engine_core_output.spec_decode_stats
 
             if pooling_output is None:
                 assert req_state.detokenizer is not None

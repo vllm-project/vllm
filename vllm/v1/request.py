@@ -20,7 +20,7 @@ from vllm.v1.engine import (
     EngineCoreRequest,
     FinishReason,
 )
-from vllm.v1.metrics.stats import PrefillStats
+from vllm.v1.metrics.stats import PrefillStats, RequestSpecDecodeStats
 from vllm.v1.structured_output.request import StructuredOutputRequest
 from vllm.v1.utils import ConstantList
 
@@ -195,6 +195,11 @@ class Request:
         self.num_preemptions = 0
 
         self.prefill_stats: PrefillStats | None = PrefillStats()
+
+        # Per-request speculative-decoding acceptance accumulator. Created
+        # lazily on the first verify step when --speculative-decoding-stats
+        # (see Scheduler.update_from_output); stays None otherwise.
+        self.spec_decode_stats: RequestSpecDecodeStats | None = None
 
         self.block_hashes: list[BlockHash] = []
         # Store the block hasher without binding self to avoid creating a
