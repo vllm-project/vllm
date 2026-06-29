@@ -71,15 +71,14 @@ def test_scheduler_reports_lookup_sync_delay(request_runner):
     assert reduced[f"{_ConnectorMetricName.LOOKUP_SYNC_DELAY}_sum"] > 0
 
 
-def test_scheduler_reports_lookup_async_delay_on_finish(request_runner):
-    """A deferred lookup that never resolves before request finish reports
-    its async delay."""
+def test_scheduler_reports_lookup_async_delay_on_resolve(request_runner):
+    """A deferred lookup reports its async delay once it resolves."""
     runner = request_runner(
         block_size=4,
         num_gpu_blocks=10,
         async_scheduling=False,
     )
-    runner.manager.lookup.return_value = None
+    runner.manager.lookup.side_effect = [None, LookupResult.MISS]
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output([])
     )
