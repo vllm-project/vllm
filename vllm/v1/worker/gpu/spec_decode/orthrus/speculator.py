@@ -231,15 +231,18 @@ class OrthrusSpeculator(DraftModelSpeculator):
         num_reqs: int,
         num_reqs_padded: int,
         num_tokens_padded: int,
+        num_query_per_req: int | None = None,
+        causal: bool = False,
     ) -> dict[str, Any] | None:
         if not self.draft_attn_layer_names:
             return None
+        assert num_query_per_req is None
         return super()._build_draft_attn_metadata(
             num_reqs,
             num_reqs_padded,
             num_tokens_padded,
             num_query_per_req=self.num_query_per_req,
-            causal=False,
+            causal=causal,
         )
 
     @torch.inference_mode()
