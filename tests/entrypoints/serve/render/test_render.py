@@ -14,7 +14,7 @@ MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 
 @pytest.fixture(scope="module")
 def server():
-    args: list[str] = []
+    args: list[str] = ["--trust-request-chat-template"]
 
     with RemoteLaunchRenderServer(MODEL_NAME, args) as remote_server:
         yield remote_server
@@ -369,3 +369,127 @@ async def test_completion_render_multiple_prompts_token_offsets(client):
         assert len(offsets) == len(item["token_ids"])
         for start, end in offsets:
             assert 0 <= start <= end <= len(prompt)
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_render_assistant_tokens_mask_default(client):
+    """Without return_assistant_tokens_mask, assistant_tokens_mask should be null."""
+    response = await client.post(
+        "/v1/chat/completions/render",
+        json={
+            "model": MODEL_NAME,
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi!"},
+                {"role": "user", "content": "How are you?"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("assistant_tokens_mask") is None
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_render_assistant_tokens_mask_false(client):
+    """Explicitly setting return_assistant_tokens_mask=false gives null."""
+    response = await client.post(
+        "/v1/chat/completions/render",
+        json={
+            "model": MODEL_NAME,
+            "messages": [
+                {"role": "user", "content": "Hello"},
+            ],
+            "return_assistant_tokens_mask": False,
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data.get("assistant_tokens_mask") is None
+
+
+@pytest.mark.asyncio
+async def test_chat_render_assistant_tokens_mask_null_without_gen_tags(
+    client,
+):
+    """The tiny test model lacks ``{% generation %}`` tags, so the mask is null."""
+    response = await client.post(
+        "/v1/chat/completions/render",
+        json={
+            "model": MODEL_NAME,
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi!"},
+            ],
+            "return_assistant_tokens_mask": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json().get("assistant_tokens_mask") is None
+
+
+# A minimal chat template with {% generation %} tags so we can test that
+# the mask correctly marks assistant tokens.
+_TEMPLATE_WITH_GENERATION = (
+    "{% for m in messages %}"
+    "{% if m['role'] == 'user' %}User: {{ m['content'] }}\n"
+    "{% elif m['role'] == 'assistant' %}"
+    "{% generation %}Assistant: {{ m['content'] }}\n{% endgeneration %}"
+    "{% endif %}"
+    "{% endfor %}"
+)
+
+
+@pytest.mark.asyncio
+async def test_chat_completion_render_assistant_tokens_mask_with_generation_tags(
+    client,
+):
+    """With a ``{% generation %}``-enabled template, the mask marks assistant
+    tokens and the masked tokens decode to the assistant content."""
+    response = await client.post(
+        "/v1/chat/completions/render",
+        json={
+            "model": MODEL_NAME,
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi!"},
+                {"role": "user", "content": "Bye"},
+            ],
+            "chat_template": _TEMPLATE_WITH_GENERATION,
+            "return_assistant_tokens_mask": True,
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+
+    mask = data["assistant_tokens_mask"]
+    token_ids = data["token_ids"]
+    assert mask is not None
+    assert isinstance(mask, list)
+    assert len(mask) == len(token_ids)
+    assert all(v in (0, 1) for v in mask)
+    assert sum(mask) > 0, "mask should mark at least one assistant token"
+
+    # Detokenize masked (assistant) and unmasked (non-assistant) tokens
+    # separately to verify the mask is correct, not just non-empty.
+    masked_ids = [t for t, m in zip(token_ids, mask, strict=True) if m]
+    unmasked_ids = [t for t, m in zip(token_ids, mask, strict=True) if not m]
+
+    detok = await client.post(
+        "/detokenize",
+        json={"model": MODEL_NAME, "tokens": masked_ids},
+    )
+    assert detok.status_code == 200
+    assert "Hi!" in detok.json()["prompt"]
+
+    detok_rest = await client.post(
+        "/detokenize",
+        json={"model": MODEL_NAME, "tokens": unmasked_ids},
+    )
+    assert detok_rest.status_code == 200
+    assert "Hi!" not in detok_rest.json()["prompt"]
+    assert "Bye" in detok_rest.json()["prompt"]
