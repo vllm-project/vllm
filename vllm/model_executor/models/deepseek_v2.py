@@ -695,6 +695,7 @@ class Indexer(nn.Module):
         )
 
         self.is_inplace_rope = is_inplace_rope
+        self.n_head_scale = self.n_head**-0.5
         self.use_fused_indexer_q = (
             current_platform.is_cuda()
             and self.quant_block_size == self.head_dim
@@ -743,7 +744,7 @@ class Indexer(nn.Module):
                 rotary_emb.cos_sin_cache,
                 weights,
                 self.softmax_scale,
-                self.n_head**-0.5,
+                self.n_head_scale,
                 rotary_emb.is_neox_style,
             )
 
@@ -792,7 +793,7 @@ class Indexer(nn.Module):
         q_scale = q_scale.view(-1, self.n_head, 1)
 
         weights = (
-            weights.unsqueeze(-1) * q_scale * self.softmax_scale * self.n_head**-0.5
+            weights.unsqueeze(-1) * q_scale * self.softmax_scale * self.n_head_scale
         )
         weights = weights.squeeze(-1)
 
@@ -1269,13 +1270,10 @@ class DeepseekV2DecoderLayer(nn.Module):
             hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
             hidden_states = hidden_states[:full_num_tokens]
 
-        attn_kwargs = {
-            "positions": positions,
-            "hidden_states": hidden_states,
-        }
-        if not self.use_mha:
-            attn_kwargs["llama_4_scaling"] = llama_4_scaling
-        hidden_states = self.self_attn(**attn_kwargs)
+        if self.use_mha:
+            hidden_states = self.self_attn(positions, hidden_states)
+        else:
+            hidden_states = self.self_attn(positions, hidden_states, llama_4_scaling)
 
         if (
             not isinstance(self.self_attn, DeepseekAttention)
