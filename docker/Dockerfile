@@ -903,14 +903,6 @@ RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm
     uv pip install --system ep_kernels/dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
-# The nvidia-nccl-cu* pip package ships libnccl.so.2 but not the libnccl.so
-# linker symlink. The nccl_allocator JIT extension links with -lnccl, so we
-# create the symlink after pip installs have resolved the final NCCL version.
-RUN NCCL_LIB=$(python3 -c "import nvidia.nccl; import os; print(os.path.join(os.path.dirname(nvidia.nccl.__file__), 'lib'))" 2>/dev/null) && \
-    if [ -n "$NCCL_LIB" ] && [ -f "$NCCL_LIB/libnccl.so.2" ] && [ ! -e "$NCCL_LIB/libnccl.so" ]; then \
-        ln -s libnccl.so.2 "$NCCL_LIB/libnccl.so"; \
-    fi
-
 # nvidia-cutlass-dsl[cu13] installs -libs-base and -libs-cu13 wheels that
 # share paths with different content. Force -libs-cu13 last after runtime
 # dependency installs so uv cannot leave base files behind.

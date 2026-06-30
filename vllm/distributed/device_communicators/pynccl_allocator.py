@@ -74,7 +74,7 @@ def compile_nccl_allocator():
         out_dir = tempfile.gettempdir()
         nccl_allocator_libname = "nccl_allocator"
         nccl_include_paths = find_nccl_include_paths()
-        ldflags = ["-lnccl"]
+        ldflags = ["-l:libnccl.so.2"]
         nccl_lib_paths = find_nccl_library_paths()
         if nccl_lib_paths:
             ldflags = [f"-L{p}" for p in nccl_lib_paths] + ldflags
