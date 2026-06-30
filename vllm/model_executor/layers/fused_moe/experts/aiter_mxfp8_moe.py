@@ -134,11 +134,7 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
         # global ids with a trailing fake-expert sentinel slot (shape
         # ``[global_num_experts + 1]``), from which it derives the global->local
         # compaction. What ``RoutedExperts.expert_map`` hands us depends on the
-        # aiter master switch (``rocm_aiter_fmoe_enabled``):
-        #   * master ON  -> already the 0/1 ``expert_mask``; forward as-is, like
-        #     the native rocm_aiter_moe path.
-        #   * master OFF -> vLLM's expert_map (a global->local index map, -1 for
-        #     non-local); build the 0/1 mask from it.
+        # aiter master switch (``rocm_aiter_fmoe_enabled``).
         # Branching on the (static) master flag — not the tensor contents —
         # keeps this HIP-graph/torch.compile safe (no data-dependent sync).
         # ``None`` under pure TP.
