@@ -1305,10 +1305,11 @@ class Worker(WorkerBase):
         # Release kept-alive cumem pools while the pluggable allocator wrappers
         # and callbacks are still alive, so MemPool teardown is not deferred to
         # interpreter finalization (pytorch/pytorch#145168).
-        from vllm.device_allocator.cumem import CuMemAllocator
+        if current_platform.is_cuda_alike():
+            from vllm.device_allocator.cumem import CuMemAllocator
 
-        if CuMemAllocator.instance is not None:
-            CuMemAllocator.instance.release_pools()
+            if CuMemAllocator.instance is not None:
+                CuMemAllocator.instance.release_pools()
 
     def elastic_ep_execute(self, execute_method: str, *args, **kwargs):
         return self.elastic_ep_executor.execute(execute_method, *args, **kwargs)
