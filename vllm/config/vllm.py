@@ -1061,7 +1061,7 @@ class VllmConfig:
             # also rebase prefix-cache block hashes, so _reanchor_session is a
             # silent no-op when prefix caching is on (scheduler.py). With prefix
             # caching enabled (the default), the flag would be inert and the
-            # session still killed at max_model_len -- worse, with the
+            # session still killed at max_model_len; worse, with the
             # graceful-finish warning suppressed for re-anchor streams. Reject at
             # startup rather than letting the feature silently do nothing.
             if (
@@ -1075,7 +1075,7 @@ class VllmConfig:
                 )
 
             # The worker re-rotation indexes the KV cache as (num_blocks, 2, ...)
-            # and reads head_size from the trailing dim -- the layout shared by
+            # and reads head_size from the trailing dim; the layout shared by
             # the CUDA attention family (FlashAttention/FlashInfer/Triton/
             # FlexAttention). ROCm's default ROCM_ATTN backend uses
             # (2, num_blocks, ...) and the CPU backend interleaves K/V into the
@@ -1141,7 +1141,7 @@ class VllmConfig:
                         )
                     # The worker re-rotation hardcodes rope_theta=1e6 (Voxtral/
                     # Ministral). A checkpoint with a different theta would
-                    # SILENTLY corrupt re-rotated keys -- unlike head_size, theta
+                    # SILENTLY corrupt re-rotated keys; unlike head_size, theta
                     # is not tripwired at runtime. Validate it here.
                     theta = (rs or {}).get(
                         "rope_theta", getattr(cfg, "rope_theta", None)
@@ -1159,7 +1159,7 @@ class VllmConfig:
                 # and shifted by D, a 64-dim head as the GPT-J audio encoder and
                 # shifted by pool*D. The runtime head_size assert only rejects a
                 # dim outside {64, 128}; it does NOT catch a 64-dim NeoX or a
-                # 128-dim GPT-J head, nor a pool that silently fell to 1 -- all
+                # 128-dim GPT-J head, nor a pool that silently fell to 1; all
                 # of which would SILENTLY corrupt re-rotated keys, exactly like
                 # theta above. Validate the assumed geometry up front.
                 #
@@ -1168,7 +1168,7 @@ class VllmConfig:
                 # with_hf_config(audio_config)), where text_config falls back to
                 # the audio encoder (head_dim 40, not the decoder's 128). Only the
                 # full multimodal config carries a nested audio_config, so that is
-                # where -- and the only place -- the decoder vs encoder geometry
+                # where; and the only place; the decoder vs encoder geometry
                 # can be checked without falsely rejecting Voxtral.
                 if audio_config is not None:
                     text_head_dim = getattr(text_config, "head_dim", None) or (
