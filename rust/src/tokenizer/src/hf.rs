@@ -149,20 +149,6 @@ impl Tokenizer for HuggingFaceTokenizer {
     }
 
     fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> Result<String> {
-        // A pre-tokenized prompt may carry out-of-vocab ids (a benchmark/infra escape
-        // hatch). Decoding one would fail the whole streaming call when these ids seed
-        // the incremental detokenizer, so skip them, matching the Python tokenizer.
-        let filtered;
-        let token_ids = if token_ids.iter().any(|&id| self.id_to_token(id).is_none()) {
-            filtered = token_ids
-                .iter()
-                .copied()
-                .filter(|&id| self.id_to_token(id).is_some())
-                .collect::<Vec<_>>();
-            filtered.as_slice()
-        } else {
-            token_ids
-        };
         match &self.backend {
             Backend::Hf(t) => t
                 .decode(token_ids, skip_special_tokens)
@@ -229,30 +215,6 @@ mod tests {
             .build()
             .expect("build bpe tokenizer");
         HfTokenizer::new(model)
-    }
-
-    #[test]
-    fn decode_skips_out_of_vocab_token_ids() {
-        let tokenizer = tiny_bpe_tokenizer();
-        let dir = tempdir().expect("create temp dir");
-        let path = dir.path().join("tokenizer.json");
-        tokenizer.save(&path, false).expect("save tokenizer json");
-
-        // The tiny vocab has ids 0..=8; 100 and 200 are out of vocab. Both backends
-        // must skip them instead of failing the whole decode, so a pre-tokenized
-        // prompt carrying such an id does not error the streaming response.
-        for wrapper in [
-            HuggingFaceTokenizer::new_hf(&path).expect("load hf wrapper"),
-            HuggingFaceTokenizer::new_fastokens(&path).expect("load fastokens wrapper"),
-        ] {
-            let in_vocab = wrapper.decode(&[1, 8], false).expect("decode in-vocab ids");
-            let with_oob = wrapper.decode(&[1, 100, 8], false).expect("oob id must be skipped");
-            assert_eq!(with_oob, in_vocab);
-            assert_eq!(
-                wrapper.decode(&[100, 200], false).expect("oob-only decodes empty"),
-                ""
-            );
-        }
     }
 
     #[test]

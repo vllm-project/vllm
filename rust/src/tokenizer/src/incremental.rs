@@ -32,6 +32,7 @@ pub(crate) struct DecodeStream<'a, T: Tokenizer + ?Sized> {
     ids: Vec<u32>,
     prefix: String,
     prefix_index: usize,
+    prefix_seeded: bool,
     cumulative_output: String,
     output_index: usize,
 }
@@ -50,6 +51,7 @@ impl<'a, T: Tokenizer + ?Sized> DecodeStream<'a, T> {
             ids: prompt_token_ids.to_vec(),
             prefix: String::new(),
             prefix_index: 0,
+            prefix_seeded: prompt_token_ids.is_empty(),
             cumulative_output: String::new(),
             output_index: 0,
         }
@@ -63,6 +65,25 @@ const SAFE_SUFFIX_MIN: usize = 4;
 const SAFE_SUFFIX_MAX: usize = 6;
 
 impl<T: Tokenizer + ?Sized> DecodeStream<'_, T> {
+    fn decode_prompt_context(&self, ids: &[u32]) -> Result<(String, Vec<u32>)> {
+        match self.tokenizer.decode(ids, self.skip_special_tokens) {
+            Ok(decoded) => Ok((decoded, ids.to_vec())),
+            Err(error) => {
+                let filtered = ids
+                    .iter()
+                    .copied()
+                    .filter(|&id| self.tokenizer.id_to_token(id).is_some())
+                    .collect::<Vec<_>>();
+                if filtered.len() == ids.len() {
+                    return Err(error);
+                }
+                self.tokenizer
+                    .decode(&filtered, self.skip_special_tokens)
+                    .map(|decoded| (decoded, filtered))
+            }
+        }
+    }
+
     /// Seed `self.prefix` from the shortest trailing suffix whose decoded text
     /// has no U+FFFD — a clean decode means the suffix starts and ends at
     /// valid UTF-8/token boundaries, so priming from it is equivalent to
@@ -73,19 +94,19 @@ impl<T: Tokenizer + ?Sized> DecodeStream<'_, T> {
             let max_try = SAFE_SUFFIX_MAX.min(prompt_len - 1);
             for suffix_len in SAFE_SUFFIX_MIN..=max_try {
                 let start = prompt_len - suffix_len;
-                let decoded =
-                    self.tokenizer.decode(&self.ids[start..], self.skip_special_tokens)?;
+                let (decoded, context_ids) = self.decode_prompt_context(&self.ids[start..])?;
                 if !decoded.contains('\u{FFFD}') {
                     self.prefix = decoded;
-                    self.ids.drain(..start);
+                    self.ids = context_ids;
                     self.prefix_index = self.ids.len();
                     return Ok(());
                 }
             }
         }
-        let decoded = self.tokenizer.decode(&self.ids, self.skip_special_tokens)?;
+        let (decoded, context_ids) = self.decode_prompt_context(&self.ids)?;
         if !decoded.ends_with('\u{FFFD}') {
             self.prefix = decoded;
+            self.ids = context_ids;
             self.prefix_index = self.ids.len();
         }
         Ok(())
@@ -94,8 +115,9 @@ impl<T: Tokenizer + ?Sized> DecodeStream<'_, T> {
 
 impl<T: Tokenizer + ?Sized> IncrementalDecoder for DecodeStream<'_, T> {
     fn push_token(&mut self, token_id: u32) -> Result<usize> {
-        if self.prefix.is_empty() && !self.ids.is_empty() {
+        if !self.prefix_seeded && !self.ids.is_empty() {
             self.seed_prefix()?;
+            self.prefix_seeded = true;
         }
 
         self.ids.push(token_id);
@@ -129,6 +151,7 @@ impl<T: Tokenizer + ?Sized> IncrementalDecoder for DecodeStream<'_, T> {
             self.ids.clear();
             self.prefix.clear();
             self.prefix_index = 0;
+            self.prefix_seeded = true;
             // Ensure we split at a utf-8 char boundary.
             self.cumulative_output
                 .push_str(&string[string.floor_char_boundary(prefix_len)..]);
@@ -167,6 +190,37 @@ mod tests {
 
         fn token_to_id(&self, _token: &str) -> Option<u32> {
             unreachable!()
+        }
+    }
+
+    #[derive(Debug)]
+    struct StrictByteBackend;
+
+    impl Tokenizer for StrictByteBackend {
+        fn encode(&self, _text: &str, _add_special_tokens: bool) -> Result<Vec<u32>> {
+            unreachable!()
+        }
+
+        fn decode(&self, token_ids: &[u32], _skip_special_tokens: bool) -> Result<String> {
+            let mut bytes = Vec::with_capacity(token_ids.len());
+            for &id in token_ids {
+                let byte = u8::try_from(id).map_err(|_| {
+                    tokenizer_error!("strict byte tokenizer cannot decode token id {id}")
+                })?;
+                bytes.push(byte);
+            }
+            Ok(String::from_utf8_lossy(&bytes).into_owned())
+        }
+
+        fn token_to_id(&self, _token: &str) -> Option<u32> {
+            unreachable!()
+        }
+
+        fn id_to_token(&self, id: u32) -> Option<String> {
+            u8::try_from(id).ok().map(|byte| {
+                let bytes = [byte];
+                String::from_utf8_lossy(&bytes).into_owned()
+            })
         }
     }
 
@@ -269,6 +323,43 @@ mod tests {
         let added = decoder.push_token(b'!' as u32).unwrap();
         assert_eq!(added, 1);
         assert_eq!(decoder.output(), "!");
+    }
+
+    #[test]
+    fn prompt_context_filters_unknown_ids_from_suffix_seed() {
+        let backend = StrictByteBackend;
+        let prompt = &[
+            b'a' as u32,
+            b'b' as u32,
+            b'c' as u32,
+            10_000,
+            b'H' as u32,
+            b'i' as u32,
+        ];
+        let mut decoder = backend.create_decode_stream(prompt, false, 0);
+
+        assert_eq!(decoder.push_token(b'!' as u32).unwrap(), 1);
+        assert_eq!(decoder.output(), "!");
+    }
+
+    #[test]
+    fn prompt_context_filters_only_unknown_ids() {
+        let backend = StrictByteBackend;
+        let prompt = &[10_000];
+        let mut decoder = backend.create_decode_stream(prompt, false, 0);
+
+        assert_eq!(decoder.push_token(b'!' as u32).unwrap(), 1);
+        assert_eq!(decoder.output(), "!");
+    }
+
+    #[test]
+    fn generated_unknown_ids_still_return_decode_error() {
+        let backend = StrictByteBackend;
+        let prompt = &[10_000, b'H' as u32, b'i' as u32];
+        let mut decoder = backend.create_decode_stream(prompt, false, 0);
+
+        let error = decoder.push_token(10_000).unwrap_err();
+        assert!(error.to_string().contains("strict byte tokenizer cannot decode token id 10000"));
     }
 
     #[test]
