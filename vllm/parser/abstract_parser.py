@@ -441,7 +441,7 @@ class DelegatingParser(Parser):
 
         tool_calls = list[FunctionCall]()
         if is_named_tool_choice and supports_required_and_named:
-            if content is None:
+            if content is None or (isinstance(content, str) and not content.strip()):
                 return [], None
             function_name = self._get_function_name(request)
             tool_calls.append(
@@ -490,6 +490,14 @@ class DelegatingParser(Parser):
                     content = None
             else:
                 # No tool calls.
+                # For required/named tool choice (when falling back to auto
+                # parsing), if content is empty or whitespace-only, return
+                # empty list with None content.
+                if (is_required_tool_choice or is_named_tool_choice) and (
+                    content is None
+                    or (isinstance(content, str) and not content.strip())
+                ):
+                    return [], None
                 return None, content
 
         return tool_calls, content
