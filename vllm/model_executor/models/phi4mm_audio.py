@@ -9,7 +9,6 @@ import abc
 import math
 from typing import Any, Literal
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
@@ -28,7 +27,6 @@ from vllm.model_executor.models.phi4mm_utils import (
     MultiSequential,
     NemoConvSubsampling,
     T5RelativeAttentionLogitBias,
-    adaptive_enc_mask,
     get_offset,
     unfold_tensor,
 )
@@ -520,19 +518,32 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
         chunk_size_train_eff, left_chunk_train_eff = self._chunk_size_selection(
             chunk_size, left_chunk
         )
+        chunk_size_train_eff = int(chunk_size_train_eff)
+        left_chunk_train_eff = int(left_chunk_train_eff)
+        dev_type = getattr(self, "dev_type", None)
+        if isinstance(dev_type, torch.Tensor):
+            device = dev_type.device
+        else:
+            try:
+                device = next(self.parameters()).device
+            except StopIteration:
+                device = torch.device("cpu")
 
-        # Create mask matrix for streaming
-        # S stores start index. if chunksize is 18, s is [0,18,36,....]
-        chunk_start_idx = np.arange(0, seq_len, chunk_size_train_eff)
-
-        enc_streaming_mask = (
-            adaptive_enc_mask(
-                seq_len, chunk_start_idx, left_window=left_chunk_train_eff
-            )
-            .unsqueeze(0)
-            .expand([batch_size, -1, -1])
+        seq_range = torch.arange(int(seq_len), device=device, dtype=torch.long)
+        chunk_idx = torch.div(
+            seq_range, chunk_size_train_eff, rounding_mode="floor"
         )
-        return enc_streaming_mask
+        left_boundary = torch.clamp(
+            chunk_idx - left_chunk_train_eff, min=0
+        ) * chunk_size_train_eff
+        right_boundary = torch.clamp(
+            (chunk_idx + 1) * chunk_size_train_eff, max=int(seq_len)
+        )
+        seq_range_expand = seq_range.unsqueeze(0)
+        mask = (seq_range_expand >= left_boundary.unsqueeze(1)) & (
+            seq_range_expand < right_boundary.unsqueeze(1)
+        )
+        return mask.unsqueeze(0).expand(batch_size, -1, -1)
 
     def forward_embeddings(
         self,
