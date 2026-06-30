@@ -42,7 +42,7 @@ def _visible_gpu_count() -> int:
     visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
     if visible_devices:
         return len([d for d in visible_devices.split(",") if d.strip()])
-    return torch.cuda.device_count()
+    return torch.accelerator.device_count()
 
 
 def _model_path() -> str:
@@ -148,11 +148,13 @@ def _replay_cached_weights(worker, bucket_size_bytes: int = 256 << 20) -> dict:
             backend = str(
                 getattr(self.unquantized_backend, "value", self.unquantized_backend)
             )
-            pad_events.append({
-                "backend": backend,
-                "before": before,
-                "after": after,
-            })
+            pad_events.append(
+                {
+                    "backend": backend,
+                    "before": before,
+                    "after": after,
+                }
+            )
         return padded
 
     with torch.device(worker.device):
@@ -164,7 +166,7 @@ def _replay_cached_weights(worker, bucket_size_bytes: int = 256 << 20) -> dict:
             loaded = model.load_weights(device_bucket)
             loaded_counts.append(len(loaded) if loaded is not None else 0)
             del device_bucket
-            torch.cuda.empty_cache()
+            torch.accelerator.empty_cache()
         before_post_load = _moe_weight_fingerprints(worker)
         UnquantizedFusedMoEMethod._maybe_pad_weight = _recording_maybe_pad_weight
         try:
@@ -243,7 +245,7 @@ def _shutdown_llm(llm) -> None:
     finally:
         del llm
         gc.collect()
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
 
 
 @pytest.mark.parametrize("backend", ["triton", "aiter"])
@@ -254,15 +256,11 @@ def test_moe_weight_replay_after_sleep_wake_is_deterministic(
     tp_size = int(os.environ.get(TP_ENV, "8"))
     if _visible_gpu_count() < tp_size:
         pytest.skip(
-            f"requires at least {tp_size} visible GPUs, "
-            f"found {_visible_gpu_count()}"
+            f"requires at least {tp_size} visible GPUs, found {_visible_gpu_count()}"
         )
     if not _cumem_allocator_available():
         pytest.skip("sleep mode replay requires the cumem allocator extension")
-    if not (
-        hasattr(torch.ops, "_moe_C")
-        and hasattr(torch.ops._moe_C, "topk_softmax")
-    ):
+    if not (hasattr(torch.ops, "_moe_C") and hasattr(torch.ops._moe_C, "topk_softmax")):
         pytest.skip("MoE C extension with topk_softmax is required")
 
     _set_backend_env(monkeypatch, backend)
