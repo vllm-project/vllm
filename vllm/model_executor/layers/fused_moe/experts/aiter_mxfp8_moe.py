@@ -78,9 +78,10 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config) -> bool:
-        # Both TP (expert_map=None) and EP are supported: apply() forwards the
-        # expert_map as aiter's ``expert_mask`` (the per-rank local-expert
-        # selection), mirroring the native rocm_aiter_moe path.
+        # Both TP (expert_map=None) and EP are supported: under EP apply()
+        # forwards the per-rank local-expert selection to aiter as
+        # ``expert_mask``, handling both the 0/1-mask form (aiter master ON) and
+        # the -1 index-map form (master OFF). See apply().
         return True
 
     @staticmethod
@@ -129,17 +130,25 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
         limit = self.quant_config.gemm1_clamp_limit
         swiglu_limit = 0.0 if limit is None else float(limit)
 
-        # Under EP, aiter expects ``expert_mask`` as a 0/1 *local-expert* mask
-        # over global ids with a trailing fake-expert sentinel slot
-        # (shape ``[global_num_experts + 1]``), NOT vLLM's expert_map (a
-        # global->local index map with -1 for non-local). Convert it; aiter
-        # derives the global->local compaction from the mask itself. ``None``
-        # under pure TP.
-        if expert_map is not None:
+        # Under EP, aiter expects ``expert_mask``: a 0/1 *local-expert* mask over
+        # global ids with a trailing fake-expert sentinel slot (shape
+        # ``[global_num_experts + 1]``), from which it derives the global->local
+        # compaction. What ``RoutedExperts.expert_map`` hands us depends on the
+        # aiter master switch (``rocm_aiter_fmoe_enabled``):
+        #   * master ON  -> already the 0/1 ``expert_mask``; forward as-is, like
+        #     the native rocm_aiter_moe path.
+        #   * master OFF -> vLLM's expert_map (a global->local index map, -1 for
+        #     non-local); build the 0/1 mask from it.
+        # Branching on the (static) master flag — not the tensor contents —
+        # keeps this HIP-graph/torch.compile safe (no data-dependent sync).
+        # ``None`` under pure TP.
+        if expert_map is None:
+            expert_mask = None
+        elif self.moe_config.rocm_aiter_fmoe_enabled:
+            expert_mask = expert_map
+        else:
             local_mask = (expert_map >= 0).to(torch.int32)
             expert_mask = torch.cat([local_mask, local_mask.new_zeros(1)])
-        else:
-            expert_mask = None
 
         # Route through the graph-safe ``rocm_aiter_fused_moe`` custom op so the
         # call is captured under HIP graphs / torch.compile (a direct
