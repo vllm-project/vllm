@@ -5,6 +5,8 @@ import asyncio
 from abc import ABC
 from collections.abc import AsyncGenerator, Mapping
 
+import numpy as np
+
 from vllm import CompletionOutput, RequestOutput
 from vllm.engine.protocol import EngineClient
 from vllm.inputs import EngineInput
@@ -152,11 +154,23 @@ class BeamSearchOnlineMixin(ABC):
                             )
 
             # Processing non-EOS tokens
-            candidates = sorted(candidates, key=lambda x: x[0], reverse=True)
+            candidate_logprobs = np.fromiter(
+                (candidate[0] for candidate in candidates),
+                dtype=np.float64,
+                count=len(candidates),
+            )
+            if len(candidates) <= beam_width:
+                topn_idx = np.argsort(-candidate_logprobs)
+            else:
+                topn_idx = np.argpartition(
+                    -candidate_logprobs,
+                    beam_width - 1,
+                )[:beam_width]
+                topn_idx = topn_idx[np.argsort(-candidate_logprobs[topn_idx])]
+
             new_beams = []
-            for cum_logprob, token_id, current_beam, logprobs in candidates[
-                :beam_width
-            ]:
+            for idx in topn_idx:
+                cum_logprob, token_id, current_beam, logprobs = candidates[int(idx)]
                 new_beams.append(
                     BeamSearchSequence(
                         orig_prompt=prompt,
