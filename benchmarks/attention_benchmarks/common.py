@@ -49,6 +49,7 @@ def run_do_bench(
         if warmup_ms is not None:
             kwargs["warmup"] = warmup_ms
         result = triton.testing.do_bench(benchmark_fn, **kwargs)
+    torch.accelerator.synchronize()
     return result
 
 
