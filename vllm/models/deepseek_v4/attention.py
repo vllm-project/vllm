@@ -760,10 +760,7 @@ class DeepseekV4Indexer(nn.Module):
 
         # None on ROCm — maybe_execute_in_parallel falls back to sequential.
         self.aux_stream = aux_stream
-        self.ln_events: list[torch.Event] = [
-            torch.Event(),
-            torch.Event(),
-        ]
+        self.ln_events: list[torch.Event] = [torch.Event(), torch.Event()]
 
     def forward(
         self,
