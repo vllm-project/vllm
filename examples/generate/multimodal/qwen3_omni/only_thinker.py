@@ -11,6 +11,7 @@ from vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
+from vllm.lora.request import LoRARequest
 from vllm.multimodal.image import convert_image_mode
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -149,6 +150,8 @@ def main(args):
     model_name = args.model
     query_result = query_map[args.query_type]()
 
+    enable_lora = args.lora_path is not None
+
     llm = LLM(
         model=model_name,
         max_model_len=args.max_model_len,
@@ -157,13 +160,25 @@ def main(args):
         seed=args.seed,
         tensor_parallel_size=args.tensor_parallel_size,
         gpu_memory_utilization=args.gpu_memory_utilization,
+        enable_lora=enable_lora,
+        max_lora_rank=args.max_lora_rank,
+        enable_tower_connector_lora=enable_lora,
+        mm_processor_cache_gb=0 if enable_lora else None,
     )
 
     # We set temperature to 0.2 so that outputs can be different
     # even when all prompts are identical when running batch inference.
     sampling_params = SamplingParams(temperature=0.2, max_tokens=256)
 
-    outputs = llm.generate(query_result.inputs, sampling_params=sampling_params)
+    lora_request = None
+    if enable_lora:
+        lora_request = LoRARequest(args.lora_name, args.lora_id, args.lora_path)
+
+    outputs = llm.generate(
+        query_result.inputs,
+        sampling_params=sampling_params,
+        lora_request=lora_request,
+    )
 
     for o in outputs:
         generated_text = o.outputs[0].text
@@ -213,6 +228,30 @@ def parse_args():
         type=int,
         default=12800,
         help="Maximum model context length.",
+    )
+    parser.add_argument(
+        "--lora-path",
+        type=str,
+        default=None,
+        help="Optional path to the LoRA adapter weights.",
+    )
+    parser.add_argument(
+        "--lora-name",
+        type=str,
+        default="vision",
+        help="LoRA adapter name.",
+    )
+    parser.add_argument(
+        "--lora-id",
+        type=int,
+        default=1,
+        help="LoRA adapter ID.",
+    )
+    parser.add_argument(
+        "--max-lora-rank",
+        type=int,
+        default=8,
+        help="Maximum LoRA rank.",
     )
 
     return parser.parse_args()
