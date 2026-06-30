@@ -79,6 +79,7 @@ if TYPE_CHECKING:
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
     VLLM_MAX_AUDIO_DECODE_DURATION_S: int = 600
     VLLM_MAX_AUDIO_PREPROCESS_WORKERS: int = max(1, min(os.cpu_count() or 1, 2))
+    VLLM_REALTIME_AUDIO_IDLE_TIMEOUT_S: float = 30.0
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MEDIA_CONNECTOR: str = "http"
     VLLM_MM_HASHER_ALGORITHM: str = "blake3"
@@ -953,6 +954,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
             "VLLM_MAX_AUDIO_PREPROCESS_WORKERS",
             str(max(1, min(os.cpu_count() or 1, 2))),
         )
+    ),
+    # Realtime audio WebSocket sessions are closed after this many seconds
+    # without valid audio input. Set to 0 or a negative value to disable.
+    "VLLM_REALTIME_AUDIO_IDLE_TIMEOUT_S": lambda: float(
+        os.getenv("VLLM_REALTIME_AUDIO_IDLE_TIMEOUT_S", "30")
     ),
     # Backend for Video IO — selects the frame-sampling algorithm.
     # - "opencv": uniform sampling.
