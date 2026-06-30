@@ -21,6 +21,7 @@ from urllib3.util import Url, parse_url
 
 import vllm.envs as envs
 from vllm.connections import HTTPConnection, global_http_connection
+from vllm.exceptions import VLLMUnprocessableEntityError
 from vllm.logger import init_logger
 from vllm.multimodal.video import get_video_loader_backend_for_processor
 from vllm.utils.registry import ExtensionManager
@@ -46,6 +47,67 @@ MODALITY_IO_MAP: dict[str, type[MediaIO]] = {
     "image": ImageMediaIO,
     "video": VideoMediaIO,
 }
+
+
+def _wrap_media_fetch_error(
+    url: str, exc: Exception
+) -> VLLMUnprocessableEntityError | Exception:
+    """Convert media fetch exceptions to VLLMUnprocessableEntityError.
+
+    This handles various HTTP/client errors that indicate the media resource
+    is unavailable (404, 403, DNS failures, connection errors, etc.) and
+    converts them to a 422 Unprocessable Entity error instead of 500.
+
+    Returns:
+        VLLMUnprocessableEntityError for client-side errors (4xx, DNS, etc.)
+        Original exception for server-side errors (5xx) or other exceptions
+    """
+    import aiohttp
+    import requests
+
+    # List of exception types that indicate unprocessable content
+    # (client-side issues with the URL/resource, not server errors)
+    unprocessable_types = (
+        # aiohttp client errors (4xx, DNS, connection)
+        aiohttp.ClientResponseError,  # Includes 404, 403, etc.
+        aiohttp.ClientConnectorError,  # Connection refused, etc.
+        aiohttp.ClientConnectorDNSError,  # DNS resolution failed
+        aiohttp.ClientConnectionError,  # Base class for connection errors
+        aiohttp.ServerDisconnectedError,  # Server disconnected
+        # requests errors
+        requests.exceptions.HTTPError,  # HTTP errors (includes 4xx)
+        requests.exceptions.ConnectionError,  # Connection errors
+        requests.exceptions.InvalidURL,  # Invalid URL
+        # Standard library errors
+        ValueError,  # Invalid URL, etc.
+        TimeoutError,  # Connection timeout
+    )
+
+    if isinstance(exc, unprocessable_types):
+        # Check if it's a 5xx error - those should remain server errors
+        if isinstance(exc, aiohttp.ClientResponseError) and exc.status >= 500:
+            # 5xx errors are server-side, keep as-is
+            return exc
+        if (
+            isinstance(exc, requests.exceptions.HTTPError)
+            and exc.response is not None
+            and exc.response.status_code >= 500
+        ):
+            # 5xx errors are server-side, keep as-is
+            return exc
+
+        # Convert to VLLMUnprocessableEntityError
+        error_msg = str(exc)
+        # Sanitize the error message to remove sensitive information
+        # but keep it informative
+        return VLLMUnprocessableEntityError(
+            f"Failed to fetch media from URL: {error_msg}",
+            parameter="image_url",
+            value=url,
+        )
+
+    # For other exceptions, return as-is (will be handled as server errors)
+    return exc
 
 
 def merge_media_io_kwargs(
@@ -303,11 +365,17 @@ class MediaConnector:
                 return media_io.load_bytes(cached)
 
             connection = self.connection
-            data = connection.get_bytes(
-                url_spec.url,
-                timeout=fetch_timeout,
-                allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
-            )
+            try:
+                data = connection.get_bytes(
+                    url_spec.url,
+                    timeout=fetch_timeout,
+                    allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
+                )
+            except Exception as e:
+                wrapped = _wrap_media_fetch_error(url, e)
+                if isinstance(wrapped, VLLMUnprocessableEntityError):
+                    raise wrapped from e
+                raise
 
             self._put_cached_bytes(url, data)
             return media_io.load_bytes(data)
@@ -348,11 +416,17 @@ class MediaConnector:
                 return await future
 
             connection = self.connection
-            data = await connection.async_get_bytes(
-                url_spec.url,
-                timeout=fetch_timeout,
-                allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
-            )
+            try:
+                data = await connection.async_get_bytes(
+                    url_spec.url,
+                    timeout=fetch_timeout,
+                    allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
+                )
+            except Exception as e:
+                wrapped = _wrap_media_fetch_error(url, e)
+                if isinstance(wrapped, VLLMUnprocessableEntityError):
+                    raise wrapped from e
+                raise
 
             await loop.run_in_executor(
                 global_thread_pool, self._put_cached_bytes, url, data
