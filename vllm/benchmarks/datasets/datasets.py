@@ -4194,7 +4194,6 @@ class ASRDataset(HuggingFaceDataset):
                     y, sr = sf.read(audio_buffer, dtype="float32")
                 duration_s = get_audio_duration(y=y, sr=sr)
                 mm_content = {"audio": (y, sr)}
-                print(f"Sampling rate: {sr}")
             elif isinstance(audio, dict) and audio.get("path"):
                 duration_s = sf.info(audio["path"]).duration
                 mm_content = {"audio_path": audio["path"]}
