@@ -2,45 +2,29 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Regression test for AITER MLA persistent decode metadata dtypes.
 
-The AITER MLA decode builder sizes its persistent split/reduce metadata buffers
-via ``get_mla_metadata_info_v1`` (passing the q/kv dtypes) and then fills them
-via ``get_mla_metadata_v1``. The ``dtype_q``/``dtype_kv`` args of the latter are
-*optional* in the aiter API, but for the gfx950 fp8/fp8 nhead=32 qlen=1 fold
-path the split/reduce layout depends on the element size: omitting them lays out
-the work for the wrong dtype, corrupting decode output (observed Kimi-K2.5 TP2
-gsm8k ~0.93 -> ~0).
-
-The test pins the builder's metadata to a golden recomputed at runtime from the
-same inputs with the *explicit* correct dtypes. The fixed builder forwards those
-dtypes and matches the golden; reverting the fix (dropping the dtypes) diverges
-and fails. Recomputing the golden against the live aiter keeps it valid if the
-aiter default ever changes.
-
-See commit 35bf6676 ("[Bugfix][ROCm][MLA] Pass q/kv dtypes to
-get_mla_metadata_v1 in FP8 decode").
+For the gfx950 fp8/fp8 nhead=32 qlen=1 fold path, the split/reduce metadata
+layout depends on the q/kv element size. The builder must forward dtype_q/dtype_kv
+to ``get_mla_metadata_v1``; omitting them lays out the work for the wrong dtype
+and corrupts decode output. The test pins the builder's metadata to a golden
+recomputed at runtime with the explicit correct dtypes.
 """
 
-import importlib.util
 import types
 from unittest.mock import patch
 
 import pytest
 import torch
 
+from vllm._aiter_ops import is_aiter_found
 from vllm.platforms import current_platform
-
-aiter_available = importlib.util.find_spec("aiter") is not None
 
 
 def _on_gfx950() -> bool:
-    if not (current_platform.is_rocm() and aiter_available):
+    if not (current_platform.is_rocm() and is_aiter_found()):
         return False
-    try:
-        from vllm.platforms.rocm import on_gfx950
+    from vllm.platforms.rocm import on_gfx950
 
-        return on_gfx950()
-    except Exception:
-        return False
+    return on_gfx950()
 
 
 pytestmark = pytest.mark.skipif(
@@ -216,7 +200,3 @@ def test_persistent_decode_metadata_matches_fp8_golden():
         f"golden for fields {mismatched}; the builder must forward "
         "dtype_q/dtype_kv to get_mla_metadata_v1."
     )
-
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
