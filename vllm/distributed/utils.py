@@ -70,23 +70,14 @@ def verify_group_size_divides_partition(
     layer_name: str | None = None,
     extra_suggestion: str = "",
 ) -> None:
-    """Validate that a TP-sharded layer holds a whole number of quant groups.
-
-    When group-quantized scales are partitioned across tensor-parallel ranks,
-    each rank's ``input_size_per_partition`` (``input_size // tp_size``) must be
-    a multiple of ``group_size``; otherwise a group would straddle a rank
-    boundary and its scales cannot be sliced. Unlike ``ensure_divisibility``,
-    this raises an actionable ``ValueError`` (issue #46230) rather than a bare
-    assertion that is stripped under ``python -O``.
-    """
+    """Validate that a TP-sharded layer holds a whole number of quant groups."""
     if input_size_per_partition % group_size == 0:
         return
     location = f" for layer '{layer_name}'" if layer_name else ""
     raise ValueError(
-        f"Weight input_size_per_partition = {input_size_per_partition}"
-        f"{location} is not divisible by group_size = {group_size}. "
-        "This happens when tensor_parallel_size splits the layer input into "
-        "shards that are not a whole number of quant groups. Consider reducing "
+        f"Weight {input_size_per_partition=}{location} is not divisible by "
+        f"{group_size=}. This happens when tensor_parallel_size splits the layer input "
+        "into shards that are not a whole number of quant groups. Consider reducing "
         f"tensor_parallel_size{extra_suggestion}."
     )
 
