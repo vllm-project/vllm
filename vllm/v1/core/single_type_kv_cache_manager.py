@@ -20,6 +20,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
+    RSWASpec,
     SinkFullAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
@@ -476,8 +477,38 @@ class SingleTypeKVCacheManager(ABC):
 
         raise NotImplementedError
 
+    def _remove_blocks_in_range(
+        self,
+        request_id: str,
+        first_block: int,
+        last_block: int,
+    ) -> None:
+        """Free blocks in ``[first_block, last_block)`` and replace with null_block.
+
+        Iterates backward so newly-evictable tail blocks are reached even after
+        earlier blocks in the range were nulled in a prior call.
+        """
+        if request_id not in self.req_to_blocks:
+            return
+        if first_block >= last_block:
+            return
+        blocks = self.req_to_blocks[request_id]
+        last_block = min(last_block, len(blocks))
+
+        freed: list[KVCacheBlock] = []
+        for i in range(last_block - 1, first_block - 1, -1):
+            if blocks[i] == self._null_block:
+                break
+            freed.append(blocks[i])
+            blocks[i] = self._null_block
+        if freed:
+            self.block_pool.free_blocks(freed)
+
     def remove_skipped_blocks(
-        self, request_id: str, total_computed_tokens: int
+        self,
+        request_id: str,
+        total_computed_tokens: int,
+        num_prompt_tokens: int | None = None,
     ) -> None:
         """
         Remove and free the blocks that are no longer needed for attention computation.
@@ -490,7 +521,11 @@ class SingleTypeKVCacheManager(ABC):
             request_id: The request ID.
             total_computed_tokens: The total number of computed tokens, including
                 local computed tokens and external computed tokens.
+            num_prompt_tokens: Optional prompt length for attention types (e.g.
+                R-SWA) that evict a middle gap rather than a head prefix. Ignored
+                by the default implementation.
         """
+        del num_prompt_tokens
         # Remove the blocks that will be skipped during attention computation.
         num_skipped_tokens = self.get_num_skipped_tokens(total_computed_tokens)
         if num_skipped_tokens <= 0:
@@ -506,18 +541,7 @@ class SingleTypeKVCacheManager(ABC):
         # range), so we must cap to the number of blocks that currently exist for
         # this request.
         num_skipped_blocks = min(num_skipped_blocks, len(blocks))
-        removed_blocks: list[KVCacheBlock] = []
-        # Because the block starts from index 0, the num_skipped_block-th block
-        # corresponds to index num_skipped_blocks - 1.
-        for i in range(num_skipped_blocks - 1, -1, -1):
-            if blocks[i] == self._null_block:
-                # If the block is already a null block, the blocks before it
-                # should also have been set to null blocks by the previous calls
-                # to this function.
-                break
-            removed_blocks.append(blocks[i])
-            blocks[i] = self._null_block
-        self.block_pool.free_blocks(removed_blocks)
+        self._remove_blocks_in_range(request_id, 0, num_skipped_blocks)
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """
@@ -596,6 +620,50 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             else:
                 break
         return num_common_blocks
+
+
+class RSWAManager(FullAttentionManager):
+    """KV cache manager for Reference Sliding Window Attention (R-SWA).
+
+    When ``num_prompt_tokens`` is supplied to ``remove_skipped_blocks``, frees
+    gap blocks between the prefill tail and the current decode window.  This
+    bounds per-request KV memory at O(prefix_len + rswa_window) instead of
+    growing linearly with decode length.
+    """
+
+    def __init__(self, kv_cache_spec: RSWASpec, **kwargs) -> None:
+        super().__init__(kv_cache_spec, **kwargs)
+        self.rswa_window: int = kv_cache_spec.rswa_window
+
+    def remove_skipped_blocks(
+        self,
+        request_id: str,
+        total_computed_tokens: int,
+        num_prompt_tokens: int | None = None,
+    ) -> None:
+        """Free gap blocks that are no longer needed for attention.
+
+        Gap = blocks entirely within
+            [ceil(prefix_len / block_size) * block_size,
+             max(prefix_len, total_computed_tokens - rswa_window))
+
+        Freed blocks are replaced with null_block in req_to_blocks so the
+        block_table passed to FA4 is valid (null_block KV is all-zero;
+        rswa_mask_mod marks gap positions as non-visible so FA4 skips them).
+        """
+        if num_prompt_tokens is None:
+            super().remove_skipped_blocks(
+                request_id, total_computed_tokens, num_prompt_tokens
+            )
+            return
+
+        bs = self.block_size
+        # First block fully after the prefill boundary.
+        first_gap_block = cdiv(num_prompt_tokens, bs)
+        # Decode window start position; blocks before this are evictable.
+        window_start = max(num_prompt_tokens, total_computed_tokens - self.rswa_window)
+        last_gap_block = window_start // bs  # exclusive upper bound
+        self._remove_blocks_in_range(request_id, first_gap_block, last_gap_block)
 
 
 class SlidingWindowManager(SingleTypeKVCacheManager):
@@ -1072,7 +1140,12 @@ class MambaManager(SingleTypeKVCacheManager):
 
         return mask
 
-    def remove_skipped_blocks(self, request_id: str, num_computed_tokens: int) -> None:
+    def remove_skipped_blocks(
+        self,
+        request_id: str,
+        num_computed_tokens: int,
+        num_prompt_tokens: int | None = None,
+    ) -> None:
         assert isinstance(self.kv_cache_spec, MambaSpec)
 
         # NOTE (tdoublep) with async scheduling, the num_computed_tokens can contain
@@ -1082,7 +1155,9 @@ class MambaManager(SingleTypeKVCacheManager):
         # that we might actually need.
         num_computed_tokens = max(0, num_computed_tokens - self.num_speculative_blocks)
 
-        super().remove_skipped_blocks(request_id, num_computed_tokens)
+        super().remove_skipped_blocks(
+            request_id, num_computed_tokens, num_prompt_tokens
+        )
         if self.mamba_cache_mode == "align":
             # `last_state_block_idx` refers to the block index allocated two steps ago.
             # The block allocated in the previous step is used to copy Mamba states
@@ -1401,10 +1476,16 @@ def get_manager_for_kv_cache_spec(
     assert manager_class is not None, (
         f"No manager registered for KVCacheSpec {type(kv_cache_spec)}"
     )
-    # SlidingWindow / ChunkedLocalAttention managers recycle blocks across
-    # chunks; the runtime admission cap must match the recycling-aware bound
-    # the startup pool sizer uses (single source of truth: the spec method).
-    if isinstance(kv_cache_spec, (SlidingWindowSpec, ChunkedLocalAttentionSpec)):
+    # SlidingWindow / ChunkedLocalAttention managers recycle blocks;
+    # the runtime admission cap must match the recycling-aware bound the
+    # startup pool sizer uses (single source of truth: the spec method).
+    # R-SWA also recycles gap blocks but peak physical KV still fits the
+    # full-attention bound (prefix + window <= max_model_len), so it inherits
+    # FullAttentionSpec sizing without a separate admission cap.
+    if isinstance(
+        kv_cache_spec,
+        (SlidingWindowSpec, ChunkedLocalAttentionSpec),
+    ):
         kwargs["max_admission_blocks_per_request"] = (
             kv_cache_spec.max_admission_blocks_per_request(
                 max_num_batched_tokens=max_num_batched_tokens,
@@ -1456,6 +1537,9 @@ def register_all_kvcache_specs(vllm_config):
     )
     KVCacheSpecRegistry.register(
         MLAAttentionSpec, FullAttentionManager, uniform_type_base_spec=FullAttentionSpec
+    )
+    KVCacheSpecRegistry.register(
+        RSWASpec, RSWAManager, uniform_type_base_spec=FullAttentionSpec
     )
     # NOTE(Mengqing): HiddenStateCacheSpec won't take part in
     # grouping, thus the uniform_type_base_spec is just a

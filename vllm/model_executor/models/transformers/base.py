@@ -158,9 +158,6 @@ class Base(
                     "Transformers modeling backend does "
                     "not support MXFP4 quantization yet."
                 )
-            # Skip loading extra bias for GPTQ models.
-            if "gptq" in quant_method_name:
-                self.ignore_unexpected_suffixes.append(".bias")
 
         self._patch_config()
         from_config_kwargs = dict(
@@ -643,10 +640,7 @@ class Base(
             return hidden_states, aux_hidden_states
         return hidden_states
 
-    def load_weights(
-        self,
-        weights: Iterable[tuple[str, torch.Tensor]],
-    ) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=self.skip_prefixes,

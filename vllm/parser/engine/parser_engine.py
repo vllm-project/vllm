@@ -116,6 +116,7 @@ class ParserEngine(Parser):
         self._deferred_content: str = ""
         self._deferred_reasoning: str = ""
         self._content_has_nonws: bool = False
+        self._suppress_tool_calls: bool = False
 
         self._arg_converter = parser_engine_config.arg_converter
         self._arg_structural_chars = parser_engine_config.arg_structural_chars
@@ -398,10 +399,10 @@ class ParserEngine(Parser):
         tools = getattr(request, "tools", None)
         if tools:
             self._tools = tools
-        if not self.skip_tool_parsing:
+        if not self.skip_tool_parsing and not self._suppress_tool_calls:
             tool_choice = getattr(request, "tool_choice", None)
             if tool_choice == "none" and tools:
-                self.skip_tool_parsing = True
+                self._suppress_tool_calls = True
 
     def _strip_content_whitespace(
         self,
@@ -642,7 +643,7 @@ class ParserEngine(Parser):
         events = self._feed(text, token_ids)
         events.extend(self._engine.finish())
 
-        delta = self._events_to_delta(events)
+        delta = self._events_to_delta(events, finished=True)
         tool_call_info = self._build_extracted_result()
 
         reasoning = delta.reasoning if delta else None
@@ -701,6 +702,7 @@ class ParserEngine(Parser):
         reasoning_parts: list[str] = []
 
         seen_tool_event = False
+        suppress = self._suppress_tool_calls
         for event in events:
             match event.type:
                 case EventType.TEXT_CHUNK:
@@ -713,17 +715,21 @@ class ParserEngine(Parser):
                 case EventType.REASONING_END:
                     self._reasoning_ended = True
                 case EventType.TOOL_CALL_START:
-                    seen_tool_event = True
-                    self._ensure_slot(event.tool_index)
+                    if not suppress:
+                        seen_tool_event = True
+                        self._ensure_slot(event.tool_index)
                 case EventType.TOOL_NAME:
-                    seen_tool_event = True
-                    self._handle_tool_name(event)
+                    if not suppress:
+                        seen_tool_event = True
+                        self._handle_tool_name(event)
                 case EventType.ARG_VALUE_CHUNK:
-                    seen_tool_event = True
-                    self._handle_arg_chunk(event, tool_call_deltas)
+                    if not suppress:
+                        seen_tool_event = True
+                        self._handle_arg_chunk(event, tool_call_deltas)
                 case EventType.TOOL_CALL_END:
-                    seen_tool_event = True
-                    self._handle_tool_end(event, tool_call_deltas)
+                    if not suppress:
+                        seen_tool_event = True
+                        self._handle_tool_end(event, tool_call_deltas)
                 case EventType.REASONING_START:
                     pass  # no delta-level effect
 
