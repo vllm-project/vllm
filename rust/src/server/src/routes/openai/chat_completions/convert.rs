@@ -105,6 +105,19 @@ pub(super) fn prepare_chat_request(
         &request.structured_outputs,
     )?;
 
+    // Mirror Python: structured outputs and a specific tool choice are mutually
+    // exclusive. The keyword choices (none/auto/required) are allowed; naming a
+    // function is not.
+    // https://github.com/vllm-project/vllm/blob/f22d6e026/vllm/entrypoints/openai/chat_completion/protocol.py#L800-L809
+    if structured_outputs.is_some()
+        && matches!(request.tool_choice, Some(ToolChoice::Function { .. }))
+    {
+        bail_invalid_request!(
+            "You can only either use constraints for structured outputs or \
+             tools, not both."
+        );
+    }
+
     let chat_request = ChatRequest {
         request_id: request_id.clone(),
         messages,
@@ -392,6 +405,7 @@ mod tests {
     use crate::routes::openai::chat_completions::types::{
         AssistantRole, ChatCompletionMessage, ChatCompletionRequest,
     };
+    use crate::routes::openai::utils::structured_outputs::ResponseFormat;
     use crate::routes::openai::utils::types::{
         ChatMessage, ContentPart, Function, FunctionCallResponse, ImageUrl, MessageContent,
         StreamOptions, Tool, ToolCall, ToolChoice, ToolChoiceValue, VideoUrl,
@@ -1205,5 +1219,44 @@ mod tests {
             prepared.chat_request.chat_options.generation_prompt_mode,
             GenerationPromptMode::StartNewAssistant
         );
+    }
+
+    #[test]
+    fn prepare_chat_request_rejects_structured_outputs_with_named_tool() {
+        let request = ChatCompletionRequest {
+            response_format: Some(ResponseFormat::JsonObject),
+            tool_choice: Some(ToolChoice::Function {
+                tool_type: "function".to_string(),
+                function: crate::routes::openai::utils::types::FunctionChoice {
+                    name: "get_weather".to_string(),
+                },
+            }),
+            ..base_request()
+        };
+
+        let err = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect_err("structured outputs and a named tool are mutually exclusive");
+
+        assert!(err.to_error_response().error.message.contains("not both"));
+    }
+
+    #[test]
+    fn prepare_chat_request_allows_structured_outputs_with_keyword_tool_choice() {
+        let request = ChatCompletionRequest {
+            response_format: Some(ResponseFormat::JsonObject),
+            tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Auto)),
+            ..base_request()
+        };
+
+        prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("structured outputs with auto tool choice is valid");
     }
 }
