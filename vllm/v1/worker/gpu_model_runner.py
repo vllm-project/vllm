@@ -239,6 +239,19 @@ AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 
 
+def _valid_sampled_count_for_prev_index(
+    valid_sampled_token_count: Sequence[int],
+    prev_req_index: int | None,
+) -> int | None:
+    if (
+        prev_req_index is None
+        or prev_req_index < 0
+        or prev_req_index >= len(valid_sampled_token_count)
+    ):
+        return None
+    return valid_sampled_token_count[prev_req_index]
+
+
 # Wrapper for ModelRunnerOutput to support overlapped execution.
 class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
     def __init__(
@@ -1493,9 +1506,12 @@ class GPUModelRunner(
                     req_state,
                 ) in deferred_spec_decode_corrections:
                     prev_req_index = prev_req_id_to_index.get(req_id)
-                    if prev_req_index is None:
+                    valid_count = _valid_sampled_count_for_prev_index(
+                        valid_sampled_token_count, prev_req_index
+                    )
+                    if valid_count is None:
                         continue
-                    num_accepted = valid_sampled_token_count[prev_req_index] - 1
+                    num_accepted = valid_count - 1
                     correction = optimistic_num_accepted - num_accepted
                     req_state.num_computed_tokens -= correction
                     cur_req_index = self.input_batch.req_id_to_index.get(req_id)
@@ -1756,6 +1772,8 @@ class GPUModelRunner(
         # Async scheduling case, where some decode requests from the previous
         # iteration won't have entries in input_ids_cpu and need to be copied
         # on the GPU from prev_sampled_token_ids.
+        prev_sampled_token_ids = self.input_batch.prev_sampled_token_ids
+        prev_sampled_count = prev_sampled_token_ids.shape[0]
         prev_positions = self.prev_positions.np[:num_reqs]
         scheduled_spec_tokens = scheduler_output.scheduled_spec_decode_tokens
         sample_flattened_indices: list[int] = []
@@ -1768,7 +1786,7 @@ class GPUModelRunner(
 
         for cur_index in range(num_reqs):
             prev_index = prev_positions[cur_index]
-            if prev_index < 0:
+            if prev_index < 0 or prev_index >= prev_sampled_count:
                 continue
             prev_indices.append(prev_index)
             req_id = self.input_batch.req_ids[cur_index]
@@ -1818,7 +1836,7 @@ class GPUModelRunner(
             # The indices are both the same permutation of 0..N-1 so
             # we can copy directly using a single slice.
             self.input_ids.gpu[:num_common_tokens].copy_(
-                self.input_batch.prev_sampled_token_ids[:num_common_tokens, 0],
+                prev_sampled_token_ids[:num_common_tokens, 0],
                 non_blocking=True,
             )
             return
@@ -1832,9 +1850,7 @@ class GPUModelRunner(
         self.input_ids.gpu.scatter_(
             dim=0,
             index=sampled_tokens_index_tensor,
-            src=self.input_batch.prev_sampled_token_ids[
-                prev_common_req_indices_tensor, 0
-            ],
+            src=prev_sampled_token_ids[prev_common_req_indices_tensor, 0],
         )
 
         # Scatter the draft tokens after the sampled tokens are scattered.

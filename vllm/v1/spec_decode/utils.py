@@ -576,22 +576,39 @@ def update_num_computed_tokens_for_batch_change(
     Requests that had drafts: corrected = prev_gpu + valid_count.
     New requests or non-draft (e.g. prefills): use CPU value directly.
     """
-    # Clamp because prev_positions can be -1 for new requests
-    gather_indices = prev_positions.clamp(min=0)
+    if valid_sampled_token_count.shape[0] == 0:
+        n = prev_positions.shape[0]
+        num_computed_tokens[:n].copy_(cpu_num_computed_tokens)
+        return
+
+    # prev_positions maps current request rows to the previous batch. In async
+    # scheduling, stale rows can be absent from the previous sampled-count
+    # tensor. Do not clamp those rows onto another request.
+    prev_count = valid_sampled_token_count.shape[0]
+    in_range = (prev_positions >= 0) & (prev_positions < prev_count)
+    gather_indices = torch.where(
+        in_range,
+        prev_positions,
+        torch.zeros_like(prev_positions),
+    )
 
     valid_counts = valid_sampled_token_count[gather_indices]
     prev_computed = num_computed_tokens[gather_indices]
     prev_drafts = prev_num_draft_tokens[gather_indices]
 
-    participating = (prev_positions >= 0) & (prev_drafts > 0)
-    corrected = prev_computed + valid_counts.int()
+    participating = in_range & (prev_drafts > 0)
+    corrected = prev_computed + valid_counts.to(prev_computed.dtype)
 
     n = prev_positions.shape[0]
     num_computed_tokens[:n].copy_(
         torch.where(participating, corrected, cpu_num_computed_tokens)
     )
     num_accepted_tokens.copy_(
-        torch.where(participating, valid_counts, num_accepted_tokens)
+        torch.where(
+            participating,
+            valid_counts.to(num_accepted_tokens.dtype),
+            num_accepted_tokens,
+        )
     )
 
 

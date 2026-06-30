@@ -51,7 +51,10 @@ from vllm.v1.worker.gpu.lora_utils import LoraState
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu_input_batch import InputBatch
-from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.v1.worker.gpu_model_runner import (
+    GPUModelRunner,
+    _valid_sampled_count_for_prev_index,
+)
 from vllm.v1.worker.utils import select_common_block_size
 
 BLOCK_SIZE = 16
@@ -137,6 +140,22 @@ def model_runner():
 
 
 model_runner_2 = model_runner
+
+
+class _FakeInputIdsBuffer:
+    def __init__(self, cpu_values: list[int], device: torch.device) -> None:
+        self.cpu = torch.tensor(cpu_values, dtype=torch.int32)
+        self.gpu = torch.full(
+            (len(cpu_values),), -999, dtype=torch.int32, device=device
+        )
+
+    def copy_to_gpu(self, n: int) -> None:
+        self.gpu[:n].copy_(self.cpu[:n].to(self.gpu.device))
+
+
+class _FakePrevPositions:
+    def __init__(self, values: list[int]) -> None:
+        self.np = np.array(values, dtype=np.int64)
 
 
 def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
@@ -309,6 +328,43 @@ def test_sample_tokens_skips_pp_group_lookup_without_async_scheduling(
 
     output = GPUModelRunner.sample_tokens(runner, None)
     assert output in (EMPTY_MODEL_RUNNER_OUTPUT, None)
+
+
+def test_valid_sampled_count_for_prev_index_checks_bounds():
+    assert _valid_sampled_count_for_prev_index([3, 4], 0) == 3
+    assert _valid_sampled_count_for_prev_index([3, 4], None) is None
+    assert _valid_sampled_count_for_prev_index([3, 4], -1) is None
+    assert _valid_sampled_count_for_prev_index([3, 4], 2) is None
+
+
+def test_prepare_input_ids_skips_stale_positive_prev_position():
+    device = torch.device("cpu")
+    runner = SimpleNamespace()
+    runner.input_batch = SimpleNamespace(
+        prev_sampled_token_ids=torch.tensor(
+            [[111], [222]], dtype=torch.int32, device=device
+        ),
+        req_ids=["a", "b", "c"],
+    )
+    runner.input_ids = _FakeInputIdsBuffer([10, 20, 30], device)
+    runner.enable_prompt_embeds = False
+    runner.prev_positions = _FakePrevPositions([0, 2, -1])
+    runner.prev_num_spec_tokens = 5
+    runner._draft_token_ids = None
+    runner.device = device
+
+    scheduler_output = SimpleNamespace(scheduled_spec_decode_tokens={})
+    cu_num_tokens = np.array([1, 2, 3], dtype=np.int32)
+
+    GPUModelRunner._prepare_input_ids(
+        runner,
+        scheduler_output,
+        num_reqs=3,
+        total_num_scheduled_tokens=3,
+        cu_num_tokens=cu_num_tokens,
+    )
+
+    assert runner.input_ids.gpu.cpu().tolist() == [111, 20, 30]
 
 
 def test_select_common_block_size_no_valid_option():
