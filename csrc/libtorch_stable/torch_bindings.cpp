@@ -450,10 +450,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
 
 #ifndef USE_ROCM
   ops.def(
-      "minimax_allreduce_rms("
-      "Tensor input, Tensor norm_weight, Tensor workspace, "
-      "int rank, int nranks, float eps) -> Tensor");
-  ops.def(
       "minimax_allreduce_rms_qk("
       "Tensor qkv, Tensor norm_weight_q, Tensor norm_weight_k, "
       "Tensor workspace, int q_size, int kv_size, int rank, int nranks, "
@@ -492,6 +488,12 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def(
       "persistent_topk(Tensor logits, Tensor lengths, Tensor! output, "
       "Tensor workspace, int k, int max_seq_len) -> ()");
+
+#ifdef VLLM_ENABLE_COOPERATIVE_TOPK
+  ops.def(
+      "cooperative_topk(Tensor logits, Tensor lengths, Tensor! output, "
+      "Tensor workspace, int k, int max_seq_len) -> ()");
+#endif
 
   // Activation ops
   ops.def(
@@ -699,7 +701,6 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
       "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert",
       TORCH_BOX(&fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert));
 #ifndef USE_ROCM
-  ops.impl("minimax_allreduce_rms", TORCH_BOX(&minimax_allreduce_rms));
   ops.impl("minimax_allreduce_rms_qk", TORCH_BOX(&minimax_allreduce_rms_qk));
 #endif
   ops.impl("fused_minimax_m3_qknorm_rope_kv_insert",
@@ -711,6 +712,9 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("top_k_per_row_prefill", TORCH_BOX(&top_k_per_row_prefill));
   ops.impl("top_k_per_row_decode", TORCH_BOX(&top_k_per_row_decode));
   ops.impl("persistent_topk", TORCH_BOX(&persistent_topk));
+#ifdef VLLM_ENABLE_COOPERATIVE_TOPK
+  ops.impl("cooperative_topk", TORCH_BOX(&cooperative_topk));
+#endif
 
   // Activation kernels (shared CUDA/ROCm)
   ops.impl("persistent_masked_m_silu_mul_quant",
