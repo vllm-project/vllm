@@ -318,6 +318,21 @@ class NixlBaseConnectorWorkerMultiview(NixlBaseConnectorWorker):
             compute_nixl_compatibility_hash,
         )
 
+        # Detect packed allocation (DSv4-style contiguous per-block packing).
+        # All tensors are strided views into the same backing storage.
+        # The packed path uses 1 region / 1 desc-per-block and doesn't need
+        # multi-view machinery, so delegate to the base class.
+        if len(kv_caches) > 1 and not self._has_mamba:
+            storage = next(iter(kv_caches.values())).untyped_storage()
+            storage_ptrs = {
+                cache.untyped_storage().data_ptr() for cache in kv_caches.values()
+            }
+            data_ptrs = {cache.data_ptr() for cache in kv_caches.values()}
+            if len(storage_ptrs) == 1 and len(data_ptrs) > 1:
+                self._register_packed_kv_cache(storage)
+                self.device_kv_caches = kv_caches
+                return
+
         self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
             tp_size=self.world_size,

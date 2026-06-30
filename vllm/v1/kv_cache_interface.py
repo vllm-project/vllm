@@ -250,6 +250,8 @@ class AttentionSpec(KVCacheSpec):
         N = block_size
         if self.kv_quant_mode.is_nvfp4:
             head_dim = nvfp4_kv_cache_full_dim(self.head_size)
+        elif self.kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+            head_dim = self.head_size // 2
         else:
             head_dim = self.head_size
 

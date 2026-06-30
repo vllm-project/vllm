@@ -915,6 +915,7 @@ class NixlBaseConnectorWorker:
             ),
             num_blocks=self.num_blocks,
             block_lens=self.block_len_per_layer,
+            block_strides=self.block_len_per_layer,
             kv_cache_layout=self.kv_cache_layout,
             block_size=self.block_size,
             ssm_sizes=self._mamba_ssm_size,
