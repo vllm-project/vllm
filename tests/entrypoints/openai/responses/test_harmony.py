@@ -454,18 +454,20 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
             if event.type == "response.output_item.added":
                 assert event.item.id != current_item_id
                 current_item_id = event.item.id
+                # content_index is per output item, so it restarts at 0
+                current_content_index = -1
             elif event.type in [
                 "response.output_text.delta",
                 "response.reasoning_text.delta",
             ]:
                 assert event.item_id == current_item_id
 
-            # Verify content indices
+            # Verify content indices: 0-based within each output item
             if event.type in [
                 "response.content_part.added",
                 "response.reasoning_part.added",
             ]:
-                assert event.content_index != current_content_index
+                assert event.content_index == current_content_index + 1
                 current_content_index = event.content_index
             elif event.type in [
                 "response.output_text.delta",
