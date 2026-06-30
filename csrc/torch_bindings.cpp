@@ -2,7 +2,6 @@
 // cache.h, which is no longer included here after cache ops moved to
 // _C_stable_libtorch).
 #include <torch/all.h>
-#include "cuda_utils.h"
 #include "ops.h"
 #include "core/registration.h"
 #include <torch/library.h>
@@ -20,15 +19,6 @@
 
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops
-
-#ifdef USE_ROCM
-  // TODO: Remove this once we upgrade to torch 2.11.
-  // ROCm still uses torch 2.10,
-  // So we still need to use unstable torch ABI for now.
-  ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
-  ops.impl("get_cuda_view_from_cpu_tensor", torch::kCPU,
-           &get_cuda_view_from_cpu_tensor);
-#endif
 }
 
 #ifdef USE_ROCM
@@ -47,20 +37,6 @@ TORCH_LIBRARY_FRAGMENT(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
   custom_ar.impl("qr_open_handles", torch::kCPU, &qr_open_handles);
 
   custom_ar.def("qr_max_size", &qr_max_size);
-}
-
-// TODO: Remove this once ROCm upgrade to torch 2.11.
-TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cuda_utils), cuda_utils) {
-  // Cuda utils
-  // Gets the specified device attribute.
-  cuda_utils.def("get_device_attribute(int attribute, int device_id) -> int");
-  cuda_utils.impl("get_device_attribute", &get_device_attribute);
-
-  // Gets the maximum shared memory per block device attribute.
-  cuda_utils.def(
-      "get_max_shared_memory_per_block_device_attribute(int device_id) -> int");
-  cuda_utils.impl("get_max_shared_memory_per_block_device_attribute",
-                  &get_max_shared_memory_per_block_device_attribute);
 }
 #endif
 
