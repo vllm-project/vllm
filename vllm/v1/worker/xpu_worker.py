@@ -170,6 +170,10 @@ class XPUWorker(Worker):
             self.local_rank,
         )
         super().shutdown()
+        from vllm.device_allocator.xpumem import XpuMemAllocator
+
+        if XpuMemAllocator.instance is not None:
+            XpuMemAllocator.instance.release_pools()
         logger.info(
             "XPUWorker shutdown: done (rank=%d, local_rank=%d)",
             self.rank,

@@ -1299,11 +1299,6 @@ class Worker(WorkerBase):
 
             if CuMemAllocator.instance is not None:
                 CuMemAllocator.instance.release_pools()
-        if current_platform.is_xpu():
-            from vllm.device_allocator.xpumem import XpuMemAllocator
-
-            if XpuMemAllocator.instance is not None:
-                XpuMemAllocator.instance.release_pools()
 
     def elastic_ep_execute(self, execute_method: str, *args, **kwargs):
         return self.elastic_ep_executor.execute(execute_method, *args, **kwargs)
