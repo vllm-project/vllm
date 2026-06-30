@@ -37,6 +37,9 @@ from vllm.model_executor.layers.fused_moe.routed_experts import (
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
+from vllm.model_executor.layers.fused_moe.router.zero_expert_router import (
+    ZeroExpertRouter,
+)
 from vllm.model_executor.layers.fused_moe.runner.moe_runner_interface import (
     MoERunnerInterface,
 )
@@ -119,7 +122,7 @@ def _moe_forward(
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
-) -> list[torch.Tensor]:
+) -> torch.Tensor:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
     return layer._forward_impl(
         hidden_states,
@@ -136,21 +139,14 @@ def _moe_forward_fake(
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
-) -> list[torch.Tensor]:
+) -> torch.Tensor:
     # `hidden_dim_unpadded > 0` only on the TRT-LLM MXFP4 path, where the
     # real kernel writes narrower than `hidden_states.shape[-1]`. Plumbed
     # as an op arg (not peeked from the layer registry) to keep the fake
     # a pure shape function of its inputs and preserve subgraph dedup.
     if hidden_dim_unpadded > 0:
-        fused_out = hidden_states.new_empty(
-            (*hidden_states.shape[:-1], hidden_dim_unpadded)
-        )
-    else:
-        fused_out = torch.empty_like(hidden_states)
-    # Return zero tensor for zero_expert_output (not used in monolithic path)
-    zero_expert_out = torch.zeros_like(fused_out)
-    # Clone outputs to match real _forward_impl behavior (required for torch.compile)
-    return [fused_out.clone(), zero_expert_out.clone()]
+        return hidden_states.new_empty((*hidden_states.shape[:-1], hidden_dim_unpadded))
+    return torch.empty_like(hidden_states)
 
 
 def _moe_forward_shared(
@@ -160,7 +156,7 @@ def _moe_forward_shared(
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
-) -> list[torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
     return layer._forward_impl(
         hidden_states,
@@ -177,20 +173,21 @@ def _moe_forward_shared_fake(
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
-) -> list[torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     # `fused_out`: see `_moe_forward_fake` for hidden_dim_unpadded semantics.
-    # Note: _forward_impl returns [combined, zero_expert_output] (2 elements)
-    # The combined result includes shared expert output when applicable
+    # `shared_out`: matches `shared_experts_input` if provided (latent MoE),
+    # else `hidden_states`.
     if hidden_dim_unpadded > 0:
         fused_out = hidden_states.new_empty(
             (*hidden_states.shape[:-1], hidden_dim_unpadded)
         )
     else:
         fused_out = torch.empty_like(hidden_states)
-    # Return zero tensor for zero_expert_output
-    zero_expert_out = torch.zeros_like(fused_out)
-    # Clone outputs to match real _forward_impl behavior (required for torch.compile)
-    return [fused_out.clone(), zero_expert_out.clone()]
+    if shared_experts_input is not None:
+        shared_out = torch.empty_like(shared_experts_input)
+    else:
+        shared_out = torch.empty_like(hidden_states)
+    return shared_out, fused_out
 
 
 # NOTE: `moe_forward` and `moe_forward_shared` being opaque custom ops is a
@@ -198,7 +195,7 @@ def _moe_forward_shared_fake(
 direct_register_custom_op(
     op_name="moe_forward",
     op_func=_moe_forward,
-    mutates_args=[],
+    mutates_args=["hidden_states"],
     fake_impl=_moe_forward_fake,
     tags=(torch.Tag.needs_fixed_stride_order,),
 )
@@ -542,18 +539,17 @@ class MoERunner(MoERunnerInterface):
         router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
         input_ids: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor | None]:
+    ) -> tuple[torch.Tensor | None, torch.Tensor]:
         """Run expert routing and the fused MoE kernel via the quant method.
 
         Orchestrates shared expert execution (before/after), expert selection
         via the router, and the actual fused MoE computation. Returns
-        (shared_expert_output, fused_expert_output, zero_expert_output).
+        (shared_expert_output, fused_expert_output).
         """
         self._maybe_apply_shared_experts(
             shared_experts_input, SharedExpertsOrder.NO_OVERLAP
         )
 
-        zero_expert_output = None
         if self.routed_experts.quant_method.is_monolithic:
             # Monolithic kernels: pass router_logits to routed_experts
             fused_out = self.routed_experts.forward_monolithic(
@@ -583,13 +579,9 @@ class MoERunner(MoERunnerInterface):
             SharedExpertsOrder.MULTI_STREAM_OVERLAPPED,
         )
 
-        # Get zero_expert_output from router property (if it exists)
-        zero_expert_output = getattr(self.router, "zero_expert_output", None)
-
         return (
             self._shared_experts.output if self._shared_experts is not None else None,
             fused_out,
-            zero_expert_output,
         )
 
     def _sequence_parallel_context(self):
@@ -615,8 +607,25 @@ class MoERunner(MoERunnerInterface):
         # (Note: This code runs only when "overlapped mode" is on to allow
         #        parallel execution of shared experts with the FusedMoE via
         #        separate cuda stream)
-        if self._shared_experts is not None and shared_experts_input is not None:
+        if self._shared_experts is not None:
+            assert shared_experts_input is not None
             self._shared_experts.maybe_sync_shared_experts_stream(shared_experts_input)
+
+    def _maybe_add_zero_expert_output(
+        self,
+        result: torch.Tensor,
+    ) -> torch.Tensor:
+        """Add the zero expert's contribution to the final result.
+
+        When a ZeroExpertRouter is used, it computes a bias-like output
+        from the "zero expert" that is added to the combined routed+shared
+        expert output.
+        """
+        if isinstance(self.router, ZeroExpertRouter):
+            zero_expert_output = self.router.zero_expert_output
+            if zero_expert_output is not None:
+                result = result + zero_expert_output
+        return result
 
     def forward(
         self,
@@ -662,7 +671,7 @@ class MoERunner(MoERunnerInterface):
             )
         )
 
-        result_list = self._forward_entry(
+        result = self._forward_entry(
             hidden_states,
             router_logits,
             shared_experts_input,
@@ -672,8 +681,6 @@ class MoERunner(MoERunnerInterface):
             if self._quant_method.has_unpadded_output
             else 0,
         )
-        result = result_list[0]
-        zero_expert_output = result_list[1]
 
         #
         # Note: there are two all-reduce points below. They are mutually
@@ -708,11 +715,7 @@ class MoERunner(MoERunnerInterface):
 
         result = self._maybe_reduce_final_output(result, og_hidden_dim_post_xform)
 
-        # Add zero expert output only if present (from ZeroExpertRouter)
-        if zero_expert_output is not None:
-            result = result + zero_expert_output
-
-        return result
+        return self._maybe_add_zero_expert_output(result)
 
     @property
     def do_naive_dispatch_combine(self) -> bool:
@@ -781,7 +784,7 @@ class MoERunner(MoERunnerInterface):
         router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
         input_ids: torch.Tensor | None = None,
-    ) -> list[torch.Tensor]:
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Entry point called by the custom op to run the MoE computation.
 
         Handles pre-dispatch setup (gate application, external shared expert
@@ -792,7 +795,7 @@ class MoERunner(MoERunnerInterface):
         - fused MoE kernel execution
         - shared expert computation.
 
-        Returns a list of [combined_result, zero_expert_output].
+        Returns a single tensor of combined fused and shared output (if present).
         """
         # TODO(bnell): this can be removed after MK migration is complete.
         self.routed_experts._ensure_moe_quant_config_init()
@@ -819,27 +822,17 @@ class MoERunner(MoERunnerInterface):
                 router_logits,
             )
 
-            shared_output, hidden_states, zero_expert_output = self._apply_quant_method(
+            shared_output, hidden_states = self._apply_quant_method(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
                 shared_experts_input=shared_experts_input,
                 input_ids=input_ids,
             )
 
-            combined = self._maybe_combine(
+            return self._maybe_combine(
                 shared_output,
                 hidden_states,
             )
-            # If zero_expert_output is None, return zeros tensor
-            if zero_expert_output is None:
-                # Use hidden_states shape (not combined which might be tuple)
-                zero_expert_output = torch.zeros_like(hidden_states)
-            # Handle tuple case from _maybe_combine
-            if isinstance(combined, tuple):
-                combined = torch.stack(combined, dim=0)
-            # Clone outputs to prevent aliasing with input tensors
-            # (required for torch.compile compatibility)
-            return [combined.clone(), zero_expert_output.clone()]
 
     #########################################################
     #
