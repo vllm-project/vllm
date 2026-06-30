@@ -43,7 +43,20 @@ class Step3p5ReasoningParser(BaseThinkingReasoningParser):
         self._end_token_pending = False
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        return self._is_reasoning_end_from_ids(input_ids)
+        # Intentionally stateless: the non-streaming path receives the full
+        # accumulated token sequence, so it does not need (and must not mutate)
+        # the streaming-only _end_token_pending accumulator.  Walking the full
+        # sequence backwards is sufficient and avoids cross-contaminating the
+        # streaming state when both paths are used on the same parser instance.
+        for i in range(len(input_ids) - 1, -1, -1):
+            if input_ids[i] == self.start_token_id:
+                # Still inside a reasoning block.
+                return False
+            if input_ids[i] == self.end_token_id:
+                # Require at least one token after </think> to mirror the
+                # streaming "pending" semantics.
+                return i < len(input_ids) - 1
+        return False
 
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
