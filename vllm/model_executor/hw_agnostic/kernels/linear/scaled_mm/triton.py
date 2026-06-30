@@ -3,6 +3,7 @@
 
 import torch
 
+from vllm.model_executor.hw_agnostic._custom_op_lib import vllm_hw_agnostic_lib
 from vllm.model_executor.hw_agnostic.quantization.fp8_utils import (
     w8a8_triton_block_scaled_mm,
 )
@@ -26,7 +27,7 @@ class TritonFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         As: torch.Tensor,
         Bs: torch.Tensor,
     ) -> torch.Tensor:
-        return torch.ops.vllm.hw_agnostic_w8a8_triton_block_scaled_mm_func(
+        return torch.ops.vllm_hw_agnostic.w8a8_triton_block_scaled_mm_func(
             A,
             B,
             As,
@@ -36,7 +37,7 @@ class TritonFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         )
 
 
-def _hw_agnostic_w8a8_triton_block_scaled_mm_func(
+def _w8a8_triton_block_scaled_mm_func(
     qx: torch.Tensor,
     weight: torch.Tensor,
     x_scale: torch.Tensor,
@@ -49,7 +50,7 @@ def _hw_agnostic_w8a8_triton_block_scaled_mm_func(
     )
 
 
-def _hw_agnostic_w8a8_triton_block_scaled_mm_fake(
+def _w8a8_triton_block_scaled_mm_fake(
     qx: torch.Tensor,
     weight: torch.Tensor,
     x_scale: torch.Tensor,
@@ -63,7 +64,8 @@ def _hw_agnostic_w8a8_triton_block_scaled_mm_fake(
 
 
 direct_register_custom_op(
-    "hw_agnostic_w8a8_triton_block_scaled_mm_func",
-    _hw_agnostic_w8a8_triton_block_scaled_mm_func,
-    fake_impl=_hw_agnostic_w8a8_triton_block_scaled_mm_fake,
+    "w8a8_triton_block_scaled_mm_func",
+    _w8a8_triton_block_scaled_mm_func,
+    fake_impl=_w8a8_triton_block_scaled_mm_fake,
+    target_lib=vllm_hw_agnostic_lib,
 )

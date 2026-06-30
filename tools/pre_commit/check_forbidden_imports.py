@@ -146,8 +146,8 @@ CHECK_IMPORTS = {
         # ("is_out_of_tree" branches) and must not import from any
         # hw_agnostic tree. The agnostic counterpart lives under
         # vllm/models/deepseek_v4/hw_agnostic/attention/sparse_attn_indexer.py
-        # (registered as torch.ops.vllm.dsv4_sparse_attn_indexer) so no
-        # OOT branch is needed here.
+        # (registered as torch.ops.vllm_hw_agnostic.dsv4_sparse_attn_indexer)
+        # so no OOT branch is needed here.
         pattern=(
             r"(?:"
             r"current_platform\.is_out_of_tree\("

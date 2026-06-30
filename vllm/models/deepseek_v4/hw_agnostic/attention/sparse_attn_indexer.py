@@ -9,6 +9,7 @@ import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.hw_agnostic._custom_op_lib import vllm_hw_agnostic_lib
 from vllm.models.deepseek_v4.hw_agnostic.attention.indexer import (
     DeepseekV4IndexerMetadata,
 )
@@ -257,6 +258,7 @@ direct_register_custom_op(
     mutates_args=["topk_indices_buffer"],
     fake_impl=dsv4_sparse_attn_indexer_fake,
     dispatch_key=current_platform.dispatch_key,
+    target_lib=vllm_hw_agnostic_lib,
 )
 
 
@@ -296,7 +298,7 @@ class SparseAttnIndexer(nn.Module):
         # Per-token Q scale is folded into ``weights`` earlier in the
         # pipeline (``fused_indexer_q_rope_quant``); the kernel sees a
         # single quantized tensor.
-        return torch.ops.vllm.dsv4_sparse_attn_indexer(
+        return torch.ops.vllm_hw_agnostic.dsv4_sparse_attn_indexer(
             hidden_states,
             _encode_layer_name(self.k_cache.prefix),
             self.k_cache.kv_cache,

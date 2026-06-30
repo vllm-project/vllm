@@ -39,6 +39,7 @@ from vllm.model_executor.hw_agnostic.layers.fused_moe.router.fused_moe_router im
 from vllm.model_executor.hw_agnostic.layers.fused_moe.runner.moe_runner_interface import (  # noqa: E501
     MoERunnerInterface,
 )
+from vllm.model_executor.hw_agnostic._custom_op_lib import vllm_hw_agnostic_lib
 from vllm.model_executor.hw_agnostic.layers.fused_moe.runner.shared_experts import (  # noqa: E501
     SharedExperts,
     SharedExpertsOrder,
@@ -208,19 +209,17 @@ def _moe_forward_shared_fake(
     return shared_out, fused_out
 
 
-# Register the forward ops in a dedicated ``vllm_hw_agnostic`` namespace
-# so the op body's ``isinstance(layer, MoERunnerInterface)`` check resolves
-# against this MoERunnerInterface, not the hw-specific one. The ops are
-# opaque-body custom ops: torch.compile sees them as a single boundary,
+# Opaque-body custom ops: torch.compile sees them as a single boundary,
 # preserving the LoRA dual-stream and shared-experts overlap schedules.
-_VLLM_HW_AGNOSTIC_LIB = torch.library.Library("vllm_hw_agnostic", "FRAGMENT")  # noqa: TOR901
-
+# The shared ``vllm_hw_agnostic`` namespace also ensures the op body's
+# ``isinstance(layer, MoERunnerInterface)`` check resolves against this
+# class, not the hw-specific one.
 direct_register_custom_op(
     op_name="moe_forward",
     op_func=_moe_forward,
     mutates_args=["hidden_states"],
     fake_impl=_moe_forward_fake,
-    target_lib=_VLLM_HW_AGNOSTIC_LIB,
+    target_lib=vllm_hw_agnostic_lib,
     tags=(torch.Tag.needs_fixed_stride_order,),
 )
 
@@ -228,7 +227,7 @@ direct_register_custom_op(
     op_name="moe_forward_shared",
     op_func=_moe_forward_shared,
     fake_impl=_moe_forward_shared_fake,
-    target_lib=_VLLM_HW_AGNOSTIC_LIB,
+    target_lib=vllm_hw_agnostic_lib,
     tags=(torch.Tag.needs_fixed_stride_order,),
 )
 

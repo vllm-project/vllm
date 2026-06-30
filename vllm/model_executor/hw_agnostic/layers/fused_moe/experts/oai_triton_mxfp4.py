@@ -30,49 +30,18 @@ from vllm.model_executor.hw_agnostic.layers.fused_moe.utils import (
     _resize_cache,
     swiglu_limit_func,
 )
-from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_triton_kernels
 
 logger = init_logger(__name__)
 
 
-def _triton_kernel_moe_supports_current_device() -> bool:
-    """Device gate for the OAI Triton MXFP4 path."""
-    p = current_platform
-    if p.is_cuda():
-        cap = p.get_device_capability()
-        # CUDA SM 9.0 (Hopper) through 10.x (early Blackwell); SM 12.0+
-        # ranges are not validated for the triton_kernels MXFP4 path.
-        return cap is not None and (9, 0) <= (cap.major, cap.minor) < (11, 0)
-    if p.is_rocm():
-        from vllm.platforms.rocm import on_gfx1x, on_gfx9
-
-        return on_gfx9() or on_gfx1x()
-    return False
-
-
-# ---------------------------------------------------------------------------
-# Monkey-patches: make ``triton_kernels`` routing compile for non-power-of-2
-# top_k. The stock ``make_bitmatrix_metadata`` (v3.6+) and ``sort_tokens``
-# (legacy v3.5.1) helpers compile ``tl.arange(BLOCK_PER_TOK * top_k)`` which
-# requires the operand to be a power of two; replace them with copies that
-# round the ``tl.arange`` up to the next power of two and mask the tail.
-# ``triton_kernels`` is a process-wide module, so applying the patch here is
-# visible to every caller.
-# ---------------------------------------------------------------------------
-
-
 def _patch_make_bitmatrix_metadata() -> None:
-    """Patch ``make_bitmatrix_metadata`` so the SparseMatrix path supports
-    non-power-of-2 top_k.
+    """Monkey-patch make_bitmatrix_metadata to support non-power-of-2 top_k.
 
-    Imports go through the canonical ``triton_kernels`` package; that name
-    is set up by ``has_triton_kernels()`` to point at whichever copy of
-    ``triton_kernels`` the runtime resolved (system install or the bundled
-    fallback). Patching is funnelled through ``SparseMatrix.__post_init__``'s
-    ``__globals__`` so call sites pick up the replacement regardless of
-    which name they originally imported ``make_bitmatrix_metadata`` under.
+    triton's ``tl.arange`` requires a power-of-2 range. Patch is installed
+    via ``SparseMatrix.__post_init__.__globals__`` so callers pick it up
+    regardless of how they imported the original.
     """
     import triton as _triton
     import triton.language as _tl
@@ -194,13 +163,10 @@ def _patch_make_bitmatrix_metadata() -> None:
 
 
 def _patch_legacy_routing_for_nonpow2_topk() -> None:
-    """Patch the legacy (v3.5.1) ``triton_kernels`` routing for non-pow2
-    top_k.
+    """Monkey-patch legacy (v3.5.1) routing to support non-pow2 top_k.
 
-    Patches the ``sort_tokens`` function on ``triton_kernels.routing`` so
-    its non-power-of-2 top_k path compiles. ``routing_from_bitmatrix``
-    looks up ``sort_tokens`` on the module at call time, so installing
-    the replacement here is what every caller picks up.
+    Only needed on the legacy path; the v3.6+ SparseMatrix path is handled
+    by ``_patch_make_bitmatrix_metadata``.
     """
     import triton as _triton
     import triton.language as _tl
@@ -415,14 +381,9 @@ def _patch_legacy_routing_for_nonpow2_topk() -> None:
     _routing.sort_tokens = _sort_tokens_pow2
 
 
-# Two ``triton_kernels`` API generations are supported:
-#   - v3.5.1: routing goes through ``routing()`` / ``routing_from_bitmatrix()``
-#     and ``Bitmatrix`` is constructed with a ``scratchpad`` kwarg.
-#   - v3.6.0+: routing goes through ``SparseMatrix`` and ``Bitmatrix`` takes
-#     a ``dtype=BIT`` kwarg.
-#
-# ``use_legacy_triton_kernels`` is set at import time by probing for the
-# v3.6+ ``SparseMatrix`` symbol.
+# v3.5.1 uses ``routing()`` / ``Bitmatrix(scratchpad=...)``; v3.6.0+ uses
+# ``SparseMatrix`` / ``Bitmatrix(dtype=BIT)``. Detect at import time by
+# probing for the v3.6+ ``SparseMatrix`` symbol.
 use_legacy_triton_kernels = False
 
 if has_triton_kernels():
@@ -452,11 +413,6 @@ if has_triton_kernels():
             "version is compatible. Error: %s",
             e,
         )
-
-
-# ---------------------------------------------------------------------------
-# Helper Triton kernels + Python wrappers
-# ---------------------------------------------------------------------------
 
 
 @triton.jit
@@ -652,11 +608,6 @@ def remap_topk_to_local(
     return out
 
 
-# ---------------------------------------------------------------------------
-# Expert class
-# ---------------------------------------------------------------------------
-
-
 class OAITritonMxfp4Experts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
     """Modular MXFP4 expert built on ``triton_kernels.matmul_ogs``.
 
@@ -671,7 +622,7 @@ class OAITritonMxfp4Experts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return _triton_kernel_moe_supports_current_device() and has_triton_kernels()
+        return has_triton_kernels()
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -703,8 +654,7 @@ class OAITritonMxfp4Experts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         return E, M, N, K, topk
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
-        # Weight application and the topk reduce both happen inside this
-        # class's apply(); the finalize step has nothing left to do.
+        # Weights and the topk reduce are handled inside apply().
         return TopKWeightAndReduceNoOP()
 
     def workspace_shapes(
@@ -784,7 +734,6 @@ class OAITritonMxfp4Experts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 
         topk = topk_ids.size(1)
 
-        # uint8 weight storage means MXFP4 packing.
         assert hidden_states.dtype == torch.bfloat16
         assert (
             quant_config.w1_bias is None or quant_config.w1_bias.dtype == torch.float32
@@ -823,9 +772,8 @@ class OAITritonMxfp4Experts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             y=intermediate_cache1,
         )
 
-        # w13 LoRA: gather the activation input from expert-sorted
-        # intermediate_cache1, then add the LoRA delta in-place on that copy
-        # before passing it to activation.
+        # Gather into expert-sorted order so apply_w13_lora can add the LoRA
+        # delta in-place before activation.
         act_input = intermediate_cache1.view(-1, N)[gather_indx.dst_indx]
 
         sorted_token_ids_lora = None
@@ -858,10 +806,8 @@ class OAITritonMxfp4Experts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             act_input,
         )
 
-        # matmul_ogs grouped reduction fuses sum across multiple experts:
-        # y[dst_indx // n_expts_act, :] += x
-        # Set n_expts_act to 1 to unfuse the sum so we can do it manually via
-        # masked_moe_sum below.
+        # Unfuse matmul_ogs's grouped topk sum so masked_moe_sum below handles
+        # the reduction (skipping invalid slots).
         routing_data.n_expts_act = 1
 
         matmul_ogs(
@@ -875,9 +821,6 @@ class OAITritonMxfp4Experts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             y=intermediate_cache3,
         )
 
-        # w2 LoRA: after ``matmul_ogs`` with scatter_indx, intermediate_cache3
-        # is in token-topk order, matching the (M, topk, K) layout the
-        # ``add_lora_w2`` helper expects.
         if lora_context is not None:
             self.apply_w2_lora(
                 lora_context,
@@ -894,6 +837,5 @@ class OAITritonMxfp4Experts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 top_k_num=topk,
             )
 
-        # ``matmul_ogs`` leaves invalid (-1 / non-local EP) slots unwritten.
-        # Reduce over topk skipping those slots.
+        # matmul_ogs leaves -1 slots unwritten; masked sum skips them.
         masked_moe_sum(intermediate_cache3.view(-1, topk, K), topk_ids, output)
