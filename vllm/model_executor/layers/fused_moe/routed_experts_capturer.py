@@ -90,10 +90,20 @@ class RoutedExpertsCapturer:
     ) -> None:
         hf_config = vllm_config.model_config.hf_text_config
         num_experts_per_tok = _get_num_experts_per_tok(hf_config)
+        num_layers = hf_config.num_hidden_layers
+        logger.info(
+            "RoutedExpertsCapturer: allocating buffer with "
+            "max_tokens=%d, num_layers=%d, num_experts_per_tok=%d "
+            "(hf_config.model_type=%s)",
+            max_num_batched_tokens,
+            num_layers,
+            num_experts_per_tok,
+            getattr(hf_config, "model_type", "unknown"),
+        )
         self.device_buffer = torch.zeros(
             (
                 max_num_batched_tokens,
-                hf_config.num_hidden_layers,
+                num_layers,
                 num_experts_per_tok,
             ),
             # Use int32 for the device / host transit buffers: it
@@ -199,6 +209,15 @@ class RoutedExpertsCapturer:
         # was sized for (unusual, but guards against miss-config).
         if layer_id >= self.device_buffer.shape[1]:
             return
+
+        buf_top_k = self.device_buffer.shape[2]
+        ids_top_k = topk_ids.shape[1]
+        assert buf_top_k == ids_top_k, (
+            f"RoutedExpertsCapturer buffer top_k ({buf_top_k}) != "
+            f"topk_ids top_k ({ids_top_k}) at layer {layer_id}. "
+            f"The buffer was allocated from hf_config.num_experts_per_tok "
+            f"but the router produced a different top_k."
+        )
 
         self.device_buffer[:token_num_per_dp, layer_id, :] = topk_ids[
             start_loc:end_loc, :
