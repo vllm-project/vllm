@@ -194,7 +194,11 @@ from vllm.v1.spec_decode.step3p5 import Step3p5MTPProposer
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.spec_decode.utils import update_num_computed_tokens_for_batch_change
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
-from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
+from vllm.v1.utils import (
+    CpuGpuBuffer,
+    compute_iteration_details,
+    record_function_or_nullcontext,
+)
 from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.cp_utils import (
     check_attention_cp_compatibility,
@@ -4160,6 +4164,12 @@ class GPUModelRunner(
                     scheduler_output.num_common_prefix_blocks,
                 )
 
+            force_uniform_decode = None
+            if self.model_config.is_hybrid:
+                iteration_details = compute_iteration_details(scheduler_output)
+                if iteration_details.num_ctx_requests > 0:
+                    force_uniform_decode = False
+
             (
                 cudagraph_mode,
                 batch_desc,
@@ -4173,6 +4183,7 @@ class GPUModelRunner(
                 max_num_scheduled_tokens=max_num_scheduled_tokens,
                 use_cascade_attn=cascade_attn_prefix_lens is not None,
                 num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
+                force_uniform_decode=force_uniform_decode,
             )
 
             logger.debug(
