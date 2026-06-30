@@ -1,4 +1,6 @@
-use vllm_text::{SamplingParams, TextDecodeOptions, TextRequest};
+use thiserror_ext::AsReport as _;
+use vllm_text::tokenizer::Tokenizer;
+use vllm_text::{Prompt, SamplingParams, TextDecodeOptions, TextRequest};
 
 use super::types::CompletionRequest;
 use crate::error::ApiError;
@@ -29,8 +31,7 @@ pub(super) struct ResponseOptions {
     pub include_continuous_usage: bool,
     /// Whether the caller requested prompt-only echo via `max_tokens=0`.
     pub prompt_only: bool,
-    /// Original text prompt that should be echoed back northbound when
-    /// `echo=true`.
+    /// Prompt text that should be echoed back northbound when `echo=true`.
     pub echo: Option<String>,
     /// Whether the caller requested output logprobs on completion choices.
     pub requested_logprobs: Option<u32>,
@@ -51,6 +52,7 @@ pub(super) fn prepare_completion_request(
     request: CompletionRequest,
     lora_resolution: &LoraModelResolution,
     ctx: ResolvedRequestContext,
+    tokenizer: &dyn Tokenizer,
 ) -> Result<PreparedRequest, ApiError> {
     validate::validate_request_compat(&request, &lora_resolution.model_names)?;
 
@@ -92,7 +94,7 @@ pub(super) fn prepare_completion_request(
     } else {
         request.max_tokens
     };
-    let echo = request.echo.then(|| request.prompt.as_text().cloned()).flatten();
+    let echo = completion_echo_text(&request, tokenizer)?;
 
     let structured_outputs =
         convert_from_response_format_value(&request.response_format, &request.structured_outputs)?;
@@ -108,6 +110,7 @@ pub(super) fn prepare_completion_request(
             seed: request.seed,
             max_tokens,
             min_tokens: request.min_tokens,
+            thinking_token_budget: request.thinking_token_budget,
             logprobs,
             prompt_logprobs,
             min_p: request.min_p,
@@ -138,6 +141,7 @@ pub(super) fn prepare_completion_request(
         cache_salt: request.cache_salt,
         add_special_tokens: request.add_special_tokens,
         data_parallel_rank: ctx.data_parallel_rank,
+        reasoning_parser_kwargs: None,
         lora_request: lora_resolution.lora_request.clone(),
     };
 
@@ -158,11 +162,39 @@ pub(super) fn prepare_completion_request(
     })
 }
 
+fn completion_echo_text(
+    request: &CompletionRequest,
+    tokenizer: &dyn Tokenizer,
+) -> Result<Option<String>, ApiError> {
+    if !request.echo {
+        return Ok(None);
+    }
+
+    match &request.prompt {
+        Prompt::Text(prompt) => Ok(Some(prompt.clone())),
+        Prompt::TokenIds(token_ids) if request.return_token_ids.unwrap_or(false) => {
+            Ok(Some(String::new()))
+        }
+        Prompt::TokenIds(token_ids) => {
+            tokenizer.decode(token_ids, false).map(Some).map_err(|error| {
+                ApiError::invalid_request(
+                    format!(
+                        "Failed to decode token-ID prompt for echo: {}",
+                        error.to_report_string()
+                    ),
+                    Some("prompt"),
+                )
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use axum::http::HeaderMap;
     use serde_json::json;
     use vllm_text::Prompt;
+    use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::prepare_completion_request;
     use crate::lora::LoraModelResolution;
@@ -178,6 +210,10 @@ mod tests {
             model_names: names.iter().map(|s| s.to_string()).collect(),
             lora_request: None,
         }
+    }
+
+    fn test_tokenizer() -> TestTokenizer {
+        TestTokenizer::new()
     }
 
     fn base_request_json() -> serde_json::Value {
@@ -237,6 +273,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
+            &test_tokenizer(),
         )
         .expect("prepare");
 
@@ -267,6 +304,35 @@ mod tests {
     }
 
     #[test]
+    fn prepare_completion_request_passes_through_thinking_token_budget() {
+        let prepare = |budget: serde_json::Value| {
+            let request: CompletionRequest = serde_json::from_value(json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "prompt": "hello",
+                "thinking_token_budget": budget,
+            }))
+            .expect("parse request");
+            prepare_completion_request(
+                request,
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+                &test_tokenizer(),
+            )
+            .expect("prepare")
+            .text_request
+            .sampling_params
+            .thinking_token_budget
+        };
+
+        // The convert layer forwards the raw value verbatim (including the `-1`
+        // "unlimited" sentinel); normalization/validation happens during
+        // lowering (see `vllm_text::lower`).
+        assert_eq!(prepare(json!(64)), Some(64));
+        assert_eq!(prepare(json!(-1)), Some(-1));
+        assert_eq!(prepare(json!(null)), None);
+    }
+
+    #[test]
     fn prepare_completion_request_maps_stream_usage_and_token_format_options() {
         let request: CompletionRequest = serde_json::from_value(json!({
             "model": "Qwen/Qwen1.5-0.5B-Chat",
@@ -284,6 +350,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
+            &test_tokenizer(),
         )
         .expect("prepare");
 
@@ -308,6 +375,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
+            &test_tokenizer(),
         )
         .expect("prepare");
 
@@ -330,6 +398,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
+            &test_tokenizer(),
         )
         .expect("prepare");
 
@@ -353,6 +422,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
+            &test_tokenizer(),
         )
         .expect("prepare");
 
@@ -377,6 +447,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
+            &test_tokenizer(),
         )
         .expect("prepare");
 
@@ -403,6 +474,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
+            &test_tokenizer(),
         )
         .expect("prepare");
 
@@ -414,22 +486,27 @@ mod tests {
     }
 
     #[test]
-    fn prepare_completion_request_rejects_token_id_prompt_echo() {
+    fn prepare_completion_request_decodes_token_id_prompt_echo() {
         let request: CompletionRequest = serde_json::from_value(json!({
             "model": "Qwen/Qwen1.5-0.5B-Chat",
-            "prompt": [11, 22, 33],
+            "prompt": [104, 101, 108, 108, 111],
             "stream": true,
             "echo": true
         }))
         .expect("parse request");
 
-        assert!(
-            prepare_completion_request(
-                request,
-                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
-                ResolvedRequestContext::default(),
-            )
-            .is_err()
+        let prepared = prepare_completion_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+            &test_tokenizer(),
+        )
+        .expect("prepare");
+
+        assert_eq!(prepared.options.echo, Some("hello".to_string()));
+        assert_eq!(
+            prepared.text_request.prompt,
+            Prompt::TokenIds(vec![104, 101, 108, 108, 111])
         );
     }
 
@@ -448,6 +525,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
+            &test_tokenizer(),
         )
         .expect("prepare");
         assert_eq!(prepared.text_request.sampling_params.logprobs, Some(1));
@@ -472,6 +550,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             request_context(&headers, None),
+            &test_tokenizer(),
         )
         .expect("prepare");
         assert_eq!(prepared.text_request.data_parallel_rank, Some(3));
@@ -490,6 +569,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
+            &test_tokenizer(),
         )
         .expect("prepare");
         assert_eq!(prepared.text_request.data_parallel_rank, None);

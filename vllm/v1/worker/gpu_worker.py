@@ -4,6 +4,7 @@
 
 import gc
 import os
+import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import timedelta
@@ -50,12 +51,19 @@ from vllm.distributed.weight_transfer import (
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
+from vllm.multimodal.video import (
+    PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES,
+    PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES,
+    PYNVVIDEOCODEC_MAX_RETAINED_DECODERS,
+    PYNVVIDEOCODEC_VIDEO_BACKEND,
+)
 from vllm.platforms import current_platform
 from vllm.profiler.wrapper import CudaProfilerWrapper, TorchProfilerWrapper
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
 from vllm.utils.gc_utils import freeze_gc_heap, maybe_attach_gc_debug_callback
+from vllm.utils.gpu_sync_debug import enable_gpu_sync_check, with_gpu_sync_check
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import set_random_seed
@@ -163,7 +171,8 @@ class Worker(WorkerBase):
         self._pp_send_work: list[Handle] = []
 
     def sleep(self, level: int = 1) -> None:
-        free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
+        torch.accelerator.synchronize()
+        free_bytes_before_sleep = torch.accelerator.get_memory_info()[0]
 
         # Save the buffers before level 2 sleep
         if level == 2:
@@ -174,8 +183,16 @@ class Worker(WorkerBase):
 
         allocator = get_mem_allocator_instance()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
-        free_bytes_after_sleep, total = torch.cuda.mem_get_info()
-        freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
+
+        torch.accelerator.synchronize()
+        deadline = time.monotonic() + (5.0 if current_platform.is_rocm() else 0)
+        while True:
+            free_bytes_after_sleep, total = torch.accelerator.get_memory_info()
+            freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
+            if freed_bytes >= 0 or time.monotonic() >= deadline:
+                break
+            time.sleep(0.1)
+
         used_bytes = total - free_bytes_after_sleep
         assert freed_bytes >= 0, "Memory usage increased after sleeping."
         logger.info(
@@ -270,19 +287,47 @@ class Worker(WorkerBase):
 
                 # DP_LOCAL_RANK * TP_PP_WORLD_SIZE + TP_LOCAL_RANK
                 self.local_rank += dp_local_rank * tp_pp_world_size
+
+            # Publish the logical-to-physical mapping for topology queries
+            # such as NIC affinity and P2P checks.
+            assigned_physical_gpu_ids = parallel_config.assigned_physical_gpu_ids
+            if assigned_physical_gpu_ids is not None:
+                from vllm.platforms.interface import set_assigned_physical_gpu_ids
+
+                set_assigned_physical_gpu_ids(assigned_physical_gpu_ids)
+                assert self.local_rank < len(assigned_physical_gpu_ids), (
+                    f"local_rank {self.local_rank} is out of bounds for "
+                    f"assigned_physical_gpu_ids {assigned_physical_gpu_ids}"
+                )
+                # NOTE(patch pr45026): local_world_size is derived from
+                # parallel_config.nnodes, which is only set for the "mp"
+                # multi-node backend. With the "ray"/"external_launcher"
+                # backends nnodes stays 1, so local_world_size collapses to
+                # the full world_size and this check wrongly fires on
+                # cross-node deployments. assigned_physical_gpu_ids is already
+                # per-node and the local_rank bound above fully validates the
+                # mapping for these backends, so skip the check for them.
+                if parallel_config.distributed_executor_backend not in (
+                    "ray",
+                    "external_launcher",
+                ):
+                    assert self.parallel_config.local_world_size <= len(
+                        assigned_physical_gpu_ids
+                    ), (
+                        f"local_world_size ({self.parallel_config.local_world_size})"
+                        " exceeds assigned_physical_gpu_ids count "
+                        f"({len(assigned_physical_gpu_ids)})"
+                    )
+            else:
                 assert self.local_rank < torch.accelerator.device_count(), (
-                    f"DP adjusted local rank {self.local_rank} is out of bounds. "
-                )
-                visible_device_count = (
-                    torch.accelerator.device_count() if torch.cuda.is_available() else 0
-                )
-                assert self.parallel_config.local_world_size <= visible_device_count, (
-                    f"local_world_size ({self.parallel_config.local_world_size}) must "
-                    f"be less than or equal to the number of visible devices "
-                    f"({visible_device_count})."
+                    f"DP adjusted local rank {self.local_rank} is out of "
+                    f"bounds for {torch.accelerator.device_count()} devices."
                 )
 
-            self.device = torch.device(f"cuda:{self.local_rank}")
+            visible_device_index = (
+                current_platform.logical_device_id_to_visible_device_id(self.local_rank)
+            )
+            self.device = torch.device(f"cuda:{visible_device_index}")
             torch.accelerator.set_device_index(self.device)
 
             current_platform.check_if_supports_dtype(self.model_config.dtype)
@@ -399,7 +444,7 @@ class Worker(WorkerBase):
                 "correspondingly."
             )
             logger.info(msg)
-            return kv_cache_memory_bytes
+            return self._reserve_mm_ipc_gpu_memory(kv_cache_memory_bytes)
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
@@ -414,8 +459,8 @@ class Worker(WorkerBase):
             )
 
             # Profile CUDA graph memory if graphs will be captured.
-            # Skip on ROCm/HIP/XPU as graph pool handles and mem_get_info behave
-            # differently and can produce incorrect/negative estimates.
+            # Skip on ROCm/HIP/XPU as graph pool handles and get_memory_info
+            # behave differently and can produce incorrect/negative estimates.
             cudagraph_memory_estimate = 0
             if (
                 current_platform.is_cuda()
@@ -521,7 +566,81 @@ class Worker(WorkerBase):
                     suggested_util,
                 )
 
-        return int(self.available_kv_cache_memory_bytes)
+        return self._reserve_mm_ipc_gpu_memory(
+            int(self.available_kv_cache_memory_bytes)
+        )
+
+    @staticmethod
+    def _uses_pynvvideocodec_video_backend(mm_config) -> bool:
+        video_kwargs = mm_config.media_io_kwargs.get("video", {})
+        video_loader_backend = (
+            video_kwargs.get("video_backend") or envs.VLLM_VIDEO_LOADER_BACKEND
+        )
+        codec_backend = video_kwargs.get("backend")
+        return (
+            video_loader_backend == PYNVVIDEOCODEC_VIDEO_BACKEND
+            or codec_backend == PYNVVIDEOCODEC_VIDEO_BACKEND
+        )
+
+    def _reserve_mm_ipc_gpu_memory(self, available_kv_cache_memory_bytes: int) -> int:
+        """Carve frontend multimodal GPU memory out of the KV cache.
+
+        The frontend (API-server) process allocates GPU memory for hardware
+        multimodal decoding. Raw decoded frames are bounded by
+        ``mm_ipc_gpu_memory_gb`` and acquired by the frontend semaphore. Some
+        decoders also keep persistent surfaces around; reserve a fixed upper
+        bound for those when the corresponding backend is configured.
+        """
+        mm_config = self.model_config.multimodal_config
+        if mm_config is None:
+            return available_kv_cache_memory_bytes
+
+        raw_frame_reserved_bytes = int(mm_config.mm_ipc_gpu_memory_gb * GiB_bytes)
+        # Each api_server_count process runs its OWN decoder surfaces + NVDEC/CUVID
+        # CUDA context on the GPU, outside this (worker) memory pool. Reserve that
+        # per-server footprint x api_server_count so gpu_memory_utilization bounds
+        # TOTAL GPU usage across all API-server processes. Without the multiply,
+        # HW decode overshoots the budget by ~(api_server_count-1) x per-server and
+        # OOMs at high gmu, while SW decode (no per-server GPU allocation) does not.
+        num_api_servers = max(1, getattr(self.parallel_config, "_api_process_count", 1))
+        per_server_decoder_bytes = (
+            PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES
+            * PYNVVIDEOCODEC_MAX_RETAINED_DECODERS
+            + PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES
+        )
+        decoder_reserved_bytes = (
+            num_api_servers * per_server_decoder_bytes
+            if self._uses_pynvvideocodec_video_backend(mm_config)
+            else 0
+        )
+        reserved_bytes = raw_frame_reserved_bytes + decoder_reserved_bytes
+        if reserved_bytes <= 0:
+            return available_kv_cache_memory_bytes
+
+        remaining = available_kv_cache_memory_bytes - reserved_bytes
+        if remaining <= 0:
+            raise ValueError(
+                f"frontend multimodal GPU decoding reserves "
+                f"{format_gib(reserved_bytes)} GiB "
+                f"({format_gib(raw_frame_reserved_bytes)} GiB raw-frame budget, "
+                f"{format_gib(decoder_reserved_bytes)} GiB decoder cache budget), "
+                f"but only {format_gib(available_kv_cache_memory_bytes)} GiB is "
+                "available for the KV cache. Reduce mm_ipc_gpu_memory_gb, use a "
+                "different video backend, or increase gpu_memory_utilization."
+            )
+        logger.info_once(
+            "Reserving %s GiB of GPU memory for frontend multimodal decoding "
+            "(%s GiB raw-frame semaphore budget, %s GiB decoder+CUDA-context "
+            "across %d API server(s) @ %s GiB/server); "
+            "KV cache memory reduced to %s GiB.",
+            format_gib(reserved_bytes),
+            format_gib(raw_frame_reserved_bytes),
+            format_gib(decoder_reserved_bytes),
+            num_api_servers,
+            format_gib(per_server_decoder_bytes),
+            format_gib(remaining),
+        )
+        return remaining
 
     def get_kv_connector_handshake_metadata(
         self,
@@ -731,20 +850,33 @@ class Worker(WorkerBase):
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
 
+        # Eagerly trigger inductor's once-per-process lazy inits during
+        # warmup (rather than on a later compile cache-miss at runtime).
+        c_config = self.compilation_config
+        if c_config.mode != CompilationMode.NONE and c_config.backend == "inductor":
+            from vllm.compilation.compiler_interface import (
+                trigger_inductor_lazy_init,
+            )
+
+            trigger_inductor_lazy_init(self.device)
+
         # All warmup is done — start monitoring for unexpected JIT
         # compilations that would cause latency spikes during inference.
-        from vllm.triton_utils.jit_monitor import (
-            activate as activate_triton_jit_monitor,
-        )
+        from vllm.utils.jit_monitor import activate as activate_jit_monitor
 
-        activate_triton_jit_monitor(
-            verbose=self.observability_config.jit_monitor_verbose
+        activate_jit_monitor(
+            mode=self.observability_config.jit_monitor_mode,
+            verbose=self.observability_config.jit_monitor_verbose,
         )
 
         # Freeze the worker heap so the GC won't scan static objects
         # (model weights, KV caches, CUDA graphs) during inference.
         freeze_gc_heap()
         maybe_attach_gc_debug_callback()
+
+        # Warmup / first-compile is done — activate the `VLLM_GPU_SYNC_CHECK`
+        # gate so subsequent `execute_model` / `sample_tokens` calls enforce it.
+        enable_gpu_sync_check()
 
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
@@ -799,12 +931,14 @@ class Worker(WorkerBase):
         return self.profiler.annotate_context_manager(annotation)
 
     @torch.inference_mode()
+    @with_gpu_sync_check
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
         return self.model_runner.sample_tokens(grammar_output)
 
     @torch.inference_mode()
+    @with_gpu_sync_check
     def execute_model(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
@@ -1156,6 +1290,15 @@ class Worker(WorkerBase):
         # can be reclaimed when running in-process
         if model_runner := getattr(self, "model_runner", None):
             model_runner.shutdown()
+
+        # Release kept-alive cumem pools while the pluggable allocator wrappers
+        # and callbacks are still alive, so MemPool teardown is not deferred to
+        # interpreter finalization (pytorch/pytorch#145168).
+        if current_platform.is_cuda_alike():
+            from vllm.device_allocator.cumem import CuMemAllocator
+
+            if CuMemAllocator.instance is not None:
+                CuMemAllocator.instance.release_pools()
 
     def elastic_ep_execute(self, execute_method: str, *args, **kwargs):
         return self.elastic_ep_executor.execute(execute_method, *args, **kwargs)

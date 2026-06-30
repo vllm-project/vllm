@@ -11,7 +11,11 @@ from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_fp8_min_max,
+)
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
     fp8_fp4_mqa_logits,
     fp8_fp4_paged_mqa_logits,
@@ -35,6 +39,133 @@ RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 
 # MXFP4 layout: 2 values packed per byte, ue8m0 (1-byte) scale per block of 32.
 MXFP4_BLOCK_SIZE = 32
+
+
+@triton.jit
+def _fused_indexer_q_rope_quant_kernel(
+    positions,
+    q,
+    q_s0,
+    q_s1,
+    cos_sin_cache,
+    cos_sin_s0,
+    q_fp8,
+    q_fp8_s0,
+    q_fp8_s1,
+    weights,
+    weights_s0,
+    weights_s1,
+    weights_out,
+    weights_out_s0,
+    weights_out_s1,
+    softmax_scale,
+    head_scale,
+    fp8_min: tl.constexpr,
+    fp8_max: tl.constexpr,
+    is_neox: tl.constexpr,
+):
+    token = tl.program_id(0)
+    head = tl.program_id(1)
+    offs32 = tl.arange(0, 32)
+    offs64 = tl.arange(0, 64)
+
+    pos = tl.load(positions + token)
+    cos = tl.load(cos_sin_cache + pos * cos_sin_s0 + offs32).to(tl.float32)
+    sin = tl.load(cos_sin_cache + pos * cos_sin_s0 + 32 + offs32).to(tl.float32)
+    q_base = q + token * q_s0 + head * q_s1
+    out_base = q_fp8 + token * q_fp8_s0 + head * q_fp8_s1
+
+    if is_neox:
+        # NeoX layout, x0 = q[0:32], x1 = q[32:64]
+        x0 = tl.load(q_base + offs32).to(tl.float32)
+        x1 = tl.load(q_base + 32 + offs32).to(tl.float32)
+    else:
+        # interleaved layout
+        # x0 = q[0, 2, 4, ...], x1 = q[1, 3, 5, ...]
+        x0 = tl.load(q_base + offs32 * 2).to(tl.float32)
+        x1 = tl.load(q_base + offs32 * 2 + 1).to(tl.float32)
+    r0 = (x0 * cos - x1 * sin).to(tl.bfloat16).to(tl.float32)
+    r1 = (x1 * cos + x0 * sin).to(tl.bfloat16).to(tl.float32)
+    amax = tl.maximum(tl.max(tl.abs(r0)), tl.max(tl.abs(r1)))
+
+    q_nope = tl.load(q_base + 64 + offs64).to(tl.float32)
+    amax = tl.maximum(amax, tl.max(tl.abs(q_nope)))
+    scale_raw = tl.maximum(amax, 1e-10) * (1.0 / fp8_max)
+    # e8m0 format
+    q_scale = tl.math.exp2(tl.ceil(tl.log2(scale_raw)))
+
+    if is_neox:
+        tl.store(
+            out_base + offs32,
+            tl.clamp(r0 / q_scale, fp8_min, fp8_max).to(q_fp8.dtype.element_ty),
+        )
+        tl.store(
+            out_base + 32 + offs32,
+            tl.clamp(r1 / q_scale, fp8_min, fp8_max).to(q_fp8.dtype.element_ty),
+        )
+    else:
+        tl.store(
+            out_base + offs32 * 2,
+            tl.clamp(r0 / q_scale, fp8_min, fp8_max).to(q_fp8.dtype.element_ty),
+        )
+        tl.store(
+            out_base + offs32 * 2 + 1,
+            tl.clamp(r1 / q_scale, fp8_min, fp8_max).to(q_fp8.dtype.element_ty),
+        )
+    tl.store(
+        out_base + 64 + offs64,
+        tl.clamp(q_nope / q_scale, fp8_min, fp8_max).to(q_fp8.dtype.element_ty),
+    )
+
+    weight = tl.load(weights + token * weights_s0 + head * weights_s1).to(tl.float32)
+    tl.store(
+        weights_out + token * weights_out_s0 + head * weights_out_s1,
+        weight * q_scale * softmax_scale * head_scale,
+    )
+
+
+def fused_indexer_q_rope_quant(
+    positions: torch.Tensor,
+    q: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    weights: torch.Tensor,
+    softmax_scale: float,
+    head_scale: float,
+    is_neox: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    assert current_platform.is_cuda()
+    assert q.dtype == torch.bfloat16
+    assert q.shape[-1] == 128
+    assert cos_sin_cache.shape[-1] == 64
+    assert weights.shape == q.shape[:2]
+
+    q_fp8 = torch.empty_like(q, dtype=current_platform.fp8_dtype())
+    weights_out = torch.empty_like(weights, dtype=torch.float32)
+    fp8_min, fp8_max = get_fp8_min_max()
+    _fused_indexer_q_rope_quant_kernel[(q.shape[0], q.shape[1])](
+        positions,
+        q,
+        q.stride(0),
+        q.stride(1),
+        cos_sin_cache,
+        cos_sin_cache.stride(0),
+        q_fp8,
+        q_fp8.stride(0),
+        q_fp8.stride(1),
+        weights,
+        weights.stride(0),
+        weights.stride(1),
+        weights_out,
+        weights_out.stride(0),
+        weights_out.stride(1),
+        softmax_scale,
+        head_scale,
+        fp8_min=fp8_min,
+        fp8_max=fp8_max,
+        is_neox=is_neox,
+        num_warps=1,
+    )
+    return q_fp8, weights_out
 
 
 def _gather_workspace_shapes(
@@ -96,6 +227,7 @@ def sparse_attn_indexer(
     topk_indices_buffer: torch.Tensor,
     skip_k_cache_insert: bool,
     use_fp4_cache: bool = False,
+    skip_topk_buffer_clear: bool = False,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
@@ -172,7 +304,13 @@ def sparse_attn_indexer(
             scale_fmt,
         )
 
-    topk_indices_buffer[: hidden_states.shape[0]] = -1
+    # The buffer must be pre-filled with -1 (the "no token" sentinel) before the
+    # top-k kernels scatter valid indices into it. On the fused deepseek_v32
+    # nvidia path, _fused_norm_rope_kernel already cleared the same
+    # [:num_tokens, :topk] region earlier in this forward, so skip the redundant
+    # fill.
+    if not skip_topk_buffer_clear:
+        topk_indices_buffer[: hidden_states.shape[0]] = -1
     if has_prefill:
         prefill_metadata = attn_metadata_narrowed.prefill
         assert prefill_metadata is not None
@@ -334,7 +472,32 @@ def sparse_attn_indexer(
         num_rows = logits.shape[0]
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
-        if current_platform.is_cuda() and topk_tokens in (512, 1024, 2048):
+        use_cooperative_topk = (
+            current_platform.is_cuda()
+            and topk_tokens in (512, 1024, 2048)
+            and num_rows <= 32
+            and logits.stride(0) % 4 == 0  # TMA 16-byte alignment
+            and current_platform.has_device_capability(90)
+        )
+        use_persistent_topk = current_platform.is_cuda() and topk_tokens in (
+            512,
+            1024,
+            2048,
+        )
+        if use_cooperative_topk:
+            workspace_manager = current_workspace_manager()
+            (topk_workspace,) = workspace_manager.get_simultaneous(
+                ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
+            )
+            torch.ops._C.cooperative_topk(
+                logits,
+                seq_lens,
+                topk_indices,
+                topk_workspace,
+                topk_tokens,
+                attn_metadata_narrowed.max_seq_len,
+            )
+        elif use_persistent_topk:
             workspace_manager = current_workspace_manager()
             (topk_workspace,) = workspace_manager.get_simultaneous(
                 ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
@@ -390,6 +553,7 @@ def sparse_attn_indexer_fake(
     topk_indices_buffer: torch.Tensor | None,
     skip_k_cache_insert: bool,
     use_fp4_cache: bool = False,
+    skip_topk_buffer_clear: bool = False,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
