@@ -71,7 +71,10 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
           2. ``--attention-config '{"backend": "FLEX_ATTENTION"}'``
              → FlexAttention R-SWA via Triton block mask.
 
-          3. ``--attention-config '{"backend": "auto"}'`` (or omitted)
+          3. ``--attention-config '{"backend": "TRITON_ATTN"}'``
+             → Triton unified attention with an R-SWA decode mask.
+
+          4. ``--attention-config '{"backend": "auto"}'`` (or omitted)
              → Auto-detect: FA4 if available (H20/H100 SM90), else FlexAttention.
 
         Regardless of backend, prefix caching is disabled for this model: R-SWA
@@ -140,11 +143,16 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
                 ),
             )
 
+        elif attn_config.backend == AttentionBackendEnum.TRITON_ATTN:
+            logger.info(
+                "Unlimited-OCR: TritonAttention — R-SWA via unified attention mask."
+            )
+
         else:
             raise ValueError(
                 f"Unlimited-OCR: unsupported attention backend "
                 f"{attn_config.backend!r} for R-SWA. "
-                "Use FLASH_ATTN (FA4) or FLEX_ATTENTION."
+                "Use FLASH_ATTN (FA4), FLEX_ATTENTION, or TRITON_ATTN."
             )
 
         # R-SWA windows the *generated* tokens, so a decode-token's KV is not a
