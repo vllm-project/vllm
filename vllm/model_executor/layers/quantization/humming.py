@@ -30,6 +30,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
@@ -359,6 +360,7 @@ class HummingLayerQuantizationConfig(HummingConfig):
 
 class HummingLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: HummingLayerQuantizationConfig):
+        self._gemm_impl = dispatch_unquantized_gemm()
         self.quant_config = quant_config
         self.weight_schema = quant_config.weight_schema
         self.input_schema = quant_config.input_schema

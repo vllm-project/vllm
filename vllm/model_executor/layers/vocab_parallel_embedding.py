@@ -35,6 +35,9 @@ DEFAULT_VOCAB_PADDING_SIZE = 64
 class UnquantizedEmbeddingMethod(QuantizeMethodBase):
     """Unquantized method for embeddings."""
 
+    def __init__(self) -> None:
+        self._gemm_impl = dispatch_unquantized_gemm()
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -72,7 +75,7 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
     ) -> torch.Tensor:
         if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda_alike():
             return linear_batch_invariant(x, layer.weight, bias)
-        return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
+        return self._gemm_impl(layer, x, layer.weight, bias)
 
     def embedding(self, layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
         return F.embedding(input_, layer.weight)
