@@ -487,6 +487,62 @@ class TestAiterAsmValidation:
             assert any(reason.lower() in r.lower() for r in reasons)
 
 
+class TestAiterAsmIsAvailable:
+    """is_available gates on the aiter#3606 chunked-prefill final_lse fix.
+
+    The fix shipped the `max_kvlen` kwarg on get_ps_metadata_info_v1 alongside
+    the kernel-side LSE correction, so the kwarg's presence is the marker that a
+    fixed aiter is installed.
+    """
+
+    def _patch_aiter(self, monkeypatch, info_fn):
+        """Install a fake `aiter` module exposing the four required symbols."""
+        import sys
+
+        fake_aiter = MagicMock()
+        fake_aiter.get_ps_metadata_info_v1 = info_fn
+        monkeypatch.setitem(sys.modules, "aiter", fake_aiter)
+
+    def test_available_when_max_kvlen_present(self, aiter_asm_cls, monkeypatch):
+        def info_fn(
+            batch_size,
+            num_head_k,
+            max_qlen,
+            qlen_granularity=256,
+            max_kvlen=None,
+            kvlen_granularity=128,
+        ):
+            return None
+
+        self._patch_aiter(monkeypatch, info_fn)
+        with patch("vllm.platforms.rocm.on_gfx950", return_value=True):
+            assert aiter_asm_cls.is_available()
+
+    def test_unavailable_when_max_kvlen_absent(self, aiter_asm_cls, monkeypatch):
+        # Pre-fix aiter: no max_kvlen kwarg.
+        def info_fn(batch_size, num_head_k, max_qlen, qlen_granularity=256):
+            return None
+
+        self._patch_aiter(monkeypatch, info_fn)
+        with patch("vllm.platforms.rocm.on_gfx950", return_value=True):
+            assert not aiter_asm_cls.is_available()
+
+    def test_unavailable_when_not_gfx950(self, aiter_asm_cls, monkeypatch):
+        def info_fn(
+            batch_size,
+            num_head_k,
+            max_qlen,
+            qlen_granularity=256,
+            max_kvlen=None,
+            kvlen_granularity=128,
+        ):
+            return None
+
+        self._patch_aiter(monkeypatch, info_fn)
+        with patch("vllm.platforms.rocm.on_gfx950", return_value=False):
+            assert not aiter_asm_cls.is_available()
+
+
 class TestAiterAsmSelectorPriority:
     """On gfx950, AITER_ASM should win over FLASH_ATTN when FP8 KV is on."""
 

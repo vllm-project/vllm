@@ -67,6 +67,15 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
 
     @classmethod
     def is_available(cls) -> bool:
+        # Requires:
+        # 1. gfx950
+        # 2. AITER with MLA PS kernels
+        # 3. AITER with the aiter#3606 fix, which corrects the LSE bug required
+        #    for correct non-causal attn and adds the `max_kvlen` kwarg to
+        #    get_ps_metadata_info_v1. We use that kwarg as a proxy for whether
+        #    the fix is available.
+        import inspect
+
         try:
             from vllm.platforms.rocm import on_gfx950
         except Exception:  # noqa: BLE001
@@ -82,7 +91,12 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
             )
         except Exception:  # noqa: BLE001
             return False
-        return True
+
+        try:
+            params = inspect.signature(get_ps_metadata_info_v1).parameters
+        except (ValueError, TypeError):
+            return False
+        return "max_kvlen" in params
 
     @classmethod
     def validate_configuration(
