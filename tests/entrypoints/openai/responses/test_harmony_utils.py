@@ -159,7 +159,7 @@ class TestHarmonyToResponseOutput:
         assert output_items[0].arguments == content
         assert output_items[0].call_id.startswith("call_")
         assert output_items[0].id.startswith("fc_")
-        assert output_items[0].status == "incomplete" if incomplete else "completed"
+        assert output_items[0].status == ("incomplete" if incomplete else "completed")
 
     @pytest.mark.parametrize("channel", ["commentary", "comment", "analysis", "final"])
     @pytest.mark.parametrize(
