@@ -106,7 +106,7 @@ def test_memory_snapshot_uses_psutil_on_integrated_gpu():
 
 
 def test_memory_snapshot_uses_cuda_on_discrete_gpu():
-    """On discrete GPUs, free_memory should come from CUDA mem_get_info."""
+    """On discrete GPUs, free_memory should come from accelerator  get_memory_info."""
     mock_cuda_free = 70 * 1024**3
     mock_cuda_total = 80 * 1024**3
 
