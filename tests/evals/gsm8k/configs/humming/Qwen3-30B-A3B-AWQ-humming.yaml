@@ -1,4 +1,4 @@
-model_name: "QuantTrio/Qwen3.6-35B-A3B-AWQ"
+model_name: "QuixiAI/Qwen3-30B-A3B-AWQ"
 accuracy_threshold: 0.90
 num_questions: 1319
 num_fewshot: 5
@@ -7,3 +7,5 @@ server_args: >-
   --enforce-eager
   --max-model-len 8192
   --moe-backend humming
+  --linear-backend humming
+  --dtype bfloat16

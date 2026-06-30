@@ -7,5 +7,6 @@ server_args: >-
   --enforce-eager
   --max-model-len 8192
   --moe-backend humming
+  --linear-backend humming
 env:
   VLLM_HUMMING_INPUT_QUANT_CONFIG: '{"dtype":"float8e4m3"}'
