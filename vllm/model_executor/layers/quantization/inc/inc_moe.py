@@ -1,20 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Fused-MoE methods for AutoRound checkpoints.
-
-This module owns the AutoRound fused-MoE compute methods end to end:
-
-* :class:`INCXPUWNA16MoEMethod` -- W4A16 INT4-symmetric group MoE for the
-  ``auto_round:auto_gptq`` packing format, executed by the native Intel XPU
-  kernel. It subclasses :class:`MoeWNA16Method` to reuse the GPTQ-named weight
-  creation / loading and only swaps the compute backend to
-  :class:`XPUExpertsWNA16`.
-* :class:`INCMxfp4MoEMethod` -- W4A4 MXFP4 group MoE for the
-  ``auto_round:llm_compressor`` packing format. It selects the fused-MoE
-  backend by platform (CUTLASS / Marlin / XPU), mirroring the general dispatch
-  used elsewhere in vLLM so the AutoRound MXFP4 MoE is not restricted to a
-  single device.
-"""
 
 import torch
 
