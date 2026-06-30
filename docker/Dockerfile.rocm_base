@@ -25,10 +25,11 @@ ARG SCCACHE_S3_NO_CREDENTIALS=0
 
 FROM ${BASE_IMAGE} AS base
 
-ARG PYTORCH_ROCM_ARCH=gfx1250
+ARG PYTORCH_ROCM_ARCH=gfx942;gfx950;gfx1250
 ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
-ENV AITER_ROCM_ARCH=gfx1250
+ENV AITER_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
 ENV MORI_GPU_ARCHS=gfx942;gfx950
+ENV FA_GPU_ARCHS=gfx942;gfx950
 
 # TODO: Unset these when support is available for gfx1250
 ENV ENABLE_CK=0
@@ -175,17 +176,14 @@ RUN mkdir -p /app/install && cp ${SITE_PACKAGES}/_rocm_sdk_core/share/amd_smi/di
 FROM base AS build_mori
 ARG MORI_BRANCH
 ARG MORI_REPO
+ARG MORI_GPU_ARCHS
 RUN mkdir -p /app/install; \
-    if echo "${PYTORCH_ROCM_ARCH}" | grep -q "gfx1250"; then \
-    echo "gfx1250 in PYTORCH_ROCM_ARCH; skipping MORI build"; \
-    else \
     git clone ${MORI_REPO} \
     && cd mori \
     && git checkout ${MORI_BRANCH} \
     && git submodule update --init --recursive \
     && python3 setup.py bdist_wheel --dist-dir=dist && ls /app/mori/dist/*.whl \
-    && cp /app/mori/dist/*.whl /app/install; \
-    fi
+    && cp /app/mori/dist/*.whl /app/install;
 
 
 ###
@@ -196,9 +194,6 @@ ARG FA_BRANCH
 ARG FA_REPO
 ARG USE_SCCACHE
 RUN mkdir -p /app/install; \
-    if echo "${PYTORCH_ROCM_ARCH}" | grep -q "gfx1250"; then \
-    echo "gfx1250 in PYTORCH_ROCM_ARCH; skipping FlashAttention build"; \
-    else \
     git clone ${FA_REPO} \
     && cd flash-attention \
     && git checkout ${FA_BRANCH} \
@@ -207,10 +202,9 @@ RUN mkdir -p /app/install; \
     export HIP_CLANG_PATH=/opt/sccache-wrappers \
     && sccache --show-stats; \
     fi \
-    && GPU_ARCHS=$(echo ${PYTORCH_ROCM_ARCH} | sed -e 's/;gfx1[0-9]\{3\}//g') python3 setup.py bdist_wheel --dist-dir=dist \
+    && GPU_ARCHS=$(echo ${FA_GPU_ARCHS} | sed -e 's/;gfx1[0-9]\{3\}//g') python3 setup.py bdist_wheel --dist-dir=dist \
     && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
-    && cp dist/*.whl /app/install; \
-    fi
+    && cp dist/*.whl /app/install;
 
 
 ###
