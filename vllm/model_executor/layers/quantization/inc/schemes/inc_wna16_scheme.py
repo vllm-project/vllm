@@ -227,7 +227,7 @@ def _resolve_xpu_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
     """
     from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 
-    from ..inc_xpu_moe import INCXPUWNA16MoEMethod
+    from ..inc_moe import INCXPUWNA16MoEMethod
 
     moe_config = MoeWNA16Config.from_config(
         {

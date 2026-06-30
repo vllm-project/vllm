@@ -21,9 +21,9 @@ if TYPE_CHECKING:
 class INCMxfp4LinearMethod(INCLinearScheme):
     """MXFP4 (W4A4) linear method for AutoRound checkpoints.
 
-    Mirrors ``CompressedTensorsW4A4Mxfp4``: E2M1 weights packed two per byte
-    with per-group E8M0 scales (group_size=32, no global scale). The platform
-    kernel is selected by ``init_mxfp4_linear_kernel`` (XPU uses ``fp4_gemm``).
+    E2M1 weights packed two per byte with per-group E8M0 scales
+    (group_size=32, no global scale). The platform kernel is selected by
+    ``init_mxfp4_linear_kernel`` (XPU uses ``fp4_gemm``).
     """
 
     def __init__(self, layer_config: "INCLayerConfig") -> None:
