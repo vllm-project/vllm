@@ -40,6 +40,7 @@ from vllm.v1.kv_offload.base import (
     PrepareStoreOutput,
     ReqContext,
     RequestOffloadingContext,
+    ScheduleEndContext,
 )
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
@@ -615,7 +616,7 @@ class TieringOffloadingManager(OffloadingManager):
         del self._req_state[req_id]
 
     @override
-    def on_schedule_end(self) -> None:
+    def on_schedule_end(self, context: ScheduleEndContext) -> None:
         """End-of-schedule hook: process finished jobs, flush deferred
         promotions, and reset the per-step gate.
 
@@ -626,7 +627,7 @@ class TieringOffloadingManager(OffloadingManager):
         self._processed_jobs_this_step = False
         self._flush_pending_promotions()
         for tier in self.secondary_tiers:
-            tier.on_schedule_end()
+            tier.on_schedule_end(context)
 
     @override
     def has_pending_work(self) -> bool:

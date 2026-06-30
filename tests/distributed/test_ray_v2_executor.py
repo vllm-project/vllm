@@ -17,6 +17,7 @@ import ray
 from vllm import LLM
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
+from vllm.v1.executor import ray_executor_v2
 from vllm.v1.executor.ray_executor_v2 import RayExecutorV2
 
 pytestmark = pytest.mark.usefixtures("enable_ray_v2_backend")
@@ -93,6 +94,43 @@ def assert_executor(executor, tp_size, pp_size):
 
     for handle in executor.ray_worker_handles:
         assert handle.node_id is not None
+
+
+def test_select_tcpstore_port_seeds_disjoint_windows(monkeypatch):
+    """Co-located DP engines scan distinct, adjacent port windows, so two
+    engines on a node cannot pick the same TCPStore port."""
+    requested = []
+
+    def fake_get_open_port(start_port, max_attempts):
+        requested.append((start_port, max_attempts))
+        return start_port
+
+    monkeypatch.setattr(ray_executor_v2, "_get_open_port", fake_get_open_port)
+
+    ports = [
+        RayExecutorV2._select_tcpstore_port(rank, master_port=29500)
+        for rank in range(4)
+    ]
+
+    assert requested == [(29600, 32), (29632, 32), (29664, 32), (29696, 32)]
+    assert len(set(ports)) == 4
+
+
+def test_select_tcpstore_port_non_dp_uses_random(monkeypatch):
+    """A non-DP engine has no local rank and uses a random port."""
+    monkeypatch.setattr(ray_executor_v2, "get_open_port", lambda: 54321)
+    assert RayExecutorV2._select_tcpstore_port(None, master_port=29500) == 54321
+
+
+def test_select_tcpstore_port_full_window_uses_random(monkeypatch):
+    """A fully occupied window falls back to a random port."""
+
+    def raise_full(start_port, max_attempts):
+        raise RuntimeError("no open port")
+
+    monkeypatch.setattr(ray_executor_v2, "_get_open_port", raise_full)
+    monkeypatch.setattr(ray_executor_v2, "get_open_port", lambda: 54321)
+    assert RayExecutorV2._select_tcpstore_port(0, master_port=29500) == 54321
 
 
 @pytest.mark.parametrize("tp_size, pp_size", [(1, 1), (2, 1), (4, 1), (2, 2)])
