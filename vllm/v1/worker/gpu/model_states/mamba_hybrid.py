@@ -141,7 +141,7 @@ class MambaHybridModelState(DefaultModelState):
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
             model_specific_attn_metadata=mamba_attn_metadata,
             for_cudagraph_capture=for_capture,
-            rswa_prefix_lens=input_batch.rswa_prefix_lens,
+            rswa_prefix_lens=input_batch.prompt_lens,
         )
 
     def postprocess_state(

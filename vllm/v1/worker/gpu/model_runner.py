@@ -223,13 +223,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_tokens=self.max_num_tokens,
             device=self.device,
         )
-        # R-SWA: persistent GPU buffer for per-request prefix lengths (CUDA-graph safe).
-        self.rswa_prefix_lens_buffer: torch.Tensor | None = None
-        if self.model_config.rswa_window is not None:
-            self.rswa_prefix_lens_buffer = torch.zeros(
-                self.max_num_reqs, dtype=torch.int32, device=self.device
-            )
-
         if self.use_pp:
             self.pp_handler = PPHandler(
                 max_num_reqs=self.max_num_reqs,
@@ -992,14 +985,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # max_seq_len is only consumed by the PP `compute_need_sampled_mask`
             max_seq_len_np = self.req_states.max_seq_len[idx_mapping_np]
 
-        rswa_prefix_lens = None
-        if self.rswa_prefix_lens_buffer is not None:
-            rswa_prefix_lens = self.rswa_prefix_lens_buffer[:num_reqs_padded]
-            rswa_prefix_lens[:num_reqs] = self.req_states.prompt_len.gpu[
-                idx_mapping[:num_reqs]
-            ]
-            if num_reqs_padded > num_reqs:
-                rswa_prefix_lens[num_reqs:].zero_()
+        prompt_lens = None
+        if self.model_config.rswa_window is not None:
+            # prompt_lens is only used in R-SWA case.
+            prompt_lens = self.req_states.prompt_len.gpu[idx_mapping]
 
         return InputBatch(
             req_ids=req_ids,
@@ -1031,7 +1020,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
             has_structured_output_reqs=scheduler_output.has_structured_output_requests,
-            rswa_prefix_lens=rswa_prefix_lens,
+            prompt_lens=prompt_lens,
         )
 
     def prepare_attn(
