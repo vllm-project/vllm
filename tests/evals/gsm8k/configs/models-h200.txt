@@ -4,3 +4,7 @@ DeepSeek-V3.2-TP.yaml
 DeepSeek-V3.2-DP.yaml
 Nemotron-3-Super-120B-A12B-BF16.yaml
 Nemotron-3-Super-120B-A12B-FP8.yaml
+DeepSeek-R1-0528-NVFP4.yaml
+DeepSeek-V3.2-NVFP4.yaml
+Kimi-K2-Thinking-NVFP4.yaml
+Kimi-K2-Thinking-INT4.yaml

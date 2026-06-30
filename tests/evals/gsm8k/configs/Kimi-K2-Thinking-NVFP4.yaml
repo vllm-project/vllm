@@ -1,0 +1,10 @@
+model_name: "nvidia/Kimi-K2-Thinking-NVFP4"
+accuracy_threshold: 0.92
+num_questions: 1319
+num_fewshot: 5
+startup_max_wait_seconds: 1800
+server_args: >-
+  --enforce-eager
+  --max-model-len 4096
+  --tensor-parallel-size 8
+  --enable-expert-parallel
