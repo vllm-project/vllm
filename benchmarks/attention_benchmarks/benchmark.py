@@ -1091,6 +1091,7 @@ def main():
             ("masked_mha", False, "masked"),
             ("mqa", True, "auto"),
         ]
+        formatter = ResultsFormatter(console)
         total = 0
         for spec in args.batch_specs:
             q_len = max(request.q_len for request in parse_batch_spec(spec))
@@ -1151,6 +1152,9 @@ def main():
                         # run_mla_benchmark needs the real backend name
                         from mla_runner import run_mla_benchmark as run_mla
 
+                        run_label = f"{backend}_{variant_label} {spec}"
+                        pbar.set_postfix_str(run_label)
+
                         try:
                             result = run_mla(
                                 backend,
@@ -1169,6 +1173,10 @@ def main():
                             )
 
                         all_results.append(result)
+                        if args.output_csv:
+                            formatter.save_csv(all_results, args.output_csv)
+                        if args.output_json:
+                            formatter.save_json(all_results, args.output_json)
 
                         if not result.success:
                             console.print(
@@ -1180,7 +1188,6 @@ def main():
 
         # Display results with variant labels as separate "backends"
         console.print("\n[bold green]MHA vs MQA Results:[/]")
-        formatter = ResultsFormatter(console)
         variant_backends = [f"{b}_{v}" for b in backends for v, _, _ in variants]
         formatter.print_table(all_results, variant_backends)
 
