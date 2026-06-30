@@ -7,11 +7,11 @@ declare -A MODEL_PATHS=(
   [DeepSeek-R1-0528-MXFP4]="/data/amd/DeepSeek-R1-0528-MXFP4"
 )
 declare -A MODEL_SERVE_ARGS=(
-  [gpt-oss-120b-mxfp4]="--tensor-parallel-size 1 --gpu_memory_utilization 0.9 --attention-backend ROCM_AITER_UNIFIED_ATTN --compilation-config {\"mode\":\"None\",\"cudagraph_mode\":\"FULL\",\"cudagraph_capture_sizes\":[1]}"
+  [gpt-oss-120b-mxfp4]="--tensor-parallel-size 1 --gpu_memory_utilization 0.7 --attention-backend TRITON_ATTN"
   [DeepSeek-R1-0528-MXFP4]="--tensor-parallel-size 1 --gpu_memory_utilization 0.9 --dtype auto --no-enable-prefix-caching --disable-uvicorn-access-log --trust-remote-code"
 )
 declare -A MODEL_ENV=(
-  [gpt-oss-120b-mxfp4]="HSA_ENABLE_SDMA=0 USE_SVM=0 HSA_XNACK=0 VLLM_ROCM_AITER_FUSED_MOE_TRITON_GEMM_A4W4=1 VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1 VLLM_ROCM_USE_SKINNY_GEMM=0 VLLM_ROCM_USE_AITER_RMSNORM=0"
+  [gpt-oss-120b-mxfp4]="HSA_ENABLE_SDMA=0 USE_SVM=0 HSA_XNACK=0 VLLM_ROCM_AITER_FUSED_MOE_TRITON_GEMM_A4W4=1 VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=0 VLLM_ROCM_USE_SKINNY_GEMM=0 VLLM_ROCM_USE_AITER_RMSNORM=0"
   [DeepSeek-R1-0528-MXFP4]="HSA_ENABLE_SDMA=0 USE_SVM=0 HSA_XNACK=0 VLLM_ROCM_AITER_FUSED_MOE_TRITON_GEMM_A4W4=1 VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1 VLLM_ROCM_USE_SKINNY_GEMM=0 VLLM_ROCM_USE_AITER_RMSNORM=0"
 )
 
@@ -69,8 +69,7 @@ trap 'exit 130' INT TERM
 
 # --- start server ---
 env $MODEL_ENV_ARGS \
-vllm serve --model "$MODEL" --host localhost --port "$PORT" $SERVE_ARGS \
-  > "$LOG_DIR/server.log" 2>&1 &
+vllm serve --model "$MODEL" --host localhost --port "$PORT" $SERVE_ARGS &
 server_pid=$!
 echo "Waiting for server (pid $server_pid)..."
 

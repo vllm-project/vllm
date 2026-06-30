@@ -10,7 +10,7 @@ ARG APEX_VERSION=1.11.0+rocm7.14.0a20260623
 
 ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
-ARG AITER_BRANCH="jpvillam/gfx1250_0604"
+ARG AITER_BRANCH="main"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 ARG MORI_BRANCH="v1.1.0"
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
@@ -46,7 +46,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Install Python and other dependencies
 RUN apt-get update -y \
-    && apt-get install -y software-properties-common git curl sudo vim less libgfortran5 libopenmpi-dev libpci-dev liblzma-dev pkg-config \
+    && apt-get install -y software-properties-common git curl sudo vim less libgfortran5 libopenmpi-dev libpci-dev liblzma-dev pkg-config g++\
     && for i in 1 2 3; do \
     add-apt-repository -y ppa:deadsnakes/ppa && break || \
     { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
@@ -96,31 +96,6 @@ ARG TORCHVISION_VERSION
 ARG TORCHAUDIO_VERSION
 ARG ROCM_SDK_VERSION
 ARG APEX_VERSION
-# torch/torchvision/torchaudio must be pinned to mutually-consistent builds
-# (same +rocm... suffix) or the C++ ops break at import (ABI skew). The rocm
-# sdk version is derived from torch's own dependency pin unless overridden,
-# which keeps the set consistent and avoids pip backtracking.
-RUN pip install --pre --index-url "${ROCM_WHEEL_INDEX}" \
-    "torch==${TORCH_VERSION}" \
-    "torchvision==${TORCHVISION_VERSION}" \
-    "torchaudio==${TORCHAUDIO_VERSION}" \
-    "apex==${APEX_VERSION}" \
-    "rocm[libraries,devel]==${ROCM_SDK_VERSION}" && \
-    rocm-sdk init
-
-### Install triton from upstream for AITER Deps TODO: (JPVILLAM) If possible to get this on whls it would be better
-RUN pip3 uninstall triton && \
-    git clone https://github.com/triton-lang/triton.git && \
-    cd triton && \
-    git checkout c517f38c && \
-    TRITON_APPEND_CMAKE_ARGS="-DCMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH=FALSE" pip3 install .
-
- 
-# Torch runtime deps that may not be published on the ROCm wheel index;
-# install them from PyPI afterwards.
-RUN pip install filelock "typing-extensions>=4.10.0" "sympy>=1.13.3" \
-    "networkx>=2.5.1" jinja2 "fsspec>=0.8.5"
-
 ENV SITE_PACKAGES=${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages
 ENV ROCM_PATH=${SITE_PACKAGES}/_rocm_sdk_devel
 ENV ROCM_HOME=${ROCM_PATH}
@@ -132,6 +107,25 @@ ENV PATH=${ROCM_PATH}/bin:${ROCM_PATH}/llvm/bin:$PATH
 ENV LD_LIBRARY_PATH=${ROCM_PATH}/lib:${SITE_PACKAGES}/_rocm_sdk_core/lib
 ENV CMAKE_PREFIX_PATH=${ROCM_PATH}/lib/cmake:${SITE_PACKAGES}/torch/share/cmake
 ENV PYTHONPATH=${SITE_PACKAGES}/_rocm_sdk_core/share/amd_smi
+
+# torch/torchvision/torchaudio must be pinned to mutually-consistent builds
+# (same +rocm... suffix) or the C++ ops break at import (ABI skew). The rocm
+# sdk version is derived from torch's own dependency pin unless overridden,
+# which keeps the set consistent and avoids pip backtracking.
+RUN pip install --pre --index-url "${ROCM_WHEEL_INDEX}" \
+    --extra-index-url https://pypi.org/simple \
+    "torch[device-all]==${TORCH_VERSION}" \
+    "torchvision==${TORCHVISION_VERSION}" \
+    "torchaudio==${TORCHAUDIO_VERSION}" \
+    "rocm[libraries,devel,device-all]==${ROCM_SDK_VERSION}" && \
+    rocm-sdk init
+ 
+# Torch runtime deps that may not be published on the ROCm wheel index;
+# install them from PyPI afterwards.
+RUN pip install filelock "typing-extensions>=4.10.0" "sympy>=1.13.3" \
+    "networkx>=2.5.1" jinja2 "fsspec>=0.8.5"
+
+
 
 # Expose the rocm-sdk wheel as a conventional /opt/rocm install so downstream
 # builds (Dockerfile.rocm: vLLM csrc, RIXL/UCX, ROCShmem/DeepEP) keep working.
