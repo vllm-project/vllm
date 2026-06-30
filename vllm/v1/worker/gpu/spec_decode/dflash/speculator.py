@@ -29,6 +29,8 @@ logger = init_logger(__name__)
 
 
 class DFlashSpeculator(DraftModelSpeculator):
+    _speculator_name = "DFlash"  # For logging, so we can share methods with subclasses
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
 
@@ -48,13 +50,15 @@ class DFlashSpeculator(DraftModelSpeculator):
 
         self.dflash_causal = get_dflash_causal(self.draft_model_config)
 
-        # Buffers for context K/V precomputation. Populated by prepare_dflash_inputs,
-        # and processed by the model's precompute_and_store_context_kv method.
-        # NOT captured by CUDA graphs.
+        # Whether the anchor query position is itself a prediction. DFlash default uses
+        # the anchor as the bonus token (only mask tokens predict); DSpark samples from
+        # the anchor and the N-1 mask token positions. See _prepare_dflash_inputs_kernel
+        self.sample_from_anchor = False
+
+        # Context positions for the K/V precompute. Populated by
+        # prepare_dflash_inputs, and processed by the model's
+        # precompute_and_store_context_kv method. NOT captured by CUDA graphs.
         self.context_positions = torch.zeros(
-            self.max_num_tokens, dtype=torch.int64, device=device
-        )
-        self.context_slot_mapping = torch.zeros(
             self.max_num_tokens, dtype=torch.int64, device=device
         )
 
@@ -94,7 +98,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         )
 
     def capture(self, attn_states: dict | None = None) -> None:
-        logger.info("Capturing model for DFlash speculator...")
+        logger.info("Capturing model for %s speculator...", self._speculator_name)
         # Reset sampling indices to zero to prevent stale values from prior
         # dummy runs from being baked into the captured graph.
         self.sample_indices.zero_()
@@ -108,7 +112,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.attn_groups,
             self.kv_cache_config,
             self.max_model_len,
-            progress_bar_desc="Capturing dflash CUDA graphs",
+            progress_bar_desc=f"Capturing {self._speculator_name.lower()} CUDA graphs",
         )
 
     def load_draft_model(
@@ -126,17 +130,38 @@ class DFlashSpeculator(DraftModelSpeculator):
     ) -> None:
         super().set_attn(model_state, kv_cache_config, block_tables)
 
-        # DFlash precomputes context K/V with a single block_size; mixing
-        # kv-cache groups would silently corrupt the cache for the non-matching group.
-        draft_groups = [gid for gid, g in enumerate(self.attn_groups) if g]
-        assert len(draft_groups) == 1, (
-            "DFlash currently requires all draft attention layers to share "
-            "a single kv-cache group."
-        )
-        self.draft_kv_cache_group_id = draft_groups[0]
+        self.draft_kv_cache_group_ids = [
+            gid for gid, g in enumerate(self.attn_groups) if g
+        ]
+        assert self.draft_kv_cache_group_ids, "No draft attention groups found."
+        self.draft_kv_cache_group_id = self.draft_kv_cache_group_ids[0]
         self.draft_block_size = self.block_tables.block_sizes[
             self.draft_kv_cache_group_id
         ]
+
+        # Per-group context slot buffers for the precompute (one row per group).
+        self._context_slot_mappings = torch.zeros(
+            len(self.draft_kv_cache_group_ids),
+            self.max_num_tokens,
+            dtype=torch.int64,
+            device=self.device,
+        )
+
+        # Map each draft decoder layer to the index (within draft_kv_cache_group_ids)
+        # of the kv-cache group its cache belongs to. Models that share a single group
+        # leave this as None and share one context slot mapping.
+        self._layer_group_idx: list[int] | None = None
+        if hasattr(self.model, "get_draft_kv_cache_layer_names"):
+            name_to_gid = {
+                ln: gid
+                for gid, group in enumerate(kv_cache_config.kv_cache_groups)
+                for ln in group.layer_names
+            }
+            gid_to_idx = {gid: i for i, gid in enumerate(self.draft_kv_cache_group_ids)}
+            self._layer_group_idx = [
+                gid_to_idx[name_to_gid[name]]
+                for name in self.model.get_draft_kv_cache_layer_names()
+            ]
 
     @torch.inference_mode()
     def _run_model(
@@ -183,9 +208,11 @@ class DFlashSpeculator(DraftModelSpeculator):
 
         num_sample = num_reqs * self.num_speculative_steps
         sample_hidden_states = last_hidden_states[self.sample_indices[:num_sample]]
+        # sample_pos is the predicted token's position Q; verification keys
+        # Gumbel by the predecessor (Q-1). sample_draft adds +1, so pass Q-2.
         draft_tokens = self.sample_draft(
             sample_hidden_states,
-            self.sample_pos[:num_sample],
+            self.sample_pos[:num_sample] - 2,
             self.sample_idx_mapping[:num_sample],
             self.temperature,
             self.seeds,
@@ -294,41 +321,49 @@ class DFlashSpeculator(DraftModelSpeculator):
         # The query slot mapping is written into the shared BlockTables slot_mappings.
         # That buffer's address is what the captured CUDA graph reads from at replay.
         assert self.draft_kv_cache_group_id >= 0
-        query_slot_mapping = self.block_tables.slot_mappings[
-            self.draft_kv_cache_group_id
-        ]
-        prepare_dflash_inputs(
-            self.input_buffers,
-            query_slot_mapping,
-            self.context_positions,
-            self.context_slot_mapping,
-            self.sample_indices,
-            self.sample_pos,
-            self.sample_idx_mapping,
-            input_batch,
-            num_sampled,
-            num_rejected,
-            last_sampled,
-            next_prefill_tokens,
-            self.block_tables.input_block_tables[self.draft_kv_cache_group_id],
-            self.draft_block_size,
-            self.parallel_drafting_token_id,
-            self.num_query_per_req,
-            self.num_speculative_steps,
-            self.max_num_reqs,
-            self.max_num_tokens,
-            self.max_model_len,
-        )
+        # Support multiple draft KV cache groups by preparing inputs once for each
+        for i, gid in enumerate(self.draft_kv_cache_group_ids):
+            prepare_dflash_inputs(
+                self.input_buffers,
+                self.block_tables.slot_mappings[gid],
+                self.context_positions,
+                self._context_slot_mappings[i],
+                self.sample_indices,
+                self.sample_pos,
+                self.sample_idx_mapping,
+                input_batch,
+                num_sampled,
+                num_rejected,
+                last_sampled,
+                next_prefill_tokens,
+                self.block_tables.input_block_tables[gid],
+                self.block_tables.block_sizes[gid],
+                self.parallel_drafting_token_id,
+                self.num_query_per_req,
+                self.num_speculative_steps,
+                self.max_num_reqs,
+                self.max_num_tokens,
+                self.max_model_len,
+                self.sample_from_anchor,
+            )
 
         # Pre-insert context K/V into the cache. Runs eagerly outside the captured graph
         # because the context shape varies per step. During dummy runs the block tables
         # are placeholders, so we skip the cache write to avoid clobbering real entries.
+        # Each layer uses the context slots of its own kv-cache group.
+        if dummy_run:
+            context_slots: torch.Tensor | list[torch.Tensor | None] | None = None
+        elif self._layer_group_idx is not None:
+            context_slots = [
+                self._context_slot_mappings[gidx][:num_target_tokens]
+                for gidx in self._layer_group_idx
+            ]
+        else:
+            context_slots = self._context_slot_mappings[0][:num_target_tokens]
         self.model.precompute_and_store_context_kv(
             self.hidden_states[:num_target_tokens],
             self.context_positions[:num_target_tokens],
-            context_slot_mapping=(
-                None if dummy_run else self.context_slot_mapping[:num_target_tokens]
-            ),
+            context_slots,
         )
 
         # Every DFlash step has exactly num_query_per_req tokens, so we can use FULL CGs
@@ -410,6 +445,7 @@ def _prepare_dflash_inputs_kernel(
     max_num_reqs,
     max_num_tokens,
     max_model_len,
+    SAMPLE_FROM_ANCHOR: tl.constexpr,
     PAD_SLOT_ID: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -474,11 +510,17 @@ def _prepare_dflash_inputs_kernel(
     tl.store(out_query_positions_ptr + query_idx, clamped_query_pos, mask=is_query)
     tl.store(out_query_slot_mapping_ptr + query_idx, q_slot, mask=is_query)
 
-    # --- Sample indices / positions / idx_mapping (mask tokens only) ---
-    is_sample = is_query & (query_off > 0)
-    sample_idx = req_idx * num_speculative_steps + (query_off - 1)
+    # --- Sample indices / positions / idx_mapping ---
+    # When SAMPLE_FROM_ANCHOR (DSpark), so we sample at EVERY query position
+    # and each position k predicts the NEXT token (sampled position = query_pos + 1).
+    # Otherwise (DFlash default) the anchor is the bonus token and only the mask tokens
+    # at offsets > 0 are sampled from, each AT its own position.
+    sample_off = 0 if SAMPLE_FROM_ANCHOR else 1
+    is_sample = is_query & (query_off >= sample_off)
+    sample_idx = req_idx * num_speculative_steps + (query_off - sample_off)
+    sample_pos = query_pos + 1 if SAMPLE_FROM_ANCHOR else query_pos
     tl.store(out_sample_indices_ptr + sample_idx, query_idx, mask=is_sample)
-    tl.store(out_sample_pos_ptr + sample_idx, query_pos, mask=is_sample)
+    tl.store(out_sample_pos_ptr + sample_idx, sample_pos, mask=is_sample)
     tl.store(out_sample_idx_mapping_ptr + sample_idx, req_state_idx, mask=is_sample)
 
     if block_idx == 0:
@@ -546,6 +588,7 @@ def prepare_dflash_inputs(
     max_num_reqs: int,
     max_num_tokens: int,
     max_model_len: int,
+    sample_from_anchor: bool = False,
 ) -> None:
     num_reqs = input_batch.num_reqs
     assert num_reqs > 0
@@ -582,6 +625,7 @@ def prepare_dflash_inputs(
         max_num_reqs,
         max_num_tokens,
         max_model_len,
+        SAMPLE_FROM_ANCHOR=sample_from_anchor,
         PAD_SLOT_ID=PAD_SLOT_ID,
         BLOCK_SIZE=BLOCK_SIZE,
     )
