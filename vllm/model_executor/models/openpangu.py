@@ -448,6 +448,14 @@ class StaticSinkMultiHeadLatentAttentionWrapper(PluggableLayer):
             StaticSinkMLAAttention,
         )
 
+        attn_backend = None
+        if self.is_sparse:
+            from vllm.v1.attention.backends.mla.flashmla_sparse import (
+                FlashMLASparseBackend,
+            )
+
+            attn_backend = FlashMLASparseBackend
+
         self.mla_attn = StaticSinkMLAAttention(
             num_heads=self.num_heads,
             scale=scale,
@@ -461,6 +469,7 @@ class StaticSinkMultiHeadLatentAttentionWrapper(PluggableLayer):
             prefix=f"{prefix}.attn",
             kv_b_proj=self.kv_b_proj,
             use_sparse=self.is_sparse,
+            attn_backend=attn_backend,
             indexer=self.indexer,
             sink_len=sink_len,
             sliding_window=sliding_window,
