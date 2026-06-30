@@ -142,6 +142,7 @@ class TestHarmonyToResponseOutput:
         )
         assert output_items[0].call_id.startswith("call_")
         assert output_items[0].id.startswith("fc_")
+        assert output_items[0].status == "completed"
 
     def test_commentary_with_python_recipient_creates_reasoning(self):
         """Test that commentary with recipient='python' creates reasoning items."""

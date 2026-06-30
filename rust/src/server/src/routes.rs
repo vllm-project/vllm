@@ -12,16 +12,20 @@ mod server_info;
 mod sleep;
 mod tokenize;
 mod version;
+mod world_size;
 
 use std::sync::Arc;
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::middleware::{from_fn, from_fn_with_state};
 use axum::routing::{get, post};
 use tower_http::trace::TraceLayer;
 
 use crate::middleware;
 use crate::state::AppState;
+
+const DEFAULT_JSON_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 
 fn server_dev_mode_enabled() -> bool {
     std::env::var("VLLM_SERVER_DEV_MODE")
@@ -100,12 +104,15 @@ fn build_router_with_options(
             .route("/resume", post(pause::resume))
             .route("/is_paused", get(pause::is_paused))
             .route("/server_info", get(server_info::server_info))
+            .route("/get_world_size", get(world_size::get_world_size))
     }
 
     let enable_request_id_headers = state.api_server_options.enable_request_id_headers;
     let enable_api_key_auth = state.has_api_keys();
     let mut router = router
         .with_state(state.clone())
+        .layer(DefaultBodyLimit::max(DEFAULT_JSON_BODY_LIMIT_BYTES))
+        .layer(middleware::request_runtime_layer(state.clone()))
         .layer(from_fn_with_state(
             state.clone(),
             middleware::track_server_load,
