@@ -55,7 +55,7 @@ class XPUPlatform(Platform):
         from vllm.v1.attention.backends.utils import set_kv_cache_layout
 
         set_kv_cache_layout("NHD")
-        logger.info(
+        logger.info_once(
             "Setting VLLM_KV_CACHE_LAYOUT to 'NHD' for XPU; "
             "only NHD layout is supported by XPU attention kernels."
         )
@@ -91,7 +91,7 @@ class XPUPlatform(Platform):
                 f"with use_mla: {attn_selector_config.use_mla}"
             )
 
-        logger.info("Using Flash Attention backend.")
+        logger.info_once("Using Flash Attention backend.")
         return AttentionBackendEnum.FLASH_ATTN.get_path()
 
     @classmethod
@@ -193,13 +193,13 @@ class XPUPlatform(Platform):
 
         if not supports_xpu_graph():
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            logger.warning(
+            logger.warning_once(
                 "XPU Graph is not supported in the current PyTorch version, "
                 "disabling cudagraph_mode."
             )
         elif not envs.VLLM_XPU_ENABLE_XPU_GRAPH:
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            logger.warning(
+            logger.warning_once(
                 "XPU Graph is disabled by environment variable, "
                 "please set VLLM_XPU_ENABLE_XPU_GRAPH=1 to enable it."
             )
@@ -218,7 +218,7 @@ class XPUPlatform(Platform):
         if compilation_config.mode != CompilationMode.NONE:
             for flag, feature_name in fusion_passes_to_disable.items():
                 if getattr(pass_config, flag):
-                    logger.warning(
+                    logger.warning_once(
                         "Feature %r is not yet supported on XPU and will be disabled.",
                         feature_name,
                     )
@@ -242,6 +242,16 @@ class XPUPlatform(Platform):
         # spawn is the only supported multiprocessing method on XPU
         if "VLLM_WORKER_MULTIPROC_METHOD" not in os.environ:
             os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
+        # XPU requires graceful shutdown to allow oneCCL/Level Zero resources
+        # to be properly released. Without this, subsequent server startups on
+        # the same devices may hang during CCL initialization.
+        if vllm_config.shutdown_timeout == 0:
+            vllm_config.shutdown_timeout = 5
+            logger.info(
+                "XPU platform: set server shutdown_timeout=%d.",
+                vllm_config.shutdown_timeout,
+            )
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
