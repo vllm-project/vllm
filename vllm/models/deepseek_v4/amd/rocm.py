@@ -6,7 +6,6 @@ from typing import cast
 
 import torch
 
-import vllm.envs as envs
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
@@ -35,8 +34,6 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_sparse_attn_prefill,
 )
 from vllm.v1.worker.workspace import current_workspace_manager
-
-_USE_AITER_PRESHUFFLE = envs.VLLM_DSV4_AITER_PRESHUFFLE
 
 
 def _build_indptr_from_lengths(lengths: torch.Tensor) -> torch.Tensor:
@@ -601,16 +598,20 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         return num_heads
 
     def prepare_attn_preshuffle(self) -> None:
-        if not _USE_AITER_PRESHUFFLE:
-            return
         from vllm._aiter_ops import rocm_aiter_ops
+
+        if not rocm_aiter_ops.is_enabled():
+            return
         from vllm.model_executor.layers.quantization.utils.fp8_utils import (
             _upcast_e8m0_to_fp32,
         )
 
         def _prep(linear) -> tuple[torch.Tensor, torch.Tensor] | None:
             w = getattr(linear, "weight", None)
-            if w is None or w.dim() != 2 or w.shape[-1] % 128 != 0:
+            if w is None or w.dim() != 2:
+                return None
+            # K % 128 (group-128 quant) and N % 16 (shuffle_weight) must hold.
+            if w.shape[-1] % 128 != 0 or w.shape[0] % 16 != 0:
                 return None
             ws = getattr(linear, "weight_scale_inv", None)  # per-block scale
             if ws is None:

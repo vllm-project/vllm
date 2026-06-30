@@ -132,7 +132,6 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
     VLLM_ROCM_USE_AITER_FP4BMM: bool = True
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
-    VLLM_DSV4_AITER_PRESHUFFLE: bool = True
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
@@ -1146,10 +1145,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_ROCM_USE_AITER": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in ("true", "1")
-    ),
-    # DSv4: B-preshuffle the fp8 projections -- attn q/kv/o + MLP gate_up (ROCm).
-    "VLLM_DSV4_AITER_PRESHUFFLE": lambda: (
-        os.getenv("VLLM_DSV4_AITER_PRESHUFFLE", "True").lower() in ("true", "1")
     ),
     # Whether to use aiter paged attention.
     # By default is disabled.

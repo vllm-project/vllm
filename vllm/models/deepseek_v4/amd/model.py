@@ -8,7 +8,6 @@ import regex as re
 import torch
 import torch.nn as nn
 
-import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.distributed import (
@@ -56,8 +55,6 @@ from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLAAttention
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-_USE_AITER_PRESHUFFLE = envs.VLLM_DSV4_AITER_PRESHUFFLE
-
 
 class DeepseekV4MLP(nn.Module):
     def __init__(
@@ -104,11 +101,7 @@ class DeepseekV4MLP(nn.Module):
             self.act_fn = SiluAndMul()
 
         # gate_up_proj B-preshuffle (ColumnParallel -> no all-reduce); set at load.
-        self._gateup = (
-            _USE_AITER_PRESHUFFLE
-            and current_platform.is_rocm()
-            and rocm_aiter_ops.is_enabled()
-        )
+        self._gateup = rocm_aiter_ops.is_enabled()
         self._gateup_pre: tuple[torch.Tensor, torch.Tensor] | None = None
 
     def prepare_gateup_preshuffle(self) -> None:
@@ -117,7 +110,10 @@ class DeepseekV4MLP(nn.Module):
             return
         w = getattr(self.gate_up_proj, "weight", None)
         ws = getattr(self.gate_up_proj, "weight_scale_inv", None)  # per-block scale
-        if w is None or ws is None or w.dim() != 2 or w.shape[-1] % 128 != 0:
+        if w is None or ws is None or w.dim() != 2:
+            return
+        # K % 128 (group-128 quant) and N % 16 (shuffle_weight) must hold.
+        if w.shape[-1] % 128 != 0 or w.shape[0] % 16 != 0:
             return
         if ws.dtype == torch.float8_e8m0fnu:
             from vllm.model_executor.layers.quantization.utils.fp8_utils import (
