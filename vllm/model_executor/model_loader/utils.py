@@ -125,6 +125,21 @@ def process_weights_after_loading(
             with device_loading_context(module, target_device):
                 module.process_weights_after_loading(model_config.dtype)
 
+    # Build the fused GatedDeltaNet in_proj weight after all weights are
+    # loaded (and before the profiling forward / CUDA-graph capture). Scoped by an
+    # isinstance check so it is a no-op for every other model. Lazy import avoids a
+    # circular dependency (the mamba gdn module imports from model_executor.layers).
+    from vllm.model_executor.layers.mamba.gdn.base import (
+        GatedDeltaNetAttention,
+    )
+
+    for _, module in model.named_modules():
+        if isinstance(module, GatedDeltaNetAttention) and hasattr(
+            module, "fuse_weights_after_loading"
+        ):
+            with device_loading_context(module, target_device):
+                module.fuse_weights_after_loading()
+
     # Needed for torchao model reloading via model.reload_weights
     # @kylesayrs @jerryzh168 this can be removed if callers move to `reload_weights`
     if model_config.quantization == "torchao":

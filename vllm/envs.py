@@ -114,6 +114,9 @@ if TYPE_CHECKING:
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE: bool = True
+    VLLM_GDN_FUSE_IN_PROJ: bool = False
+    VLLM_FUSE_EXPERT_GATE: bool = False
+    VLLM_GDN_DIRECT_SCAN_OUTPUT: bool = False
     VLLM_DISABLE_PYNCCL: bool = False
     VLLM_USE_OINK_OPS: bool = False
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
@@ -1114,6 +1117,38 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE": lambda: bool(
         int(os.getenv("VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE", "1"))
+    ),
+    # Horizontally fuse the GatedDeltaNet in_proj_qkvz (N=20480) and
+    # in_proj_ba (N=128) projections into a single cuBLAS F.linear on a
+    # concatenated [20608, K] weight (built once post-load), then slice the
+    # output back into qkvz/ba. Eliminates the underfilled N=128 ba GEMM and
+    # its split-K reduction. Default off; set 1 to enable.
+    "VLLM_GDN_FUSE_IN_PROJ": lambda: bool(
+        int(os.getenv("VLLM_GDN_FUSE_IN_PROJ", "0"))
+    ),
+    # Fuse the Qwen MoE shared-expert gate chain
+    # (gemv2N N=1 + ATen sigmoid + ATen broadcast-mul) inside the opaque
+    # vllm::moe_forward_shared op. Decode/small-M (M <=
+    # VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD): one Triton kernel does
+    # per-row dot+sigmoid+in-place scale (3 kernels -> 1). Prefill/large-M:
+    # keep the library GEMV, fuse sigmoid+broadcast-mul (2 kernels -> 1,
+    # vectorized). Lossless (fp32 accum, bf16 in/out). Default off; set 1 to
+    # enable.
+    "VLLM_FUSE_EXPERT_GATE": lambda: bool(
+        int(os.getenv("VLLM_FUSE_EXPERT_GATE", "0"))
+    ),
+    # Eliminate the per-GDN-layer scan-output bridge D2D copy in
+    # Qwen3.5 prefill. In the no-spec prefill branch, thread the pre-allocated
+    # core_attn_out buffer (sliced to num_actual_tokens) into the FLA chunk
+    # gated-delta-rule scan so chunk_fwd_o direct-writes the scan output into
+    # the caller buffer (chunk_o.py:166), then skip the now-redundant
+    # core_attn_out[:n] = out.squeeze(0) self-copy. Removes a 268MB/layer
+    # cudaMemcpyAsync on the serial prefill stream. Lossless (same kernel, same
+    # math, different destination buffer). Gated to spec_sequence_masks is None
+    # and num_prefills > 0; spec/merged branches keep their copies. Default off;
+    # set 1 to enable.
+    "VLLM_GDN_DIRECT_SCAN_OUTPUT": lambda: bool(
+        int(os.getenv("VLLM_GDN_DIRECT_SCAN_OUTPUT", "0"))
     ),
     # Disable pynccl (using torch.distributed instead)
     "VLLM_DISABLE_PYNCCL": lambda: (
