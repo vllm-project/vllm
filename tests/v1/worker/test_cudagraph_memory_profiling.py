@@ -254,9 +254,34 @@ def test_separate_profile_accounts_persistent_and_graph_pool(monkeypatch):
                         num_tokens=128,
                         uniform=False,
                         num_active_loras=0,
-                    )
+                    ),
+                    SimpleNamespace(
+                        num_tokens=64,
+                        uniform=False,
+                        num_active_loras=0,
+                    ),
+                    SimpleNamespace(
+                        num_tokens=32,
+                        uniform=False,
+                        num_active_loras=0,
+                    ),
                 ],
-            )
+            ),
+            (
+                CUDAGraphMode.FULL,
+                [
+                    SimpleNamespace(
+                        num_tokens=80,
+                        uniform=False,
+                        num_active_loras=0,
+                    ),
+                    SimpleNamespace(
+                        num_tokens=40,
+                        uniform=False,
+                        num_active_loras=0,
+                    ),
+                ],
+            ),
         ],
         cudagraph_keys={},
         keys_initialized=True,
@@ -266,20 +291,35 @@ def test_separate_profile_accounts_persistent_and_graph_pool(monkeypatch):
     capture_calls = []
     cleanup_calls = []
 
+    runner.max_model_len = 4096
+    runner.max_num_tokens = 128
     runner._init_minimal_kv_cache_for_profiling = lambda: None
     runner._requires_separate_cudagraph_memory_profiling = lambda: True
     runner._create_encoder_cudagraph_manager = lambda: None
     runner._freeze_gc = null_context
     runner._cleanup_profiling_kv_cache = lambda: cleanup_calls.append("cleanup")
     runner.maybe_remove_all_loras = lambda lora_config: None
-    runner._reserve_attention_workspace_for_cudagraph_capture = lambda: 0
+    runner._reserve_attention_workspace_for_cudagraph_capture = lambda: 200
     runner._warmup_before_cudagraph_capture = lambda *args, **kwargs: (
-        warmup_calls.append(kwargs)
+        warmup_calls.append((args[0], kwargs))
     )
-    runner._warmup_and_capture = lambda *args, **kwargs: capture_calls.append(kwargs)
+    runner._warmup_and_capture = lambda *args, **kwargs: (
+        capture_calls.append((args[0], kwargs))
+    )
 
     memory_reserved_values = iter([1_000, 1_600])
-    mem_get_info_values = iter([(5_000, 0), (4_300, 0)])
+    mem_get_info_values = iter(
+        [
+            (10_000_000, 0),
+            (8_000_000, 0),
+            (8_000_000, 0),
+            (6_500_000, 0),
+            (6_500_000, 0),
+            (4_100_000, 0),
+            (4_100_000, 0),
+            (3_000_000, 0),
+        ]
+    )
 
     monkeypatch.setattr(gpu_model_runner, "CUDAGraphWrapper", FakeWrapper)
     monkeypatch.setattr(gpu_model_runner, "BreakableCUDAGraphWrapper", FakeWrapper)
@@ -316,10 +356,12 @@ def test_separate_profile_accounts_persistent_and_graph_pool(monkeypatch):
 
     estimate = runner.profile_cudagraph_memory()
 
-    assert estimate == 1_300
-    assert runner.cudagraph_memory_persistent_estimate == 600
-    assert runner.cudagraph_memory_graph_pool_estimate == 700
-    assert len(warmup_calls) == 1
-    assert len(capture_calls) == 1
-    assert capture_calls[0]["num_warmups"] == 0
+    assert estimate == 6_500_800
+    assert runner.cudagraph_memory_persistent_estimate == 800
+    assert runner.cudagraph_memory_graph_pool_estimate == 6_500_000
+    assert [call[0].num_tokens for call in warmup_calls] == [128, 64, 80, 40]
+    assert [call[0].num_tokens for call in capture_calls] == [128, 64, 80, 40]
+    assert all(call[1]["num_warmups"] == 0 for call in capture_calls)
+    assert warmup_calls[2][1]["profile_seq_lens"] == 1
+    assert warmup_calls[3][1]["profile_seq_lens"] is None
     assert cleanup_calls == ["cleanup"]

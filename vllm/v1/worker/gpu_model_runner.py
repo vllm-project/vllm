@@ -6537,7 +6537,6 @@ class GPUModelRunner(
         shared_memory_estimate = {}
         per_graph_estimate = {}
         persistent_memory_estimate = 0
-        decoder_memory_estimate = 0
         encoder_memory_estimate = 0
 
         # Cleanup-only guard: CUDA graph capture errors should still propagate
@@ -6554,7 +6553,8 @@ class GPUModelRunner(
                 if use_separate_profiling:
                     reserved_before = torch.accelerator.memory_reserved(self.device)
                     for mode, descs in capture_descs:
-                        for i, desc in enumerate(descs):
+                        profile_descs = descs[:2]
+                        for i, desc in enumerate(profile_descs):
                             self._warmup_before_cudagraph_capture(
                                 desc,
                                 cudagraph_runtime_mode=mode,
@@ -6568,13 +6568,16 @@ class GPUModelRunner(
                     torch.accelerator.synchronize()
                     torch.accelerator.empty_cache()
                     reserved_after = torch.accelerator.memory_reserved(self.device)
-                    persistent_memory_estimate = max(
+                    persistent_memory_estimate += max(
                         reserved_after - reserved_before, 0
                     )
 
-                    mem_before = torch.cuda.mem_get_info()[0]
                     for mode, descs in capture_descs:
-                        for i, desc in enumerate(descs):
+                        profile_descs = descs[:2]
+                        separate_mem_samples: list[int] = []
+
+                        for i, desc in enumerate(profile_descs):
+                            mem_before = torch.cuda.mem_get_info()[0]
                             self._warmup_and_capture(
                                 desc,
                                 cudagraph_runtime_mode=mode,
@@ -6586,15 +6589,32 @@ class GPUModelRunner(
                                 num_warmups=0,
                             )
                             torch.accelerator.synchronize()
-                    free_after = torch.cuda.mem_get_info()[0]
-                    decoder_memory_estimate = max(mem_before - free_after, 0)
+                            free_after = torch.cuda.mem_get_info()[0]
+                            separate_mem_samples.append(mem_before - free_after)
 
-                    logger.debug(
-                        "Estimated decoder CUDA graph memory with separate "
-                        "profiling: %.2f MiB persistent + %.2f MiB graph pool",
-                        persistent_memory_estimate / (1 << 20),
-                        decoder_memory_estimate / (1 << 20),
-                    )
+                        first_capture = separate_mem_samples[0]
+                        # Use at least 1 MiB per graph for driver overhead
+                        per_graph = max(
+                            (
+                                separate_mem_samples[1]
+                                if len(separate_mem_samples) > 1
+                                else 0
+                            ),
+                            1 << 20,
+                        )
+
+                        shared_memory_estimate[mode] = first_capture
+                        per_graph_estimate[mode] = per_graph * (len(descs) - 1)
+
+                        logger.debug(
+                            "Estimated %s CUDA graph memory with separate "
+                            "profiling: %.2f MiB first-capture + "
+                            "(%d-1) × %.2f MiB per-graph",
+                            mode.name,
+                            first_capture / (1 << 20),
+                            len(descs),
+                            per_graph / (1 << 20),
+                        )
                 else:
                     for mode, descs in capture_descs:
                         profile_descs = descs[:2]
@@ -6667,12 +6687,9 @@ class GPUModelRunner(
         # FULL and PIECEWISE graphs share the global pool at runtime and are
         # never replayed concurrently, so the pool overlays their memory.
         # Take the max to avoid double-counting the overlap.
-        if use_separate_profiling:
-            decoder_estimate = decoder_memory_estimate
-        else:
-            decoder_estimate = max(shared_memory_estimate.values(), default=0) + sum(
-                per_graph_estimate.values()
-            )
+        decoder_estimate = max(shared_memory_estimate.values(), default=0) + sum(
+            per_graph_estimate.values()
+        )
         # Encoder graphs use a manager-local pool at runtime, separate from the
         # decoder pool, so add their estimate instead of overlaying it.
         graph_pool_estimate = decoder_estimate + encoder_memory_estimate
