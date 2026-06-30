@@ -311,6 +311,17 @@ class CudaCommunicator(DeviceCommunicatorBase):
             torch.distributed.all_reduce(out, group=self.device_group)
         return out
 
+    def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
+        # Route uniform dim-0 all-gathers through NVLS symmetric memory when
+        # enabled (mirrors reduce_scatter); otherwise fall back to the
+        # base-class ring all-gather. Sequence parallelism's gather-before-GEMM
+        # uses dim=0 with tp-aligned (uniform) shards.
+        if dim < 0:
+            dim += input_.dim()
+        if dim == 0 and should_nccl_symm_mem_ag_rs():
+            return self._all_gather_symm_mem(input_.contiguous())
+        return super().all_gather(input_, dim)
+
     def reduce_scatter(self, input_: torch.Tensor, dim: int = -1):
         world_size = self.world_size
         pynccl_comm = self.pynccl_comm
@@ -379,6 +390,41 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # Reshape before returning
         return output.movedim(0, dim).contiguous()
 
+    def _get_symm_scratch(
+        self,
+        role: str,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Persistent, pre-registered NCCL symmetric-memory scratch buffer.
+
+        Allocating a fresh symm tensor per collective pays the
+        ``nccl_symm_mem_context`` snapshot + window-registration scan on every
+        call (~0.5 ms/RS+AG pair, dwarfing the NVLS transfer itself). Instead we
+        allocate once per ``(role, shape, dtype)``, register once, and reuse.
+
+        Safe for serial (eager) sequence parallelism: each collective's result
+        is consumed on the same stream before the next same-role collective
+        reuses the buffer. Distinct roles (e.g. ``rs_in`` vs ``ag_out``, both
+        full-size) get distinct buffers so a reduce-scatter input copy never
+        clobbers a still-live all-gather output.
+        """
+        from vllm.distributed.device_communicators.pynccl_allocator import (
+            nccl_symm_mem_context,
+        )
+
+        pynccl_comm = self.pynccl_comm
+        assert pynccl_comm is not None
+        cache = self.__dict__.setdefault("_symm_scratch_bufs", {})
+        key = (role, tuple(shape), dtype)
+        buf = cache.get(key)
+        if buf is None:
+            with nccl_symm_mem_context(pynccl_comm):
+                buf = torch.empty(shape, dtype=dtype, device=device)
+            cache[key] = buf
+        return buf
+
     def _reduce_scatter_symm_mem(
         self,
         input_tensor: torch.Tensor,
@@ -387,37 +433,31 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         Only called for uniform-size reduce_scatter (variable sizes are
         guarded out by the caller to avoid asymmetric ncclCommWindowRegister).
-        Output shape is derived from input_tensor and world_size.
-
-        NOTE: ncclMemAlloc allocates outside PyTorch's caching allocator, so
-        it competes with KV-cache memory.  Lower gpu_memory_utilization
-        (e.g. 0.8) to leave headroom for the NCCL pool.
+        Uses persistent pre-registered scratch (see _get_symm_scratch).
         """
         from vllm.distributed.device_communicators.pynccl_allocator import (
             is_symmetric_memory_tensor,
-            nccl_symm_mem_context,
         )
 
         pynccl_comm = self.pynccl_comm
         assert pynccl_comm is not None
 
         chunk = input_tensor.shape[0] // self.world_size
-        output_shape = (chunk,) + input_tensor.shape[1:]
+        output_shape = (chunk,) + tuple(input_tensor.shape[1:])
 
-        # Skip the copy when the input is already in the NCCL symmetric pool
-        # (e.g. output of a prior symm-mem AllGather).
-        input_already_symm = is_symmetric_memory_tensor(input_tensor)
-
-        with nccl_symm_mem_context(pynccl_comm):
-            if not input_already_symm:
-                symm_input = torch.empty_like(input_tensor)
-            symm_output = torch.empty(
-                output_shape, dtype=input_tensor.dtype, device=input_tensor.device
-            )
-
-        if input_already_symm:
+        symm_output = self._get_symm_scratch(
+            "rs_out", output_shape, input_tensor.dtype, input_tensor.device
+        )
+        # NVLS reduce-scatter (LDMC) requires the input in symmetric memory.
+        if is_symmetric_memory_tensor(input_tensor):
             symm_input = input_tensor
         else:
+            symm_input = self._get_symm_scratch(
+                "rs_in",
+                tuple(input_tensor.shape),
+                input_tensor.dtype,
+                input_tensor.device,
+            )
             symm_input.copy_(input_tensor)
 
         pynccl_comm.reduce_scatter(symm_output, symm_input)
@@ -538,20 +578,15 @@ class CudaCommunicator(DeviceCommunicatorBase):
         Only the output needs to be in symmetric memory; NCCL does not
         require the AG input to be symmetrically allocated.
         """
-        from vllm.distributed.device_communicators.pynccl_allocator import (
-            nccl_symm_mem_context,
-        )
-
         pynccl_comm = self.pynccl_comm
         assert pynccl_comm is not None
 
-        out_size = (input_.size(0) * self.world_size,) + input_.size()[1:]
-
-        with nccl_symm_mem_context(pynccl_comm):
-            symm_output = torch.empty(
-                out_size, dtype=input_.dtype, device=input_.device
-            )
-
+        out_size = (input_.size(0) * self.world_size,) + tuple(input_.size()[1:])
+        # Persistent pre-registered scratch avoids the per-call symm-mem context
+        # snapshot/registration overhead (see _get_symm_scratch).
+        symm_output = self._get_symm_scratch(
+            "ag_out", out_size, input_.dtype, input_.device
+        )
         pynccl_comm.all_gather(symm_output, input_)
         return symm_output
 
