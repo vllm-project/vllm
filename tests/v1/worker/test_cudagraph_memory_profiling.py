@@ -308,7 +308,7 @@ def test_separate_profile_accounts_persistent_and_graph_pool(monkeypatch):
     )
 
     memory_reserved_values = iter([1_000, 1_600])
-    mem_get_info_values = iter(
+    get_memory_info_values = iter(
         [
             (10_000_000, 0),
             (8_000_000, 0),
@@ -349,9 +349,9 @@ def test_separate_profile_accounts_persistent_and_graph_pool(monkeypatch):
         lambda device: next(memory_reserved_values),
     )
     monkeypatch.setattr(
-        gpu_model_runner.torch.cuda,
-        "mem_get_info",
-        lambda: next(mem_get_info_values),
+        gpu_model_runner.torch.accelerator,
+        "get_memory_info",
+        lambda: next(get_memory_info_values),
     )
 
     estimate = runner.profile_cudagraph_memory()
