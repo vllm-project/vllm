@@ -111,7 +111,7 @@ def test_gemma4_routing_kernel_triton(
 
     print(
         f"T={num_tokens:5d} E={num_experts:4d} K={topk} "
-        f"{str(dtype).split('.')[-1]:7s} ids={ids_match} max_Δweight={max_err:.2e}"
+        f"{str(dtype).split('.')[-1]:7s} max_Δweight={max_err:.2e}"
     )
     if not weights_match:
         bad = (ref_is != tri_is).any(dim=-1).nonzero(as_tuple=True)[0]
