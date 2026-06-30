@@ -264,6 +264,12 @@ class Worker(WorkerBase):
                         buf = named_bufs.get(name)
                         if buf is not None:
                             buf.data.copy_(saved)
+                # Rebuild derived tensor caches (e.g. DFlash fused KV buffers)
+                # that are not registered as parameters or buffers but live in
+                # cumem and become stale after level-2 sleep.
+                inner = getattr(draft, "model", None)
+                if inner is not None and hasattr(inner, "_build_fused_kv_buffers"):
+                    inner._build_fused_kv_buffers()
             self._sleep_saved_draft_params = {}
             self._sleep_saved_draft_buffers = {}
 
