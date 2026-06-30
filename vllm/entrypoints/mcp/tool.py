@@ -59,7 +59,7 @@ class Tool(ABC):
 class HarmonyBrowserTool(Tool):
     def __init__(self):
         self.enabled = True
-        tool_backend = os.getenv("BROWSER_BACKEND", "exa")
+        tool_backend = os.getenv("BROWSER_BACKEND", "youcom")
 
         if tool_backend == "youcom":
             api_key = os.getenv("YDC_API_KEY")
