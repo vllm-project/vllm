@@ -30,11 +30,7 @@ pub trait Tokenizer: Send + Sync {
     fn token_to_id(&self, token: &str) -> Option<u32>;
 
     /// Convert one token ID into the tokenizer's raw token string.
-    fn id_to_token(&self, _id: u32) -> Option<String> {
-        // TODO: remove default impl and require this to be implemented by all
-        // tokenizers
-        None
-    }
+    fn id_to_token(&self, id: u32) -> Option<String>;
 
     /// Return the vocabulary size. Backends that cannot report it fall back to
     /// `usize::MAX`, an effectively unbounded value used only by test stubs.
