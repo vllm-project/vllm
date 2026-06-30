@@ -80,7 +80,7 @@ else:
 logger = init_logger(__name__)
 
 
-def vllm_flash_attention_forward(
+def vllm_attention_forward(
     # Transformers args
     module: torch.nn.Module,
     query: torch.Tensor,
@@ -102,7 +102,7 @@ def vllm_flash_attention_forward(
     return self_attn.forward(query, key, value), None
 
 
-ALL_ATTENTION_FUNCTIONS["vllm"] = vllm_flash_attention_forward
+ALL_ATTENTION_FUNCTIONS["vllm"] = vllm_attention_forward
 
 
 class Base(
@@ -538,7 +538,7 @@ class Base(
                 num_heads=num_heads,
                 head_size=head_size,
                 # NOTE: We use Llama scale as default, if it's set by
-                # Transformers, it's updated in vllm_flash_attention_forward
+                # Transformers, it's updated in vllm_attention_forward
                 scale=head_size**-0.5,
                 num_kv_heads=num_kv_heads,
                 cache_config=self.cache_config,
