@@ -175,3 +175,25 @@ def test_gemm(N, K, M, splitK, group_size):
     torch.testing.assert_close(
         output_triton.cpu(), output_torch.cpu(), atol=1e-1, rtol=1e-1
     )
+
+
+# TD activation load must be bit-exact vs the plain masked-load path.
+@pytest.mark.parametrize("M_out", [16, 32])
+@pytest.mark.parametrize("K", [256, 4096])
+@pytest.mark.parametrize("N_tok", [1, 64])
+@pytest.mark.parametrize("splitK", [1, 4])
+@pytest.mark.parametrize("group_size", [128])
+def test_gemm_td_matches_plain(M_out, K, N_tok, splitK, group_size):
+    set_random_seed(0)
+    qweight = torch.randint(
+        0, torch.iinfo(torch.int32).max, (K, M_out // 8), device=device
+    )
+    qzeros = torch.randint(
+        0, torch.iinfo(torch.int32).max, (K // group_size, M_out // 8), device=device
+    )
+    scales = torch.rand((K // group_size, M_out), dtype=torch.float16, device=device)
+    inp = (torch.rand((N_tok, K), dtype=torch.float16, device=device) - 0.5) * 0.1
+
+    out_plain = awq_gemm_triton(inp, qweight, scales, qzeros, splitK, use_td=False)
+    out_td = awq_gemm_triton(inp, qweight, scales, qzeros, splitK, use_td=True)
+    torch.testing.assert_close(out_td, out_plain, rtol=0, atol=0)
