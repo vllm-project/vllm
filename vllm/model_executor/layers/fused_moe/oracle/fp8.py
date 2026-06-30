@@ -52,13 +52,16 @@ class Fp8MoeBackend(Enum):
     BATCHED_VLLM_CUTLASS = "BATCHED_VLLM_CUTLASS"
     XPU = "XPU"
     CPU = "CPU"
+    HPC = "HPC"
     # Dequantize-to-BF16 emulation for MXFP8 on devices without a native
     # MXFP8 MoE kernel (e.g. ROCm). Weights pass through unchanged here.
     EMULATION = "EMULATION"
     # MXFP8 MoE via a Triton ``dot_scaled`` kernel that lowers to CDNA4
     # (gfx950) native MX matrix-core ops. Weights stay in MXFP8 (no load-time
     # format conversion); the FP8 values + E8M0 scales are consumed directly.
-    NATIVE_MXFP8 = "NATIVE_MXFP8"
+    TRITON_MXFP8 = "TRITON_MXFP8"
+    # MXFP8 MoE via AITER (FlyDSL two-stage grouped GEMM) on gfx950.
+    AITER_MXFP8 = "AITER_MXFP8"
 
 
 def _get_priority_backends(
@@ -85,6 +88,7 @@ def _get_priority_backends(
         Fp8MoeBackend.BATCHED_TRITON,
         Fp8MoeBackend.XPU,
         Fp8MoeBackend.CPU,
+        Fp8MoeBackend.HPC,
     ]
 
     def _move_to_front(backends: list[Fp8MoeBackend], backend: Fp8MoeBackend) -> None:
@@ -216,6 +220,13 @@ def backend_to_kernel_cls(
 
         return [CPUExpertsFp8]
 
+    elif backend == Fp8MoeBackend.HPC:
+        from vllm.model_executor.layers.fused_moe.hpc_moe import (
+            HPCExperts,
+        )
+
+        return [HPCExperts]
+
     else:
         raise ValueError(f"Unknown FP8 MoE backend: {backend.value}")
 
@@ -230,6 +241,7 @@ def map_fp8_backend(runner_backend: MoEBackend) -> Fp8MoeBackend:
         "flashinfer_cutlass": Fp8MoeBackend.FLASHINFER_CUTLASS,
         "marlin": Fp8MoeBackend.MARLIN,
         "aiter": Fp8MoeBackend.AITER,
+        "hpc": Fp8MoeBackend.HPC,
     }
     if backend := mapping.get(runner_backend):
         return backend
@@ -413,6 +425,10 @@ def convert_to_fp8_moe_kernel_format(
         )
     elif fp8_backend == Fp8MoeBackend.AITER:
         w13, w2 = rocm_aiter_ops.shuffle_weights(w13, w2)
+    elif fp8_backend == Fp8MoeBackend.AITER_MXFP8:
+        w13, w2, w13_scale, w2_scale = rocm_aiter_ops.shuffle_mxfp8_moe_weights(
+            w13, w2, w13_scale, w2_scale
+        )
     elif fp8_backend == Fp8MoeBackend.MARLIN:
         weight_block_size = getattr(layer, "weight_block_size", None)
         if weight_block_size == [1, 32]:
@@ -470,10 +486,11 @@ def convert_to_fp8_moe_kernel_format(
             Fp8MoeBackend.VLLM_CUTLASS,
             Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
             Fp8MoeBackend.XPU,
+            Fp8MoeBackend.HPC,
             # EMULATION dequantizes weights at runtime; NATIVE_MXFP8 consumes
             # the MXFP8 weights as-is — neither needs a load-time layout change.
             Fp8MoeBackend.EMULATION,
-            Fp8MoeBackend.NATIVE_MXFP8,
+            Fp8MoeBackend.TRITON_MXFP8,
         ]:
             raise ValueError(f"Unsupported FP8 MoE backend: {fp8_backend.value}")
 
@@ -521,9 +538,12 @@ def make_fp8_moe_quant_config(
             gemm1_clamp_limit=swiglu_limit,
         )
 
-    # Flashinfer CUTLASS per-tensor uses single dq scale
+    # Flashinfer CUTLASS or HPC per-tensor uses single dq scale
     # (alpha = w_scale * a_scale) and inverse a2 scale.
-    if fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS and block_shape is None:
+    if (
+        fp8_backend in [Fp8MoeBackend.FLASHINFER_CUTLASS, Fp8MoeBackend.HPC]
+        and block_shape is None
+    ):
         assert a1_scale is not None and a2_scale is not None
         return fp8_w8a8_moe_quant_config(
             w1_scale=w1_scale,
@@ -568,6 +588,8 @@ def make_fp8_moe_quant_config(
         block_shape=block_shape,
         per_act_token_quant=per_act_token_quant,
         per_out_ch_quant=per_out_ch_quant,
+        gemm1_alpha=gemm1_alpha,
+        gemm1_beta=gemm1_beta,
         gemm1_clamp_limit=swiglu_limit,
     )
 

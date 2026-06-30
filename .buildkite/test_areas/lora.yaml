@@ -12,6 +12,17 @@ steps:
   commands:
     - pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_qwen3_with_multi_loras.py --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py --ignore=lora/test_qwen3moe_tp.py --ignore=lora/test_qwen35_densemodel_lora.py 
   parallelism: 4
+  mirror:
+    amd:
+      device: mi325_1
+      working_dir: "/vllm-workspace/tests"
+      timeout_in_minutes: 60
+      source_file_dependencies:
+      - vllm/lora
+      - tests/lora
+      - vllm/platforms/rocm.py
+      depends_on:
+      - image-build-amd
 
 
 - label: LoRA TP (Distributed)

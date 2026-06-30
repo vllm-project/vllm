@@ -115,8 +115,10 @@ from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.nvtx_pytorch_hooks import PytHooks
-from vllm.utils.platform_utils import is_pin_memory_available, num_compute_units
+from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import (
+    PIN_MEMORY,
+    async_tensor_h2d,
     get_dtype_size,
     is_quantized_kv_cache,
     kv_cache_dtype_str_to_dtype,
@@ -200,6 +202,7 @@ from vllm.v1.worker.cp_utils import (
 )
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
+from vllm.v1.worker.gpu.attn_utils import _reshape_attention_kv_cache
 from vllm.v1.worker.gpu.pool.late_interaction_runner import LateInteractionRunner
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
@@ -440,7 +443,6 @@ class GPUModelRunner(
         scheduler_config = self.scheduler_config
         parallel_config = self.parallel_config
         self.device = device
-        self.pin_memory = is_pin_memory_available()
         self.dtype = self.model_config.dtype
 
         self.kv_cache_dtype = kv_cache_dtype_str_to_dtype(
@@ -665,7 +667,6 @@ class GPUModelRunner(
             max_model_len=max(self.max_model_len, self.max_encoder_len),
             max_num_batched_tokens=self.max_num_tokens,
             device=self.device,
-            pin_memory=self.pin_memory,
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[placeholder_block_size],
             kernel_block_sizes=[placeholder_block_size],
@@ -673,7 +674,7 @@ class GPUModelRunner(
             logitsprocs=build_logitsprocs(
                 self.vllm_config,
                 self.device,
-                self.pin_memory,
+                PIN_MEMORY,
                 self.is_pooling_model,
                 custom_logitsprocs,
             ),
@@ -728,7 +729,7 @@ class GPUModelRunner(
             self.max_num_reqs, dtype=torch.int32, device=self.device
         )
         self.optimistic_seq_lens_cpu = torch.zeros(
-            self.max_num_reqs, dtype=torch.int32, pin_memory=self.pin_memory
+            self.max_num_reqs, dtype=torch.int32, pin_memory=PIN_MEMORY
         )
         self.num_computed_tokens = torch.zeros(
             self.max_num_reqs, dtype=torch.int32, device=self.device
@@ -845,7 +846,7 @@ class GPUModelRunner(
             and self.speculative_config.use_ngram_gpu()
         ):
             self._num_valid_draft_tokens_cpu = torch.empty(
-                self.max_num_reqs, dtype=torch.int32, pin_memory=self.pin_memory
+                self.max_num_reqs, dtype=torch.int32, pin_memory=PIN_MEMORY
             )
             self._num_valid_draft_tokens_event = torch.cuda.Event()
             self._num_valid_draft_tokens_copy_stream = torch.cuda.Stream()
@@ -856,7 +857,7 @@ class GPUModelRunner(
             (self.max_num_reqs, 1),
             dtype=torch.int64,
             device="cpu",
-            pin_memory=self.pin_memory,
+            pin_memory=PIN_MEMORY,
         )
 
         # Pre-allocated tensor for copying valid sampled token counts to CPU,
@@ -878,7 +879,7 @@ class GPUModelRunner(
                 (self.max_num_reqs, self.num_spec_tokens),
                 dtype=torch.int64,
                 device="cpu",
-                pin_memory=self.pin_memory,
+                pin_memory=PIN_MEMORY,
             )
             if self.use_async_scheduling:
                 self.valid_sampled_token_count_event = torch.Event()
@@ -887,7 +888,7 @@ class GPUModelRunner(
                     self.max_num_reqs,
                     dtype=torch.int32,
                     device="cpu",
-                    pin_memory=self.pin_memory,
+                    pin_memory=PIN_MEMORY,
                 )
 
         # Model weight offloader
@@ -999,7 +1000,6 @@ class GPUModelRunner(
             *size,
             dtype=dtype,
             device=self.device,
-            pin_memory=self.pin_memory,
             with_numpy=numpy,
         )
 
@@ -1054,7 +1054,7 @@ class GPUModelRunner(
             token_type_ids.append(ids)
 
         token_type_ids_cpu = torch.empty(
-            sum(seq_lens_cpu), dtype=torch.int32, pin_memory=self.pin_memory
+            sum(seq_lens_cpu), dtype=torch.int32, pin_memory=PIN_MEMORY
         )
         torch.cat(token_type_ids, out=token_type_ids_cpu)
         model_kwargs["token_type_ids"] = token_type_ids_cpu.to(
@@ -1094,12 +1094,12 @@ class GPUModelRunner(
         """
         self._kv_block_zeroer = KVBlockZeroer(
             self.device,
-            self.pin_memory,
+            pin_memory=PIN_MEMORY,
             attn_groups_iter=self._kv_cache_spec_attn_group_iterator(),
             kernel_block_sizes=self._kernel_block_sizes,
             cache_dtype=self.cache_config.cache_dtype,
             runner_only_attn_layers=self.runner_only_attn_layers,
-            static_forward_context=(self.compilation_config.static_forward_context),
+            static_forward_context=self.compilation_config.static_forward_context,
         )
 
     def _zero_block_ids(self, block_ids: list[int]) -> None:
@@ -1650,7 +1650,7 @@ class GPUModelRunner(
         for _, _, mm_kwargs_batch in group_and_batch_mm_kwargs(
             mm_kwargs,
             device=self.device,
-            pin_memory=self.pin_memory,
+            pin_memory=PIN_MEMORY,
         ):
             mm_kwargs_combined.update(mm_kwargs_batch)
 
@@ -1806,10 +1806,10 @@ class GPUModelRunner(
             return
         # Upload the index tensors asynchronously so the scatter can be non-blocking.
         sampled_tokens_index_tensor = torch.tensor(
-            sample_flattened_indices, dtype=torch.int64, pin_memory=self.pin_memory
+            sample_flattened_indices, dtype=torch.int64, pin_memory=PIN_MEMORY
         ).to(self.device, non_blocking=True)
         prev_common_req_indices_tensor = torch.tensor(
-            prev_indices, dtype=torch.int64, pin_memory=self.pin_memory
+            prev_indices, dtype=torch.int64, pin_memory=PIN_MEMORY
         ).to(self.device, non_blocking=True)
         self.input_ids.gpu.scatter_(
             dim=0,
@@ -1825,10 +1825,10 @@ class GPUModelRunner(
 
         assert isinstance(self._draft_token_ids, torch.Tensor)
         draft_tokens_index_tensor = torch.tensor(
-            spec_flattened_indices, dtype=torch.int64, pin_memory=self.pin_memory
+            spec_flattened_indices, dtype=torch.int64, pin_memory=PIN_MEMORY
         ).to(self.device, non_blocking=True)
         prev_draft_token_indices_tensor = torch.tensor(
-            prev_draft_token_indices, dtype=torch.int64, pin_memory=self.pin_memory
+            prev_draft_token_indices, dtype=torch.int64, pin_memory=PIN_MEMORY
         ).to(self.device, non_blocking=True)
 
         # because input_ids dtype is torch.int32,
@@ -2035,7 +2035,13 @@ class GPUModelRunner(
 
         # Sync num_accepted_tokens from CPU (set by
         # _update_states_after_model_execute for hybrid models).
-        if self.num_accepted_tokens_event is not None:
+        # Skipped under async scheduling (non-align): the CPU copy races with
+        # the in-flight D2H copy and with input-batch row moves.
+        needs_cpu_accepted_counts = self.num_accepted_tokens_event is not None and not (
+            self.use_async_scheduling and self.cache_config.mamba_cache_mode != "align"
+        )
+        if needs_cpu_accepted_counts:
+            assert self.num_accepted_tokens_event is not None
             self.num_accepted_tokens_event.synchronize()
             # Async mode: condense() reordered indices, use prev_positions mapping
             if self.use_async_scheduling and prev_req_id_to_index:
@@ -2058,6 +2064,8 @@ class GPUModelRunner(
             self.num_accepted_tokens.np[num_reqs:].fill(1)
             self.num_accepted_tokens.copy_to_gpu()
         else:
+            # Default to 1; update_num_computed_tokens_for_batch_change below
+            # corrects rows that had drafts from valid_sampled_token_count.
             self.num_accepted_tokens.np.fill(1)
             self.num_accepted_tokens.gpu.fill_(1)
 
@@ -2327,6 +2335,13 @@ class GPUModelRunner(
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 req_doc_ranges[req_idx] = image_doc_ranges
 
+        # Reference Sliding Window Attention (R-SWA): pass per-request prompt
+        # lengths so the attention backend can keep the prefix globally visible.
+        # The backend owns the persistent CUDA-graph-safe GPU buffer.
+        rswa_prefix_lens = None
+        if self.model_config.rswa_window is not None:
+            rswa_prefix_lens = num_prompt_tokens_cpu
+
         cm_base = CommonAttentionMetadata(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
             query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs_padded + 1],
@@ -2344,6 +2359,7 @@ class GPUModelRunner(
             is_prefilling=is_prefilling,
             positions=self.positions[:num_tokens_padded],
             mm_req_doc_ranges=req_doc_ranges,
+            rswa_prefix_lens=rswa_prefix_lens,
         )
 
         if self.dcp_world_size > 1:
@@ -2787,21 +2803,16 @@ class GPUModelRunner(
         # [0, 1, 2, 5, 6, 9]
         target_logits_indices += self._arange_scratch[: cu_num_draft_tokens[-1]]
 
-        # TODO: Optimize the CPU -> GPU copy.
-        cu_num_draft_tokens = torch.from_numpy(cu_num_draft_tokens).to(
-            self.device, non_blocking=True
+        cu_num_draft_tokens = async_tensor_h2d(cu_num_draft_tokens, device=self.device)
+        cu_num_sampled_tokens = async_tensor_h2d(
+            cu_num_sampled_tokens, device=self.device
         )
-        cu_num_sampled_tokens = torch.from_numpy(cu_num_sampled_tokens).to(
-            self.device, non_blocking=True
+        logits_indices = async_tensor_h2d(logits_indices, device=self.device)
+        target_logits_indices = async_tensor_h2d(
+            target_logits_indices, device=self.device
         )
-        logits_indices = torch.from_numpy(logits_indices).to(
-            self.device, non_blocking=True
-        )
-        target_logits_indices = torch.from_numpy(target_logits_indices).to(
-            self.device, non_blocking=True
-        )
-        bonus_logits_indices = torch.from_numpy(bonus_logits_indices).to(
-            self.device, non_blocking=True
+        bonus_logits_indices = async_tensor_h2d(
+            bonus_logits_indices, device=self.device
         )
 
         # Compute the draft token ids.
@@ -3011,9 +3022,7 @@ class GPUModelRunner(
         # Track the current index in mm_kwargs/mm_lora_refs to map groups to request IDs
         current_item_idx = 0
         for modality, num_items, mm_kwargs_batch in group_and_batch_mm_kwargs(
-            mm_kwargs,
-            device=self.device,
-            pin_memory=self.pin_memory,
+            mm_kwargs, device=self.device, pin_memory=PIN_MEMORY
         ):
             batch_outputs: MultiModalEmbeddings
 
@@ -3047,7 +3056,7 @@ class GPUModelRunner(
                             group_and_batch_mm_kwargs(
                                 [video_mm_kwargs_item],
                                 device=self.device,
-                                pin_memory=self.pin_memory,
+                                pin_memory=PIN_MEMORY,
                             )
                         )
 
@@ -3106,7 +3115,10 @@ class GPUModelRunner(
 
         mm_embeds = list[torch.Tensor]()
         is_mm_embed = torch.zeros(
-            total_num_scheduled_tokens, dtype=torch.bool, device="cpu"
+            total_num_scheduled_tokens,
+            dtype=torch.bool,
+            device="cpu",
+            pin_memory=PIN_MEMORY,
         )
 
         req_start_idx = 0
@@ -3148,7 +3160,16 @@ class GPUModelRunner(
 
                 mm_hash = mm_feature.identifier
                 encoder_output = self.encoder_cache.get(mm_hash, None)
-                assert encoder_output is not None, f"Encoder cache miss for {mm_hash}."
+                if encoder_output is None:
+                    # A feature starting at/after the processed boundary is only
+                    # reached via the drafter's +1 look-ahead and might not be
+                    # encoded yet; fall back to the token embedding for drafting.
+                    if (
+                        start_pos
+                        >= req_state.num_computed_tokens + num_scheduled_tokens
+                    ):
+                        continue
+                    raise RuntimeError(f"Encoder cache miss for {mm_hash}.")
 
                 if (is_embed := pos_info.is_embed) is not None:
                     is_embed = is_embed[start_idx:end_idx]
@@ -3514,8 +3535,7 @@ class GPUModelRunner(
             token_ids_idx_np = np.nonzero(is_token_ids)[0]
             # Some tokens ids may need to become embeds
             if token_ids_idx_np.size > 0:
-                token_ids_idx = torch.from_numpy(token_ids_idx_np)
-                token_ids_idx = token_ids_idx.to(self.device, non_blocking=True)
+                token_ids_idx = async_tensor_h2d(token_ids_idx_np, device=self.device)
                 token_ids = self.input_ids.gpu[token_ids_idx]
                 tokens_to_embeds = self.model.embed_input_ids(input_ids=token_ids)
                 self.inputs_embeds.gpu[token_ids_idx] = tokens_to_embeds
@@ -4299,6 +4319,13 @@ class GPUModelRunner(
         # When spec decode is enabled, defer connector finalization
         # (wait_for_save + clear metadata) until after draft model runs.
         defer_kv_connector_finalize = self.speculative_config is not None
+        # Update the EPLB meta.
+        if self.eplb_state is not None:
+            self.eplb_state.prepare_forward(
+                self.model_config,
+                num_tokens_unpadded,
+                ubatch_slices_padded,
+            )
         with (
             set_forward_context(
                 attn_metadata,
@@ -4952,7 +4979,7 @@ class GPUModelRunner(
                 ):
                     indices.append(offset + len(tokens) - 1)
                     offset += num_draft + 1
-                indices = torch.tensor(indices, device=self.device)
+                indices = async_tensor_h2d(indices, device=self.device)
                 hidden_states = sample_hidden_states[indices]
 
             draft_token_ids = self.drafter.propose(
@@ -5195,6 +5222,8 @@ class GPUModelRunner(
                             self.drafter.model,
                             spec_config.draft_model_config,
                         )
+                        assert hasattr(self.drafter, "set_eplb_state")
+                        self.drafter.set_eplb_state(self.eplb_state)
                         eplb_models += 1
 
                 self._setup_eagle3_aux_hidden_state_outputs()
@@ -5482,8 +5511,8 @@ class GPUModelRunner(
                 continue
 
             num_prompt_tokens = len(request.prompt_token_ids)
-            prompt_token_ids = torch.tensor(request.prompt_token_ids).to(
-                self.device, non_blocking=True
+            prompt_token_ids = async_tensor_h2d(
+                request.prompt_token_ids, device=self.device
             )
 
             # Set up target LogprobsTensors object.
@@ -5650,7 +5679,7 @@ class GPUModelRunner(
             for _, _, mm_kwargs_batch in group_and_batch_mm_kwargs(
                 [(modality, dummy_mm_item)] * max_items_per_batch,
                 device=self.device,
-                pin_memory=self.pin_memory,
+                pin_memory=PIN_MEMORY,
             )
         )
 
@@ -6356,7 +6385,7 @@ class GPUModelRunner(
         _ROPE_DICT.clear()
 
         reset_workspace_manager()
-        if current_platform.is_rocm():
+        if current_platform.is_rocm() or current_platform.is_xpu():
             gc.collect()
             torch.accelerator.empty_cache()
             torch.accelerator.synchronize()
@@ -6498,7 +6527,7 @@ class GPUModelRunner(
                     mem_samples: list[int] = []
 
                     for i, desc in enumerate(profile_descs):
-                        mem_before = torch.cuda.mem_get_info()[0]
+                        mem_before = torch.accelerator.get_memory_info()[0]
                         self._warmup_and_capture(
                             desc,
                             cudagraph_runtime_mode=mode,
@@ -6512,7 +6541,7 @@ class GPUModelRunner(
                             ),
                         )
                         torch.accelerator.synchronize()
-                        free_after = torch.cuda.mem_get_info()[0]
+                        free_after = torch.accelerator.get_memory_info()[0]
                         mem_samples.append(mem_before - free_after)
 
                     first_capture = mem_samples[0]
@@ -6534,10 +6563,10 @@ class GPUModelRunner(
                     )
 
                 if encoder_cudagraph_manager is not None:
-                    mem_before = torch.cuda.mem_get_info()[0]
+                    mem_before = torch.accelerator.get_memory_info()[0]
                     encoder_cudagraph_manager.capture(graph_pool=encoder_profiling_pool)
                     torch.accelerator.synchronize()
-                    free_after = torch.cuda.mem_get_info()[0]
+                    free_after = torch.accelerator.get_memory_info()[0]
                     encoder_memory_estimate = max(mem_before - free_after, 0)
 
                     logger.debug(
@@ -6603,7 +6632,7 @@ class GPUModelRunner(
         with self._freeze_gc(), graph_capture(device=self.device):
             torch.accelerator.synchronize()
             torch.accelerator.empty_cache()
-            start_free_gpu_memory = torch.cuda.mem_get_info()[0]
+            start_free_gpu_memory = torch.accelerator.get_memory_info()[0]
 
             for (
                 runtime_mode,
@@ -6621,7 +6650,7 @@ class GPUModelRunner(
                 self.encoder_cudagraph_manager.capture(graph_pool=encoder_graph_pool)
 
             torch.accelerator.synchronize()
-            end_free_gpu_memory = torch.cuda.mem_get_info()[0]
+            end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
 
         # Disable cudagraph capturing globally, so any unexpected cudagraph
         # capturing will be detected and raise an error after here.
@@ -6994,7 +7023,6 @@ class GPUModelRunner(
                 max_model_len=max_model_len,
                 max_num_batched_tokens=self.max_num_tokens,
                 device=self.device,
-                pin_memory=self.pin_memory,
                 vocab_size=self.model_config.get_vocab_size(),
                 block_sizes=block_sizes,
                 kernel_block_sizes=kernel_block_sizes,
@@ -7029,10 +7057,21 @@ class GPUModelRunner(
             corresponding memory buffer for KV cache.
         """
         kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
+        packed_backing: torch.Tensor | None = None
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            tensor = torch.zeros(
-                kv_cache_tensor.size, dtype=torch.int8, device=self.device
-            )
+            if kv_cache_tensor.block_stride > 0:
+                # Allocate once; all packed tensors alias the same backing.
+                if packed_backing is None:
+                    packed_backing = torch.zeros(
+                        kv_cache_tensor.size,
+                        dtype=torch.int8,
+                        device=self.device,
+                    )
+                tensor = packed_backing
+            else:
+                tensor = torch.zeros(
+                    kv_cache_tensor.size, dtype=torch.int8, device=self.device
+                )
             for layer_name in kv_cache_tensor.shared_by:
                 kv_cache_raw_tensors[layer_name] = tensor
 
@@ -7074,6 +7113,14 @@ class GPUModelRunner(
         """
         kv_caches: dict[str, torch.Tensor] = {}
         has_attn, has_mamba = False, False
+
+        # Map layer names to (offset, block_stride) within the packed
+        # backing tensor so we can create strided views per layer.
+        layer_packing: dict[str, tuple[int, int]] = {}
+        for kv_tensor in self.kv_cache_config.kv_cache_tensors:
+            if kv_tensor.block_stride > 0:
+                for ln in kv_tensor.shared_by:
+                    layer_packing[ln] = (kv_tensor.offset, kv_tensor.block_stride)
         for group in self._kv_cache_spec_attn_group_iterator():
             kv_cache_spec = group.kv_cache_spec
             attn_backend = group.backend
@@ -7085,8 +7132,13 @@ class GPUModelRunner(
                 if layer_name in self.runner_only_attn_layers:
                     continue
                 raw_tensor = kv_cache_raw_tensors[layer_name]
-                assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
-                num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
+                packing = layer_packing.get(layer_name)
+                if packing is not None:
+                    _, blk_stride = packing
+                    num_blocks = raw_tensor.numel() // blk_stride
+                else:
+                    assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
+                    num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
                 if isinstance(kv_cache_spec, AttentionSpec):
                     has_attn = True
                     num_blocks_per_kv_block = (
@@ -7107,49 +7159,20 @@ class GPUModelRunner(
                         kv_cache_spec.head_size,
                         cache_dtype_str=self.cache_config.cache_dtype,
                     )
-                    dtype = kv_cache_spec.dtype
                     try:
                         kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
                         assert len(kv_cache_stride_order) == len(kv_cache_shape)
                     except (AttributeError, NotImplementedError):
                         kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
-                    # The allocation respects the backend-defined stride order
-                    # to ensure the semantic remains consistent for each
-                    # backend. We first obtain the generic kv cache shape and
-                    # then permute it according to the stride order which could
-                    # result in a non-contiguous tensor.
-                    kv_cache_shape = tuple(
-                        kv_cache_shape[i] for i in kv_cache_stride_order
+                    raw_tensor = kv_cache_raw_tensors[layer_name]
+                    kv_caches[layer_name] = _reshape_attention_kv_cache(
+                        raw_tensor,
+                        kv_cache_spec,
+                        kv_cache_shape,
+                        kv_cache_stride_order,
+                        kernel_num_blocks,
+                        packing,
                     )
-                    # Maintain original KV shape view.
-                    inv_order = [
-                        kv_cache_stride_order.index(i)
-                        for i in range(len(kv_cache_stride_order))
-                    ]
-
-                    raw_tensor = kv_cache_raw_tensors[layer_name].view(dtype)
-                    if kv_cache_spec.page_size_padded is not None:
-                        # Use strided view to handle page_size_bytes that
-                        # include padding. This follows
-                        # the same pattern as MambaSpec handling below.
-                        # NOTE: This assumes kv_cache_shape[0] == num_blocks
-                        # (i.e. the first physical dimension is the block
-                        # index), which holds for MLA backends but NOT for
-                        # standard attention backends whose shape starts with
-                        # a K/V dimension of size 2.
-                        dtype_size = get_dtype_size(dtype)
-                        page_stride = kv_cache_spec.page_size_bytes // dtype_size
-                        strides = list(torch.empty(kv_cache_shape).stride())
-                        strides[inv_order[0]] = page_stride
-                        kv_cache = torch.as_strided(
-                            raw_tensor,
-                            size=kv_cache_shape,
-                            stride=tuple(strides),
-                        )
-                    else:
-                        # No padding — safe to use a contiguous view.
-                        kv_cache = raw_tensor.view(kv_cache_shape)
-                    kv_caches[layer_name] = kv_cache.permute(*inv_order)
 
                 elif isinstance(kv_cache_spec, MambaSpec):
                     has_mamba = True
@@ -7234,7 +7257,7 @@ class GPUModelRunner(
 
         # Try creating KV caches optimized for kv-connector transfers
         cache_dtype = self.cache_config.cache_dtype
-        if self.use_uniform_kv_cache(self.attn_groups, cache_dtype):
+        if self.use_uniform_kv_cache(self.attn_groups):
             kv_caches, cross_layers_kv_cache, attn_backend = (
                 self.allocate_uniform_kv_caches(
                     kv_cache_config,
@@ -7392,7 +7415,7 @@ class GPUModelRunner(
             self.routed_experts_capturer.device_buffer.shape,
             dtype=self.routed_experts_capturer.device_buffer.dtype,
             device="cpu",
-            pin_memory=self.pin_memory,
+            pin_memory=PIN_MEMORY,
         )
         # ``slot_mapping`` dtype is fixed to int64 by
         # ``block_table.slot_mapping``; we mirror that here.
@@ -7401,7 +7424,7 @@ class GPUModelRunner(
             (max_tokens,),
             dtype=torch.int64,
             device="cpu",
-            pin_memory=self.pin_memory,
+            pin_memory=PIN_MEMORY,
         )
         # Private device buffer so the shared ``block_table.slot_mapping``
         # can be overwritten by the next ``_prepare_inputs`` while the
@@ -7484,6 +7507,13 @@ class GPUModelRunner(
                 continue
             # Skip modules that don't need KV cache (eg encoder-only attention)
             if spec := attn_module.get_kv_cache_spec(self.vllm_config):
+                if isinstance(spec, AttentionSpec):
+                    backend = attn_module.get_attn_backend()
+                    # indexes_kv_by_block_stride() -> get_kv_cache_stride_order()
+                    # -> get_kv_cache_layout() needs the current vLLM config.
+                    with set_current_vllm_config(self.vllm_config):
+                        indexes = backend.indexes_kv_by_block_stride()
+                    spec = replace(spec, indexes_kv_by_block_stride=indexes)
                 kv_cache_spec[layer_name] = spec
 
         return kv_cache_spec

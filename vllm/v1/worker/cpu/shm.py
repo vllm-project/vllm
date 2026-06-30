@@ -7,12 +7,18 @@
 
 from typing import Any
 
+import numpy as np
+
 # Patch torch APIs
 import torch
 
 
 def noop(*args: Any, **kwargs: Any) -> None:
     pass
+
+
+def fake_pin_memory(self: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
+    return self
 
 
 class _EventPlaceholder:
@@ -32,6 +38,14 @@ class _StreamPlaceholder:
         pass
 
 
+from vllm.utils.cpu_resource_utils import get_memory_node_info
+
+
+def get_memory_info(*args: Any, **kwargs: Any) -> tuple[int, int]:
+    meminfo = get_memory_node_info()
+    return meminfo.available_memory, meminfo.total_memory
+
+
 torch.Event = _EventPlaceholder
 torch.cuda.Event = _EventPlaceholder
 torch.cuda.Stream = _StreamPlaceholder
@@ -39,17 +53,22 @@ torch.cuda.set_stream = noop
 torch.cuda.current_stream = lambda *args, **kwargs: _StreamPlaceholder()
 torch.accelerator.synchronize = noop
 torch.accelerator.empty_cache = noop
+torch.Tensor.pin_memory = fake_pin_memory
+torch.accelerator.get_memory_info = get_memory_info
 
 # Patch vLLM torch utils
 import vllm.utils.torch_utils as torch_utils
 
 
 def async_tensor_h2d(
-    data: list,
-    dtype: torch.dtype,
+    data: list | np.ndarray | torch.Tensor,
     device: str | torch.device,
-    pin_memory: bool = False,
+    dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
+    if isinstance(data, np.ndarray):
+        data = torch.from_numpy(data)
+    if isinstance(data, torch.Tensor):
+        return data.to(dtype=dtype)
     return torch.tensor(data, dtype=dtype, device="cpu")
 
 
