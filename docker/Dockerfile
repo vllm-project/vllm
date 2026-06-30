@@ -311,9 +311,10 @@ ENV CARGO_BUILD_JOBS=4
 # Build the release artifacts. Cache cargo registry/git, but not target/,
 # because stale target metadata can outlive source updates across BuildKit
 # cache reuse.
-RUN --mount=type=cache,target=/root/.cargo/registry \
-    --mount=type=cache,target=/root/.cargo/git \
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,target=/root/.cargo/git,sharing=locked \
     bash build_rust.sh
+
 #################### RUST BUILD IMAGE ####################
 
 #################### CSRC BUILD IMAGE ####################
