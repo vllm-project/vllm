@@ -159,7 +159,7 @@ For simplicity, we assume `block_size=1` in this section.
 
 ### High level idea
 
-The block pool uses a dict similar to `tuple(block_hash, group_id) -> block` to catch the full blocks. That means the same tokens of different groups are cached and evicted independently.
+The block pool uses a dict similar to `tuple(block_hash, group_id) -> block` to cache the full blocks. That means the same tokens of different groups are cached and evicted independently.
 
 When a new request comes in, we check the cache hit prefix of each group, and return the intersection of these groups as the cached prefix of the request. See below for the detailed algorithm for checking the cache hit of one group & performing the intersection.
 

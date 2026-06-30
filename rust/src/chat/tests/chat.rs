@@ -277,6 +277,7 @@ impl ChatRenderer for FakeChatBackend {
 
         Ok(RenderedPrompt {
             prompt: Prompt::Text(prompt),
+            effective_template_kwargs: request.chat_options.template_kwargs.clone(),
         })
     }
 }
@@ -494,12 +495,12 @@ async fn chat_streams_text_events() {
     match next_semantic(&mut stream).await {
         Some(Ok(ChatEvent::Done {
             message,
-            output_token_count,
+            usage,
             finish_reason,
             ..
         })) => {
             assert_eq!(message.text(), "Hi");
-            assert_eq!(output_token_count, 3);
+            assert_eq!(usage.output_token_count, 3);
             assert_eq!(
                 finish_reason,
                 FinishReason::Stop(Some(StopReason::TokenId(b'!' as u32)))
@@ -590,13 +591,9 @@ async fn chat_stream_waits_for_complete_utf8_before_emitting() {
     );
 
     match next_semantic(&mut stream).await {
-        Some(Ok(ChatEvent::Done {
-            message,
-            output_token_count,
-            ..
-        })) => {
+        Some(Ok(ChatEvent::Done { message, usage, .. })) => {
             assert_eq!(message.text(), "你");
-            assert_eq!(output_token_count, 4);
+            assert_eq!(usage.output_token_count, 4);
         }
         other => panic!("unexpected final event: {other:?}"),
     }
@@ -681,12 +678,12 @@ async fn chat_stream_flushes_held_text_on_finish() {
     match next_semantic(&mut stream).await {
         Some(Ok(ChatEvent::Done {
             message,
-            output_token_count,
+            usage,
             finish_reason,
             ..
         })) => {
             assert_eq!(message.text(), "ok st");
-            assert_eq!(output_token_count, 5);
+            assert_eq!(usage.output_token_count, 5);
             assert_eq!(finish_reason, FinishReason::Length);
         }
         other => panic!("unexpected final event: {other:?}"),
@@ -857,13 +854,9 @@ async fn chat_stream_preserves_terminal_stop_token_when_requested() {
     );
 
     match next_semantic(&mut stream).await {
-        Some(Ok(ChatEvent::Done {
-            message,
-            output_token_count,
-            ..
-        })) => {
+        Some(Ok(ChatEvent::Done { message, usage, .. })) => {
             assert_eq!(message.text(), "Hi!");
-            assert_eq!(output_token_count, 3);
+            assert_eq!(usage.output_token_count, 3);
         }
         other => panic!("unexpected final event: {other:?}"),
     }
@@ -1066,11 +1059,11 @@ async fn chat_collectors_return_structured_message_and_visible_text() {
     assert_eq!(message.message.text(), "outer");
     assert_eq!(message.finish_reason, FinishReason::Length);
     assert_eq!(
-        message.prompt_token_count,
+        message.usage.prompt_token_count,
         "system: You are terse.\nuser: Say hi\nassistant:".len()
     );
     assert_eq!(
-        message.output_token_count,
+        message.usage.output_token_count,
         "<think>inner</think>outer".len()
     );
 
@@ -1187,7 +1180,7 @@ async fn chat_stream_parses_tool_calls_automatically() {
                             ),
                             request_output(
                                 "chat-tool",
-                                bytes_to_token_ids(
+                                bytes_with_special_stop_token(
                                     b"\"arguments\":{\"city\":\"Paris\"}}\n</tool_call>",
                                 ),
                                 Some(EngineCoreFinishReason::Stop),

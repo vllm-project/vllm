@@ -423,6 +423,54 @@ To enable this feature:
 --kv-transfer-config '{..., "kv_connector_extra_config": {"enable_cross_layers_blocks": "True"}}'
 ```
 
+## Metrics Reference
+
+vLLM periodically logs a `KV Transfer metrics` line summarising NIXL transfer
+activity for the last reporting interval. Example output:
+
+```text
+KV Transfer metrics: Num successful transfers=4, Avg xfer time (ms)=1.381,
+P90 xfer time (ms)=2.601, Avg post time (ms)=0.672, P90 post time (ms)=0.801,
+Avg MB per transfer=2.25, Throughput (MB/s)=1629.549, Avg number of descriptors=72.0
+```
+
+The table below describes each field. All timing values cover only the
+successful transfers recorded in the current interval; failed transfers are
+counted separately via Prometheus (see
+[Prometheus metrics](#prometheus-metrics) below).
+
+| Metric | Unit | Description |
+| -------- | ------ | ------------- |
+| `Num successful transfers` | count | Number of NIXL KV-block transfers that completed without error during the interval. A transfer corresponds to one prefill request's worth of KV cache being moved from the prefiller to the decoder (or vice versa in bidirectional mode). |
+| `Avg xfer time (ms)` | ms | Mean end-to-end transfer duration (`xferDuration` in NIXL telemetry, converted from µs). Measured from when the request is posted to when the backend reports completion, so it includes both the posting step and the actual data movement. |
+| `P90 xfer time (ms)` | ms | 90th-percentile transfer duration. Use this to identify tail latency: a large gap between average and P90 suggests occasional stragglers (e.g., network congestion or large KV blocks). |
+| `Avg post time (ms)` | ms | Mean time to submit the transfer request to the RDMA backend (`postDuration` in NIXL telemetry). This is the synchronous cost of posting work to the NIC queue (descriptor setup, etc.) before the async data movement begins. |
+| `P90 post time (ms)` | ms | 90th-percentile request-posting duration. Elevated P90 here (with low xfer P90) points to overhead in submitting requests rather than in the data transfer itself. |
+| `Avg MB per transfer` | MB | Mean payload size per transfer, computed as `total bytes transferred / number of transfers`. Reflects the average KV cache footprint of a single request (sequence length × layers × head dimension × dtype bytes). |
+| `Throughput (MB/s)` | MB/s | Effective bandwidth over the interval: `total MB transferred / total xfer time (s)` across all successful transfers. This is aggregate throughput, not per-request bandwidth. |
+| `Avg number of descriptors` | count | Mean number of NIXL memory descriptors (scatter-gather segments) submitted per transfer. More descriptors indicate more fragmented or larger KV cache allocations; very high counts can increase descriptor-registration overhead. |
+
+### Prometheus metrics
+
+In addition to the periodic log line, the following Prometheus metrics are
+exported when NixlConnector is active:
+
+| Metric name | Type | Description |
+| ------------- | ------ | ------------- |
+| `vllm:nixl_xfer_time_seconds` | Histogram | Per-transfer RDMA copy duration (seconds). |
+| `vllm:nixl_post_time_seconds` | Histogram | Time to submit the transfer request to the RDMA backend (seconds). |
+| `vllm:nixl_bytes_transferred` | Histogram | Bytes moved per transfer. |
+| `vllm:nixl_num_descriptors` | Histogram | Descriptor count per transfer. |
+| `vllm:nixl_num_failed_transfers` | Counter | Cumulative count of failed NIXL KV-block transfers. |
+| `vllm:nixl_num_failed_notifications` | Counter | Cumulative count of failed completion notifications (`send_notif`). |
+| `vllm:nixl_num_kv_expired_reqs` | Counter | Requests whose KV blocks expired on the prefiller before the decoder read them (tracked on the P instance). |
+
+!!! tip
+    High `vllm:nixl_num_kv_expired_reqs` indicates that the prefiller's lease
+    duration (`kv_lease_duration`) is too short for your network or workload.
+    Increase it via `--kv-transfer-config '{"kv_connector_extra_config":
+    {"kv_lease_duration": <seconds>}}'`.
+
 ## Example Scripts/Code
 
 Refer to these example scripts in the vLLM repository:

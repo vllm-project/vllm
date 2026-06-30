@@ -72,11 +72,10 @@ def _missing(*_: Any, **__: Any) -> NoReturn:
     )
 
 
-def _missing_dsv4_sparse_mla(*_: Any, **__: Any) -> NoReturn:
+def _missing_sparse_mla(*_: Any, **__: Any) -> NoReturn:
     raise RuntimeError(
-        "flashinfer.mla.trtllm_batch_decode_sparse_mla_dsv4 is not available. "
-        "Install a FlashInfer build that includes DeepSeek V4 sparse MLA "
-        "TRTLLM-GEN support."
+        "FlashInfer sparse MLA decode APIs are not available. "
+        "Install a FlashInfer build that includes sparse MLA decode support."
     )
 
 
@@ -149,14 +148,18 @@ flashinfer_b12x_fused_moe = _lazy_import_wrapper(
 trtllm_fp4_block_scale_moe = _lazy_import_wrapper(
     "flashinfer", "trtllm_fp4_block_scale_moe"
 )
-# DeepSeek V4 sparse MLA TRTLLM-GEN decode launcher (public wrapper). Handles
-# the SWA + compressed KV pools, the concatenated sparse-index matrix, and
-# per-tensor FP8 / BF16 inputs with BF16 output.
-flashinfer_trtllm_batch_decode_sparse_mla_dsv4 = _lazy_import_wrapper(
-    "flashinfer.mla",
-    "trtllm_batch_decode_sparse_mla_dsv4",
-    fallback_fn=_missing_dsv4_sparse_mla,
+flashinfer_trtllm_batch_decode_with_kv_cache_mla = _lazy_import_wrapper(
+    "flashinfer.decode",
+    "trtllm_batch_decode_with_kv_cache_mla",
+    fallback_fn=_missing_sparse_mla,
 )
+flashinfer_trtllm_batch_decode_sparse_mla_dsv4 = _lazy_import_wrapper(
+    "flashinfer.decode",
+    "trtllm_batch_decode_sparse_mla_dsv4",
+    fallback_fn=_missing_sparse_mla,
+)
+
+
 # Special case for autotune since it returns a context manager
 autotune = _lazy_import_wrapper(
     "flashinfer.autotuner",
@@ -206,6 +209,26 @@ def has_flashinfer_moe() -> bool:
     return (
         has_flashinfer()
         and importlib.util.find_spec("flashinfer.fused_moe") is not None
+    )
+
+
+@functools.cache
+def has_flashinfer_sparse_mla_sm120() -> bool:
+    """Return ``True`` if FlashInfer sparse MLA decode support is available."""
+    if not has_flashinfer():
+        return False
+    try:
+        from flashinfer.autotuner import autotune
+        from flashinfer.decode import (
+            trtllm_batch_decode_sparse_mla_dsv4,
+            trtllm_batch_decode_with_kv_cache_mla,
+        )
+    except ImportError:
+        return False
+    return (
+        callable(trtllm_batch_decode_sparse_mla_dsv4)
+        and callable(trtllm_batch_decode_with_kv_cache_mla)
+        and callable(autotune)
     )
 
 
@@ -934,20 +957,27 @@ def should_use_flashinfer_for_blockscale_fp8_gemm(
     return should_use_flashinfer
 
 
-_MIN_CUDNN_FP8 = 91701  # cuDNN >= 9.17.1 required for FP8 attention
+_MIN_CUDNN_FP8 = 91701  # cuDNN >= 9.17.1 required for FP8 ViT attention
 
 
 @functools.cache
 def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
     """Check if FP8 ViT attention is supported on this platform.
 
-    Requires native FP8 hardware support, the FlashInfer cuDNN backend,
+    Requires Blackwell (SM 100) or newer, the FlashInfer cuDNN backend,
     and cuDNN >= 9.17.1.
+
+    cuDNN's FP8 SDPA forward path with bf16/fp16 output (used by
+    ``MMEncoderAttention._forward_flashinfer``) gates internally on
+    ``prop.major >= 10``; on Hopper it raises a misleading
+    ``cudnnGraphNotSupportedError: ... cuDNN version 9.13.0 and newer``
+    even when the installed cuDNN is new enough. See PR #38065 for the
+    original Blackwell-only design intent.
     """
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-    # cuDNN SDPA FP8 requires Hopper (SM 90) or newer.
-    if not current_platform.has_device_capability(90):
+    # cuDNN SDPA FP8 with bf16/fp16 output requires Blackwell (SM 100) or newer.
+    if not current_platform.has_device_capability(100):
         return False
 
     try:
@@ -981,6 +1011,7 @@ __all__ = [
     "flashinfer_b12x_fused_moe",
     "flashinfer_convert_sf_to_mma_layout",
     "trtllm_fp4_block_scale_moe",
+    "flashinfer_trtllm_batch_decode_with_kv_cache_mla",
     "flashinfer_trtllm_batch_decode_sparse_mla_dsv4",
     "autotune",
     "has_flashinfer_moe",

@@ -34,6 +34,12 @@ pub trait Tokenizer: Send + Sync {
         None
     }
 
+    /// Return the vocabulary size. Backends that cannot report it fall back to
+    /// `usize::MAX`, an effectively unbounded value used only by test stubs.
+    fn vocab_size(&self) -> usize {
+        usize::MAX
+    }
+
     /// Return whether the given token ID is special.
     fn is_special_id(&self, _token_id: u32) -> bool {
         false
