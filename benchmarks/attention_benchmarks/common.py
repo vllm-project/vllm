@@ -310,7 +310,7 @@ class BenchmarkConfig:
     max_model_len: int | None = None
     dtype: torch.dtype = torch.float16
     profile_memory: bool = False
-    use_cuda_graphs: bool = False
+    use_cuda_graphs: bool = True
     ncu_profile: bool = False
     warmup_ms: int | None = None
 
