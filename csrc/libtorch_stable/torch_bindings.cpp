@@ -4,6 +4,10 @@
 
 #include <torch/csrc/stable/library.h>
 
+#ifndef USE_ROCM
+std::string get_compiled_cuda_archs() { return VLLM_COMPILED_CUDA_ARCHS; }
+#endif
+
 // Register ops with STABLE_TORCH_LIBRARY for libtorch stable ABI compatibility.
 // Note: We register under namespace "_C" so ops are accessible as
 // torch.ops._C.<op_name> for compatibility with existing code.
@@ -33,6 +37,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
 
   // TODO: Remove this once ROCm upgrade to torch 2.11.
   ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
+  ops.def("get_compiled_cuda_archs() -> str");
 
   // Note about marlin kernel 'workspace' arguments:
   // Technically these should be mutable since they are modified by the kernel.
@@ -786,6 +791,7 @@ STABLE_TORCH_LIBRARY_IMPL(_C_cuda_utils, CompositeExplicitAutograd,
 // ops.impl("op_name", &func) without a dispatch key in the non-stable API.
 STABLE_TORCH_LIBRARY_IMPL(_C, CompositeExplicitAutograd, ops) {
 #ifndef USE_ROCM
+  ops.impl("get_compiled_cuda_archs", TORCH_BOX(&get_compiled_cuda_archs));
   ops.impl("cutlass_scaled_mm_supports_fp8",
            TORCH_BOX(&cutlass_scaled_mm_supports_fp8));
   ops.impl("cutlass_group_gemm_supported",

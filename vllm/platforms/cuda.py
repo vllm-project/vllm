@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 from collections.abc import Callable
 from datetime import timedelta
 from functools import cache, lru_cache, wraps
@@ -48,6 +49,8 @@ _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
 pynvml = import_pynvml()
+
+_COMPILED_CUDA_ARCH_RE = re.compile(r"^(?P<major>\d+)\.(?P<minor>\d+)(?P<kind>[af])?$")
 
 # pytorch 2.5 uses cudnn sdpa by default, which will cause crash on some models
 # see https://github.com/huggingface/diffusers/issues/9704 for details
@@ -284,6 +287,62 @@ class CudaPlatformBase(Platform):
     @classmethod
     def log_warnings(cls):
         pass
+
+    @staticmethod
+    def _compiled_arch_covers_device(arch: str, capability: DeviceCapability) -> bool:
+        match = _COMPILED_CUDA_ARCH_RE.match(arch)
+        if match is None:
+            return False
+
+        major = int(match.group("major"))
+        minor = int(match.group("minor"))
+        kind = match.group("kind")
+
+        if kind == "f":
+            return major == capability.major
+        return major == capability.major and minor == capability.minor
+
+    @classmethod
+    def _warn_if_device_arch_not_compiled(cls) -> None:
+        try:
+            compiled_archs_str = torch.ops._C.get_compiled_cuda_archs()
+        except (AttributeError, RuntimeError):
+            return
+
+        compiled_archs = [
+            arch.strip() for arch in compiled_archs_str.split(",") if arch.strip()
+        ]
+        if not compiled_archs:
+            return
+
+        unsupported_devices: list[str] = []
+        for device_id in range(cls.device_count()):
+            capability = cls.get_device_capability(device_id)
+            if capability is None:
+                continue
+            if any(
+                cls._compiled_arch_covers_device(arch, capability)
+                for arch in compiled_archs
+            ):
+                continue
+            device_name = cls.get_device_name(device_id)
+            unsupported_devices.append(
+                f"{device_id}: {device_name} (compute capability "
+                f"{capability.as_version_str()})"
+            )
+
+        if unsupported_devices:
+            logger.warning_once(
+                "The current vLLM wheel was built for CUDA architectures %s, "
+                "but the following visible CUDA device(s) are not covered: %s. "
+                "This may cause CUDA kernel launch failures or force slower "
+                "fallback paths. Note that CUDA 13 family-specific targets "
+                "such as 10.0f and 12.0f cover the corresponding major-version "
+                "GPU family, while architecture-specific targets such as 12.1a "
+                "cover only that exact compute capability.",
+                ", ".join(compiled_archs),
+                "; ".join(unsupported_devices),
+            )
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:
@@ -950,6 +1009,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
     @classmethod
     @with_nvml_context
     def log_warnings(cls):
+        cls._warn_if_device_arch_not_compiled()
         device_ids: int = pynvml.nvmlDeviceGetCount()
         if device_ids > 1:
             device_names = [cls._get_physical_device_name(i) for i in range(device_ids)]

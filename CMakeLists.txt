@@ -218,6 +218,22 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   cuda_archs_loose_intersection(CUDA_ARCHS
     "${CUDA_SUPPORTED_ARCHS}" "${CUDA_ARCHS}")
   message(STATUS "CUDA supported target architectures: ${CUDA_ARCHS}")
+
+  set(VLLM_COMPILED_CUDA_ARCHS)
+  foreach(_ARCH ${CUDA_ARCHS})
+    set(_COMPILED_ARCH "${_ARCH}")
+    if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.0)
+      if(_ARCH MATCHES "^(10|11|12)\\.0$")
+        set(_COMPILED_ARCH "${_ARCH}f")
+      endif()
+    elseif(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.8)
+      if(_ARCH MATCHES "^(10\\.(0|1|3)|12\\.(0|1))$")
+        set(_COMPILED_ARCH "${_ARCH}a")
+      endif()
+    endif()
+    list(APPEND VLLM_COMPILED_CUDA_ARCHS "${_COMPILED_ARCH}")
+  endforeach()
+  list(JOIN VLLM_COMPILED_CUDA_ARCHS "," VLLM_COMPILED_CUDA_ARCHS_STR)
 else()
   #
   # For other GPU targets override the GPU architectures detected by cmake/torch
@@ -473,6 +489,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       "${NVFP4_SCALED_MM_ENTRY_SRC}"
       "csrc/libtorch_stable/quantization/awq/gemm_kernels.cu"
       "csrc/libtorch_stable/minimax_reduce_rms_kernel.cu")
+    set_compile_definitions_for_srcs(
+      SRCS "${VLLM_STABLE_TORCH_BINDINGS_SRC}"
+      DEFINITIONS VLLM_COMPILED_CUDA_ARCHS=\"${VLLM_COMPILED_CUDA_ARCHS_STR}\")
 
     #
     # Machete kernels
