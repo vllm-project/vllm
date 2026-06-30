@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Engine-level event notifications.
 
-These are rare, engine-scoped state transitions (as opposed to the
-per-request lifecycle events in `EngineCoreEvent` and the per-step sampling
-in `SchedulerStats`). Events originate in the worker or engine core and are
-forwarded to frontends on `EngineCoreOutputs.engine_notifications`.
+These are engine-scoped state transitions (as opposed to the per-request
+lifecycle events in `EngineCoreEvent` and the per-step sampling in
+`SchedulerStats`). Events originate in the worker or engine core and are
+forwarded to frontends on `EngineCoreOutputs.engine_notifications`. They are
+typically infrequent (LoRA load/unload), but the channel does not assume so:
+a producer may emit on every step.
 
 Each event is a msgspec Struct with an explicit `tag`, so the union is
 encoded as a map with a `"type"` discriminator field. Like the rest of
@@ -15,10 +17,12 @@ rather than being skipped. The Rust frontend
 (`rust/src/engine-core-client/src/protocol/notifications.rs`) mirrors the
 union and the same fail-fast behavior.
 
-Channel contract: every notification type must be a complete, self-contained
-snapshot. The engine may coalesce queued notifications by keeping only the
-latest one per type, and consumers replace (never merge with) previously
-observed state.
+Channel contract: notifications accumulate additively (like `SchedulerStats`).
+The engine delivers every queued event in emission order and never drops one,
+so a notification may carry an absolute snapshot (consumers replace prior
+state, as `LoRALoadEvent` does) or an incremental delta (consumers apply each
+event, e.g. a counter increment). Throttling redundant events is the
+producer's job: `LoRALoadEvent` only emits when the loaded set changed.
 """
 
 import msgspec

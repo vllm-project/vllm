@@ -230,10 +230,11 @@ class EngineCore:
 
         # Engine notifications awaiting delivery to the in-process frontend
         # (EngineCoreProc overrides _publish_notifications to broadcast
-        # immediately instead). Keyed by notification type: each
-        # notification is a complete snapshot, so the latest one supersedes
-        # earlier ones and the queue stays bounded while the engine is idle.
-        self._pending_notifications: dict[type, EngineNotification] = {}
+        # immediately instead). Accumulated additively in emission order,
+        # like scheduler_stats: every queued event is delivered, nothing is
+        # dropped. Producers throttle their own emission (e.g. LoRA only
+        # emits on a change), so the buffer stays bounded while idle.
+        self._pending_notifications: list[EngineNotification] = []
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
@@ -644,14 +645,13 @@ class EngineCore:
     def _publish_notifications(self, notifications: list[EngineNotification]) -> None:
         """Queue engine notifications for delivery to the frontend.
 
-        Notifications are one-shot deltas (unlike scheduler_stats they are
-        not regenerated every step), so delivery must not silently drop
-        them. The in-process engine holds the latest snapshot per type
-        until the next step's outputs; EngineCoreProc overrides this to
-        broadcast to every connected frontend immediately.
+        Notifications accumulate additively (like scheduler_stats), so
+        delivery must not silently drop them: every queued event is sent in
+        emission order. The in-process engine buffers them until the next
+        step's outputs; EngineCoreProc overrides this to broadcast to every
+        connected frontend immediately.
         """
-        for notification in notifications:
-            self._pending_notifications[type(notification)] = notification
+        self._pending_notifications.extend(notifications)
 
     def _flush_notifications(
         self, engine_core_outputs: dict[int, EngineCoreOutputs]
@@ -661,8 +661,8 @@ class EngineCore:
             return
         if (eco := next(iter(engine_core_outputs.values()), None)) is None:
             engine_core_outputs[0] = eco = EngineCoreOutputs()
-        eco.engine_notifications = list(self._pending_notifications.values())
-        self._pending_notifications.clear()
+        eco.engine_notifications = self._pending_notifications
+        self._pending_notifications = []
 
     def _collect_step_notifications(
         self,
