@@ -425,6 +425,13 @@ def _parse_message_no_recipient(
 # ---------------------------------------------------------------------------
 
 
+def get_response_output_recipient(recipient: str | None) -> str | None:
+    """Exclude constrained formats misparsed as recipients by older Harmony."""
+    if recipient and recipient.startswith("<|constrain|>"):
+        return None
+    return recipient
+
+
 def harmony_to_response_output(
     message: Message,
     function_tool_names: frozenset[str] | None = None,
@@ -440,7 +447,7 @@ def harmony_to_response_output(
         return []
 
     output_items: list[ResponseOutputItem] = []
-    recipient = message.recipient
+    recipient = get_response_output_recipient(message.recipient)
 
     if recipient is not None:
         # Browser tool calls (browser.search, browser.open, browser.find)
@@ -479,7 +486,7 @@ def parser_state_to_response_output(
         return []
     if parser.current_role != Role.ASSISTANT:
         return []
-    current_recipient = parser.current_recipient
+    current_recipient = get_response_output_recipient(parser.current_recipient)
     if current_recipient is not None and current_recipient.startswith("browser."):
         return []
 

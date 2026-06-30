@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for vllm.entrypoints.openai.responses.harmony."""
 
+from types import SimpleNamespace
+
 from openai.types.responses import (
     ResponseFunctionToolCall,
     ResponseOutputMessage,
@@ -10,10 +12,19 @@ from openai.types.responses import (
 from openai.types.responses.response_output_item import McpCall
 from openai_harmony import Author, Message, Role, TextContent
 
+from vllm.entrypoints.openai.parser.harmony_utils import (
+    get_encoding,
+    get_streamable_parser_for_assistant,
+)
 from vllm.entrypoints.openai.responses.harmony import (
     harmony_to_response_output,
     parser_state_to_response_output,
     response_previous_input_to_harmony,
+)
+from vllm.entrypoints.openai.responses.streaming_events import (
+    StreamingState,
+    emit_content_delta_events,
+    emit_previous_item_done_events,
 )
 
 
@@ -632,3 +643,49 @@ def test_parser_state_to_response_output_analysis_channel() -> None:
     assert len(builtin_items) == 1
     assert not isinstance(builtin_items[0], McpCall)
     assert builtin_items[0].type == "reasoning"
+
+
+class TestConstrainedOutputWithoutRecipient:
+    @staticmethod
+    def _parse(text: str):
+        parser = get_streamable_parser_for_assistant()
+        for token in get_encoding().encode(text, allowed_special="all"):
+            parser.process(token)
+        return parser
+
+    def test_completed_output(self) -> None:
+        parser = self._parse(
+            '<|channel|>final <|constrain|>json<|message|>{"result":true}<|return|>',
+        )
+
+        message = parser.messages[0]
+        output_items = harmony_to_response_output(message)
+        assert len(output_items) == 1
+        assert isinstance(output_items[0], ResponseOutputMessage)
+        assert output_items[0].content[0].text == '{"result":true}'
+
+        state = StreamingState(
+            current_content_index=0,
+            current_item_id="msg_test",
+        )
+        events = emit_previous_item_done_events(message, state)
+        assert "response.output_text.done" in [event.type for event in events]
+
+    def test_in_progress_output(self) -> None:
+        parser = self._parse(
+            '<|channel|>final <|constrain|>json<|message|>{"result":true}',
+        )
+
+        output_items = parser_state_to_response_output(parser)
+        assert len(output_items) == 1
+        assert isinstance(output_items[0], ResponseOutputMessage)
+        assert output_items[0].content[0].text == '{"result":true}'
+
+        context = SimpleNamespace(
+            last_content_delta=parser.current_content,
+            parser=parser,
+            function_tool_names=None,
+        )
+        events = emit_content_delta_events(context, StreamingState())
+        event_types = [event.type for event in events]
+        assert "response.output_text.delta" in event_types
