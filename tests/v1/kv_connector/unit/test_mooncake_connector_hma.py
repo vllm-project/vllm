@@ -318,14 +318,14 @@ async def test_build_transfer_params_multi_group_trimming(monkeypatch):
         worker.shutdown()
 
 
-def test_common_group_indices_rejects_missing_group_metadata():
+def test_common_group_indices_falls_back_to_physical_group_without_logical_metadata():
     local_region = TransferRegion(
         layer_name="model.layers.4.self_attn",
         layer_index=4,
         base_addr=0x1000,
         block_len=4096,
         kv_block_len=4096,
-        group_indices=(0,),
+        logical_group_indices=(0,),
     )
     remote_region = TransferRegion(
         layer_name="model.layers.4.self_attn",
@@ -340,25 +340,19 @@ def test_common_group_indices_rejects_missing_group_metadata():
         base_addr=0x3000,
         block_len=4096,
         kv_block_len=4096,
-        group_indices=(0, 2),
+        logical_group_indices=(0, 2),
     )
 
-    assert (
-        _common_group_indices_for_regions(
-            local_region,
-            remote_region,
-            num_groups=3,
-        )
-        is None
-    )
-    assert (
-        _common_group_indices_for_regions(
-            remote_region,
-            local_region,
-            num_groups=3,
-        )
-        is None
-    )
+    assert _common_group_indices_for_regions(
+        local_region,
+        remote_region,
+        num_groups=3,
+    ) == (0,)
+    assert _common_group_indices_for_regions(
+        remote_region,
+        local_region,
+        num_groups=3,
+    ) == (0,)
     assert _common_group_indices_for_regions(
         local_region,
         annotated_remote_region,
@@ -397,7 +391,7 @@ def test_align_transfer_regions_fans_out_shared_physical_region_groups():
             "model.layers.4.attn.compressor.state_cache",
         ),
         layer_indices=(4, 4),
-        group_indices=(1, 3),
+        logical_group_indices=(1, 3),
         alias_group_indices=((1,), (3,)),
     )
     local_layer = TransferRegion(
@@ -414,7 +408,7 @@ def test_align_transfer_regions_fans_out_shared_physical_region_groups():
             "model.layers.5.attn.compressor.state_cache",
         ),
         layer_indices=(6, 6, 5, 6, 5),
-        group_indices=(0, 1, 2, 3, 4),
+        logical_group_indices=(0, 1, 2, 3, 4),
         alias_group_indices=((0,), (1,), (2,), (3,), (4,)),
     )
     remote_prev_layer = TransferRegion(
@@ -431,7 +425,7 @@ def test_align_transfer_regions_fans_out_shared_physical_region_groups():
             "model.layers.5.attn.compressor.state_cache",
         ),
         layer_indices=(4, 2, 3, 4, 5),
-        group_indices=(0, 1, 2, 3, 4),
+        logical_group_indices=(0, 1, 2, 3, 4),
         alias_group_indices=((0,), (1,), (2,), (3,), (4,)),
     )
     remote_current_layer = TransferRegion(
@@ -448,7 +442,7 @@ def test_align_transfer_regions_fans_out_shared_physical_region_groups():
             "model.layers.7.attn.compressor.state_cache",
         ),
         layer_indices=(6, 4, 5, 6, 7),
-        group_indices=(0, 1, 2, 3, 4),
+        logical_group_indices=(0, 1, 2, 3, 4),
         alias_group_indices=((0,), (1,), (2,), (3,), (4,)),
     )
     remote_next_layer = TransferRegion(
@@ -465,7 +459,7 @@ def test_align_transfer_regions_fans_out_shared_physical_region_groups():
             "model.layers.9.attn.compressor.state_cache",
         ),
         layer_indices=(8, 6, 7, 8, 9),
-        group_indices=(0, 1, 2, 3, 4),
+        logical_group_indices=(0, 1, 2, 3, 4),
         alias_group_indices=((0,), (1,), (2,), (3,), (4,)),
     )
 
@@ -528,7 +522,7 @@ def test_align_transfer_regions_rejects_unbound_alias_index_match():
             "model.layers.11.attn.swa_cache",
         ),
         layer_indices=(10, 11),
-        group_indices=(0, 1),
+        logical_group_indices=(0, 1),
         alias_group_indices=((0,), (1,)),
     )
     remote_region = TransferRegion(
@@ -542,7 +536,7 @@ def test_align_transfer_regions_rejects_unbound_alias_index_match():
             "model.layers.12.attn.swa_cache",
         ),
         layer_indices=(12, 11),
-        group_indices=(0, 1),
+        logical_group_indices=(0, 1),
         alias_group_indices=((0,), (1,)),
     )
 
@@ -566,7 +560,7 @@ def test_align_transfer_regions_rejects_duplicate_remote_alias_group():
         kv_block_len=100,
         layer_aliases=("model.layers.4.attn",),
         layer_indices=(4,),
-        group_indices=(0,),
+        logical_group_indices=(0,),
         alias_group_indices=((0,),),
     )
     local_region_b = TransferRegion(
@@ -577,7 +571,7 @@ def test_align_transfer_regions_rejects_duplicate_remote_alias_group():
         kv_block_len=100,
         layer_aliases=("model.layers.4.attn",),
         layer_indices=(4,),
-        group_indices=(0,),
+        logical_group_indices=(0,),
         alias_group_indices=((0,),),
     )
     remote_region = TransferRegion(
@@ -588,7 +582,7 @@ def test_align_transfer_regions_rejects_duplicate_remote_alias_group():
         kv_block_len=100,
         layer_aliases=("model.layers.4.attn",),
         layer_indices=(4,),
-        group_indices=(0,),
+        logical_group_indices=(0,),
         alias_group_indices=((0,),),
     )
 
@@ -655,7 +649,7 @@ async def test_build_transfer_params_filters_groups_per_shared_tensor_alias():
             "model.layers.31.attn.compressor.state_cache",
         ),
         layer_indices=(30, 30, 31, 30, 31),
-        group_indices=(0, 1, 2, 3, 4),
+        logical_group_indices=(0, 1, 2, 3, 4),
         alias_group_indices=((0,), (1,), (2,), (3,), (4,)),
     )
     remote_current_layer = TransferRegion(
@@ -672,7 +666,7 @@ async def test_build_transfer_params_filters_groups_per_shared_tensor_alias():
             "model.layers.31.attn.compressor.state_cache",
         ),
         layer_indices=(30, 28, 29, 30, 31),
-        group_indices=(0, 1, 2, 3, 4),
+        logical_group_indices=(0, 1, 2, 3, 4),
         alias_group_indices=((0,), (1,), (2,), (3,), (4,)),
     )
     remote_shifted_layer = TransferRegion(
@@ -689,7 +683,7 @@ async def test_build_transfer_params_filters_groups_per_shared_tensor_alias():
             "model.layers.33.attn.compressor.state_cache",
         ),
         layer_indices=(32, 30, 31, 32, 33),
-        group_indices=(0, 1, 2, 3, 4),
+        logical_group_indices=(0, 1, 2, 3, 4),
         alias_group_indices=((0,), (1,), (2,), (3,), (4,)),
     )
 
@@ -774,7 +768,7 @@ async def test_build_transfer_params_filters_groups_per_shared_region():
             kv_block_len=block_len,
             layer_aliases=("model.layers.4.self_attn",),
             layer_indices=(4,),
-            group_indices=(0, 1),
+            logical_group_indices=(0, 1),
         ),
         TransferRegion(
             layer_name="model.layers.4.swa_attn",
@@ -784,7 +778,7 @@ async def test_build_transfer_params_filters_groups_per_shared_region():
             kv_block_len=block_len,
             layer_aliases=("model.layers.4.swa_attn",),
             layer_indices=(4,),
-            group_indices=(2,),
+            logical_group_indices=(2,),
         ),
     ]
     remote_regions = [
@@ -796,7 +790,7 @@ async def test_build_transfer_params_filters_groups_per_shared_region():
             kv_block_len=block_len,
             layer_aliases=("model.layers.4.self_attn",),
             layer_indices=(4,),
-            group_indices=(0,),
+            logical_group_indices=(0,),
         ),
         TransferRegion(
             layer_name="model.layers.4.swa_attn",
@@ -806,7 +800,7 @@ async def test_build_transfer_params_filters_groups_per_shared_region():
             kv_block_len=block_len,
             layer_aliases=("model.layers.4.swa_attn",),
             layer_indices=(4,),
-            group_indices=(1, 2),
+            logical_group_indices=(1, 2),
         ),
     ]
 
