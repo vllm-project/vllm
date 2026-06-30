@@ -301,6 +301,13 @@ def convert_to_unquantized_kernel_format(
             is_gated_act_gemm=is_act_and_mul,
         )
 
+    if (
+        unquantized_backend == UnquantizedMoeBackend.TRITON
+        and current_platform.is_rocm()
+        and envs.VLLM_ROCM_MOE_PADDING
+    ):
+        # Skip .contiguous(): it would undo the ROCm MoE weight padding.
+        return w13_weight, w2_weight
     return w13_weight.contiguous(), w2_weight.contiguous()
 
 
