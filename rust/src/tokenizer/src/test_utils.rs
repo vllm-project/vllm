@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use crate::{Result, Tokenizer, TokenizerError};
 
+const FIRST_CONFIGURED_TOKEN_ID: u32 = 256;
+
 /// Whether a configured test token should be treated as special.
 ///
 /// Special tokens are skipped by [`Tokenizer::decode`] when
@@ -48,6 +50,8 @@ struct TestToken {
 /// contract as production tokenizers:
 ///
 /// - ordinary text encodes as UTF-8 byte ids;
+/// - configured token ids start at 256, leaving `0..=255` for byte fallback;
+/// - configured token ids and token text are unique;
 /// - configured tokens are matched before ordinary bytes, using longest-prefix matching so
 ///   multi-character markers such as `<think>` work naturally;
 /// - `token_to_id` and `id_to_token` are consistent for configured tokens;
@@ -87,9 +91,8 @@ impl TestTokenizer {
 
     /// Add a configured token and return the updated tokenizer.
     ///
-    /// Configured tokens may use ids outside the byte range and may be marked
-    /// special or regular. If a configured id overlaps a byte id, the
-    /// configured token wins for `id_to_token`, `decode`, and `is_special_id`.
+    /// Configured tokens must use ids outside the byte range and may be marked
+    /// special or regular.
     pub fn with_token(mut self, token: impl Into<String>, id: u32, kind: TestTokenKind) -> Self {
         self.insert_token(token, id, kind);
         self
@@ -133,8 +136,24 @@ impl TestTokenizer {
 
     fn insert_token(&mut self, token: impl Into<String>, id: u32, kind: TestTokenKind) {
         let token = token.into();
-        self.token_to_id.insert(token.clone(), id);
-        self.id_to_token.insert(id, TestToken { text: token, kind });
+        assert!(
+            !token.is_empty(),
+            "configured test token text must be non-empty"
+        );
+        assert!(
+            id >= FIRST_CONFIGURED_TOKEN_ID,
+            "configured test token id {id} overlaps byte fallback range 0..=255"
+        );
+        assert!(
+            token.as_bytes().len() > 1,
+            "configured test token text {token:?} overlaps byte fallback token text"
+        );
+        if self.token_to_id.insert(token.clone(), id).is_some() {
+            panic!("configured test token text {token:?} was registered more than once");
+        }
+        if self.id_to_token.insert(id, TestToken { text: token, kind }).is_some() {
+            panic!("configured test token id {id} was registered more than once");
+        }
     }
 
     fn byte_to_token(id: u32) -> Option<String> {
@@ -267,24 +286,54 @@ mod tests {
     #[test]
     fn special_tokens_respect_skip_special_tokens() {
         let tokenizer = TestTokenizer::new()
-            .with_bos_token("<bos>", 1)
+            .with_bos_token("<bos>", 256)
             .with_special_token("<think>", 0xF001)
             .with_regular_token("</think>", 0xF002);
 
         assert_eq!(
             tokenizer.encode("<think>x</think>", true).unwrap(),
-            vec![1, 0xF001, b'x' as u32, 0xF002,]
+            vec![256, 0xF001, b'x' as u32, 0xF002,]
         );
         assert_eq!(
-            tokenizer.decode(&[1, 0xF001, b'x' as u32, 0xF002], false).unwrap(),
+            tokenizer.decode(&[256, 0xF001, b'x' as u32, 0xF002], false).unwrap(),
             "<bos><think>x</think>"
         );
         assert_eq!(
-            tokenizer.decode(&[1, 0xF001, b'x' as u32, 0xF002], true).unwrap(),
+            tokenizer.decode(&[256, 0xF001, b'x' as u32, 0xF002], true).unwrap(),
             "x</think>"
         );
         assert!(tokenizer.is_special_id(0xF001));
         assert!(!tokenizer.is_special_id(0xF002));
+    }
+
+    #[test]
+    #[should_panic(expected = "configured test token id 255 overlaps byte fallback range 0..=255")]
+    fn configured_token_id_must_stay_outside_byte_range() {
+        let _ = TestTokenizer::new().with_regular_token("<token>", 255);
+    }
+
+    #[test]
+    #[should_panic(expected = "configured test token text \"a\" overlaps byte fallback token text")]
+    fn configured_token_text_must_not_shadow_byte_tokens() {
+        let _ = TestTokenizer::new().with_regular_token("a", 256);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "configured test token text \"<token>\" was registered more than once"
+    )]
+    fn configured_token_text_must_be_unique() {
+        let _ = TestTokenizer::new()
+            .with_regular_token("<token>", 256)
+            .with_regular_token("<token>", 257);
+    }
+
+    #[test]
+    #[should_panic(expected = "configured test token id 256 was registered more than once")]
+    fn configured_token_id_must_be_unique() {
+        let _ = TestTokenizer::new()
+            .with_regular_token("<token-a>", 256)
+            .with_regular_token("<token-b>", 256);
     }
 
     #[test]
