@@ -38,6 +38,8 @@ if TYPE_CHECKING:
     from vllm.tokenizers import TokenizerLike
     from vllm.tool_parsers.abstract_tool_parser import Tool
 
+THINK_START = "<think>"
+THINK_END = "</think>"
 TOOL_CALL_START = "<tool_call>"
 TOOL_CALL_END = "</tool_call>"
 FUNC_PREFIX = "<function="
@@ -75,17 +77,25 @@ def _qwen3_arg_converter(raw_args: str, partial: bool) -> str:
 
 
 @functools.cache
-def qwen3_config(thinking: bool = True) -> ParserEngineConfig:
+def qwen3_config(
+    thinking: bool = True,
+    *,
+    name: str = "qwen3",
+    think_start: str = THINK_START,
+    think_end: str = THINK_END,
+    tool_start: str = TOOL_CALL_START,
+    tool_end: str = TOOL_CALL_END,
+) -> ParserEngineConfig:
     return ParserEngineConfig(
-        name="qwen3",
+        name=name,
         initial_state=ParserState.REASONING if thinking else ParserState.CONTENT,
         terminals={
             # Reasoning terminals
-            "THINK_START": "<think>",
-            "THINK_END": "</think>",
+            "THINK_START": think_start,
+            "THINK_END": think_end,
             # Tool call terminals
-            "TOOL_START": TOOL_CALL_START,
-            "TOOL_END": TOOL_CALL_END,
+            "TOOL_START": tool_start,
+            "TOOL_END": tool_end,
             "FUNC_PREFIX": FUNC_PREFIX,
             "FUNC_END": FUNC_END,
             "PARAM_START": PARAM_START,
@@ -93,10 +103,10 @@ def qwen3_config(thinking: bool = True) -> ParserEngineConfig:
             "CLOSE_ANGLE": ">",
         },
         token_id_terminals={
-            "THINK_START": "<think>",
-            "THINK_END": "</think>",
-            "TOOL_START": TOOL_CALL_START,
-            "TOOL_END": TOOL_CALL_END,
+            "THINK_START": think_start,
+            "THINK_END": think_end,
+            "TOOL_START": tool_start,
+            "TOOL_END": tool_end,
         },
         transitions={
             # -- Reasoning transitions --
@@ -185,7 +195,17 @@ class Qwen3Parser(ParserEngine):
 
     - ``<tool_call>`` as implicit reasoning end
     - Unpaired ``<tool_call>`` token ID detection for ``is_reasoning_end``
+
+    Subclasses that share the grammar but differ only in the four wrapper
+    token strings (reasoning + tool-call) override the class attributes
+    below; everything else is inherited unchanged.
     """
+
+    CONFIG_NAME = "qwen3"
+    THINK_START = THINK_START
+    THINK_END = THINK_END
+    TOOL_START = TOOL_CALL_START
+    TOOL_END = TOOL_CALL_END
 
     def __init__(
         self,
@@ -197,7 +217,14 @@ class Qwen3Parser(ParserEngine):
         self.thinking_enabled = chat_kwargs.get("enable_thinking", True)
         kwargs.setdefault(
             "parser_engine_config",
-            qwen3_config(thinking=self.thinking_enabled),
+            qwen3_config(
+                thinking=self.thinking_enabled,
+                name=self.CONFIG_NAME,
+                think_start=self.THINK_START,
+                think_end=self.THINK_END,
+                tool_start=self.TOOL_START,
+                tool_end=self.TOOL_END,
+            ),
         )
         super().__init__(
             tokenizer,
@@ -205,8 +232,8 @@ class Qwen3Parser(ParserEngine):
             **kwargs,
         )
         vocab = self.vocab
-        self._tool_call_token_id: int | None = vocab.get("<tool_call>")
-        self._tool_call_end_token_id: int | None = vocab.get("</tool_call>")
+        self._tool_call_token_id: int | None = vocab.get(self.TOOL_START)
+        self._tool_call_end_token_id: int | None = vocab.get(self.TOOL_END)
 
     def extract_reasoning(
         self,

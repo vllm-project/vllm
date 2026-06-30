@@ -665,6 +665,12 @@ class AnthropicServingMessages(OpenAIServingChat):
             )
             content += [anthropic_tool_call]
 
+        # Anthropic's canonical shape for an empty completion is a single
+        # empty text block, not []. Some strict clients assume content[0]
+        # exists, so emit one here.
+        if not content:
+            content.append(AnthropicContentBlock(type="text", text=""))
+
         result.content = content
 
         return result

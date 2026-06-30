@@ -141,6 +141,7 @@ pub(super) fn prepare_completion_request(
         cache_salt: request.cache_salt,
         add_special_tokens: request.add_special_tokens,
         data_parallel_rank: ctx.data_parallel_rank,
+        reasoning_parser_kwargs: None,
         lora_request: lora_resolution.lora_request.clone(),
     };
 
@@ -193,7 +194,7 @@ mod tests {
     use axum::http::HeaderMap;
     use serde_json::json;
     use vllm_text::Prompt;
-    use vllm_text::tokenizer::Tokenizer;
+    use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::prepare_completion_request;
     use crate::lora::LoraModelResolution;
@@ -211,32 +212,8 @@ mod tests {
         }
     }
 
-    #[derive(Debug)]
-    struct TestTokenizer;
-
-    impl Tokenizer for TestTokenizer {
-        fn encode(
-            &self,
-            text: &str,
-            _add_special_tokens: bool,
-        ) -> vllm_text::tokenizer::Result<Vec<u32>> {
-            Ok(text.bytes().map(u32::from).collect())
-        }
-
-        fn decode(
-            &self,
-            token_ids: &[u32],
-            _skip_special_tokens: bool,
-        ) -> vllm_text::tokenizer::Result<String> {
-            Ok(
-                String::from_utf8_lossy(&token_ids.iter().map(|id| *id as u8).collect::<Vec<_>>())
-                    .into_owned(),
-            )
-        }
-
-        fn token_to_id(&self, _token: &str) -> Option<u32> {
-            None
-        }
+    fn test_tokenizer() -> TestTokenizer {
+        TestTokenizer::new()
     }
 
     fn base_request_json() -> serde_json::Value {
@@ -296,7 +273,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &TestTokenizer,
+            &test_tokenizer(),
         )
         .expect("prepare");
 
@@ -339,7 +316,7 @@ mod tests {
                 request,
                 &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
                 ResolvedRequestContext::default(),
-                &TestTokenizer,
+                &test_tokenizer(),
             )
             .expect("prepare")
             .text_request
@@ -373,7 +350,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &TestTokenizer,
+            &test_tokenizer(),
         )
         .expect("prepare");
 
@@ -398,7 +375,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &TestTokenizer,
+            &test_tokenizer(),
         )
         .expect("prepare");
 
@@ -421,7 +398,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &TestTokenizer,
+            &test_tokenizer(),
         )
         .expect("prepare");
 
@@ -445,7 +422,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &TestTokenizer,
+            &test_tokenizer(),
         )
         .expect("prepare");
 
@@ -470,7 +447,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &TestTokenizer,
+            &test_tokenizer(),
         )
         .expect("prepare");
 
@@ -497,7 +474,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &TestTokenizer,
+            &test_tokenizer(),
         )
         .expect("prepare");
 
@@ -522,7 +499,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &TestTokenizer,
+            &test_tokenizer(),
         )
         .expect("prepare");
 
@@ -548,7 +525,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &TestTokenizer,
+            &test_tokenizer(),
         )
         .expect("prepare");
         assert_eq!(prepared.text_request.sampling_params.logprobs, Some(1));
@@ -573,7 +550,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             request_context(&headers, None),
-            &TestTokenizer,
+            &test_tokenizer(),
         )
         .expect("prepare");
         assert_eq!(prepared.text_request.data_parallel_rank, Some(3));
@@ -592,7 +569,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
-            &TestTokenizer,
+            &test_tokenizer(),
         )
         .expect("prepare");
         assert_eq!(prepared.text_request.data_parallel_rank, None);
