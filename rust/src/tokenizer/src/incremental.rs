@@ -95,7 +95,7 @@ impl<T: Tokenizer + ?Sized> DecodeStream<'_, T> {
             for suffix_len in SAFE_SUFFIX_MIN..=max_try {
                 let start = prompt_len - suffix_len;
                 let (decoded, context_ids) = self.decode_prompt_context(&self.ids[start..])?;
-                if !decoded.contains('\u{FFFD}') {
+                if !decoded.contains('\u{FFFD}') && context_ids.len() >= SAFE_SUFFIX_MIN {
                     self.prefix = decoded;
                     self.ids = context_ids;
                     self.prefix_index = self.ids.len();
@@ -366,6 +366,16 @@ mod tests {
     fn prompt_context_filters_unknown_ids_before_incomplete_utf8() {
         let backend = StrictByteBackend;
         let prompt = &[10_000, 0xe4, 0xbd];
+        let mut decoder = backend.create_decode_stream(prompt, false, 0);
+
+        assert_eq!(decoder.push_token(0xa0).unwrap(), 3);
+        assert_eq!(decoder.output(), "你");
+    }
+
+    #[test]
+    fn prompt_context_keeps_incomplete_utf8_before_filtered_suffix() {
+        let backend = StrictByteBackend;
+        let prompt = &[0xe4, 0xbd, 10_000, 10_001, 10_002, 10_003, 10_004, 10_005];
         let mut decoder = backend.create_decode_stream(prompt, false, 0);
 
         assert_eq!(decoder.push_token(0xa0).unwrap(), 3);
