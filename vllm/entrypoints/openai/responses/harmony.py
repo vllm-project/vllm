@@ -9,6 +9,7 @@ Handles two directions:
 """
 
 import json
+from typing import Any
 
 from openai.types.responses import (
     ResponseFunctionToolCall,
@@ -45,9 +46,64 @@ from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
-# ---------------------------------------------------------------------------
-# 1. Private helpers for input parsing
-# ---------------------------------------------------------------------------
+
+def _validate_content_parts(content: Any, role: str | None = None) -> None:
+    if role == "tool":
+        return
+    if isinstance(content, list):
+        for c in content:
+            if isinstance(c, dict):
+                part_type = c.get("type")
+                if part_type is None:
+                    if "image_url" in c:
+                        part_type = "image_url"
+                    elif "image_pil" in c:
+                        part_type = "image_pil"
+                    elif "image_embeds" in c:
+                        part_type = "image_embeds"
+                    elif "audio_embeds" in c:
+                        part_type = "audio_embeds"
+                    elif "prompt_embeds" in c:
+                        part_type = "prompt_embeds"
+                    elif "audio_url" in c:
+                        part_type = "audio_url"
+                    elif "input_audio" in c:
+                        part_type = "input_audio"
+                    elif "video_url" in c:
+                        part_type = "video_url"
+                    elif "tool_reference" in c:
+                        part_type = "tool_reference"
+                    else:
+                        part_type = "text"
+
+                # Check if it is valid/supported
+                from vllm.exceptions import VLLMValidationError
+
+                supported = {
+                    "text",
+                    "thinking",
+                    "input_text",
+                    "output_text",
+                    "input_image",
+                    "image_url",
+                    "image_embeds",
+                    "audio_embeds",
+                    "prompt_embeds",
+                    "image_pil",
+                    "audio_url",
+                    "input_audio",
+                    "refusal",
+                    "video_url",
+                    "tool_reference",
+                }
+                if part_type not in supported:
+                    supported_str = ", ".join(sorted(supported))
+                    raise VLLMValidationError(
+                        f"Unsupported chat content part type: {part_type!r}. "
+                        f"Supported types: {supported_str}.",
+                        parameter="type",
+                        value=part_type,
+                    )
 
 
 def _parse_harmony_format_message(chat_msg: dict) -> Message:
@@ -58,6 +114,7 @@ def _parse_harmony_format_message(chat_msg: dict) -> Message:
     name = author_dict.get("name")
 
     raw_content = chat_msg.get("content", "")
+    _validate_content_parts(raw_content, role)
     if isinstance(raw_content, list):
         # TODO: Support refusal and non-text content types.
         contents = [TextContent(text=c.get("text", "")) for c in raw_content]
@@ -89,6 +146,8 @@ def _parse_chat_format_message(chat_msg: dict) -> list[Message]:
     role = chat_msg.get("role")
     if role is None:
         raise ValueError(f"Message has no 'role' key: {chat_msg}")
+
+    _validate_content_parts(chat_msg.get("content"), role)
 
     # Assistant message with tool calls
     tool_calls = chat_msg.get("tool_calls")
@@ -159,6 +218,7 @@ def response_input_to_harmony(
     if "type" not in response_msg or response_msg["type"] == "message":
         role = response_msg["role"]
         content = response_msg["content"]
+        _validate_content_parts(content, role)
         if role in ("system", "developer"):
             text = flatten_input_text_content(content)
             if text:
