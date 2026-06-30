@@ -631,8 +631,6 @@ def _make_mock_worker_for_desc_ids(
     worker._group_spec_types = group_spec_types
     worker.block_len_per_layer = block_len_per_layer or [100]
     worker._conv_decomp = None
-    worker._fa_desc_chunks = 1
-    worker._region_is_mla = [False] * num_regions
     if has_mamba:
         from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (  # noqa: E501
             MambaConvSplitInfo,
@@ -646,25 +644,6 @@ def _make_mock_worker_for_desc_ids(
             ssm_sizes=(0, 0),
         )
     worker._compute_desc_ids = NixlConnectorWorker._compute_desc_ids.__get__(
-        worker, NixlConnectorWorker
-    )
-    worker._compute_fa_desc_ids = NixlConnectorWorker._compute_fa_desc_ids.__get__(
-        worker, NixlConnectorWorker
-    )
-    worker._num_fa_desc_streams = NixlConnectorWorker._num_fa_desc_streams.__get__(
-        worker, NixlConnectorWorker
-    )
-    worker._fa_desc_chunks_for_region = (
-        NixlConnectorWorker._fa_desc_chunks_for_region.__get__(
-            worker, NixlConnectorWorker
-        )
-    )
-    worker._append_fa_descs_for_region = (
-        NixlConnectorWorker._append_fa_descs_for_region.__get__(
-            worker, NixlConnectorWorker
-        )
-    )
-    worker._is_region_replicated = NixlConnectorWorker._is_region_replicated.__get__(
         worker, NixlConnectorWorker
     )
     return worker
@@ -694,79 +673,6 @@ def test_get_block_descs_ids_hybrid_ssm():
 
     expected = [3, 5, 103, 105, 201, 202, 301, 302, 401, 402, 501, 502]
     assert list(result) == expected, f"Expected {expected}, got {list(result)}"
-
-
-@pytest.mark.cpu_test
-def test_get_block_descs_ids_hybrid_ssm_chunked_fa_descs():
-    """Chunked FA descriptor streams shift the SSM descriptor boundary."""
-    from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
-
-    worker = _make_mock_worker_for_desc_ids(
-        num_regions=2,
-        has_mamba=True,
-        group_spec_types=(FullAttentionSpec, MambaSpec),
-        block_len_per_layer=[100],
-    )
-    worker._fa_desc_chunks = 2
-
-    result = worker._compute_desc_ids(
-        block_ids=([3, 5], [1, 2]),
-        dst_num_blocks=100,
-        block_size_ratio=None,
-        physical_blocks_per_logical=1,
-    )
-
-    expected = [
-        3,
-        5,
-        103,
-        105,
-        203,
-        205,
-        303,
-        305,
-        401,
-        402,
-        501,
-        502,
-        601,
-        602,
-        701,
-        702,
-    ]
-    assert list(result) == expected, f"Expected {expected}, got {list(result)}"
-
-
-@pytest.mark.cpu_test
-def test_fa_desc_chunking_uses_stream_major_order():
-    """Chunking preserves main-like stream-major descriptor order."""
-    worker = _make_mock_worker_for_desc_ids(
-        num_regions=1,
-        has_mamba=False,
-        group_spec_types=(),
-    )
-    worker._fa_desc_chunks = 2
-
-    descs: list[tuple[int, int, int]] = []
-    worker._append_fa_descs_for_region(
-        descs,
-        region_idx=0,
-        base_addr=1000,
-        num_blocks=3,
-        page_stride=100,
-        desc_len=80,
-        device_id=0,
-    )
-
-    expected = [
-        (1000, 40, 0),
-        (1100, 40, 0),
-        (1200, 40, 0),
-        (1040, 40, 0),
-        (1140, 40, 0),
-        (1240, 40, 0),
-    ]
-    assert descs == expected
 
 
 @pytest.mark.cpu_test

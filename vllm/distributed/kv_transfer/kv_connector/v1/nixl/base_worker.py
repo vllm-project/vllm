@@ -87,49 +87,6 @@ logger = init_logger(__name__)
 class NixlBaseConnectorWorker:
     """Base implementation of Worker side methods shared by pull and push."""
 
-    def _append_fa_descs_for_region(
-        self,
-        result: list[tuple[int, int, int]],
-        region_idx: int,
-        base_addr: int,
-        num_blocks: int,
-        page_stride: int,
-        desc_len: int,
-        device_id: int,
-    ) -> None:
-        chunks = self._fa_desc_chunks_for_region(region_idx)
-        assert desc_len % chunks == 0, (
-            f"Cannot split FA descriptor of {desc_len} bytes into {chunks} chunks."
-        )
-        chunk_len = desc_len // chunks
-        for chunk_idx in range(chunks):
-            chunk_offset = chunk_idx * chunk_len
-            for block_id in range(num_blocks):
-                block_offset = block_id * page_stride
-                result.append(
-                    (base_addr + block_offset + chunk_offset, chunk_len, device_id)
-                )
-
-    def _fa_desc_chunks_for_region(self, region_idx: int) -> int:
-        if self._is_region_replicated(region_idx):
-            return 1
-        return getattr(self, "_fa_desc_chunks", 1)
-
-    def _num_fa_desc_streams(self, num_fa_regions: int) -> int:
-        return sum(
-            self._fa_desc_chunks_for_region(region_idx)
-            for region_idx in range(num_fa_regions)
-        )
-
-    def _compute_fa_desc_ids(
-        self,
-        block_arr: np.ndarray,
-        num_fa_regions: int,
-        num_blocks: int,
-    ) -> np.ndarray:
-        stream_ids = np.arange(self._num_fa_desc_streams(num_fa_regions))[:, None]
-        return (stream_ids * num_blocks + block_arr[None, :]).flatten()
-
     def _compute_desc_ids(
         self,
         block_ids: BlockIds,
@@ -150,7 +107,7 @@ class NixlBaseConnectorWorker:
         num_blocks = dst_num_blocks
         if block_size_ratio is not None:
             num_blocks = int(num_blocks * block_size_ratio)
-        num_fa_descs = self._num_fa_desc_streams(num_fa_regions) * num_blocks
+        num_fa_descs = num_fa_regions * num_blocks
 
         # All-attention fast path: single vectorized broadcast.
         if num_ssm_regions == 0:
@@ -160,8 +117,9 @@ class NixlBaseConnectorWorker:
             # read across all regions, same for [3], but group0-group1 blocks will
             # always differ (different areas). Therefore we can just flatten the
             # block_ids and compute the descs ids for all groups at once.
-            block_arr = np.concatenate(block_ids)
-            return self._compute_fa_desc_ids(block_arr, num_fa_regions, num_blocks)
+            block_arr = np.concatenate(block_ids)[None, :]
+            region_ids = np.arange(num_fa_regions)[:, None]
+            return (region_ids * num_blocks + block_arr).flatten()
 
         # Compute desc ids per group using the right stride: FA descs have
         # num_blocks entries per region (kernel granularity), SSM descs have
@@ -171,8 +129,9 @@ class NixlBaseConnectorWorker:
         for i, group in enumerate(block_ids):
             group_arr = np.asarray(group)
             if _is_attention_spec(self._group_spec_types[i]):
+                fa_region_ids = np.arange(num_fa_regions)[:, None]
                 all_descs.append(
-                    self._compute_fa_desc_ids(group_arr, num_fa_regions, num_blocks)
+                    (fa_region_ids * num_blocks + group_arr[None, :]).flatten()
                 )
             elif _is_ssm_spec(self._group_spec_types[i]):
                 # NOTE (NickLucche) SSM and Attention block regions can
@@ -352,11 +311,6 @@ class NixlBaseConnectorWorker:
             )
             mamba_ssm_size = self._conv_decomp.ssm_sizes
         self._mamba_ssm_size = mamba_ssm_size
-        # Hybrid Mamba HMA reuses the same backing pages for Mamba state and
-        # attention KV. Keep NIXL FA descriptors split into two byte streams so
-        # packed attention pages retain the old transfer topology without
-        # changing their K/V-packed tensor semantics.
-        self._fa_desc_chunks = 2 if self._has_mamba else 1
 
         # Agent.
         non_ucx_backends = [b for b in self.nixl_backends if b != "UCX"]
@@ -1157,7 +1111,7 @@ class NixlBaseConnectorWorker:
         self.num_regions = len(caches_data)
 
         # Total local FA descriptors (boundary between FA and mamba descs).
-        self.num_descs = self._num_fa_desc_streams(self.num_regions) * self.num_blocks
+        self.num_descs = self.num_regions * self.num_blocks
 
         descs = self.nixl_wrapper.get_reg_descs(caches_data, self.nixl_memory_type)
         logger.debug("Registering descs: %s", caches_data)
@@ -1315,15 +1269,10 @@ class NixlBaseConnectorWorker:
                 // block_size_ratio
             )
             page_stride = self.block_len_per_layer[i] // block_size_ratio
-            self._append_fa_descs_for_region(
-                result,
-                i,
-                base_addr,
-                num_blocks,
-                page_stride,
-                kv_block_len,
-                self.device_id,
-            )
+            for block_id in range(num_blocks):
+                block_offset = block_id * page_stride
+                addr = base_addr + block_offset
+                result.append((addr, kv_block_len, self.device_id))
         return result
 
     def _build_fa_remote(
@@ -1362,15 +1311,12 @@ class NixlBaseConnectorWorker:
             local_block_len = local_block_len // num_reads
 
             page_size = nixl_agent_meta.block_lens[i]
-            self._append_fa_descs_for_region(
-                result,
-                i,
-                base_addr + rank_offset,
-                num_blocks,
-                page_size,
-                local_block_len,
-                nixl_agent_meta.device_id,
-            )
+            for block_id in range(num_blocks):
+                block_offset = block_id * page_size
+                # For each block, grab the kv heads chunk belonging to current local
+                # tp rank of size local_block_len.
+                addr = base_addr + block_offset + rank_offset
+                result.append((addr, local_block_len, nixl_agent_meta.device_id))
         return result
 
     def register_local_xfer_handler(
