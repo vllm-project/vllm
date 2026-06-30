@@ -18,7 +18,12 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.v1.kv_offload.base import OffloadKey, ReqContext, make_offload_key
+from vllm.v1.kv_offload.base import (
+    LookupResult,
+    OffloadKey,
+    ReqContext,
+    make_offload_key,
+)
 from vllm.v1.kv_offload.tiering.base import JobMetadata
 from vllm.v1.kv_offload.tiering.fs.manager import (
     FileSystemTierManager,
@@ -98,7 +103,7 @@ def lookup_and_wait(
     keys: list[OffloadKey],
     ctx: ReqContext = _CTX,
     timeout: float = 1.0,
-) -> list[bool]:
+) -> list[LookupResult]:
     """Perform a full async lookup cycle and return resolved results."""
     for k in keys:
         tier.lookup(k, ctx)
@@ -166,7 +171,7 @@ def fs_tier(tmp_path):
 def test_lookup_empty_tier(fs_tier):
     tier, _ = fs_tier
     results = lookup_and_wait(tier, [key(1), key(2)])
-    assert results == [False, False]
+    assert results == [LookupResult.MISS, LookupResult.MISS]
 
 
 def test_store_creates_file_and_lookup_succeeds(fs_tier):
@@ -176,7 +181,7 @@ def test_store_creates_file_and_lookup_succeeds(fs_tier):
     results = drain(tier)
     assert len(results) == 1
     assert results[0].success
-    assert lookup_and_wait(tier, [key(1)]) == [True]
+    assert lookup_and_wait(tier, [key(1)]) == [LookupResult.HIT]
     dest = tier.file_mapper.get_file_name(key(1))
     assert os.path.exists(dest), f"Expected file at {dest}"
 
@@ -188,14 +193,20 @@ def test_store_then_load_roundtrip(fs_tier):
     store_results = drain(tier)
     assert all(r.success for r in store_results)
 
-    assert lookup_and_wait(tier, [key(1), key(2)]) == [True, True]
+    assert lookup_and_wait(tier, [key(1), key(2)]) == [
+        LookupResult.HIT,
+        LookupResult.HIT,
+    ]
 
     job_l = make_job(2, [key(1), key(2)], [2, 3], is_promotion=True)
     tier.submit_load(job_l)
     load_results = drain(tier)
     assert all(r.success for r in load_results)
     # Blocks stay on disk after load
-    assert lookup_and_wait(tier, [key(1), key(2)]) == [True, True]
+    assert lookup_and_wait(tier, [key(1), key(2)]) == [
+        LookupResult.HIT,
+        LookupResult.HIT,
+    ]
 
 
 def test_invalid_path_raises_at_construction():
@@ -231,7 +242,10 @@ def test_multiple_jobs_tracked_independently(fs_tier):
     results = drain(tier)
     job_ids = {r.job_id for r in results}
     assert job_ids == {1, 2}
-    assert lookup_and_wait(tier, [key(1), key(2)]) == [True, True]
+    assert lookup_and_wait(tier, [key(1), key(2)]) == [
+        LookupResult.HIT,
+        LookupResult.HIT,
+    ]
 
 
 def test_multi_block_job_partial_failure(fs_tier):
@@ -318,3 +332,66 @@ def test_wait_idle_blocks_until_tasks_complete():
         gate.set()
         pool.shutdown(wait=True)
         waiter.join(timeout=5.0)
+
+
+def test_batch_lookup_c_extension(tmp_path):
+    """Validates batch_lookup_C: empty, single, all-existing, all-missing,
+    mixed ordering, and input type validation."""
+    try:
+        from vllm.fs_io_C import batch_lookup as batch_lookup_C
+    except ImportError:
+        pytest.skip("fs_io_C extension not built")
+
+    # Setup
+    all_exist = [str(tmp_path / f"e{i}.bin") for i in range(3)]
+    for p in all_exist:
+        open(p, "w").close()
+    all_missing = [str(tmp_path / f"m{i}.bin") for i in range(3)]
+
+    # Empty list
+    assert batch_lookup_C([]) == []
+
+    # Single existing / missing
+    assert batch_lookup_C([all_exist[0]]) == [True]
+    assert batch_lookup_C([all_missing[0]]) == [False]
+
+    # All existing / all missing
+    assert batch_lookup_C(all_exist) == [True, True, True]
+    assert batch_lookup_C(all_missing) == [False, False, False]
+
+    # Mixed — verifies index ordering is preserved
+    paths = [val for pair in zip(all_exist, all_missing) for val in pair]
+    assert batch_lookup_C(paths) == [True, False, True, False, True, False]
+
+    # Input validation: non-list argument
+    with pytest.raises(TypeError):
+        batch_lookup_C(("/tmp/foo",))
+    with pytest.raises(TypeError):
+        batch_lookup_C(None)
+
+    # Input validation: non-str elements in list
+    with pytest.raises(TypeError):
+        batch_lookup_C([None])
+    with pytest.raises(TypeError):
+        batch_lookup_C([b"/tmp/foo"])
+    with pytest.raises(TypeError):
+        batch_lookup_C([42])
+    with pytest.raises(TypeError):
+        batch_lookup_C([all_exist[0], None])  # valid first, invalid mid-list
+
+
+@pytest.mark.parametrize("use_c_ext", [True, False])
+def test_batch_lookup_dispatch(fs_tier, monkeypatch, use_c_ext):
+    import vllm.v1.kv_offload.tiering.fs.manager as mgr_mod
+
+    if use_c_ext and not mgr_mod._HAS_BATCH_LOOKUP_C:
+        pytest.skip("fs_io_C extension not built")
+
+    monkeypatch.setattr(mgr_mod, "_HAS_BATCH_LOOKUP_C", use_c_ext)
+
+    tier, _ = fs_tier
+    tier.submit_store(make_job(1, [key(1)], [0]))
+    assert all(r.success for r in drain(tier))
+
+    results = lookup_and_wait(tier, [key(1), key(2)])
+    assert results == [LookupResult.HIT, LookupResult.MISS]

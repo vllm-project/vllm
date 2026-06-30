@@ -4,16 +4,21 @@ mod convert;
 
 use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
-use futures::{Stream, StreamExt as _};
+use futures::{Stream, StreamExt as _, stream};
 use thiserror_ext::AsReport as _;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::mpsc;
+use tokio_openssl::SslStream;
 use tokio_stream::wrappers::ReceiverStream;
+use tonic::transport::server::{Connected, TcpConnectInfo};
 use tonic::{Request, Response, Status};
 use tracing::info;
 use vllm_text::{DecodedTextEvent, TextOutputStreamExt as _};
 
 use self::convert::ResponseOpts;
+use crate::listener::{Listener, ListenerIo};
 use crate::state::AppState;
 
 /// Generated protobuf/gRPC types for the `vllm` package.
@@ -25,6 +30,78 @@ pub use pb::generate_server::GenerateServer;
 
 #[cfg(test)]
 mod tests;
+
+/// Newtype over `tokio-openssl`'s `SslStream` so we can implement tonic's
+/// [`Connected`] on it (the orphan rule blocks doing so on the foreign type).
+pub(crate) struct GrpcTlsStream {
+    inner: SslStream<ListenerIo>,
+}
+
+impl GrpcTlsStream {
+    pub(crate) fn new(inner: SslStream<ListenerIo>) -> Self {
+        Self { inner }
+    }
+}
+
+impl AsyncRead for GrpcTlsStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for GrpcTlsStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+impl Connected for GrpcTlsStream {
+    type ConnectInfo = TcpConnectInfo;
+
+    fn connect_info(&self) -> TcpConnectInfo {
+        self.inner.get_ref().connect_info()
+    }
+}
+
+/// Adapt the shared server listener into tonic's incoming stream shape.
+pub(crate) fn incoming(listener: Listener) -> impl Stream<Item = std::io::Result<ListenerIo>> {
+    stream::unfold(listener, |mut listener| async move {
+        let (io, _) = axum::serve::Listener::accept(&mut listener).await;
+        Some((Ok(io), listener))
+    })
+}
+
+/// Wrap the gRPC listener so each accepted connection completes a TLS handshake
+/// before tonic serves it.
+pub(crate) fn tls_incoming(
+    listener: Listener,
+    context: openssl::ssl::SslContext,
+    handshake_timeout: std::time::Duration,
+) -> impl Stream<Item = std::io::Result<GrpcTlsStream>> {
+    tls_listener::builder(context)
+        .handshake_timeout(handshake_timeout)
+        .listen(listener)
+        .map(|res| {
+            res.map(|(inner, _addr)| GrpcTlsStream::new(inner))
+                .map_err(std::io::Error::other)
+        })
+}
 
 /// gRPC Generate service implementation backed by the shared application state.
 pub struct GenerateServiceImpl {
@@ -56,12 +133,9 @@ impl pb::generate_server::Generate for GenerateServiceImpl {
         info!(%request_id, "grpc generate (unary)");
 
         let stream = self.state.chat.text().generate(text_request).await;
-        let stream = stream.map_err(|e| Status::internal(e.to_report_string()))?;
+        let stream = stream.map_err(text_error_to_status)?;
 
-        let collected = stream
-            .collect_output()
-            .await
-            .map_err(|e| Status::internal(e.to_report_string()))?;
+        let collected = stream.collect_output().await.map_err(text_error_to_status)?;
 
         // Build the single aggregated response.
         let prompt_info = convert::to_prompt_info(
@@ -104,7 +178,7 @@ impl pb::generate_server::Generate for GenerateServiceImpl {
         info!(%request_id, "grpc generate (stream)");
 
         let stream = self.state.chat.text().generate(text_request).await;
-        let stream = stream.map_err(|e| Status::internal(e.to_report_string()))?;
+        let stream = stream.map_err(text_error_to_status)?;
 
         let (tx, rx) = mpsc::channel(32);
 
@@ -112,7 +186,7 @@ impl pb::generate_server::Generate for GenerateServiceImpl {
             futures::pin_mut!(stream);
             while let Some(event) = stream.next().await {
                 let response = match event {
-                    Err(e) => Err(Status::internal(e.to_report_string())),
+                    Err(e) => Err(text_error_to_status(e)),
                     Ok(DecodedTextEvent::Start {
                         prompt_token_ids,
                         prompt_logprobs,
@@ -153,5 +227,14 @@ impl pb::generate_server::Generate for GenerateServiceImpl {
 
         let response_stream = ReceiverStream::new(rx);
         Ok(Response::new(Box::pin(response_stream)))
+    }
+}
+
+fn text_error_to_status(error: vllm_text::Error) -> Status {
+    let message = error.to_report_string();
+    if error.is_request_validation_error() {
+        Status::invalid_argument(message)
+    } else {
+        Status::internal(message)
     }
 }

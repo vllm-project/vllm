@@ -44,6 +44,7 @@ from .interfaces import (
     HasInnerState,
     IsHybrid,
     MultiModalEmbeddings,
+    SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
     SupportsPP,
@@ -921,6 +922,7 @@ class MiniCPMV4_6Merger(nn.Module):
 class MiniCPMV4_6ForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
+    SupportsLoRA,
     SupportsPP,
     HasInnerState,
     IsHybrid,
