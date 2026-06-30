@@ -1079,9 +1079,18 @@ def unify_kv_cache_spec_page_size(
         else:
             layer_page_size = layer_spec.page_size_bytes
             if max_page_size % layer_page_size == 0:
-                ratio = max_page_size // layer_page_size
-                new_block_size = layer_spec.block_size * ratio
-                new_spec = replace(layer_spec, block_size=new_block_size)
+                # KVarN/TQ specs are group-locked: block_size must equal the
+                # variance-normalization tile size, so block_size cannot be
+                # scaled to grow the page. Pad the page instead (strided view,
+                # like MLA), keeping block_size fixed.
+                if getattr(layer_spec, "tq_slot_size", 0) > 0:
+                    new_spec = replace(  # type: ignore[call-arg]
+                        layer_spec, page_size_padded=max_page_size
+                    )
+                else:
+                    ratio = max_page_size // layer_page_size
+                    new_block_size = layer_spec.block_size * ratio
+                    new_spec = replace(layer_spec, block_size=new_block_size)
             elif (
                 isinstance(layer_spec, AttentionSpec)
                 and layer_spec.indexes_kv_by_block_stride

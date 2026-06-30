@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
@@ -398,6 +399,11 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_sharing_target_layer_name,
             **extra_impl_args,
         )
+        # Expose the layer name on the impl so backends that scope per-layer /
+        # per-KV-cache-group state (e.g. KVarN's slot allocator) can identify
+        # which group an impl belongs to by matching the builder's layer_names.
+        with contextlib.suppress(Exception):
+            self.impl.layer_name = prefix  # type: ignore[attr-defined]
         self.backend = AttentionBackendEnum[self.attn_backend.get_name()]
         self.dtype = dtype
 
@@ -595,6 +601,32 @@ class Attention(nn.Module, AttentionLayerBase):
             assert not vllm_config.model_config.use_mla, (
                 "MLA is not supported for slidingwindow"
             )
+            # KVarN-compressed sliding-window layer: report the packed KVarN
+            # per-slot byte count via a TQ-aware sliding spec, but keep the
+            # SlidingWindowManager (so out-of-window blocks are still evicted).
+            # Worthwhile only when sliding_window > group (full int4 tiles fit
+            # inside the window); KVarN gates this on KVARN_QUANT_SLIDING.
+            if self.kv_cache_dtype.startswith(
+                "kvarn_"
+            ) and not self.kv_cache_dtype.startswith("kvarn_mla"):
+                from vllm.model_executor.layers.quantization.kvarn.config import (
+                    KVarNConfig,
+                )
+                from vllm.v1.kv_cache_interface import TQSlidingWindowSpec
+
+                kvarn_cfg = KVarNConfig.from_cache_dtype(
+                    self.kv_cache_dtype, self.head_size
+                )
+                slot_bytes = kvarn_cfg.tile_bytes_aligned // kvarn_cfg.group
+                return TQSlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=self.num_kv_heads,
+                    head_size=self.head_size,
+                    head_size_v=self.head_size,
+                    dtype=self.kv_cache_torch_dtype,
+                    sliding_window=self.sliding_window,
+                    tq_slot_size=slot_bytes,
+                )
             return SlidingWindowSpec(
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,
@@ -620,6 +652,31 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size_v=self.head_size,
                 dtype=self.kv_cache_torch_dtype,
                 tq_slot_size=tq_config.slot_size_aligned,
+            )
+        elif self.kv_cache_dtype.startswith(
+            "kvarn_"
+        ) and not self.kv_cache_dtype.startswith("kvarn_mla"):
+            from vllm.model_executor.layers.quantization.kvarn.config import (
+                KVarNConfig,
+            )
+            from vllm.v1.kv_cache_interface import TQFullAttentionSpec
+
+            kvarn_cfg = KVarNConfig.from_cache_dtype(
+                self.kv_cache_dtype, self.head_size
+            )
+            # KVarN's per-slot byte count = tile_bytes_aligned / block_size.
+            # We reuse the TQ spec class because the on-disk layout primitive
+            # (a uint8 block of per-(token,head) "slots") is the same; only the
+            # slot semantics differ. This gives the packed per-block page size
+            # so vLLM allocates blocks at the compressed size.
+            slot_bytes = kvarn_cfg.tile_bytes_aligned // kvarn_cfg.group
+            return TQFullAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=self.num_kv_heads,
+                head_size=self.head_size,
+                head_size_v=self.head_size,
+                dtype=self.kv_cache_torch_dtype,
+                tq_slot_size=slot_bytes,
             )
         else:
             return FullAttentionSpec(
