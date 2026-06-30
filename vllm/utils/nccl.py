@@ -120,9 +120,7 @@ def query_nccl_gin_type(
 
     query_fn = nccl._funcs.get("ncclCommQueryProperties")
     if query_fn is None:
-        logger.warning(
-            "ncclCommQueryProperties not available (NCCL < 2.29)"
-        )
+        logger.warning("ncclCommQueryProperties not available (NCCL < 2.29)")
         return None
 
     props = ncclCommProperties()
@@ -131,15 +129,11 @@ def query_nccl_gin_type(
     try:
         result = query_fn(ctypes.c_void_p(comm_ptr), ctypes.byref(props))
     except Exception:
-        logger.warning(
-            "ncclCommQueryProperties call failed", exc_info=True
-        )
+        logger.warning("ncclCommQueryProperties call failed", exc_info=True)
         return None
 
     if result != 0:
-        logger.warning(
-            "ncclCommQueryProperties returned error %d", result
-        )
+        logger.warning("ncclCommQueryProperties returned error %d", result)
         return None
 
     logger.info("NCCL GIN type: %d", props.ginType)
