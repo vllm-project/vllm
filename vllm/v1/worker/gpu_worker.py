@@ -43,6 +43,8 @@ from vllm.distributed.parallel_state import (
     Handle,
     get_pp_group,
     get_tp_group,
+    resume_nccl_comms,
+    suspend_nccl_comms,
 )
 from vllm.distributed.weight_transfer import (
     WeightTransferEngine,
@@ -184,6 +186,11 @@ class Worker(WorkerBase):
         allocator = get_mem_allocator_instance()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
 
+        # Release idle NCCL communicator memory (NCCL >= 2.29.7). Collective
+        # across ranks; no-op at world_size 1 or on older NCCL. Done after the
+        # cumem unmap so the reported freed bytes include the NCCL release.
+        suspend_nccl_comms()
+
         torch.accelerator.synchronize()
         deadline = time.monotonic() + (5.0 if current_platform.is_rocm() else 0)
         while True:
@@ -204,6 +211,10 @@ class Worker(WorkerBase):
     def wake_up(self, tags: list[str] | None = None) -> None:
         allocator = get_mem_allocator_instance()
         allocator.wake_up(tags)
+
+        # Restore NCCL communicator memory before any collective runs again.
+        # Collective across ranks; no-op at world_size 1 or on older NCCL.
+        resume_nccl_comms()
 
         # Restore the buffers after level 2 sleep
         if len(self._sleep_saved_buffers):

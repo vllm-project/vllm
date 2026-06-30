@@ -127,6 +127,49 @@ def _register_group(group: "GroupCoordinator") -> None:
     _groups[group.unique_name] = weakref.ref(group)
 
 
+def _apply_to_nccl_comms(label: str, action: Callable[[Any], None]) -> None:
+    """Apply ``action`` to every group's NCCL communicator, collectively.
+
+    Walks the registered parallel groups and skips those without a CUDA NCCL
+    communicator (``pynccl_comm`` is CUDA-only; also absent at ``world_size
+    == 1`` or when disabled). ncclCommSuspend/Resume are collective (internal
+    cross-rank barrier) and synchronous on return, so no extra sync is needed.
+    """
+    comms = []
+    for group_ref in _groups.values():
+        group = group_ref()
+        if group is None:
+            continue
+        # pynccl_comm exists only on CudaCommunicator (not CPU/XPU/Ray, nor on
+        # groups with no device communicator such as world_size == 1).
+        pynccl = getattr(group.device_communicator, "pynccl_comm", None)
+        if pynccl is None or pynccl.disabled:
+            continue
+        comms.append(pynccl)
+    if not comms:
+        return
+
+    free_before = torch.cuda.mem_get_info()[0]
+    for pynccl in comms:
+        action(pynccl)
+    freed = abs(free_before - torch.cuda.mem_get_info()[0])
+    logger.info("NCCL %s: %d comms, %.1f MiB", label, len(comms), freed / 1024**2)
+
+
+def suspend_nccl_comms() -> None:
+    """Release idle NCCL communicator memory on every group (collective).
+
+    Must run on every rank with the communicators idle; ncclCommSuspend has an
+    internal cross-rank barrier. No-op on NCCL < 2.29.7 or at world_size 1.
+    """
+    _apply_to_nccl_comms("suspend", lambda c: c.suspend())
+
+
+def resume_nccl_comms() -> None:
+    """Restore all suspended NCCL communicators before reuse (collective)."""
+    _apply_to_nccl_comms("resume", lambda c: c.resume())
+
+
 def all_reduce(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
     assert group_name in _groups, f"Group {group_name} is not found."
     group = _groups[group_name]()
