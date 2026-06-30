@@ -84,9 +84,7 @@ def _populate_worker_layer_metadata(worker: MooncakeConnectorWorker):
         group_spec = group.kv_cache_spec
         specs_by_layer = getattr(group_spec, "kv_cache_specs", {})
         for layer_name in group.layer_names:
-            worker._layer_specs[layer_name] = specs_by_layer.get(
-                layer_name, group_spec
-            )
+            worker._layer_specs[layer_name] = specs_by_layer.get(layer_name, group_spec)
             worker._layer_group_indices[layer_name] = group_index
             worker._layer_logical_group_indices.setdefault(layer_name, []).append(
                 group_index

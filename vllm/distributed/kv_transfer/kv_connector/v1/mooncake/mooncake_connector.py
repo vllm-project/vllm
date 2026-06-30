@@ -186,15 +186,17 @@ def _expand_transfer_regions(
         layer_index,
         group_index,
         split_kv_region,
-    ) in enumerate(zip(
-        base_addrs,
-        block_lens,
-        kv_block_lens,
-        layer_names,
-        layer_indices,
-        group_indices,
-        split_kv_regions,
-    )):
+    ) in enumerate(
+        zip(
+            base_addrs,
+            block_lens,
+            kv_block_lens,
+            layer_names,
+            layer_indices,
+            group_indices,
+            split_kv_regions,
+        )
+    ):
         if split_kv_region:
             aliases: tuple[str, ...] = ()
             index_aliases: tuple[int, ...] = ()
@@ -604,7 +606,9 @@ def _common_group_indices_for_regions(
             if 0 <= group_idx < num_groups
         )
     if local_region.group_index == remote_region.group_index:
-        return (local_region.group_index,) if local_region.group_index < num_groups else ()
+        return (
+            (local_region.group_index,) if local_region.group_index < num_groups else ()
+        )
     return ()
 
 
@@ -2063,12 +2067,12 @@ class MooncakeConnectorWorker:
         self.registered_logical_group_indices = []
         self.registered_alias_group_indices = []
         overlay_key_to_region_idx: dict[tuple[int, int, int, int, int], int] = {}
-        region_aliases_by_key: dict[
-            tuple[int, int, int, int, int], list[str]
-        ] = defaultdict(list)
-        region_index_aliases_by_key: dict[
-            tuple[int, int, int, int, int], list[int]
-        ] = defaultdict(list)
+        region_aliases_by_key: dict[tuple[int, int, int, int, int], list[str]] = (
+            defaultdict(list)
+        )
+        region_index_aliases_by_key: dict[tuple[int, int, int, int, int], list[int]] = (
+            defaultdict(list)
+        )
         region_logical_groups_by_key: dict[
             tuple[int, int, int, int, int], list[int]
         ] = defaultdict(list)
@@ -2078,8 +2082,7 @@ class MooncakeConnectorWorker:
         speculative_config = self.vllm_config.speculative_config
         speculative_method = getattr(speculative_config, "method", None)
         is_mtp_speculative = speculative_method == "mtp" or (
-            isinstance(speculative_method, str)
-            and speculative_method.endswith("_mtp")
+            isinstance(speculative_method, str) and speculative_method.endswith("_mtp")
         )
         total_num_hidden_layers = self.model_config.get_total_num_hidden_layers()
 
