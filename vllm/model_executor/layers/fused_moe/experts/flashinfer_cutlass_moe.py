@@ -188,6 +188,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
     def _supports_activation(activation: MoEActivation) -> bool:
         return activation in [
             MoEActivation.SILU,
+            MoEActivation.GELU_TANH,
             MoEActivation.RELU2_NO_MUL,
             MoEActivation.SWIGLUOAI,
         ]
@@ -267,6 +268,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
 
         activation_str_to_value_map = {
             MoEActivation.SILU: ActivationType.Swiglu,  # This is the default
+            MoEActivation.GELU_TANH: ActivationType.Geglu,
             MoEActivation.SWIGLUOAI: ActivationType.Swiglu,  # gpt-oss alias
             MoEActivation.RELU2_NO_MUL: ActivationType.Relu2,
         }

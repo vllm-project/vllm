@@ -45,6 +45,7 @@ MTPModelTypes = Literal[
     "qwen3_next_mtp",
     "qwen3_5_mtp",
     "longcat_flash_mtp",
+    "minimax_m3_mtp",
     "mtp",
     "pangu_ultra_moe_mtp",
     "step3p5_mtp",
@@ -156,6 +157,14 @@ class SpeculativeConfig:
     """The configuration of the target model."""
     target_parallel_config: SkipValidation[ParallelConfig] = None  # type: ignore
     """The parallel configuration for the target model."""
+
+    # dynamic speculative decoding control
+    num_speculative_tokens_per_batch_size: list[tuple[int, int, int]] | None = None
+    """Batch-size schedule used to dynamically choose speculative-token count.
+
+    Each entry is ``(range_start, range_end, num_speculative_tokens)`` with an
+    inclusive batch-size range.
+    """
 
     # params generated in the post-init stage
     draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore
@@ -519,6 +528,36 @@ class SpeculativeConfig:
             if hasattr(text_config, "num_kv_shared_layers"):
                 text_config.num_kv_shared_layers = 0
             hf_config.update({"n_predict": 1, "architectures": ["Gemma4MTPModel"]})
+
+        if (
+            hf_config.model_type == "minimax_m3_vl"
+            or initial_architecture == "MiniMaxM3SparseForConditionalGeneration"
+        ):
+            # MTP modules live on the language model of this VL checkpoint, so
+            # promote text_config before rewriting it into an MTP config.
+            quantization_config = getattr(hf_config, "quantization_config", None)
+            hf_config = getattr(hf_config, "text_config", hf_config)
+            if (
+                quantization_config is not None
+                and getattr(hf_config, "quantization_config", None) is None
+            ):
+                hf_config.update({"quantization_config": quantization_config})
+            hf_config.model_type = "minimax_m3_mtp"
+            n_predict = getattr(hf_config, "num_mtp_modules", 1)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["MiniMaxM3MTP"]}
+            )
+        elif (
+            hf_config.model_type == "minimax_m3_mtp"
+            or initial_architecture == "MiniMaxM3MTP"
+        ):
+            # Standalone MTP checkpoints already use a flat MTP config with no
+            # VL wrapper / text_config to promote, so just normalize the
+            # architecture and derive n_predict from num_mtp_modules.
+            n_predict = getattr(hf_config, "num_mtp_modules", 1)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["MiniMaxM3MTP"]}
+            )
 
         return hf_config
 
@@ -1072,6 +1111,9 @@ class SpeculativeConfig:
 
     def use_dflash(self) -> bool:
         return self.method == "dflash"
+
+    def uses_dynamic_speculative_decoding(self) -> bool:
+        return self.num_speculative_tokens_per_batch_size is not None
 
     def uses_draft_model(self) -> bool:
         return self.method == "draft_model"

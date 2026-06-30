@@ -6,7 +6,10 @@ from vllm.config import SpeculativeConfig
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
-from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.input_batch import (
+    InputBatch,
+    get_num_sampled_and_rejected,
+)
 from vllm.v1.worker.gpu.metrics.logits import get_num_nans
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
@@ -136,9 +139,18 @@ class RejectionSampler:
             else logits,
         )
 
+        num_sampled, num_rejected = get_num_sampled_and_rejected(
+            num_sampled,
+            input_batch.seq_lens,
+            input_batch.cu_num_logits,
+            input_batch.idx_mapping,
+            self.sampler.req_states.prefill_len.gpu,
+        )
+
         return SamplerOutput(
             sampled_token_ids=sampled,
             logprobs_tensors=logprobs_tensors,
             num_nans=num_nans,
             num_sampled=num_sampled,
+            num_rejected=num_rejected,
         )

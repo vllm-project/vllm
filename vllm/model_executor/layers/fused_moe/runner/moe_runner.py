@@ -423,6 +423,7 @@ class MoERunner(MoERunnerInterface):
         if (
             shared_output is not None
             and not self.moe_config.is_sequence_parallel
+            and not self.moe_config.skip_final_all_reduce
             and self._fused_output_is_reduced
         ):
             shared_output = tensor_model_parallel_all_reduce(shared_output)
@@ -445,6 +446,7 @@ class MoERunner(MoERunnerInterface):
         # - The MK already reduced the fused output itself.
         if (
             not self.moe_config.is_sequence_parallel
+            and not self.moe_config.skip_final_all_reduce
             and (self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1)
             and not self._fused_output_is_reduced
         ):
@@ -499,11 +501,13 @@ class MoERunner(MoERunnerInterface):
         #   pre_xform:  applied to fused_output BEFORE routed_output_transform
         #   post_xform: applied to the final result AFTER all-reduce
         #
-        # Latent MoE with shared experts (NemotronH):
-        #   - pre_xform strips padding from the latent dim so
-        #     routed_output_transform receives the correct input size
-        #   - post_xform truncates to shared_experts_hidden_dim (full hidden)
-        #     after shared + routed outputs are combined and all-reduced
+        # MoE with routed output transform or shared experts:
+        #   - pre_xform applies if the transform needs unpadded routed output
+        #     or shared+routed add needs matching hidden dims. For Nemotron-3
+        #     Nano, TRTLLM NVFP4 pads routed MoE hidden dim 2688->2816, while
+        #     shared output stays 2688.
+        #   - post_xform uses shared_experts_hidden_dim when transform and shared
+        #     experts make the final output full hidden dim.
         #
         # Standard MoE / MoE without transforms (GPT-OSS, Mixtral):
         #   - pre_xform is None (no early truncation)
@@ -511,12 +515,12 @@ class MoERunner(MoERunnerInterface):
         if transformed_hidden_dim == hidden_states.shape[-1]:
             transformed_hidden_dim = None
 
-        if self.routed_output_transform is not None and shared_experts_hidden_dim > 0:
+        pre_xform_trunc_size = None
+        if self.routed_output_transform is not None or shared_experts_hidden_dim > 0:
             pre_xform_trunc_size = transformed_hidden_dim
+        post_xform_trunc_size = transformed_hidden_dim
+        if self.routed_output_transform is not None and shared_experts_hidden_dim > 0:
             post_xform_trunc_size = shared_experts_hidden_dim
-        else:
-            pre_xform_trunc_size = None
-            post_xform_trunc_size = transformed_hidden_dim
 
         return hidden_states, pre_xform_trunc_size, post_xform_trunc_size
 

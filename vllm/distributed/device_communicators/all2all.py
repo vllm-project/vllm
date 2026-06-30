@@ -9,6 +9,7 @@ import torch.distributed as dist
 
 import vllm.envs as envs
 from vllm.distributed import get_dp_group, get_ep_group
+from vllm.distributed.utils import StatelessProcessGroup
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.utils.flashinfer import (
@@ -342,7 +343,12 @@ class NixlEPAll2AllManager(All2AllManagerBase):
     _lock = threading.RLock()
 
     def __init__(self, cpu_group, tcp_store_group=None):
-        assert tcp_store_group is not None
+        if tcp_store_group is None:
+            tcp_store_group = StatelessProcessGroup(
+                rank=cpu_group.rank(),
+                world_size=cpu_group.size(),
+                store=dist.PrefixStore("nixl_ep", cpu_group.get_group_store()),
+            )
         super().__init__(cpu_group, tcp_store_group)
 
         self.max_num_ep_ranks = envs.VLLM_NIXL_EP_MAX_NUM_RANKS
@@ -698,7 +704,14 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
         self.num_experts = num_experts
 
         self.cleanup()
-        gpus_per_node = torch.accelerator.device_count()
+        from vllm.platforms.interface import get_assigned_physical_gpu_ids
+
+        assigned_physical_gpu_ids = get_assigned_physical_gpu_ids()
+        gpus_per_node = (
+            len(assigned_physical_gpu_ids)
+            if assigned_physical_gpu_ids is not None
+            else torch.accelerator.device_count()
+        )
         logger.debug(
             "Making One-sided NVLink mapping: rank=%d, world size=%d",
             self.rank,

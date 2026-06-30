@@ -108,7 +108,7 @@ def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
     mgr.token_budgets = sorted(budgets)
     mgr.max_batch_size = 16
     mgr.use_dp = False
-    mgr.budget_graphs = {}
+    mgr.budget_graphs = {"default": {}}
     mgr.graph_pool = None
     mgr.graph_hits = 0
     mgr.graph_misses = 0
@@ -341,6 +341,7 @@ class SimpleMockViTModel(torch.nn.Module, SupportsEncoderCudaGraph):
         max_frames_per_batch: int,
         device: torch.device,
         dtype: torch.dtype,
+        path: str = "default",
     ) -> EncoderCudaGraphCaptureInputs:
         per_image_output = token_budget // max_batch_size
         grid_config = [
@@ -365,6 +366,7 @@ class SimpleMockViTModel(torch.nn.Module, SupportsEncoderCudaGraph):
         mm_kwargs: dict[str, Any],
         max_batch_size: int,
         max_frames_per_batch: int,
+        path: str = "default",
     ) -> EncoderCudaGraphReplayBuffers:
         grid_thw = mm_kwargs["image_grid_thw"]
         n_out = _count_output_tokens(grid_thw, _SPATIAL_MERGE)
@@ -380,12 +382,14 @@ class SimpleMockViTModel(torch.nn.Module, SupportsEncoderCudaGraph):
     def encoder_cudagraph_forward(
         self,
         values: dict[str, torch.Tensor],
+        path: str = "default",
     ) -> torch.Tensor:
         return self._forward(values["pixel_values"])
 
     def encoder_eager_forward(
         self,
         mm_kwargs: dict[str, Any],
+        path: str = "default",
     ) -> torch.Tensor:
         return self._forward(mm_kwargs["pixel_values"])
 
@@ -413,7 +417,7 @@ def _make_manager_for_gpu(
         max_frames_per_batch if max_frames_per_batch is not None else max_batch_size * 2
     )
     mgr.use_dp = False
-    mgr.budget_graphs = {}
+    mgr.budget_graphs = {"default": {}}
     mgr.graph_pool = None
     mgr.graph_hits = 0
     mgr.graph_misses = 0
@@ -479,15 +483,15 @@ class TestEncoderCudaGraphCaptureReplay:
     # --- capture ---
 
     def test_capture_creates_one_graph_per_budget(self):
-        assert len(self.mgr.budget_graphs) == len(_BUDGETS)
-        assert set(self.mgr.budget_graphs.keys()) == set(_BUDGETS)
+        assert len(self.mgr.budget_graphs["default"]) == len(_BUDGETS)
+        assert set(self.mgr.budget_graphs["default"].keys()) == set(_BUDGETS)
 
     def test_capture_uses_supplied_graph_pool(self):
         assert self.mgr.graph_pool is self.graph_pool
 
     def test_clear_releases_graphs_and_pool(self):
         self.mgr.clear()
-        assert self.mgr.budget_graphs == {}
+        assert self.mgr.budget_graphs == {"default": {}}
         assert self.mgr.graph_pool is None
 
     # --- output shape ---
@@ -642,6 +646,7 @@ class SimpleMockViTVideoModel(SimpleMockViTModel):
         max_frames_per_batch: int,
         device: torch.device,
         dtype: torch.dtype,
+        path: str = "default",
     ) -> EncoderCudaGraphCaptureInputs:
         per_item_output = token_budget // max_batch_size
         frames_per_item = max_frames_per_batch // max_batch_size
@@ -678,6 +683,7 @@ class SimpleMockViTVideoModel(SimpleMockViTModel):
         mm_kwargs: dict[str, Any],
         max_batch_size: int,
         max_frames_per_batch: int,
+        path: str = "default",
     ) -> EncoderCudaGraphReplayBuffers:
         n_out = _count_output_tokens(self._get_grid_thw(mm_kwargs), _SPATIAL_MERGE)
         p = next(self.parameters())
@@ -692,12 +698,14 @@ class SimpleMockViTVideoModel(SimpleMockViTModel):
     def encoder_cudagraph_forward(
         self,
         values: dict[str, torch.Tensor],
+        path: str = "default",
     ) -> torch.Tensor:
         return self._forward(values["pixel_values"])
 
     def encoder_eager_forward(
         self,
         mm_kwargs: dict[str, Any],
+        path: str = "default",
     ) -> torch.Tensor:
         return self._forward(self._get_pixel_values(mm_kwargs))
 
@@ -763,8 +771,8 @@ class TestEncoderCudaGraphVideoReplay:
     # --- capture ---
 
     def test_capture_creates_one_graph_per_budget(self):
-        assert len(self.mgr.budget_graphs) == len(_BUDGETS)
-        assert set(self.mgr.budget_graphs.keys()) == set(_BUDGETS)
+        assert len(self.mgr.budget_graphs["default"]) == len(_BUDGETS)
+        assert set(self.mgr.budget_graphs["default"].keys()) == set(_BUDGETS)
 
     # --- output shape ---
 
