@@ -2,9 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the in-process engine-notification buffer.
 
-These exercise the real `EngineCore` buffering helpers without loading a
-model: the buffer only touches `self._pending_notifications`, so a bare
-instance is enough to assert the additive delivery contract.
+Hits the real `EngineCore`/`Scheduler` buffer helpers without a model: they
+only touch `_pending_notifications`, so a bare instance is enough.
 """
 
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -27,10 +26,10 @@ def _bare_scheduler() -> Scheduler:
 
 
 def test_notifications_accumulate_additively():
-    """Multiple events queued before a flush are all delivered, in order.
+    """Everything queued before a flush comes out, in order.
 
-    This is the additive contract: the buffer must not coalesce (e.g. keep
-    only the latest per type), or counter-style increments would be lost.
+    The additive contract: no coalescing (e.g. latest-per-type), or counter
+    increments would get lost.
     """
     engine_core = _bare_engine_core()
 
@@ -98,16 +97,15 @@ def test_scheduler_publish_take_roundtrip():
     scheduler.publish_notification(custom)
 
     assert scheduler.take_notifications() == [lora, custom]
-    # Drained: a second take returns nothing.
+    # Second take is empty, it drained.
     assert scheduler.take_notifications() == []
 
 
 def test_collect_drains_scheduler_notifications():
-    """_collect_step_notifications forwards scheduler-sourced events.
+    """Scheduler-sourced events flow out through EngineCore too.
 
-    Worker and scheduler producers share the same additive channel; this
-    pins the review ask (maxdebayser) that scheduler notifications flow
-    through EngineCore alongside worker_notifications.
+    Worker and scheduler notifications share the same channel: scheduler events
+    ride alongside worker_notifications.
     """
     engine_core = _bare_engine_core()
     engine_core.scheduler = _bare_scheduler()
@@ -119,5 +117,5 @@ def test_collect_drains_scheduler_notifications():
     engine_core._collect_step_notifications(EMPTY_MODEL_RUNNER_OUTPUT, outputs)
 
     assert outputs[0].engine_notifications == [event]
-    # Scheduler buffer was drained as a side effect.
+    # Draining it was a side effect of the collect.
     assert engine_core.scheduler.take_notifications() == []
