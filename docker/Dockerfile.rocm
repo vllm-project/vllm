@@ -123,7 +123,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         curl -fSL --retry 5 --retry-all-errors --retry-delay 5 \
             -o "/tmp/rocm_wheels/${whl}" "${index}/${spec}%2Brocm7.1-${pytag}-${pytag}-manylinux_2_28_x86_64.whl"; \
     done; \
-    uv pip install --system --reinstall /tmp/rocm_wheels/*.whl; \
+    uv pip install --system --reinstall --extra-index-url "${index}" /tmp/rocm_wheels/*.whl; \
     rm -rf /tmp/rocm_wheels
 
 
