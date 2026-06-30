@@ -78,6 +78,10 @@ def test_gemma4_routing_kernel_triton(
         "Returned weights dtype must match reference dtype."
     )
 
+    assert (tri_ids >= 0).all().item() and (tri_ids < num_experts).all().item(), (
+        f"Returned indices must be within the range of 0 to {num_experts}"
+    )
+
     # 1) Check for valid top-k.
     #
     # Get a stable sort of the gating values and take the top-k.
