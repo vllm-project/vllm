@@ -435,7 +435,7 @@ def test_pooling_prompt_lens_not_aliased(device: str):
     )
 
 
-def test_placeholder_spec_token_ids_not_used_as_model_input():
+def test_placeholder_spec_token_ids_written_verbatim():
     input_batch = InputBatch(
         max_num_reqs=1,
         max_model_len=8,
@@ -457,14 +457,16 @@ def test_placeholder_spec_token_ids_not_used_as_model_input():
     )
     input_batch.add_request(req)
 
-    input_batch.token_ids_cpu[0, 2] = -1
     input_batch.update_req_spec_token_ids(
         req,
         {"req": [13, -1, -1]},
     )
 
+    # Placeholders (-1) are kept verbatim in both the spec_token_ids list and
+    # the token buffer; they are clamped to 0 only at the embedding boundary
+    # (GPUModelRunner._preprocess).
     assert input_batch.spec_token_ids[0] == [13, -1, -1]
-    assert input_batch.token_ids_cpu[0, 3:6].tolist() == [13, 0, 0]
+    assert input_batch.token_ids_cpu[0, 3:6].tolist() == [13, -1, -1]
 
 
 @pytest.mark.parametrize(

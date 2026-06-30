@@ -2191,7 +2191,6 @@ class GPUModelRunner(
             spec_decode_metadata = self._calc_spec_decode_metadata(
                 num_draft_tokens, cu_num_tokens
             )
-            self._mask_invalid_draft_token_ids(spec_decode_metadata, num_draft_tokens)
             logits_indices = spec_decode_metadata.logits_indices
             num_sampled_tokens = num_draft_tokens + 1
             # For DECODE only cuda graph of some attention backends (e.g., GDN).
@@ -2213,28 +2212,6 @@ class GPUModelRunner(
             logits_indices,
             spec_decode_metadata,
         )
-
-    def _mask_invalid_draft_token_ids(
-        self,
-        spec_decode_metadata: SpecDecodeMetadata,
-        num_draft_tokens: np.ndarray,
-    ) -> None:
-        spec_token_ids = self.input_batch.spec_token_ids
-        invalid_mask = np.fromiter(
-            (
-                token_id < 0
-                for req_idx, draft_len in enumerate(num_draft_tokens)
-                for token_id in spec_token_ids[req_idx][: int(draft_len)]
-            ),
-            dtype=np.bool_,
-        )
-        if not invalid_mask.any():
-            return
-
-        invalid_mask_tensor = async_tensor_h2d(
-            invalid_mask, dtype=torch.bool, device=self.device
-        )
-        spec_decode_metadata.draft_token_ids.masked_fill_(invalid_mask_tensor, -1)
 
     def _build_attention_metadata(
         self,
@@ -3483,6 +3460,10 @@ class GPUModelRunner(
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         is_first_rank = get_pp_group().is_first_rank
         is_encoder_decoder = self.model_config.is_encoder_decoder
+
+        # Clamp speculative scheduler placeholders (-1) before embedding lookup.
+        if self.speculative_config is not None:
+            self.input_ids.gpu[:num_input_tokens].clamp_(min=0)
 
         # _prepare_inputs may reorder the batch, so we must gather multi
         # modal outputs after that to ensure the correct order
