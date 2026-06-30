@@ -17,6 +17,12 @@ rather than being skipped. The Rust frontend
 (`rust/src/engine-core-client/src/protocol/notifications.rs`) mirrors the
 union and the same fail-fast behavior.
 
+Out-of-tree producers (plugins) can't add their own tags without forking the
+protocol, so the union reserves a single open `CustomNotification` tag: a
+plugin namespaces its event under `key` and carries an arbitrary payload.
+The tag is known to every frontend (so it never trips fail-fast), but an
+unrecognized `key` is ignored rather than fatal.
+
 Channel contract: notifications accumulate additively (like `SchedulerStats`).
 The engine delivers every queued event in emission order and never drops one,
 so a notification may carry an absolute snapshot (consumers replace prior
@@ -24,6 +30,8 @@ state, as `LoRALoadEvent` does) or an incremental delta (consumers apply each
 event, e.g. a counter increment). Throttling redundant events is the
 producer's job: `LoRALoadEvent` only emits when the loaded set changed.
 """
+
+from typing import Any
 
 import msgspec
 
@@ -57,6 +65,31 @@ class LoRALoadEvent(
     """Names of adapters pinned in the caches (sorted)."""
 
 
+class CustomNotification(
+    msgspec.Struct,
+    tag="custom",
+    omit_defaults=True,  # type: ignore[call-arg]
+    gc=False,
+):  # type: ignore[call-arg]
+    """An open-schema notification for out-of-tree producers (plugins).
+
+    The in-tree union fails fast on unknown tags, so a plugin can't add its
+    own struct type without forking the protocol. This reserved tag is the
+    escape hatch: emit a `CustomNotification`, namespace it under `key`, and
+    carry whatever the consumer needs in `payload`. Frontends that don't
+    recognize `key` ignore the event (per the channel's additive contract,
+    deltas a consumer doesn't apply are simply no-ops).
+    """
+
+    key: str
+    """Producer-chosen namespace (e.g. the plugin name). Consumers match on
+    this to decide whether and how to interpret `payload`."""
+
+    payload: dict[str, Any] = {}
+    """Arbitrary msgpack-encodable event data, opaque to the engine and to
+    consumers that don't recognize `key`."""
+
+
 # Union of all engine-level event types. Grows as new event types are added
 # (e.g. graceful shutdown progress); msgspec dispatches on each struct's tag.
-EngineNotification = LoRALoadEvent
+EngineNotification = LoRALoadEvent | CustomNotification
