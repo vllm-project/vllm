@@ -22,6 +22,7 @@ boots without the SDK installed.
 
 See https://docs.cohere.com/reference/chat for the upstream spec.
 """
+
 from __future__ import annotations
 
 from typing import Any, Literal
@@ -230,9 +231,7 @@ class CohereChatV2Request(BaseModel):
 
     @field_validator("messages")
     @classmethod
-    def _validate_messages(
-        cls, v: list[ChatMessageV2]
-    ) -> list[ChatMessageV2]:
+    def _validate_messages(cls, v: list[ChatMessageV2]) -> list[ChatMessageV2]:
         if not v:
             raise ValueError("messages must contain at least one message")
         return v

@@ -427,11 +427,7 @@ def _melody_sources_to_vllm(raw_sources: Any) -> list[CitationSource]:
         out.append(
             CitationSource(
                 type="tool",
-                id=(
-                    str(tool_call_index)
-                    if tool_call_index is not None
-                    else None
-                ),
+                id=(str(tool_call_index) if tool_call_index is not None else None),
             )
         )
     return out

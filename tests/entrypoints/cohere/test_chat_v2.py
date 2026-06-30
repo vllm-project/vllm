@@ -64,9 +64,7 @@ def server():
     # max_num_seqs=4.
     env_dict = {"VLLM_CPU_KVCACHE_SPACE": "1"}
 
-    with RemoteOpenAIServer(
-        MODEL_NAME, args, env_dict=env_dict
-    ) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as remote_server:
         yield remote_server
 
 

@@ -25,7 +25,8 @@ import json
 import logging
 import time
 from collections.abc import AsyncGenerator
-from enum import StrEnum
+from enum import Enum
+from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
 
 from cohere.types import (
@@ -117,7 +118,7 @@ def _emit(event: BaseModel) -> str:
     return _sse(event.model_dump_json(exclude_none=True))
 
 
-class ContentBlockType(StrEnum):
+class ContentBlockType(str, Enum):
     """Wire-format / internal discriminator for chat content blocks.
 
     ``THINKING`` and ``TEXT`` are the documented Cohere v2 content-block
@@ -170,7 +171,7 @@ class CohereServingChatV2(OpenAIServingChat):
         models: OpenAIServingModels,
         response_role: str,
         *,
-        online_renderer: "OnlineRenderer",
+        online_renderer: OnlineRenderer,
         request_logger: RequestLogger | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
@@ -656,9 +657,9 @@ class CohereServingChatV2(OpenAIServingChat):
         ``ChatMessage`` natively carries a ``citations: list[Citation] |
         None`` field (see :mod:`vllm.entrypoints.openai.engine.protocol`).
         Renderers / parsers (the ``cohere_command3`` and
-        ``cohere_command4`` reasoning parsers) populate it. We map each :class:`vllm...Citation` into the SDK
-        :class:`cohere.types.Citation` wire model, preserving sources and
-        span.
+        ``cohere_command4`` reasoning parsers) populate it. We map each
+        :class:`vllm...Citation` into the SDK :class:`cohere.types.Citation`
+        wire model, preserving sources and span.
         """
         raw = getattr(msg, "citations", None)
         if not raw:
@@ -783,8 +784,9 @@ class CohereServingChatV2(OpenAIServingChat):
 
                 # Citations: a Cohere-specific extension on DeltaMessage that
                 # the cohere renderer/parsers may populate.
-                if getattr(delta, "citations", None):
-                    for ev in self._handle_citation_deltas(state, delta.citations):
+                delta_citations = getattr(delta, "citations", None)
+                if delta_citations:
+                    for ev in self._handle_citation_deltas(state, delta_citations):
                         yield ev
 
         except Exception as exc:
@@ -1050,16 +1052,26 @@ class CohereServingChatV2(OpenAIServingChat):
     # Helpers for the router
     # ==================================================================
 
-    def create_error_response(self, message: str) -> ErrorResponse:
-        # Reuse the OpenAI engine's error response so that the router can
-        # translate it into Cohere's error envelope uniformly.
+    @staticmethod
+    def create_error_response(
+        message: str | Exception,
+        err_type: str = "bad_request",
+        status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
+        param: str | None = None,
+    ) -> ErrorResponse:
+        # Override of :meth:`BaseServing.create_error_response` that uses
+        # Cohere-flavored defaults (``type="bad_request"``, ``code=400``)
+        # so the router can translate the envelope uniformly. ``param``
+        # is accepted for signature parity with the base class but is
+        # not surfaced in the Cohere wire format.
         from vllm.entrypoints.openai.engine.protocol import ErrorInfo
 
+        del param  # unused; kept for signature compatibility
         return ErrorResponse(
             error=ErrorInfo(
-                message=message,
-                type="bad_request",
-                code=400,
+                message=str(message),
+                type=err_type,
+                code=int(status_code),
             )
         )
 

@@ -84,7 +84,10 @@ if _SDK_AVAILABLE:
         status = info.code or fallback_status
         return JSONResponse(
             status_code=status,
-            content=CohereError(message=info.message, id=_request_id(raw_request)).model_dump(exclude_none=True),
+            content=CohereError(
+                message=info.message,
+                id=_request_id(raw_request),
+            ).model_dump(exclude_none=True),
         )
 
     @router.post(

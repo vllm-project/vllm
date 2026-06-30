@@ -35,11 +35,12 @@ Citations produced by Cohere models are surfaced through the standard
 ``ChatMessage.citations`` / ``DeltaMessage.citations`` fields (populated by
 the ``cohere2`` reasoning parser).
 """
+
 from __future__ import annotations
 
 import copy
 import json
-from enum import StrEnum
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from vllm.config import VllmConfig
@@ -68,7 +69,7 @@ _DEFAULT_FORMAT = "cmd3"
 _VALID_FORMATS = ("cmd3", "cmd4")
 
 
-class MelodyContentType(StrEnum):
+class MelodyContentType(str, Enum):
     """Wire-format discriminator for melody content blocks.
 
     These strings are what the cmd3 / cmd4 Jinja templates check against
@@ -81,6 +82,7 @@ class MelodyContentType(StrEnum):
     THINKING = "thinking"
     IMAGE = "image"
     DOCUMENT = "document"
+
 
 # Keys this renderer interprets directly from ``chat_template_kwargs`` and
 # maps onto typed melody render-config fields. Everything *not* in this
@@ -269,14 +271,10 @@ def _content_blocks(content: Any) -> list[dict[str, Any]]:
         elif part_type == MelodyContentType.DOCUMENT:
             doc = part.get("document")
             if isinstance(doc, dict):
-                blocks.append(
-                    {"type": MelodyContentType.DOCUMENT, "document": doc}
-                )
+                blocks.append({"type": MelodyContentType.DOCUMENT, "document": doc})
             else:
                 # Fall back to wrapping arbitrary string as text.
-                blocks.append(
-                    {"type": MelodyContentType.TEXT, "text": json.dumps(doc)}
-                )
+                blocks.append({"type": MelodyContentType.TEXT, "text": json.dumps(doc)})
         elif part_type == "tool_reference":
             # Tool references are rendered by name; emit as text so the
             # renderer downstream is content-format agnostic.
@@ -356,9 +354,7 @@ def _conversation_to_melody_messages(
                 {"type": MelodyContentType.THINKING, "thinking": reasoning},
             )
 
-        tool_calls = [
-            _normalize_tool_call(tc) for tc in (msg.get("tool_calls") or [])
-        ]
+        tool_calls = [_normalize_tool_call(tc) for tc in (msg.get("tool_calls") or [])]
 
         out_msg: dict[str, Any] = {
             "role": role,
@@ -467,7 +463,7 @@ def _build_render_config(
         # prompt-template layer; both request grounding-on).
         if (gr := chat_template_kwargs.get("grounding")) is not None:
             config["grounding"] = _normalize_cmd4_grounding(gr)
-        elif (co := chat_template_kwargs.get("citation_options")):
+        elif co := chat_template_kwargs.get("citation_options"):
             mode = co.get("mode") if isinstance(co, dict) else None
             if mode is not None:
                 config["grounding"] = _normalize_cmd4_grounding(mode)

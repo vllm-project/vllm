@@ -85,9 +85,7 @@ class TestOptionalCohereImport:
 
         paths = [getattr(r, "path", None) for r in app.routes]
         assert "/cohere/v2/chat" not in paths
-        assert any(
-            "cohere SDK not installed" in rec.message for rec in caplog.records
-        )
+        assert any("cohere SDK not installed" in rec.message for rec in caplog.records)
 
     def test_attach_router_registers_route_when_cohere_present(self):
         app = _build_app(handler=None)
