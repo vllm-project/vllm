@@ -275,6 +275,7 @@ mod tests {
     use std::collections::{BTreeSet, HashMap};
 
     use serial_test::file_serial;
+    use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::*;
     use crate::backend::hf::HfTextBackend;
@@ -282,34 +283,8 @@ mod tests {
     use crate::error::{LogprobsError, TokenIdsError};
     use crate::request::{Prompt, TextRequest};
 
-    /// Stub tokenizer that returns empty token IDs — sufficient for tests that
-    /// don't exercise bad-words tokenization.
-    struct StubTokenizer;
-
-    impl Tokenizer for StubTokenizer {
-        fn encode(
-            &self,
-            _text: &str,
-            _add_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<Vec<u32>> {
-            Ok(vec![])
-        }
-
-        fn decode(
-            &self,
-            _token_ids: &[u32],
-            _skip_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<String> {
-            Ok(String::new())
-        }
-
-        fn token_to_id(&self, _token: &str) -> Option<u32> {
-            None
-        }
-    }
-
-    fn stub_tokenizer() -> StubTokenizer {
-        StubTokenizer
+    fn stub_tokenizer() -> TestTokenizer {
+        TestTokenizer::new()
     }
 
     struct FixedTokenizer {

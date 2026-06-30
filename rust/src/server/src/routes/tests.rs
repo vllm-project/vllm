@@ -42,6 +42,7 @@ use vllm_llm::Llm;
 use vllm_metrics::METRICS;
 use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
 use vllm_text::{Prompt, TextBackend};
+use vllm_tokenizer::test_utils::TestTokenizer;
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
@@ -417,82 +418,19 @@ struct FakeChatBackend {
 }
 
 /// Synthetic BOS id used when `add_special_tokens` is true in tests.
-const FAKE_BOS_TOKEN_ID: u32 = 1;
+const FAKE_BOS_TOKEN_ID: u32 = 256;
 
-#[derive(Debug)]
-struct FakeChatTokenizer;
-
-impl Tokenizer for FakeChatTokenizer {
-    fn encode(
-        &self,
-        text: &str,
-        add_special_tokens: bool,
-    ) -> vllm_text::tokenizer::Result<Vec<u32>> {
-        let mut token_ids = Vec::new();
-        if add_special_tokens {
-            token_ids.push(FAKE_BOS_TOKEN_ID);
-        }
-        let mut rest = text;
-        while !rest.is_empty() {
-            if let Some(stripped) = rest.strip_prefix("<image>") {
-                token_ids.push(999);
-                rest = stripped;
-                continue;
-            }
-            if let Some(stripped) = rest.strip_prefix("<|image_pad|>") {
-                token_ids.push(151655);
-                rest = stripped;
-                continue;
-            }
-
-            let ch = rest.chars().next().expect("rest is not empty");
-            let mut buf = [0; 4];
-            token_ids.extend(ch.encode_utf8(&mut buf).bytes().map(u32::from));
-            rest = &rest[ch.len_utf8()..];
-        }
-        Ok(token_ids)
-    }
-
-    fn decode(
-        &self,
-        token_ids: &[u32],
-        _skip_special_tokens: bool,
-    ) -> vllm_text::tokenizer::Result<String> {
-        Ok(
-            String::from_utf8_lossy(&token_ids.iter().map(|id| *id as u8).collect::<Vec<_>>())
-                .into_owned(),
-        )
-    }
-
-    fn token_to_id(&self, token: &str) -> Option<u32> {
-        match token {
-            "<image>" => Some(999),
-            "<|image_pad|>" => Some(151655),
-            "<think>" => Some(0xF001),
-            "</think>" => Some(0xF002),
-            "<|START_THINKING|>" => Some(0xF003),
-            "<|END_THINKING|>" => Some(0xF004),
-            "◁think▷" => Some(0xF005),
-            "◁/think▷" => Some(0xF006),
-            _ => None,
-        }
-    }
-
-    fn id_to_token(&self, id: u32) -> Option<String> {
-        match id {
-            FAKE_BOS_TOKEN_ID => Some("<bos>".to_string()),
-            999 => Some("<image>".to_string()),
-            151655 => Some("<|image_pad|>".to_string()),
-            0xF001 => Some("<think>".to_string()),
-            0xF002 => Some("</think>".to_string()),
-            0xF003 => Some("<|START_THINKING|>".to_string()),
-            0xF004 => Some("<|END_THINKING|>".to_string()),
-            0xF005 => Some("◁think▷".to_string()),
-            0xF006 => Some("◁/think▷".to_string()),
-            id if id < 128 => char::from_u32(id).map(|ch| ch.to_string()),
-            _ => None,
-        }
-    }
+fn fake_chat_tokenizer() -> TestTokenizer {
+    TestTokenizer::new()
+        .with_bos_token("<bos>", FAKE_BOS_TOKEN_ID)
+        .with_regular_token("<image>", 999)
+        .with_regular_token("<|image_pad|>", 151655)
+        .with_regular_token("<think>", 0xF001)
+        .with_regular_token("</think>", 0xF002)
+        .with_regular_token("<|START_THINKING|>", 0xF003)
+        .with_regular_token("<|END_THINKING|>", 0xF004)
+        .with_regular_token("◁think▷", 0xF005)
+        .with_regular_token("◁/think▷", 0xF006)
 }
 
 impl FakeChatBackend {
@@ -530,7 +468,7 @@ impl fmt::Debug for FakeChatBackend {
 
 impl TextBackend for FakeChatBackend {
     fn tokenizer(&self) -> DynTokenizer {
-        Arc::new(FakeChatTokenizer)
+        Arc::new(fake_chat_tokenizer())
     }
 
     fn model_id(&self) -> &str {
@@ -630,7 +568,7 @@ fn qwen_multimodal_model_info() -> vllm_chat::multimodal::MultimodalModelInfo {
         Some("qwen2_vl".to_string()),
         Some(&config_path),
         None,
-        Arc::new(FakeChatTokenizer),
+        Arc::new(fake_chat_tokenizer()),
     )
     .expect("load multimodal info")
     .expect("qwen multimodal info is registered");
@@ -650,7 +588,7 @@ impl Tokenizer for FailingDecodeTokenizer {
         text: &str,
         add_special_tokens: bool,
     ) -> vllm_text::tokenizer::Result<Vec<u32>> {
-        FakeChatTokenizer.encode(text, add_special_tokens)
+        fake_chat_tokenizer().encode(text, add_special_tokens)
     }
 
     fn decode(
@@ -664,11 +602,11 @@ impl Tokenizer for FailingDecodeTokenizer {
             ));
         }
 
-        FakeChatTokenizer.decode(token_ids, skip_special_tokens)
+        fake_chat_tokenizer().decode(token_ids, skip_special_tokens)
     }
 
     fn token_to_id(&self, token: &str) -> Option<u32> {
-        FakeChatTokenizer.token_to_id(token)
+        fake_chat_tokenizer().token_to_id(token)
     }
 }
 
