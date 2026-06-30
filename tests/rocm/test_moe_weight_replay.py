@@ -253,7 +253,7 @@ def test_moe_weight_replay_after_sleep_wake_is_deterministic(
     monkeypatch: pytest.MonkeyPatch,
     backend: str,
 ) -> None:
-    tp_size = int(os.environ.get(TP_ENV, "8"))
+    tp_size = int(os.environ.get(TP_ENV, "2"))
     if _visible_gpu_count() < tp_size:
         pytest.skip(
             f"requires at least {tp_size} visible GPUs, found {_visible_gpu_count()}"
