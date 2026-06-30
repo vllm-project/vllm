@@ -139,6 +139,7 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
                 )
                 self.strategy = QuantizationStrategy.CHANNEL
                 self.weight_quant_key = STRATEGY_TO_WEIGHT_QUANT_KEY[self.strategy]
+                self.linear_kernel.config.weight_quant_key = self.weight_quant_key
 
             # Canonicalize to (K, N) for the kernel.
             replace_parameter(layer, "weight", layer.weight.t())

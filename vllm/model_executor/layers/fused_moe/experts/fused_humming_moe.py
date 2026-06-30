@@ -66,9 +66,9 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def get_humming_moe_gemm_type() -> str | None:
+def get_humming_moe_gemm_type() -> str:
     env_gemm_type: str | None = envs.VLLM_HUMMING_MOE_GEMM_TYPE
-    gemm_type = None
+    gemm_type = "indexed"
     if env_gemm_type is not None:
         env_gemm_type = env_gemm_type.lower()
         if env_gemm_type == "indexed":
@@ -486,13 +486,12 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             assert hasattr(cls, "humming_gemm_type")
             gemm_type = cls.humming_gemm_type().value.lower()
             preferred_gemm_type = get_humming_moe_gemm_type()
-            if preferred_gemm_type is not None:
-                supported = preferred_gemm_type.lower() == gemm_type
-                if not supported:
-                    reason = (
-                        f"preferred gemm type {preferred_gemm_type} != "
-                        f"supported gemm type {gemm_type}"
-                    )
+            supported = preferred_gemm_type.lower() == gemm_type
+            if not supported:
+                reason = (
+                    f"preferred gemm type {preferred_gemm_type} != "
+                    f"supported gemm type {gemm_type}"
+                )
 
         return supported, reason
 
