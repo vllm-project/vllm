@@ -84,6 +84,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    normalize_e4m3fn_to_e4m3fnuz,
     requantize_with_max_scale,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
@@ -95,6 +96,7 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -604,8 +606,15 @@ class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.weight = Parameter(layer.weight.t(), requires_grad=False)
-        layer.weight_scale = Parameter(layer.weight_scale.data, requires_grad=False)
+        weight = layer.weight
+        weight_scale = layer.weight_scale.data
+        if current_platform.is_fp8_fnuz():
+            weight, weight_scale, _ = normalize_e4m3fn_to_e4m3fnuz(
+                weight=weight,
+                weight_scale=weight_scale,
+            )
+        layer.weight = Parameter(weight.t(), requires_grad=False)
+        layer.weight_scale = Parameter(weight_scale, requires_grad=False)
         self.fp8_linear.process_weights_after_loading(layer)
 
     def apply(
