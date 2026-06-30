@@ -120,12 +120,9 @@ class VoxtralProcessingInfo(BaseProcessingInfo):
         return {"audio": self.get_max_audio_tokens()}
 
     def get_max_audio_tokens(self) -> int:
-        # Voxtral realtime decoders declare text_config.sliding_window; for those
-        # the audio tokens that live in the attention window are window-bounded,
-        # not max_model_len-bounded. Without this cap the encoder cache and the
-        # profiling dummy audio are sized at max_model_len per item and starve the
-        # decoder KV cache (boot OOM on 16 GB GPUs). Standard Voxtral ships
-        # sliding_window=None and is unaffected. Refs vllm-project/vllm#38233.
+        # Cap audio tokens by the decoder sliding window when set: the encoder
+        # cache and profiling dummy are otherwise sized at max_model_len and OOM
+        # at boot on small GPUs. Standard Voxtral has sliding_window=None. #38233
         max_model_len = self.ctx.model_config.max_model_len
         text_config = getattr(self.ctx.model_config.hf_config, "text_config", None)
         sliding_window = getattr(text_config, "sliding_window", None)

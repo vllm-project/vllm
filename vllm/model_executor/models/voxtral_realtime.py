@@ -264,18 +264,10 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
             await buffer.append_audio(right_pad.audio_array)
             await buffer.append_audio(None)  # signal end
 
-        # Feed output tokens back into buffer in background.
-        # input_stream is a token-feedback queue fed from engine outputs, so an
-        # idle wait here is normal (gaps between tokens or between utterances /
-        # silences) and must NOT be treated as a hang. Previously this await was
-        # wrapped in asyncio.wait_for(VLLM_ENGINE_ITERATION_TIMEOUT_S), which
-        # raised an uncaught TimeoutError on any silence past the timeout and
-        # killed this feeder task while the websocket stayed open, so the session
-        # hung with no further tokens (vllm-project/vllm#36015, #35863). The v1
-        # engine has no per-iteration timeout watchdog, and the
-        # removed local timeout never recovered a genuinely wedged stream; a real
-        # request failure ends the stream and cancels this task via the finally
-        # block below, so this await needs no timeout.
+        # Feed output tokens back into the buffer. input_stream is a token
+        # queue; idle gaps (silences) are normal, not a hang. The old wait_for
+        # timeout killed this feeder on any silence and hung the session.
+        # #36015, #35863
         async def feed_tokens():
             while True:
                 all_outputs = await input_stream.get()

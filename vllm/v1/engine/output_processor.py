@@ -647,11 +647,11 @@ class OutputProcessor:
                 # if required.
                 req_state.logprobs_processor.update_from_output(engine_core_output)
 
-            # A streaming session stays unfinished between chunks, but a
-            # terminal finish (length cap / error / abort) ends it: deliver
-            # finished=True and free it, else AsyncLLM.generate() hangs.
+            # A streaming session stays unfinished between chunks. A normal
+            # per-step finish is FinishReason.LENGTH (the session resumes with
+            # the next chunk), so only ERROR/ABORT is terminal here; genuine
+            # max_model_len caps are delivered via _streaming_finish_outputs.
             terminal_stream_finish = req_state.streaming_input and finish_reason in (
-                FinishReason.LENGTH,
                 FinishReason.ERROR,
                 FinishReason.ABORT,
             )

@@ -197,14 +197,9 @@ class Scheduler(SchedulerInterface):
         # IDs of requests preempted since the last call to schedule().
         self.reset_preempted_req_ids: set[str] = set()
 
-        # Streaming sessions finished from inside schedule()/add_request() (e.g.
-        # a resumable realtime session that reached max_model_len). finish_requests
-        # frees them scheduler-side but, outside update_from_output, has no
-        # `outputs` dict to emit an EngineCoreOutput on -- and finished_req_ids is
-        # worker-facing only, so the client would never receive a finish_reason
-        # and the websocket would hang. Buffer (client_index, req_id, reason) here
-        # and drain it in the next update_from_output, mirroring the failed-KV-load
-        # finish path. Flushed each step.
+        # Client-facing finishes for streaming sessions ended inside schedule()/
+        # add_request() (no `outputs` dict there). Drained next update_from_output
+        # so the client gets a finish_reason instead of hanging. Flushed each step.
         self._streaming_finish_outputs: list[tuple[int, str, FinishReason]] = []
 
         # Counter for requests waiting for streaming input. Used to calculate
@@ -493,12 +488,6 @@ class Scheduler(SchedulerInterface):
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens = min(num_new_tokens, token_budget)
-
-            # NOTE: realtime sessions advance their position clock through the
-            # WAITING loop (each audio chunk resumes the session with WAITING
-            # status), so the unbounded-realtime re-anchor trigger lives there,
-            # not here. The re-anchor margin keeps the running-loop decode clear
-            # of max_model_len between chunks.
 
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
@@ -830,18 +819,10 @@ class Scheduler(SchedulerInterface):
                     # requests, which have output tokens.
                     num_new_tokens = request.num_tokens - num_computed_tokens
 
-                    # Clamp to max_model_len. Mirrors the RUNNING-path guard
-                    # above, but ONLY for streaming/resumable sessions whose
-                    # accumulated token count can grow past max_model_len across
-                    # successive `_update_request_as_session` resumes (continuous
-                    # Voxtral realtime audio). Classic one-shot prefills must NOT
-                    # be clamped here: a pooling/embedding request with
-                    # prompt_len == max_model_len would otherwise lose its last
-                    # token and hang (generate rejects that length at validation,
-                    # pooling does not). They keep the upstream invariant below.
-                    # Run before spec-decode padding so a length-capped session
-                    # drops to <=0 and the padding block (gated on
-                    # num_new_tokens == 1) is naturally skipped.
+                    # Clamp resumable (streaming) sessions to max_model_len;
+                    # their token count grows across resumes. Classic prefills
+                    # stay unclamped (a pooling req at prompt_len == max_model_len
+                    # must keep its last token). Runs before spec-decode padding.
                     if request.resumable:
                         num_new_tokens = min(
                             num_new_tokens,
@@ -880,18 +861,11 @@ class Scheduler(SchedulerInterface):
 
                     num_new_tokens = min(num_new_tokens, token_budget)
                     if not request.resumable:
-                        # Classic one-shot prefill: preserve the upstream
-                        # invariant. A non-resumable request is never clamped
-                        # above, so it always has tokens to schedule here.
+                        # Non-resumable prefills are never clamped above.
                         assert num_new_tokens > 0
                     elif num_new_tokens <= 0:
-                        # Resumable streaming session has reached max_model_len
-                        # and can never make progress. Finish it gracefully
-                        # (finish_requests removes it from the waiting queues)
-                        # instead of asserting and crashing the engine, and
-                        # avoid head-of-line blocking the waiting queue. Buffer a
-                        # client-facing finish output so the websocket does not
-                        # hang waiting for a finish_reason that never arrives.
+                        # Resumable session hit max_model_len: finish gracefully
+                        # (don't crash the engine) and notify the client.
                         finished = self.finish_requests(
                             request_id, RequestStatus.FINISHED_LENGTH_CAPPED
                         )
@@ -1764,8 +1738,7 @@ class Scheduler(SchedulerInterface):
                 finish_reason = request.get_finished_reason()
                 finished = self._handle_stopped_request(request)
                 if finished:
-                    # It may have applied a queued chunk and length-capped the
-                    # session (STOP -> LENGTH); re-read the final reason.
+                    # Applying a queued chunk may have flipped STOP -> LENGTH.
                     finish_reason = request.get_finished_reason()
                     kv_transfer_params = self._free_request(request)
 
@@ -1836,11 +1809,8 @@ class Scheduler(SchedulerInterface):
                     )
                 )
 
-        # Emit client-facing finish outputs for streaming sessions finished from
-        # inside schedule()/add_request() (the request is already freed, so this
-        # is the only place the client learns it ended). Mirrors the failed-KV
-        # path above; without it the websocket hangs on a finish_reason that
-        # never comes.
+        # Drain finishes buffered by schedule()/add_request() (request already
+        # freed; only place the client learns it ended).
         if self._streaming_finish_outputs:
             for client_index, req_id, reason in self._streaming_finish_outputs:
                 outputs[client_index].append(
@@ -1962,11 +1932,8 @@ class Scheduler(SchedulerInterface):
                 # Streaming request finished.
                 return True
             self._update_request_as_session(request, update)
-            # After extending the session with new streaming input, check if
-            # the accumulated tokens (prompt + encoder + output) reached
-            # max_model_len. Without this guard a fatal assertion fires in
-            # gpu_model_runner._bookkeeping_sync once the streaming input pushes
-            # the total past the limit (continuous Voxtral realtime sessions).
+            # Streaming input pushed the session past max_model_len: finish
+            # gracefully, else a fatal assert fires later in the model runner.
             if request.num_tokens >= self.max_model_len:
                 logger.warning(
                     "Streaming session %s reached max_model_len (%d >= %d) "
@@ -2110,10 +2077,8 @@ class Scheduler(SchedulerInterface):
             elif update is not None:
                 # Commence next input chunk.
                 self._update_request_as_session(existing, update)
-                # If the session reached max_model_len after the update (e.g.
-                # continuous audio streaming accumulating encoder tokens past
-                # the limit), finish gracefully here instead of letting it
-                # crash later in the model runner.
+                # Session reached max_model_len after the update: finish
+                # gracefully + notify the client.
                 if existing.num_tokens >= self.max_model_len:
                     logger.warning(
                         "Streaming session %s reached max_model_len "
@@ -2211,11 +2176,10 @@ class Scheduler(SchedulerInterface):
         finished: list[tuple[str, int]],
         finished_status: RequestStatus,
     ) -> None:
-        """Queue client-facing finish outputs for sessions finished from inside
-        schedule()/add_request() (where there is no `outputs` dict). Drained in
-        the next update_from_output so the client receives a finish_reason
-        instead of hanging. ``finished`` is the (req_id, client_index) list
-        returned by finish_requests."""
+        """Buffer a client-facing finish for a session ended inside schedule()/
+        add_request(); drained next update_from_output so the client isn't left
+        hanging. ``finished`` is the (req_id, client_index) list from
+        finish_requests."""
         reason = RequestStatus.get_finished_reason(finished_status)
         if reason is None:
             return
