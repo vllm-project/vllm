@@ -79,7 +79,7 @@ class SchedulerConfig:
 
     long_prefill_token_threshold: int = Field(default=0, ge=0)
     """For chunked prefill, a request is considered long if the prompt is
-    longer than this number of tokens."""
+    longer than this number of tokens. 0 disables the cap (default)."""
 
     enable_chunked_prefill: bool = True
     """If True, prefill requests can be chunked based
