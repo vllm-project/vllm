@@ -67,7 +67,7 @@ def _parse_harmony_format_message(chat_msg: dict) -> Message:
         contents = [TextContent(text="")]
 
     if name:
-        msg = Message.from_author_and_contents(Author.new(Role(role), name), contents)
+        msg = Message(author=Author.new(Role(role), name), content=contents)
     else:
         msg = Message.from_role_and_contents(Role(role), contents)
 
@@ -318,6 +318,7 @@ def _parse_function_call(message: Message, recipient: str) -> list[ResponseOutpu
             type="function_call",
             name=function_name,
             id=f"fc_{random_id}",
+            status="completed",
         )
         output_items.append(response_item)
     return output_items

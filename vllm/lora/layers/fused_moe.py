@@ -12,10 +12,16 @@ from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.custom_op import maybe_get_oot_by_class
 from vllm.model_executor.layers.fused_moe import MoERunner
 from vllm.model_executor.layers.fused_moe.experts.lora_context import MoELoRAContext
+from vllm.model_executor.layers.fused_moe.experts.lora_experts_mixin import (
+    LoRAExpertsMixin,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
     FusedMoEModularMethod,
 )
-from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
+from vllm.model_executor.layers.fused_moe.modular_kernel import (
+    FusedMoEKernel,
+    FusedMoEKernelModularImpl,
+)
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoDPEPModular,
 )
@@ -33,6 +39,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self._ep_check()
 
         routed_experts = self.base_layer.routed_experts
+        routed_experts.lora_base_layer_prefix = "base_layer."
         assert not routed_experts.quant_method.is_monolithic, (
             "Monolithic kernels are not supported for Fused MoE LoRA."
         )
@@ -58,6 +65,13 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         routed_experts._ensure_moe_quant_config_init()
         if getattr(routed_experts.quant_method, "supports_internal_mk", False):
             moe_kernel = routed_experts.quant_method.moe_kernel
+            assert moe_kernel is not None, (
+                "Fused MoE quant method must provide a moe_kernel."
+            )
+            # Don't let the kernel own shared experts so the runner can
+            # overlap them with routed experts via a separate CUDA stream.
+            assert isinstance(moe_kernel.impl, FusedMoEKernelModularImpl)
+            moe_kernel.impl.shared_experts = None
         else:
             prepare_finalize = MoEPrepareAndFinalizeNoDPEPModular()
             moe_kernel = FusedMoEKernel(
@@ -104,7 +118,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
     def _init_lora_stream_context(self) -> None:
         self._lora_stream: torch.cuda.Stream | None = None
-        self._events: tuple[torch.cuda.Event, ...] | None = None
+        self._events: tuple[torch.Event, ...] | None = None
         if not self._enable_aux_cuda_stream:
             return
         if not current_platform.is_cuda_alike():
@@ -113,7 +127,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         # 4 events: 2 per (base GEMM, LoRA) pair so w13 and w2 don't reuse
         # the same event objects; reuse-within-a-pair is fine because the
         # second pair starts only after intermediate_cache1.add_() has joined.
-        self._events = tuple(torch.cuda.Event() for _ in range(4))
+        self._events = tuple(torch.Event() for _ in range(4))
 
     def _build_lora_context(self):
         use_dual_stream = (
@@ -405,7 +419,11 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     def set_mapping(self, punica_wrapper):
         super().set_mapping(punica_wrapper)
         lora_context = self._build_lora_context()
-        self._moe_kernel.fused_experts.set_lora_context(lora_context)
+        fused_experts = self._moe_kernel.fused_experts
+        assert isinstance(fused_experts, LoRAExpertsMixin), (
+            f"{type(fused_experts).__name__} does not support LoRA context setup."
+        )
+        fused_experts.set_lora_context(lora_context)
         prepare_finalize = self._moe_kernel.prepare_finalize
         if hasattr(prepare_finalize, "set_lora_context"):
             prepare_finalize.set_lora_context(lora_context)
@@ -482,9 +500,13 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
     ) -> None:
         """Initializes lora matrices."""
 
-        assert isinstance(model_config, PretrainedConfig)
+        if model_config is None:
+            raise ValueError("model_config must be provided for MoE LoRA.")
+        architectures = model_config.architectures
+        if not architectures:
+            raise ValueError("model_config.architectures must be defined for MoE LoRA.")
         self._verify_ep_fs(lora_config)
-        self._base_model = model_config.architectures[0]
+        self._base_model = architectures[0]
         self.max_loras = lora_config.max_loras
         self.fully_sharded = lora_config.fully_sharded_loras
 
