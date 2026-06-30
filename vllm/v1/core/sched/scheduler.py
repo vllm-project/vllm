@@ -307,14 +307,14 @@ class Scheduler(SchedulerInterface):
         )
 
         if self.enable_return_routed_experts:
-            assert self.dcp_world_size == 1 and self.pcp_world_size == 1, (
-                "enable_return_routed_experts does not support context parallelism "
-                "(dcp_world_size > 1 or pcp_world_size > 1)"
-            )
-
+            total_cp = self.dcp_world_size * self.pcp_world_size
             self.routed_experts_mgr = RoutedExpertsManager(
                 vllm_config=vllm_config,
                 kv_cache_config=kv_cache_config,
+                total_cp_world_size=total_cp,
+                cp_kv_cache_interleave_size=(
+                    vllm_config.parallel_config.cp_kv_cache_interleave_size
+                ),
             )
             # Block-ID snapshot taken at schedule time (before forward),
             # so update_from_output can read slot data even if a later

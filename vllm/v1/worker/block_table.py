@@ -11,6 +11,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.cp_utils import get_total_cp_world_size
+from vllm.v1.worker.re_slot_mapping import compute_re_slot_mapping
 
 logger = init_logger(__name__)
 
@@ -26,6 +27,7 @@ class BlockTable:
         device: torch.device,
         kernel_block_size: int,
         cp_kv_cache_interleave_size: int,
+        dcp_override: tuple[int, int] | None = None,
     ):
         """
         Args:
@@ -90,13 +92,15 @@ class BlockTable:
             # PCP might not be initialized in testing
             self.pcp_world_size = 1
             self.pcp_rank = 0
-        try:
-            self.dcp_world_size = get_dcp_group().world_size
-            self.dcp_rank = get_dcp_group().rank_in_group
-        except AssertionError:
-            # DCP might not be initialized in testing
-            self.dcp_world_size = 1
-            self.dcp_rank = 0
+        if dcp_override is not None:
+            self.dcp_world_size, self.dcp_rank = dcp_override
+        else:
+            try:
+                self.dcp_world_size = get_dcp_group().world_size
+                self.dcp_rank = get_dcp_group().rank_in_group
+            except AssertionError:
+                self.dcp_world_size = 1
+                self.dcp_rank = 0
         self.cp_kv_cache_interleave_size = cp_kv_cache_interleave_size
 
     def append_row(
@@ -137,6 +141,30 @@ class BlockTable:
         src_tgt, tgt_src = [src, tgt], [tgt, src]
         self.num_blocks_per_row[src_tgt] = self.num_blocks_per_row[tgt_src]
         self.block_table.np[src_tgt] = self.block_table.np[tgt_src]
+
+    @property
+    def total_cp_world_size(self) -> int:
+        return self.pcp_world_size * self.dcp_world_size
+
+    def compute_re_slot_mapping(
+        self,
+        num_reqs: int,
+        query_start_loc: torch.Tensor,
+        positions: torch.Tensor,
+        out: torch.Tensor,
+    ) -> None:
+        """Compute virtual slot mapping for routed experts with CP."""
+        compute_re_slot_mapping(
+            num_reqs=num_reqs,
+            query_start_loc=query_start_loc,
+            positions=positions,
+            block_table=self.block_table.gpu,
+            block_table_stride=self.block_table.gpu.stride(0),
+            block_size=self.block_size,
+            total_cp_world_size=self.total_cp_world_size,
+            cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
+            out=out,
+        )
 
     def compute_slot_mapping(
         self,
@@ -234,12 +262,15 @@ class MultiGroupBlockTable:
         kernel_block_sizes: list[int],
         max_num_blocks: list[int] | None = None,
         cp_kv_cache_interleave_size: int = 1,
+        dcp_overrides: list[tuple[int, int] | None] | None = None,
     ) -> None:
         if len(kernel_block_sizes) != len(block_sizes):
             raise ValueError(
                 f"kernel_block_sizes length ({len(kernel_block_sizes)}) "
                 f"must match block_sizes length ({len(block_sizes)})"
             )
+        if dcp_overrides is None:
+            dcp_overrides = [None] * len(block_sizes)
         if max_num_blocks is None:
             # Note(hc): each dcp rank only store
             # (max_model_len//dcp_world_size) tokens in kvcache,
@@ -247,8 +278,11 @@ class MultiGroupBlockTable:
             # must be multiplied by dcp_world_size.
             total_cp_world_size = get_total_cp_world_size()
             max_num_blocks = [
-                cdiv(max_model_len, block_size * total_cp_world_size)
-                for block_size in block_sizes
+                cdiv(
+                    max_model_len,
+                    block_size * (ovr[0] if ovr is not None else total_cp_world_size),
+                )
+                for block_size, ovr in zip(block_sizes, dcp_overrides)
             ]
 
         if len(max_num_blocks) != len(block_sizes):
@@ -274,9 +308,10 @@ class MultiGroupBlockTable:
                 device,
                 kernel_block_size,
                 cp_kv_cache_interleave_size,
+                dcp_override=ovr,
             )
-            for block_size, kernel_block_size, max_num_blocks_per_req in zip(
-                block_sizes, kernel_block_sizes, max_num_blocks
+            for block_size, kernel_block_size, max_num_blocks_per_req, ovr in zip(
+                block_sizes, kernel_block_sizes, max_num_blocks, dcp_overrides
             )
         ]
 

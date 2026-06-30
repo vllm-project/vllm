@@ -27,7 +27,8 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                     "MTP with cp_kv_cache_interleave_size > 1 is not "
                     f"supported in {layer_impl.__class__.__name__}."
                 )
-            if dcp_size > 1:
+            is_full_attn = getattr(layer_impl, "sliding_window_size", 0) == 0
+            if dcp_size > 1 and is_full_attn:
                 assert layer_impl.need_to_return_lse_for_decode, (
                     "Decode Context Parallelism (DCP) requires attention "
                     "implementations to return the softmax LSE during decode, "

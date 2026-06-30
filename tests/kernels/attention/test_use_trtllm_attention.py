@@ -135,8 +135,13 @@ def test_use_force_off(_mock):
 
 
 @patch("vllm.utils.flashinfer.supports_trtllm_attention", return_value=True)
-def test_use_dcp_fallback(_mock):
-    assert _call(dcp_world_size=2) is False
+def test_use_dcp_fallback_prefill(_mock):
+    assert _call(dcp_world_size=2, is_prefill=True) is False
+
+
+@patch("vllm.utils.flashinfer.supports_trtllm_attention", return_value=True)
+def test_use_dcp_allowed_decode(_mock):
+    assert _call(dcp_world_size=2, is_prefill=False) is True
 
 
 @patch("vllm.utils.flashinfer.supports_trtllm_attention", return_value=False)

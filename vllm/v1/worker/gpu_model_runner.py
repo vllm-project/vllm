@@ -203,6 +203,7 @@ from vllm.v1.worker.cp_utils import (
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
 from vllm.v1.worker.gpu.attn_utils import _reshape_attention_kv_cache
+from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.pool.late_interaction_runner import LateInteractionRunner
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
@@ -2277,17 +2278,20 @@ class GPUModelRunner(
         slot_mapping_gid_0 = slot_mappings[0]
 
         if self.routed_experts_initialized:
-            # Copy this step's attention slot_mapping into our private
-            # device buffer. The shared ``slot_mappings[attn_gid]`` is
-            # owned by the attention block table and will be overwritten
-            # by the next ``_prepare_inputs``; we need a stable snapshot
-            # because the async D2H may still be in flight on the copy
-            # stream when the next step runs.
             attn_gid = self.routed_experts_attn_gid
-            slot_mapping_attn = slot_mappings[attn_gid]
-            self.routed_experts_slot_mapping_device[:num_tokens].copy_(
-                slot_mapping_attn[:num_tokens]
-            )
+            attn_block_table = self.input_batch.block_table[attn_gid]
+            if attn_block_table.total_cp_world_size > 1:
+                attn_block_table.compute_re_slot_mapping(
+                    num_reqs,
+                    self.query_start_loc.gpu[: num_reqs + 1],
+                    self.positions[:num_tokens],
+                    self.routed_experts_slot_mapping_device[:num_tokens],
+                )
+            else:
+                slot_mapping_attn = slot_mappings[attn_gid]
+                self.routed_experts_slot_mapping_device[:num_tokens].copy_(
+                    slot_mapping_attn[:num_tokens]
+                )
 
         num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
             :num_reqs_padded
@@ -2362,7 +2366,7 @@ class GPUModelRunner(
             rswa_prefix_lens=rswa_prefix_lens,
         )
 
-        if self.dcp_world_size > 1:
+        if self.dcp_world_size > 1 and not self.use_async_spec_decode:
             self.dcp_local_seq_lens.cpu[:num_reqs] = get_dcp_local_seq_lens(
                 self.optimistic_seq_lens_cpu[:num_reqs],
                 self.dcp_world_size,
@@ -2376,6 +2380,16 @@ class GPUModelRunner(
             cm_base.dcp_local_seq_lens_cpu = self.dcp_local_seq_lens.cpu[
                 :num_reqs_padded
             ]
+        elif self.dcp_world_size > 1 and self.use_async_spec_decode:
+            prepare_dcp_local_seq_lens(
+                self.dcp_local_seq_lens.gpu,
+                self.seq_lens,
+                num_reqs,
+                self.dcp_world_size,
+                self.dcp_rank,
+                self.parallel_config.cp_kv_cache_interleave_size,
+            )
+            cm_base.dcp_local_seq_lens = self.dcp_local_seq_lens.gpu[:num_reqs_padded]
 
         if logits_indices is not None and self.cache_config.kv_sharing_fast_prefill:
             cm_base.num_logits_indices = logits_indices.size(0)
@@ -5867,12 +5881,17 @@ class GPUModelRunner(
                     # In the mixed batch mode (used for FI warmup), we use
                     # shorter sequence lengths to run faster.
                     # TODO(luka) better system for describing dummy batches
+                    min_decode_sl = max(
+                        1, get_total_cp_world_size() + self.num_spec_tokens
+                    )
                     seq_lens = torch.tensor(  # type: ignore[assignment]
-                        [1] * num_decode_tokens + [num_prefill_tokens + 1],
+                        [min_decode_sl] * num_decode_tokens + [num_prefill_tokens + 1],
                         dtype=torch.int,
                     )
                 else:
-                    seq_lens = max_query_len  # type: ignore[assignment]
+                    seq_lens = max_query_len * max(  # type: ignore[assignment]
+                        1, get_total_cp_world_size()
+                    )
                 self.optimistic_seq_lens_cpu[:num_reqs] = seq_lens
                 self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
                 self.seq_lens.copy_(self.optimistic_seq_lens_cpu, non_blocking=True)
@@ -6995,21 +7014,24 @@ class GPUModelRunner(
         """
         block_sizes = []
         max_num_blocks = []
+        dcp_overrides: list[tuple[int, int] | None] = []
         max_model_len = max(self.max_model_len, self.max_encoder_len)
         for kv_cache_group in kv_cache_config.kv_cache_groups:
-            if isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec):
+            spec = kv_cache_group.kv_cache_spec
+            if isinstance(spec, EncoderOnlyAttentionSpec):
                 continue
-            block_size = kv_cache_group.kv_cache_spec.block_size
+            block_size = spec.block_size
             block_sizes.append(block_size)
-            max_num_blocks_per_req = cdiv(
-                max_model_len, block_size * get_total_cp_world_size()
-            )
-            if isinstance(kv_cache_group.kv_cache_spec, MambaSpec):
+            is_replicated = isinstance(spec, SlidingWindowSpec)
+            cp_ws = 1 if is_replicated else get_total_cp_world_size()
+            dcp_overrides.append((1, 0) if is_replicated else None)
+            max_num_blocks_per_req = cdiv(max_model_len, block_size * cp_ws)
+            if isinstance(spec, MambaSpec):
                 max_num_blocks_per_req = (
                     max_num_blocks_per_req
                     if self.cache_config.enable_prefix_caching
                     else 1
-                ) + kv_cache_group.kv_cache_spec.num_speculative_blocks
+                ) + spec.num_speculative_blocks
             max_num_blocks.append(max_num_blocks_per_req)
 
         if (
@@ -7031,6 +7053,7 @@ class GPUModelRunner(
                 logitsprocs=self.input_batch.logitsprocs,
                 logitsprocs_need_output_token_ids=self.input_batch.logitsprocs_need_output_token_ids,
                 is_pooling_model=self.is_pooling_model,
+                dcp_overrides=dcp_overrides,
                 reasoning_config=self.vllm_config.reasoning_config,
             )
 

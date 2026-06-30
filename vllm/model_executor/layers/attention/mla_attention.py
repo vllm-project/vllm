@@ -277,6 +277,7 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheSpec,
     MLAAttentionSpec,
+    SlidingWindowSpec,
 )
 
 logger = init_logger(__name__)
@@ -677,7 +678,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             return output.fill_(0)
 
         if self.impl.dcp_world_size == -1:
-            self.impl.dcp_world_size = get_dcp_group().world_size
+            if getattr(self.impl, "sliding_window_size", 0) > 0:
+                self.impl.dcp_world_size = 1
+                self.impl.dcp_rank = 0
+            else:
+                self.impl.dcp_world_size = get_dcp_group().world_size
+                self.impl.dcp_rank = get_dcp_group().rank_in_group
 
         fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
 
@@ -813,19 +819,20 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
             # correct dcp attn_out with lse.
             if self.impl.dcp_world_size > 1:
+                lse_base_e = getattr(self.impl, "lse_base_is_e", True)
                 if self.dcp_a2a:
                     attn_out = dcp_a2a_lse_reduce(
                         attn_out,
                         lse,
                         get_dcp_group(),
-                        is_lse_base_on_e=True,
+                        is_lse_base_on_e=lse_base_e,
                     )
                 else:
                     attn_out = cp_lse_ag_out_rs(
                         attn_out,
                         lse,
                         get_dcp_group(),
-                        is_lse_base_on_e=True,
+                        is_lse_base_on_e=lse_base_e,
                     )
 
             # v_up projection
@@ -1521,13 +1528,16 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             vllm_config, self.model_config.dtype
         )
 
-        try:
-            self.dcp_world_size = get_dcp_group().world_size
-            self.dcp_rank = get_dcp_group().rank_in_group
-        except AssertionError:
-            # DCP might not be initialized in testing
+        if isinstance(kv_cache_spec, SlidingWindowSpec):
             self.dcp_world_size = 1
             self.dcp_rank = 0
+        else:
+            try:
+                self.dcp_world_size = get_dcp_group().world_size
+                self.dcp_rank = get_dcp_group().rank_in_group
+            except AssertionError:
+                self.dcp_world_size = 1
+                self.dcp_rank = 0
         self.dcp_local_block_size = parallel_config.cp_kv_cache_interleave_size
         self.dcp_virtual_block_size = self.dcp_local_block_size * self.dcp_world_size
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
@@ -2052,10 +2062,15 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         )
 
         self.dcp_world_size: int = -1
+        self.dcp_rank: int = 0
 
         self.cp_kv_cache_interleave_size: int = (
             get_current_vllm_config().parallel_config.cp_kv_cache_interleave_size
         )
+
+    @property
+    def lse_base_is_e(self) -> bool:
+        return True
 
     def _concat_k_nope_k_pe(
         self, k_nope: torch.Tensor, k_pe: torch.Tensor
