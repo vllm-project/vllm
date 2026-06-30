@@ -3462,6 +3462,16 @@ class GPUModelRunner(
         inputs_embeds = self.inputs_embeds.gpu[:num_tokens]
         return input_ids, inputs_embeds
 
+    def _clear_padded_input_ids(
+        self,
+        num_scheduled_tokens: int,
+        num_input_tokens: int,
+    ) -> None:
+        # Padded slots are not real scheduled tokens, but some forward paths
+        # still slice input_ids to the padded size. Keep those ids embed-safe.
+        if num_input_tokens > num_scheduled_tokens:
+            self.input_ids.gpu[num_scheduled_tokens:num_input_tokens].zero_()
+
     def _preprocess(
         self,
         scheduler_output: "SchedulerOutput",
@@ -3566,6 +3576,7 @@ class GPUModelRunner(
             # While it is possible to use embeddings as input just like the
             # multimodal models, it is not desirable for performance since
             # then the embedding layer is not included in the CUDA graph.
+            self._clear_padded_input_ids(num_scheduled_tokens, num_input_tokens)
             input_ids = self.input_ids.gpu[:num_input_tokens]
             inputs_embeds = None
             model_kwargs = self._init_model_kwargs()
