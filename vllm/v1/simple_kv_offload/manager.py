@@ -598,16 +598,24 @@ class SimpleCPUOffloadScheduler:
             aligned_tokens = confirmed_tokens // self.block_size * self.block_size
 
             for g in range(num_groups):
-                # NOTE: num_stored_blocks is a monotonic cursor — it only
-                # advances, never retreats. Blocks already stored (below the
-                # cursor) that are evicted from CPU cache by LRU are NOT
-                # re-stored here. This is safe because:
-                # 1. Active request blocks (ref_cnt > 0) cannot be evicted
-                #    by LRU — they are not in the free queue.
-                # 2. Finished request blocks (ref_cnt == 0) can be evicted,
-                #    but their offload state is cleaned up, so this loop
-                #    skips them (state is None or finished).
-                # See test_active_request_blocks_not_evicted.
+                # NOTE: num_stored_blocks is a monotonic cursor within a
+                # request's non-preempted lifetime — it only advances, never
+                # retreats. Blocks already stored (below the cursor) that are
+                # evicted from CPU cache by LRU are NOT re-stored here. This
+                # is safe because:
+                # 1. During an in-flight store, CPU blocks leave the free
+                #    queue (ref_cnt=1 via get_new_blocks). When num_free=0,
+                #    the store loop sets out_of_space and defers rather than
+                #    evicting cached blocks.
+                # 2. After _process_store_completion() frees blocks, ref_cnt
+                #    drops to 0 and they become LRU eviction candidates even
+                #    for active requests. If evicted, the load path simply
+                #    gets a shorter cache hit and recomputes — no data loss.
+                # 3. Preemption resets num_stored_blocks to 0, causing
+                #    evicted blocks to be re-scanned and re-stored.
+                # 4. Finished request blocks are skipped (state is None or
+                #    finished).
+                # See test_in_flight_store_protected.
                 already_stored_g = state.num_stored_blocks[g]
                 group_gpu_ids = block_ids_by_group[g]
 
