@@ -167,7 +167,13 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         self.enable_eplb = parallel_config.enable_eplb
 
         self.n_logical_experts = self.n_routed_experts
-        self.n_redundant_experts = eplb_config.num_redundant_experts
+        self.n_redundant_experts = (
+            eplb_config.get_num_redundant_experts(
+                self.n_routed_experts, self.ep_size
+            )
+            if self.enable_eplb
+            else 0
+        )
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
@@ -451,7 +457,13 @@ class Qwen3MoeModel(nn.Module, EagleModelMixin):
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
         eplb_config = parallel_config.eplb_config
-        self.num_redundant_experts = eplb_config.num_redundant_experts
+        self.num_redundant_experts = (
+            eplb_config.get_num_redundant_experts(
+                config.num_experts, get_ep_group().world_size
+            )
+            if parallel_config.enable_eplb
+            else 0
+        )
 
         self.vocab_size = config.vocab_size
         self.config = config

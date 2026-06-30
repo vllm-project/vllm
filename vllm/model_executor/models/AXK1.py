@@ -138,7 +138,13 @@ class AXK1MoE(nn.Module):
         eplb_config = parallel_config.eplb_config
         self.enable_eplb = parallel_config.enable_eplb
 
-        self.n_redundant_experts = eplb_config.num_redundant_experts
+        self.n_redundant_experts = (
+            eplb_config.get_num_redundant_experts(
+                self.n_routed_experts, self.ep_size
+            )
+            if self.enable_eplb
+            else 0
+        )
         self.n_logical_experts = self.n_routed_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
@@ -733,7 +739,11 @@ class AXK1Model(nn.Module):
         )
         self.fuse_qkv_a_proj = config.q_lora_rank is not None
         self.num_redundant_experts = (
-            vllm_config.parallel_config.eplb_config.num_redundant_experts
+            vllm_config.parallel_config.eplb_config.get_num_redundant_experts(
+                config.n_routed_experts, get_ep_group().world_size
+            )
+            if vllm_config.parallel_config.enable_eplb
+            else 0
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
