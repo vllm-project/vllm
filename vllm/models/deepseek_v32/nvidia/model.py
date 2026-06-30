@@ -142,12 +142,13 @@ class DeepseekV32Model(torch.nn.Module):
         # DSA is always sparse (has index_topk); allocate the shared top-k
         # buffer the indexer writes and the sparse MLA backend reads.
         self.is_v32 = True
-        topk_indices_buffer = torch.empty(
+        self.topk_indices_buffer = torch.empty(
             vllm_config.scheduler_config.max_num_batched_tokens,
             config.index_topk,
             dtype=torch.int32,
             device=self.device,
         )
+        topk_indices_buffer = self.topk_indices_buffer
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
