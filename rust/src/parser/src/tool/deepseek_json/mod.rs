@@ -96,7 +96,7 @@ impl DeepSeekJsonToolParser {
     ) -> Result<()> {
         match event {
             DeepSeekJsonEvent::Text { len: consumed_len } => {
-                output.normal_text.push_str(&self.buffer[..consumed_len]);
+                output.push_text(&self.buffer[..consumed_len]);
             }
             DeepSeekJsonEvent::ToolCallsStart => self.mode = DeepSeekJsonMode::ToolBlock,
             DeepSeekJsonEvent::ToolCallStart => self.mode = DeepSeekJsonMode::Header,
@@ -107,7 +107,7 @@ impl DeepSeekJsonToolParser {
                 self.mode = DeepSeekJsonMode::Arguments {
                     json_scan: JsonObjectScanState::default(),
                 };
-                output.calls.push(ToolCallDelta {
+                output.push_call(ToolCallDelta {
                     tool_index,
                     name: Some(function_name),
                     arguments: String::new(),
@@ -120,7 +120,7 @@ impl DeepSeekJsonToolParser {
                         self.format.parser_name()
                     ));
                 };
-                output.calls.push(ToolCallDelta {
+                output.push_call(ToolCallDelta {
                     tool_index,
                     name: None,
                     arguments: self.buffer[..consumed_len].to_string(),
@@ -155,7 +155,7 @@ impl DeepSeekJsonToolParser {
     fn finish(&mut self) -> Result<ToolParserOutput> {
         let mut output = ToolParserOutput::default();
         match &self.mode {
-            DeepSeekJsonMode::Text => output.normal_text.push_str(&self.buffer),
+            DeepSeekJsonMode::Text => output.push_text(&self.buffer),
             DeepSeekJsonMode::ToolBlock | DeepSeekJsonMode::Done => {}
             DeepSeekJsonMode::Header | DeepSeekJsonMode::Arguments { .. } => {
                 return Err(parsing_failed!(

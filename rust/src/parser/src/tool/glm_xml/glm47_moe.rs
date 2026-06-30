@@ -69,11 +69,11 @@ mod tests {
 
         let output = parser.parse_complete(&output).unwrap();
 
-        assert_eq!(output.normal_text, "Let me search for that.\n");
-        assert_eq!(output.calls.len(), 1);
-        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(output.normal_text(), "Let me search for that.\n");
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
         assert_eq!(
-            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
             json!({"city": "Beijing", "date": "2024-12-25"})
         );
     }
@@ -90,12 +90,12 @@ mod tests {
         let chunks = split_by_chars(&output, 7);
         let output = collect_stream(&mut parser, &chunks);
 
-        assert_eq!(output.normal_text, "");
-        assert_eq!(output.calls.len(), 2);
-        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
-        assert_eq!(output.calls[1].name.as_deref(), Some("add"));
+        assert_eq!(output.normal_text(), "");
+        assert_eq!(output.calls().len(), 2);
+        assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(output.calls()[1].name.as_deref(), Some("add"));
         assert_eq!(
-            serde_json::from_str::<Value>(&output.calls[1].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls()[1].arguments).unwrap(),
             json!({"x": 1, "y": 2})
         );
     }
@@ -117,7 +117,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
             json!({
                 "whole": 42,
                 "flag": true,
@@ -134,10 +134,10 @@ mod tests {
 
         let output = parser.parse_complete("<tool_call>add</tool_call>").unwrap();
 
-        assert_eq!(output.calls.len(), 1);
-        assert_eq!(output.calls[0].name.as_deref(), Some("add"));
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(output.calls()[0].name.as_deref(), Some("add"));
         assert_eq!(
-            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
             json!({})
         );
     }
