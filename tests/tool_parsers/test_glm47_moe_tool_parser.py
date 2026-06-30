@@ -16,7 +16,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 
-MODEL = "zai-org/GLM-4.5"
+MODEL = "zai-org/GLM-4.7"
 
 
 @pytest.fixture(scope="module")
@@ -91,6 +91,12 @@ class TestGlm47ExtractToolCalls:
         assert r.tools_called
         assert json.loads(r.tool_calls[0].function.arguments) == {"city": "Beijing"}
 
+    def test_whitespace_preserved_in_arg_values(self, glm47_tool_parser, mock_request):
+        out = "<tool_call>get_weather<arg_key>city</arg_key><arg_value>  Beijing  </arg_value></tool_call>"
+        r = glm47_tool_parser.extract_tool_calls(out, request=mock_request)
+        assert r.tools_called
+        assert json.loads(r.tool_calls[0].function.arguments) == {"city": "  Beijing  "}
+
     def test_content_before(self, glm47_tool_parser, mock_request):
         out = "Checking.<tool_call>get_current_date</tool_call>"
         r = glm47_tool_parser.extract_tool_calls(out, request=mock_request)
@@ -130,9 +136,10 @@ class TestGlm47Streaming:
         _reset(glm47_tool_parser)
         chunks = ["<tool_call>", "get_current_date", "</tool_call>"]
         current_text = ""
+        deltas = []
         for chunk in chunks:
             current_text += chunk
-            glm47_tool_parser.extract_tool_calls_streaming(
+            delta = glm47_tool_parser.extract_tool_calls_streaming(
                 previous_text="",
                 current_text=current_text,
                 delta_text=chunk,
@@ -141,7 +148,23 @@ class TestGlm47Streaming:
                 delta_token_ids=[],
                 request=mock_request,
             )
-        assert len(glm47_tool_parser.prev_tool_call_arr) >= 1
+            if delta:
+                deltas.append(delta)
+        tool_calls = [
+            tool_call for delta in deltas for tool_call in (delta.tool_calls or [])
+        ]
+        names = [
+            tool_call.function.name
+            for tool_call in tool_calls
+            if tool_call.function and tool_call.function.name
+        ]
+        arguments = [
+            tool_call.function.arguments
+            for tool_call in tool_calls
+            if tool_call.function and tool_call.function.arguments
+        ]
+        assert names == ["get_current_date"]
+        assert "".join(arguments) == "{}"
 
     def test_with_args(self, glm47_tool_parser, mock_request):
         _reset(glm47_tool_parser)
@@ -155,9 +178,10 @@ class TestGlm47Streaming:
             "</tool_call>",
         ]
         current_text = ""
+        deltas = []
         for chunk in chunks:
             current_text += chunk
-            glm47_tool_parser.extract_tool_calls_streaming(
+            delta = glm47_tool_parser.extract_tool_calls_streaming(
                 previous_text="",
                 current_text=current_text,
                 delta_text=chunk,
@@ -166,5 +190,13 @@ class TestGlm47Streaming:
                 delta_token_ids=[],
                 request=mock_request,
             )
-        args = json.loads(glm47_tool_parser.prev_tool_call_arr[0]["arguments"])
+            if delta:
+                deltas.append(delta)
+        arguments = [
+            tool_call.function.arguments
+            for delta in deltas
+            for tool_call in (delta.tool_calls or [])
+            if tool_call.function and tool_call.function.arguments
+        ]
+        args = json.loads("".join(arguments))
         assert args["city"] == "Beijing"

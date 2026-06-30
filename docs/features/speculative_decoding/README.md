@@ -15,6 +15,9 @@ vLLM supports a variety of methods of speculative decoding. Model-based methods 
 - [Multi-Layer Perceptron](mlp.md)
 - [N-Gram](n_gram.md)
 - [Suffix Decoding](suffix.md)
+- [Hidden State Extraction](extract_hidden_states.md)
+- [Custom Proposer Backend (Experimental)](#custom-proposer-backend-experimental)
+- [Dynamic Speculative Decoding](dynamic_speculative_decoding.md)
 
 ## Method Selection at a Glance
 
@@ -30,10 +33,22 @@ depend on your model family, traffic pattern, hardware, and sampling settings.
 | MLP speculator | Medium to high gain | Medium gain | Good when compatible MLP speculators are available. |
 | N-gram | Low to medium gain | Medium gain | Lightweight and easy to enable. |
 | Suffix decoding | Low to medium gain | Medium gain | No extra draft model; dynamic speculation depth. |
+| Custom Proposer | Varies | Varies | Bring your own proposer class (experimental). |
+| Dynamic Speculative Decoding | High gain | Higher than base SD method | Useful for RL or workload with fluctuating QPS |
 
 For reproducible measurements in your environment, use
 [`examples/features/speculative_decoding/spec_decode_offline.py`](../../../examples/features/speculative_decoding/spec_decode_offline.py)
 or the [benchmark CLI guide](../../benchmarking/cli.md).
+
+## Custom Proposer Backend (Experimental)
+
+You can plug in your own custom proposer class for speculative decoding by setting the method to `custom_class` and providing the full module path to your class.
+Your custom class must accept a `VllmConfig` upon instantiation and implement a `propose` method.
+
+**Example configuration:**
+
+- `speculative_config.method = "custom_class"`
+- `speculative_config.model = "your_module.YourCustomProposerClass"`
 
 ## `--speculative-config` schema
 
@@ -71,6 +86,17 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 | `parallel_drafting` | `boolean` | `false` | Enable parallel draft token generation. Only compatible with EAGLE and draft-model methods. |
 | `rejection_sample_method` | `string` | `strict` | `strict`, `probabilistic`, or `synthetic`. |
 | `synthetic_acceptance_rate` | `float` | `None` | Average acceptance rate to target when `rejection_sample_method` is `synthetic`. Valid range is `[0, 1]`. |
+
+!!! note
+    Gemma 4 assistant checkpoints are handled as Gemma 4 MTP speculators, not
+    as generic draft models. Use `"method": "mtp"` with the assistant
+    checkpoint in `model`, as shown in the [MTP guide](mtp.md#gemma-4-assistant-models).
+
+    If startup logs show `SpeculativeConfig(method='draft_model', ...)` for a
+    Gemma 4 assistant checkpoint, the installed vLLM version does not include
+    Gemma 4 MTP support for that path. Upgrade to a version that includes
+    Gemma 4 MTP support instead of forcing the assistant checkpoint through
+    generic draft-model speculative decoding.
 
 ### Method-specific keys
 
@@ -145,7 +171,7 @@ speculative decoding, breaking down the guarantees into three key areas:
     >   distribution. [View Test Code](https://github.com/vllm-project/vllm/blob/47b65a550866c7ffbd076ecb74106714838ce7da/tests/samplers/test_rejection_sampler.py#L252)
     > - **Greedy Sampling Equality**: Confirms that greedy sampling with speculative decoding matches greedy sampling
     >   without it. This verifies that vLLM's speculative decoding framework, when integrated with the vLLM forward pass and the vLLM rejection sampler,
-    >   provides a lossless guarantee. Almost all of the tests in [tests/spec_decode/e2e](/tests/v1/spec_decode).
+    >   provides a lossless guarantee. Almost all of the tests in [tests/spec_decode/e2e](../../../tests/v1/spec_decode).
     >   verify this property using [this assertion implementation](https://github.com/vllm-project/vllm/blob/b67ae00cdbbe1a58ffc8ff170f0c8d79044a684a/tests/spec_decode/e2e/conftest.py#L291)
 
 3. **vLLM Logprob Stability**
@@ -164,7 +190,7 @@ For mitigation strategies, please refer to the FAQ entry *Can the output of a pr
 
 ## Known Feature Incompatibility
 
-1. Pipeline parallelism is not composible with speculative decoding as of `vllm<=0.15.0`
+1. Pipeline parallelism is not composable with speculative decoding as of `vllm<=0.15.0`
 2. Speculative decoding with a draft models is not supported in `vllm<=0.10.0`
 
 ## Resources for vLLM contributors

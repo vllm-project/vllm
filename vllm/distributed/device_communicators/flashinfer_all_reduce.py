@@ -19,6 +19,8 @@ from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
+# The empirical value for small batch
+PDL_ADVANCE_LAUNCH_TOKENS = 16
 
 fi_ar_available = False
 try:
@@ -59,6 +61,7 @@ def _create_workspace(
             hidden_dim=hidden_dim,
             dtype=dtype,
             comm_backend=comm_backend,
+            group=group,
         )
     except Exception as e:
         if "multicast" in str(e).lower():
@@ -312,7 +315,7 @@ class FlashInferAllReduce:
         return self._ensure_workspace(hidden_dim, input_tensor.dtype)
 
     def all_reduce(self, input_tensor: torch.Tensor) -> torch.Tensor:
-        _, hidden_dim = input_tensor.shape
+        num_tokens, hidden_dim = input_tensor.shape
         workspace = get_fi_ar_workspace(
             world_size=self.world_size,
             rank=self.rank,
@@ -325,6 +328,8 @@ class FlashInferAllReduce:
             input=input_tensor,
             workspace=workspace,
             pattern=flashinfer_comm.AllReduceFusionPattern.kAllReduce,
+            launch_with_pdl=True,
+            trigger_completion_at_end=num_tokens > PDL_ADVANCE_LAUNCH_TOKENS,
         )
 
     def destroy(self):

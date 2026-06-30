@@ -10,7 +10,8 @@ import pytest
 import torch.distributed
 from torch.distributed import ProcessGroup
 
-from tests.kernels.moe.utils import make_dummy_moe_config
+import vllm.envs as envs
+from tests.kernels.moe.utils import check_accuracy, make_dummy_moe_config
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -19,11 +20,14 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.fused_batched_moe import BatchedTritonExperts
+from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
+    BatchedTritonExperts,
+)
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
+from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_ep
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -61,7 +65,7 @@ def make_weights(
         return w1, w2, None, None
 
     # per-out-channel weight quantization
-    assert dtype == torch.float8_e4m3fn
+    assert dtype == current_platform.fp8_dtype()
     w1 = torch.empty((e, 2 * n, k), device="cuda", dtype=torch.float16)
     w2 = torch.empty((e, k, n), device="cuda", dtype=torch.float16)
 
@@ -102,9 +106,11 @@ class TestTensors:
     @staticmethod
     def make(config: TestConfig, low_latency_mode: bool) -> "TestTensors":
         # TODO (varun) - check that float16 works ?
-        assert config.dtype in [torch.bfloat16, torch.float8_e4m3fn]
+        assert config.dtype in [torch.bfloat16, current_platform.fp8_dtype()]
         token_dtype = (
-            torch.bfloat16 if config.dtype == torch.float8_e4m3fn else config.dtype
+            torch.bfloat16
+            if config.dtype == current_platform.fp8_dtype()
+            else config.dtype
         )
         rank_tokens = (
             torch.randn((config.m, config.k), device="cuda", dtype=token_dtype) / 10
@@ -183,7 +189,6 @@ def make_modular_kernel(
     mk = FusedMoEKernel(
         prepare_finalize=a2a,
         fused_experts=fused_experts,
-        inplace=False,
     )
     return mk
 
@@ -214,47 +219,52 @@ def deep_ep_moe_impl(
         return expert_map.to(device=device, dtype=torch.int32)
 
     hidden_size = test_tensors.rank_tokens.size(1)
-    is_quantized = w1.dtype == torch.float8_e4m3fn
+    is_quantized = w1.dtype == current_platform.fp8_dtype()
     q_dtype = None
     if is_quantized:
-        q_dtype = torch.float8_e4m3fn
+        q_dtype = current_platform.fp8_dtype()
 
     out_hidden_states = torch.empty_like(test_tensors.rank_tokens)
     total_num_tokens = test_tensors.rank_tokens.size(0)
+
+    quant_config = FusedMoEQuantConfig.make(
+        q_dtype,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        per_act_token_quant=per_act_token_quant,
+        a1_scale=test_tensors.rank_token_scales,
+    )
+
+    # Build the kernel (and its DeepEP buffer) once and reuse it across chunks.
+    # Re-creating it per chunk re-inits rocSHMEM, which only allows one
+    # allocation per process on ROCm. The buffer is sized by max_tokens_per_rank
+    # so it is valid for every chunk (mirrors production's cached all2all handle).
+    mk: FusedMoEKernel = make_modular_kernel(
+        pg,
+        pgi,
+        low_latency_mode,
+        hidden_size,
+        dp_size,
+        num_experts,
+        num_local_experts,
+        q_dtype,
+        use_fp8_dispatch,
+        quant_config,
+    )
 
     def process_chunk(chunk_start, chunk_end, skip_result_store=False):
         rank_tokens_chunk = test_tensors.rank_tokens[chunk_start:chunk_end]
         topk_weights_chunk = test_tensors.topk_weights[chunk_start:chunk_end]
         topk_chunk = test_tensors.topk[chunk_start:chunk_end]
-        rank_token_scales_chunk = test_tensors.rank_token_scales
-        if (
-            rank_token_scales_chunk is not None
-            and rank_token_scales_chunk.size(0) == total_num_tokens
-        ):
-            # per act token
-            rank_token_scales_chunk = rank_token_scales_chunk[chunk_start:chunk_end]
 
-        quant_config = FusedMoEQuantConfig.make(
-            q_dtype,
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            per_act_token_quant=per_act_token_quant,
-            a1_scale=rank_token_scales_chunk,
-        )
-
-        # Make modular kernel
-        mk: FusedMoEKernel = make_modular_kernel(
-            pg,
-            pgi,
-            low_latency_mode,
-            hidden_size,
-            dp_size,
-            num_experts,
-            num_local_experts,
-            q_dtype,
-            use_fp8_dispatch,
-            quant_config,
-        )
+        if low_latency_mode:
+            # Reusing one buffer leaves it dirty; the low-latency kernels need
+            # the zero-initialized regions reset before each dispatch.
+            mk.prepare_finalize.buffer.clean_low_latency_buffer(
+                MAX_TOKENS_PER_RANK,
+                hidden_size,
+                num_experts,
+            )
 
         out = mk.apply(
             hidden_states=rank_tokens_chunk,
@@ -316,7 +326,7 @@ def torch_moe_impl(
             .to(a.dtype)
         )
 
-    is_quantized = w1.dtype == torch.float8_e4m3fn
+    is_quantized = w1.dtype == current_platform.fp8_dtype()
     a_dtype = a.dtype
     if is_quantized:
         w1 = w1.to(dtype=torch.float32) * w1_scale
@@ -345,6 +355,28 @@ def torch_moe_impl(
     return out
 
 
+def assert_deepep_close(
+    expected: torch.Tensor,
+    actual: torch.Tensor,
+    k: int,
+    use_fp8_dispatch: bool,
+) -> None:
+    if use_fp8_dispatch and current_platform.is_fp8_fnuz():
+        # ROCm e4m3fnuz rounds differently than the reference quant,
+        # so DeepEP's fp8 dispatch can yield a few outliers even with
+        # a correct kernel; allow a small fraction of mismatches here.
+        atol = rtol = 1.5e-1
+        check_accuracy(expected, actual, atol=atol, rtol=rtol, percent=0.95)
+        return
+
+    torch.testing.assert_close(
+        expected,
+        actual,
+        atol=6e-2,
+        rtol=6e-2,
+    )
+
+
 def _deep_ep_moe(
     pgi: ProcessGroupInfo,
     low_latency_mode: bool,
@@ -357,6 +389,9 @@ def _deep_ep_moe(
     use_fp8_dispatch: bool,
     per_act_token_quant: bool,
 ):
+    # Set seed in worker process for deterministic tensor generation.
+    set_random_seed(7)
+
     device = torch.device(f"cuda:{pgi.local_rank}")
     init_workspace_manager(device)
 
@@ -365,7 +400,7 @@ def _deep_ep_moe(
             "FP8 dispatch interface is available only in low-latency mode"
         )
 
-    is_quantized = w1.dtype == torch.float8_e4m3fn
+    is_quantized = w1.dtype == current_platform.fp8_dtype()
     device_idx = torch.accelerator.current_device_index()
     w1 = w1.to(device=device_idx)
     w2 = w2.to(device=device_idx)
@@ -374,7 +409,13 @@ def _deep_ep_moe(
         w1_scale = w1_scale.to(device=device_idx)
         w2_scale = w2_scale.to(device=device_idx)
 
-    pg = torch.distributed.new_group(list(range(pgi.world_size)))
+    if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
+        pg = torch.distributed.split_group(
+            split_ranks=[list(range(pgi.world_size))],
+            group_desc="deepep_test",
+        )
+    else:
+        pg = torch.distributed.new_group(list(range(pgi.world_size)))
     test_tensors = TestTensors.make(config, low_latency_mode)
 
     with set_current_vllm_config(VllmConfig()):
@@ -415,12 +456,7 @@ def _deep_ep_moe(
             per_act_token_quant,
         )
 
-    torch.testing.assert_close(
-        torch_combined,
-        deepep_combined,
-        atol=6e-2,
-        rtol=6e-2,
-    )
+    assert_deepep_close(torch_combined, deepep_combined, config.k, use_fp8_dispatch)
 
 
 MNKs = [
@@ -433,7 +469,7 @@ MNKs = [
     (222, 1024, 2048),
 ]
 
-DTYPES = [torch.bfloat16, torch.float8_e4m3fn]
+DTYPES = [torch.bfloat16, current_platform.fp8_dtype()]
 
 
 @pytest.mark.parametrize("dtype", DTYPES)
@@ -488,7 +524,7 @@ MNKs = [
     (64, 1024, 2560),
     (222, 1024, 2560),
 ]
-DTYPES = [torch.float8_e4m3fn, torch.bfloat16]
+DTYPES = [current_platform.fp8_dtype(), torch.bfloat16]
 USE_FP8_DISPATCH = [True, False]
 
 

@@ -5,11 +5,17 @@
 import torch
 
 import vllm.envs as envs
+from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_fp8_min_max,
+)
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
     fp8_fp4_mqa_logits,
     fp8_fp4_paged_mqa_logits,
@@ -27,17 +33,139 @@ from vllm.v1.attention.backends.mla.indexer import (
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
 
-if current_platform.is_cuda_alike():
-    from vllm import _custom_ops as ops
-elif current_platform.is_xpu():
-    from vllm._xpu_ops import xpu_ops
-
 logger = init_logger(__name__)
 
 RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 
 # MXFP4 layout: 2 values packed per byte, ue8m0 (1-byte) scale per block of 32.
 MXFP4_BLOCK_SIZE = 32
+
+
+@triton.jit
+def _fused_indexer_q_rope_quant_kernel(
+    positions,
+    q,
+    q_s0,
+    q_s1,
+    cos_sin_cache,
+    cos_sin_s0,
+    q_fp8,
+    q_fp8_s0,
+    q_fp8_s1,
+    weights,
+    weights_s0,
+    weights_s1,
+    weights_out,
+    weights_out_s0,
+    weights_out_s1,
+    softmax_scale,
+    head_scale,
+    fp8_min: tl.constexpr,
+    fp8_max: tl.constexpr,
+    is_neox: tl.constexpr,
+):
+    token = tl.program_id(0)
+    head = tl.program_id(1)
+    offs32 = tl.arange(0, 32)
+    offs64 = tl.arange(0, 64)
+
+    pos = tl.load(positions + token)
+    cos = tl.load(cos_sin_cache + pos * cos_sin_s0 + offs32).to(tl.float32)
+    sin = tl.load(cos_sin_cache + pos * cos_sin_s0 + 32 + offs32).to(tl.float32)
+    q_base = q + token * q_s0 + head * q_s1
+    out_base = q_fp8 + token * q_fp8_s0 + head * q_fp8_s1
+
+    if is_neox:
+        # NeoX layout, x0 = q[0:32], x1 = q[32:64]
+        x0 = tl.load(q_base + offs32).to(tl.float32)
+        x1 = tl.load(q_base + 32 + offs32).to(tl.float32)
+    else:
+        # interleaved layout
+        # x0 = q[0, 2, 4, ...], x1 = q[1, 3, 5, ...]
+        x0 = tl.load(q_base + offs32 * 2).to(tl.float32)
+        x1 = tl.load(q_base + offs32 * 2 + 1).to(tl.float32)
+    r0 = (x0 * cos - x1 * sin).to(tl.bfloat16).to(tl.float32)
+    r1 = (x1 * cos + x0 * sin).to(tl.bfloat16).to(tl.float32)
+    amax = tl.maximum(tl.max(tl.abs(r0)), tl.max(tl.abs(r1)))
+
+    q_nope = tl.load(q_base + 64 + offs64).to(tl.float32)
+    amax = tl.maximum(amax, tl.max(tl.abs(q_nope)))
+    scale_raw = tl.maximum(amax, 1e-10) * (1.0 / fp8_max)
+    # e8m0 format
+    q_scale = tl.math.exp2(tl.ceil(tl.log2(scale_raw)))
+
+    if is_neox:
+        tl.store(
+            out_base + offs32,
+            tl.clamp(r0 / q_scale, fp8_min, fp8_max).to(q_fp8.dtype.element_ty),
+        )
+        tl.store(
+            out_base + 32 + offs32,
+            tl.clamp(r1 / q_scale, fp8_min, fp8_max).to(q_fp8.dtype.element_ty),
+        )
+    else:
+        tl.store(
+            out_base + offs32 * 2,
+            tl.clamp(r0 / q_scale, fp8_min, fp8_max).to(q_fp8.dtype.element_ty),
+        )
+        tl.store(
+            out_base + offs32 * 2 + 1,
+            tl.clamp(r1 / q_scale, fp8_min, fp8_max).to(q_fp8.dtype.element_ty),
+        )
+    tl.store(
+        out_base + 64 + offs64,
+        tl.clamp(q_nope / q_scale, fp8_min, fp8_max).to(q_fp8.dtype.element_ty),
+    )
+
+    weight = tl.load(weights + token * weights_s0 + head * weights_s1).to(tl.float32)
+    tl.store(
+        weights_out + token * weights_out_s0 + head * weights_out_s1,
+        weight * q_scale * softmax_scale * head_scale,
+    )
+
+
+def fused_indexer_q_rope_quant(
+    positions: torch.Tensor,
+    q: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    weights: torch.Tensor,
+    softmax_scale: float,
+    head_scale: float,
+    is_neox: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    assert current_platform.is_cuda()
+    assert q.dtype == torch.bfloat16
+    assert q.shape[-1] == 128
+    assert cos_sin_cache.shape[-1] == 64
+    assert weights.shape == q.shape[:2]
+
+    q_fp8 = torch.empty_like(q, dtype=current_platform.fp8_dtype())
+    weights_out = torch.empty_like(weights, dtype=torch.float32)
+    fp8_min, fp8_max = get_fp8_min_max()
+    _fused_indexer_q_rope_quant_kernel[(q.shape[0], q.shape[1])](
+        positions,
+        q,
+        q.stride(0),
+        q.stride(1),
+        cos_sin_cache,
+        cos_sin_cache.stride(0),
+        q_fp8,
+        q_fp8.stride(0),
+        q_fp8.stride(1),
+        weights,
+        weights.stride(0),
+        weights.stride(1),
+        weights_out,
+        weights_out.stride(0),
+        weights_out.stride(1),
+        softmax_scale,
+        head_scale,
+        fp8_min=fp8_min,
+        fp8_max=fp8_max,
+        is_neox=is_neox,
+        num_warps=1,
+    )
+    return q_fp8, weights_out
 
 
 def _gather_workspace_shapes(
@@ -81,6 +209,7 @@ def kv_cache_as_quant_view(
     return kv_cache.unsqueeze(-2)
 
 
+@eager_break_during_capture
 def sparse_attn_indexer(
     hidden_states: torch.Tensor,
     k_cache_prefix: LayerNameType,
@@ -98,6 +227,7 @@ def sparse_attn_indexer(
     topk_indices_buffer: torch.Tensor,
     skip_k_cache_insert: bool,
     use_fp4_cache: bool = False,
+    skip_topk_buffer_clear: bool = False,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
@@ -174,7 +304,13 @@ def sparse_attn_indexer(
             scale_fmt,
         )
 
-    topk_indices_buffer[: hidden_states.shape[0]] = -1
+    # The buffer must be pre-filled with -1 (the "no token" sentinel) before the
+    # top-k kernels scatter valid indices into it. On the fused deepseek_v32
+    # nvidia path, _fused_norm_rope_kernel already cleared the same
+    # [:num_tokens, :topk] region earlier in this forward, so skip the redundant
+    # fill.
+    if not skip_topk_buffer_clear:
+        topk_indices_buffer[: hidden_states.shape[0]] = -1
     if has_prefill:
         prefill_metadata = attn_metadata_narrowed.prefill
         assert prefill_metadata is not None
@@ -220,42 +356,42 @@ def sparse_attn_indexer(
                 q_slice_cast = q_slice
                 k_quant_cast = k_quant
                 k_scale_cast = k_scale.view(torch.float32).squeeze(-1)
-            logits = fp8_fp4_mqa_logits(
-                (q_slice_cast, q_scale_slice),
-                (k_quant_cast, k_scale_cast),
-                weights[chunk.token_start : chunk.token_end],
-                chunk.cu_seqlen_ks,
-                chunk.cu_seqlen_ke,
-                clean_logits=False,
-            )
+            if current_platform.is_xpu():
+                if q_scale_slice is not None:
+                    raise RuntimeError("XPU fp8_mqa_logits does not support FP4 Q")
+                logits = torch.ops.vllm.xpu_fp8_mqa_logits(
+                    q_slice_cast,
+                    k_quant_cast,
+                    k_scale_cast,
+                    weights[chunk.token_start : chunk.token_end],
+                    chunk.cu_seqlen_ks,
+                    chunk.cu_seqlen_ke,
+                )
+            else:
+                logits = fp8_fp4_mqa_logits(
+                    (q_slice_cast, q_scale_slice),
+                    (k_quant_cast, k_scale_cast),
+                    weights[chunk.token_start : chunk.token_end],
+                    chunk.cu_seqlen_ks,
+                    chunk.cu_seqlen_ke,
+                    clean_logits=False,
+                )
             num_rows = logits.shape[0]
 
             topk_indices = topk_indices_buffer[
                 chunk.token_start : chunk.token_end, :topk_tokens
             ]
 
-            if current_platform.is_xpu():
-                xpu_ops.top_k_per_row_prefill(  # type: ignore[attr-defined]
-                    logits,
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
-                    topk_indices,
-                    num_rows,
-                    logits.stride(0),
-                    logits.stride(1),
-                    topk_tokens,
-                )
-            else:
-                torch.ops._C.top_k_per_row_prefill(
-                    logits,
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
-                    topk_indices,
-                    num_rows,
-                    logits.stride(0),
-                    logits.stride(1),
-                    topk_tokens,
-                )
+            ops.top_k_per_row_prefill(
+                logits,
+                chunk.cu_seqlen_ks,
+                chunk.cu_seqlen_ke,
+                topk_indices,
+                num_rows,
+                logits.stride(0),
+                logits.stride(1),
+                topk_tokens,
+            )
 
     if has_decode:
         decode_metadata = attn_metadata_narrowed.decode
@@ -307,20 +443,61 @@ def sparse_attn_indexer(
             if use_fp4_cache
             else padded_q_quant_decode_tokens
         )
-        logits = fp8_fp4_paged_mqa_logits(
-            (padded_q_quant_cast, padded_q_scale),
-            kv_cache,
-            weights[:num_padded_tokens],
-            seq_lens,
-            decode_metadata.block_table,
-            decode_metadata.schedule_metadata,
-            max_model_len=max_model_len,
-            clean_logits=False,
-        )
+        if current_platform.is_xpu():
+            if padded_q_scale is not None:
+                raise RuntimeError("XPU fp8_paged_mqa_logits does not support FP4 Q")
+            seq_lens_xpu = (
+                seq_lens[:, -1].contiguous() if seq_lens.ndim == 2 else seq_lens
+            )
+            logits = torch.ops.vllm.xpu_fp8_paged_mqa_logits(
+                padded_q_quant_cast,
+                kv_cache,
+                weights[:num_padded_tokens],
+                seq_lens_xpu,
+                decode_metadata.block_table,
+                decode_metadata.schedule_metadata,
+                max_model_len,
+            )
+        else:
+            logits = fp8_fp4_paged_mqa_logits(
+                (padded_q_quant_cast, padded_q_scale),
+                kv_cache,
+                weights[:num_padded_tokens],
+                seq_lens,
+                decode_metadata.block_table,
+                decode_metadata.schedule_metadata,
+                max_model_len=max_model_len,
+                clean_logits=False,
+            )
         num_rows = logits.shape[0]
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
-        if current_platform.is_cuda() and topk_tokens in (512, 1024, 2048):
+        use_cooperative_topk = (
+            current_platform.is_cuda()
+            and topk_tokens in (512, 1024, 2048)
+            and num_rows <= 32
+            and logits.stride(0) % 4 == 0  # TMA 16-byte alignment
+            and current_platform.has_device_capability(90)
+        )
+        use_persistent_topk = current_platform.is_cuda() and topk_tokens in (
+            512,
+            1024,
+            2048,
+        )
+        if use_cooperative_topk:
+            workspace_manager = current_workspace_manager()
+            (topk_workspace,) = workspace_manager.get_simultaneous(
+                ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
+            )
+            torch.ops._C.cooperative_topk(
+                logits,
+                seq_lens,
+                topk_indices,
+                topk_workspace,
+                topk_tokens,
+                attn_metadata_narrowed.max_seq_len,
+            )
+        elif use_persistent_topk:
             workspace_manager = current_workspace_manager()
             (topk_workspace,) = workspace_manager.get_simultaneous(
                 ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
@@ -334,28 +511,16 @@ def sparse_attn_indexer(
                 attn_metadata_narrowed.max_seq_len,
             )
         else:
-            if current_platform.is_xpu():
-                xpu_ops.top_k_per_row_decode(  # type: ignore[attr-defined]
-                    logits,
-                    next_n,
-                    seq_lens,
-                    topk_indices,
-                    num_rows,
-                    logits.stride(0),
-                    logits.stride(1),
-                    topk_tokens,
-                )
-            else:
-                torch.ops._C.top_k_per_row_decode(
-                    logits,
-                    next_n,
-                    seq_lens,
-                    topk_indices,
-                    num_rows,
-                    logits.stride(0),
-                    logits.stride(1),
-                    topk_tokens,
-                )
+            ops.top_k_per_row_decode(
+                logits,
+                next_n,
+                seq_lens,
+                topk_indices,
+                num_rows,
+                logits.stride(0),
+                logits.stride(1),
+                topk_tokens,
+            )
 
         if decode_metadata.requires_padding:
             # if padded, we need to unpack
@@ -388,6 +553,7 @@ def sparse_attn_indexer_fake(
     topk_indices_buffer: torch.Tensor | None,
     skip_k_cache_insert: bool,
     use_fp4_cache: bool = False,
+    skip_topk_buffer_clear: bool = False,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -440,7 +606,8 @@ class SparseAttnIndexer(CustomOp):
         self.use_fp4_cache = use_fp4_cache
         if current_platform.is_cuda() and not has_deep_gemm():
             raise RuntimeError(
-                "Sparse Attention Indexer CUDA op requires DeepGEMM to be installed."
+                "Sparse Attention Indexer CUDA op requires DeepGEMM support in "
+                "the current vLLM environment."
             )
 
     def forward_native(
@@ -492,6 +659,15 @@ class SparseAttnIndexer(CustomOp):
             self.use_fp4_cache,
         )
 
+    def forward_xpu(
+        self,
+        hidden_states: torch.Tensor,
+        q_fp8: torch.Tensor,
+        k: torch.Tensor,
+        weights: torch.Tensor,
+    ):
+        return self.forward_cuda(hidden_states, q_fp8, k, weights)
+
     def forward_hip(
         self,
         hidden_states: torch.Tensor,
@@ -499,9 +675,6 @@ class SparseAttnIndexer(CustomOp):
         k: torch.Tensor,
         weights: torch.Tensor,
     ):
-        assert not self.skip_k_cache_insert, (
-            "AMD platform doesn't support skip cache insert yet"
-        )
         assert not self.use_fp4_cache, "AMD platform doesn't support fp4 cache yet"
         assert isinstance(q_quant, torch.Tensor), (
             "AMD sparse_attn_indexer expects a single FP8 q_quant tensor"
@@ -521,9 +694,9 @@ class SparseAttnIndexer(CustomOp):
                 self.max_model_len,
                 self.max_total_seq_len,
                 self.topk_indices_buffer,
+                skip_k_cache_insert=self.skip_k_cache_insert,
             )
-        else:
-            raise RuntimeError(
-                "Sparse attention indexer ROCm custom op requires ROCm "
-                "Aiter ops to be enabled."
-            )
+        raise RuntimeError(
+            "Sparse attention indexer ROCm path is only supported on AITER. "
+            "Please enable aiter with VLLM_ROCM_USE_AITER=1"
+        )

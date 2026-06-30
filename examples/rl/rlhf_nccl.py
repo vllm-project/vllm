@@ -29,6 +29,7 @@ causes unexpected behavior.
 import os
 
 import ray
+import torch
 from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from transformers import AutoModelForCausalLM
@@ -39,10 +40,22 @@ from vllm.distributed.weight_transfer.nccl_engine import (
     NCCLTrainerSendWeightsArgs,
     NCCLWeightTransferEngine,
 )
+from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_ip, get_open_port
 
 MODEL_NAME = "facebook/opt-125m"
 # MODEL_NAME = "inference-optimization/Qwen3-0.6B-W4A16-G128"
+
+
+def get_assigned_gpu():
+    """This is a temporary workaround for a runtime bug in RCCL on ROCm."""
+    if not current_platform.is_rocm():
+        return 0
+    assigned_gpu = int(ray.get_gpu_ids()[0])
+    os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+    os.environ.pop("HIP_VISIBLE_DEVICES", None)
+    torch.accelerator.set_device_idx(assigned_gpu)
+    return assigned_gpu
 
 
 class MyLLM(LLM):
@@ -58,9 +71,11 @@ class TrainModel:
     """Ray actor that wraps the training model on a dedicated GPU."""
 
     def __init__(self, model_name: str):
+        assigned_gpu = get_assigned_gpu()
+
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
-        ).to("cuda:0")
+        ).to(f"cuda:{assigned_gpu}")
 
         self.port = get_open_port()
         self.master_address = get_ip()
@@ -186,6 +201,9 @@ ray.get([train_handle, inference_handle])
 # Collect all weight metadata from the training actor
 names, dtype_names, shapes = ray.get(train_model.get_weight_metadata.remote())
 
+# Start weight update
+ray.get(llm.start_weight_update.remote(is_checkpoint_format=True))
+
 # Issue update_weights call with NCCL-specific update info
 # packed=True enables efficient batched tensor broadcasting
 inference_handle = llm.update_weights.remote(
@@ -202,6 +220,9 @@ inference_handle = llm.update_weights.remote(
 # Broadcast all weights from trainer using the weight transfer API
 train_handle = train_model.broadcast_weights.remote(packed=True)
 ray.get([train_handle, inference_handle])
+
+# Finish weight update
+ray.get(llm.finish_weight_update.remote())
 
 ray.get(llm.wake_up.remote(tags=["scheduling"]))
 
