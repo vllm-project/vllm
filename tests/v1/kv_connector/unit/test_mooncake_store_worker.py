@@ -1621,6 +1621,54 @@ def _make_bare_worker(
     return worker
 
 
+def test_lookup_key_prefixes_cover_dcp_rank_namespaces():
+    worker = _make_bare_worker()
+    worker.tp_size = 4
+    worker.num_kv_head = 1
+    worker.dcp_size = 4
+    worker._init_lookup_key_prefixes()
+
+    assert worker._lookup_expected_per_key == 4
+    assert worker._lookup_key_prefixes[0] == (
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0",
+        "test-model@tp_rank:1@pcp0@dcp1@pp_rank:0@group:0",
+        "test-model@tp_rank:2@pcp0@dcp2@pp_rank:0@group:0",
+        "test-model@tp_rank:3@pcp0@dcp3@pp_rank:0@group:0",
+    )
+
+
+def test_lookup_key_prefixes_cover_pcp_rank_namespaces():
+    worker = _make_bare_worker()
+    worker.tp_size = 4
+    worker.num_kv_head = 1
+    worker.pcp_size = 2
+    worker.dcp_size = 1
+    worker._init_lookup_key_prefixes()
+
+    assert worker._lookup_expected_per_key == 2
+    assert worker._lookup_key_prefixes[0] == (
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0",
+        "test-model@tp_rank:0@pcp1@dcp0@pp_rank:0@group:0",
+    )
+
+
+def test_lookup_requires_all_dcp_rank_namespaces():
+    worker = _make_bare_worker(block_size=16)
+    worker.tp_size = 4
+    worker.num_kv_head = 1
+    worker.dcp_size = 4
+    worker._init_lookup_key_prefixes()
+    worker.store.batch_is_exist.return_value = [1, 1, 0, 1]
+
+    assert worker.lookup(16, [b"a0"]) == 0
+    assert worker.store.batch_is_exist.call_args.args[0] == [
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130",
+        "test-model@tp_rank:1@pcp0@dcp1@pp_rank:0@group:0@6130",
+        "test-model@tp_rank:2@pcp0@dcp2@pp_rank:0@group:0@6130",
+        "test-model@tp_rank:3@pcp0@dcp3@pp_rank:0@group:0@6130",
+    ]
+
+
 def test_lookup_partial_prefix_returns_first_hit_length():
     worker = _make_bare_worker()
     worker.store.batch_is_exist.return_value = [1, 1, 0]

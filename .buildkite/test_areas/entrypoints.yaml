@@ -29,6 +29,8 @@ steps:
   mirror:
     amd:
       device: mi325_1
+      # TODO(akaratza): Test after Torch >= 2.12 bump
+      soft_fail: true
       depends_on:
       - image-build-amd
 
@@ -40,10 +42,12 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/serve
+  - tests/entrypoints/scale_out
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc
+  - pytest -v -s entrypoints/scale_out
   mirror:
     amd:
       device: mi325_1

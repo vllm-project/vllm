@@ -30,13 +30,6 @@ class Gemma4Speculator(AutoRegressiveSpeculator):
         # No new KV slots are written, so positions and seq_lens stay fixed.
         return False
 
-    @property
-    def model_returns_tuple(self) -> bool:
-        # forward() returns (draft_hidden_states, backbone_hidden_states).
-        # The proposer uses draft_hidden_states for compute_logits and
-        # backbone_hidden_states for the hidden-state feedback buffer.
-        return True
-
     def load_draft_model(
         self,
         target_model: nn.Module,
