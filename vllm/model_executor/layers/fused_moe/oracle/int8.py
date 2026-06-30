@@ -23,6 +23,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8DynamicTokenSym,
     kInt8StaticChannelSym,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -256,9 +257,21 @@ def convert_to_int8_moe_kernel_format(
             convert_to_humming_moe_kernel_format,
         )
 
-        assert layer is not None and w13_scale is not None
+        assert layer is not None
+        # Humming reads canonical CT scales (w*_weight_scale) from the layer.
+        # Online int8 produces per-channel (E, N) w*_scale; expose them as the
+        # (E, N, 1) w*_weight_scale humming's loader expects.
+        for sub in ("w13", "w2"):
+            if hasattr(layer, f"{sub}_weight_scale"):
+                continue
+            scale = getattr(layer, f"{sub}_scale").data
+            if scale.dim() < 3:
+                scale = scale.unsqueeze(-1)
+            replace_parameter(layer, f"{sub}_weight_scale", scale)
+            delattr(layer, f"{sub}_scale")
         convert_to_humming_moe_kernel_format(
-            layer, quant_config=_humming_int8_weight_schema(w13, w13_scale)
+            layer,
+            quant_config=_humming_int8_weight_schema(w13, layer.w13_weight_scale),
         )
         return layer.w13_weight, layer.w2_weight
     elif int8_backend == Int8MoeBackend.CPU:

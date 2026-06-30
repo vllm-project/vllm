@@ -104,7 +104,6 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
         WNA16MoEBackend.FLASHINFER_TRTLLM,
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
-        # Last-resort in auto mode (gated by has_humming()); opt-in via --moe-backend.
         WNA16MoEBackend.HUMMING,
     ]
     return _AVAILABLE_BACKENDS
@@ -989,6 +988,35 @@ def _process_weights_xpu(
     )
 
 
+def _humming_wna16_weight_schema(
+    quant_config: QuantizationConfig | QuantizationArgs | None,
+) -> dict[str, Any]:
+    """Humming weight schema for a WNA16 checkpoint, derived from the quant
+    config rather than the running kernel."""
+    from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
+    from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
+
+    if isinstance(quant_config, AutoAWQConfig):
+        return {
+            "quant_method": "awq",
+            "bits": quant_config.weight_bits,
+            "group_size": quant_config.group_size,
+            "zero_point": quant_config.zero_point,
+        }
+    if isinstance(quant_config, AutoGPTQConfig):
+        return {
+            "quant_method": "gptq",
+            "bits": quant_config.weight_bits,
+            "group_size": quant_config.group_size,
+            "desc_act": quant_config.desc_act,
+            "sym": quant_config.is_sym,
+        }
+    raise TypeError(
+        "Humming WNA16 MoE requires AutoAWQConfig or AutoGPTQConfig, "
+        f"got {type(quant_config).__name__}."
+    )
+
+
 def convert_to_wna16_moe_kernel_format(
     backend: WNA16MoEBackend,
     layer: torch.nn.Module,
@@ -1004,26 +1032,30 @@ def convert_to_wna16_moe_kernel_format(
     w2_qzeros: torch.Tensor | None = None,
     w13_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
-) -> tuple[
-    torch.Tensor,  # w13_qweight
-    torch.Tensor,  # w2_qweight
-    torch.Tensor,  # w13_scales
-    torch.Tensor,  # w2_scales
-    torch.Tensor | None,  # w13_g_idx
-    torch.Tensor | None,  # w2_g_idx
-    torch.Tensor | None,  # w13_g_idx_sort_indices
-    torch.Tensor | None,  # w2_g_idx_sort_indices
-    torch.Tensor | None,  # w13_qzeros
-    torch.Tensor | None,  # w2_qzeros
-    torch.Tensor | None,  # w13_input_global_scale
-    torch.Tensor | None,  # w2_input_global_scale
-    torch.Tensor | None,  # w13_bias
-    torch.Tensor | None,  # w2_bias
-]:
+) -> (
+    tuple[
+        torch.Tensor,  # w13_qweight
+        torch.Tensor,  # w2_qweight
+        torch.Tensor,  # w13_scales
+        torch.Tensor,  # w2_scales
+        torch.Tensor | None,  # w13_g_idx
+        torch.Tensor | None,  # w2_g_idx
+        torch.Tensor | None,  # w13_g_idx_sort_indices
+        torch.Tensor | None,  # w2_g_idx_sort_indices
+        torch.Tensor | None,  # w13_qzeros
+        torch.Tensor | None,  # w2_qzeros
+        torch.Tensor | None,  # w13_input_global_scale
+        torch.Tensor | None,  # w2_input_global_scale
+        torch.Tensor | None,  # w13_bias
+        torch.Tensor | None,  # w2_bias
+    ]
+    | None
+):
     """Dispatch weight post-processing to the appropriate per-backend handler.
 
     To add a new backend, implement a ``_process_weights_<name>`` helper and
-    add a branch here.
+    add a branch here. Backends that rewrite the layer's parameters in place
+    (e.g. Humming) return ``None``; the caller then skips the param scatter.
 
     Args:
         backend: the selected ``WNA16MoEBackend``.
@@ -1031,6 +1063,16 @@ def convert_to_wna16_moe_kernel_format(
         quant_config: the ``QuantizationConfig`` for this layer.
         input_dtype: optional activation dtype, usually should be 16 bit.
     """
+    if backend == WNA16MoEBackend.HUMMING:
+        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+            convert_to_humming_moe_kernel_format,
+        )
+
+        convert_to_humming_moe_kernel_format(
+            layer, quant_config=_humming_wna16_weight_schema(quant_config)
+        )
+        return None
+
     if backend in (
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,

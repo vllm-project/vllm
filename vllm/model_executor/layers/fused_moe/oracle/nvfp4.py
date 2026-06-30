@@ -366,8 +366,11 @@ def convert_to_nvfp4_moe_kernel_format(
             convert_to_humming_moe_kernel_format,
         )
 
-        # Pick the schema by which global-scale param is present:
+        # Discriminate the source checkpoint layout by its global-scale param:
         # compressed-tensors uses *_weight_global_scale, modelopt *_weight_scale_2.
+        # The logical schema is identical (nvfp4 group-16); only the on-layer
+        # param names differ. TODO: normalize both methods to a single canonical
+        # layout upstream so the oracle needs neither the probe nor the re-alias.
         if hasattr(layer, "w13_weight_global_scale"):
             quant_config = {
                 "quant_method": "compressed-tensors",

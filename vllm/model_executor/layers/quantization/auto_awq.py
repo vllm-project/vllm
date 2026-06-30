@@ -664,21 +664,23 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
         layer.workspace = marlin_make_workspace_new(device, 4)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
-        if self.wna16_moe_backend == WNA16MoEBackend.HUMMING:
-            # Humming consumes the AWQ weights in-place (no marlin repack).
-            from vllm.model_executor.layers.quantization.utils.humming_utils import (
-                convert_to_humming_moe_kernel_format,
-            )
+        converted = convert_to_wna16_moe_kernel_format(
+            backend=self.wna16_moe_backend,
+            layer=layer,
+            quant_config=self.quant_config,
+            input_dtype=self.input_dtype,
+            w13=layer.w13_qweight,
+            w2=layer.w2_qweight,
+            w13_scale=layer.w13_scales,
+            w2_scale=layer.w2_scales,
+            w13_qzeros=layer.w13_qzeros,
+            w2_qzeros=layer.w2_qzeros,
+            w13_bias=getattr(layer, "w13_bias", None),
+            w2_bias=getattr(layer, "w2_bias", None),
+        )
 
-            convert_to_humming_moe_kernel_format(
-                layer,
-                quant_config={
-                    "quant_method": "awq",
-                    "bits": self.quant_config.weight_bits,
-                    "group_size": self.quant_config.group_size,
-                    "zero_point": self.quant_config.zero_point,
-                },
-            )
+        if converted is None:
+            # Backend rewrote the layer's params in place (e.g. Humming).
             self._setup_kernel(layer)
             return
 
@@ -697,20 +699,7 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             w2_input_global_scale,
             w13_bias,
             w2_bias,
-        ) = convert_to_wna16_moe_kernel_format(
-            backend=self.wna16_moe_backend,
-            layer=layer,
-            quant_config=self.quant_config,
-            input_dtype=self.input_dtype,
-            w13=layer.w13_qweight,
-            w2=layer.w2_qweight,
-            w13_scale=layer.w13_scales,
-            w2_scale=layer.w2_scales,
-            w13_qzeros=layer.w13_qzeros,
-            w2_qzeros=layer.w2_qzeros,
-            w13_bias=getattr(layer, "w13_bias", None),
-            w2_bias=getattr(layer, "w2_bias", None),
-        )
+        ) = converted
 
         replace_parameter(layer, "w13_qweight", w13)
         replace_parameter(layer, "w2_qweight", w2)

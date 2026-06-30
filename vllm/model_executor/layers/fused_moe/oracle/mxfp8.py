@@ -25,7 +25,6 @@ _SUPPORTED_BACKENDS = (
     # is_supported_config passes (gfx950 + flydsl installed + not EP). On other
     # devices / no flydsl / EP it is skipped and native is used.
     Fp8MoeBackend.AITER_MXFP8,
-    # Last-resort in auto mode (gated by has_humming()); opt-in via --moe-backend.
     Fp8MoeBackend.HUMMING,
 )
 

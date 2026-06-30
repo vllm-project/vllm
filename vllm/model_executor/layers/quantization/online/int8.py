@@ -13,7 +13,6 @@ if TYPE_CHECKING:
 
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.oracle.int8 import (
-    Int8MoeBackend,
     convert_to_int8_moe_kernel_format,
     make_int8_moe_kernel,
     make_int8_moe_quant_config,
@@ -94,26 +93,15 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
         replace_parameter(layer, "w2_scale", w2_scale)
 
     def _setup_kernel(self, layer: RoutedExperts) -> None:
-        if self.int8_backend == Int8MoeBackend.HUMMING:
-            # Re-expose online (E, N) scales as canonical w13_weight_scale
-            # (E, N, 1) for humming's loader, dropping the originals.
-            w13_scale = layer.w13_scale.data
-            w2_scale = layer.w2_scale.data
-            if w13_scale.dim() < 3:
-                w13_scale = w13_scale.unsqueeze(-1)
-            if w2_scale.dim() < 3:
-                w2_scale = w2_scale.unsqueeze(-1)
-            replace_parameter(layer, "w13_weight_scale", w13_scale)
-            replace_parameter(layer, "w2_weight_scale", w2_scale)
-            delattr(layer, "w13_scale")
-            delattr(layer, "w2_scale")
-            convert_to_int8_moe_kernel_format(
-                int8_backend=self.int8_backend,
-                w13=layer.w13_weight,
-                w2=layer.w2_weight,
-                layer=layer,
-                w13_scale=layer.w13_weight_scale,
-            )
+        w13, w2 = convert_to_int8_moe_kernel_format(
+            int8_backend=self.int8_backend,
+            w13=layer.w13_weight,
+            w2=layer.w2_weight,
+            layer=layer,
+            w13_scale=layer.w13_scale,
+        )
+        replace_parameter(layer, "w13_weight", w13)
+        replace_parameter(layer, "w2_weight", w2)
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.moe_quant_config is not None
