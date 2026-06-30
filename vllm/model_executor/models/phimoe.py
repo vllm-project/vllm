@@ -32,8 +32,13 @@ from torch import nn
 from transformers.configuration_utils import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.distributed import (
+    get_ep_group,
+    get_pp_group,
+    get_tensor_model_parallel_world_size,
+)
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
@@ -57,14 +62,17 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
+    PPMissingLayer,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
 )
+
+logger = init_logger(__name__)
 
 
 class PhiMoEConfig(PretrainedConfig):
@@ -264,9 +272,30 @@ class PhiMoE(nn.Module):
         quant_config: QuantizationConfig | None = None,
         tp_size: int | None = None,
         prefix: str = "",
+        enable_eplb: bool = False,
     ):
         super().__init__()
         self.hidden_size = hidden_size
+
+        self.ep_group = get_ep_group().device_group
+        self.ep_rank = get_ep_group().rank_in_group
+        self.ep_size = self.ep_group.size()
+
+        # Expert Parallelism Load Balancing settings.
+        vllm_config = get_current_vllm_config()
+        parallel_config = vllm_config.parallel_config
+        self.enable_eplb = enable_eplb
+
+        self.n_shared_experts = 0
+        self.n_routed_experts = num_experts
+        self.n_logical_experts = num_experts
+        self.n_redundant_experts = parallel_config.eplb_config.num_redundant_experts
+        self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
+        self.n_local_physical_experts = self.n_physical_experts // self.ep_size
+        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
+        self.physical_expert_end = (
+            self.physical_expert_start + self.n_local_physical_experts
+        )
 
         # Gate always runs at half / full precision for now.
         self.gate = ReplicatedLinear(
@@ -289,6 +318,8 @@ class PhiMoE(nn.Module):
             tp_size=tp_size,
             custom_routing_function=phimoe_routing_function,
             prefix=f"{prefix}.experts",
+            enable_eplb=self.enable_eplb,
+            num_redundant_experts=self.n_redundant_experts,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -389,6 +420,7 @@ class PhiMoEDecoderLayer(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        enable_eplb: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -413,6 +445,7 @@ class PhiMoEDecoderLayer(nn.Module):
             intermediate_size=config.intermediate_size,
             quant_config=quant_config,
             prefix=f"{prefix}.block_sparse_moe",
+            enable_eplb=enable_eplb,
         )
         self.input_layernorm = nn.LayerNorm(
             config.hidden_size, eps=config.rms_norm_eps, elementwise_affine=True
@@ -455,6 +488,8 @@ class PhiMoEModel(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        parallel_config = vllm_config.parallel_config
+        enable_eplb = parallel_config.enable_eplb
 
         self.vocab_size = config.vocab_size
 
@@ -468,7 +503,11 @@ class PhiMoEModel(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: PhiMoEDecoderLayer(
-                config, cache_config, quant_config, prefix=prefix
+                config,
+                cache_config,
+                quant_config,
+                prefix=prefix,
+                enable_eplb=enable_eplb,
             ),
             prefix=f"{prefix}.layers",
         )
@@ -591,7 +630,45 @@ class PhiMoEModel(nn.Module):
         return loaded_params
 
 
-class PhiMoEForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class PhiMoEMixtureOfExperts(MixtureOfExperts):
+    moe_mlp_layers: list[PhiMoE]
+
+    def extract_moe_parameters(self, example_moe: PhiMoE | None) -> None:
+        if example_moe is None:
+            self.num_moe_layers = 0
+            self.num_expert_groups = 0
+            self.num_logical_experts = 0
+            self.num_physical_experts = 0
+            self.num_local_physical_experts = 0
+            self.num_routed_experts = 0
+            self.num_shared_experts = 0
+            self.num_redundant_experts = 0
+            logger.warning("PhiMoE: No PhiMoE layer found in model.layers.")
+        else:
+            self.num_logical_experts = example_moe.n_logical_experts
+            self.num_physical_experts = example_moe.n_physical_experts
+            self.num_local_physical_experts = example_moe.n_local_physical_experts
+            self.num_routed_experts = example_moe.n_routed_experts
+            self.num_shared_experts = example_moe.n_shared_experts
+            self.num_redundant_experts = example_moe.n_redundant_experts
+
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        assert self.num_local_physical_experts == num_local_physical_experts
+        self.num_physical_experts = num_physical_experts
+        self.num_local_physical_experts = num_local_physical_experts
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
+        for moe in self.moe_mlp_layers:
+            moe.n_local_physical_experts = num_local_physical_experts
+            moe.n_physical_experts = num_physical_experts
+            moe.n_redundant_experts = self.num_redundant_experts
+            moe.experts.update_expert_map()
+
+
+class PhiMoEForCausalLM(nn.Module, SupportsLoRA, SupportsPP, PhiMoEMixtureOfExperts):
     fall_back_to_pt_during_load = False
 
     packed_modules_mapping = {
@@ -632,6 +709,29 @@ class PhiMoEForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
+
+        # Set MoE hyperparameters
+        self.num_moe_layers = config.num_hidden_layers
+        self.set_moe_parameters()
+
+    def set_moe_parameters(self) -> None:
+        self.expert_weights = []
+        self.num_expert_groups = 1
+        self.moe_layers: list[FusedMoE] = []
+        self.moe_mlp_layers: list[PhiMoE] = []
+        example_moe: PhiMoE | None = None
+        for layer in self.model.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+            assert isinstance(layer, PhiMoEDecoderLayer)
+            if hasattr(layer, "block_sparse_moe") and isinstance(
+                layer.block_sparse_moe, PhiMoE
+            ):
+                example_moe = layer.block_sparse_moe
+                self.moe_mlp_layers.append(layer.block_sparse_moe)
+                self.moe_layers.append(layer.block_sparse_moe.experts)
+        self.num_moe_layers = len(self.moe_layers)
+        self.extract_moe_parameters(example_moe)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
