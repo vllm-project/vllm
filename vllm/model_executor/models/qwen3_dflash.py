@@ -33,6 +33,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.multimodal.inputs import NestedTensors
 from vllm.transformers_utils.config import set_default_rope_theta
+from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import AttentionType
 
 from .qwen2 import Qwen2MLP as Qwen3MLP
@@ -45,6 +46,132 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+
+@triton.jit
+def _dflash_cache_insert_kernel(
+    k_ptr,
+    v_ptr,
+    kv_cache_ptrs_ptr,
+    slot_mapping_ptr,
+    cache_stride_0: tl.constexpr,
+    cache_stride_1: tl.constexpr,
+    cache_stride_2: tl.constexpr,
+    cache_stride_3: tl.constexpr,
+    cache_stride_4: tl.constexpr,
+    num_ctx: tl.constexpr,
+    block_size: tl.constexpr,
+    kv_size: tl.constexpr,
+    head_dim: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    token_idx = tl.program_id(0)
+    layer_idx = tl.program_id(1)
+    kv_cache_ptr = tl.cast(tl.load(kv_cache_ptrs_ptr + layer_idx), k_ptr.dtype)
+
+    slot = tl.load(slot_mapping_ptr + token_idx)
+    valid_slot = slot >= 0
+
+    block_idx = slot // block_size
+    block_offset = slot - block_idx * block_size
+    offsets = tl.arange(0, BLOCK)
+    mask = (offsets < kv_size) & valid_slot
+    head_idx = offsets // head_dim
+    dim_idx = offsets - head_idx * head_dim
+
+    src_base = (layer_idx * num_ctx + token_idx) * kv_size
+    k = tl.load(k_ptr + src_base + offsets, mask=mask)
+    v = tl.load(v_ptr + src_base + offsets, mask=mask)
+
+    cache_base = (
+        block_idx * cache_stride_0
+        + block_offset * cache_stride_2
+        + head_idx * cache_stride_3
+        + dim_idx * cache_stride_4
+    )
+    tl.store(kv_cache_ptr + cache_base, k, mask=mask)
+    tl.store(kv_cache_ptr + cache_base + cache_stride_1, v, mask=mask)
+
+
+def _try_dflash_cache_insert(
+    all_k: torch.Tensor,
+    all_v: torch.Tensor,
+    attn_layers: list[Attention],
+    slot_mapping: torch.Tensor,
+    kv_cache_ptrs: torch.Tensor | None,
+    kv_cache_ptrs_signature: tuple[int, ...] | None,
+    *,
+    num_ctx: int,
+    num_layers: int,
+    kv_size: int,
+    head_dim: int,
+) -> tuple[bool, torch.Tensor | None, tuple[int, ...] | None]:
+    if (
+        all_k.device.type != "cuda"
+        or not all_k.is_contiguous()
+        or not all_v.is_contiguous()
+        or slot_mapping.device != all_k.device
+        or len(attn_layers) != num_layers
+    ):
+        return False, kv_cache_ptrs, kv_cache_ptrs_signature
+
+    kv_caches = [attn.kv_cache for attn in attn_layers]
+    first_cache = kv_caches[0]
+    if first_cache.dtype != all_k.dtype or first_cache.dim() != 5:
+        return False, kv_cache_ptrs, kv_cache_ptrs_signature
+
+    cache_shape = first_cache.shape
+    cache_stride = first_cache.stride()
+    if cache_shape[1] != 2 or cache_shape[4] != head_dim:
+        return False, kv_cache_ptrs, kv_cache_ptrs_signature
+    if cache_shape[3] * head_dim != kv_size:
+        return False, kv_cache_ptrs, kv_cache_ptrs_signature
+
+    # This fast path only handles unquantized KV cache writes. Quantized cache
+    # paths need scale handling and keep using the backend implementation.
+    for attn in attn_layers:
+        if getattr(attn.impl, "kv_cache_dtype", "auto") not in (
+            "auto",
+            str(all_k.dtype).removeprefix("torch."),
+        ):
+            return False, kv_cache_ptrs, kv_cache_ptrs_signature
+
+    for cache in kv_caches:
+        if (
+            cache.dtype != first_cache.dtype
+            or cache.device != first_cache.device
+            or cache.shape != cache_shape
+            or cache.stride() != cache_stride
+        ):
+            return False, kv_cache_ptrs, kv_cache_ptrs_signature
+
+    ptr_signature = tuple(cache.data_ptr() for cache in kv_caches)
+    if kv_cache_ptrs is None or kv_cache_ptrs_signature != ptr_signature:
+        kv_cache_ptrs = torch.tensor(
+            ptr_signature,
+            dtype=torch.int64,
+            device=all_k.device,
+        )
+        kv_cache_ptrs_signature = ptr_signature
+
+    block = triton.next_power_of_2(kv_size)
+    _dflash_cache_insert_kernel[(num_ctx, num_layers)](
+        all_k,
+        all_v,
+        kv_cache_ptrs,
+        slot_mapping,
+        cache_stride[0],
+        cache_stride[1],
+        cache_stride[2],
+        cache_stride[3],
+        cache_stride[4],
+        num_ctx,
+        cache_shape[2],
+        kv_size,
+        head_dim,
+        BLOCK=block,
+    )
+    return True, kv_cache_ptrs, kv_cache_ptrs_signature
 
 
 class DFlashQwen3Attention(nn.Module):
@@ -282,6 +409,8 @@ class DFlashQwen3Model(nn.Module):
             self.config.hidden_size,
             eps=self.config.rms_norm_eps,
         )
+        self._dflash_kv_cache_ptrs: torch.Tensor | None = None
+        self._dflash_kv_cache_ptrs_signature: tuple[int, ...] | None = None
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -427,6 +556,25 @@ class DFlashQwen3Model(nn.Module):
 
         # --- Per-layer cache insert ---
         all_k_final = all_k_flat.view(L, num_ctx, nkv, hd)
+        cache_inserted, kv_cache_ptrs, kv_cache_ptrs_signature = (
+            _try_dflash_cache_insert(
+                all_k_final,
+                all_v,
+                self._attn_layers,
+                context_slot_mapping,
+                self._dflash_kv_cache_ptrs,
+                self._dflash_kv_cache_ptrs_signature,
+                num_ctx=num_ctx,
+                num_layers=L,
+                kv_size=kv,
+                head_dim=hd,
+            )
+        )
+        self._dflash_kv_cache_ptrs = kv_cache_ptrs
+        self._dflash_kv_cache_ptrs_signature = kv_cache_ptrs_signature
+        if cache_inserted:
+            return
+
         for i in range(L):
             attn = self._attn_layers[i]
             kv_cache = attn.kv_cache
