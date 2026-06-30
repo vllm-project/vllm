@@ -29,6 +29,7 @@ from vllm.v1.kv_offload.base import (
     get_offload_block_hash,
     make_offload_key,
 )
+from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 
 
@@ -291,6 +292,68 @@ def test_on_request_finished_is_not_deferred_until_store_completion(
     assert finished_idx < min(store_indices), calls
 
 
+@pytest.mark.parametrize(
+    ("async_scheduling", "expected_stored"),
+    [(True, (0,)), (False, ())],
+)
+def test_request_finished_kicks_off_async_final_block(
+    request_runner, async_scheduling: bool, expected_stored: tuple[int, ...]
+):
+    """Async scheduling can compute KV for a just-confirmed final token.
+
+    The prompt has one token less than a full offload block. In async mode the
+    next decode step is scheduled before the sampled token is processed, so the
+    final sampled token's KV exists and completes the block. Non-async mode
+    samples the same final token but never computes its KV.
+    """
+    block_size = 4
+
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=10,
+        async_scheduling=async_scheduling,
+        block_size_factor=1,
+    )
+
+    finalized: list[str] = []
+    runner.manager.on_request_finished.side_effect = lambda req_context: (
+        finalized.append(req_context.req_id)
+    )
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+
+    runner.new_request(token_ids=[0] * (block_size - 1))
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID, EOS_TOKEN_ID],
+        expected_stored=expected_stored,
+    )
+
+    assert finalized == [str(runner.req_id)]
+    assert str(runner.req_id) not in runner.connector_scheduler._req_status
+    assert str(runner.req_id) not in runner.scheduler.requests
+
+
+def test_request_finished_final_partial_block_is_not_stored(request_runner):
+    block_size = 4
+
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=10,
+        async_scheduling=True,
+        block_size_factor=1,
+    )
+
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+
+    runner.new_request(token_ids=[0] * (block_size - 2))
+    runner.run(decoded_tokens=[EOS_TOKEN_ID, EOS_TOKEN_ID], expected_stored=())
+
+    runner.manager.prepare_store.assert_not_called()
+
+
 @pytest.mark.parametrize("async_scheduling", [True, False])
 def test_concurrent_lookups_of_the_same_prefix(request_runner, async_scheduling: bool):
     block_size = 4
@@ -479,7 +542,11 @@ def test_two_groups_full_and_sliding_window(request_runner, async_scheduling: bo
     touch_calls = runner.manager.touch.call_args_list
     assert len(touch_calls) == 6
 
-    runner.run(decoded_tokens=[EOS_TOKEN_ID])
+    final_expected_stored = ((0, 6), (1, 6)) if async_scheduling else ()
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=final_expected_stored,
+    )
 
     runner.scheduler.reset_prefix_cache()
 
@@ -1339,19 +1406,86 @@ def test_reset_cache_finalizes_finished_request_with_pending_store(
     assert req_status.transfer_jobs, "expected an in-flight store before finish"
     assert any(job.is_store for job in cs._jobs.values())
 
-    # Finish the request while its store is still in flight. request_finished
-    # fires the hook eagerly, but the entry stays tracked so later completions
-    # can still call complete_store().
+    # Finish the request while its store is still in flight. If no new
+    # finish-time stores are submitted, request_finished fires the hook eagerly.
+    # If async scheduling exposed one more offloadable block at finish time, the
+    # hook is delayed until that final store is either completed or discarded.
     req_status.req.status = RequestStatus.FINISHED_STOPPED
     cs.request_finished(req_status.req)
-    assert finalized == [req_id]
+    if cs._req_status[req_id].delay_free_until_done:
+        assert finalized == []
+    else:
+        assert finalized == [req_id]
     assert req_id in cs._req_status
 
-    # reset_cache discards the in-flight store and drops the state without a
+    # reset_cache discards the in-flight stores and drops the state without a
     # duplicate on_request_finished call.
     cs.reset_cache()
     assert finalized == [req_id]
     assert req_id not in cs._req_status
+
+
+def test_reset_cache_frees_delay_free_request_blocks(request_runner):
+    """reset_cache must still release the blocks of a delay-freed request.
+
+    When async scheduling exposes a final offloadable block at finish time,
+    request_finished() returns True and defers freeing the request's GPU blocks
+    until the finish-time store completes and emits finished_sending. If
+    reset_cache discards that store, the signal would never fire and the blocks
+    would leak. reset_cache must therefore retain the req id and surface it on
+    the next update_connector_output() so the engine reclaims the blocks.
+    """
+    block_size = 4
+    block_size_factor = 3
+    offloaded_block_size = block_size * block_size_factor
+
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=100,
+        async_scheduling=True,
+        block_size_factor=block_size_factor,
+    )
+
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+
+    # make has_pending_push_work() false for manager so it reflects
+    # only the connector's own pending work
+    runner.manager.has_pending_work.return_value = False
+
+    # decode past a block boundary while keeping every transfer in flight, so a
+    # final offloadable block is only exposed at finish time (async scheduling)
+    runner.new_request(token_ids=[0] * offloaded_block_size * 2)
+    runner.run(decoded_tokens=[0], complete_transfers=False)
+    runner.run(
+        decoded_tokens=[0] * (2 * offloaded_block_size),
+        complete_transfers=False,
+    )
+
+    cs = runner.connector_scheduler
+    req_id = str(runner.req_id)
+    req_status = cs._req_status[req_id]
+
+    # finish-time store is queued and the free deferred
+    req_status.req.status = RequestStatus.FINISHED_STOPPED
+    delay_free, _ = cs.request_finished(req_status.req)
+    assert delay_free, "expected request_finished to defer the free"
+    assert cs._req_status[req_id].delay_free_until_done
+
+    # discard the in-flight store; the finished_sending signal must be retained.
+    cs.reset_cache()
+    assert req_id not in cs._req_status
+    assert req_id in cs._reset_finished_sending
+    # engine step so the deferred signal is delivered
+    assert cs.has_pending_push_work()
+
+    # the next worker update drains the stash into finished_sending, which the
+    # engine consumes to free the request's still-held blocks.
+    finished_sending = cs.update_connector_output(KVConnectorOutput())
+    assert finished_sending == {req_id}
+    assert not cs._reset_finished_sending
+    assert not cs.has_pending_push_work()
 
 
 def test_pending_transfer_defers_prefix_lookup():
