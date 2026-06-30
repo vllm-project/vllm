@@ -226,7 +226,9 @@ class SchedulerOutput:
     # need to perform grammar bitmask computation.
     pending_structured_output_tokens: bool = False
 
-    # Used for adjusting acceptance rate calculation.
+    # Number of invalid draft tokens at the end of each request's speculative
+    # suffix. Used to exclude invalid drafts from acceptance metrics and to
+    # mark them as placeholders for rejection sampling.
     num_invalid_spec_tokens: dict[str, int] | None = None
 
     # KV Cache Connector metadata.
