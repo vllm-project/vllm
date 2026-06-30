@@ -13,7 +13,6 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from vllm import _custom_ops as ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -42,6 +41,7 @@ from vllm.multimodal.inputs import NestedTensors
 from vllm.v1.attention.backend import AttentionType
 
 from .laguna import LagunaMLP
+from .qwen3_dflash import DFlashQwen3Model
 from .utils import (
     AutoWeightsLoader,
     get_draft_quant_config,
@@ -312,7 +312,7 @@ class DFlashLagunaDecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class DFlashLagunaModel(nn.Module, EagleModelMixin):
+class DFlashLagunaModel(DFlashQwen3Model, EagleModelMixin):
     def __init__(
         self,
         *,
@@ -320,7 +320,7 @@ class DFlashLagunaModel(nn.Module, EagleModelMixin):
         weight_layer_offset: int = 0,
         prefix: str = "",
     ) -> None:
-        super().__init__()
+        nn.Module.__init__(self)
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
         self.quant_config = get_draft_quant_config(vllm_config)
@@ -384,24 +384,11 @@ class DFlashLagunaModel(nn.Module, EagleModelMixin):
             eps=self.config.rms_norm_eps,
         )
 
-    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.embed_tokens(input_ids)
-
-    def _build_fused_kv_buffers(self) -> None:
-        """Cache per-layer tensors used to precompute context K/V.
-
-        DFlash receives verifier hidden states as context. We project those
-        states into the drafter's K/V space and write them directly into each
-        layer's Attention KV cache before query-token decoding starts.
-        """
-        layers_attn = [layer.self_attn for layer in self.layers]
-        attn0 = layers_attn[0]
-        has_bias = attn0.qkv_proj.bias is not None
-
-        self._input_layernorm_weights = [
-            layer.input_layernorm.weight.data for layer in self.layers
-        ]
-
+    def _build_context_kv_buffers(
+        self,
+        layers_attn: list[DFlashLagunaAttention],
+        has_bias: bool,
+    ) -> None:
         self._kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
         if has_bias:
             self._kv_biases: list[torch.Tensor | None] = [
@@ -410,128 +397,36 @@ class DFlashLagunaModel(nn.Module, EagleModelMixin):
         else:
             self._kv_biases = [None for _ in layers_attn]
 
-        self._k_norm_weights = [a.k_norm.weight.data for a in layers_attn]
-
-        self._rope_head_size = attn0.rotary_emb.head_size
-        self._rope_cos_sin_cache = attn0.rotary_emb.cos_sin_cache
-        self._rope_is_neox = attn0.rotary_emb.is_neox_style
-        for attn in layers_attn[1:]:
-            assert (
-                attn.rotary_emb.head_size == self._rope_head_size
-                and attn.rotary_emb.is_neox_style == self._rope_is_neox
-            ), "All layers must have the same RoPE parameters for DFlash precomputation"
-
-        self._num_attn_layers = len(layers_attn)
-        self._kv_size = attn0.kv_size
-        self._head_dim = attn0.head_dim
-        self._num_kv_heads = attn0.num_kv_heads
-        self._rms_norm_eps = attn0.q_norm.variance_epsilon
-        for attn in layers_attn[1:]:
-            assert (
-                attn.kv_size == self._kv_size
-                and attn.head_dim == self._head_dim
-                and attn.num_kv_heads == self._num_kv_heads
-                and attn.q_norm.variance_epsilon == self._rms_norm_eps
-            ), "All layers must have the same attn config for DFlash precomputation"
-
-        self._attn_layers = [layer.self_attn.attn for layer in self.layers]
-
-    def precompute_and_store_context_kv(
+    def _project_context_kv(
         self,
         context_states: torch.Tensor,
-        context_positions: torch.Tensor,
-        context_slot_mapping: torch.Tensor | None = None,
-    ) -> None:
-        """Project verifier context states and insert K/V into Attention cache.
-
-        The normal forward path only handles synthetic query tokens. Context
-        K/V is precomputed here because it comes from verifier hidden states,
-        not from the drafter token stream.
-        """
-        if not hasattr(self, "_num_attn_layers"):
-            logger.warning_once(
-                "DFlash buffer initialization was skipped. If dummy weights are not "
-                "in use, this may indicate an error in weight loading."
-            )
-            self._build_fused_kv_buffers()
-
-        num_ctx = context_states.shape[0]
-        L = self._num_attn_layers
-        kv = self._kv_size
-        hd = self._head_dim
-        nkv = self._num_kv_heads
-
+        num_ctx: int,
+        num_layers: int,
+        num_kv_heads: int,
+        head_dim: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         all_k = torch.empty(
-            (L, num_ctx, nkv, hd),
+            (num_layers, num_ctx, num_kv_heads, head_dim),
             dtype=context_states.dtype,
             device=context_states.device,
         )
         all_v = torch.empty_like(all_k)
-        for i in range(L):
+        for i in range(num_layers):
             normed_context_states = self.layers[i].input_layernorm(context_states)
             kv_i = F.linear(
                 normed_context_states,
                 self._kv_weights[i],
                 self._kv_biases[i],
-            ).view(num_ctx, 2, nkv, hd)
+            ).view(num_ctx, 2, num_kv_heads, head_dim)
             all_k[i] = kv_i[:, 0]
             all_v[i] = kv_i[:, 1]
+        return all_k, all_v
 
+    def _normalize_context_k(self, all_k: torch.Tensor) -> torch.Tensor:
         all_k_normed = torch.empty_like(all_k)
-        for i in range(L):
+        for i in range(self._num_attn_layers):
             all_k_normed[i] = self.layers[i].self_attn.k_norm(all_k[i])
-
-        # Apply RoPE to every layer's context K before writing it into the
-        # drafter cache. The temporary buffer is sized by drafter layers times
-        # active context tokens, not by the full model depth.
-        all_k_flat = all_k_normed.view(L * num_ctx, kv)
-        positions_repeated = context_positions.repeat(L)
-        cos_sin_cache = self._rope_cos_sin_cache
-        if cos_sin_cache.dtype != all_k_flat.dtype:
-            cos_sin_cache = cos_sin_cache.to(dtype=all_k_flat.dtype)
-        ops.rotary_embedding(
-            positions_repeated,
-            all_k_flat,
-            None,
-            self._rope_head_size,
-            cos_sin_cache,
-            self._rope_is_neox,
-        )
-
-        if context_slot_mapping is None:
-            return
-
-        all_k_final = all_k_flat.view(L, num_ctx, nkv, hd)
-        for i in range(L):
-            attn = self._attn_layers[i]
-            kv_cache = attn.kv_cache
-            attn.impl.do_kv_cache_update(
-                attn,
-                all_k_final[i],
-                all_v[i],
-                kv_cache,
-                context_slot_mapping,
-            )
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        input_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        if input_embeds is None:
-            input_embeds = self.embed_input_ids(input_ids)
-
-        hidden_states = input_embeds
-        residual = None
-        for layer in self.layers:
-            hidden_states, residual = layer(
-                positions=positions,
-                hidden_states=hidden_states,
-                residual=residual,
-            )
-        hidden_states, _ = self.norm(hidden_states, residual)
-        return hidden_states
+        return all_k_normed
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         params_dict = dict(self.named_parameters())
