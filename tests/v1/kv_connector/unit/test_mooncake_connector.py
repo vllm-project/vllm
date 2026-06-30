@@ -1455,6 +1455,12 @@ def test_register_kv_caches_keeps_non_mtp_speculative_layers_outside_base_model(
     worker.receiver_loop = MagicMock()
     worker.receiver_loop.is_running.return_value = False
     _populate_worker_layer_metadata(worker)
+    eagle_layer_name = f"model.layers.{num_hidden_layers}.attn.swa_cache"
+    worker._layer_specs[eagle_layer_name] = worker._layer_specs[
+        "model.layers.0.self_attn"
+    ]
+    worker._layer_group_indices[eagle_layer_name] = 0
+    worker._layer_logical_group_indices[eagle_layer_name] = [0]
 
     kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
         num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
@@ -1463,7 +1469,7 @@ def test_register_kv_caches_keeps_non_mtp_speculative_layers_outside_base_model(
     eagle_cache = torch.zeros(*kv_cache_shape, dtype=torch.float16)
     kv_caches = {
         "model.layers.0.self_attn": normal_cache,
-        f"model.layers.{num_hidden_layers}.attn.swa_cache": eagle_cache,
+        eagle_layer_name: eagle_cache,
     }
 
     worker.register_kv_caches(kv_caches)
