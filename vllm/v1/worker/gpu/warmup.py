@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
 import torch
@@ -19,22 +17,14 @@ from vllm.v1.core.sched.output import (
     NewRequestData,
     SchedulerOutput,
 )
-from vllm.v1.kv_cache_interface import (
-    AttentionSpec,
-    KVCacheSpec,
-    MambaSpec,
-    TQFullAttentionSpec,
-    UniformTypeKVCacheSpecs,
-)
+from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.request import Request
+from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
-if TYPE_CHECKING:
-    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+logger = init_logger(__name__)
 
 _TQ_CONTINUATION_DECODE_THRESHOLD = 128
 _TQ_WARMUP_PROMPT_CHUNK_LEN = 256
-
-logger = init_logger(__name__)
 
 
 def run_mixed_prefill_decode_warmup(
@@ -308,7 +298,13 @@ def warmup_kernels(
     torch.accelerator.synchronize()
 
 
-def _kv_cache_spec_uses_turboquant(kv_cache_spec: KVCacheSpec) -> bool:
+def _kv_cache_spec_uses_turboquant(kv_cache_spec: Any) -> bool:
+    from vllm.v1.kv_cache_interface import (
+        AttentionSpec,
+        TQFullAttentionSpec,
+        UniformTypeKVCacheSpecs,
+    )
+
     if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
         return any(
             _kv_cache_spec_uses_turboquant(spec)
