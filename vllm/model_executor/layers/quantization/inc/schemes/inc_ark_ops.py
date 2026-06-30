@@ -50,19 +50,11 @@ def _inc_ark_woq_linear_impl(
     scale_type: str,
     asym: bool,
 ) -> torch.Tensor:
-    is_available, error_str, ark, _ = get_ark_state()
-    if not is_available or ark is None:
-        reason = error_str or "unknown error"
-        raise RuntimeError(f"Failed to import auto_round_kernel. {reason}")
+    ark = get_ark_state()[2]
+    assert ark is not None
 
-    raw_input_dtype = x.dtype
-    target_dtype = torch.float16 if x.device.type == "xpu" else torch.float32
-    x = x.to(target_dtype)
-    out_shape = x.shape[:-1] + (out_features,)
-    x_2d = x.reshape(-1, x.shape[-1])
-
-    out = ark.woqgemm(
-        x_2d,
+    return ark.woqgemm_linear(
+        x,
         qweight,
         bias,
         out_features,
@@ -73,7 +65,6 @@ def _inc_ark_woq_linear_impl(
         scale_type,
         asym,
     )
-    return out.to(raw_input_dtype).reshape(out_shape)
 
 
 def _inc_ark_woq_linear_fake(
