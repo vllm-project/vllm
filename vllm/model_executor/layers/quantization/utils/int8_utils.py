@@ -10,11 +10,15 @@ from typing import Any
 
 import torch
 
+import vllm.envs as envs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.triton_utils.allocation import set_triton_allocator
 from vllm.utils.platform_utils import get_device_name_as_file_name
 
 logger = logging.getLogger(__name__)
+
+_TD_ALLOCATOR_DEVICES: set[torch.device] = set()
 
 
 def block_dequant(
@@ -261,6 +265,7 @@ def _w8a8_block_int8_matmul(
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
+    USE_TD: tl.constexpr = False,
 ):
     """Triton-accelerated function used to perform linear operations (dot
     product) on input tensors `A` and `B` with block-wise quantization, and
@@ -287,10 +292,28 @@ def _w8a8_block_int8_matmul(
     offs_bsn = offs_bn // group_n
     Bs_ptrs = Bs + offs_bsn * stride_Bs_n
 
+    if USE_TD:
+        a_desc = tl.make_tensor_descriptor(
+            A,
+            shape=[M, K],
+            strides=[stride_am, 1],
+            block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_K],
+        )
+        b_desc = tl.make_tensor_descriptor(
+            B,
+            shape=[N, K],
+            strides=[stride_bn, 1],
+            block_shape=[BLOCK_SIZE_N, BLOCK_SIZE_K],
+        )
+
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+        if USE_TD:
+            a = a_desc.load([pid_m * BLOCK_SIZE_M, k * BLOCK_SIZE_K])
+            b = tl.trans(b_desc.load([pid_n * BLOCK_SIZE_N, k * BLOCK_SIZE_K]))
+        else:
+            a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
+            b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
 
         k_start = k * BLOCK_SIZE_K
         offs_ks = k_start // group_k
@@ -364,6 +387,7 @@ def w8a8_block_int8_matmul(
     Bs: torch.Tensor,
     block_size: list[int],
     output_dtype: torch.dtype = torch.float16,
+    use_td: bool | None = None,
 ) -> torch.Tensor:
     """This function performs matrix multiplication with block-wise
     quantization.
@@ -421,6 +445,23 @@ def w8a8_block_int8_matmul(
             triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
         )
 
+
+    bm, bn, bk = config["BLOCK_SIZE_M"], config["BLOCK_SIZE_N"], config["BLOCK_SIZE_K"]
+    td_override = use_td if use_td is not None else envs.VLLM_TRITON_USE_TD
+    use_td = current_platform.is_xpu() if td_override is None else td_override
+    use_td = (
+        use_td
+        and A.stride(-1) == 1
+        and B.stride(1) == 1
+        and (K * A.element_size()) % 16 == 0
+        and (bm & (bm - 1)) == 0
+        and (bn & (bn - 1)) == 0
+        and (bk & (bk - 1)) == 0
+    )
+    if use_td and A.device not in _TD_ALLOCATOR_DEVICES:
+        set_triton_allocator(A.device)
+        _TD_ALLOCATOR_DEVICES.add(A.device)
+
     _w8a8_block_int8_matmul[grid](
         A,
         B,
@@ -442,6 +483,7 @@ def w8a8_block_int8_matmul(
         As.stride(-1),
         Bs.stride(1),
         Bs.stride(0),
+        USE_TD=use_td,
         **config,
     )
 
