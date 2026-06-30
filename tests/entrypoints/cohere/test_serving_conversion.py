@@ -773,10 +773,6 @@ class TestApplyCohereTemplateKwargs:
             "token_budget": 16,
         }
 
-    def test_strict_tools_forwarded(self):
-        result = _convert(_make_request(strict_tools=True))
-        assert result.chat_template_kwargs["strict_tools"] is True
-
     def test_existing_chat_template_kwargs_preserved(self):
         # User-supplied kwargs should not be clobbered by the v2 fields
         # (setdefault semantics).

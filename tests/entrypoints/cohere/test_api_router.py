@@ -12,13 +12,13 @@ Covers:
 """
 
 import json
-import sys
 from collections.abc import AsyncGenerator
 from http import HTTPStatus
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from vllm.entrypoints.cohere import api_router as api_router_mod
 from vllm.entrypoints.cohere.api_router import attach_router
 from vllm.entrypoints.cohere.protocol import (
     AssistantMessageResponse,
@@ -71,35 +71,23 @@ def _minimal_request_body() -> dict:
 
 class TestOptionalCohereImport:
     def test_attach_router_noop_when_cohere_missing(self, monkeypatch, caplog):
-        # Simulate ``import cohere`` failing by injecting a sentinel that
-        # raises ImportError on first attribute access. The simplest
-        # approach: stash the real module, delete it from sys.modules,
-        # and shadow it with an entry that raises on next import.
-        real = sys.modules.pop("cohere", None)
+        # ``api_router`` probes for the SDK once at module load (because
+        # the route handler closes over types imported from ``cohere``)
+        # and stashes the result in ``_SDK_AVAILABLE``. We can't undo the
+        # original import, so simulate the "SDK missing" state by
+        # flipping that flag for the duration of the test. This is what
+        # ``attach_router`` actually checks at call time.
+        monkeypatch.setattr(api_router_mod, "_SDK_AVAILABLE", False)
 
-        # Block re-import.
-        class _RaisingFinder:
-            def find_spec(self, name, path=None, target=None):
-                if name == "cohere":
-                    raise ImportError("simulated missing cohere SDK")
-                return None
+        with caplog.at_level("INFO", logger="vllm.entrypoints.cohere.api_router"):
+            app = FastAPI()
+            attach_router(app)
 
-        finder = _RaisingFinder()
-        sys.meta_path.insert(0, finder)
-        try:
-            with caplog.at_level("INFO", logger="vllm.entrypoints.cohere.api_router"):
-                app = FastAPI()
-                attach_router(app)
-            # No routes should have been registered.
-            paths = [r.path for r in app.routes]
-            assert "/cohere/v2/chat" not in paths
-            assert any(
-                "cohere SDK not installed" in rec.message for rec in caplog.records
-            )
-        finally:
-            sys.meta_path.remove(finder)
-            if real is not None:
-                sys.modules["cohere"] = real
+        paths = [getattr(r, "path", None) for r in app.routes]
+        assert "/cohere/v2/chat" not in paths
+        assert any(
+            "cohere SDK not installed" in rec.message for rec in caplog.records
+        )
 
     def test_attach_router_registers_route_when_cohere_present(self):
         app = _build_app(handler=None)
