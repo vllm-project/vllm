@@ -214,6 +214,21 @@ def test_jit_monitor_verbose_arg():
     assert EngineArgs(model="test", jit_monitor_verbose=True).jit_monitor_verbose
 
 
+@pytest.mark.parametrize("task", ["embed", "embedding"])
+def test_task_embedding_alias_sets_pooling_runner(task):
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(["--task", task])
+
+    assert args.runner == "pooling"
+
+
+def test_task_alias_rejects_unknown_task():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--task", "generate"])
+
+
 @pytest.mark.parametrize("mode", ["warn", "error"])
 def test_jit_monitor_mode_arg(mode):
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())

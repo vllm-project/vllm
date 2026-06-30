@@ -134,6 +134,17 @@ else:
 
 logger = init_logger(__name__)
 
+
+def pooling_runner_alias(value: str) -> str:
+    if value in ("embed", "embedding"):
+        return "pooling"
+    msg = (
+        f"invalid task: {value!r} (choose from 'embed', 'embedding'; "
+        "use --runner for other runner types)"
+    )
+    raise argparse.ArgumentTypeError(msg)
+
+
 # object is used to allow for special typing forms
 T = TypeVar("T")
 TypeHint: TypeAlias = type[Any] | object
@@ -796,6 +807,15 @@ class EngineArgs:
         if not ("serve" in sys.argv[1:] and "--help" in sys.argv[1:]):
             model_group.add_argument("--model", **model_kwargs["model"])
         model_group.add_argument("--runner", **model_kwargs["runner"])
+        model_group.add_argument(
+            "--task",
+            dest="runner",
+            type=pooling_runner_alias,
+            default=argparse.SUPPRESS,
+            metavar="{embed,embedding}",
+            help="Deprecated compatibility alias for embedding servers. "
+            "Use --runner pooling instead.",
+        )
         model_group.add_argument("--convert", **model_kwargs["convert"])
         model_group.add_argument("--tokenizer", **model_kwargs["tokenizer"])
         model_group.add_argument("--tokenizer-mode", **model_kwargs["tokenizer_mode"])
