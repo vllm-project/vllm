@@ -16,6 +16,7 @@ from vllm._custom_ops import (
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization.utils.layer_utils import replace_parameter
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
 _CPU_MOE_LAYER_CACHE = {}
@@ -311,6 +312,17 @@ class CPUFusedMOE:
 
         if supports_amx:
             return False, "none"
+
+        supports_neon = current_platform.get_cpu_architecture() == CpuArchEnum.ARM
+        if supports_neon:
+            if (
+                dtype == torch.bfloat16
+                and w13_input_size % 4 == 0
+                and w2_input_size % 4 == 0
+            ):
+                return True, "neon"
+            else:
+                return False, "none"
 
         return True, "vec"
 

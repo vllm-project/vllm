@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.attention import CrossAttention
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 
 
@@ -18,13 +19,13 @@ def init_model_state(
         cls = model.get_model_state_cls()
         return cls(vllm_config, model, encoder_cache, device)
 
-    if (
-        "WhisperForConditionalGeneration" in vllm_config.model_config.architectures
-        or "CohereAsrForConditionalGeneration" in vllm_config.model_config.architectures
-    ):
-        from vllm.v1.worker.gpu.model_states.whisper import WhisperModelState
+    # Cross-attention encoder-decoder models (Whisper, CohereASR, NemotronParse, ...)
+    if any(isinstance(m, CrossAttention) for m in model.modules()):
+        from vllm.v1.worker.gpu.model_states.encoder_decoder import (
+            EncoderDecoderModelState,
+        )
 
-        return WhisperModelState(vllm_config, model, encoder_cache, device)
+        return EncoderDecoderModelState(vllm_config, model, encoder_cache, device)
 
     if vllm_config.model_config.is_hybrid:
         from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState

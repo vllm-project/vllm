@@ -2126,7 +2126,6 @@ class OpenPanguMoEModel(OpenPanguModelBase, MixtureOfExperts):
         config = vllm_config.model_config.hf_config
 
         # Set MoE hyperparameters
-        self.expert_weights = []
         self.num_moe_layers = config.num_hidden_layers - config.first_k_dense_replace
         self.num_expert_groups = 1
 
