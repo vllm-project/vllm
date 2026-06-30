@@ -9,10 +9,12 @@ if TYPE_CHECKING:
 
 
 def resolve_scheme(layer_config: "INCLayerConfig") -> "INCScheme":
+    from .inc_mxfp4_scheme import INCMxfp4Scheme
     from .inc_wna16_scheme import INCWna16Scheme
 
     scheme_list: list[type[INCScheme]] = [
         INCWna16Scheme,
+        INCMxfp4Scheme,
     ]
 
     for scheme_cls in scheme_list:
