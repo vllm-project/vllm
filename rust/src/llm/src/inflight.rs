@@ -64,6 +64,16 @@ impl InflightRequests {
             .collect()
     }
 
+    /// Collect the internal engine ids of every in-flight request. Used to
+    /// abort all outstanding requests when no external ids are given.
+    pub(crate) fn all_internal_ids(&self) -> Vec<String> {
+        let map = self.map.lock();
+        map.values()
+            .flat_map(|internal_ids| internal_ids.keys())
+            .cloned()
+            .collect()
+    }
+
     #[cfg(test)]
     fn is_empty(&self) -> bool {
         self.map.lock().is_empty()

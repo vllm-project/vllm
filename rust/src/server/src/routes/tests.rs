@@ -5396,10 +5396,12 @@ async fn abort_requests_route_returns_ok_for_well_formed_body() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn abort_requests_route_rejects_missing_request_ids() {
+async fn abort_requests_route_aborts_all_when_request_ids_missing() {
     let (app, engine_task) =
         test_admin_app_with_engine_script(|_dealer, _push| boxed_test_future(async move {})).await;
 
+    // Missing `request_ids` means "abort all in-flight requests"; with no
+    // in-flight requests this is a no-op that still succeeds.
     let response = app
         .clone()
         .call(
@@ -5413,11 +5415,10 @@ async fn abort_requests_route_rejects_missing_request_ids() {
         .await
         .expect("call app");
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let status = response.status();
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
-    assert_eq!(json["error"]["type"], "invalid_request_error");
-    assert_eq!(json["error"]["param"], "request_ids");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert!(body.is_empty());
     engine_task.abort_and_join().await;
 }
 
