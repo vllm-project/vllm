@@ -247,6 +247,41 @@ def test_cpu_manager_reports_allocation_size_histogram():
     )
 
 
+def test_cpu_manager_reports_allocation_size_on_allocation_failure(monkeypatch):
+    manager = make_cpu_manager(num_blocks=4, cache_policy="lru")
+
+    def fail_allocate_blocks(keys):
+        raise RuntimeError("allocation failed")
+
+    monkeypatch.setattr(manager, "_allocate_blocks", fail_allocate_blocks)
+
+    with pytest.raises(RuntimeError, match="allocation failed"):
+        manager.prepare_store(to_keys([1, 2, 3]), _EMPTY_REQ_CTX)
+
+    stats = manager.get_stats()
+
+    assert stats is not None
+    reduced = stats.reduce()
+    assert reduced[f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_count"] == 1
+    assert reduced[f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_sum"] == 3
+
+
+def test_cpu_manager_reports_allocation_size_on_eviction_failure():
+    manager = make_cpu_manager(num_blocks=1, cache_policy="lru")
+
+    manager.prepare_store(to_keys([1]), _EMPTY_REQ_CTX)
+    manager.get_stats()
+
+    assert manager.prepare_store(to_keys([2]), _EMPTY_REQ_CTX) is None
+
+    stats = manager.get_stats()
+
+    assert stats is not None
+    reduced = stats.reduce()
+    assert reduced[f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_count"] == 1
+    assert reduced[f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_sum"] == 1
+
+
 def test_cpu_manager():
     """
     Tests CPUOffloadingManager with lru policy.

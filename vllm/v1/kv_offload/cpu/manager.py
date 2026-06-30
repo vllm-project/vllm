@@ -186,6 +186,7 @@ class CPUOffloadingManager(OffloadingManager):
                 evicted_keys=[],
             )
 
+        self.allocation_sizes_in_current_batch.append(len(keys_to_store))
         num_blocks_to_evict = len(keys_to_store) - self._get_num_free_blocks()
 
         to_evict: list[OffloadKey] = []
@@ -221,7 +222,6 @@ class CPUOffloadingManager(OffloadingManager):
             )
 
         blocks = self._allocate_blocks(keys_to_store)
-        self.allocation_sizes_in_current_batch.append(len(keys_to_store))
         assert len(blocks) == len(keys_to_store), (
             "Block pool did not allocate the expected number of blocks"
         )
