@@ -123,3 +123,38 @@ def test_scaled_mm(
     c_actual = torch_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
 
     torch.testing.assert_close(c_check, c_actual, rtol=1e-1, atol=1e-1)
+
+
+# TD operand loads must be bit-exact vs the plain masked-load path.
+@pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="Triton scaled_mm runs on CUDA-alike or XPU.",
+)
+@pytest.mark.parametrize("M,N,K", [(1, 4096, 4096), (64, 4096, 4096), (256, 2048, 4096)])
+@pytest.mark.parametrize("in_dtype", get_8bit_types())
+@pytest.mark.parametrize("use_scalar_scale_a", [True, False])
+@pytest.mark.parametrize("use_bias", [True, False])
+def test_scaled_mm_td_matches_plain(M, N, K, in_dtype, use_scalar_scale_a, use_bias):
+    dev = current_platform.device_type
+    out_dtype = torch.bfloat16
+    set_random_seed(0)
+
+    is_fp = torch.tensor([1, 1], dtype=in_dtype).is_floating_point()
+    if is_fp:
+        a = (0.25 * torch.rand((M, K), dtype=torch.float32, device=dev)).to(in_dtype)
+        b = (0.25 * torch.rand((K, N), dtype=torch.float32, device=dev)).to(in_dtype)
+    else:
+        a = torch.randint(-32, 32, (M, K), dtype=in_dtype, device=dev)
+        b = torch.randint(-32, 32, (K, N), dtype=in_dtype, device=dev)
+
+    scale_a = (
+        torch.rand((1, 1), device=dev)
+        if use_scalar_scale_a
+        else 0.25 * torch.rand((M, 1), device=dev)
+    )
+    scale_b = 0.25 * torch.rand((N, 1), device=dev)
+    bias = torch.rand((N,), device=dev, dtype=out_dtype) if use_bias else None
+
+    out_plain = triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias, use_td=False)
+    out_td = triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias, use_td=True)
+    torch.testing.assert_close(out_td, out_plain, rtol=0, atol=0)
