@@ -756,6 +756,17 @@ class AttentionImplBase(ABC, Generic[T]):
     # Some features like decode context parallelism require the softmax lse.
     can_return_lse_for_decode: bool = False
 
+    # Base of the logarithm used by this backend when returning softmax lse.
+    # True  => natural log (lse = ln(sum(exp(qk))))
+    #          -- e.g. Triton MLA, FlashAttention, FlashMLA, Cutlass MLA
+    # False => base 2      (lse = log2(sum(exp(qk))))
+    #          -- e.g. FlashInfer trtllm-gen MLA
+    # The DCP combine kernel (cp_lse_ag_out_rs / dcp_a2a_lse_reduce in
+    # vllm/v1/attention/ops/common.py) branches on this via its IS_BASE_E
+    # constexpr; getting it wrong silently corrupts the cross-shard
+    # softmax denominator.
+    lse_base_on_e: bool = True
+
     # Whether the attention impl supports Prefill Context Parallelism.
     supports_pcp: bool = False
     # Whether the attention impl(or ops) supports MTP
@@ -765,10 +776,6 @@ class AttentionImplBase(ABC, Generic[T]):
     # some attention backends might not always want to return lse
     # even if they can return lse (for efficiency reasons)
     need_to_return_lse_for_decode: bool = False
-
-    # Whether decode LSE returned by this implementation is natural-log based.
-    # Some FlashInfer TRT-LLM kernels return log2 LSE.
-    is_lse_base_on_e: bool = True
 
     # Whether this attention implementation supports pre-quantized query input.
     # When True, the attention layer will quantize queries before passing them

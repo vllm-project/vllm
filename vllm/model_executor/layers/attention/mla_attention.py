@@ -818,14 +818,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                         attn_out,
                         lse,
                         get_dcp_group(),
-                        is_lse_base_on_e=self.impl.is_lse_base_on_e,
+                        is_lse_base_on_e=self.impl.lse_base_on_e,
                     )
                 else:
                     attn_out = cp_lse_ag_out_rs(
                         attn_out,
                         lse,
                         get_dcp_group(),
-                        is_lse_base_on_e=self.impl.is_lse_base_on_e,
+                        is_lse_base_on_e=self.impl.lse_base_on_e,
                     )
 
             # v_up projection
