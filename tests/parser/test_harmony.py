@@ -728,6 +728,27 @@ class TestProcessChunk:
             (s.channel, s.recipient, s.delta) for s in result.segments if s.delta
         ] == [("final", None, "Hello")]
 
+    def test_constrained_output_segment_recipient_normalized(self, harmony_parser):
+        result = harmony_parser.process_chunk(
+            encode_output(
+                '<|channel|>final <|constrain|>json<|message|>{"result":true}<|end|>'
+            )
+        )
+
+        content_segments = [segment for segment in result.segments if segment.delta]
+        assert all(segment.channel == "final" for segment in content_segments)
+        assert all(segment.recipient is None for segment in content_segments)
+        assert (
+            "".join(segment.delta for segment in content_segments) == '{"result":true}'
+        )
+        completed_messages = [
+            segment.completed_message
+            for segment in result.segments
+            if segment.completed_message is not None
+        ]
+        assert len(completed_messages) == 1
+        assert completed_messages[0].recipient is None
+
     def test_cross_channel(self, harmony_parser):
         result = harmony_parser.process_chunk(
             encode_output(

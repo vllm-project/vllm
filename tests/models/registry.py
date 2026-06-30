@@ -1369,22 +1369,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "fixie-ai/ultravox-v0_5-llama-3_2-1b",
         trust_remote_code=True,
     ),
-    "TarsierForConditionalGeneration": _HfExamplesInfo("omni-research/Tarsier-7b"),
-    "Tarsier2ForConditionalGeneration": _HfExamplesInfo(
-        "omni-research/Tarsier2-Recap-7b",
-        hf_overrides={
-            "architectures": ["Tarsier2ForConditionalGeneration"],
-            "model_type": "tarsier2",
-        },
-        max_transformers_version="5.3",
-        transformers_version_reason={
-            "vllm": (
-                "Qwen2VLConfig was split into Qwen2VLConfig + "
-                "Qwen2VLTextConfig in transformers v5, breaking "
-                "attribute access (num_attention_heads, hidden_size, etc.)"
-            )
-        },
-    ),
     "VoxtralForConditionalGeneration": _HfExamplesInfo(
         "mistralai/Voxtral-Mini-3B-2507",
         tokenizer_mode="mistral",
