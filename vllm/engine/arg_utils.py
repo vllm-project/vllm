@@ -91,6 +91,7 @@ from vllm.config.parallel import (
     All2AllBackend,
     DataParallelBackend,
     DCPCommBackend,
+    DCPSparseIndexerMode,
     DistributedExecutorBackend,
     ExpertPlacementStrategy,
 )
@@ -471,6 +472,9 @@ class EngineArgs:
     prefill_context_parallel_size: int = ParallelConfig.prefill_context_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
     dcp_comm_backend: DCPCommBackend = ParallelConfig.dcp_comm_backend
+    dcp_sparse_indexer_mode: DCPSparseIndexerMode = (
+        ParallelConfig.dcp_sparse_indexer_mode
+    )
     dcp_kv_cache_interleave_size: int = ParallelConfig.dcp_kv_cache_interleave_size
     cp_kv_cache_interleave_size: int = ParallelConfig.cp_kv_cache_interleave_size
     data_parallel_size: int = ParallelConfig.data_parallel_size
@@ -1008,6 +1012,10 @@ class EngineArgs:
         parallel_group.add_argument(
             "--dcp-comm-backend",
             **parallel_kwargs["dcp_comm_backend"],
+        )
+        parallel_group.add_argument(
+            "--dcp-sparse-indexer-mode",
+            **parallel_kwargs["dcp_sparse_indexer_mode"],
         )
         parallel_group.add_argument(
             "--dcp-kv-cache-interleave-size",
@@ -2109,6 +2117,7 @@ class EngineArgs:
             worker_extension_cls=self.worker_extension_cls,
             decode_context_parallel_size=self.decode_context_parallel_size,
             dcp_comm_backend=self.dcp_comm_backend,
+            dcp_sparse_indexer_mode=self.dcp_sparse_indexer_mode,
             dcp_kv_cache_interleave_size=self.dcp_kv_cache_interleave_size,
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
             _api_process_count=self._api_process_count,

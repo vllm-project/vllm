@@ -800,6 +800,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             else:
                 mqa_q = (mqa_ql_nope, mqa_q_pe)
             if self.impl.dcp_world_size > 1:
+                # The head-dim all-gather below is only valid when q reaches it
+                # unquantized: a per-rank fp8 q-scale would make the gathered
+                # heads inconsistent across DCP ranks. Sparse MLA impls keep q as
+                # a bf16 (nope, pe) tuple (supports_quant_query_input is False),
+                # so they pass; dense fp8 paths quantize q per-rank and remain
+                # unsupported. Gate on the actual invariant, not on is_sparse_impl
+                # (FlashInfer/ROCm sparse impls also quantize q per-rank).
+                assert not fp8_attention or not self.impl.supports_quant_query_input, (
+                    "DCP with an fp8 kv-cache requires q to stay unquantized "
+                    "(supports_quant_query_input must be False)."
+                )
                 if isinstance(mqa_q, tuple):
                     # concatenate mqa_ql_nope and mqa_q_pe -> (B, N, L + P)
                     mqa_q = torch.cat(mqa_q, dim=-1)

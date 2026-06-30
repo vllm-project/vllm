@@ -855,3 +855,107 @@ def test_triton_convert_returns_valid_counts():
     )
     assert isinstance(result_only, torch.Tensor)
     torch.testing.assert_close(result_only, result, rtol=0, atol=0)
+
+
+def _build_sparse_dcp_vllm_config(
+    local_heads: int,
+    dcp_world_size: int,
+    comm_backend: str = "ag_rs",
+):
+    """Minimal sparse-MLA VllmConfig for exercising the FlashMLASparse DCP
+    head-envelope guard in ``FlashMLASparseMetadataBuilder.__init__``.
+
+    TP is simulated by mocking ``get_num_attention_heads`` to return the
+    per-rank head count directly (as the decode-correctness test does), so the
+    guard sees ``local_heads`` local heads and ``local_heads * dcp_world_size``
+    gathered heads after the q all-gather.
+    """
+    kv_lora_rank = 512
+    qk_nope_head_dim = 128
+    qk_rope_head_dim = 64
+    v_head_dim = 128
+    head_size = kv_lora_rank + qk_rope_head_dim
+    topk_tokens = 128
+
+    vllm_config = create_vllm_config(
+        model_name="deepseek-ai/DeepSeek-V2-Lite-Chat",
+        tensor_parallel_size=1,
+        max_model_len=4096,
+        block_size=64,
+        hf_config_override={
+            "index_topk": topk_tokens,
+            "attn_module_list_cfg": [{"topk_tokens": topk_tokens}],
+        },
+    )
+    model_config = vllm_config.model_config
+    model_config.dtype = torch.bfloat16
+    model_config.hf_text_config = SimpleNamespace(
+        q_lora_rank=None,
+        kv_lora_rank=kv_lora_rank,
+        qk_nope_head_dim=qk_nope_head_dim,
+        qk_rope_head_dim=qk_rope_head_dim,
+        v_head_dim=v_head_dim,
+        model_type="deepseek_v2",
+    )
+    model_config.get_num_attention_heads = MethodType(
+        lambda self, parallel_config: local_heads, model_config
+    )
+    model_config.get_num_kv_heads = MethodType(
+        lambda self, parallel_config: 1, model_config
+    )
+    model_config.get_head_size = MethodType(lambda self: head_size, model_config)
+    model_config.get_sliding_window = MethodType(lambda self: None, model_config)
+
+    vllm_config.cache_config.cache_dtype = "fp8_ds_mla"
+    vllm_config.parallel_config.decode_context_parallel_size = dcp_world_size
+    vllm_config.parallel_config.dcp_comm_backend = comm_backend
+    return vllm_config
+
+
+@pytest.mark.skipif(
+    torch.cuda.get_device_capability() < (9, 0),
+    reason="FlashMLASparseBackend requires CUDA 9.0 or higher",
+)
+@pytest.mark.parametrize(
+    "local_heads,dcp_world_size,should_raise",
+    [
+        # local 16 -> pad 64; gathered 16*8=128 -> pad 128. The gathered heads
+        # cross the 64->128 envelope boundary => rejected. Mirrors the
+        # documented 128-head TP=DCP=8 case.
+        (16, 8, True),
+        # local 24 -> pad 64; gathered 24*4=96 -> pad 128 => rejected.
+        (24, 4, True),
+        # local 16 -> pad 64; gathered 16*4=64 -> pad 64. Same envelope =>
+        # accepted. This is the GLM-5.2 prod envelope (64 heads, TP4/DCP4:
+        # local 16, gathered 64).
+        (16, 4, False),
+        # No DCP: the guard is inert regardless of head count.
+        (16, 1, False),
+    ],
+)
+def test_fp8_dcp_head_envelope_guard(local_heads, dcp_world_size, should_raise):
+    """The builder sizes the fp8 decode kernel envelope (head padding +
+    tile-scheduler metadata) from the LOCAL head count, but under DCP the
+    kernel runs on ``local * dcp_world_size`` gathered heads. When the two pad
+    to a different envelope (64 vs 128) the scheduler metadata would silently
+    mismatch the kernel, so ``__init__`` must reject the config up front.
+
+    The guard fires exactly when the gathered head count exceeds the per-rank
+    padded envelope: gathered >= local and the padding map is monotonic, so
+    ``local_pad != gathered_pad`` is equivalent to ``gathered_pad > local_pad``.
+    """
+    device = torch.device(DEVICE_TYPE)
+    vllm_config = _build_sparse_dcp_vllm_config(local_heads, dcp_world_size)
+    kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
+    builder_cls = FlashMLASparseBackend.get_builder_cls()
+
+    if should_raise:
+        with pytest.raises(NotImplementedError, match="envelope"):
+            builder_cls(kv_cache_spec, ["placeholder"], vllm_config, device)
+    else:
+        builder = builder_cls(kv_cache_spec, ["placeholder"], vllm_config, device)
+        gathered_heads = local_heads * dcp_world_size
+        local_pad = 64 if local_heads <= 64 else 128
+        gathered_pad = 64 if gathered_heads <= 64 else 128
+        assert builder.fp8_decode_padded_heads == local_pad
+        assert local_pad == gathered_pad
