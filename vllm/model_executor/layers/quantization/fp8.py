@@ -219,19 +219,18 @@ class Fp8Config(QuantizationConfig):
             return Fp8KVCacheMethod(self)
         return None
 
-    @staticmethod
-    def get_cache_scale_mapper() -> "WeightsMapper":
+    def get_cache_scale_mapper(self) -> "WeightsMapper":
         """Map compressed-tensors KV-cache scale names to vLLM names."""
         from vllm.model_executor.models.utils import WeightsMapper
 
-        orig_to_new_suffix = {
-            ".k_proj.output_scale": ".attn.k_scale",
-            ".v_proj.output_scale": ".attn.v_scale",
-            ".q_proj.output_scale": ".attn.q_scale",
-            ".self_attn.prob_output_scale": ".self_attn.attn.prob_scale",
-        }
-        cache_scale_mapper = WeightsMapper(orig_to_new_suffix=orig_to_new_suffix)
-        return cache_scale_mapper | QuantizationConfig.get_cache_scale_mapper()
+        return WeightsMapper(
+            orig_to_new_suffix={
+                ".k_proj.output_scale": ".attn.k_scale",
+                ".v_proj.output_scale": ".attn.v_scale",
+                ".q_proj.output_scale": ".attn.q_scale",
+                ".self_attn.prob_output_scale": ".self_attn.attn.prob_scale",
+            }
+        )
 
 
 class CopyNumelCounter(TorchDispatchMode):
