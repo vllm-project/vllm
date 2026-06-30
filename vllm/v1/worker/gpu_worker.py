@@ -4,6 +4,7 @@
 
 import gc
 import os
+import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import timedelta
@@ -169,7 +170,8 @@ class Worker(WorkerBase):
         self._pp_send_work: list[Handle] = []
 
     def sleep(self, level: int = 1) -> None:
-        free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
+        torch.accelerator.synchronize()
+        free_bytes_before_sleep = torch.accelerator.get_memory_info()[0]
 
         # Save the buffers before level 2 sleep
         if level == 2:
@@ -180,8 +182,16 @@ class Worker(WorkerBase):
 
         allocator = get_mem_allocator_instance()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
-        free_bytes_after_sleep, total = torch.cuda.mem_get_info()
-        freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
+
+        torch.accelerator.synchronize()
+        deadline = time.monotonic() + (5.0 if current_platform.is_rocm() else 0)
+        while True:
+            free_bytes_after_sleep, total = torch.accelerator.get_memory_info()
+            freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
+            if freed_bytes >= 0 or time.monotonic() >= deadline:
+                break
+            time.sleep(0.1)
+
         used_bytes = total - free_bytes_after_sleep
         assert freed_bytes >= 0, "Memory usage increased after sleeping."
         logger.info(
@@ -449,8 +459,8 @@ class Worker(WorkerBase):
             )
 
             # Profile CUDA graph memory if graphs will be captured.
-            # Skip on ROCm/HIP/XPU as graph pool handles and mem_get_info behave
-            # differently and can produce incorrect/negative estimates.
+            # Skip on ROCm/HIP/XPU as graph pool handles and get_memory_info
+            # behave differently and can produce incorrect/negative estimates.
             cudagraph_memory_estimate = 0
             if (
                 current_platform.is_cuda()
@@ -1217,10 +1227,11 @@ class Worker(WorkerBase):
         # Release kept-alive cumem pools while the pluggable allocator wrappers
         # and callbacks are still alive, so MemPool teardown is not deferred to
         # interpreter finalization (pytorch/pytorch#145168).
-        from vllm.device_allocator.cumem import CuMemAllocator
+        if current_platform.is_cuda_alike():
+            from vllm.device_allocator.cumem import CuMemAllocator
 
-        if CuMemAllocator.instance is not None:
-            CuMemAllocator.instance.release_pools()
+            if CuMemAllocator.instance is not None:
+                CuMemAllocator.instance.release_pools()
 
     def elastic_ep_execute(self, execute_method: str, *args, **kwargs):
         return self.elastic_ep_executor.execute(execute_method, *args, **kwargs)
