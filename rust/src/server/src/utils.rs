@@ -45,6 +45,24 @@ pub fn merge_kv_transfer_params(
     xargs
 }
 
+/// Merge `ec_transfer_params` into the `vllm_xargs` map, mirroring the Python
+/// vLLM behavior where `ec_transfer_params` is injected into `extra_args` for
+/// engine-core consumption.
+pub fn merge_ec_transfer_params(
+    mut xargs: Option<HashMap<String, Value>>,
+    ec_transfer_params: Option<&HashMap<String, Value>>,
+) -> Option<HashMap<String, Value>> {
+    if let Some(ec_params) = ec_transfer_params {
+        let map = xargs.get_or_insert_with(HashMap::new);
+        map.insert(
+            "ec_transfer_params".to_string(),
+            // This is safe because we know that `ec_params` is already valid JSON.
+            serde_json::to_value(ec_params).unwrap(),
+        );
+    }
+    xargs
+}
+
 /// Convert OpenAI-style `logit_bias` with string token-ID keys into the
 /// internal `HashMap<u32, f32>` representation, validating that every key
 /// parses as a `u32`.

@@ -170,6 +170,9 @@ pub struct CompletionRequest {
     /// KV transfer parameters for disaggregated serving
     pub kv_transfer_params: Option<HashMap<String, Value>>,
 
+    /// Encoder cache transfer parameters for disaggregated serving
+    pub ec_transfer_params: Option<HashMap<String, Value>>,
+
     /// Additional request parameters with string or numeric values for custom
     /// extensions
     pub vllm_xargs: Option<HashMap<String, Value>>,
@@ -193,6 +196,7 @@ pub(super) struct CompletionResponse {
     pub usage: Option<Usage>,
     pub system_fingerprint: Option<String>,
     pub kv_transfer_params: Option<Value>,
+    pub ec_transfer_params: Option<Value>,
 }
 
 /// Mirrors the Python vLLM `CompletionResponseChoice` class.

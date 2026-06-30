@@ -13,7 +13,7 @@ use crate::routes::openai::utils::structured_outputs::convert_from_response_form
 use crate::routes::openai::utils::types::{
     ChatMessage, ContentPart, MessageContent, Tool, ToolChoice, ToolChoiceValue,
 };
-use crate::utils::{ResolvedRequestContext, convert_logit_bias, merge_kv_transfer_params};
+use crate::utils::{ResolvedRequestContext, convert_logit_bias, merge_ec_transfer_params, merge_kv_transfer_params};
 
 /// Lowered chat request plus the public response metadata carried by every SSE
 /// chunk.
@@ -131,7 +131,10 @@ pub(super) fn prepare_chat_request(
             structured_outputs,
             skip_reading_prefix_cache: None,
             vllm_xargs: merge_kv_transfer_params(
-                request.vllm_xargs,
+                merge_ec_transfer_params(
+                    request.vllm_xargs,
+                    request.ec_transfer_params.as_ref(),
+                ),
                 request.kv_transfer_params.as_ref(),
             ),
         },

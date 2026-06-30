@@ -22,6 +22,9 @@ pub struct CollectedAssistantMessage {
     pub finish_reason: FinishReason,
     /// Connector-specific KV transfer parameters for disaggregated serving.
     pub kv_transfer_params: Option<serde_json::Value>,
+    /// Connector-specific encoder cache transfer parameters for disaggregated
+    /// serving.
+    pub ec_transfer_params: Option<serde_json::Value>,
 }
 
 /// Per-request stream of chat events.
@@ -77,6 +80,7 @@ impl ChatEventStream {
                     usage,
                     finish_reason,
                     kv_transfer_params,
+                    ec_transfer_params,
                 } => {
                     return Ok(CollectedAssistantMessage {
                         message: done,
@@ -89,6 +93,7 @@ impl ChatEventStream {
                         usage,
                         finish_reason,
                         kv_transfer_params,
+                        ec_transfer_params,
                     });
                 }
                 ChatEvent::ToolCallEnd { call, .. } => {
@@ -235,6 +240,7 @@ mod tests {
                 },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             }
         );
     }
