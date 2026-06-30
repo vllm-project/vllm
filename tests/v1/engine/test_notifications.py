@@ -7,15 +7,23 @@ model: the buffer only touches `self._pending_notifications`, so a bare
 instance is enough to assert the additive delivery contract.
 """
 
+from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreOutputs
 from vllm.v1.engine.core import EngineCore
-from vllm.v1.notifications import LoRALoadEvent
+from vllm.v1.notifications import CustomNotification, LoRALoadEvent
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 
 
 def _bare_engine_core() -> EngineCore:
     engine_core = EngineCore.__new__(EngineCore)
     engine_core._pending_notifications = []
     return engine_core
+
+
+def _bare_scheduler() -> Scheduler:
+    scheduler = Scheduler.__new__(Scheduler)
+    scheduler._pending_notifications = []
+    return scheduler
 
 
 def test_notifications_accumulate_additively():
@@ -78,3 +86,38 @@ def test_flush_noop_when_empty():
     outputs: dict[int, EngineCoreOutputs] = {}
     engine_core._flush_notifications(outputs)
     assert outputs == {}
+
+
+def test_scheduler_publish_take_roundtrip():
+    """publish_notification queues; take_notifications drains exactly once."""
+    scheduler = _bare_scheduler()
+
+    lora = LoRALoadEvent(gpu_adapters=["a"])
+    custom = CustomNotification(key="my_plugin", payload={"count": 1})
+    scheduler.publish_notification(lora)
+    scheduler.publish_notification(custom)
+
+    assert scheduler.take_notifications() == [lora, custom]
+    # Drained: a second take returns nothing.
+    assert scheduler.take_notifications() == []
+
+
+def test_collect_drains_scheduler_notifications():
+    """_collect_step_notifications forwards scheduler-sourced events.
+
+    Worker and scheduler producers share the same additive channel; this
+    pins the review ask (maxdebayser) that scheduler notifications flow
+    through EngineCore alongside worker_notifications.
+    """
+    engine_core = _bare_engine_core()
+    engine_core.scheduler = _bare_scheduler()
+
+    event = CustomNotification(key="my_plugin", payload={"n": 1})
+    engine_core.scheduler.publish_notification(event)
+
+    outputs: dict[int, EngineCoreOutputs] = {}
+    engine_core._collect_step_notifications(EMPTY_MODEL_RUNNER_OUTPUT, outputs)
+
+    assert outputs[0].engine_notifications == [event]
+    # Scheduler buffer was drained as a side effect.
+    assert engine_core.scheduler.take_notifications() == []

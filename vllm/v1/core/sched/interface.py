@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from vllm.v1.engine import EngineCoreOutputs
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.metrics.stats import SchedulerStats
+    from vllm.v1.notifications import EngineNotification
     from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
     from vllm.v1.request import Request, RequestStatus
     from vllm.v1.structured_output import StructuredOutputManager
@@ -240,6 +241,16 @@ class SchedulerInterface(ABC):
         The SchedulerStats object is created for every scheduling step.
         """
         raise NotImplementedError
+
+    def take_notifications(self) -> list["EngineNotification"]:
+        """Drain engine notifications the scheduler produced this step.
+
+        EngineCore calls this each step and forwards the result on
+        `EngineCoreOutputs.engine_notifications` (the same additive channel
+        the worker uses). The base scheduler produces none; override to emit
+        engine-scoped events (e.g. plugin metrics) from the scheduler.
+        """
+        return []
 
     @abstractmethod
     def shutdown(self) -> None:

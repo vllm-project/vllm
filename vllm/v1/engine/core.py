@@ -671,6 +671,8 @@ class EngineCore:
     ) -> None:
         if model_output.worker_notifications:
             self._publish_notifications(model_output.worker_notifications)
+        if scheduler_notifications := self.scheduler.take_notifications():
+            self._publish_notifications(scheduler_notifications)
         self._flush_notifications(engine_core_outputs)
 
     def _process_aborts_queue(self):

@@ -458,6 +458,32 @@ def test_engine_notifications_round_trip():
     assert no_events.engine_notifications is None
 
 
+def test_custom_notification_round_trip():
+    """The open `custom` tag survives the wire and namespaces its payload.
+
+    Plugins emit this when they can't add a struct type to the lockstep
+    union; the Rust frontend decodes the same bytes (see
+    rust/src/engine-core-client/src/protocol/notifications.rs).
+    """
+    from vllm.v1.engine import EngineCoreOutputs
+    from vllm.v1.notifications import CustomNotification
+
+    event = CustomNotification(key="my_plugin", payload={"count": 5, "name": "foo"})
+    outputs = EngineCoreOutputs(engine_index=1, engine_notifications=[event])
+
+    encoder = MsgpackEncoder()
+    decoder = MsgpackDecoder(EngineCoreOutputs)
+    decoded = decoder.decode(encoder.encode(outputs))
+
+    assert decoded.engine_notifications == [event]
+
+    raw = msgspec.msgpack.decode(msgspec.msgpack.encode(event))
+    assert raw["type"] == "custom"
+    # omit_defaults strips the payload when empty.
+    empty = msgspec.msgpack.decode(msgspec.msgpack.encode(CustomNotification(key="p")))
+    assert "payload" not in empty
+
+
 def test_engine_notifications_unknown_tag_fails_fast():
     """The notification union is version-lockstep, like the rest of
     EngineCoreOutputs: an unknown tag is a deployment error and must fail

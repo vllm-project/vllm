@@ -107,8 +107,17 @@ class LoRALoadEvent(
     pinned_adapters: list[str] = []
 
 
+class CustomNotification(
+    msgspec.Struct,
+    tag="custom",
+    omit_defaults=True,
+):
+    key: str
+    payload: dict[str, object] = {}
+
+
 # Union of engine-level event types; mirrors vllm/v1/notifications.py.
-EngineNotification = LoRALoadEvent
+EngineNotification = LoRALoadEvent | CustomNotification
 
 
 class EngineCoreOutputs(
