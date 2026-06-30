@@ -1448,6 +1448,56 @@ def test_async_preempt_readmit_before_transfer_output_is_deferred(request_runner
     assert req_status.transfer_jobs == pending_store_jobs
 
 
+def test_reset_cache_clears_stalled_job_state(request_runner):
+    """reset_cache() should clear _stalled_job_ids and reset _last_stall_check.
+
+    When reset_cache() is called, it clears all job tracking state. The stalled
+    job detection state (_stalled_job_ids and _last_stall_check) must also be
+    cleared to avoid memory leaks and ensure immediate detection of new stalled
+    jobs after reset.
+    """
+    block_size = 4
+    offloaded_block_size = block_size
+    num_gpu_blocks = 100
+
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=True,
+    )
+
+    # Create a store job
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[0] * offloaded_block_size,
+        complete_transfers=False,
+    )
+
+    assert len(runner.connector_scheduler._jobs) >= 1
+    job_id = next(iter(runner.connector_scheduler._jobs.keys()))
+
+    # Simulate timeout and trigger stall check
+    import time
+
+    runner.connector_scheduler._jobs[job_id].submitted_at = time.monotonic() - 400.0
+    runner.connector_scheduler._check_stalled_jobs()
+
+    # Verify job was cleaned up and tracked
+    assert job_id not in runner.connector_scheduler._jobs
+    assert job_id in runner.connector_scheduler._stalled_job_ids
+    assert runner.connector_scheduler._last_stall_check > 0
+
+    # Call reset_cache
+    runner.connector_scheduler.reset_cache()
+
+    # Verify stalled job state was cleared
+    assert not runner.connector_scheduler._stalled_job_ids
+    assert runner.connector_scheduler._last_stall_check == 0.0
+
+
 @pytest.mark.parametrize("async_scheduling", [True, False])
 def test_swa_alignment_skip(request_runner, async_scheduling: bool):
     """SWA blocks unreachable by the load path are skipped during store.
@@ -2614,3 +2664,304 @@ def test_request_finished_mixed_full_attn_and_sliding_window(
     # Verify fence is empty after full lifecycle (cleanup happened).
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
     assert len(runner.connector_scheduler._jobs) == 0
+
+
+def test_stalled_store_job_detected(request_runner):
+    """Verify that a stalled store job is detected and cleaned up."""
+    block_size = 4
+    offloaded_block_size = block_size
+    num_gpu_blocks = 100
+
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=True,
+    )
+
+    # Create a request and run it to trigger a store job
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[0] * offloaded_block_size,
+        complete_transfers=False,
+    )
+
+    # Verify a store job was created
+    assert len(runner.connector_scheduler._jobs) >= 1
+    store_job_ids = [
+        jid
+        for jid, status in runner.connector_scheduler._jobs.items()
+        if status.is_store
+    ]
+    assert store_job_ids, "Expected at least one store job"
+
+    # Simulate timeout by setting submitted_at to the past
+    import time
+
+    for jid in store_job_ids:
+        runner.connector_scheduler._jobs[jid].submitted_at = (
+            time.monotonic() - 400.0  # 400s ago, exceeds 300s timeout
+        )
+
+    # Trigger stall check
+    runner.connector_scheduler._check_stalled_jobs()
+
+    # Verify jobs were removed
+    for jid in store_job_ids:
+        assert jid not in runner.connector_scheduler._jobs
+
+    # Verify complete_store was called with success=False
+    runner.manager.complete_store.assert_called()
+    for call in runner.manager.complete_store.call_args_list:
+        _, kwargs = call
+        assert kwargs.get("success", True) is False
+
+    # Verify jobs were tracked for stale worker report skipping
+    for jid in store_job_ids:
+        assert jid in runner.connector_scheduler._stalled_job_ids
+
+
+def test_stalled_load_unblocks_being_loaded(request_runner):
+    """Verify that a stalled load job cleans up _blocks_being_loaded."""
+    block_size = 4
+    offloaded_block_size = block_size
+    num_gpu_blocks = 100
+
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=True,
+    )
+
+    # First request: store some blocks
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[0] * offloaded_block_size + [EOS_TOKEN_ID],
+        expected_stored=(0,),
+    )
+
+    # Second request: load the stored blocks
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: 1
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output([])
+    )
+    runner.run(decoded_tokens=[], complete_transfers=False)
+
+    # Verify a load job was created and _blocks_being_loaded is populated
+    load_job_ids = [
+        jid
+        for jid, status in runner.connector_scheduler._jobs.items()
+        if not status.is_store
+    ]
+    assert load_job_ids, "Expected at least one load job"
+    assert runner.connector_scheduler._blocks_being_loaded
+    blocks_before = runner.connector_scheduler._blocks_being_loaded.copy()
+
+    # Simulate timeout
+    import time
+
+    for jid in load_job_ids:
+        runner.connector_scheduler._jobs[jid].submitted_at = time.monotonic() - 400.0
+
+    # Trigger stall check
+    runner.connector_scheduler._check_stalled_jobs()
+
+    # Verify load jobs were removed
+    for jid in load_job_ids:
+        assert jid not in runner.connector_scheduler._jobs
+
+    # Verify _blocks_being_loaded was cleared
+    assert not (runner.connector_scheduler._blocks_being_loaded & blocks_before)
+
+    # Verify complete_load was called
+    runner.manager.complete_load.assert_called()
+
+
+def test_stalled_job_skips_late_worker_report(request_runner):
+    """Verify that late worker reports for stalled jobs don't cause KeyError."""
+    block_size = 4
+    offloaded_block_size = block_size
+    num_gpu_blocks = 100
+
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=True,
+    )
+
+    # Create a store job
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[0] * offloaded_block_size,
+        complete_transfers=False,
+    )
+
+    assert len(runner.connector_scheduler._jobs) >= 1
+    job_id = next(iter(runner.connector_scheduler._jobs.keys()))
+
+    # Simulate timeout and trigger stall check
+    import time
+
+    runner.connector_scheduler._jobs[job_id].submitted_at = time.monotonic() - 400.0
+    runner.connector_scheduler._check_stalled_jobs()
+
+    # Verify job was cleaned up
+    assert job_id not in runner.connector_scheduler._jobs
+    # Verify job is tracked with its pending_count (num_workers)
+    assert job_id in runner.connector_scheduler._stalled_job_ids
+    pending_count_before = runner.connector_scheduler._stalled_job_ids[job_id]
+    assert pending_count_before > 0
+
+    # Simulate late worker completion reports arriving
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+        OffloadingWorkerMetadata,
+    )
+    from vllm.v1.outputs import KVConnectorOutput
+
+    # First late report: decrement count
+    late_meta = OffloadingWorkerMetadata()
+    late_meta.completed_jobs[job_id] = 1
+    late_output = KVConnectorOutput(kv_connector_worker_meta=late_meta)
+
+    # This should NOT raise KeyError
+    runner.connector_scheduler.update_connector_output(late_output)
+
+    # Count should have decremented
+    if pending_count_before > 1:
+        assert runner.connector_scheduler._stalled_job_ids[job_id] == (
+            pending_count_before - 1
+        )
+    else:
+        # Entry removed when count reaches 0
+        assert job_id not in runner.connector_scheduler._stalled_job_ids
+
+
+def test_stalled_job_with_missing_req_status(request_runner):
+    """Verify that stalled job cleanup handles missing req_status gracefully.
+
+    If a request is cleaned up but its job is still in _jobs (edge case),
+    _handle_stalled_job should not crash and should still clean up the job.
+    """
+    block_size = 4
+    offloaded_block_size = block_size
+    num_gpu_blocks = 100
+
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=True,
+    )
+
+    # Create a store job
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[0] * offloaded_block_size,
+        complete_transfers=False,
+    )
+
+    assert len(runner.connector_scheduler._jobs) >= 1
+    job_id = next(iter(runner.connector_scheduler._jobs.keys()))
+    req_id = runner.connector_scheduler._jobs[job_id].req_id
+
+    # Simulate edge case: req_status is removed but job still exists
+    # (This shouldn't happen in normal flow, but we test defensive handling)
+    if req_id in runner.connector_scheduler._req_status:
+        del runner.connector_scheduler._req_status[req_id]
+
+    # Simulate timeout
+    import time
+
+    runner.connector_scheduler._jobs[job_id].submitted_at = time.monotonic() - 400.0
+
+    # This should NOT crash even though req_status is None
+    runner.connector_scheduler._check_stalled_jobs()
+
+    # Job should still be cleaned up
+    assert job_id not in runner.connector_scheduler._jobs
+    assert job_id in runner.connector_scheduler._stalled_job_ids
+
+    # complete_store/load should NOT be called (no req_context)
+    runner.manager.complete_store.assert_not_called()
+    runner.manager.complete_load.assert_not_called()
+
+
+def test_stall_check_is_throttled(request_runner):
+    """Verify that _check_stalled_jobs is throttled to once per 10s interval.
+
+    Multiple calls to update_connector_output() within the throttle interval
+    should only trigger one stall check.
+    """
+    block_size = 4
+    offloaded_block_size = block_size
+    num_gpu_blocks = 100
+
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=True,
+    )
+
+    # Create a store job
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[0] * offloaded_block_size,
+        complete_transfers=False,
+    )
+
+    assert len(runner.connector_scheduler._jobs) >= 1
+    job_id = next(iter(runner.connector_scheduler._jobs.keys()))
+
+    # Simulate timeout
+    import time
+
+    runner.connector_scheduler._jobs[job_id].submitted_at = time.monotonic() - 400.0
+
+    # Mock _check_stalled_jobs to count calls
+    original_check = runner.connector_scheduler._check_stalled_jobs
+    call_count = [0]
+
+    def counting_check():
+        call_count[0] += 1
+        original_check()
+
+    runner.connector_scheduler._check_stalled_jobs = counting_check
+
+    # Reset throttle state
+    runner.connector_scheduler._last_stall_check = 0.0
+
+    # Create a dummy connector_output
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+        OffloadingWorkerMetadata,
+    )
+    from vllm.v1.outputs import KVConnectorOutput
+
+    empty_meta = OffloadingWorkerMetadata()
+    empty_output = KVConnectorOutput(kv_connector_worker_meta=empty_meta)
+
+    # Call update_connector_output multiple times rapidly
+    # First call should trigger check (last_stall_check was 0)
+    runner.connector_scheduler.update_connector_output(empty_output)
+    assert call_count[0] == 1
+
+    # Subsequent calls within 10s should NOT trigger check
+    runner.connector_scheduler.update_connector_output(empty_output)
+    runner.connector_scheduler.update_connector_output(empty_output)
+    assert call_count[0] == 1  # Still 1
+
+    # Verify _last_stall_check was updated
+    assert runner.connector_scheduler._last_stall_check > 0
