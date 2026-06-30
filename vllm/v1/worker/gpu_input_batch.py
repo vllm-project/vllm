@@ -504,25 +504,12 @@ class InputBatch:
         # _prepare_input_ids.
         start_index = self.num_tokens_no_spec[req_index]
         end_token_index = start_index + num_spec_tokens
-
-        # Negative IDs are scheduler-side placeholders. Keep them in
-        # spec_token_ids for rejection sampling, but never expose them to the
-        # model embedding lookup.
-        if all(token_id >= 0 for token_id in spec_token_ids):
-            self.token_ids_cpu[req_index, start_index:end_token_index] = spec_token_ids
-        else:
-            safe_spec_token_ids = np.asarray(
-                spec_token_ids,
-                dtype=self.token_ids_cpu.dtype,
-            ).copy()
-            safe_spec_token_ids[safe_spec_token_ids < 0] = 0
-            self.token_ids_cpu[req_index, start_index:end_token_index] = (
-                safe_spec_token_ids
-            )
-        self.is_token_ids[req_index, start_index:end_token_index] = True
-
-        # Preserve the original values, including -1 placeholders.
         cur_spec_token_ids.extend(spec_token_ids)
+        if any(token_id < 0 for token_id in spec_token_ids):
+            # Clamp placeholder spec token ids.
+            spec_token_ids = [max(0, token_id) for token_id in spec_token_ids]
+        self.token_ids_cpu[req_index, start_index:end_token_index] = spec_token_ids
+        self.is_token_ids[req_index, start_index:end_token_index] = True
 
     def remove_request(self, req_id: str) -> int | None:
         """This method must always be followed by a call to condense().

@@ -2191,11 +2191,7 @@ class GPUModelRunner(
             spec_decode_metadata = self._calc_spec_decode_metadata(
                 num_draft_tokens, cu_num_tokens
             )
-            self._mask_invalid_draft_token_ids(
-                spec_decode_metadata,
-                num_draft_tokens,
-                scheduler_output.num_invalid_spec_tokens,
-            )
+            self._mask_invalid_draft_token_ids(spec_decode_metadata, num_draft_tokens)
             logits_indices = spec_decode_metadata.logits_indices
             num_sampled_tokens = num_draft_tokens + 1
             # For DECODE only cuda graph of some attention backends (e.g., GDN).
@@ -2222,42 +2218,23 @@ class GPUModelRunner(
         self,
         spec_decode_metadata: SpecDecodeMetadata,
         num_draft_tokens: np.ndarray,
-        num_invalid_spec_tokens: dict[str, int] | None,
     ) -> None:
-        if not num_invalid_spec_tokens:
-            return
-
-        invalid_mask = np.zeros(
-            int(num_draft_tokens.sum()),
+        spec_token_ids = self.input_batch.spec_token_ids
+        invalid_mask = np.fromiter(
+            (
+                token_id < 0
+                for req_idx, draft_len in enumerate(num_draft_tokens)
+                for token_id in spec_token_ids[req_idx][: int(draft_len)]
+            ),
             dtype=np.bool_,
         )
-
-        offset = 0
-        for req_id, draft_len in zip(
-            self.input_batch.req_ids[: len(num_draft_tokens)],
-            num_draft_tokens,
-        ):
-            draft_len = int(draft_len)
-            num_invalid = num_invalid_spec_tokens.get(req_id, 0)
-            assert 0 <= num_invalid <= draft_len, (
-                f"Invalid speculative suffix length for {req_id}: "
-                f"{num_invalid=} > {draft_len=}"
-            )
-            if num_invalid:
-                invalid_mask[offset + draft_len - num_invalid : offset + draft_len] = (
-                    True
-                )
-            offset += draft_len
+        if not invalid_mask.any():
+            return
 
         invalid_mask_tensor = async_tensor_h2d(
-            invalid_mask,
-            dtype=torch.bool,
-            device=self.device,
+            invalid_mask, dtype=torch.bool, device=self.device
         )
-        spec_decode_metadata.draft_token_ids.masked_fill_(
-            invalid_mask_tensor,
-            -1,
-        )
+        spec_decode_metadata.draft_token_ids.masked_fill_(invalid_mask_tensor, -1)
 
     def _build_attention_metadata(
         self,

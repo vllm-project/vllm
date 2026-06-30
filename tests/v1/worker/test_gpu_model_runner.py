@@ -867,7 +867,11 @@ def test_sample_passes_reordered_draft_probs_to_rejection_sampler():
 def test_invalid_draft_suffixes_remain_rejected_in_metadata():
     runner = object.__new__(GPUModelRunner)
     runner.device = torch.device("cpu")
-    runner.input_batch = SimpleNamespace(req_ids=["req_a", "req_b", "req_c"])
+    # The -1 placeholders in spec_token_ids mark which (sanitized) draft
+    # positions must be re-masked to -1 in the rejection-sampling metadata.
+    runner.input_batch = SimpleNamespace(
+        spec_token_ids=[[10, -1], [12], [13, -1]],
+    )
 
     metadata = SpecDecodeMetadata.make_dummy(
         [[10, 11], [12], [13, 14]],
@@ -878,10 +882,6 @@ def test_invalid_draft_suffixes_remain_rejected_in_metadata():
         runner,
         metadata,
         np.array([2, 1, 2], dtype=np.int32),
-        {
-            "req_a": 1,
-            "req_c": 1,
-        },
     )
 
     assert metadata.draft_token_ids.tolist() == [10, -1, 12, 13, -1]
