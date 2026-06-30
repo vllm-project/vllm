@@ -11,11 +11,23 @@ permissions:
 
 jobs:
   macos-m1-smoke-test:
-    runs-on: macos-latest
+    # macos-26 (the supported target) is still a preview runner, so gate on GA
+    # macos-15 and keep macos-26 non-blocking.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            required: true
+          - os: macos-26
+            required: false
+    name: macos-m1-smoke-test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ !matrix.required }}
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
@@ -72,14 +84,11 @@ jobs:
           # Test health endpoint
           curl -f http://localhost:8000/health
 
-          # Test completion
-          curl -f http://localhost:8000/v1/completions \
+          # Long prompt: hits the split-KV path that short prompts skip (#46769).
+          PAYLOAD=$(python -c "import json; print(json.dumps({'model': 'Qwen/Qwen3-0.6B', 'prompt': 'The quick brown fox jumps over the lazy dog. ' * 24, 'max_tokens': 16}))")
+          curl -f --max-time 120 http://localhost:8000/v1/completions \
             -H "Content-Type: application/json" \
-            -d '{
-              "model": "Qwen/Qwen3-0.6B",
-              "prompt": "Hello",
-              "max_tokens": 5
-            }'
+            -d "$PAYLOAD"
 
           # Cleanup
           kill "$SERVER_PID"

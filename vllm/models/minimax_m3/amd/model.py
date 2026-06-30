@@ -24,6 +24,8 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm import _custom_ops as ops
+from vllm import envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import (
     CacheConfig,
@@ -102,6 +104,24 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     get_kv_quant_mode,
 )
+
+
+def _fuse_shared_experts_enabled(config: PretrainedConfig) -> bool:
+    """Whether to fuse the shared expert with routed experts.
+
+    ROCm only. Opt-in via ``VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS`` (the
+    router-append fusion runs on both aiter and non-aiter MoE);
+    it is disabled under expert parallelism (the shared slot is appended to
+    the routed top-k, which the EP expert-mapping path does not handle).
+    """
+    from vllm.platforms import current_platform
+
+    return bool(
+        current_platform.is_rocm()
+        and getattr(config, "n_shared_experts", None)
+        and envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
+        and not get_current_vllm_config().parallel_config.enable_expert_parallel
+    )
 
 
 def _sparse_attention_layer_ids(config: PretrainedConfig) -> set[int]:
@@ -249,6 +269,24 @@ class MiniMaxM3MLP(nn.Module):
         return x
 
 
+def _aiter_moe_fused_shared_experts_enabled(config: PretrainedConfig) -> bool:
+    """Whether the fused shared expert routes through aiter's grouped top-k MoE.
+
+    A strict sub-case of :func:`_fuse_shared_experts_enabled`: shared-expert
+    fusion must already be opted in (``VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS``)
+    and allowed (not under expert parallelism). When additionally on gfx950 with
+    an active aiter MoE backend, the shared expert is appended inside aiter's
+    biased grouped top-k kernel (``num_fused_shared_experts``) instead of the
+    vLLM router's torch concat. Otherwise FSE still runs via the vLLM top-k bias
+    router.
+    """
+    if not _fuse_shared_experts_enabled(config):
+        return False
+    from vllm.platforms.rocm import on_gfx950
+
+    return on_gfx950() and rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+
+
 class MiniMaxM3MoE(nn.Module):
     """Sigmoid-routed MoE block with a routing-bias correction and a shared
     expert."""
@@ -294,8 +332,16 @@ class MiniMaxM3MoE(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
+        # Shared-expert fusion (opt-in via VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS,
+        # off under expert parallelism) folds the shared expert into the routed
+        # MoE call as the last expert slot, so we don't build a separate module.
+        # On gfx950 with aiter MoE the append is fused inside aiter's grouped
+        # top-k kernel; otherwise it goes through the vLLM top-k bias router.
+        self.fuse_shared_experts = _fuse_shared_experts_enabled(config)
+        self.use_aiter_moe_fse = _aiter_moe_fused_shared_experts_enabled(config)
+
         self.shared_experts: MiniMaxM3MLP | None = None
-        if self.n_shared_experts:
+        if self.n_shared_experts and not self.fuse_shared_experts:
             self.shared_experts = MiniMaxM3MLP(
                 config=config,
                 intermediate_size=config.intermediate_size * self.n_shared_experts,
@@ -304,22 +350,36 @@ class MiniMaxM3MoE(nn.Module):
                 prefix=f"{prefix}.shared_experts",
             )
 
+        # The aiter MoE fused path goes through aiter's biased grouped top-k
+        # (GroupedTopKRouter, as in DeepSeek-V4): M3 is not group-routed, so a
+        # trivial single group (num_expert_group=topk_group=1) reduces to plain
+        # top-k while applying the sigmoid + bias correction and appending the
+        # always-on shared expert; aiter applies the routed scaling internally.
+        # Every other path (vLLM top-k bias router, or no fusion) applies the
+        # routed scaling to the MoE output here.
         self.experts = FusedMoE(
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
+            intermediate_pad=0,
             scoring_func=config.scoring_func,
             e_score_correction_bias=self.e_score_correction_bias,
             renormalize=True,
+            use_grouped_topk=self.use_aiter_moe_fse,
+            num_expert_group=1 if self.use_aiter_moe_fse else None,
+            topk_group=1 if self.use_aiter_moe_fse else None,
             activation="swigluoai_uninterleave",
             swiglu_limit=config.swiglu_limit,
             swiglu_alpha=config.swiglu_alpha,
             swiglu_beta=config.swiglu_beta,
             routed_scaling_factor=self.routed_scaling_factor,
-            apply_routed_scale_to_output=True,
+            apply_routed_scale_to_output=not self.use_aiter_moe_fse,
             router_logits_dtype=self.gate.out_dtype,
             shared_experts=self.shared_experts,
+            n_shared_experts=(
+                self.n_shared_experts if self.fuse_shared_experts else None
+            ),
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
         )
@@ -863,13 +923,18 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         return hidden_states
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        # Checkpoint experts use w1=gate, w2=down, w3=up.
+        # Checkpoint experts use w1=gate, w2=down, w3=up. When fusing the shared
+        # expert, include the appended slot (id == num_local_experts).
+        n_shared = getattr(self.config, "n_shared_experts", 0) or 0
+        num_experts = self.config.num_local_experts + (
+            n_shared if _fuse_shared_experts_enabled(self.config) else 0
+        )
         return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="w1",
             ckpt_down_proj_name="w2",
             ckpt_up_proj_name="w3",
-            num_experts=self.config.num_local_experts,
+            num_experts=num_experts,
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -894,6 +959,8 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         # (param_name, weight_name, expert_id, shard_id)
         expert_params_mapping = self.get_expert_mapping()
 
+        _fuse_shared = _fuse_shared_experts_enabled(self.config)
+
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
@@ -905,6 +972,17 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             # ModelOpt MXFP8 layers expose them as ``weight_scale``.
             if "weight_scale_inv" in name:
                 name = name.replace("weight_scale_inv", "weight_scale")
+
+            # Shared-expert fusion: redirect the checkpoint shared expert into
+            # routed-expert slot ``num_local_experts`` (gate->w1, up->w3,
+            # down->w2) so it loads via the routed expert loader. Runs before the
+            # stacked/dense mappings so shared_experts.gate_proj/up_proj are not
+            # captured by the dense gate_up_proj mapping.
+            if _fuse_shared and ".shared_experts." in name:
+                sid = self.config.num_local_experts
+                name = name.replace(".shared_experts.gate_proj.", f".experts.{sid}.w1.")
+                name = name.replace(".shared_experts.up_proj.", f".experts.{sid}.w3.")
+                name = name.replace(".shared_experts.down_proj.", f".experts.{sid}.w2.")
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
