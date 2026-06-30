@@ -4,7 +4,7 @@ from copy import copy
 
 import torch
 
-from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -51,12 +51,6 @@ class OpenPanguV2MTPProposer(EagleProposer):
             device=device,
         )
         self.fix_multi_mtp_kvcache = self.use_multi_mtp_heads
-
-    def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode) -> None:
-        if self.use_multi_mtp_heads:
-            self.cudagraph_dispatcher.initialize_cudagraph_keys(CUDAGraphMode.NONE)
-            return
-        super().initialize_cudagraph_keys(cudagraph_mode)
 
     def prepare_next_token_ids_padded(
         self,
