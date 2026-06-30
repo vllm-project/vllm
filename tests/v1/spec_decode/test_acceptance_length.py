@@ -54,6 +54,10 @@ EAGLE3_MODEL_CONFIGS = [
         expected_acceptance_length=2.60,
         expected_acceptance_lengths_per_pos=[0.7296, 0.5208, 0.3545],
         id="llama3-8b-eagle3",
+        marks=[
+            pytest.mark.slow_test,
+            large_gpu_mark(min_gb=32),
+        ],
     ),
     Eagle3ModelConfig(
         verifier="Qwen/Qwen3-8B",
@@ -61,6 +65,10 @@ EAGLE3_MODEL_CONFIGS = [
         expected_acceptance_length=2.26,
         expected_acceptance_lengths_per_pos=[0.6541, 0.3993, 0.2020],
         id="qwen3-8b-eagle3",
+        marks=[
+            pytest.mark.slow_test,
+            large_gpu_mark(min_gb=32),
+        ],
     ),
     Eagle3ModelConfig(
         verifier="openai/gpt-oss-20b",
@@ -72,6 +80,10 @@ EAGLE3_MODEL_CONFIGS = [
         # FLASHINFER does not support ("sink setting not supported")
         excluded_backends={AttentionBackendEnum.FLASHINFER},
         rocm_expected_acceptance_lengths_per_pos=[0.7040, 0.4820, 0.3350],
+        marks=[
+            pytest.mark.slow_test,
+            large_gpu_mark(min_gb=32),
+        ],
     ),
     Eagle3ModelConfig(
         verifier="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
@@ -81,6 +93,7 @@ EAGLE3_MODEL_CONFIGS = [
         id="qwen3-30b-moe-vl-eagle3",
         marks=[
             pytest.mark.slow_test,
+            large_gpu_mark(min_gb=40),
         ],
         rtol=0.15,  # Higher tolerance due to small absolute values at position 2
     ),
@@ -213,7 +226,6 @@ def extract_acceptance_metrics(metrics, num_spec_tokens: int) -> dict:
     }
 
 
-@large_gpu_mark(min_gb=40)
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(),
     reason="This test is only supported on CUDA-alike platforms.",

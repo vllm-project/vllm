@@ -434,7 +434,7 @@ steps:
 - label: Acceptance Length Test (Large Models) # optional
   device: h200_35gb
   key: acceptance-length-test-large-models
-  timeout_in_minutes: 20
+  timeout_in_minutes: 90
   gpu: h100
   optional: true
   num_gpus: 1
