@@ -143,7 +143,25 @@ class MemorySnapshot:
             "allocated_bytes.all.peak", 0
         )
 
-        self.free_memory, self.total_memory = current_platform.mem_get_info(device)
+        try:
+            self.free_memory, self.total_memory = current_platform.mem_get_info(device)
+        except RuntimeError as e:
+            # Some Intel integrated GPUs do not implement free-memory query
+            # in torch.xpu yet; use total device memory and host available
+            # memory as a conservative fallback so initialization can proceed.
+            is_xpu = current_platform.is_xpu()
+            unsupported_mem_query = "doesn't support querying the available free memory" in str(e)
+            if not (is_xpu and unsupported_mem_query):
+                raise
+
+            self.total_memory = current_platform.get_device_total_memory(device.index)
+            self.free_memory = min(psutil.virtual_memory().available,
+                                   self.total_memory)
+            logger.warning_once(
+                "XPU free-memory query is unsupported on this device; "
+                "falling back to host available memory estimate."
+            )
+
         if current_platform.is_integrated_gpu(device.index):
             # On UMA (Unified Memory Architecture) platforms where CPU and
             # GPU share physical memory (e.g. GH200, DGX Spark, Jetson Orin),
@@ -153,7 +171,7 @@ class MemorySnapshot:
             # https://docs.nvidia.com/cuda/cuda-for-tegra-appnote/#estimating-total-allocatable-device-memory-on-an-integrated-gpu-device
             self.free_memory = psutil.virtual_memory().available
 
-        self.cuda_memory = self.total_memory - self.free_memory
+        self.cuda_memory = max(0, self.total_memory - self.free_memory)
 
         # torch.accelerator.memory_reserved() is how many bytes
         # PyTorch gets from cuda (by calling cudaMalloc, etc.)
