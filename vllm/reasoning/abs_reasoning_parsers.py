@@ -92,6 +92,20 @@ class ReasoningParser:
         """
         return self.is_reasoning_end(input_ids)
 
+    def is_prompt_reasoning_end(self, input_ids: Sequence[int]) -> bool:
+        """
+        Check if the prompt already ends the reasoning section, so that the
+        generated output should be treated as content from the first token.
+
+        This is distinct from :meth:`is_reasoning_end`, which inspects model
+        *output*. A prompt may contain ``</think>`` tokens from prior
+        conversation turns (e.g. replayed reasoning) that must not be mistaken
+        for the current turn's reasoning state. Subclasses that need
+        turn-aware detection should override this; the default preserves the
+        previous behavior of reusing :meth:`is_reasoning_end`.
+        """
+        return self.is_reasoning_end(input_ids)
+
     @abstractmethod
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """

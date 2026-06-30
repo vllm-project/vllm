@@ -249,3 +249,44 @@ def test_reasoning_streaming_multi_token_deltas(
 
     assert reconstructor.reasoning == expected_reasoning
     assert (reconstructor.other_content or None) == expected_content
+
+
+# --- is_prompt_reasoning_end: prompt-level (turn-aware) detection ---
+
+PROMPT_REASONING_END_CASES = [
+    pytest.param(
+        # enable_thinking=False template tail: only whitespace after </think>.
+        "<|im_start|>assistant\n<think>\n\n</think>\n\n",
+        True,
+        id="thinking_disabled_tail",
+    ),
+    pytest.param(
+        # Multi-turn history: a prior turn's </think> is followed by real
+        # content and a new generation boundary, so this turn has not ended
+        # reasoning yet.
+        "<think>old reasoning</think>The answer is 42."
+        "<|im_end|>\n<|im_start|>user\nnext question<|im_end|>\n"
+        "<|im_start|>assistant\n",
+        False,
+        id="multi_turn_history",
+    ),
+    pytest.param(
+        # No think tokens in the prompt at all (older template, thinking on).
+        "<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n",
+        False,
+        id="no_think_tokens",
+    ),
+]
+
+
+@pytest.mark.parametrize("prompt, expected", PROMPT_REASONING_END_CASES)
+def test_is_prompt_reasoning_end(
+    prompt: str,
+    expected: bool,
+    qwen3_tokenizer,
+):
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        qwen3_tokenizer
+    )
+    prompt_token_ids = qwen3_tokenizer.encode(prompt, add_special_tokens=False)
+    assert parser.is_prompt_reasoning_end(prompt_token_ids) is expected

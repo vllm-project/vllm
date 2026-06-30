@@ -489,7 +489,7 @@ class OpenAIServingChat(OpenAIServing):
                     )
                 else:
                     reasoning_ended = (
-                        reasoning_parser.is_reasoning_end(prompt_token_ids or [])
+                        reasoning_parser.is_prompt_reasoning_end(prompt_token_ids or [])
                         if reasoning_parser
                         else None
                     )
@@ -891,7 +891,9 @@ class OpenAIServingChat(OpenAIServing):
                         # only check once per choice, because prompt_token_ids
                         # are the same for all deltas in that choice
                         prompt_is_reasoning_end_arr[i] = (
-                            reasoning_parser.is_reasoning_end(res.prompt_token_ids)
+                            reasoning_parser.is_prompt_reasoning_end(
+                                res.prompt_token_ids
+                            )
                         )
                     if finish_reason_sent[i]:
                         continue
@@ -1233,7 +1235,16 @@ class OpenAIServingChat(OpenAIServing):
                         and delta_message.content
                     ):
                         cleaned = delta_message.content
+                        start_token = getattr(reasoning_parser, "start_token", None)
                         end_token = getattr(reasoning_parser, "end_token", None)
+                        # Drop a leaked "<think>" marker (and anything before it)
+                        # symmetrically with the end marker below, so the two
+                        # never leak asymmetrically into the content stream.
+                        if start_token and start_token in cleaned:
+                            cleaned = cleaned[
+                                cleaned.rfind(start_token) + len(start_token) :
+                            ]
+                            content_started_arr[i] = False
                         if end_token and end_token in cleaned:
                             cleaned = cleaned[
                                 cleaned.rfind(end_token) + len(end_token) :
