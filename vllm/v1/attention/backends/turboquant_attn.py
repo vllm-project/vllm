@@ -623,20 +623,24 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         # ne() + any() short-circuits on the first mismatch.  .item() on a
         # CPU scalar tensor is a host read — no GPU sync.
         _has_continuation = False
-        if (attn_metadata.query_start_loc_cpu is not None
-                and attn_metadata.seq_lens_cpu is not None):
+        if (
+            attn_metadata.query_start_loc_cpu is not None
+            and attn_metadata.seq_lens_cpu is not None
+        ):
             _qsl = attn_metadata.query_start_loc_cpu
             _sl = attn_metadata.seq_lens_cpu
             _has_continuation = (
-                (_qsl[1:len(_sl) + 1] - _qsl[:len(_sl)]) != _sl
-            ).any().item()
+                ((_qsl[1 : len(_sl) + 1] - _qsl[: len(_sl)]) != _sl).any().item()
+            )
 
         # Fast path: use flash_attn for first-chunk prefills (all K/V in batch).
         # Guarded: only fires when NO continuation requests exist in the batch.
         # Both max values are Python ints — no GPU sync.
-        if (_HAS_FLASH_ATTN
-                and attn_metadata.max_query_len == attn_metadata.max_seq_len
-                and not _has_continuation):
+        if (
+            _HAS_FLASH_ATTN
+            and attn_metadata.max_query_len == attn_metadata.max_seq_len
+            and not _has_continuation
+        ):
             return self._flash_attn_varlen(
                 q=query,
                 k=key,
