@@ -104,9 +104,9 @@ impl<T: Tokenizer + ?Sized> DecodeStream<'_, T> {
             }
         }
         let (decoded, context_ids) = self.decode_prompt_context(&self.ids)?;
+        self.ids = context_ids;
         if !decoded.ends_with('\u{FFFD}') {
             self.prefix = decoded;
-            self.ids = context_ids;
             self.prefix_index = self.ids.len();
         }
         Ok(())
@@ -360,6 +360,16 @@ mod tests {
 
         let error = decoder.push_token(10_000).unwrap_err();
         assert!(error.to_string().contains("strict byte tokenizer cannot decode token id 10000"));
+    }
+
+    #[test]
+    fn prompt_context_filters_unknown_ids_before_incomplete_utf8() {
+        let backend = StrictByteBackend;
+        let prompt = &[10_000, 0xe4, 0xbd];
+        let mut decoder = backend.create_decode_stream(prompt, false, 0);
+
+        assert_eq!(decoder.push_token(0xa0).unwrap(), 3);
+        assert_eq!(decoder.output(), "你");
     }
 
     #[test]
