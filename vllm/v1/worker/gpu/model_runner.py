@@ -464,12 +464,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_cache_config,
             self.max_num_reqs,
         )
-        # DSV4 eager mHC sequence parallelism shards the token dim across the TP
-        # group, so a captured (and later replayed) cudagraph size that engages
-        # SP would need its chunk to stay exact across capture/replay. Require SP
-        # to never engage on a captured size: sp_threshold must exceed the
-        # largest captured size, so every captured size runs plain TP. Larger
-        # forwards run eager and engage SP.
+
         sp_threshold = self.parallel_config.sp_threshold
         max_cg_size = self.compilation_config.max_cudagraph_capture_size
         if (
@@ -483,6 +478,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 f"cudagraph capture size ({max_cg_size}) so that sequence "
                 "parallelism never engages on a captured cudagraph size."
             )
+
         self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,
             self.device,
@@ -1162,16 +1158,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         max_query_len = max(scheduler_output.num_scheduled_tokens.values())
         uniform_tok_count = get_uniform_token_count(num_reqs, num_toks, max_query_len)
 
-        # DSV4 mHC sequence parallelism shards the token dim across the TP
-        # group, so a forward that engages SP (>= sp_threshold tokens) must run
-        # on a multiple of tp_size tokens. Pad the dispatch token count to tp
-        # (covers the eager / non-captured path; captured SP sizes are already
-        # tp-aligned). Sub-threshold forwards, and any with fewer tokens than tp
-        # ranks, run plain TP and are not padded. Extra rows are flagged as
-        # padding below.
+        # mHC sequence parallelism shards the token dim across the TP group.
+        # so a forward that engages SP (>= sp_threshold tokens) must run
+        # on a multiple of tp_size tokens.
         tp_size = self.parallel_config.tensor_parallel_size
         sp_threshold = self.parallel_config.sp_threshold
-        if sp_threshold is not None and num_toks >= max(sp_threshold, tp_size):
+        if sp_threshold is not None and num_toks >= sp_threshold:
             num_toks = round_up(num_toks, tp_size)
 
         num_active_loras = 0
