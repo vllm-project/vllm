@@ -28,6 +28,22 @@ from vllm.v1.attention.backends.utils import KVCacheLayoutType
 logger = init_logger(__name__)
 
 FLASHINFER_MLA_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
+FLASHINFER_MLA_LSE_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
+
+_fi_workspace: torch.Tensor | None = None
+
+
+def _get_workspace_buffer(return_lse: bool) -> torch.Tensor:
+    global _fi_workspace
+
+    buffer_size = (
+        FLASHINFER_MLA_LSE_WORKSPACE_BUFFER_SIZE
+        if return_lse
+        else FLASHINFER_MLA_WORKSPACE_BUFFER_SIZE
+    )
+    if _fi_workspace is None or _fi_workspace.numel() < buffer_size:
+        _fi_workspace = torch.zeros(buffer_size, dtype=torch.uint8, device="cuda")
+    return _fi_workspace
 
 
 class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
@@ -105,13 +121,6 @@ class FlashInferMLABackend(MLACommonBackend):
         return "HND"
 
 
-g_fi_workspace = torch.zeros(
-    FLASHINFER_MLA_WORKSPACE_BUFFER_SIZE,
-    dtype=torch.uint8,
-    device="cuda",
-)
-
-
 class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
     can_return_lse_for_decode: bool = True
     # trtllm-gen MLA decode emits LSE in log2 (per flashinfer's own
@@ -166,7 +175,6 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 "FlashInferMLAImpl"
             )
 
-        self._workspace_buffer = g_fi_workspace
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
 
@@ -206,10 +214,11 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 self.bmm2_scale *= layer._k_scale_float
 
         return_lse = self.need_to_return_lse_for_decode
+        workspace_buffer = _get_workspace_buffer(return_lse)
         kernel_out = trtllm_batch_decode_with_kv_cache_mla(
             query=q,
             kv_cache=kv_c_and_k_pe_cache.unsqueeze(1),
-            workspace_buffer=self._workspace_buffer,
+            workspace_buffer=workspace_buffer,
             qk_nope_head_dim=self.qk_nope_head_dim,
             kv_lora_rank=self.kv_lora_rank,
             qk_rope_head_dim=self.qk_rope_head_dim,
