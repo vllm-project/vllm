@@ -19,6 +19,9 @@ from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import DeepGemmE
 from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
 )
+from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
+    DeepGemmFp8BlockScaledMMKernel,
+)
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
 from vllm.model_executor.layers.quantization.online.mxfp8 import Mxfp8OnlineLinearMethod
@@ -144,6 +147,12 @@ def _fp8_linear_may_use_deep_gemm(module: torch.nn.Module) -> bool:
         and not isinstance(module.quant_method, Mxfp8OnlineLinearMethod)
         and getattr(module.quant_method, "block_quant", False)
         and not getattr(module.quant_method, "use_marlin", True)
+    ):
+        return False
+
+    if not isinstance(
+        getattr(module.quant_method, "fp8_linear", None),
+        DeepGemmFp8BlockScaledMMKernel,
     ):
         return False
 
