@@ -78,6 +78,10 @@ impl DefaultChatOutputProcessor {
 
         if parser.preserve_special_tokens() {
             request.decode_options.skip_special_tokens = false;
+            // When the parser expects delimiter tokens in the decoded output
+            // (e.g. `<|tools_suffix|>`), stop/EOS tokens must also be kept
+            // visible so the parser can see the closing marker.
+            request.decode_options.include_stop_str_in_output = true;
         }
 
         Ok(Self {
