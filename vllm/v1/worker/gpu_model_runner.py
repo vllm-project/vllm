@@ -839,7 +839,7 @@ class GPUModelRunner(
         # N-gram GPU path: async D2H buffer/event for per-request valid draft counts.
         self._num_valid_draft_tokens: torch.Tensor | None = None
         self._num_valid_draft_tokens_cpu: torch.Tensor | None = None
-        self._num_valid_draft_tokens_event: torch.cuda.Event | None = None
+        self._num_valid_draft_tokens_event: torch.Event | None = None
         self._num_valid_draft_tokens_copy_stream: torch.cuda.Stream | None = None
         if (
             self.speculative_config is not None
@@ -848,7 +848,7 @@ class GPUModelRunner(
             self._num_valid_draft_tokens_cpu = torch.empty(
                 self.max_num_reqs, dtype=torch.int32, pin_memory=PIN_MEMORY
             )
-            self._num_valid_draft_tokens_event = torch.cuda.Event()
+            self._num_valid_draft_tokens_event = torch.Event()
             self._num_valid_draft_tokens_copy_stream = torch.cuda.Stream()
 
         self._draft_token_req_ids: list[str] | None = None

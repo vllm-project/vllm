@@ -239,7 +239,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         # this event is complete the request is considered "done sending"
         # by get_finished; clients block on the per-file flock to wait for
         # the disk write itself.
-        self._req_copy_events: dict[str, torch.cuda.Event] = {}
+        self._req_copy_events: dict[str, torch.Event] = {}
         # req_ids reported as finished-generating by the scheduler,
         # accumulated across get_finished calls.
         self._accumulated_finished_req_ids: set[str] = set()
@@ -320,7 +320,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
     @staticmethod
     def _write_tensors(
         tensors: dict[str, torch.Tensor],
-        event: torch.cuda.Event,
+        event: torch.Event,
         filename: str,
         lock_fd: int | None,
     ) -> None:
@@ -375,7 +375,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         copy_stream = self._get_copy_stream()
 
         # Ensure the copy stream sees all prior writes on the default stream.
-        ready_event = torch.cuda.Event()
+        ready_event = torch.Event()
         ready_event.record()
         copy_stream.wait_event(ready_event)
 
@@ -396,7 +396,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             pinned_hs.copy_(hidden_states_gpu, non_blocking=True)
 
         # Record completion of this copy on the copy stream.
-        copy_done = torch.cuda.Event()
+        copy_done = torch.Event()
         copy_done.record(copy_stream)
 
         # token_ids is already on CPU (created in request_finished).
