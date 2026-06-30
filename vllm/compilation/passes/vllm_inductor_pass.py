@@ -25,6 +25,8 @@ from .inductor_pass import InductorPass, enable_fake_mode
 
 logger = init_logger(__name__)
 
+DEVICE_TYPE = current_platform.device_type
+
 
 @dataclass
 class InductorCompilationConfig:
@@ -228,31 +230,23 @@ class VllmPatternReplacement(ABC, Generic[P, R]):
     # Helpers for get_inputs: uninitialized tensors of common dtypes.
     @staticmethod
     def empty(*args, **kwargs) -> torch.Tensor:
-        return torch.empty(*args, device=current_platform.device_type, **kwargs)
+        return torch.empty(*args, device=DEVICE_TYPE, **kwargs)
 
     @staticmethod
     def empty_bf16(*args, **kwargs) -> torch.Tensor:
-        return torch.empty(
-            *args, dtype=torch.bfloat16, device=current_platform.device_type, **kwargs
-        )
+        return torch.empty(*args, dtype=torch.bfloat16, device=DEVICE_TYPE, **kwargs)
 
     @staticmethod
     def empty_fp16(*args, **kwargs) -> torch.Tensor:
-        return torch.empty(
-            *args, dtype=torch.float16, device=current_platform.device_type, **kwargs
-        )
+        return torch.empty(*args, dtype=torch.float16, device=DEVICE_TYPE, **kwargs)
 
     @staticmethod
     def empty_fp32(*args, **kwargs) -> torch.Tensor:
-        return torch.empty(
-            *args, dtype=torch.float32, device=current_platform.device_type, **kwargs
-        )
+        return torch.empty(*args, dtype=torch.float32, device=DEVICE_TYPE, **kwargs)
 
     @staticmethod
     def empty_i32(*args, **kwargs) -> torch.Tensor:
-        return torch.empty(
-            *args, dtype=torch.int32, device=current_platform.device_type, **kwargs
-        )
+        return torch.empty(*args, dtype=torch.int32, device=DEVICE_TYPE, **kwargs)
 
 
 def _fx_view_to_reshape(gm: fx.GraphModule) -> None:
