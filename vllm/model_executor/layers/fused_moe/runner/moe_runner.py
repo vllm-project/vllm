@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable, Iterable
 from contextlib import nullcontext
+import os
 from typing import TYPE_CHECKING
 
 import torch
@@ -55,6 +56,431 @@ from vllm.utils.torch_utils import (
 )
 
 logger = init_logger(__name__)
+
+_DSV4_ROUTER_FOCUS_DIMS = (3753, 2404, 5308, 1040, 532, 4265, 5414, 2949)
+
+
+def _dsv4_debug_runner_tensor(
+    counts: dict[str, int],
+    layer_name: str,
+    label: str,
+    tensor: torch.Tensor | None,
+    max_logs: int = 8,
+) -> None:
+    if "layers.60.ffn.experts" not in layer_name:
+        return
+    if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+        return
+    if tensor is None:
+        logger.warning("[DSV4_MOE_RUNNER_DEBUG] %s:%s None", layer_name, label)
+        return
+    key = f"{label}:{tuple(tensor.shape)}"
+    count = counts.get(key, 0)
+    if count >= max_logs:
+        return
+    counts[key] = count + 1
+    with torch.no_grad():
+        data = tensor.detach()
+        stat = data.float() if data.is_floating_point() else data.to(torch.float32)
+        finite = torch.isfinite(stat) if data.is_floating_point() else None
+        if finite is not None and not finite.all():
+            stat = stat[finite]
+        if stat.numel() == 0:
+            logger.warning(
+                "[DSV4_MOE_RUNNER_DEBUG] %s:%s count=%s shape=%s dtype=%s EMPTY",
+                layer_name,
+                label,
+                count,
+                tuple(data.shape),
+                data.dtype,
+            )
+            return
+        logger.warning(
+            "[DSV4_MOE_RUNNER_DEBUG] %s:%s count=%s shape=%s dtype=%s "
+            "finite=%s mean=%.6g std=%.6g max=%.6g min=%.6g nonzero=%.6g",
+            layer_name,
+            label,
+            count,
+            tuple(data.shape),
+            data.dtype,
+            bool(finite.all().item()) if finite is not None else True,
+            stat.mean().item(),
+            stat.std(unbiased=False).item(),
+            stat.abs().max().item(),
+            stat.min().item(),
+            (data != 0).float().mean().item(),
+        )
+
+
+def _dsv4_debug_router_selection(
+    counts: dict[str, int],
+    layer_name: str,
+    router: FusedMoERouter,
+    gate: torch.nn.Module | None,
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    input_ids: torch.Tensor | None,
+    max_logs: int = 4,
+) -> None:
+    if "layers.60.ffn.experts" not in layer_name:
+        return
+    if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+        return
+    key = f"router_selection:{tuple(router_logits.shape)}"
+    count = counts.get(key, 0)
+    if count >= max_logs:
+        return
+    counts[key] = count + 1
+    with torch.no_grad():
+        hidden = hidden_states.detach().float()
+        logits = router_logits.detach().float()
+        weights = topk_weights.detach().float()
+        ids = topk_ids.detach().to(torch.int64)
+        finite = torch.isfinite(logits)
+        finite_logits = logits[finite] if finite.numel() else logits
+        if finite_logits.numel() == 0:
+            finite_logits = logits.reshape(-1)[:0]
+
+        scoring_func = getattr(router, "scoring_func", None)
+        routed_scaling_factor = float(
+            getattr(router, "routed_scaling_factor", 1.0)
+        )
+        renormalize = bool(getattr(router, "renormalize", False))
+        e_score_bias = getattr(router, "e_score_correction_bias", None)
+        bias_124 = None
+        top_bias = None
+        if e_score_bias is not None and e_score_bias.numel() > 124:
+            bias = e_score_bias.detach().float()
+            bias_124 = float(bias[124].item())
+            top_bias_values, top_bias_ids = torch.topk(
+                bias, k=min(12, bias.numel()), dim=-1
+            )
+            top_bias = [
+                (int(expert_id.item()), float(value.item()))
+                for expert_id, value in zip(top_bias_ids, top_bias_values)
+            ]
+
+        unscaled_weights = (
+            weights / routed_scaling_factor
+            if routed_scaling_factor != 0.0
+            else weights
+        )
+        row_sums = weights.sum(dim=-1) if weights.ndim >= 2 else weights
+        unscaled_row_sums = (
+            unscaled_weights.sum(dim=-1)
+            if unscaled_weights.ndim >= 2
+            else unscaled_weights
+        )
+
+        mask_124 = ids == 124
+        if mask_124.any():
+            weights_124 = weights[mask_124]
+            unscaled_124 = unscaled_weights[mask_124]
+            token_has_124 = mask_124.any(dim=-1) if mask_124.ndim >= 2 else mask_124
+            first_pos = int(torch.nonzero(mask_124.reshape(-1), as_tuple=False)[0].item())
+        else:
+            weights_124 = weights.reshape(-1)[:0]
+            unscaled_124 = unscaled_weights.reshape(-1)[:0]
+            token_has_124 = mask_124.reshape(-1)[:0]
+            first_pos = -1
+
+        scores_124 = None
+        logits_124 = None
+        scores = None
+        if logits.ndim >= 2 and logits.shape[-1] > 124:
+            logits_124 = logits[:, 124]
+            if scoring_func == "sigmoid":
+                scores = logits.sigmoid()
+            elif scoring_func == "softmax":
+                scores = torch.softmax(logits, dim=-1)
+            elif scoring_func == "sqrtsoftplus":
+                scores = torch.sqrt(F.softplus(logits))
+            if scores is not None:
+                scores_124 = scores[:, 124]
+
+        top_logits_by_mean = None
+        top_scores_by_mean = None
+        if logits.ndim >= 2 and logits.shape[-1] > 0:
+            logits_mean_by_expert = logits.mean(dim=0)
+            top_logit_values, top_logit_ids = torch.topk(
+                logits_mean_by_expert,
+                k=min(12, logits_mean_by_expert.numel()),
+                dim=-1,
+            )
+            top_logits_by_mean = [
+                (int(expert_id.item()), float(value.item()))
+                for expert_id, value in zip(top_logit_ids, top_logit_values)
+            ]
+        if scores is not None and scores.ndim >= 2 and scores.shape[-1] > 0:
+            scores_mean_by_expert = scores.mean(dim=0)
+            top_score_values, top_score_ids = torch.topk(
+                scores_mean_by_expert,
+                k=min(12, scores_mean_by_expert.numel()),
+                dim=-1,
+            )
+            top_scores_by_mean = [
+                (int(expert_id.item()), float(value.item()))
+                for expert_id, value in zip(top_score_ids, top_score_values)
+            ]
+
+        gate124_stats = None
+        gate_top_norms = None
+        gate124_recomputed_stats = None
+        hidden_norm_stats = None
+        hidden_dim_top_signed_124 = None
+        hidden_dim_top_abs_124 = None
+        expert124_logit_sample = None
+        focus_counterfactual = None
+        gate_weight = getattr(gate, "weight", None) if gate is not None else None
+        if gate_weight is not None and gate_weight.ndim == 2:
+            gate_data = gate_weight.detach().float()
+            if gate_data.shape[0] > 124:
+                gate124 = gate_data[124]
+                gate124_stats = (
+                    tuple(gate124.shape),
+                    float(gate124.mean().item()),
+                    float(gate124.std(unbiased=False).item()),
+                    float(gate124.abs().max().item()),
+                    float(torch.linalg.vector_norm(gate124).item()),
+                )
+                if hidden.ndim == 2 and hidden.shape[-1] == gate124.shape[-1]:
+                    hidden_norm = torch.linalg.vector_norm(hidden, dim=-1)
+                    hidden_norm_stats = (
+                        float(hidden_norm.mean().item()),
+                        float(hidden_norm.std(unbiased=False).item()),
+                        float(hidden_norm.min().item()),
+                        float(hidden_norm.max().item()),
+                    )
+                    recomputed_124 = torch.matmul(hidden, gate124)
+                    gate_bias = getattr(gate, "bias", None)
+                    if gate_bias is not None and gate_bias.numel() > 124:
+                        recomputed_124 = recomputed_124 + gate_bias.detach().float()[124]
+                    if logits_124 is not None and logits_124.numel():
+                        diff = recomputed_124 - logits_124
+                        gate124_recomputed_stats = (
+                            float(recomputed_124.mean().item()),
+                            float(recomputed_124.std(unbiased=False).item()),
+                            float(recomputed_124.min().item()),
+                            float(recomputed_124.max().item()),
+                            float(diff.abs().max().item()),
+                            float(diff.abs().mean().item()),
+                        )
+                        expert124_logit_sample = [
+                            float(v.item()) for v in logits_124[:8]
+                        ]
+
+                    mean_hidden = hidden.mean(dim=0)
+                    mean_abs_hidden = hidden.abs().mean(dim=0)
+                    signed_contrib = mean_hidden * gate124
+                    abs_contrib = mean_abs_hidden * gate124.abs()
+                    top_signed_values, top_signed_ids = torch.topk(
+                        signed_contrib.abs(),
+                        k=min(16, signed_contrib.numel()),
+                        dim=-1,
+                    )
+                    hidden_dim_top_signed_124 = [
+                        (
+                            int(dim_id.item()),
+                            float(signed_contrib[dim_id].item()),
+                            float(mean_hidden[dim_id].item()),
+                            float(gate124[dim_id].item()),
+                        )
+                        for dim_id in top_signed_ids
+                    ]
+                    top_abs_values, top_abs_ids = torch.topk(
+                        abs_contrib,
+                        k=min(16, abs_contrib.numel()),
+                        dim=-1,
+                    )
+                    hidden_dim_top_abs_124 = [
+                        (
+                            int(dim_id.item()),
+                            float(top_value.item()),
+                            float(mean_abs_hidden[dim_id].item()),
+                            float(gate124[dim_id].item()),
+                        )
+                        for dim_id, top_value in zip(top_abs_ids, top_abs_values)
+                    ]
+                    focus_dims = [
+                        d for d in _DSV4_ROUTER_FOCUS_DIMS if d < hidden.shape[-1]
+                    ]
+                    if focus_dims and gate_data.shape[-1] == hidden.shape[-1]:
+                        focus = torch.tensor(
+                            focus_dims, device=hidden.device, dtype=torch.long
+                        )
+                        hidden_zero = hidden.clone()
+                        hidden_zero[:, focus] = 0
+                        logits_zero = torch.matmul(hidden_zero, gate_data.T)
+                        hidden_centered = hidden.clone()
+                        hidden_centered[:, focus] = (
+                            hidden_centered[:, focus]
+                            - hidden_centered[:, focus].mean(dim=0, keepdim=True)
+                        )
+                        logits_centered = torch.matmul(hidden_centered, gate_data.T)
+                        gate_bias_full = getattr(gate, "bias", None)
+                        if gate_bias_full is not None:
+                            logits_zero = logits_zero + gate_bias_full.detach().float()
+                            logits_centered = (
+                                logits_centered + gate_bias_full.detach().float()
+                            )
+                        zero_mean = logits_zero.mean(dim=0)
+                        centered_mean = logits_centered.mean(dim=0)
+                        zero_top_vals, zero_top_ids = torch.topk(
+                            zero_mean, k=min(8, zero_mean.numel())
+                        )
+                        centered_top_vals, centered_top_ids = torch.topk(
+                            centered_mean, k=min(8, centered_mean.numel())
+                        )
+                        focus_counterfactual = {
+                            "dims": focus_dims,
+                            "zero124_mean": float(zero_mean[124].item()),
+                            "zero124_rank": int(
+                                (zero_mean > zero_mean[124]).sum().item() + 1
+                            ),
+                            "zero_top": [
+                                (int(i.item()), float(v.item()))
+                                for i, v in zip(zero_top_ids, zero_top_vals)
+                            ],
+                            "centered124_mean": float(centered_mean[124].item()),
+                            "centered124_rank": int(
+                                (centered_mean > centered_mean[124]).sum().item() + 1
+                            ),
+                            "centered_top": [
+                                (int(i.item()), float(v.item()))
+                                for i, v in zip(centered_top_ids, centered_top_vals)
+                            ],
+                        }
+            norms = torch.linalg.vector_norm(gate_data, dim=1)
+            top_norm_values, top_norm_ids = torch.topk(
+                norms, k=min(12, norms.numel()), dim=-1
+            )
+            gate_top_norms = [
+                (int(expert_id.item()), float(value.item()))
+                for expert_id, value in zip(top_norm_ids, top_norm_values)
+            ]
+
+        logger.warning(
+            "[DSV4_ROUTER_SELECTION_DEBUG] layer=%s count=%s "
+            "router=%s scoring=%s renormalize=%s routed_scaling_factor=%.6g "
+            "bias124=%s input_shape=%s logits_shape=%s logits_dtype=%s "
+            "logits_finite=%s logits_mean=%.6g logits_std=%.6g "
+            "logits_min=%.6g logits_max=%.6g topk_ids_shape=%s "
+            "topk_min=%s topk_max=%s topk_unique=%s weights_shape=%s "
+            "weights_mean=%.6g weights_std=%.6g weights_min=%.6g "
+            "weights_max=%.6g row_sum_mean=%.6g row_sum_min=%.6g "
+            "row_sum_max=%.6g unscaled_row_sum_mean=%.6g "
+            "expert124_count=%s expert124_token_frac=%.6g "
+            "expert124_weight_mean=%.6g expert124_weight_max=%.6g "
+            "expert124_unscaled_mean=%.6g expert124_unscaled_max=%.6g "
+            "expert124_logit_mean=%s expert124_logit_max=%s "
+            "expert124_score_mean=%s expert124_score_max=%s first124_flat_pos=%s",
+            layer_name,
+            count,
+            type(router).__name__,
+            scoring_func,
+            renormalize,
+            routed_scaling_factor,
+            bias_124,
+            tuple(input_ids.shape) if input_ids is not None else None,
+            tuple(router_logits.shape),
+            router_logits.dtype,
+            bool(finite.all().item()) if finite.numel() else True,
+            finite_logits.mean().item() if finite_logits.numel() else 0.0,
+            finite_logits.std(unbiased=False).item()
+            if finite_logits.numel()
+            else 0.0,
+            finite_logits.min().item() if finite_logits.numel() else 0.0,
+            finite_logits.max().item() if finite_logits.numel() else 0.0,
+            tuple(topk_ids.shape),
+            int(ids.min().item()) if ids.numel() else None,
+            int(ids.max().item()) if ids.numel() else None,
+            int(torch.unique(ids).numel()) if ids.numel() else 0,
+            tuple(topk_weights.shape),
+            weights.mean().item() if weights.numel() else 0.0,
+            weights.std(unbiased=False).item() if weights.numel() else 0.0,
+            weights.min().item() if weights.numel() else 0.0,
+            weights.max().item() if weights.numel() else 0.0,
+            row_sums.mean().item() if row_sums.numel() else 0.0,
+            row_sums.min().item() if row_sums.numel() else 0.0,
+            row_sums.max().item() if row_sums.numel() else 0.0,
+            unscaled_row_sums.mean().item() if unscaled_row_sums.numel() else 0.0,
+            int(mask_124.sum().item()) if mask_124.numel() else 0,
+            token_has_124.float().mean().item() if token_has_124.numel() else 0.0,
+            weights_124.mean().item() if weights_124.numel() else 0.0,
+            weights_124.max().item() if weights_124.numel() else 0.0,
+            unscaled_124.mean().item() if unscaled_124.numel() else 0.0,
+            unscaled_124.max().item() if unscaled_124.numel() else 0.0,
+            logits_124.mean().item()
+            if logits_124 is not None and logits_124.numel()
+            else None,
+            logits_124.max().item()
+            if logits_124 is not None and logits_124.numel()
+            else None,
+            scores_124.mean().item()
+            if scores_124 is not None and scores_124.numel()
+            else None,
+            scores_124.max().item()
+            if scores_124 is not None and scores_124.numel()
+            else None,
+            first_pos,
+        )
+
+        if weights.numel() and ids.numel():
+            flat_ids = ids.reshape(-1)
+            flat_weights = weights.reshape(-1)
+            unique_ids = torch.unique(flat_ids, sorted=True)
+            summaries: list[tuple[int, int, float, float]] = []
+            for expert_id in unique_ids[:384]:
+                expert_mask = flat_ids == expert_id
+                expert_weights = flat_weights[expert_mask]
+                summaries.append(
+                    (
+                        int(expert_id.item()),
+                        int(expert_mask.sum().item()),
+                        float(expert_weights.mean().item()),
+                        float(expert_weights.max().item()),
+                    )
+                )
+            summaries.sort(key=lambda item: item[2], reverse=True)
+            logger.warning(
+                "[DSV4_ROUTER_SELECTION_DEBUG] layer=%s count=%s "
+                "top_experts_by_avg_weight=%s",
+                layer_name,
+                count,
+                summaries[:12],
+            )
+
+        logger.warning(
+            "[DSV4_ROUTER_GATE_DEBUG] layer=%s count=%s top_bias=%s "
+            "top_logits_by_mean=%s top_scores_by_mean=%s "
+            "gate124_stats=(shape,mean,std,absmax,l2)=%s "
+            "hidden_norm_stats=(mean,std,min,max)=%s "
+            "gate124_recomputed=(mean,std,min,max,diff_absmax,diff_absmean)=%s "
+            "expert124_logit_sample=%s gate_top_norms=%s",
+            layer_name,
+            count,
+            top_bias,
+            top_logits_by_mean,
+            top_scores_by_mean,
+            gate124_stats,
+            hidden_norm_stats,
+            gate124_recomputed_stats,
+            expert124_logit_sample,
+            gate_top_norms,
+        )
+        logger.warning(
+            "[DSV4_ROUTER_INPUT_CONTRIB_DEBUG] layer=%s count=%s "
+            "expert124_top_signed_dims=(dim,mean_hidden_x_weight,mean_hidden,weight)=%s "
+            "expert124_top_abs_dims=(dim,mean_abs_hidden_x_abs_weight,mean_abs_hidden,weight)=%s "
+            "focus_counterfactual=%s",
+            layer_name,
+            count,
+            hidden_dim_top_signed_124,
+            hidden_dim_top_abs_124,
+            focus_counterfactual,
+        )
 
 
 def register_layer_for_moe_forward_op(
@@ -286,6 +712,7 @@ class MoERunner(MoERunnerInterface):
 
         # Needed for string -> MoERunner layer lookup in custom ops.
         self.layer_name = layer_name
+        self._dsv4_debug_counts: dict[str, int] = {}
 
         self._forward_entry = self._select_forward()
 
@@ -423,7 +850,6 @@ class MoERunner(MoERunnerInterface):
         if (
             shared_output is not None
             and not self.moe_config.is_sequence_parallel
-            and not self.moe_config.skip_final_all_reduce
             and self._fused_output_is_reduced
         ):
             shared_output = tensor_model_parallel_all_reduce(shared_output)
@@ -446,7 +872,6 @@ class MoERunner(MoERunnerInterface):
         # - The MK already reduced the fused output itself.
         if (
             not self.moe_config.is_sequence_parallel
-            and not self.moe_config.skip_final_all_reduce
             and (self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1)
             and not self._fused_output_is_reduced
         ):
@@ -501,13 +926,11 @@ class MoERunner(MoERunnerInterface):
         #   pre_xform:  applied to fused_output BEFORE routed_output_transform
         #   post_xform: applied to the final result AFTER all-reduce
         #
-        # MoE with routed output transform or shared experts:
-        #   - pre_xform applies if the transform needs unpadded routed output
-        #     or shared+routed add needs matching hidden dims. For Nemotron-3
-        #     Nano, TRTLLM NVFP4 pads routed MoE hidden dim 2688->2816, while
-        #     shared output stays 2688.
-        #   - post_xform uses shared_experts_hidden_dim when transform and shared
-        #     experts make the final output full hidden dim.
+        # Latent MoE with shared experts (NemotronH):
+        #   - pre_xform strips padding from the latent dim so
+        #     routed_output_transform receives the correct input size
+        #   - post_xform truncates to shared_experts_hidden_dim (full hidden)
+        #     after shared + routed outputs are combined and all-reduced
         #
         # Standard MoE / MoE without transforms (GPT-OSS, Mixtral):
         #   - pre_xform is None (no early truncation)
@@ -515,12 +938,12 @@ class MoERunner(MoERunnerInterface):
         if transformed_hidden_dim == hidden_states.shape[-1]:
             transformed_hidden_dim = None
 
-        pre_xform_trunc_size = None
-        if self.routed_output_transform is not None or shared_experts_hidden_dim > 0:
-            pre_xform_trunc_size = transformed_hidden_dim
-        post_xform_trunc_size = transformed_hidden_dim
         if self.routed_output_transform is not None and shared_experts_hidden_dim > 0:
+            pre_xform_trunc_size = transformed_hidden_dim
             post_xform_trunc_size = shared_experts_hidden_dim
+        else:
+            pre_xform_trunc_size = None
+            post_xform_trunc_size = transformed_hidden_dim
 
         return hidden_states, pre_xform_trunc_size, post_xform_trunc_size
 
@@ -564,6 +987,17 @@ class MoERunner(MoERunnerInterface):
                 router_logits=router_logits,
                 topk_indices_dtype=self._quant_method.topk_indices_dtype,
                 input_ids=input_ids,
+            )
+            _dsv4_debug_router_selection(
+                self._dsv4_debug_counts,
+                self.layer_name,
+                self.router,
+                self.gate,
+                hidden_states,
+                router_logits,
+                topk_weights,
+                topk_ids,
+                input_ids,
             )
 
             fused_out = self.routed_experts.forward_modular(
@@ -693,6 +1127,18 @@ class MoERunner(MoERunnerInterface):
 
         # Extract outputs from result
         shared_output, fused_output = _unpack(result)
+        _dsv4_debug_runner_tensor(
+            self._dsv4_debug_counts,
+            self.layer_name,
+            "shared_output_raw",
+            shared_output,
+        )
+        _dsv4_debug_runner_tensor(
+            self._dsv4_debug_counts,
+            self.layer_name,
+            "fused_output_raw",
+            fused_output,
+        )
 
         if og_hidden_dim_pre_xform is not None:
             fused_output = fused_output[..., :og_hidden_dim_pre_xform]
@@ -700,10 +1146,58 @@ class MoERunner(MoERunnerInterface):
         # If combine kernel already reduced fused, reduce shared to match.
         # See note above re: the two all-reduce points.
         shared_output = self._maybe_reduce_shared_expert_output(shared_output)
+        _dsv4_debug_runner_tensor(
+            self._dsv4_debug_counts,
+            self.layer_name,
+            "shared_output_after_maybe_reduce",
+            shared_output,
+        )
 
         shared_output, fused_output = self._maybe_apply_routed_scale_to_output(
             shared_output, fused_output
         )
+        _dsv4_debug_runner_tensor(
+            self._dsv4_debug_counts,
+            self.layer_name,
+            "shared_output_after_routed_scale",
+            shared_output,
+        )
+        _dsv4_debug_runner_tensor(
+            self._dsv4_debug_counts,
+            self.layer_name,
+            "fused_output_after_routed_scale",
+            fused_output,
+        )
+
+        if (
+            shared_output is not None
+            and "layers.60.ffn.experts" in self.layer_name
+        ):
+            shared_scale = os.environ.get("DSV4_DEBUG_LAYER60_SHARED_SCALE")
+            if shared_scale is not None:
+                try:
+                    shared_scale_value = float(shared_scale)
+                except ValueError:
+                    shared_scale_value = 1.0
+                    logger.warning(
+                        "[DSV4_MOE_RUNNER_DEBUG] %s invalid "
+                        "DSV4_DEBUG_LAYER60_SHARED_SCALE=%r; using 1.0",
+                        self.layer_name,
+                        shared_scale,
+                    )
+                logger.warning(
+                    "[DSV4_MOE_RUNNER_DEBUG] %s applying "
+                    "DSV4_DEBUG_LAYER60_SHARED_SCALE=%s",
+                    self.layer_name,
+                    shared_scale_value,
+                )
+                shared_output = shared_output * shared_scale_value
+                _dsv4_debug_runner_tensor(
+                    self._dsv4_debug_counts,
+                    self.layer_name,
+                    "shared_output_after_debug_scale",
+                    shared_output,
+                )
 
         # Apply output transform (e.g. latent -> full dim)
         fused_output = self.apply_routed_output_transform(fused_output)
@@ -712,8 +1206,20 @@ class MoERunner(MoERunnerInterface):
             result = shared_output + fused_output
         else:
             result = fused_output
+        _dsv4_debug_runner_tensor(
+            self._dsv4_debug_counts,
+            self.layer_name,
+            "result_before_final_reduce",
+            result,
+        )
 
         result = self._maybe_reduce_final_output(result, og_hidden_dim_post_xform)
+        _dsv4_debug_runner_tensor(
+            self._dsv4_debug_counts,
+            self.layer_name,
+            "result_after_final_reduce",
+            result,
+        )
 
         return self._maybe_add_zero_expert_output(result)
 

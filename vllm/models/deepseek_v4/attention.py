@@ -62,22 +62,23 @@ logger = init_logger(__name__)
 
 
 def _resolve_dsv4_kv_cache_dtype(
-    use_fp8_ds_mla_layout: bool,
+    use_flashmla_fp8_layout: bool,
     kv_cache_dtype: str,
     cache_config: CacheConfig | None,
 ) -> tuple[str, torch.dtype]:
     """Map ``(layout, --kv-cache-dtype)`` to ``(cache_dtype_str, torch_dtype)``.
 
     Both layouts are paged; they differ in the per-token block format. The
-    ``fp8_ds_mla`` format is UE8M0 block-scaled fp8 packed as ``uint8`` (the
-    canonical ``fp8_ds_mla`` string is written back onto ``cache_config`` so the
-    page-size specs pick the 576B per-token slot). Plain-row backends store each
-    token's KV row in its element dtype: bf16 or per-tensor FP8 E4M3.
+    FlashMLA fp8 layout (FlashMLA / ROCm Aiter) is the ``fp8_ds_mla`` format:
+    UE8M0 block-scaled fp8 packed as ``uint8`` (the canonical ``fp8_ds_mla``
+    string is written back onto ``cache_config`` so the page-size specs pick
+    the 576B per-token slot). Otherwise (FlashInfer) each token's KV row is
+    stored in its plain element dtype — bf16 or per-tensor FP8 E4M3.
     """
-    if use_fp8_ds_mla_layout:
+    if use_flashmla_fp8_layout:
         # fp8_ds_mla block format: UE8M0 block-scaled fp8 packed as uint8.
         assert kv_cache_dtype.startswith("fp8"), (
-            f"DeepseekV4 fp8_ds_mla layout only supports fp8 kv-cache, "
+            f"DeepseekV4 FlashMLA fp8 layout only supports fp8 kv-cache, "
             f"got {kv_cache_dtype}"
         )
         if kv_cache_dtype != "fp8_ds_mla":
@@ -99,20 +100,18 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
     The platform-specific sparse-MLA forward (``forward_mqa`` /
     ``get_padded_num_q_heads`` / ``_o_proj`` / ``backend_cls``) is provided by a
-    subclass — ``DeepseekV4FlashMLAAttention`` /
-    ``DeepseekV4FlashInferSM120Attention`` /
-    ``DeepseekV4FlashInferMLAAttention`` (CUDA) or
-    ``DeepseekV4ROCMAiterMLAAttention`` (ROCm) — selected by the platform-specific
-    deepseek_v4 model module. The base is never instantiated directly.
+    subclass — ``DeepseekV4FlashMLAAttention`` / ``DeepseekV4FlashInferMLAAttention``
+    (CUDA) or ``DeepseekV4ROCMAiterMLAAttention`` (ROCm) — selected by the
+    platform-specific deepseek_v4 model module. The base is never instantiated
+    directly.
     """
 
     # Provided by the platform subclass.
     backend_cls: ClassVar[type[AttentionBackend]]
     # KV-cache per-token block format (both layouts are paged). True (default)
-    # = fp8_ds_mla (UE8M0 block-scaled fp8 packed as uint8); False = plain
-    # bf16 / per-tensor fp8 KV row. Backends can override the instance hook when
-    # a single attention class dispatches across arch-specific layouts.
-    use_fp8_ds_mla_layout: ClassVar[bool] = True
+    # = FlashMLA / ROCm fp8_ds_mla (UE8M0 block-scaled fp8 packed as uint8);
+    # False = FlashInfer plain bf16 / per-tensor fp8 KV row.
+    use_flashmla_fp8_layout: ClassVar[bool] = True
     # Prefill is processed in fixed-size chunks; this bounds the bf16 kv-gather
     # workspace allocated in _forward_prefill and is also read by the dummy-run
     # path to pre-reserve that workspace.
@@ -146,10 +145,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         """Inverse-RoPE + wo_a + wo_b output projection (platform-specific)."""
         raise NotImplementedError
 
-    def _uses_fp8_ds_mla_layout(self) -> bool:
-        """Return whether this instance stores fp8 KV in fp8_ds_mla layout."""
-        return self.use_fp8_ds_mla_layout
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -163,9 +158,20 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         cache_config = vllm_config.cache_config
         tp_size = get_tensor_model_parallel_world_size()
         layer_id = extract_layer_index(prefix)
+        self.layer_id = layer_id
 
         self.prefix = prefix  # Alias for compatibility with compressor
         self.hidden_size = config.hidden_size
+        self.hc_input_size = self.hidden_size
+        self._dsv4_debug_printed = False
+        self._dsv4_debug_labels: set[str] = set()
+        if layer_id == 0:
+            logger.warning(
+                "[DSV4_INIT] prefix=%s layer_id=%s hc_input_size=%s",
+                prefix,
+                layer_id,
+                self.hc_input_size,
+            )
         self.n_heads = config.num_attention_heads
         assert self.n_heads % tp_size == 0
         self.n_local_heads = self.n_heads // tp_size
@@ -197,7 +203,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         )
 
         self.fused_wqa_wkv = MergedColumnParallelLinear(
-            self.hidden_size,
+            self.hc_input_size,
             [self.q_lora_rank, self.head_dim],
             bias=False,
             quant_config=quant_config,
@@ -281,10 +287,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         )
         self.max_model_len = vllm_config.model_config.max_model_len
 
-        # Resolve the kv-cache dtype from this backend's block format. The same
-        # resolution drives the SWA cache tensor dtype below.
+        # Resolve the kv-cache dtype from this backend's block format (a
+        # ClassVar set by the subclass): fp8_ds_mla (UE8M0 block-scaled fp8 as
+        # uint8) for FlashMLA / ROCm, vs a plain bf16 / per-tensor fp8 row for
+        # FlashInfer. The same resolution drives the SWA cache tensor dtype
+        # below.
         self.kv_cache_dtype, self.kv_cache_torch_dtype = _resolve_dsv4_kv_cache_dtype(
-            self._uses_fp8_ds_mla_layout(), cache_config.cache_dtype, cache_config
+            self.use_flashmla_fp8_layout, cache_config.cache_dtype, cache_config
         )
 
         self.swa_cache_layer = DeepseekV4SWACache(
@@ -335,8 +344,18 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # Metadata-independent input GEMMs + RMSNorm stay in the captured
         # graph; the metadata-dependent rest (q up-proj + kv-insert, indexer,
         # compressor, MLA attention) runs in the eager break.
+        hidden_states_base = (
+            hidden_states[:, 0, :] if hidden_states.dim() == 3 else hidden_states
+        )
+        hidden_states_flat = hidden_states_base
         qr_kv, kv_score, indexer_kv_score, indexer_weights = (
-            self.attn_gemm_parallel_execute(hidden_states)
+            self.attn_gemm_parallel_execute(hidden_states_base, hidden_states_flat)
+        )
+        self._debug_layer0_attention_input(
+            hidden_states,
+            hidden_states_base,
+            hidden_states_flat,
+            qr_kv,
         )
         qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
         qr, kv = fused_q_kv_rmsnorm(
@@ -346,12 +365,14 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             self.kv_norm.weight.data,
             self.eps,
         )
+        self._debug_layer0_tensor("DSV4_QR_NORM", qr)
+        self._debug_layer0_tensor("DSV4_KV_NORM", kv)
 
         # attention_impl is wrapped with @eager_break_during_capture: this is
         # where the breakable cudagraph capture breaks (the attention op runs
         # eagerly between captured graph segments).
         self.attention_impl(
-            hidden_states,
+            hidden_states_flat,
             qr,
             kv,
             kv_score,
@@ -361,11 +382,165 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             o_padded,
         )
         o = o_padded[:, : self.n_local_heads, :]
+        self._debug_layer0_tensor("DSV4_ATTN_O_PADDED", o_padded)
+        self._debug_layer0_tensor("DSV4_ATTN_O", o)
 
         # Inverse-RoPE + wo_a + wo_b output projection (platform-specific).
-        return self._o_proj(o, positions)
+        out = self._o_proj(o, positions)
+        self._debug_layer0_tensor("DSV4_OPROJ_OUT", out)
+        return out
 
-    def attn_gemm_parallel_execute(self, hidden_states) -> tuple[Any, ...]:
+    def _debug_layer0_tensor(self, label: str, tensor: torch.Tensor | None) -> None:
+        phase = self._debug_layer0_phase()
+        label_with_phase = f"{label}_{phase}"
+        if (
+            self.layer_id != 0
+            or tensor is None
+            or label_with_phase in self._dsv4_debug_labels
+        ):
+            return
+        if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+            return
+        self._dsv4_debug_labels.add(label_with_phase)
+        with torch.no_grad():
+            tf = tensor.detach().float()
+            if tf.numel() == 0:
+                logger.warning(
+                    "[%s] prefix=%s shape=%s dtype=%s empty_tensor=True",
+                    label_with_phase,
+                    self.prefix,
+                    tuple(tensor.shape),
+                    tensor.dtype,
+                )
+                return
+            logger.warning(
+                "[%s] prefix=%s shape=%s dtype=%s finite=%s mean=%.6g "
+                "std=%.6g max=%.6g nonzero=%.6g",
+                label_with_phase,
+                self.prefix,
+                tuple(tensor.shape),
+                tensor.dtype,
+                torch.isfinite(tf).all().item(),
+                tf.mean().item(),
+                tf.std().item(),
+                tf.abs().max().item(),
+                (tf != 0).float().mean().item(),
+            )
+
+    def _debug_layer0_phase(self) -> str:
+        try:
+            attn_metadata = get_forward_context().attn_metadata
+        except Exception:
+            return "NOCTX"
+        if not isinstance(attn_metadata, dict):
+            return "WARMUP"
+        swa_metadata = attn_metadata.get(self.swa_cache_layer.prefix)
+        if swa_metadata is None:
+            return "RUNTIME_NO_SWA"
+        num_prefills = getattr(swa_metadata, "num_prefills", 0)
+        num_decode_tokens = getattr(swa_metadata, "num_decode_tokens", 0)
+        if num_prefills > 0:
+            return "RUNTIME_PREFILL"
+        if num_decode_tokens > 16:
+            return f"RUNTIME_DUMMY_DECODE_N{num_decode_tokens}"
+        if num_decode_tokens > 0:
+            return f"RUNTIME_DECODE_N{num_decode_tokens}"
+        return "RUNTIME_EMPTY"
+
+    def _debug_layer0_attention_input(
+        self,
+        hidden_states: torch.Tensor,
+        hidden_states_base: torch.Tensor,
+        hidden_states_flat: torch.Tensor,
+        qr_kv: torch.Tensor,
+    ) -> None:
+        phase = self._debug_layer0_phase()
+        label = f"DSV4_ATTN_INPUT_{phase}"
+        if label in self._dsv4_debug_labels:
+            return
+        if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+            return
+        if self.layer_id != 0 and hidden_states_flat.shape[-1] != 2 * self.hidden_size:
+            return
+        self._dsv4_debug_labels.add(label)
+        with torch.no_grad():
+            qf = qr_kv.detach().float()
+            w = self.fused_wqa_wkv.weight.detach()
+            wf = w.float()
+            scale_infos = []
+            for n, p in self.fused_wqa_wkv.named_parameters(recurse=True):
+                if "scale" in n:
+                    pf = p.detach().float()
+                    scale_infos.append(
+                        f"{n}:shape={tuple(p.shape)},dtype={p.dtype},"
+                        f"min={pf.min().item():.6g},max={pf.max().item():.6g},"
+                        f"mean={pf.mean().item():.6g},"
+                        f"nonzero={(pf != 0).float().mean().item():.6g}"
+                    )
+            for n, b in self.fused_wqa_wkv.named_buffers(recurse=True):
+                if "scale" in n:
+                    bf = b.detach().float()
+                    scale_infos.append(
+                        f"buffer.{n}:shape={tuple(b.shape)},dtype={b.dtype},"
+                        f"min={bf.min().item():.6g},max={bf.max().item():.6g},"
+                        f"mean={bf.mean().item():.6g},"
+                        f"nonzero={(bf != 0).float().mean().item():.6g}"
+                    )
+            logger.warning(
+                "[%s] prefix=%s layer_id=%s hidden_states=%s "
+                "base=%s flat=%s fused_weight=%s",
+                label,
+                self.prefix,
+                self.layer_id,
+                tuple(hidden_states.shape),
+                tuple(hidden_states_base.shape),
+                tuple(hidden_states_flat.shape),
+                tuple(self.fused_wqa_wkv.weight.shape),
+            )
+            if hidden_states.dim() == 3 and hidden_states.shape[1] >= 2:
+                s0 = hidden_states[:, 0, :].detach().float()
+                s1 = hidden_states[:, 1, :].detach().float()
+                cos = F.cosine_similarity(s0, s1, dim=-1).mean()
+                logger.warning(
+                    "[DSV4_STREAM] s0_mean=%.6g s0_std=%.6g s0_max=%.6g "
+                    "s1_mean=%.6g s1_std=%.6g s1_max=%.6g cos=%.6g",
+                    s0.mean().item(),
+                    s0.std().item(),
+                    s0.abs().max().item(),
+                    s1.mean().item(),
+                    s1.std().item(),
+                    s1.abs().max().item(),
+                    cos.item(),
+                )
+            logger.warning(
+                "[DSV4_FUSED_WQA_WKV_WEIGHT_%s] shape=%s dtype=%s min=%.6g "
+                "max=%.6g mean=%.6g nonzero=%.6g",
+                phase,
+                tuple(w.shape),
+                w.dtype,
+                wf.min().item(),
+                wf.max().item(),
+                wf.mean().item(),
+                (wf != 0).float().mean().item(),
+            )
+            logger.warning(
+                "[DSV4_FUSED_WQA_WKV_SCALES_%s] %s",
+                phase,
+                " | ".join(scale_infos) if scale_infos else "<none>",
+            )
+            logger.warning(
+                "[DSV4_QRKV_%s] shape=%s finite=%s mean=%.6g std=%.6g max=%.6g",
+                phase,
+                tuple(qr_kv.shape),
+                torch.isfinite(qf).all().item(),
+                qf.mean().item(),
+                qf.std().item(),
+                qf.abs().max().item(),
+            )
+
+    def attn_gemm_parallel_execute(
+        self, hidden_states, hidden_states_flat
+    ) -> tuple[Any, ...]:
         aux_streams = self.aux_stream_list
         if aux_streams is not None:
             assert len(aux_streams) >= 3
@@ -410,7 +585,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
         def fused_wqa_wkv() -> torch.Tensor:
             # MergedColumnParallelLinear returns (output, bias); bias is None.
-            qr_kv, _ = self.fused_wqa_wkv(hidden_states)
+            qr_kv, _ = self.fused_wqa_wkv(hidden_states_flat)
             return qr_kv
 
         qr_kv, (kv_score, indexer_weights, indexer_kv_score) = execute_in_parallel(
@@ -453,7 +628,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
             def wq_b_kv_insert() -> torch.Tensor:
                 q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
+                self._debug_layer0_tensor("DSV4_WQB_Q", q)
                 q = self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
+                self._debug_layer0_tensor("DSV4_Q_AFTER_KV_INSERT", q)
                 return q
 
             # 3-way overlap (matches TRT-LLM PR #14142 Level 1): default runs
@@ -487,7 +664,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
             def wq_b_kv_insert() -> torch.Tensor:
                 q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
+                self._debug_layer0_tensor("DSV4_WQB_Q", q)
                 q = self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
+                self._debug_layer0_tensor("DSV4_Q_AFTER_KV_INSERT", q)
                 return q
 
             q, _ = maybe_execute_in_parallel(
@@ -500,11 +679,14 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         else:
             # SWA-only layer: no compressor, no overlap.
             q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
+            self._debug_layer0_tensor("DSV4_WQB_Q", q)
             q = self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
+            self._debug_layer0_tensor("DSV4_Q_AFTER_KV_INSERT", q)
 
         # MLA attention writes into the pre-allocated `out` buffer
         # ([num_tokens, padded_heads, head_dim]).
         self.forward_mqa(q, kv, positions, out)
+        self._debug_layer0_tensor("DSV4_FORWARD_MQA_OUT", out)
 
     def _fused_qnorm_rope_kv_insert(
         self,
@@ -541,7 +723,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
         # kv is unchanged; attention reads kv solely via swa_kv_cache.
         if cache_dtype == torch.uint8:
-            # fp8_ds_mla UE8M0 paged path. Horizontally fused:
+            # Legacy FlashMLA UE8M0 paged path. Horizontally fused:
             #   Q side:  per-head RMSNorm (no weight) + GPT-J RoPE, zero-filling
             #            the padding head slots; the kernel allocates and returns
             #            the padded q tensor.
@@ -559,10 +741,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 swa_metadata.block_size,
             )
 
-        # Plain-row path: the [num_blocks, block_size, 512] cache stores the KV
-        # row in its element dtype (no Q padding). bf16 rewrites q in place;
-        # per-tensor fp8 writes a separately-allocated fp8 q and quantizes the
-        # KV row.
+        # FlashInfer full-cache path: the [num_blocks, block_size, 512] cache
+        # stores the KV row in its plain dtype (no Q padding). bf16 rewrites q
+        # in place; per-tensor fp8 writes a separately-allocated fp8 q and
+        # quantizes the KV row.
         block_size = swa_metadata.block_size
         swa_kv_cache_3d = swa_kv_cache.view(-1, block_size, self.head_dim)
         if cache_dtype == torch.bfloat16:
@@ -603,18 +785,18 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             self.compress_ratio <= 1
         ):  # SWA part. Allocated separately as DeepseekV4SWACache.
             return None
-        # fp8_ds_mla is a UE8M0 block-scaled uint8 layout and needs 576B
-        # alignment; plain bf16 / per-tensor fp8 rows use natural element-size
-        # pages.
-        uses_fp8_ds_mla_layout = self.kv_cache_dtype == "fp8_ds_mla"
+        # FlashMLA uses the fp8_ds_mla block format (UE8M0 block-scaled fp8 as
+        # uint8, 576B aligned); FlashInfer stores a plain bf16 / per-tensor fp8
+        # row with no extra alignment.
+        is_flashmla = self.kv_cache_dtype == "fp8_ds_mla"
         return MLAAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
-            dtype=torch.uint8 if uses_fp8_ds_mla_layout else self.kv_cache_torch_dtype,
+            dtype=torch.uint8 if is_flashmla else self.kv_cache_torch_dtype,
             compress_ratio=self.compress_ratio,
             cache_dtype_str=self.kv_cache_dtype,
-            alignment=576 if uses_fp8_ds_mla_layout else None,
+            alignment=576 if is_flashmla else None,  # FlashMLA needs 576B
             model_version="deepseek_v4",
         )
 

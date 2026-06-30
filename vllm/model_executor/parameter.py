@@ -169,10 +169,36 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         param_data = self.data
 
         param_data = param_data.narrow(self.output_dim, shard_offset, shard_size)
-        loaded_weight = loaded_weight.narrow(
-            self.output_dim, self.tp_rank * shard_size, shard_size
-        )
-        assert param_data.shape == loaded_weight.shape
+        if loaded_weight.shape[self.output_dim] != shard_size:
+            loaded_dim_size = loaded_weight.shape[self.output_dim]
+            loaded_start = self.tp_rank * shard_size
+            if loaded_start + shard_size > loaded_dim_size:
+                raise AssertionError(
+                    "vLLM merged-column narrow out of range: "
+                    f"param_type={type(self).__name__}, "
+                    f"output_dim={self.output_dim}, "
+                    f"tp_rank={self.tp_rank}, tp_size={self.tp_size}, "
+                    f"shard_offset={shard_offset}, shard_size={shard_size}, "
+                    f"param_data_shape={tuple(param_data.shape)}, "
+                    f"loaded_shape={tuple(loaded_weight.shape)}, "
+                    f"loaded_dim_size={loaded_dim_size}, "
+                    f"loaded_start={loaded_start}, "
+                    f"loaded_dtype={loaded_weight.dtype}"
+                )
+            loaded_weight = loaded_weight.narrow(
+                self.output_dim, self.tp_rank * shard_size, shard_size
+            )
+        if param_data.shape != loaded_weight.shape:
+            raise AssertionError(
+                "vLLM merged-column shape mismatch: "
+                f"param_type={type(self).__name__}, "
+                f"output_dim={self.output_dim}, "
+                f"tp_rank={self.tp_rank}, tp_size={self.tp_size}, "
+                f"shard_offset={shard_offset}, shard_size={shard_size}, "
+                f"param_data_shape={tuple(param_data.shape)}, "
+                f"loaded_shape={tuple(loaded_weight.shape)}, "
+                f"loaded_dtype={loaded_weight.dtype}"
+            )
         param_data.copy_(loaded_weight)
 
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):

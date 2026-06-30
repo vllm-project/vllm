@@ -6,6 +6,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 import torch
+from torch.nn.parameter import UninitializedParameter
 
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
@@ -31,6 +32,10 @@ if TYPE_CHECKING:
 
 
 logger = init_logger(__name__)
+
+
+def _dsv4_is_current_stream_capturing() -> bool:
+    return torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
 
 
 class FusedMoeWeightScaleSupported(Enum):
@@ -72,8 +77,6 @@ class RoutedExperts(PluggableLayer):
         scoring_func: str = "softmax",
         routed_scaling_factor: float = 1.0,
         swiglu_limit: float | None = None,
-        swiglu_alpha: float | None = None,
-        swiglu_beta: float | None = None,
         e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
     ):
@@ -105,8 +108,6 @@ class RoutedExperts(PluggableLayer):
         self.scoring_func = scoring_func
         self.routed_scaling_factor = routed_scaling_factor
         self.swiglu_limit = swiglu_limit
-        self.swiglu_alpha = swiglu_alpha
-        self.swiglu_beta = swiglu_beta
         self.e_score_correction_bias = e_score_correction_bias
         self.apply_router_weight_on_input = apply_router_weight_on_input
         # End random parameters
@@ -201,7 +202,6 @@ class RoutedExperts(PluggableLayer):
             "AutoGPTQMoEMethod",
             "CompressedTensorsWNA16MarlinMoEMethod",
             "CompressedTensorsWNA16MoEMethod",
-            "CompressedTensorsW4A16FlydslMoEMethod",
         )
 
     def _ensure_moe_quant_config_init(self):
@@ -237,6 +237,62 @@ class RoutedExperts(PluggableLayer):
             self.register_buffer("expert_global_to_physical", global_to_physical)
             self.register_buffer("expert_physical_to_global", physical_to_global)
             self.register_buffer("expert_local_to_global", local_global)
+
+        self._dsv4_debug_routing_maps("update_expert_map_info")
+
+    def _dsv4_debug_routing_map_tensor(
+        self,
+        label: str,
+        tensor: torch.Tensor | None,
+    ) -> str:
+        if tensor is None:
+            return f"{label}=None"
+        with torch.no_grad():
+            data = tensor.detach()
+            if data.numel() == 0:
+                return f"{label}=shape={tuple(data.shape)} dtype={data.dtype} EMPTY"
+            stat = data.to(torch.int64)
+            unique = torch.unique(stat)
+            sample = unique[:16].tolist()
+            return (
+                f"{label}=shape={tuple(data.shape)} dtype={data.dtype} "
+                f"min={int(stat.min().item())} max={int(stat.max().item())} "
+                f"neg={(stat < 0).sum().item()} nonzero={(stat != 0).sum().item()} "
+                f"unique_count={unique.numel()} unique_sample={sample}"
+            )
+
+    def _dsv4_debug_routing_maps(self, where: str) -> None:
+        if _dsv4_is_current_stream_capturing():
+            return
+        layer_name = getattr(self, "layer_name", getattr(self, "prefix", ""))
+        if "layers.60.ffn.experts" not in layer_name:
+            return
+        raw_expert_map = self._buffers.get("_expert_map")
+        expert_mask = self._buffers.get("expert_mask")
+        rocm_aiter_fmoe_enabled = getattr(self, "rocm_aiter_fmoe_enabled", None)
+        property_equivalent = (
+            expert_mask if rocm_aiter_fmoe_enabled else raw_expert_map
+        )
+        logger.warning_once(
+            "[DSV4_ROUTED_EXPERTS_MAP_DEBUG] where=%s layer=%s "
+            "rocm_aiter_fmoe_enabled=%s use_ep=%s global=%s local=%s "
+            "property_%s raw_%s mask_%s",
+            where,
+            layer_name,
+            rocm_aiter_fmoe_enabled,
+            self.use_ep,
+            self.global_num_experts,
+            self.local_num_experts,
+            self._dsv4_debug_routing_map_tensor(
+                "expert_map_equivalent", property_equivalent
+            ),
+            self._dsv4_debug_routing_map_tensor(
+                "_expert_map", raw_expert_map
+            ),
+            self._dsv4_debug_routing_map_tensor(
+                "expert_mask", expert_mask
+            ),
+        )
 
     def _expert_routing_tables(
         self,
@@ -275,12 +331,6 @@ class RoutedExperts(PluggableLayer):
     # Weight Loading Methods
     #
 
-    @staticmethod
-    def _to_scalar(loaded_weight: torch.Tensor) -> torch.Tensor:
-        # Per-tensor scales arrive 0-D or as shape-(1,) (llm-compressor NVFP4);
-        # reduce to a 0-D scalar. numel > 1 raises instead of broadcasting.
-        return loaded_weight.reshape(())
-
     def _load_per_tensor_weight_scale(
         self,
         shard_id: str,
@@ -294,10 +344,10 @@ class RoutedExperts(PluggableLayer):
             # We have to keep the weight scales of w1 and w3 because
             # we need to re-quantize w1/w3 weights after weight loading.
             idx = 0 if shard_id == "w1" else 1
-            param_data[expert_id][idx] = self._to_scalar(loaded_weight)
+            param_data[expert_id][idx] = loaded_weight
         # If we are in the row parallel case (down_proj)
         elif shard_id == "w2":
-            param_data[expert_id] = self._to_scalar(loaded_weight)
+            param_data[expert_id] = loaded_weight
 
     def _load_combined_w13_weight_scale(
         self,
@@ -530,9 +580,7 @@ class RoutedExperts(PluggableLayer):
     ):
         param_data = param.data
 
-        # Used for both scalar input_scale and the size-2 `weight_shape`
-        # param (compressed-tensors). Assign directly so both shapes load;
-        # _to_scalar's reshape(()) would reject the size-2 weight_shape.
+        # Input scales can be loaded directly and should be equal.
         param_data[expert_id] = loaded_weight
 
     def _load_g_idx(
@@ -623,7 +671,6 @@ class RoutedExperts(PluggableLayer):
             "CompressedTensorsWNA16MarlinMoEMethod",
             "CompressedTensorsWNA16MoEMethod",
             "CompressedTensorsWNA16RDNA3MoEMethod",
-            "CompressedTensorsW4A16FlydslMoEMethod",
         ):
             if is_transposed:
                 loaded_weight = loaded_weight.t().contiguous()
@@ -637,6 +684,13 @@ class RoutedExperts(PluggableLayer):
         # based on the shard id. This will be whatever
         # dimension intermediate_size_per_partition is used.
         SHARD_ID_TO_SHARDED_DIM = {"w1": 0, "w2": 1, "w3": 0}
+
+        is_gguf_weight = getattr(param, "is_gguf_weight", False)
+        is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
+        if is_gguf_weight_type:
+            param.weight_type = loaded_weight.item()
+            param.data.copy_(loaded_weight)
+            return True if return_success else None
 
         # Case for BitsAndBytes
         use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
@@ -683,6 +737,18 @@ class RoutedExperts(PluggableLayer):
         if full_load:
             shard_dim += 1
 
+        # Materialize GGUF UninitializedParameter accounting merged weights
+        if is_gguf_weight and isinstance(param, UninitializedParameter):
+            # To materialize a tensor, we must have full shape including
+            # number of experts, making this portion to require `full_load`.
+            assert full_load
+            final_shape = list(loaded_weight.shape)
+            # w1 and w3 are merged per expert.
+            if shard_id in {"w1", "w3"}:
+                final_shape[1] *= 2
+            final_shape[shard_dim] = final_shape[shard_dim] // self.moe_config.tp_size
+            param.materialize(final_shape, dtype=loaded_weight.dtype)
+
         expert_data = param.data if full_load else param.data[expert_id]
 
         # Case input scale: input_scale loading is only supported for fp8
@@ -700,9 +766,7 @@ class RoutedExperts(PluggableLayer):
             ):
                 scale_expert_id = global_expert_id if use_global_sf else expert_id
                 scale_shard_id = 0 if shard_id == "w1" else 1
-                param.data[scale_expert_id][scale_shard_id] = self._to_scalar(
-                    loaded_weight
-                )
+                param.data[scale_expert_id][scale_shard_id] = loaded_weight.reshape(())
                 return True if return_success else None
 
             if (
@@ -1086,6 +1150,35 @@ class RoutedExperts(PluggableLayer):
             Output tensor from routed experts
         """
         assert not self.quant_method.is_monolithic
+
+        layer_name = getattr(self, "layer_name", getattr(self, "prefix", ""))
+        if "layers.60.ffn.experts" in layer_name:
+            count = getattr(self, "_dsv4_forward_modular_debug_count", 0)
+            if count < 4 and not _dsv4_is_current_stream_capturing():
+                self._dsv4_forward_modular_debug_count = count + 1
+                with torch.no_grad():
+                    ids = topk_ids.detach().to(torch.int64)
+                    weights = topk_weights.detach().float()
+                    logger.warning(
+                        "[DSV4_ROUTED_EXPERTS_FORWARD_DEBUG] layer=%s count=%s "
+                        "topk_ids_shape=%s min=%s max=%s unique=%s "
+                        "topk_weights_shape=%s mean=%.6g std=%.6g min=%.6g "
+                        "max=%.6g",
+                        layer_name,
+                        count,
+                        tuple(topk_ids.shape),
+                        int(ids.min().item()) if ids.numel() else None,
+                        int(ids.max().item()) if ids.numel() else None,
+                        torch.unique(ids).numel() if ids.numel() else 0,
+                        tuple(topk_weights.shape),
+                        weights.mean().item() if weights.numel() else 0.0,
+                        weights.std(unbiased=False).item()
+                        if weights.numel()
+                        else 0.0,
+                        weights.min().item() if weights.numel() else 0.0,
+                        weights.max().item() if weights.numel() else 0.0,
+                    )
+                self._dsv4_debug_routing_maps("forward_modular")
 
         # Modular kernels use pre-computed routing
         return self.quant_method.apply(

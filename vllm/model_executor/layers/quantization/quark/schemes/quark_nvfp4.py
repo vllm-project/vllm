@@ -116,8 +116,8 @@ class QuarkNVFP4(QuarkScheme):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         input_global_scale = layer.input_scale_2.max().to(torch.float32)
-        layer.input_global_scale = Parameter(input_global_scale, requires_grad=False)
         del layer.input_scale_2
+        layer.input_global_scale = Parameter(input_global_scale, requires_grad=False)
 
         weight_global_scale = layer.weight_scale_2.to(torch.float32)
 

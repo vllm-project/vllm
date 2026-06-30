@@ -30,6 +30,7 @@ from vllm.model_executor.layers.quantization.quark.schemes import (
     QuarkScheme,
     QuarkW4A8_MXFP4_FP8,
     QuarkW8A8Fp8,
+    QuarkW8A8Fp8Block,
     QuarkW8A8Int8,
 )
 from vllm.model_executor.layers.quantization.quark.utils import (
@@ -345,6 +346,30 @@ class QuarkConfig(QuantizationConfig):
         is_per_tensor_activation = input_quant.get("qscheme") == "per_tensor"
         return is_per_tensor_activation
 
+    def _is_fp8_block_w8a8(
+        self,
+        weight_quant: dict[str, Any] | None,
+        input_quant: dict[str, Any] | None,
+    ) -> bool:
+        if weight_quant is None or input_quant is None:
+            return False
+
+        is_weight_block_fp8 = (
+            weight_quant.get("dtype") == "fp8_e4m3"
+            and weight_quant.get("qscheme") == "per_block"
+            and weight_quant.get("block_size") == [128, 128]
+            and weight_quant.get("scale_type") == "float8_e8m0fnu"
+            and not weight_quant.get("is_dynamic")
+        )
+        is_input_dynamic_group_fp8 = (
+            input_quant.get("dtype") == "fp8_e4m3"
+            and input_quant.get("qscheme") == "per_group"
+            and input_quant.get("group_size") == 128
+            and input_quant.get("is_dynamic") is True
+        )
+
+        return is_weight_block_fp8 and is_input_dynamic_group_fp8
+
     def _is_static_tensor_w8a8(
         self,
         weight_quant: dict[str, Any] | None,
@@ -627,6 +652,8 @@ class QuarkConfig(QuantizationConfig):
 
         if self._is_nvfp4(weight_config, input_config):
             return QuarkNVFP4()
+        elif self._is_fp8_block_w8a8(weight_config, input_config):
+            return QuarkW8A8Fp8Block(weight_config, input_config)
         elif self._is_fp8_w8a8(weight_config, input_config):
             is_fp8_w8a8_supported = self._check_scheme_supported(
                 QuarkW8A8Fp8.get_min_capability(), error=False
@@ -679,17 +706,16 @@ class QuarkConfig(QuantizationConfig):
 
         return scheme
 
-    @staticmethod
-    def get_cache_scale_mapper() -> "WeightsMapper":
+    def get_cache_scale_mapper(self) -> "WeightsMapper":
         """Map Quark KV-cache scale names to vLLM names."""
-        orig_to_new_suffix = {
-            ".k_proj.output_scale": ".attn.k_scale",
-            ".v_proj.output_scale": ".attn.v_scale",
-            ".q_proj.output_scale": ".attn.q_scale",
-            ".self_attn.prob_output_scale": ".self_attn.attn.prob_scale",
-        }
-        cache_scale_mapper = WeightsMapper(orig_to_new_suffix=orig_to_new_suffix)
-        return cache_scale_mapper | QuantizationConfig.get_cache_scale_mapper()
+        return WeightsMapper(
+            orig_to_new_suffix={
+                ".k_proj.output_scale": ".attn.k_scale",
+                ".v_proj.output_scale": ".attn.v_scale",
+                ".q_proj.output_scale": ".attn.q_scale",
+                ".self_attn.prob_output_scale": ".self_attn.attn.prob_scale",
+            }
+        )
 
 
 class QuarkLinearMethod(LinearMethodBase):
