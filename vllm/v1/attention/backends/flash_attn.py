@@ -906,7 +906,10 @@ class FlashAttentionImpl(AttentionImpl):
                             f"FA{self.vllm_flash_attn_version}"
                         )
                     dynamic_causal = causal
-                    causal = False
+                    has_window = (
+                        sliding_window_size is not None and sliding_window_size[1] >= 0
+                    )
+                    causal = not has_window
 
                 flash_attn_varlen_func(
                     q=query[:num_actual_tokens],
@@ -1164,6 +1167,7 @@ class FlashAttentionImpl(AttentionImpl):
             k_descale=layer._k_scale.expand(descale_shape),  # type: ignore[operator]
             v_descale=layer._v_scale.expand(descale_shape),  # type: ignore[operator]
             num_splits=1 if self.batch_invariant_enabled else 0,
+            s_aux=self.sinks,
         )
 
         return output
