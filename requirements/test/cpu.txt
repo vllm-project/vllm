@@ -1108,7 +1108,7 @@ tokenizers==0.22.2
     #   -r requirements/test/../common.txt
     #   -r requirements/test/cuda.in
     #   transformers
-torch==2.11.0+cpu
+torch==2.12.1+cpu
     # via
     #   -r requirements/test/cuda.in
     #   accelerate
@@ -1133,7 +1133,7 @@ torchaudio==2.11.0+cpu
     #   -r requirements/test/cuda.in
     #   encodec
     #   vocos
-torchvision==0.26.0+cpu
+torchvision==0.27.1+cpu
     # via
     #   -r requirements/test/cuda.in
     #   open-clip-torch
