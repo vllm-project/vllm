@@ -1073,13 +1073,13 @@ class NixlBaseConnectorWorker:
                 )
                 self._region_is_mla.append(is_mla_region)
 
-                if not is_mla_region and not isinstance(
-                    layer_spec, TQFullAttentionSpec
-                ):
+                is_tq_region = isinstance(layer_spec, TQFullAttentionSpec)
+                
+                if not is_mla_region and not is_tq_region:
                     if tensor_size_bytes is None:
                         tensor_size_bytes = curr_tensor_size_bytes
                     assert tensor_size_bytes == curr_tensor_size_bytes, (
-                        "All non-MLA kv cache tensors must have the same size"
+                        "All non-MLA and non-Turboquant kv cache tensors must have the same size"
                     )
 
                 if cache.shape[0] != num_blocks:
