@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Roundtrip tests for multimodal serde used by the disagg generate endpoint."""
+"""
+Roundtrip tests for multimodal serde used by the
+token_in_token_out generate endpoint.
+"""
 
 import torch
 
-from vllm.entrypoints.serve.disagg.mm_serde import (
+from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
     decode_mm_kwargs_item,
     encode_mm_kwargs_item,
 )
-from vllm.entrypoints.serve.disagg.protocol import (
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     MultiModalFeatures,
     PlaceholderRangeInfo,
 )

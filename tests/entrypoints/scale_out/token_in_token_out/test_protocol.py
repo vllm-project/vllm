@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for the disagg request/response protocol.
+"""Unit tests for the token_in_token_out request/response protocol.
 
 These tests intentionally avoid spinning up a server — they exercise the
 pydantic validators on ``GenerateRequest`` directly so they run fast and
@@ -9,7 +9,7 @@ fail loudly if the validator semantics ever drift.
 
 import json
 
-from vllm.entrypoints.serve.disagg.protocol import GenerateRequest
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateRequest
 from vllm.sampling_params import SamplingParams
 
 

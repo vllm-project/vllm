@@ -41,6 +41,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         max_logprobs: None,
                         grpc_port: None,
                         shutdown_timeout: 0,
+                        http_timeout_keep_alive: None,
                         chat_template: None,
                         default_chat_template_kwargs: None,
                         chat_template_content_format: Auto,
@@ -65,6 +66,11 @@ fn serve_args_forward_python_flags_with_separator() {
                             ],
                         ),
                         allow_credentials: false,
+                        ssl_keyfile: None,
+                        ssl_certfile: None,
+                        ssl_ca_certs: None,
+                        ssl_cert_reqs: 0,
+                        ssl_ciphers: None,
                     },
                     managed_engine: ManagedEngineArgs {
                         python: "../vllm/.venv/bin/python",
@@ -364,6 +370,140 @@ fn serve_passes_enable_prompt_tokens_details_into_config() {
 }
 
 #[test]
+fn serve_passes_tls_into_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--ssl-certfile",
+        "/tmp/cert.pem",
+        "--ssl-keyfile",
+        "/tmp/key.pem",
+        "--ssl-ca-certs",
+        "/tmp/ca.pem",
+        "--ssl-cert-reqs",
+        "2",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    let tls = config.tls.expect("tls configured");
+    assert_eq!(tls.cert_file.as_deref(), Some("/tmp/cert.pem"));
+    assert_eq!(tls.key_file.as_deref(), Some("/tmp/key.pem"));
+    assert_eq!(tls.ca_certs.as_deref(), Some("/tmp/ca.pem"));
+    assert_eq!(tls.cert_reqs, 2);
+}
+
+#[test]
+fn serve_without_ssl_flags_has_no_tls() {
+    let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"]).unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    assert!(config.tls.is_none());
+}
+
+#[test]
+fn serve_ssl_keyfile_without_certfile_fails_validation() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--ssl-keyfile",
+        "/tmp/key.pem",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    // TLS is requested (a key was given) but there is no certificate, so
+    // validation fails loud rather than silently serving plaintext.
+    assert_eq!(config.tls.as_ref().expect("tls requested").cert_file, None);
+    let err = config.validate().unwrap_err().to_string();
+    assert!(err.contains("--ssl-certfile is required"), "{err}");
+}
+
+#[test]
+fn serve_mtls_without_ca_certs_fails_validation() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--ssl-certfile",
+        "/tmp/cert.pem",
+        "--ssl-cert-reqs",
+        "2",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    // Client-cert verification without a CA bundle has nothing to verify
+    // against, so it fails loud at startup.
+    let err = config.validate().unwrap_err().to_string();
+    assert!(err.contains("--ssl-ca-certs is required"), "{err}");
+}
+
+#[test]
+fn frontend_args_json_passes_tls_into_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-address",
+        "ipc:///tmp/input.sock",
+        "--output-address",
+        "ipc:///tmp/output.sock",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","ssl_certfile":"/tmp/cert.pem","ssl_keyfile":"/tmp/key.pem"}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    let config = args.into_config();
+    let tls = config.tls.expect("tls configured");
+    assert_eq!(tls.cert_file.as_deref(), Some("/tmp/cert.pem"));
+    assert_eq!(tls.key_file.as_deref(), Some("/tmp/key.pem"));
+}
+
+#[test]
+fn frontend_args_json_rejects_out_of_range_cert_reqs() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-address",
+        "ipc:///tmp/input.sock",
+        "--output-address",
+        "ipc:///tmp/output.sock",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","ssl_certfile":"/tmp/cert.pem","ssl_cert_reqs":5}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    // The JSON path bypasses clap's range check, so validate() is the only guard.
+    let config = args.into_config();
+    let err = config.validate().unwrap_err().to_string();
+    assert!(err.contains("--ssl-cert-reqs"), "{err}");
+}
+
+#[test]
 fn frontend_args_json_passes_enable_request_id_headers_into_config() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
@@ -481,13 +621,13 @@ fn serve_args_reject_unsupported_flag_arg() {
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
-        "--ssl-keyfile",
-        "/tmp/key.pem",
+        "--root-path",
+        "/prefix",
     ])
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value '/tmp/key.pem' for '--ssl-keyfile <SSL_KEYFILE>': argument is not implemented in Rust frontend yet
+        error: invalid value '/prefix' for '--root-path <ROOT_PATH>': argument is not implemented in Rust frontend yet
 
         Remove this unsupported argument to continue.
 
@@ -562,6 +702,7 @@ fn frontend_args_accept_json() {
                         max_logprobs: None,
                         grpc_port: None,
                         shutdown_timeout: 0,
+                        http_timeout_keep_alive: None,
                         chat_template: None,
                         default_chat_template_kwargs: None,
                         chat_template_content_format: Auto,
@@ -586,6 +727,11 @@ fn frontend_args_accept_json() {
                             ],
                         ),
                         allow_credentials: false,
+                        ssl_keyfile: None,
+                        ssl_certfile: None,
+                        ssl_ca_certs: None,
+                        ssl_cert_reqs: 0,
+                        ssl_ciphers: None,
                     },
                 },
             ),
@@ -798,14 +944,14 @@ fn frontend_args_json_rejects_unsupported_fields() {
         "--output-address",
         "ipc:///tmp/output.sock",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","ssl_keyfile":"/tmp/key.pem"}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","root_path":"/prefix"}"#,
     ])
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","ssl_keyfile":"/tmp/key.pem"}' for '--args-json <JSON>': 
+        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","root_path":"/prefix"}' for '--args-json <JSON>': 
         The following arguments are not implemented in Rust frontend yet:
-        - ssl_keyfile
+        - root_path
 
         Remove these arguments to continue.
 
@@ -825,16 +971,16 @@ fn frontend_args_json_aggregates_multiple_unsupported_fields() {
         "--output-address",
         "ipc:///tmp/output.sock",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","ssl_keyfile":"/tmp/key.pem"}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","root_path":"/prefix"}"#,
     ])
     .unwrap_err();
 
     let actual = error.to_string().replace(": \n", ":\n");
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","ssl_keyfile":"/tmp/key.pem"}' for '--args-json <JSON>':
+        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","root_path":"/prefix"}' for '--args-json <JSON>':
         The following arguments are not implemented in Rust frontend yet:
         - response_role
-        - ssl_keyfile
+        - root_path
 
         Remove these arguments to continue.
 
@@ -1077,6 +1223,7 @@ fn serve_args_accept_handshake_aliases() {
                         max_logprobs: None,
                         grpc_port: None,
                         shutdown_timeout: 0,
+                        http_timeout_keep_alive: None,
                         chat_template: None,
                         default_chat_template_kwargs: None,
                         chat_template_content_format: Auto,
@@ -1101,6 +1248,11 @@ fn serve_args_accept_handshake_aliases() {
                             ],
                         ),
                         allow_credentials: false,
+                        ssl_keyfile: None,
+                        ssl_certfile: None,
+                        ssl_ca_certs: None,
+                        ssl_cert_reqs: 0,
+                        ssl_ciphers: None,
                     },
                     managed_engine: ManagedEngineArgs {
                         python: "python3",
@@ -1234,10 +1386,12 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 ],
                 allow_credentials: false,
             },
+            tls: None,
             api_keys: [],
             disable_log_stats: false,
             grpc_port: None,
             shutdown_timeout: 0ns,
+            keep_alive_timeout: 5s,
         }
     "#]]
     .assert_debug_eq(&Config {
@@ -1315,10 +1469,12 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 ],
                 allow_credentials: false,
             },
+            tls: None,
             api_keys: [],
             disable_log_stats: false,
             grpc_port: None,
             shutdown_timeout: 0ns,
+            keep_alive_timeout: 5s,
         }
     "#]]
     .assert_debug_eq(&config);
@@ -1414,10 +1570,12 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
                 ],
                 allow_credentials: false,
             },
+            tls: None,
             api_keys: [],
             disable_log_stats: false,
             grpc_port: None,
             shutdown_timeout: 0ns,
+            keep_alive_timeout: 5s,
         }
     "#]]
     .assert_debug_eq(&config);
