@@ -24,10 +24,9 @@ from __future__ import annotations
 
 import hashlib
 import importlib
-import sys
-import threading
+import json
+import os
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from contextlib import contextmanager
 from functools import lru_cache
 from typing import (
     Annotated,
@@ -40,8 +39,10 @@ import regex as re
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from huggingface_hub import hf_hub_download
 from PIL import Image
-from transformers import AutoProcessor, BatchFeature
+from transformers import AutoProcessor, AutoTokenizer, BatchFeature
+from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.models.qwen2_vl import Qwen2VLImageProcessor
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 
@@ -113,80 +114,6 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 logger = init_logger(__name__)
 
 
-# Serializes the process-global resolve_trust_remote_code patch in
-# _inherit_trust_remote_code so concurrent OV2 loads never observe each other's
-# transient patched state.
-_TRUST_REMOTE_CODE_PATCH_LOCK = threading.Lock()
-
-
-@contextmanager
-def _inherit_trust_remote_code(allowed_model: str):
-    """Let OV2's own nested HF auto-loads inherit ``trust_remote_code=True``.
-
-    OV2's remote processing code pops ``trust_remote_code`` before building its
-    nested tokenizer, so the inner ``AutoConfig`` load receives ``None`` and
-    transformers falls back to an interactive stdin prompt ("Do you wish to run
-    the custom code? [y/N]") that blocks forever in non-interactive CI. Loading
-    this processor at all already requires the user to opt into
-    ``trust_remote_code=True``, so we let the nested loads inherit that decision
-    -- but only for ``allowed_model`` (OV2's own repo, which the user explicitly
-    trusted) and only for the exact case that would otherwise prompt (remote
-    code present, no local implementation, value unset). Any other repository
-    pulled in transitively is left untouched and still goes through the normal
-    transformers trust resolution. The patch is process-global while active, so
-    it is serialized with a lock and restored immediately afterwards.
-    """
-    import transformers.dynamic_module_utils as dmu
-
-    modnames = (
-        "transformers.dynamic_module_utils",
-        "transformers.models.auto.configuration_auto",
-        "transformers.models.auto.tokenization_auto",
-        "transformers.models.auto.image_processing_auto",
-        "transformers.models.auto.feature_extraction_auto",
-        "transformers.models.auto.processing_auto",
-        "transformers.models.auto.modeling_auto",
-    )
-    orig = dmu.resolve_trust_remote_code
-
-    def patched(
-        trust_remote_code, model_name, has_local_code, has_remote_code, *args, **kwargs
-    ):
-        if (
-            trust_remote_code is None
-            and has_remote_code
-            and not has_local_code
-            and model_name == allowed_model
-        ):
-            logger.debug(
-                "Inheriting trust_remote_code=True for nested load of %s during "
-                "OV2 processor initialization",
-                model_name,
-            )
-            trust_remote_code = True
-        return orig(
-            trust_remote_code,
-            model_name,
-            has_local_code,
-            has_remote_code,
-            *args,
-            **kwargs,
-        )
-
-    with _TRUST_REMOTE_CODE_PATCH_LOCK:
-        saved = []
-        for name in modnames:
-            mod = sys.modules.get(name)
-            if mod is not None and hasattr(mod, "resolve_trust_remote_code"):
-                saved.append((mod, mod.resolve_trust_remote_code))
-                mod.resolve_trust_remote_code = patched
-        try:
-            yield
-        finally:
-            for mod, fn in saved:
-                mod.resolve_trust_remote_code = fn
-
-
 @lru_cache
 def _load_ov2_processor(
     model: str,
@@ -195,17 +122,65 @@ def _load_ov2_processor(
     **kwargs: Any,
 ):
     # OV2's trust_remote_code processor is a bare class (not a ProcessorMixin),
-    # so the shared type-checked get_hf_processor rejects it; load it directly.
-    # _inherit_trust_remote_code prevents OV2's own nested tokenizer load from
-    # hanging on an interactive trust_remote_code prompt in non-interactive CI.
+    # so the shared type-checked get_hf_processor rejects it. We also can't use
+    # AutoProcessor.from_pretrained: OV2's remote from_pretrained drops
+    # trust_remote_code before building its nested tokenizer, which makes that
+    # nested load fall back to an interactive stdin prompt that hangs in
+    # non-interactive CI. Instead, assemble the processor here with
+    # trust_remote_code threaded through every component explicitly.
     path = convert_model_repo_to_path(model)
-    with _inherit_trust_remote_code(path):
-        return AutoProcessor.from_pretrained(
-            path,
-            revision=revision or "main",
-            trust_remote_code=trust_remote_code,
-            **kwargs,
-        )
+    revision = revision or "main"
+
+    processor_cls = get_class_from_dynamic_module(
+        "processing_llava_onevision2.LlavaOnevision2Processor",
+        path,
+        revision=revision,
+        trust_remote_code=trust_remote_code,
+    )
+    video_processor_cls = get_class_from_dynamic_module(
+        "video_processing_llava_onevision2.LlavaOnevision2VideoProcessor",
+        path,
+        revision=revision,
+        trust_remote_code=trust_remote_code,
+    )
+
+    # Slow Qwen2VLImageProcessor mirrors the remote processor (the Fast variant
+    # has normalization rounding differences that change pixel_values).
+    image_processor = Qwen2VLImageProcessor.from_pretrained(
+        path, revision=revision, **kwargs
+    )
+    tokenizer = AutoTokenizer.from_pretrained(
+        path, revision=revision, trust_remote_code=trust_remote_code, **kwargs
+    )
+    video_processor = video_processor_cls(
+        image_processor=image_processor,
+        min_pixels=getattr(image_processor, "min_pixels", 256 * 28 * 28),
+        max_pixels=getattr(image_processor, "max_pixels", 1605632),
+        patch_size=getattr(image_processor, "patch_size", 14),
+        spatial_merge_size=getattr(image_processor, "merge_size", 2),
+    )
+
+    # Codec defaults live under the "codec" key of preprocessor_config.json,
+    # which Qwen2VLImageProcessor does not preserve; read them directly so the
+    # codec video backend keeps its configured defaults.
+    codec_config: dict = {}
+    try:
+        config_file = os.path.join(path, "preprocessor_config.json")
+        if not os.path.isfile(config_file):
+            config_file = hf_hub_download(
+                path, "preprocessor_config.json", revision=revision
+            )
+        with open(config_file, encoding="utf-8") as f:
+            codec_config = json.load(f).get("codec", {}) or {}
+    except Exception:
+        logger.debug("OV2: no codec defaults found in preprocessor_config.json")
+
+    return processor_cls(
+        image_processor=image_processor,
+        tokenizer=tokenizer,
+        video_processor=video_processor,
+        codec_config=codec_config,
+    )
 
 
 # Upper bound on frames used when profiling the worst-case video item, mirroring
