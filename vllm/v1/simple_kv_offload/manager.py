@@ -601,21 +601,31 @@ class SimpleCPUOffloadScheduler:
                 # NOTE: num_stored_blocks is a monotonic cursor within a
                 # request's non-preempted lifetime — it only advances, never
                 # retreats. Blocks already stored (below the cursor) that are
-                # evicted from CPU cache by LRU are NOT re-stored here. This
-                # is safe because:
-                # 1. During an in-flight store, CPU blocks leave the free
-                #    queue (ref_cnt=1 via get_new_blocks). When num_free=0,
-                #    the store loop sets out_of_space and defers rather than
-                #    evicting cached blocks.
-                # 2. After _process_store_completion() frees blocks, ref_cnt
-                #    drops to 0 and they become LRU eviction candidates even
-                #    for active requests. If evicted, the load path simply
-                #    gets a shorter cache hit and recomputes — no data loss.
-                # 3. Preemption resets num_stored_blocks to 0, causing
-                #    evicted blocks to be re-scanned and re-stored.
-                # 4. Finished request blocks are skipped (state is None or
-                #    finished).
-                # See test_in_flight_store_protected.
+                # evicted from CPU cache by LRU are NOT re-stored here.
+                #
+                # The FIXME worried that evicted blocks would be silently lost.
+                # This is intentional: re-storing would require re-scanning from
+                # block 0, turning this loop from O(new blocks) into O(total
+                # blocks). The trade-off is safe because:
+                #
+                # 1. Even if evicted, the load path handles it gracefully:
+                #    find_longest_cache_hit() returns a shorter match (stops at
+                #    the evicted block) and missing tokens are recomputed from
+                #    GPU — no data loss, just a performance hit.
+                #
+                # 2. Eviction of active request blocks is rare: after
+                #    _process_store_completion() frees blocks (ref_cnt→0), they
+                #    are appended to the free queue tail (MRU). Subsequent stores
+                #    take from the head (LRU), so active request blocks are the
+                #    LAST to be evicted. See test_active_request_blocks_can_be_evicted.
+                #
+                # 3. In-flight blocks (ref_cnt=1 during async DMA) leave the free
+                #    queue entirely. When num_free=0 the loop defers (out_of_space)
+                #    rather than evicting cached blocks.
+                #    See test_in_flight_store_protected.
+                #
+                # 4. Preemption resets num_stored_blocks to 0, causing evicted
+                #    blocks to be re-scanned and re-stored on the next round.
                 already_stored_g = state.num_stored_blocks[g]
                 group_gpu_ids = block_ids_by_group[g]
 
