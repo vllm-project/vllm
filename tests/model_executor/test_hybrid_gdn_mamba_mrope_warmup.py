@@ -69,8 +69,8 @@ def test_kernel_warmup_runs_hybrid_warmup(monkeypatch) -> None:
         lambda *args: None,
     )
     monkeypatch.setattr(
-        kernel_warmup,
-        "hybrid_gdn_mamba_mrope_warmup",
+        "vllm.model_executor.warmup.hybrid_gdn_mamba_mrope_warmup"
+        ".hybrid_gdn_mamba_mrope_warmup",
         fake_hybrid_warmup,
     )
     monkeypatch.setattr(
