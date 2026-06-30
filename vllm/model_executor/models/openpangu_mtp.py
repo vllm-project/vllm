@@ -225,6 +225,25 @@ class OpenPanguMTP(nn.Module):
                         and ".layers" not in name
                     ):
                         continue
+                    if name.endswith("e_score_correction_bias"):
+                        name = name.replace(
+                            "e_score_correction_bias", "gate.e_score_correction_bias"
+                        )
+                    if ".self_attn.qa_conv.weight" in name:
+                        name = name.replace(
+                            ".self_attn.qa_conv.weight",
+                            ".self_attn.mome_attn.qa_conv.weight",
+                        )
+                    if ".self_attn.compresskv_conv.weight" in name:
+                        name = name.replace(
+                            ".self_attn.compresskv_conv.weight",
+                            ".self_attn.mome_attn.compresskv_conv.weight",
+                        )
+                    if ".self_attn.o_conv.weight" in name:
+                        name = name.replace(
+                            ".self_attn.o_conv.weight",
+                            ".self_attn.mome_attn.o_conv.weight",
+                        )
 
                     param = params_dict[name]
                     weight_loader = getattr(
