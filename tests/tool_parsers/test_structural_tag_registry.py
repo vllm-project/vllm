@@ -200,6 +200,79 @@ def test_tool_parsers_declare_matching_xgrammar_builtin_model(parser_cls, model)
     assert not parser_cls.supports_required_and_named
 
 
+def test_glm47_does_not_pin_supports_required_and_named():
+    # GLM must honor VLLM_ENFORCE_STRICT_TOOL_CALLING via __init_subclass__ like
+    # every other structural-tag parser, not hardcode the flag (which would keep
+    # forced tool calls off the full-schema guided-decode path even at strict=0).
+    assert "supports_required_and_named" not in Glm47MoeModelToolParser.__dict__
+
+
+def test_structural_tag_parser_honors_strict_env_toggle(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", "0")
+
+    class LooseStructuralTagParser(ToolParser):
+        structural_tag_model = "glm_4_7"
+
+    assert LooseStructuralTagParser.supports_required_and_named
+
+    monkeypatch.setenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", "1")
+
+    class StrictStructuralTagParser(ToolParser):
+        structural_tag_model = "glm_4_7"
+
+    assert not StrictStructuralTagParser.supports_required_and_named
+
+
+def test_build_tool_choice_json_schema_named_returns_function_params():
+    params = {"type": "object", "properties": {"x": {"type": "string"}}}
+    func = SimpleNamespace(name="record_issue", parameters=params)
+    request = SimpleNamespace(
+        tools=[SimpleNamespace(type="function", function=func)],
+        tool_choice=None,
+    )
+    parser = MagicMock()
+    parser._get_function_name.return_value = "record_issue"
+    schema = DelegatingParser._build_tool_choice_json_schema(
+        parser, request, is_named=True
+    )
+    assert schema == params
+
+
+def test_build_tool_choice_json_schema_required_hoists_defs():
+    # A forced "required" call must validate as list[FunctionDefinition], i.e.
+    # an array of {name, parameters}. Nesting parameters moves "#/$defs/..."
+    # refs off the document root, so $defs has to be hoisted to the top level.
+    func = SimpleNamespace(
+        name="record_issue",
+        parameters={
+            "type": "object",
+            "properties": {"loc": {"$ref": "#/$defs/Loc"}},
+            "$defs": {
+                "Loc": {"type": "object", "properties": {"line": {"type": "integer"}}}
+            },
+        },
+    )
+    request = SimpleNamespace(
+        tools=[SimpleNamespace(type="function", function=func)],
+        tool_choice="required",
+    )
+    schema = DelegatingParser._build_tool_choice_json_schema(
+        MagicMock(), request, is_named=False
+    )
+    assert schema["type"] == "array"
+    assert schema["minItems"] == 1
+    assert schema["$defs"]["Loc"]["properties"]["line"]["type"] == "integer"
+    item = schema["items"]
+    assert item["properties"]["name"]["const"] == "record_issue"
+    # The nested ref is preserved and $defs no longer lives under parameters.
+    assert "$defs" not in item["properties"]["parameters"]
+    assert item["properties"]["parameters"]["properties"]["loc"]["$ref"] == (
+        "#/$defs/Loc"
+    )
+
+
 def test_tool_parsers_without_structural_tag_support_required_and_named():
     class NonStructuralTagToolParser(ToolParser):
         pass
