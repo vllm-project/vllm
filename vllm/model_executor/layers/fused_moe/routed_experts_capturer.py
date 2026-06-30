@@ -249,6 +249,8 @@ class RoutedExpertsManager:
         self,
         vllm_config: VllmConfig,
         kv_cache_config: KVCacheConfig,
+        total_cp_world_size: int = 1,
+        cp_kv_cache_interleave_size: int = 1,
     ) -> None:
         # Pick the attention group for block/slot mapping. We require
         # a FullAttentionSpec group rather than any AttentionSpec to
@@ -263,6 +265,8 @@ class RoutedExpertsManager:
         )
         attn_group = kv_cache_config.kv_cache_groups[self.attn_gid]
         self.block_size = attn_group.kv_cache_spec.block_size
+        self.total_cp = total_cp_world_size
+        self.interleave = cp_kv_cache_interleave_size
 
         # All kv_cache_groups share the same physical block pool, so
         # block IDs span [0, num_blocks) regardless of how many groups
@@ -271,7 +275,7 @@ class RoutedExpertsManager:
         hf_config = vllm_config.model_config.hf_text_config
         num_experts = get_num_experts(hf_config)
         num_experts_per_tok = _get_num_experts_per_tok(hf_config)
-        max_num_slots = kv_cache_config.num_blocks * self.block_size
+        max_num_slots = kv_cache_config.num_blocks * self.block_size * self.total_cp
         # Expert IDs are 0..num_experts-1; uint8 fits 256 distinct
         # values so the boundary is ``<= 256`` (NOT ``< 256``). Keeping
         # this narrow matters because the slot buffer is sized for the
@@ -287,12 +291,13 @@ class RoutedExpertsManager:
         )
         logger.info(
             "RoutedExpertsManager CPU buffer: %.2f GB "
-            "(slots=%d, layers=%d, top_k=%d, dtype=%s)",
+            "(slots=%d, layers=%d, top_k=%d, dtype=%s, total_cp=%d)",
             self.routed_experts_by_slot.nbytes / 1e9,
             max_num_slots,
             hf_config.num_hidden_layers,
             hf_config.num_experts_per_tok,
             self.routed_experts_by_slot.dtype.name,
+            self.total_cp,
         )
 
     def store_batch(self, data: np.ndarray, slot_mapping: np.ndarray) -> None:
@@ -336,14 +341,26 @@ class RoutedExpertsManager:
             num_experts_per_tok).
         """
         bs = self.block_size
-        block_ids_array = np.array(block_ids, dtype=np.int32)
-        block_offsets = np.arange(bs)
-        # slot = block_id * block_size + offset_in_block; flatten the
-        # (num_blocks, block_size) grid and trim to num_tokens, then
-        # skip the first token_start entries so only the requested
-        # range is fetched in a single fancy-index read.
-        slot_mapping = (
-            block_ids_array.reshape(-1, 1) * bs + block_offsets.reshape(1, -1)
-        ).flatten()[:num_tokens]
+        if self.total_cp <= 1:
+            block_ids_array = np.array(block_ids, dtype=np.int32)
+            block_offsets = np.arange(bs)
+            # slot = block_id * block_size + offset_in_block; flatten the
+            # (num_blocks, block_size) grid and trim to num_tokens, then
+            # skip the first token_start entries so only the requested
+            # range is fetched in a single fancy-index read.
+            slot_mapping = (
+                block_ids_array.reshape(-1, 1) * bs + block_offsets.reshape(1, -1)
+            ).flatten()[:num_tokens]
+        else:
+            positions = np.arange(num_tokens)
+            vbs = bs * self.total_cp
+            vbi = positions // vbs
+            vbo = positions % vbs
+            rank = (vbo // self.interleave) % self.total_cp
+            local_off = (vbo // (self.total_cp * self.interleave)) * self.interleave + (
+                vbo % self.interleave
+            )
+            bid = np.array(block_ids, dtype=np.int32)[vbi]
+            slot_mapping = (bid * bs + local_off) * self.total_cp + rank
         slot_mapping = slot_mapping[token_start:]
         return self.routed_experts_by_slot[slot_mapping]

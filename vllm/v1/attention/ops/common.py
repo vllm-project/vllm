@@ -20,6 +20,7 @@ def _correct_attn_cp_out_kernel(
     lses_stride_H,
     lse_idx,
     HEAD_DIM: tl.constexpr,
+    HEAD_DIM_PADDED: tl.constexpr,
     N_ROUNDED: tl.constexpr,
     IS_BASE_E: tl.constexpr,
 ):
@@ -40,7 +41,8 @@ def _correct_attn_cp_out_kernel(
     """
     batch_idx = tl.program_id(axis=0).to(tl.int64)
     head_idx = tl.program_id(axis=1).to(tl.int64)
-    d_offsets = tl.arange(0, HEAD_DIM)
+    d_offsets = tl.arange(0, HEAD_DIM_PADDED)
+    d_mask = d_offsets < HEAD_DIM
     num_n_offsets = tl.arange(0, N_ROUNDED)
 
     # shape = [N]
@@ -88,10 +90,13 @@ def _correct_attn_cp_out_kernel(
         lse_finally,
     )
     factor = tl.exp(lse_finally) if IS_BASE_E else tl.exp2(lse_finally)
-    output = tl.load(outputs_ptr + output_offsets)
-    output = output * factor
+    output = tl.load(outputs_ptr + output_offsets, mask=d_mask, other=0.0)
+    # Guard against NaN * 0: when a DCP rank has zero local KV tokens,
+    # the attention output is NaN and factor is 0 (from -inf LSE).
+    # IEEE 754 says NaN * 0 = NaN, so we must explicitly zero out.
+    output = tl.where(factor == 0.0, 0.0, output * factor)
 
-    tl.store(new_output_ptr + output_offsets, output)
+    tl.store(new_output_ptr + output_offsets, output, mask=d_mask)
 
 
 class CPTritonContext:
@@ -173,7 +178,12 @@ def correct_attn_out(
         l_sH,
         cp_rank,
     )
-    const_args = {"HEAD_DIM": D, "N_ROUNDED": N, "IS_BASE_E": is_lse_base_on_e}
+    const_args = {
+        "HEAD_DIM": D,
+        "HEAD_DIM_PADDED": triton.next_power_of_2(D),
+        "N_ROUNDED": N,
+        "IS_BASE_E": is_lse_base_on_e,
+    }
     ctx.call_kernel(_correct_attn_cp_out_kernel, grid, *regular_args, **const_args)
     return out, lse
 

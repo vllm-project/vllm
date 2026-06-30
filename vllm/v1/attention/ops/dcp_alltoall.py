@@ -208,13 +208,15 @@ def _dcp_a2a_unpack_combine_kernel(
     out_lse_stride_H,
     N: tl.constexpr,
     HEAD_DIM: tl.constexpr,
+    HEAD_DIM_PADDED: tl.constexpr,
     IS_BASE_E: tl.constexpr,
     RETURN_LSE: tl.constexpr,
     LSE_PACK_DIM: tl.constexpr,
 ):
     batch_idx = tl.program_id(0).to(tl.int64)
     head_idx = tl.program_id(1).to(tl.int64)
-    d_offsets = tl.arange(0, HEAD_DIM)
+    d_offsets = tl.arange(0, HEAD_DIM_PADDED)
+    d_mask = d_offsets < HEAD_DIM
 
     lse_max = -float("inf")
     for rank_idx in tl.static_range(N):
@@ -274,7 +276,7 @@ def _dcp_a2a_unpack_combine_kernel(
     else:
         global_lse = tl.log2(lse_sum) + lse_max
 
-    acc = tl.zeros([HEAD_DIM], dtype=tl.float32)
+    acc = tl.zeros([HEAD_DIM_PADDED], dtype=tl.float32)
     for rank_idx in tl.static_range(N):
         recv_base = (
             rank_idx * recv_stride_N
@@ -301,15 +303,15 @@ def _dcp_a2a_unpack_combine_kernel(
         else:
             weight = tl.exp2(lse_val - global_lse)
         weight = tl.where(weight != weight, 0.0, weight)
-        acc += (
-            tl.load(recv_ptr + recv_base + d_offsets * recv_stride_D).to(tl.float32)
-            * weight
+        out_vals = tl.load(
+            recv_ptr + recv_base + d_offsets * recv_stride_D, mask=d_mask, other=0.0
         )
+        acc += out_vals.to(tl.float32) * weight
 
     final_offsets = (
         batch_idx * out_stride_B + head_idx * out_stride_H + d_offsets * out_stride_D
     )
-    tl.store(out_ptr + final_offsets, acc)
+    tl.store(out_ptr + final_offsets, acc, mask=d_mask)
 
     if RETURN_LSE:
         out_lse_offset = batch_idx * out_lse_stride_B + head_idx * out_lse_stride_H
@@ -380,6 +382,7 @@ def _dcp_a2a_unpack_combine(
         out_lse.stride(1),
         N=world_size,
         HEAD_DIM=head_dim,
+        HEAD_DIM_PADDED=triton.next_power_of_2(head_dim),
         IS_BASE_E=is_lse_base_on_e,
         RETURN_LSE=return_lse,
         LSE_PACK_DIM=lse_pack_dim,
