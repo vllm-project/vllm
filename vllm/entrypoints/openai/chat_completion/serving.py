@@ -753,6 +753,15 @@ class OpenAIServingChat(OpenAIServing):
             # and detokenizer leave right after </think> can be stripped
             # before they leak into the streamed content.
             content_started_arr = [False] * num_choices
+            # Symmetric handling for the reasoning side: some templates wrap
+            # reasoning as "<think>\n" + reasoning + "\n</think>", injecting a
+            # leading newline (first reasoning delta) and a trailing newline
+            # (last reasoning delta before </think>). For parsers that opt in
+            # via ``strip_think_wrapping_ws`` we swallow the leading whitespace
+            # and defer trailing whitespace (only flushing it if more reasoning
+            # follows), so neither leaks into the streamed reasoning.
+            reasoning_started_arr = [False] * num_choices
+            reasoning_pending_ws_arr = [""] * num_choices
         else:
             all_previous_token_ids = None
 
@@ -1216,6 +1225,40 @@ class OpenAIServingChat(OpenAIServing):
                     # handle streaming just a content delta
                     else:
                         delta_message = DeltaMessage(content=delta_text)
+
+                    # Strip the template-injected newlines that wrap reasoning
+                    # ("<think>\n" ... "\n</think>") from the streamed reasoning
+                    # deltas, for parsers that opt in via
+                    # ``strip_think_wrapping_ws``. Swallow leading whitespace
+                    # until real reasoning starts, and defer trailing whitespace
+                    # (it may be an interior newline followed by more reasoning,
+                    # or the final "\n" before </think> that should be dropped).
+                    if (
+                        getattr(reasoning_parser, "strip_think_wrapping_ws", False)
+                        and not self.use_harmony
+                        and delta_message is not None
+                        and delta_message.reasoning
+                    ):
+                        text = reasoning_pending_ws_arr[i] + delta_message.reasoning
+                        if not reasoning_started_arr[i]:
+                            text = text.lstrip()
+                            if text:
+                                reasoning_started_arr[i] = True
+                            else:
+                                # Still all leading whitespace: emit nothing.
+                                reasoning_pending_ws_arr[i] = ""
+                        if reasoning_started_arr[i]:
+                            stripped = text.rstrip()
+                            reasoning_pending_ws_arr[i] = text[len(stripped) :]
+                            text = stripped
+                        delta_message.reasoning = text or None
+                        # Drop a delta that now carries nothing at all.
+                        if (
+                            not delta_message.reasoning
+                            and not delta_message.content
+                            and not delta_message.tool_calls
+                        ):
+                            delta_message = None
 
                     # Strip the reasoning-end artifacts that leak into the
                     # streamed content. The chat template trains the model to

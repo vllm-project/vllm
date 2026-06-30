@@ -119,6 +119,28 @@ INTERIOR_NEWLINES_PRESERVED = {
     "content": "body\n\nmore",
 }
 
+# --- Template-injected think-wrapping newlines (iquest-specific) ---
+# The chat template wraps reasoning as "<think>\n" + reasoning + "\n</think>",
+# so the model emits a leading "\n" after <think> and a trailing "\n" before
+# </think>. Those are scaffolding and must be stripped from the reasoning,
+# while interior newlines (multi-paragraph reasoning) are preserved.
+THINK_WRAPPING_NEWLINES = {
+    "output": "<think>\nLet me try a broader search.\n</think>\n\nbody",
+    "reasoning": "Let me try a broader search.",
+    "content": "body",
+}
+THINK_WRAPPING_NO_START_TOKEN = {
+    # <think> placed in the prompt by the template: output starts with "\n".
+    "output": "\nLet me try a broader search.\n</think>\n\nbody",
+    "reasoning": "Let me try a broader search.",
+    "content": "body",
+}
+THINK_WRAPPING_INTERIOR_PRESERVED = {
+    "output": "<think>\nfirst line\n\nsecond line\n</think>\n\nbody",
+    "reasoning": "first line\n\nsecond line",
+    "content": "body",
+}
+
 TEST_CASES = [
     pytest.param(
         False,
@@ -204,6 +226,21 @@ TEST_CASES = [
         False,
         INTERIOR_NEWLINES_PRESERVED,
         id="interior_newlines_preserved",
+    ),
+    pytest.param(
+        False,
+        THINK_WRAPPING_NEWLINES,
+        id="think_wrapping_newlines",
+    ),
+    pytest.param(
+        False,
+        THINK_WRAPPING_NO_START_TOKEN,
+        id="think_wrapping_no_start_token",
+    ),
+    pytest.param(
+        False,
+        THINK_WRAPPING_INTERIOR_PRESERVED,
+        id="think_wrapping_interior_preserved",
     ),
 ]
 

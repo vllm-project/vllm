@@ -42,6 +42,15 @@ class IquestReasoningParser(BaseThinkingReasoningParser):
         """The token that ends reasoning content."""
         return "</think>"
 
+    # Opt-in flag read by the chat-completion serving layer to strip the
+    # template-injected newlines (``<think>\n`` ... ``\n</think>``) from
+    # streamed reasoning deltas. The chat template wraps reasoning as
+    # ``<think>\n`` + reasoning + ``\n</think>`` (and |trim's the reasoning
+    # itself), so the leading/trailing newlines are pure scaffolding. Other
+    # parsers leave this unset (treated as False), so their behavior is
+    # unchanged.
+    strip_think_wrapping_ws = True
+
     # The template's "thinking disabled" tail (``<think>\n\n</think>\n\n``)
     # leaves only a couple of whitespace tokens after ``</think>``. More than
     # this many trailing tokens means real content follows (e.g. a prior
@@ -108,6 +117,12 @@ class IquestReasoningParser(BaseThinkingReasoningParser):
 
         # Extract reasoning content from the model output.
         reasoning, _, content = model_output.partition(self.end_token)
+
+        # The chat template wraps reasoning as "<think>\n" + reasoning +
+        # "\n</think>" (and |trim's the reasoning itself), so the model emits
+        # a leading "\n" after <think> and a trailing "\n" before </think>.
+        # Strip that scaffolding while preserving interior newlines.
+        reasoning = reasoning.strip()
 
         # The chat template trains the model to emit "\n\n" right after
         # </think>. Strip the leading whitespace so it doesn't leak into the
