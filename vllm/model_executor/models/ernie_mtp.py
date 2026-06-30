@@ -27,7 +27,6 @@ from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -36,11 +35,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
 from .llama import LlamaDecoderLayer
-from .utils import is_pp_missing_parameter, maybe_prefix
+from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 
 class ErnieMultiTokenPredictorLayer(nn.Module):
@@ -147,6 +145,28 @@ class ErnieMTP(nn.Module):
         super().__init__()
 
         self.config = vllm_config.model_config.hf_config
+        # MTP weights are stored under a flat `mtp_*.0.` block in the
+        # checkpoint; rewrite them into `model.layers.{spec_layer}.*`.
+        spec_layer = self.config.num_hidden_layers
+        self.hf_to_vllm_mapper = WeightsMapper(
+            orig_to_new_substr={
+                "model.mtp_emb_norm.0.": f"model.layers.{spec_layer}.mtp_emb_norm.",
+                "model.mtp_hidden_norm.0.": (
+                    f"model.layers.{spec_layer}.mtp_hidden_norm."
+                ),
+                "model.mtp_linear_proj.0.": (
+                    f"model.layers.{spec_layer}.mtp_linear_proj."
+                ),
+                "model.mtp_block.0.": f"model.layers.{spec_layer}.mtp_block.",
+            },
+            orig_to_new_stacked={
+                ".q_proj": (".qkv_proj", "q"),
+                ".k_proj": (".qkv_proj", "k"),
+                ".v_proj": (".qkv_proj", "v"),
+                ".gate_proj": (".gate_up_proj", 0),
+                ".up_proj": (".gate_up_proj", 1),
+            },
+        )
         self.model = ErnieMultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
@@ -185,94 +205,15 @@ class ErnieMTP(nn.Module):
         return self.model.compute_logits(hidden_states, self.lm_head, spec_step_idx)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
+        # Checkpoint bundles the full base model; only MTP, embed_tokens and
+        # lm_head weights belong to this module.
+        def _filter(
+            weights: Iterable[tuple[str, torch.Tensor]],
+        ) -> Iterable[tuple[str, torch.Tensor]]:
+            for name, weight in weights:
+                if any(k in name for k in ("mtp", "embed_tokens", "lm_head")):
+                    yield name, weight
 
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            if self.config.tie_word_embeddings and name.endswith("lm_head.weight"):
-                continue
-            if "rotary_emb.inv_freq" in name:
-                continue
-            if "mtp" in name:
-                name = self._rewrite_spec_layer_name(self.config, name)
-
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                # Skip non-stacked layers and experts (experts handled below).
-                if weight_name not in name:
-                    continue
-                if "mtp" not in name:
-                    continue
-                # We have mlp.experts[0].gate_proj in the checkpoint.
-                # Since we handle the experts below in expert_params_mapping,
-                # we need to skip here BEFORE we update the name, otherwise
-                # name will be updated to mlp.experts[0].gate_up_proj, which
-                # will then be updated below in expert_params_mapping
-                # for mlp.experts[0].gate_gate_up_proj, which breaks load.
-                if ("mlp.experts." in name) and name not in params_dict:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if (
-                    name.endswith(".bias") or name.endswith("_bias")
-                ) and name not in params_dict:
-                    continue
-                # Skip layers on other devices.
-                if is_pp_missing_parameter(name, self):
-                    continue
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                # Skip loading extra bias for GPTQ models.
-                if (
-                    name.endswith(".bias") or name.endswith("_bias")
-                ) and name not in params_dict:
-                    continue
-                # Skip layers on other devices.
-                if is_pp_missing_parameter(name, self):
-                    continue
-
-                # According to DeepSeek-V3 Technical Report, MTP modules
-                # shares embedding layer. We only load the first weights.
-                if "mtp_" not in name and (
-                    "embed_tokens" not in name and "lm_head" not in name
-                ):
-                    continue
-
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
-
-    def _rewrite_spec_layer_name(self, config: PretrainedConfig, name: str) -> str:
-        """
-        Rewrite the weight name to match the format of the original model.
-        """
-        spec_layer_weight_names = [
-            "embed_tokens",
-            "mtp_emb_norm",
-            "mtp_hidden_norm",
-            "mtp_linear_proj",
-        ]
-        layer_idx = config.num_hidden_layers
-        for weight_name in spec_layer_weight_names:
-            if weight_name in name:
-                name = name.replace(
-                    f"model.{weight_name}.0.",
-                    f"model.layers.{layer_idx}.{weight_name}.",
-                )
-                return name
-        name = name.replace(
-            "model.mtp_block.0.", f"model.layers.{layer_idx}.mtp_block."
-        )
-        return name
+        skip_prefixes = ["lm_head"] if self.config.tie_word_embeddings else []
+        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        return loader.load_weights(_filter(weights), mapper=self.hf_to_vllm_mapper)
