@@ -527,7 +527,11 @@ class VllmConfig:
         if self.model_config is not None and self.model_config.is_diffusion:
             return True
 
-        if not self._is_default_v2_model_runner_model():
+        requires_v2 = (
+            self.speculative_config is not None
+            and self.speculative_config.method == "dspark"
+        )
+        if not requires_v2 and not self._is_default_v2_model_runner_model():
             return False
 
         if not HAS_TRITON:

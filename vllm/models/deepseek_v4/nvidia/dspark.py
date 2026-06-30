@@ -28,7 +28,9 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
     hc_head_fused_kernel_tilelang,
+    mhc_fused_post_pre_tilelang,
     mhc_post_tilelang,
+    mhc_pre_tilelang,
 )
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
@@ -715,18 +717,23 @@ class DeepSeekV4DSparkLayer(DeepseekV4DecoderLayer):
         attn_norm_eps = self.attn_norm.variance_epsilon
         if residual is None:
             residual = x_current
-            x_attn, post_mix, res_mix = self.hc_pre(
+            post_mix, res_mix, x_attn = mhc_pre_tilelang(
                 residual,
                 self.hc_attn_fn,
                 self.hc_attn_scale,
                 self.hc_attn_base,
+                self.rms_norm_eps,
+                self.hc_eps,
+                self.hc_eps,
+                self.hc_post_alpha,
+                self.hc_sinkhorn_iters,
                 norm_weight=attn_norm_weight,
                 norm_eps=attn_norm_eps,
             )
         else:
             assert post_mix is not None
             assert res_mix is not None
-            residual, post_mix, res_mix, x_attn = self.hc_post_pre(
+            residual, post_mix, res_mix, x_attn = mhc_fused_post_pre_tilelang(
                 x_current,
                 residual,
                 post_mix,
@@ -734,6 +741,13 @@ class DeepSeekV4DSparkLayer(DeepseekV4DecoderLayer):
                 self.hc_attn_fn,
                 self.hc_attn_scale,
                 self.hc_attn_base,
+                self.rms_norm_eps,
+                self.hc_eps,
+                self.hc_eps,
+                self.hc_post_alpha,
+                self.hc_sinkhorn_iters,
+                n_splits=1,
+                tile_n=1,
                 norm_weight=attn_norm_weight,
                 norm_eps=attn_norm_eps,
             )
@@ -747,7 +761,7 @@ class DeepSeekV4DSparkLayer(DeepseekV4DecoderLayer):
 
         ffn_norm_weight = self.ffn_norm.weight.data
         ffn_norm_eps = self.ffn_norm.variance_epsilon
-        residual, post_mix, res_mix, x_ffn = self.hc_post_pre(
+        residual, post_mix, res_mix, x_ffn = mhc_fused_post_pre_tilelang(
             x_attn,
             residual,
             post_mix,
@@ -755,9 +769,15 @@ class DeepSeekV4DSparkLayer(DeepseekV4DecoderLayer):
             self.hc_ffn_fn,
             self.hc_ffn_scale,
             self.hc_ffn_base,
+            self.rms_norm_eps,
+            self.hc_eps,
+            self.hc_eps,
+            self.hc_post_alpha,
+            self.hc_sinkhorn_iters,
+            n_splits=1,
+            tile_n=1,
             norm_weight=ffn_norm_weight,
             norm_eps=ffn_norm_eps,
-            hc_fn_bf16=self.hc_ffn_fn_bf16,
         )
         x_ffn = self.ffn(x_ffn, input_ids_flat)
         return (

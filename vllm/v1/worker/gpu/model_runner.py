@@ -51,6 +51,7 @@ from vllm.utils.torch_utils import PIN_MEMORY, STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu.async_utils import AsyncOutput, AsyncPoolingOutput
 from vllm.v1.worker.gpu.attn_utils import (
@@ -118,6 +119,17 @@ from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.utils import KVBlockZeroer
 
 logger = init_logger(__name__)
+
+
+def _profile_batch_phase(input_batch: InputBatch) -> str:
+    if input_batch.num_draft_tokens > 0:
+        return "verify"
+    if (
+        input_batch.max_query_len <= 1
+        and input_batch.num_tokens == input_batch.num_reqs
+    ):
+        return "decode"
+    return "prefill"
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
@@ -1401,6 +1413,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
 
         # Last rank: sample tokens
+        phase = _profile_batch_phase(input_batch)
         sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output
         )
@@ -1457,13 +1470,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # ensuring that `copy_event` is recorded before calling postprocess.
         # This sequencing may slightly reduce latency as async D2H copy does not
         # need to wait for the postprocess to finish.
-            self.postprocess_sampled(
-                input_batch.idx_mapping,
-                sampler_output.sampled_token_ids,
-                num_sampled,
-                num_rejected,
-                input_batch.query_start_loc,
-            )
+        self.postprocess_sampled(
+            input_batch.idx_mapping,
+            sampler_output.sampled_token_ids,
+            num_sampled,
+            num_rejected,
+            input_batch.query_start_loc,
+        )
 
         draft_tokens_for_next_step = None
         if self.speculator is not None:
