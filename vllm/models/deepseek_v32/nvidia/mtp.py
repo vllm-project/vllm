@@ -93,10 +93,15 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         # main model fuses that all-reduce into the next norm, but here the
         # recycle hidden is consumed directly, so reduce it now.
         hidden_states = tensor_model_parallel_all_reduce(hidden_states)
-        # Return the pre-final-norm recycle hidden (re-fed as the next spec
-        # step's previous_hidden_states); shared_head norm is applied in
-        # compute_logits. Matches the V2-runner / deepseek_v4 MTP contract.
-        return residual + hidden_states
+        # Recycle the post-final-norm hidden into the next draft step. The
+        # proposer expects (logit_hidden, recycle_hidden) because
+        # model_returns_tuple() is True for the DeepSeekMTPModel architecture
+        # (used by GLM-5.2 / DeepSeek-V3.2). compute_logits applies shared_head
+        # (== final norm) to the pre-norm element, so the logits hidden and the
+        # recycle hidden each get exactly one final norm. Matches
+        # deepseek_mtp.py (PR #45895).
+        hidden_states = residual + hidden_states
+        return hidden_states, self.shared_head(hidden_states)
 
 
 class DeepseekV32MultiTokenPredictor(nn.Module):
