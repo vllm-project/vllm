@@ -6492,6 +6492,65 @@ class GPUModelRunner(
         reserved_after = torch.accelerator.memory_reserved(self.device)
         return max(reserved_after - reserved_before, 0)
 
+    def _profile_cudagraph_memory_separately(
+        self,
+        capture_descs: list[tuple[CUDAGraphMode, list[BatchDescriptor]]],
+        shared_memory_estimate: dict[CUDAGraphMode, int],
+        per_graph_estimate: dict[CUDAGraphMode, int],
+    ) -> int:
+        reserved_before = torch.accelerator.memory_reserved(self.device)
+        for mode, descs in capture_descs:
+            profile_descs = descs[:2]
+            for i, desc in enumerate(profile_descs):
+                self._warmup_before_cudagraph_capture(
+                    desc,
+                    cudagraph_runtime_mode=mode,
+                    profile_seq_lens=(
+                        self._profile_seq_lens_for_cudagraph_memory(mode, i, desc)
+                    ),
+                )
+
+        torch.accelerator.synchronize()
+        torch.accelerator.empty_cache()
+        reserved_after = torch.accelerator.memory_reserved(self.device)
+        persistent_memory_estimate = max(reserved_after - reserved_before, 0)
+
+        for mode, descs in capture_descs:
+            profile_descs = descs[:2]
+            mem_samples: list[int] = []
+
+            for i, desc in enumerate(profile_descs):
+                mem_before = torch.accelerator.get_memory_info()[0]
+                self._warmup_and_capture(
+                    desc,
+                    cudagraph_runtime_mode=mode,
+                    profile_seq_lens=(
+                        self._profile_seq_lens_for_cudagraph_memory(mode, i, desc)
+                    ),
+                    num_warmups=0,
+                )
+                torch.accelerator.synchronize()
+                free_after = torch.accelerator.get_memory_info()[0]
+                mem_samples.append(mem_before - free_after)
+
+            first_capture = mem_samples[0]
+            # Use at least 1 MiB per graph for driver overhead.
+            per_graph = max(mem_samples[1] if len(mem_samples) > 1 else 0, 1 << 20)
+
+            shared_memory_estimate[mode] = first_capture
+            per_graph_estimate[mode] = per_graph * (len(descs) - 1)
+
+            logger.debug(
+                "Estimated %s CUDA graph memory with separate profiling: "
+                "%.2f MiB first-capture + (%d-1) x %.2f MiB per-graph",
+                mode.name,
+                first_capture / (1 << 20),
+                len(descs),
+                per_graph / (1 << 20),
+            )
+
+        return persistent_memory_estimate
+
     @torch.inference_mode()
     def profile_cudagraph_memory(self) -> int:
         self.cudagraph_memory_persistent_estimate = 0
@@ -6551,8 +6610,8 @@ class GPUModelRunner(
             original_pools[id(instance)] = instance.graph_pool
             instance.graph_pool = profiling_pool
 
-        shared_memory_estimate = {}
-        per_graph_estimate = {}
+        shared_memory_estimate: dict[CUDAGraphMode, int] = {}
+        per_graph_estimate: dict[CUDAGraphMode, int] = {}
         persistent_memory_estimate = 0
         encoder_memory_estimate = 0
 
@@ -6568,107 +6627,54 @@ class GPUModelRunner(
                 )
 
                 if use_separate_profiling:
-                    reserved_before = torch.accelerator.memory_reserved(self.device)
-                    for mode, descs in capture_descs:
-                        profile_descs = descs[:2]
-                        for i, desc in enumerate(profile_descs):
-                            self._warmup_before_cudagraph_capture(
-                                desc,
-                                cudagraph_runtime_mode=mode,
-                                profile_seq_lens=(
-                                    self._profile_seq_lens_for_cudagraph_memory(
-                                        mode, i, desc
-                                    )
-                                ),
-                            )
+                    persistent_memory_estimate += (
+                        self._profile_cudagraph_memory_separately(
+                            capture_descs,
+                            shared_memory_estimate,
+                            per_graph_estimate,
+                        )
+                    )
+                    capture_descs = []
 
-                    torch.accelerator.synchronize()
-                    torch.accelerator.empty_cache()
-                    reserved_after = torch.accelerator.memory_reserved(self.device)
-                    persistent_memory_estimate += max(
-                        reserved_after - reserved_before, 0
+                for mode, descs in capture_descs:
+                    profile_descs = descs[:2]
+                    mem_samples: list[int] = []
+
+                    for i, desc in enumerate(profile_descs):
+                        mem_before = torch.accelerator.get_memory_info()[0]
+                        self._warmup_and_capture(
+                            desc,
+                            cudagraph_runtime_mode=mode,
+                            profile_seq_lens=(
+                                min(
+                                    self.max_model_len,
+                                    self.max_num_tokens // desc.num_tokens,
+                                )
+                                if mode == CUDAGraphMode.FULL and i == 0
+                                else None
+                            ),
+                        )
+                        torch.accelerator.synchronize()
+                        free_after = torch.accelerator.get_memory_info()[0]
+                        mem_samples.append(mem_before - free_after)
+
+                    first_capture = mem_samples[0]
+                    # Use at least 1 MiB per graph for driver overhead
+                    per_graph = max(
+                        mem_samples[1] if len(mem_samples) > 1 else 0, 1 << 20
                     )
 
-                    for mode, descs in capture_descs:
-                        profile_descs = descs[:2]
-                        separate_mem_samples: list[int] = []
+                    shared_memory_estimate[mode] = first_capture
+                    per_graph_estimate[mode] = per_graph * (len(descs) - 1)
 
-                        for i, desc in enumerate(profile_descs):
-                            mem_before = torch.accelerator.get_memory_info()[0]
-                            self._warmup_and_capture(
-                                desc,
-                                cudagraph_runtime_mode=mode,
-                                profile_seq_lens=(
-                                    self._profile_seq_lens_for_cudagraph_memory(
-                                        mode, i, desc
-                                    )
-                                ),
-                                num_warmups=0,
-                            )
-                            torch.accelerator.synchronize()
-                            free_after = torch.accelerator.get_memory_info()[0]
-                            separate_mem_samples.append(mem_before - free_after)
-
-                        first_capture = separate_mem_samples[0]
-                        # Use at least 1 MiB per graph for driver overhead
-                        per_graph = max(
-                            (
-                                separate_mem_samples[1]
-                                if len(separate_mem_samples) > 1
-                                else 0
-                            ),
-                            1 << 20,
-                        )
-
-                        shared_memory_estimate[mode] = first_capture
-                        per_graph_estimate[mode] = per_graph * (len(descs) - 1)
-
-                        logger.debug(
-                            "Estimated %s CUDA graph memory with separate "
-                            "profiling: %.2f MiB first-capture + "
-                            "(%d-1) × %.2f MiB per-graph",
-                            mode.name,
-                            first_capture / (1 << 20),
-                            len(descs),
-                            per_graph / (1 << 20),
-                        )
-                else:
-                    for mode, descs in capture_descs:
-                        profile_descs = descs[:2]
-                        mem_samples: list[int] = []
-
-                        for i, desc in enumerate(profile_descs):
-                            mem_before = torch.accelerator.get_memory_info()[0]
-                            self._warmup_and_capture(
-                                desc,
-                                cudagraph_runtime_mode=mode,
-                                profile_seq_lens=(
-                                    self._profile_seq_lens_for_cudagraph_memory(
-                                        mode, i, desc
-                                    )
-                                ),
-                            )
-                            torch.accelerator.synchronize()
-                            free_after = torch.accelerator.get_memory_info()[0]
-                            mem_samples.append(mem_before - free_after)
-
-                        first_capture = mem_samples[0]
-                        # Use at least 1 MiB per graph for driver overhead
-                        per_graph = max(
-                            mem_samples[1] if len(mem_samples) > 1 else 0, 1 << 20
-                        )
-
-                        shared_memory_estimate[mode] = first_capture
-                        per_graph_estimate[mode] = per_graph * (len(descs) - 1)
-
-                        logger.debug(
-                            "Estimated %s CUDA graph memory: "
-                            "%.2f MiB first-capture + (%d-1) × %.2f MiB per-graph",
-                            mode.name,
-                            first_capture / (1 << 20),
-                            len(descs),
-                            per_graph / (1 << 20),
-                        )
+                    logger.debug(
+                        "Estimated %s CUDA graph memory: "
+                        "%.2f MiB first-capture + (%d-1) x %.2f MiB per-graph",
+                        mode.name,
+                        first_capture / (1 << 20),
+                        len(descs),
+                        per_graph / (1 << 20),
+                    )
 
                 if encoder_cudagraph_manager is not None:
                     mem_before = torch.accelerator.get_memory_info()[0]
@@ -6741,9 +6747,9 @@ class GPUModelRunner(
         # can reuse the memory pool allocated for the large shapes.
         set_cudagraph_capturing_enabled(True)
         with self._freeze_gc(), graph_capture(device=self.device):
+            self._reserve_attention_workspace_for_cudagraph_capture()
             torch.accelerator.synchronize()
             torch.accelerator.empty_cache()
-            self._reserve_attention_workspace_for_cudagraph_capture()
             start_free_gpu_memory = torch.accelerator.get_memory_info()[0]
 
             for (
