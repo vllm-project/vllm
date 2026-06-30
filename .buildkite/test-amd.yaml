@@ -114,26 +114,6 @@ steps:
 
 #----------------------------------------------------------  mi250 · compile  ----------------------------------------------------------#
 
-- label: PyTorch Compilation Unit Tests # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  torch_nightly: true
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/compilation/
-  - vllm/model_executor/layers/
-  - vllm/v1/worker/
-  - vllm/v1/attention/
-  - vllm/v1/cudagraph_dispatcher.py
-  - vllm/config/compilation.py
-  - csrc/
-  - tests/compile
-  - vllm/platforms/rocm.py
-  commands:
-  - "find compile/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
-
 - label: PyTorch Fullgraph Smoke Test # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
@@ -497,6 +477,26 @@ steps:
   - pytest -v -s benchmarks/
 
 #----------------------------------------------------------  mi300 · compile  ----------------------------------------------------------#
+
+- label: PyTorch Compilation Unit Tests # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_1
+  torch_nightly: true
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/compilation/
+  - vllm/model_executor/layers/
+  - vllm/v1/worker/
+  - vllm/v1/attention/
+  - vllm/v1/cudagraph_dispatcher.py
+  - vllm/config/compilation.py
+  - csrc/
+  - tests/compile
+  - vllm/platforms/rocm.py
+  commands:
+  - "find compile/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
 
 - label: Fusion E2E Config Sweep (H100-MI300) # TBD
   timeout_in_minutes: 180
