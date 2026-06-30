@@ -625,7 +625,100 @@ class BaseRenderer(ABC, Generic[_T]):
         prompts: Sequence[DictPrompt],
         params: TokenizeParams,
     ) -> list[TokPrompt]:
+        batch_result = self._batch_tokenize_text_prompts(prompts, params)
+        if batch_result is not None:
+            return batch_result
+
         return [self.tokenize_prompt(prompt, params) for prompt in prompts]
+
+    def _batch_tokenize_text_prompts(
+        self,
+        prompts: Sequence[DictPrompt],
+        params: TokenizeParams,
+    ) -> list[TokPrompt] | None:
+        """Batch-tokenize simple text prompts when the tokenizer supports it."""
+        if params.needs_detokenization:
+            return None
+
+        tokenizer = self.tokenizer
+        if tokenizer is None:
+            return None
+
+        batch_tokenize = getattr(tokenizer, "batch_encode_plus", None)
+        if not callable(batch_tokenize) and callable(tokenizer):
+            batch_tokenize = tokenizer
+        if not callable(batch_tokenize):
+            return None
+
+        text_prompts: list[TextPrompt] = []
+        for prompt in prompts:
+            if "encoder_prompt" in prompt:
+                return None
+            if "prompt_token_ids" in prompt or "prompt_embeds" in prompt:
+                return None
+            if not isinstance(prompt.get("prompt"), str):
+                return None
+            text_prompts.append(prompt)  # type: ignore[arg-type]
+
+        if not text_prompts:
+            return []
+
+        processed_prompts: list[TextPrompt] = []
+        prompt_texts: list[str] = []
+        wants_offsets: list[bool] = []
+        for prompt in text_prompts:
+            prompt = prompt.copy()
+            prompt = params.apply_pre_tokenization(tokenizer, prompt)
+            processed_prompts.append(prompt)
+            prompt_texts.append(prompt["prompt"])
+            wants_offsets.append(self._wants_offsets(prompt, params))
+
+        kwargs = params.get_encode_kwargs()
+        if any(wants_offsets):
+            kwargs = {**kwargs, "return_offsets_mapping": True}
+        try:
+            encoded = batch_tokenize(prompt_texts, **kwargs)
+        except (NotImplementedError, TypeError):
+            return None
+
+        input_ids = (
+            encoded.get("input_ids")
+            if isinstance(encoded, Mapping)
+            else getattr(encoded, "input_ids", None)
+        )
+        if input_ids is None or len(input_ids) != len(processed_prompts):
+            return None
+
+        offset_mappings = None
+        if any(wants_offsets):
+            offset_mappings = (
+                encoded.get("offset_mapping")
+                if isinstance(encoded, Mapping)
+                else getattr(encoded, "offset_mapping", None)
+            )
+            if (
+                offset_mappings is None
+                or len(offset_mappings) != len(processed_prompts)
+            ):
+                return None
+
+        return [
+            params.apply_post_tokenization(
+                tokenizer,
+                self._build_tokens_prompt(
+                    prompt_token_ids,
+                    prompt,
+                    offset_mapping=(
+                        offset_mappings[i]
+                        if offset_mappings is not None and wants_offsets[i]
+                        else None
+                    ),
+                ),
+            )
+            for i, (prompt, prompt_token_ids) in enumerate(
+                zip(processed_prompts, input_ids)
+            )
+        ]
 
     async def tokenize_prompt_async(
         self,

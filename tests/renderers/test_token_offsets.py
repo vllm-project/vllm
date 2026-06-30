@@ -71,6 +71,24 @@ class TestTokenizePromptOffsets:
             assert isinstance(s, int) and isinstance(e, int)
             assert 0 <= s <= e <= text_len
 
+    def test_batch_text_prompts_with_flag_return_offsets(self, fast_tokenizer):
+        renderer = _make_base_renderer_with(fast_tokenizer)
+        params = TokenizeParams(max_total_tokens=None, return_token_offsets=True)
+        prompts = [{"prompt": "Hello, world."}, {"prompt": "Goodbye."}]
+
+        results = renderer.tokenize_prompts(prompts, params)
+
+        assert len(results) == len(prompts)
+        for result, prompt in zip(results, prompts):
+            assert "prompt_token_ids" in result
+            offsets = result["prompt_token_offsets"]
+            assert offsets is not None
+            assert len(offsets) == len(result["prompt_token_ids"])
+            text_len = len(prompt["prompt"])
+            for s, e in offsets:
+                assert isinstance(s, int) and isinstance(e, int)
+                assert 0 <= s <= e <= text_len
+
     def test_base_renderer_without_override_yields_no_offsets(self, fast_tokenizer):
         """A renderer that does not override ``_can_produce_offsets`` never
         emits offsets, even with a fast tokenizer and the flag set. This locks
