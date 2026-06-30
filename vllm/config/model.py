@@ -1251,6 +1251,10 @@ class ModelConfig:
     def is_mm_prefix_lm(self) -> bool:
         return self.model_arch_config.is_mm_prefix_lm
 
+    @property
+    def rswa_window(self) -> int | None:
+        return self.model_arch_config.rswa_window
+
     def get_head_size(self) -> int:
         return self.model_arch_config.head_size
 
