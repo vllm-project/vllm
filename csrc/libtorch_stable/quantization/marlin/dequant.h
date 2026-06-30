@@ -536,11 +536,19 @@ __device__ inline void dequant_fp8_scales<nv_bfloat162, vllm::kFE4M3fn.id()>(
   constexpr int FP8_EXPONENT = 4, BF16_EXPONENT = 8;
   constexpr int RIGHT_SHIFT = BF16_EXPONENT - FP8_EXPONENT;
   constexpr int MASK = 0x7F007F00;
+  // Re-bias the exponent when widening FP8 E4M3 (bias 7) to BF16 (bias 127).
+  // Shifting alone (as in the half2 path, whose 5-bit FP16 exponent lines up
+  // with FP8's after the shift) leaves the BF16 exponent un-biased, collapsing
+  // every scale to ~2^-120 and zeroing the dequantized weights (issue #34694).
+  // The half2 path emits scale * 2^-8 (compensated downstream), so match that
+  // convention here: add (127 - 7 - 8) = 112 to each BF16 exponent field.
+  // (FP8 denormal scales are assumed not to occur, as in the kFE8M0fnu path.)
+  constexpr int BF16_BIAS = 0x38003800;  // (112 << 7) replicated per bf16 lane
 
-  // Extract and shift FP8 values to BF16 format
-  int Out1 = ((q & 0x80008000) >> 1) | ((q & MASK) >> RIGHT_SHIFT);
+  // Sign-extend and shift FP8 values to BF16 format, re-biasing the exponent
+  int Out1 = (q & 0x80008000) | (((q & MASK) >> RIGHT_SHIFT) + BF16_BIAS);
   q <<= 8;
-  int Out2 = ((q & 0x80008000) >> 1) | ((q & MASK) >> RIGHT_SHIFT);
+  int Out2 = (q & 0x80008000) | (((q & MASK) >> RIGHT_SHIFT) + BF16_BIAS);
 
   // Note: reverse indexing is intentional because weights are permuted
   frag_b[1] = *reinterpret_cast<const nv_bfloat162*>(&Out1);
