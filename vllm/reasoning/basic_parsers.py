@@ -83,41 +83,6 @@ class BaseThinkingReasoningParser(ReasoningParser):
         end_token_id = self.end_token_id
         return end_token_id in delta_ids
 
-    # The template's "thinking disabled" tail (``<think>\n\n</think>\n\n``)
-    # leaves only a couple of whitespace tokens after ``</think>``. More than
-    # this many trailing tokens means real content follows (e.g. a prior
-    # conversation turn), so reasoning has not ended for the upcoming output.
-    _PROMPT_REASONING_END_TAIL = 8
-
-    def is_prompt_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        """Tail-only reasoning-end detection for prompts.
-
-        Unlike :meth:`is_reasoning_end`, which returns True for any ``</think>``
-        in the sequence, this only reports an ended reasoning section when the
-        ``</think>`` sits at the very tail of the prompt followed solely by
-        whitespace — the ``enable_thinking=False`` template pattern. A prior
-        turn's replayed ``</think>`` (followed by real content and a new
-        generation boundary) is correctly treated as *not* ended, so the
-        current turn's freshly generated reasoning is still parsed.
-        """
-        last_end = -1
-        for i in range(len(input_ids) - 1, -1, -1):
-            if input_ids[i] == self.end_token_id:
-                last_end = i
-                break
-        if last_end == -1:
-            return False
-
-        trailing = input_ids[last_end + 1 :]
-        # A fresh, still-open think block after the last </think> means the
-        # model is reasoning again (should not happen in a prompt, but be safe).
-        if self.start_token_id in trailing:
-            return False
-        if len(trailing) > self._PROMPT_REASONING_END_TAIL:
-            return False
-        decoded = self.model_tokenizer.decode(list(trailing), skip_special_tokens=False)
-        return decoded.strip() == ""
-
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """
         Extract the content after the end tokens

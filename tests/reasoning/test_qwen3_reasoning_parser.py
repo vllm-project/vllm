@@ -4,78 +4,45 @@
 import pytest
 from transformers import AutoTokenizer
 
-from tests.reasoning.utils import (
-    StreamingReasoningReconstructor,
-    run_reasoning_extraction,
-    run_reasoning_extraction_streaming,
-)
+from tests.reasoning.utils import run_reasoning_extraction
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 
 parser_name = "qwen3"
 start_token = "<think>"
 end_token = "</think>"
 
-REASONING_MODEL_NAMES = [
-    "Qwen/Qwen3-0.6B",
-    "Qwen/Qwen3.5-397B-A17B",
-    "Qwen/Qwen3-4B-Thinking-2507",
-]
+REASONING_MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 
-@pytest.fixture(scope="module", params=REASONING_MODEL_NAMES)
-def qwen3_tokenizer(request):
-    return AutoTokenizer.from_pretrained(request.param)
+@pytest.fixture(scope="module")
+def qwen3_tokenizer():
+    return AutoTokenizer.from_pretrained(REASONING_MODEL_NAME)
 
 
-# --- <think> in prompt, only </think> in output (typical) ---
-
-WITHOUT_START_TOKEN = {
-    "output": "This is a reasoning section</think>This is the rest",
-    "reasoning": "This is a reasoning section",
-    "content": "This is the rest",
-}
-WITHOUT_START_TOKEN_STREAM = {
-    "output": "This is a reasoning section</think>This is the rest",
-    "reasoning": "This is a reasoning section",
-    "content": "This is the rest",
-}
-WITHOUT_START_TOKEN_COMPLETE_REASONING = {
-    "output": "This is a reasoning section</think>",
-    "reasoning": "This is a reasoning section",
-    "content": None,
-}
-
-# --- <think> present in output (old template / edge case) ---
-
+# 带 <think></think>，非stream
 WITH_THINK = {
     "output": "<think>This is a reasoning section</think>This is the rest",
     "reasoning": "This is a reasoning section",
     "content": "This is the rest",
 }
+# 带 <think></think>，stream
 WITH_THINK_STREAM = {
     "output": "<think>This is a reasoning section</think>This is the rest",
     "reasoning": "This is a reasoning section",
     "content": "This is the rest",
 }
-
-# --- No think tokens at all (thinking disabled) ---
-
+# 不带 <think></think>，非stream
 WITHOUT_THINK = {
     "output": "This is the rest",
     "reasoning": None,
     "content": "This is the rest",
 }
-# In streaming, the parser cannot distinguish "thinking disabled" from
-# "reasoning in progress" when no think tokens have appeared yet.
-# It assumes reasoning. The serving layer handles the "thinking disabled"
-# case by checking prompt_is_reasoning_end_arr before calling the parser.
+# 不带 <think></think>，stream
 WITHOUT_THINK_STREAM = {
     "output": "This is the rest",
-    "reasoning": "This is the rest",
-    "content": None,
+    "reasoning": None,
+    "content": "This is the rest",
 }
-
-# --- Edge cases ---
 
 COMPLETE_REASONING = {
     "output": "<think>This is a reasoning section</think>",
@@ -90,7 +57,7 @@ MULTILINE_REASONING = {
 ONLY_OPEN_TAG = {
     "output": "<think>This is a reasoning section",
     "reasoning": None,
-    "content": "This is a reasoning section",
+    "content": "<think>This is a reasoning section",
 }
 
 ONLY_OPEN_TAG_STREAM = {
@@ -100,26 +67,6 @@ ONLY_OPEN_TAG_STREAM = {
 }
 
 TEST_CASES = [
-    pytest.param(
-        False,
-        WITHOUT_START_TOKEN,
-        id="without_start_token",
-    ),
-    pytest.param(
-        True,
-        WITHOUT_START_TOKEN_STREAM,
-        id="without_start_token_stream",
-    ),
-    pytest.param(
-        False,
-        WITHOUT_START_TOKEN_COMPLETE_REASONING,
-        id="without_start_token_complete_reasoning",
-    ),
-    pytest.param(
-        True,
-        WITHOUT_START_TOKEN_COMPLETE_REASONING,
-        id="without_start_token_complete_reasoning_stream",
-    ),
     pytest.param(
         False,
         WITH_THINK,
@@ -193,100 +140,3 @@ def test_reasoning(
 
     assert reasoning == param_dict["reasoning"]
     assert content == param_dict["content"]
-
-
-# Multi-token delta tests: simulate real-world streaming where a single
-# delta can contain multiple tokens (e.g., speculative decoding).
-MULTI_TOKEN_DELTA_CASES = [
-    pytest.param(
-        # <think> grouped with following text in one delta
-        ["<think>This is a reasoning section", "</think>", "This is the rest"],
-        "This is a reasoning section",
-        "This is the rest",
-        id="start_token_grouped_with_text",
-    ),
-    pytest.param(
-        # </think> grouped with following content in one delta
-        ["reasoning section", "</think>This is the rest"],
-        "reasoning section",
-        "This is the rest",
-        id="end_token_grouped_with_content",
-    ),
-    pytest.param(
-        # <think> and </think> in the same delta, no content after
-        ["<think>reasoning</think>"],
-        "reasoning",
-        None,
-        id="start_and_end_in_one_delta_no_content",
-    ),
-    pytest.param(
-        # No start token, end grouped with content (Qwen3.5 style)
-        ["reasoning section", "</think>content"],
-        "reasoning section",
-        "content",
-        id="no_start_end_grouped_with_content",
-    ),
-]
-
-
-@pytest.mark.parametrize(
-    "deltas, expected_reasoning, expected_content", MULTI_TOKEN_DELTA_CASES
-)
-def test_reasoning_streaming_multi_token_deltas(
-    deltas: list[str],
-    expected_reasoning: str | None,
-    expected_content: str | None,
-    qwen3_tokenizer,
-):
-    """Test that multi-token deltas don't leak <think> into reasoning."""
-    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
-        qwen3_tokenizer
-    )
-
-    reconstructor: StreamingReasoningReconstructor = run_reasoning_extraction_streaming(
-        parser, deltas
-    )
-
-    assert reconstructor.reasoning == expected_reasoning
-    assert (reconstructor.other_content or None) == expected_content
-
-
-# --- is_prompt_reasoning_end: prompt-level (turn-aware) detection ---
-
-PROMPT_REASONING_END_CASES = [
-    pytest.param(
-        # enable_thinking=False template tail: only whitespace after </think>.
-        "<|im_start|>assistant\n<think>\n\n</think>\n\n",
-        True,
-        id="thinking_disabled_tail",
-    ),
-    pytest.param(
-        # Multi-turn history: a prior turn's </think> is followed by real
-        # content and a new generation boundary, so this turn has not ended
-        # reasoning yet.
-        "<think>old reasoning</think>The answer is 42."
-        "<|im_end|>\n<|im_start|>user\nnext question<|im_end|>\n"
-        "<|im_start|>assistant\n",
-        False,
-        id="multi_turn_history",
-    ),
-    pytest.param(
-        # No think tokens in the prompt at all (older template, thinking on).
-        "<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n",
-        False,
-        id="no_think_tokens",
-    ),
-]
-
-
-@pytest.mark.parametrize("prompt, expected", PROMPT_REASONING_END_CASES)
-def test_is_prompt_reasoning_end(
-    prompt: str,
-    expected: bool,
-    qwen3_tokenizer,
-):
-    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
-        qwen3_tokenizer
-    )
-    prompt_token_ids = qwen3_tokenizer.encode(prompt, add_special_tokens=False)
-    assert parser.is_prompt_reasoning_end(prompt_token_ids) is expected

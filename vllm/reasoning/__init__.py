@@ -52,6 +52,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "hunyuan_a13b_reasoning_parser",
         "HunyuanA13BReasoningParser",
     ),
+    "iquest": (
+        "iquest_reasoning_parser",
+        "IquestReasoningParser",
+    ),
     "kimi_k2": (
         "deepseek_v3_reasoning_parser",
         "DeepSeekV3ReasoningWithThinkingParser",
