@@ -50,9 +50,7 @@ _R = TypeVar("_R")
 
 pynvml = import_pynvml()
 
-_COMPILED_CUDA_ARCH_RE = re.compile(
-    r"^(?P<major>\d+)\.(?P<minor>\d+)(?P<kind>[af])?$"
-)
+_COMPILED_CUDA_ARCH_RE = re.compile(r"^(?P<major>\d+)\.(?P<minor>\d+)(?P<kind>[af])?$")
 
 # pytorch 2.5 uses cudnn sdpa by default, which will cause crash on some models
 # see https://github.com/huggingface/diffusers/issues/9704 for details
