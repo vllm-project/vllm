@@ -2,14 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-from vllm.exceptions import VLLMValidationError
+
 from vllm.entrypoints.openai.parser.harmony_utils import (
     parse_chat_input_to_harmony_message,
 )
 from vllm.entrypoints.openai.responses.harmony import (
-    response_previous_input_to_harmony,
     response_input_to_harmony,
+    response_previous_input_to_harmony,
 )
+from vllm.exceptions import VLLMValidationError
 
 
 @pytest.fixture()
