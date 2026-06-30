@@ -1539,7 +1539,7 @@ DEFAULT_CONFIG = {
     "model": {
         "init_args": {
             "feature_extractor": {
-                "class_path": "decoder.feature_extractors.EncodecFeatures",
+                "class_path": "EncodecFeatures",
                 "init_args": {
                     "encodec_model": "encodec_24khz",
                     "bandwidths": [6.6, 6.6, 6.6, 6.6],
@@ -1551,7 +1551,7 @@ DEFAULT_CONFIG = {
                 },
             },
             "backbone": {
-                "class_path": "decoder.models.VocosBackbone",
+                "class_path": "VocosBackbone",
                 "init_args": {
                     "input_channels": 512,
                     "dim": 768,
@@ -1561,7 +1561,7 @@ DEFAULT_CONFIG = {
                 },
             },
             "head": {
-                "class_path": "decoder.heads.ISTFTHead",
+                "class_path": "ISTFTHead",
                 "init_args": {
                     "dim": 768,
                     "n_fft": 2400,
@@ -1579,15 +1579,16 @@ def instantiate_class(args: tuple[tp.Any, ...], init: dict[str, tp.Any]) -> tp.A
     if not isinstance(args, tuple):
         args = (args,)
     class_path = init["class_path"]
+    class_name = class_path.split(".")[-1]
 
     mapping = {
-        "decoder.feature_extractors.EncodecFeatures": EncodecFeatures,
-        "decoder.models.VocosBackbone": VocosBackbone,
-        "decoder.heads.ISTFTHead": ISTFTHead,
+        "EncodecFeatures": EncodecFeatures,
+        "VocosBackbone": VocosBackbone,
+        "ISTFTHead": ISTFTHead,
     }
 
-    if class_path in mapping:
-        return mapping[class_path](*args, **kwargs)
+    if class_name in mapping:
+        return mapping[class_name](*args, **kwargs)
 
     raise ValueError(f"Unsupported class_path in configuration: {class_path}")
 
