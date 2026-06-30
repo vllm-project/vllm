@@ -82,7 +82,6 @@ async def init_generate_state(
     from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
     from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
     from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
-    from vllm.entrypoints.serve.disagg.serving import ServingTokens
     from vllm.entrypoints.serve.utils.fingerprint import set_default_fingerprint_mode
 
     # Applied before any serving class is constructed so that each one picks
@@ -223,20 +222,6 @@ async def init_generate_state(
             is_reasoning_model=args.cohere_is_reasoning_model,
         )
         if CohereServingChatV2 is not None and "generate" in supported_tasks
-        else None
-    )
-    state.serving_tokens = (
-        ServingTokens(
-            engine_client,
-            state.openai_serving_models,
-            state.online_renderer,
-            request_logger=request_logger,
-            return_tokens_as_token_ids=args.return_tokens_as_token_ids,
-            enable_prompt_tokens_details=args.enable_prompt_tokens_details,
-            enable_log_outputs=args.enable_log_outputs,
-            force_no_detokenize=args.tokens_only,
-        )
-        if "generate" in supported_tasks
         else None
     )
 

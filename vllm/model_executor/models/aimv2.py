@@ -20,7 +20,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
 from vllm.transformers_utils.configs.ovis import AIMv2Config
 
 
@@ -194,6 +194,13 @@ class AIMv2Transformer(nn.Module):
 
 
 class AIMv2Model(torch.nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".fc1": (".fc13", 0),
+            ".fc3": (".fc13", 1),
+        }
+    )
+
     def __init__(
         self,
         config: AIMv2Config,
@@ -218,34 +225,13 @@ class AIMv2Model(torch.nn.Module):
         return x
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            (".fc13", ".fc1", 0),
-            (".fc13", ".fc3", 1),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            # post_layernorm is optional in SiglipVisionModel
-            if (
-                name.startswith("trunk.post_trunk_norm")
-                and self.trunk.post_trunk_norm is None
-            ):
-                continue
-
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(
+            self,
+            # post_trunk_norm is optional (absent for clip-skip backbones).
+            skip_prefixes=(
+                ["trunk.post_trunk_norm."]
+                if self.trunk.post_trunk_norm is None
+                else None
+            ),
+        )
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

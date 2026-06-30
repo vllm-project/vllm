@@ -170,6 +170,10 @@ mod tests {
         fn token_to_id(&self, _token: &str) -> Option<u32> {
             unreachable!()
         }
+
+        fn id_to_token(&self, _id: u32) -> Option<String> {
+            unreachable!()
+        }
     }
 
     #[test]
@@ -248,6 +252,10 @@ mod tests {
         fn token_to_id(&self, _token: &str) -> Option<u32> {
             unreachable!()
         }
+
+        fn id_to_token(&self, _id: u32) -> Option<String> {
+            unreachable!()
+        }
     }
 
     #[test]
@@ -318,6 +326,10 @@ mod tests {
         }
 
         fn token_to_id(&self, _token: &str) -> Option<u32> {
+            unreachable!()
+        }
+
+        fn id_to_token(&self, _id: u32) -> Option<String> {
             unreachable!()
         }
     }
