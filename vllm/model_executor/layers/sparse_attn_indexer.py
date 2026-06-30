@@ -44,98 +44,30 @@ RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 MXFP4_BLOCK_SIZE = 32
 
 
-def _can_use_cutedsl_dcp_merge(
+def _assert_cutedsl_dcp_merge_supported(
     logits: torch.Tensor,
     topk_indices: torch.Tensor,
     k: int,
-) -> bool:
-    # Single gate for the CuteDSL DCP merge: the Triton pack kernel + the CuteDSL
-    # stable-topk selector. The Triton pack itself has no shape/topk constraints
-    # (it tiles rows x topk via strides and masks empty shards), so the
-    # `k in (...)` / `rows >= 256` requirements come from the selector kernel,
-    # and `has_cutedsl()` covers both (the pack lives in a CuteDSL module).
-    return (
-        has_cutedsl()
-        and logits.device.type == "cuda"
-        and logits.dtype == torch.float32
-        and topk_indices.dtype == torch.int32
-        and k in (512, 1024, 2048)
-        and topk_indices.shape[0] >= 256
-    )
-
-
-def _stable_topk_from_candidates_fp64(
-    candidate_scores: torch.Tensor,
-    candidate_token_ids: torch.Tensor,
-    k: int,
-) -> torch.Tensor:
-    """Stable top-K fallback matching the CuteDSL DCP selector order."""
-    num_rows, num_candidates = candidate_scores.shape
-    device = candidate_scores.device
-    select_k = min(k, num_candidates)
-    valid = candidate_token_ids >= 0
-    bits = (
-        candidate_scores.to(torch.float32).view(torch.int32).to(torch.int64)
-        & 0xFFFFFFFF
-    )
-    sign = (bits >> 31) & 1
-    score_key = (
-        torch.where(
-            sign.bool(),
-            bits ^ 0xFFFFFFFF,
-            bits ^ 0x80000000,
+) -> None:
+    # The DCP merge only supports the CuteDSL path (Triton pack kernel + CuteDSL
+    # stable-topk selector); there is no PyTorch fallback. The first cut targets
+    # Blackwell/Hopper with index_topk in (512, 1024, 2048) (the selector's radix
+    # sizing); the Triton pack itself has no shape/topk constraints.
+    if not has_cutedsl():
+        raise RuntimeError(
+            "DCP sparse-indexer merge requires CuteDSL; install it or disable DCP."
         )
-        & 0xFFFFFFFF
-    )
-    id_key = (~candidate_token_ids.to(torch.int64)) & 0xFFFFFFFF
-    key = (score_key << 32) | id_key
-    key = torch.where(valid, key, torch.zeros_like(key))
-    topk_key = key ^ torch.iinfo(torch.int64).min
-    _, topk_pos = topk_key.topk(select_k, dim=-1)
-
-    selected = candidate_token_ids.gather(1, topk_pos).to(torch.int32)
-    selected_valid = valid.gather(1, topk_pos)
-    selected = torch.where(selected_valid, selected, selected.new_full((), -1))
-    if select_k == k:
-        return selected
-    pad = torch.full((num_rows, k - select_k), -1, dtype=torch.int32, device=device)
-    return torch.cat((selected, pad), dim=1)
-
-
-def _stable_topk_from_candidates(
-    candidate_scores: torch.Tensor,
-    candidate_token_ids: torch.Tensor,
-    k: int,
-) -> torch.Tensor:
-    """Deterministic top-K over an already-pruned candidate set.
-
-    Ranks by score descending, then lowest global token id -- a total order, so
-    the result is identical on every DCP rank (plain ``torch.topk`` breaks ties
-    nondeterministically). Only the selected SET is meaningful -- array order is
-    implementation-defined. ``candidate_token_ids`` holds global token ids
-    (``-1`` marks padding).
-    """
-    num_rows, num_candidates = candidate_scores.shape
-    device = candidate_scores.device
-    if num_candidates == 0:
-        return torch.full((num_rows, k), -1, dtype=torch.int32, device=device)
-    return _stable_topk_from_candidates_fp64(candidate_scores, candidate_token_ids, k)
-
-
-def _local_dcp_indices_to_global(
-    local_indices: torch.Tensor,
-    dcp_rank: int,
-    dcp_world_size: int,
-    cp_interleave: int,
-) -> torch.Tensor:
-    valid = local_indices >= 0
-    local = local_indices.to(torch.int64).clamp_min(0)
-    global_indices = (
-        (local // cp_interleave) * (dcp_world_size * cp_interleave)
-        + dcp_rank * cp_interleave
-        + local % cp_interleave
-    )
-    return torch.where(valid, global_indices, -1).to(torch.int32)
+    if logits.device.type != "cuda":
+        raise RuntimeError("DCP sparse-indexer merge requires CUDA tensors.")
+    if logits.dtype != torch.float32 or topk_indices.dtype != torch.int32:
+        raise RuntimeError(
+            "DCP sparse-indexer merge requires fp32 logits and int32 indices."
+        )
+    if k not in (512, 1024, 2048):
+        raise RuntimeError(
+            f"DCP sparse-indexer merge requires index_topk in (512, 1024, 2048); "
+            f"got {k}."
+        )
 
 
 def _merge_dcp_topk_global(
@@ -162,68 +94,32 @@ def _merge_dcp_topk_global(
     if dcp_world_size <= 1:
         return
 
-    # Single CuteDSL path: Triton-pack each rank's (score, global_id) candidates
-    # on-device, all-gather, then the CuteDSL stable-topk selector.
-    if _can_use_cutedsl_dcp_merge(logits, topk_indices, topk_tokens):
-        try:
-            from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
-                pack_dcp_topk_candidates_cutedsl,
-                stable_topk_from_gathered_candidates_cutedsl,
-            )
-
-            packed = torch.empty(
-                (*topk_indices.shape, 2),
-                dtype=torch.float32,
-                device=topk_indices.device,
-            )
-            pack_dcp_topk_candidates_cutedsl(
-                logits,
-                topk_indices,
-                packed,
-                dcp_rank,
-                dcp_world_size,
-                cp_interleave,
-                row_starts,
-            )
-            gathered = get_dcp_group().all_gather(packed, dim=1)
-            stable_topk_from_gathered_candidates_cutedsl(
-                gathered, topk_tokens, out=topk_indices
-            )
-            return
-        except Exception as exc:
-            logger.warning_once(
-                "Falling back from CuteDSL DCP candidate merge kernels: %s", str(exc)
-            )
-
-    # PyTorch fallback: pack (score, global_id) so the candidate exchange is a
-    # single all-gather (token ids < max_model_len << 2**24, exact in fp32), then
-    # a deterministic fp64 stable top-k.
-    valid = topk_indices >= 0
-    score_indices = topk_indices.clamp_min(0).to(torch.long)
-    if row_starts is not None:
-        score_indices = score_indices + row_starts.to(torch.long).view(-1, 1)
-    if logits.shape[1] == 0:
-        local_scores = torch.full(
-            topk_indices.shape,
-            float("-inf"),
-            dtype=torch.float32,
-            device=topk_indices.device,
-        )
-    else:
-        score_indices = score_indices.clamp_max(logits.shape[1] - 1)
-        local_scores = logits.gather(1, score_indices)
-        local_scores = local_scores.masked_fill(~valid, float("-inf"))
-    global_indices = _local_dcp_indices_to_global(
-        topk_indices, dcp_rank, dcp_world_size, cp_interleave
+    # CuteDSL-only path (no PyTorch fallback): Triton-pack each rank's
+    # (score, global_id) candidates on-device, all-gather, then the CuteDSL
+    # stable-topk selector.
+    _assert_cutedsl_dcp_merge_supported(logits, topk_indices, topk_tokens)
+    from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
+        pack_dcp_topk_candidates_cutedsl,
+        stable_topk_from_gathered_candidates_cutedsl,
     )
-    packed = torch.stack(
-        (local_scores.float(), global_indices.to(torch.float32)), dim=-1
-    ).contiguous()
+
+    packed = torch.empty(
+        (*topk_indices.shape, 2),
+        dtype=torch.float32,
+        device=topk_indices.device,
+    )
+    pack_dcp_topk_candidates_cutedsl(
+        logits,
+        topk_indices,
+        packed,
+        dcp_rank,
+        dcp_world_size,
+        cp_interleave,
+        row_starts,
+    )
     gathered = get_dcp_group().all_gather(packed, dim=1)
-    candidate_scores = gathered[..., 0]
-    candidate_ids = gathered[..., 1].to(torch.int32)
-    topk_indices.copy_(
-        _stable_topk_from_candidates(candidate_scores, candidate_ids, topk_tokens)
+    stable_topk_from_gathered_candidates_cutedsl(
+        gathered, topk_tokens, out=topk_indices
     )
 
 

@@ -48,6 +48,41 @@ def _local_to_global_indices(
     return torch.where(valid, global_indices, -1).to(torch.int64)
 
 
+def _ref_stable_topk_from_candidates_fp64(
+    candidate_scores: torch.Tensor,
+    candidate_token_ids: torch.Tensor,
+    k: int,
+) -> torch.Tensor:
+    """Pure-PyTorch reference for the CuteDSL stable-topk selector order
+    (score desc, then lowest global token id). Selects the same SET as the
+    kernel; only the set is compared in tests."""
+    num_rows, num_candidates = candidate_scores.shape
+    device = candidate_scores.device
+    select_k = min(k, num_candidates)
+    valid = candidate_token_ids >= 0
+    bits = (
+        candidate_scores.to(torch.float32).view(torch.int32).to(torch.int64)
+        & 0xFFFFFFFF
+    )
+    sign = (bits >> 31) & 1
+    score_key = (
+        torch.where(sign.bool(), bits ^ 0xFFFFFFFF, bits ^ 0x80000000) & 0xFFFFFFFF
+    )
+    id_key = (~candidate_token_ids.to(torch.int64)) & 0xFFFFFFFF
+    key = (score_key << 32) | id_key
+    key = torch.where(valid, key, torch.zeros_like(key))
+    topk_key = key ^ torch.iinfo(torch.int64).min
+    _, topk_pos = topk_key.topk(select_k, dim=-1)
+
+    selected = candidate_token_ids.gather(1, topk_pos).to(torch.int32)
+    selected_valid = valid.gather(1, topk_pos)
+    selected = torch.where(selected_valid, selected, selected.new_full((), -1))
+    if select_k == k:
+        return selected
+    pad = torch.full((num_rows, k - select_k), -1, dtype=torch.int32, device=device)
+    return torch.cat((selected, pad), dim=1)
+
+
 def _attention_from_indices(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -138,28 +173,6 @@ def _run_persistent_topk(
     return indices
 
 
-def _run_prefill_topk(
-    logits: torch.Tensor,
-    row_starts: torch.Tensor,
-    row_ends: torch.Tensor,
-    topk: int,
-) -> torch.Tensor:
-    indices = torch.empty(
-        (logits.shape[0], topk), dtype=torch.int32, device=logits.device
-    )
-    torch.ops._C.top_k_per_row_prefill(
-        logits,
-        row_starts,
-        row_ends,
-        indices,
-        logits.shape[0],
-        logits.stride(0),
-        logits.stride(1),
-        topk,
-    )
-    return indices
-
-
 def _dcp_attention_from_local_topks(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -194,6 +207,10 @@ def _merge_local_topks_global_with_fake_dcp(
     all-gather and return each rank's global-index result (all ranks should
     agree). The fake pre-builds the packed candidate concatenation the merge's
     single ``all_gather`` would return."""
+    # The merge is now CuteDSL-only (no PyTorch fallback), so it runs the real
+    # Triton pack + CuteDSL selector kernels even behind the faked all-gather.
+    if not current_platform.is_cuda() or not has_cutedsl():
+        pytest.skip("DCP merge requires CUDA and CuteDSL")
     packed_per_rank = []
     for rank, (logits, indices) in enumerate(zip(local_logits, local_topks)):
         score_indices = indices.clamp_min(0).to(torch.long)
@@ -208,9 +225,7 @@ def _merge_local_topks_global_with_fake_dcp(
             scores = logits.gather(1, score_indices).masked_fill(
                 indices < 0, float("-inf")
             )
-        global_ids = sparse_indexer._local_dcp_indices_to_global(
-            indices, rank, world, interleave
-        )
+        global_ids = _local_to_global_indices(indices, rank, world, interleave)
         packed_per_rank.append(
             torch.stack((scores.float(), global_ids.to(torch.float32)), dim=-1)
         )
@@ -236,25 +251,6 @@ def _merge_local_topks_global_with_fake_dcp(
         return merged
     finally:
         sparse_indexer.get_dcp_group = original_get_dcp_group
-
-
-def _merge_local_topks_with_fake_dcp(
-    local_logits: list[torch.Tensor],
-    local_topks: list[torch.Tensor],
-    topk: int,
-    world: int,
-    interleave: int,
-    row_starts: list[torch.Tensor | None] | None = None,
-) -> list[torch.Tensor]:
-    """Like ``_merge_local_topks_global_with_fake_dcp`` but returns each rank's
-    result as local (per-shard) indices for the partial-attention helpers."""
-    merged_global = _merge_local_topks_global_with_fake_dcp(
-        local_logits, local_topks, topk, world, interleave, row_starts=row_starts
-    )
-    return [
-        _global_to_local_indices(g.to(torch.int64), rank, world, interleave)
-        for rank, g in enumerate(merged_global)
-    ]
 
 
 @pytest.mark.parametrize("world", [1, 2, 4])
@@ -418,103 +414,6 @@ def test_local_topk_union_is_not_equivalent_to_global_topk_attention():
     assert not torch.allclose(local_union_lse, ref_lse)
 
 
-def _stable_topk_local(
-    logits: torch.Tensor, seq_lens: torch.Tensor, k: int
-) -> torch.Tensor:
-    """Reference stable top-K (score desc, then lowest id) over each score row."""
-    width = logits.shape[1]
-    ids = torch.arange(width, device=logits.device, dtype=torch.float64)
-    mask = ids.unsqueeze(0) >= seq_lens.unsqueeze(1).to(torch.float64)
-    composite = logits.double() * 1.0e9 - ids.unsqueeze(0)
-    composite = composite.masked_fill(mask, float("-inf"))
-    return composite.topk(k, dim=-1).indices.to(torch.int32)
-
-
-def test_dcp_merge_topk_matches_global_stable_under_ties():
-    """The two-stage candidate merge must equal a single-pass global stable
-    top-K, bit-for-bit and identically on every rank, even with many tied
-    scores -- the case where plain ``torch.topk`` could diverge across ranks
-    and silently corrupt the LSE merge."""
-    torch.manual_seed(11)
-    world = 4
-    interleave = 1
-    topk = 6
-    num_rows = 3
-    max_seq_len = 40
-    # Coarse integer scores => many exact ties to stress tie-breaking.
-    scores = torch.randint(0, 4, (num_rows, max_seq_len)).float()
-    seq_lens = torch.full((num_rows,), max_seq_len, dtype=torch.int32)
-
-    ref_global = _stable_topk_local(scores, seq_lens, topk)
-
-    local_logits = []
-    local_topks = []
-    for rank in range(world):
-        owned = [p for p in range(max_seq_len) if (p // interleave) % world == rank]
-        rank_logits = scores[:, owned].contiguous()
-        rank_seq = torch.tensor([len(owned)] * num_rows, dtype=torch.int32)
-        local_logits.append(rank_logits)
-        local_topks.append(_stable_topk_local(rank_logits, rank_seq, topk))
-
-    merged = _merge_local_topks_global_with_fake_dcp(
-        local_logits, local_topks, topk, world, interleave
-    )
-    # Determinism: every rank selects the identical global top-K.
-    for rank_topk in merged[1:]:
-        torch.testing.assert_close(rank_topk, merged[0])
-    # Equivalence: candidate merge == single-pass global stable top-K.
-    torch.testing.assert_close(merged[0], ref_global)
-
-
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
-@pytest.mark.parametrize("interleave", [1, 2])
-def test_sparse_decode_dcp_attention_matches_non_dcp(interleave: int):
-    torch.manual_seed(0)
-    device = torch.device("cuda")
-    world = 2
-    topk = 4
-    next_n = 3
-    batch_size = 2
-    num_rows = batch_size * next_n
-    max_seq_len = 17
-    head_dim = 16
-
-    q = torch.randn(num_rows, head_dim, device=device)
-    k = torch.randn(max_seq_len, head_dim, device=device)
-    v = torch.randn(max_seq_len, head_dim, device=device)
-    logits = q @ k.T
-    seq_lens = torch.tensor(
-        [[9, 10, 11], [15, 16, 17]], dtype=torch.int32, device=device
-    )
-
-    non_dcp_topk = _run_decode_topk(logits, seq_lens, next_n, topk)
-    ref_out, ref_lse = _attention_from_indices(q, k, v, non_dcp_topk.to(torch.int64))
-
-    local_logits = []
-    local_topks = []
-    for rank in range(world):
-        owned = [
-            pos for pos in range(max_seq_len) if (pos // interleave) % world == rank
-        ]
-        rank_logits = logits[:, owned].contiguous()
-        rank_seq_lens = get_dcp_local_seq_lens(
-            seq_lens, world, rank, interleave
-        ).contiguous()
-        local_logits.append(rank_logits)
-        local_topks.append(_run_decode_topk(rank_logits, rank_seq_lens, next_n, topk))
-
-    merged_topks = _merge_local_topks_with_fake_dcp(
-        local_logits, local_topks, topk, world, interleave
-    )
-    dcp_out, dcp_lse = _dcp_attention_from_local_topks(
-        q, k, v, merged_topks, world, interleave
-    )
-
-    torch.testing.assert_close(dcp_out, ref_out, atol=1e-5, rtol=1e-5)
-    torch.testing.assert_close(dcp_lse, ref_lse, atol=1e-5, rtol=1e-5)
-
-
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 def test_sparse_decode_dcp_persistent_topk_matches_non_dcp():
     torch.manual_seed(3)
     device = torch.device("cuda")
@@ -591,89 +490,6 @@ def test_sparse_decode_dcp_persistent_topk_matches_non_dcp():
     torch.testing.assert_close(dcp_lse, ref_lse, atol=1e-5, rtol=1e-5)
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
-@pytest.mark.parametrize("interleave", [1, 2])
-def test_sparse_prefill_dcp_attention_matches_non_dcp(interleave: int):
-    torch.manual_seed(1)
-    device = torch.device("cuda")
-    world = 2
-    topk = 4
-    num_rows = 5
-    max_seq_len = 19
-    head_dim = 16
-
-    q = torch.randn(num_rows, head_dim, device=device)
-    k = torch.randn(max_seq_len, head_dim, device=device)
-    v = torch.randn(max_seq_len, head_dim, device=device)
-    logits = q @ k.T
-    row_starts = torch.zeros(num_rows, dtype=torch.int32, device=device)
-    row_ends = torch.tensor([7, 9, 11, 16, 19], dtype=torch.int32, device=device)
-
-    non_dcp_topk = _run_prefill_topk(logits, row_starts, row_ends, topk)
-    ref_out, ref_lse = _attention_from_indices(q, k, v, non_dcp_topk.to(torch.int64))
-
-    local_logits = []
-    local_topks = []
-    local_row_starts = []
-    for rank in range(world):
-        owned = [
-            pos for pos in range(max_seq_len) if (pos // interleave) % world == rank
-        ]
-        rank_logits = logits[:, owned].contiguous()
-        rank_starts = torch.zeros_like(row_starts)
-        rank_ends = get_dcp_local_seq_lens(
-            row_ends, world, rank, interleave
-        ).contiguous()
-        local_logits.append(rank_logits)
-        local_row_starts.append(rank_starts)
-        local_topks.append(_run_prefill_topk(rank_logits, rank_starts, rank_ends, topk))
-
-    merged_topks = _merge_local_topks_with_fake_dcp(
-        local_logits,
-        local_topks,
-        topk,
-        world,
-        interleave,
-        row_starts=local_row_starts,
-    )
-    dcp_out, dcp_lse = _dcp_attention_from_local_topks(
-        q, k, v, merged_topks, world, interleave
-    )
-
-    torch.testing.assert_close(dcp_out, ref_out, atol=1e-5, rtol=1e-5)
-    torch.testing.assert_close(dcp_lse, ref_lse, atol=1e-5, rtol=1e-5)
-
-
-def test_dcp_prefill_topk_merge_handles_empty_local_shard():
-    world = 2
-    interleave = 1
-    topk = 2
-    local_logits = [
-        torch.empty((1, 0), dtype=torch.float32),
-        torch.tensor([[0.5, 0.4]], dtype=torch.float32),
-    ]
-    local_topks = [
-        torch.full((1, topk), -1, dtype=torch.int32),
-        torch.tensor([[0, 1]], dtype=torch.int32),
-    ]
-    row_starts = [
-        torch.zeros(1, dtype=torch.int32),
-        torch.zeros(1, dtype=torch.int32),
-    ]
-
-    merged = _merge_local_topks_global_with_fake_dcp(
-        local_logits,
-        local_topks,
-        topk,
-        world,
-        interleave,
-        row_starts=row_starts,
-    )
-
-    for rank_topk in merged:
-        torch.testing.assert_close(rank_topk, torch.tensor([[1, 3]], dtype=torch.int32))
-
-
 @pytest.mark.skipif(
     not current_platform.is_cuda() or not has_cutedsl(),
     reason="This test requires CUDA and CuteDSL",
@@ -739,7 +555,7 @@ def test_cutedsl_dcp_candidate_pack_and_select_matches_reference(
     actual = torch.empty((rows, topk), device=device, dtype=torch.int32)
     returned = stable_topk_from_gathered_candidates_cutedsl(gathered, topk, out=actual)
     assert returned is actual
-    expected = sparse_indexer._stable_topk_from_candidates_fp64(
+    expected = _ref_stable_topk_from_candidates_fp64(
         gathered[..., 0],
         gathered[..., 1].to(torch.int32),
         topk,
