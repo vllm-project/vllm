@@ -678,7 +678,9 @@ class OpenAIServingChat(OpenAIServing):
                     else:
                         # check for error finish reason and abort streaming
                         # finish_reason='error' indicates a retryable error
-                        self._raise_if_error(output.finish_reason, request_id)
+                        self._raise_if_error(
+                            output.finish_reason, request_id, output.stop_reason
+                        )
 
                         # Send the finish response for each request.n only once
                         # In OpenAI's API, when a tool is called, the
@@ -838,7 +840,7 @@ class OpenAIServingChat(OpenAIServing):
         for output in final_res.outputs:
             # check for error finish reason and raise GenerationError
             # finish_reason='error' indicates a retryable request-level internal error
-            self._raise_if_error(output.finish_reason, request_id)
+            self._raise_if_error(output.finish_reason, request_id, output.stop_reason)
             token_ids = output.token_ids
             out_logprobs = output.logprobs
 

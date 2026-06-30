@@ -391,7 +391,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     finish_reason = output.finish_reason
                     stop_reason = output.stop_reason
 
-                    self._raise_if_error(finish_reason, request_id)
+                    self._raise_if_error(finish_reason, request_id, stop_reason)
 
                     chunk = CompletionStreamResponse(
                         id=request_id,
@@ -498,7 +498,9 @@ class OpenAIServingCompletion(OpenAIServing):
             out_logprobs: GenericSequence[dict[int, Logprob] | None] | None
 
             for output in final_res.outputs:
-                self._raise_if_error(output.finish_reason, request_id)
+                self._raise_if_error(
+                    output.finish_reason, request_id, output.stop_reason
+                )
 
                 assert request.max_tokens is not None
                 if request.echo:

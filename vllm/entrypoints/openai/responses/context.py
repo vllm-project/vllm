@@ -603,6 +603,7 @@ class HarmonyContext(ConversationContext):
         self._messages = messages
         self.response_parser = response_parser
         self.finish_reason: str | None = None
+        self.stop_reason: int | str | None = None
         self.available_tools = available_tools
         self.function_tool_names = function_tool_names
         self._tool_sessions: dict[str, ClientSession | Tool] = {}
@@ -652,7 +653,9 @@ class HarmonyContext(ConversationContext):
         # so we can append all the parser messages to _messages
         output_msgs = self.parser.messages
         # The responses finish reason is set in the last message
-        self.finish_reason = output.outputs[0].finish_reason
+        completion_output = output.outputs[0]
+        self.finish_reason = completion_output.finish_reason
+        self.stop_reason = completion_output.stop_reason
         self._messages.extend(output_msgs)
 
     def append_tool_output(self, output: list[Message]) -> None:
@@ -949,7 +952,8 @@ class StreamingHarmonyContext(HarmonyContext):
         # beginning of a new message
         self.first_tok_of_message = output.finished
         last_delta_text = ""
-        for tok in output.outputs[0].token_ids:
+        output_token_ids = output.outputs[0].token_ids
+        for tok in output_token_ids:
             self.parser.process(tok)
             last_delta_text += self.parser.last_content_delta or ""
         if last_delta_text:
@@ -957,6 +961,10 @@ class StreamingHarmonyContext(HarmonyContext):
         self._update_decode_token_usage(output)
         if output.kv_transfer_params is not None:
             self.kv_transfer_params = output.kv_transfer_params
+        if output.finished:
+            completion_output = output.outputs[0]
+            self.finish_reason = completion_output.finish_reason
+            self.stop_reason = completion_output.stop_reason
 
         # For streaming, update previous turn when message is complete
         if output.finished:
@@ -964,7 +972,8 @@ class StreamingHarmonyContext(HarmonyContext):
             self.current_turn_metrics.reset()
         # Check if the current token is part of reasoning content
         self._update_num_reasoning_tokens()
-        self.last_tok = tok
+        if output_token_ids:
+            self.last_tok = output_token_ids[-1]
         if len(self._messages) - self.num_init_messages < len(self.parser.messages):
             self._messages.extend(
                 self.parser.messages[len(self._messages) - self.num_init_messages :]

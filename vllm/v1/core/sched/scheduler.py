@@ -64,6 +64,10 @@ from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
 
+KV_LOAD_ERROR_STOP_REASON = (
+    "KV cache load failed for one or more remote blocks. The request can be retried."
+)
+
 
 class Scheduler(SchedulerInterface):
     def __init__(
@@ -1748,6 +1752,7 @@ class Scheduler(SchedulerInterface):
                         request_id=request.request_id,
                         new_token_ids=[],
                         finish_reason=request.get_finished_reason(),
+                        stop_reason=KV_LOAD_ERROR_STOP_REASON,
                         events=request.take_events(),
                         trace_headers=request.trace_headers,
                     )
