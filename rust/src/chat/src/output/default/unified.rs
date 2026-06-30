@@ -317,7 +317,7 @@ mod tests {
         where
             Self: Sized + 'static,
         {
-            unreachable!("ScriptedParser is constructed directly in tests")
+            Ok(Box::new(Self::new([])))
         }
 
         fn parse_into(
@@ -425,6 +425,18 @@ mod tests {
         }
     }
 
+    fn tool_call_arguments(arguments: &str) -> UnifiedParserOutput {
+        UnifiedParserOutput {
+            events: vec![vllm_parser::unified::UnifiedParserEvent::ToolCall(
+                ToolCallDelta {
+                    tool_index: 0,
+                    name: None,
+                    arguments: arguments.to_string(),
+                },
+            )],
+        }
+    }
+
     fn combined(first: UnifiedParserOutput, second: UnifiedParserOutput) -> UnifiedParserOutput {
         let mut output = first;
         output.append(second);
@@ -526,6 +538,38 @@ mod tests {
                 },
                 AssistantEvent::ToolCallArgumentsDelta {
                     delta: r#"{"location":"Paris"}"#.to_string(),
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn unified_stream_emits_tool_arguments_before_trailing_text() {
+        let events = collect(
+            ScriptedParser::new([
+                ScriptedStep::Output(tool_call("get_weather", "")),
+                ScriptedStep::Output(combined(
+                    tool_call_arguments(r#"{"location":"Paris"}"#),
+                    text(" done"),
+                )),
+            ]),
+            vec![decoded_delta("start"), decoded_delta("finish")],
+        )
+        .await;
+
+        assert_eq!(
+            events,
+            vec![
+                AssistantEvent::ToolCallStart {
+                    id: "call_test".to_string(),
+                    name: "get_weather".to_string(),
+                },
+                AssistantEvent::ToolCallArgumentsDelta {
+                    delta: r#"{"location":"Paris"}"#.to_string(),
+                },
+                AssistantEvent::TextDelta {
+                    kind: AssistantBlockKind::Text,
+                    delta: " done".to_string(),
                 },
             ]
         );

@@ -1,7 +1,7 @@
 use serde_json::json;
 
 use super::{ToolParser, ToolParserOutput};
-use crate::tool::{Tool, ToolParserTestExt as _};
+use crate::tool::Tool;
 
 /// Build a reusable set of function tools for parser unit tests.
 pub fn test_tools() -> Vec<Tool> {
@@ -87,10 +87,10 @@ pub fn test_tools() -> Vec<Tool> {
 pub fn collect_stream<T: ToolParser + ?Sized>(parser: &mut T, chunks: &[&str]) -> ToolParserOutput {
     let mut output = ToolParserOutput::default();
     for chunk in chunks {
-        output.append(parser.parse_chunk(chunk).unwrap());
+        parser.parse_into(chunk, &mut output).unwrap();
     }
     output.append(parser.finish().unwrap());
-    output.coalesce_calls()
+    output.coalesce()
 }
 
 /// Split text into chunks containing at most `chunk_chars` Unicode scalar
