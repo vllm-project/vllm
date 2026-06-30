@@ -226,6 +226,9 @@ class SchedulerOutput:
     # need to perform grammar bitmask computation.
     pending_structured_output_tokens: bool = False
 
+    # Used for adjusting acceptance rate calculation.
+    num_invalid_spec_tokens: dict[str, int] | None = None
+
     # KV Cache Connector metadata.
     kv_connector_metadata: KVConnectorMetadata | None = None
 
