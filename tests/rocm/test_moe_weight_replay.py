@@ -39,7 +39,7 @@ pytestmark = pytest.mark.skipif(
 
 
 def _visible_gpu_count() -> int:
-    visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+    visible_devices = os.environ.get("HIP_VISIBLE_DEVICES")
     if visible_devices:
         return len([d for d in visible_devices.split(",") if d.strip()])
     return torch.accelerator.device_count()
