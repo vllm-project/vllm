@@ -48,6 +48,21 @@ def get_cpu_memory() -> int:
     return psutil.virtual_memory().total
 
 
+def get_device_memory_info(device: torch.types.Device) -> tuple[int, int]:
+    """Returns (free, total) device memory in bytes, with the UMA correction.
+
+    Like ``torch.accelerator.get_memory_info`` but, on integrated (UMA) GPUs
+    where cudaMemGetInfo underreports free memory, the free value comes from
+    ``psutil.virtual_memory().available`` instead (no-op on discrete/non-cuda).
+    https://docs.nvidia.com/cuda/cuda-for-tegra-appnote/#estimating-total-allocatable-device-memory-on-an-integrated-gpu-device
+    """
+    device = torch.device(device)
+    free_memory, total_memory = torch.accelerator.get_memory_info(device)
+    if current_platform.is_integrated_gpu(device.index):
+        free_memory = psutil.virtual_memory().available
+    return free_memory, total_memory
+
+
 _UMA_PRESSURE_THRESHOLD = 0.8
 _UMA_MIN_RELEASE_BYTES = 512 * MiB_bytes
 
@@ -143,15 +158,8 @@ class MemorySnapshot:
             "allocated_bytes.all.peak", 0
         )
 
-        self.free_memory, self.total_memory = torch.accelerator.get_memory_info(device)
-        if current_platform.is_integrated_gpu(device.index):
-            # On UMA (Unified Memory Architecture) platforms where CPU and
-            # GPU share physical memory (e.g. GH200, DGX Spark, Jetson Orin),
-            # cudaMemGetInfo underreports free memory because it does not
-            # account for reclaimable OS memory (page cache, buffers).
-            # Use psutil to get the true available memory.
-            # https://docs.nvidia.com/cuda/cuda-for-tegra-appnote/#estimating-total-allocatable-device-memory-on-an-integrated-gpu-device
-            self.free_memory = psutil.virtual_memory().available
+        # Free/total device memory, with the UMA free-memory correction.
+        self.free_memory, self.total_memory = get_device_memory_info(device)
 
         self.cuda_memory = self.total_memory - self.free_memory
 

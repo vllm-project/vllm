@@ -5,7 +5,11 @@ from unittest.mock import MagicMock, patch
 import torch
 from vllm_test_utils.monitor import monitor
 
-from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
+from vllm.utils.mem_utils import (
+    MemorySnapshot,
+    get_device_memory_info,
+    memory_profiling,
+)
 
 from ..utils import create_new_process_for_each_test
 
@@ -103,6 +107,51 @@ def test_memory_snapshot_uses_psutil_on_integrated_gpu():
         assert snapshot.free_memory == mock_psutil_available
         assert snapshot.total_memory == mock_cuda_total
         mock_psutil.virtual_memory.assert_called_once()
+
+
+def test_get_device_memory_info_integrated_uses_psutil():
+    """On integrated (UMA) GPUs the free reading must come from psutil, not the
+    underreporting cudaMemGetInfo value."""
+    mock_cuda_free = 40 * 1024**3
+    mock_cuda_total = 120 * 1024**3
+    mock_psutil_available = 100 * 1024**3
+
+    with (
+        patch("vllm.utils.mem_utils.current_platform") as mock_platform,
+        patch("vllm.utils.mem_utils.psutil") as mock_psutil,
+        patch("torch.accelerator") as mock_accelerator,
+    ):
+        mock_accelerator.get_memory_info.return_value = (
+            mock_cuda_free,
+            mock_cuda_total,
+        )
+        mock_platform.is_integrated_gpu.return_value = True
+        mock_vmem = MagicMock()
+        mock_vmem.available = mock_psutil_available
+        mock_psutil.virtual_memory.return_value = mock_vmem
+
+        assert get_device_memory_info("cuda:0")[0] == mock_psutil_available
+        mock_psutil.virtual_memory.assert_called_once()
+
+
+def test_get_device_memory_info_discrete_is_noop():
+    """On discrete GPUs the helper is an exact no-op: raw get_memory_info, no psutil."""
+    mock_cuda_free = 70 * 1024**3
+    mock_cuda_total = 80 * 1024**3
+
+    with (
+        patch("vllm.utils.mem_utils.current_platform") as mock_platform,
+        patch("vllm.utils.mem_utils.psutil") as mock_psutil,
+        patch("torch.accelerator") as mock_accelerator,
+    ):
+        mock_accelerator.get_memory_info.return_value = (
+            mock_cuda_free,
+            mock_cuda_total,
+        )
+        mock_platform.is_integrated_gpu.return_value = False
+
+        assert get_device_memory_info("cuda:0")[0] == mock_cuda_free
+        mock_psutil.virtual_memory.assert_not_called()
 
 
 def test_memory_snapshot_uses_cuda_on_discrete_gpu():
