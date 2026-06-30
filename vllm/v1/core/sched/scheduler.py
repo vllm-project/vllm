@@ -2292,7 +2292,7 @@ class Scheduler(SchedulerInterface):
             return None
         if spec_decoding_stats is None:
             spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)
-        # Subtract placholders from draft token count.
+        # Subtract placeholders from draft token count.
         num_draft_tokens -= sum(1 for t in scheduled_spec_token_ids if t < 0)
         spec_decoding_stats.observe_draft(
             num_draft_tokens=num_draft_tokens, num_accepted_tokens=num_accepted_tokens
