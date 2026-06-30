@@ -181,11 +181,9 @@ def _trtllm_bf16_lora_supported(moe_config: FusedMoEConfig) -> bool:
         moe_config.routing_method, None, None
     ):
         return False
-    if not TrtLlmBf16LoRAExperts._supports_parallel_config(
+    return TrtLlmBf16LoRAExperts._supports_parallel_config(
         moe_config.moe_parallel_config
-    ):
-        return False
-    return True
+    )
 
 
 def select_unquantized_moe_backend(
@@ -207,15 +205,7 @@ def select_unquantized_moe_backend(
         return UnquantizedMoeBackend.OOT, None
 
     if moe_config.is_lora_enabled:
-        # Opt-in: only when the user explicitly requests the FlashInfer TRT-LLM
-        # backend AND the gemm1_lora_delta path is usable (Blackwell + supported
-        # routing) do we route LoRA through it. Otherwise (auto, or any other
-        # explicit backend) keep the always-available Triton LoRA path. This
-        # preserves the historical "LoRA -> Triton" default and respects an
-        # explicit non-trtllm choice.
-        if moe_config.moe_backend == "flashinfer_trtllm" and _trtllm_bf16_lora_supported(
-            moe_config
-        ):
+        if _trtllm_bf16_lora_supported(moe_config):
             from vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe import (
                 TrtLlmBf16LoRAExperts,
             )

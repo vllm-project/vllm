@@ -80,6 +80,15 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
 
+    @staticmethod
+    def _supports_current_device() -> bool:
+        p = current_platform
+        return (
+            p.is_cuda()
+            and p.is_device_capability_family(100)
+            and has_flashinfer_trtllm_fused_moe()
+        )
+
     def workspace_shapes(
         self,
         M,
@@ -107,10 +116,7 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         E = self.local_num_experts
         N = 2 * self.intermediate_size_per_partition
         K = self.hidden_dim
-        if a1.dim() == 2:
-            M = a1.size(0)
-        else:
-            M = a1.size(1)
+        M = a1.size(0) if a1.dim() == 2 else a1.size(1)
         topk = topk_ids.size(1)
         return E, M, N, K, topk
 
@@ -185,7 +191,7 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         lora_context = self._lora_context
         num_tokens = hidden_states.size(0)
         top_k = self.topk
-        I = self.intermediate_size_per_partition
+        intermediate_size = self.intermediate_size_per_partition
         K = output.size(1)
 
         # The LoRA tile-config heuristic (try_get_optimal_moe_config) unpacks
@@ -195,10 +201,14 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         # zero-storage meta tensors carrying the logical 3D shapes:
         #   w1: (E, 2I, H)  w2: (E, H, I)
         w1_cfg = torch.empty(
-            (self.local_num_experts, 2 * I, K), device="meta", dtype=torch.bfloat16
+            (self.local_num_experts, 2 * intermediate_size, K),
+            device="meta",
+            dtype=torch.bfloat16,
         )
         w2_cfg = torch.empty(
-            (self.local_num_experts, K, I), device="meta", dtype=torch.bfloat16
+            (self.local_num_experts, K, intermediate_size),
+            device="meta",
+            dtype=torch.bfloat16,
         )
 
         # Routing is computed outside the MoE; pack it into the
@@ -214,7 +224,7 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             gemm1_lora_delta = torch.zeros(
                 num_tokens,
                 top_k,
-                2 * I,
+                2 * intermediate_size,
                 dtype=torch.bfloat16,
                 device=hidden_states.device,
             )
@@ -255,7 +265,11 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         gemm1_act_permuted = self._as_tensor(ret[2])  # [max_padded, I], post-act
 
         act = self._unpermute_activation(
-            gemm1_act_permuted, expanded_idx_to_permuted_idx, num_tokens, top_k, I
+            gemm1_act_permuted,
+            expanded_idx_to_permuted_idx,
+            num_tokens,
+            top_k,
+            intermediate_size,
         )  # (T*top_k, I) -- same layout as the triton path's intermediate_cache2
 
         (
@@ -299,7 +313,9 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         return t if torch.is_tensor(t) else torch.from_dlpack(t)
 
     @staticmethod
-    def _unpermute_activation(act_permuted, idx_map, num_tokens, top_k, I):
+    def _unpermute_activation(
+        act_permuted, idx_map, num_tokens, top_k, intermediate_size
+    ):
         """Permuted FC1 activation -> (num_tokens*top_k, I).
 
         expanded_idx = token*top_k + k; idx_map[expanded_idx] = permuted_idx or -1.
@@ -308,7 +324,7 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         """
         act = torch.zeros(
             num_tokens * top_k,
-            I,
+            intermediate_size,
             dtype=act_permuted.dtype,
             device=act_permuted.device,
         )
@@ -322,15 +338,6 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 # --------------------------------------------------------------------------- #
 class TrtLlmBf16LoRAExperts(_TrtLlmLoRAExpertsBase):
     """BF16 unquantized trtllm MoE + LoRA."""
-
-    @staticmethod
-    def _supports_current_device() -> bool:
-        p = current_platform
-        return (
-            p.is_cuda()
-            and p.is_device_capability_family(100)
-            and has_flashinfer_trtllm_fused_moe()
-        )
 
     @staticmethod
     def _supports_quant_scheme(weight_key, activation_key) -> bool:
@@ -352,15 +359,15 @@ class TrtLlmBf16LoRAExperts(_TrtLlmLoRAExpertsBase):
     def _invoke_routed_moe(
         self,
         *,
-        hidden_states,
-        w1,
-        w2,
-        packed_topk_ids,
-        gemm1_lora_delta,
-        global_num_experts,
-        a1q_scale,
-        output,
-    ):
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        packed_topk_ids: torch.Tensor,
+        gemm1_lora_delta: torch.Tensor | None,
+        global_num_experts: int,
+        a1q_scale: torch.Tensor | None,
+        output: torch.Tensor,
+    ) -> list[torch.Tensor]:
         import flashinfer
 
         # Unlike the fp8/mxint4 routed APIs, trtllm_bf16_routed_moe has no
@@ -400,15 +407,6 @@ class TrtLlmMxfp8LoRAExperts(_TrtLlmLoRAExpertsBase):
     @property
     def expects_unquantized_inputs(self) -> bool:
         return False  # needs mxfp8-quantized inputs + scale
-
-    @staticmethod
-    def _supports_current_device() -> bool:
-        p = current_platform
-        return (
-            p.is_cuda()
-            and p.is_device_capability_family(100)
-            and has_flashinfer_trtllm_fused_moe()
-        )
 
     @staticmethod
     def _supports_quant_scheme(weight_key, activation_key) -> bool:
