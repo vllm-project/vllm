@@ -318,6 +318,7 @@ def _parse_function_call(message: Message, recipient: str) -> list[ResponseOutpu
             type="function_call",
             name=function_name,
             id=f"fc_{random_id}",
+            status="completed",
         )
         output_items.append(response_item)
     return output_items
