@@ -72,6 +72,16 @@ def can_initialize(
         check_version_reason="vllm",
     )
 
+    if model_info.min_gpu_memory_gb is not None:
+        from vllm.platforms import current_platform
+
+        device_memory_gb = current_platform.get_device_total_memory() / GiB_bytes
+        if device_memory_gb < model_info.min_gpu_memory_gb:
+            pytest.skip(
+                f"Need at least {model_info.min_gpu_memory_gb}GB GPU memory to "
+                f"initialize {model_arch}; device has {device_memory_gb:.1f}GB"
+            )
+
     hf_overrides_fn = partial(
         dummy_hf_overrides,
         model_arch=model_arch,

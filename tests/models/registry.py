@@ -113,6 +113,13 @@ class _HfExamplesInfo:
     max_num_seqs: int | None = None
     """Maximum number of sequences to be processed in a single iteration."""
 
+    min_gpu_memory_gb: float | None = None
+    """
+    The minimum per-device memory (in GiB) required to initialize this model.
+    The test is skipped when the device has less memory than this. Use for very
+    large models that OOM in CI even with the reduced-layer dummy config.
+    """
+
     use_original_num_layers: bool = False
     """
     If True, use the original number of layers from the model config
@@ -422,8 +429,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MistralForCausalLM": _HfExamplesInfo("mistralai/Mistral-7B-Instruct-v0.1"),
     "MistralLarge3ForCausalLM": _HfExamplesInfo(
         "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4",
-        # TODO: revert once figuring out OOM in CI
-        is_available_online=False,
+        # 675B model: even with the reduced-layer dummy config the profile run
+        # needs >200 GiB, OOMing on a single accelerator in CI.
+        min_gpu_memory_gb=256,
     ),
     "MixtralForCausalLM": _HfExamplesInfo(
         "mistralai/Mixtral-8x7B-Instruct-v0.1",
@@ -1452,9 +1460,6 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         trust_remote_code=True,
         speculative_model="AQ-MedAI/Kimi-K25-eagle3",
         tokenizer="moonshotai/Kimi-K2.5",
-        # CUDA graph capture for the reduced-layer MLA target trips a
-        # decode-only assertion; eager init is enough for this test.
-        enforce_eager=True,
     ),
     "Eagle3LlamaForCausalLM": _HfExamplesInfo(
         "meta-llama/Llama-3.1-8B-Instruct",
