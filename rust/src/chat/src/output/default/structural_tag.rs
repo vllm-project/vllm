@@ -2,12 +2,12 @@
 
 use thiserror_ext::AsReport;
 use vllm_engine_core_client::protocol::{StructuredOutputBackend, StructuredOutputsParams};
+use vllm_parser::tool::StructuralTagModel;
 use xgrammar_structural_tag::{
     FunctionDefinition, FunctionToolParam, ToolChoice as StructuralTagToolChoice, ToolParam,
     build_structural_tag,
 };
 
-use crate::parser::tool::ToolParser;
 use crate::request::{ChatRequest, ChatToolChoice};
 use crate::{Error, Result as ChatResult};
 
@@ -15,9 +15,9 @@ use crate::{Error, Result as ChatResult};
 /// support and the request's tool choice.
 pub(super) fn apply_structural_tag_constraint(
     request: &mut ChatRequest,
-    parser: &dyn ToolParser,
+    model: Option<StructuralTagModel>,
 ) -> ChatResult<()> {
-    let Some(model) = parser.structural_tag_model() else {
+    let Some(model) = model else {
         return Ok(());
     };
     let Some(tool_choice) = structural_tag_tool_choice(request) else {
@@ -77,7 +77,7 @@ fn structural_tag_tool_choice(request: &ChatRequest) -> Option<StructuralTagTool
 mod tests {
     use serde_json::{Value, json};
     use vllm_engine_core_client::protocol::{StructuredOutputBackend, StructuredOutputsParams};
-    use vllm_tool_parser::{Qwen3CoderToolParser, Tool};
+    use vllm_parser::tool::{Qwen3CoderToolParser, Tool, ToolParser};
 
     use super::*;
 
@@ -134,7 +134,7 @@ mod tests {
         let mut request = request(ChatToolChoice::Auto, vec![chat_tool("search", Some(true))]);
         let parser = qwen3_coder_parser(&request.tools);
 
-        apply_structural_tag_constraint(&mut request, parser.as_ref())
+        apply_structural_tag_constraint(&mut request, parser.structural_tag_model())
             .expect("structural tag should build");
 
         let tag = structural_tag_value(&request);
@@ -147,7 +147,7 @@ mod tests {
         let mut request = request(ChatToolChoice::Auto, vec![chat_tool("search", None)]);
         let parser = qwen3_coder_parser(&request.tools);
 
-        apply_structural_tag_constraint(&mut request, parser.as_ref())
+        apply_structural_tag_constraint(&mut request, parser.structural_tag_model())
             .expect("structural tag decision should succeed");
 
         assert!(request.sampling_params.structured_outputs.is_none());
@@ -163,7 +163,7 @@ mod tests {
         });
         let parser = qwen3_coder_parser(&request.tools);
 
-        apply_structural_tag_constraint(&mut request, parser.as_ref())
+        apply_structural_tag_constraint(&mut request, parser.structural_tag_model())
             .expect("structural tag should build");
 
         let params = structured_outputs(&request);
@@ -179,7 +179,7 @@ mod tests {
         let mut request = request(ChatToolChoice::Required, vec![chat_tool("search", None)]);
         let parser = qwen3_coder_parser(&request.tools);
 
-        apply_structural_tag_constraint(&mut request, parser.as_ref())
+        apply_structural_tag_constraint(&mut request, parser.structural_tag_model())
             .expect("structural tag should build");
 
         let tag = structural_tag_value(&request);
@@ -197,7 +197,7 @@ mod tests {
         });
         let parser = qwen3_coder_parser(&request.tools);
 
-        apply_structural_tag_constraint(&mut request, parser.as_ref())
+        apply_structural_tag_constraint(&mut request, parser.structural_tag_model())
             .expect("structural tag should build");
 
         let params = structured_outputs(&request);
@@ -218,7 +218,7 @@ mod tests {
         );
         let parser = qwen3_coder_parser(&request.tools);
 
-        apply_structural_tag_constraint(&mut request, parser.as_ref())
+        apply_structural_tag_constraint(&mut request, parser.structural_tag_model())
             .expect("structural tag should build");
 
         let tag = structural_tag_value(&request).to_string();
@@ -231,7 +231,7 @@ mod tests {
         let mut request = request(ChatToolChoice::None, vec![chat_tool("search", Some(true))]);
         let parser = qwen3_coder_parser(&request.tools);
 
-        apply_structural_tag_constraint(&mut request, parser.as_ref())
+        apply_structural_tag_constraint(&mut request, parser.structural_tag_model())
             .expect("structural tag decision should succeed");
 
         assert!(request.sampling_params.structured_outputs.is_none());
@@ -247,7 +247,7 @@ mod tests {
         });
         let parser = qwen3_coder_parser(&request.tools);
 
-        apply_structural_tag_constraint(&mut request, parser.as_ref())
+        apply_structural_tag_constraint(&mut request, parser.structural_tag_model())
             .expect("structural tag decision should succeed");
 
         let params = structured_outputs(&request);
