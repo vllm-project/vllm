@@ -27,7 +27,6 @@ pub use config::{
     ApiServerOptions, Config, CoordinatorMode, CorsConfig, DEFAULT_KEEP_ALIVE_TIMEOUT,
     HttpListenerMode, TlsConfig,
 };
-use futures::FutureExt as _;
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
@@ -45,7 +44,7 @@ use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
 use vllm_text::TextLlm;
 
-use crate::listener::Listener;
+use crate::listener::{Listener, MaybeTlsListener};
 use crate::routes::build_router;
 use crate::server_info::ServerInfoSnapshot;
 use crate::state::AppState;
@@ -179,7 +178,7 @@ where
     let listener = Listener::bind(&config.listener_mode)
         .await
         .context("failed to bind listener for OpenAI server")?;
-    let bind_address = listener.local_addr()?;
+    let bind_address = listener.local_addr_display()?;
     let model = state.primary_model_name().to_owned();
     let app = extend_router(build_router(state.clone()));
 
@@ -252,7 +251,6 @@ where
     // silent client cannot hold the connection open.
     let keep_alive_timeout = config.keep_alive_timeout;
     let timeouts = ConnectionTimeouts {
-        handshake: tls::TLS_HANDSHAKE_TIMEOUT,
         header_read: if keep_alive_timeout.is_zero() {
             DEFAULT_KEEP_ALIVE_TIMEOUT
         } else {
@@ -266,9 +264,15 @@ where
         let server_shutdown = server_shutdown.clone();
         let force_shutdown = force_shutdown.clone();
         async move {
+            let listener = match tls_config {
+                Some(context) => MaybeTlsListener::tls(listener, context),
+                None => MaybeTlsListener::plain(listener),
+            };
+            let server = serve_connections(listener, app, shutdown.cancelled_owned(), timeouts);
+
             let result = tokio::select! {
-                result = serve_listener(listener, tls_config, app, shutdown.cancelled_owned(), timeouts) => {
-                    result
+                result = server => {
+                    result.context("HTTP server failed")
                 }
                 _ = force_shutdown.cancelled() => {
                     warn!("HTTP graceful shutdown deadline elapsed; aborting server");
@@ -292,18 +296,11 @@ where
                 shutdown.cancelled().await;
                 return Ok(());
             };
-            // Box to unify the TLS and plaintext arms' different stream types.
-            let server = match grpc_tls {
-                Some(context) => {
-                    let incoming =
-                        grpc::tls_incoming(grpc_listener, context, tls::TLS_HANDSHAKE_TIMEOUT);
-                    svc.serve_with_incoming_shutdown(incoming, shutdown.cancelled_owned()).boxed()
-                }
-                None => {
-                    let incoming = grpc::incoming(grpc_listener);
-                    svc.serve_with_incoming_shutdown(incoming, shutdown.cancelled_owned()).boxed()
-                }
+            let incoming = match grpc_tls {
+                Some(context) => MaybeTlsListener::tls(grpc_listener, context),
+                None => MaybeTlsListener::plain(grpc_listener),
             };
+            let server = svc.serve_with_incoming_shutdown(incoming, shutdown.cancelled_owned());
 
             let result = tokio::select! {
                 result = server => {
@@ -333,51 +330,10 @@ where
 /// Per-connection timeouts applied while serving HTTP/HTTPS.
 #[derive(Clone, Copy)]
 pub(crate) struct ConnectionTimeouts {
-    /// Max time for a client to complete the TLS handshake (TLS path only).
-    pub(crate) handshake: Duration,
     /// HTTP/1 header-read timeout (bounds idle keep-alive and the head read).
     pub(crate) header_read: Duration,
     /// Whether HTTP/1 keep-alive is enabled; `false` closes after each response.
     pub(crate) keep_alive_enabled: bool,
-}
-
-/// Apply optional TLS termination and per-connection HTTP timeouts, then serve
-/// `app`. Shared by [`serve_with_router_extension`] and the TLS tests.
-async fn serve_listener(
-    listener: Listener,
-    tls: Option<openssl::ssl::SslContext>,
-    app: Router,
-    shutdown: impl Future<Output = ()> + Send + 'static,
-    timeouts: ConnectionTimeouts,
-) -> Result<()> {
-    match tls {
-        Some(context) => {
-            // tls-listener terminates TLS (handshake + timeout); serve_connections
-            // owns the HTTP keep-alive/idle bound that axum::serve cannot express.
-            // Failed handshakes (incl. timeouts) log at ERROR via tls-listener.
-            let listener = tls_listener::builder(context)
-                .handshake_timeout(timeouts.handshake)
-                .listen(listener);
-            serve_connections(
-                listener,
-                app,
-                shutdown,
-                timeouts.header_read,
-                timeouts.keep_alive_enabled,
-            )
-            .await
-            .context("HTTPS server failed")
-        }
-        None => serve_connections(
-            listener,
-            app,
-            shutdown,
-            timeouts.header_read,
-            timeouts.keep_alive_enabled,
-        )
-        .await
-        .context("HTTP server failed"),
-    }
 }
 
 /// Serve `app` per connection (HTTP/1) with a keep-alive idle timeout and
@@ -386,8 +342,7 @@ async fn serve_connections<L>(
     mut listener: L,
     app: Router,
     shutdown: impl Future<Output = ()> + Send,
-    header_read: Duration,
-    keep_alive_enabled: bool,
+    timeouts: ConnectionTimeouts,
 ) -> Result<()>
 where
     L: axum::serve::Listener,
@@ -404,8 +359,8 @@ where
             app.clone().map_request(|req: Request<Incoming>| req.map(Body::new)),
         );
         let mut builder = http1::Builder::new();
-        builder.timer(TokioTimer::new()).header_read_timeout(header_read);
-        if !keep_alive_enabled {
+        builder.timer(TokioTimer::new()).header_read_timeout(timeouts.header_read);
+        if !timeouts.keep_alive_enabled {
             builder.keep_alive(false);
         }
         let connection = builder.serve_connection(TokioIo::new(io), service);

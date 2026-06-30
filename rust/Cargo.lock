@@ -5310,6 +5310,7 @@ dependencies = [
  "vllm-llm",
  "vllm-metrics",
  "vllm-text",
+ "vllm-tokenizer",
  "zeromq",
 ]
 
