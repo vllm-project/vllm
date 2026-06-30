@@ -634,6 +634,9 @@ COPY --from=export_vllm /vllm_v1 /usr/local/lib/python${PYTHON_VERSION}/dist-pac
 # Hide source under src/ so it won't shadow the installed package in tests.
 RUN mkdir src && mv vllm src/vllm
 
+# Catch GPU<->CPU syncs in execute_model/sample_tokens during tests.
+ENV VLLM_GPU_SYNC_CHECK=error
+
 # -----------------------
 # Final vLLM image
 FROM mori_base AS final

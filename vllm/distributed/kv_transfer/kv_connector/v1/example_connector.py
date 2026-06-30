@@ -15,6 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.hashing import safe_hash
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -135,6 +136,7 @@ class ExampleConnector(KVConnectorBase_V1):
                 slot_mapping (torch.Tensor): the slot mapping. In shape
                     [num_tokens].
             """
+            slot_mapping = slot_mapping.to(dst_kv_cache_layer.device, non_blocking=True)
             if isinstance(attn_metadata, MLACommonMetadata):
                 dst_kv_cache_layer_shape = dst_kv_cache_layer.shape
                 num_pages = dst_kv_cache_layer_shape[0]
@@ -178,9 +180,8 @@ class ExampleConnector(KVConnectorBase_V1):
                 filename = self._generate_filename_debug(
                     layer_name, request.token_ids, request.mm_hashes
                 )
-                kv_cache = safetensors.torch.load_file(
-                    filename, device=str(kv_cache_layer.device)
-                )["kv_cache"]
+                kv_cache_cpu = safetensors.torch.load_file(filename)["kv_cache"]
+                kv_cache = kv_cache_cpu.to("cuda", non_blocking=True)
                 if isinstance(attn_metadata, dict):
                     inject_kv_into_layer(
                         kv_cache_layer,
@@ -227,6 +228,7 @@ class ExampleConnector(KVConnectorBase_V1):
             Assume the shape of the layer is (num_pages, page_size, xxx)
             for MLA, and (num_pages, 2, page_size, xxx) otherwise.
             """
+            slot_mapping = slot_mapping.to(layer.device, non_blocking=True)
             if isinstance(attn_metadata, MLACommonMetadata):
                 num_pages, page_size = layer.shape[0], layer.shape[1]
                 return layer.reshape(num_pages * page_size, -1)[slot_mapping, ...]
@@ -242,7 +244,8 @@ class ExampleConnector(KVConnectorBase_V1):
                     layer_name, request.token_ids, request.mm_hashes
                 )
                 kv_cache = extract_kv_from_layer(kv_layer, request.slot_mapping)
-                tensors = {"kv_cache": kv_cache.detach().cpu()}
+                with gpu_sync_allowed():
+                    tensors = {"kv_cache": kv_cache.detach().cpu()}
                 safetensors.torch.save_file(tensors, filename)
 
     def wait_for_save(self):
