@@ -73,7 +73,10 @@ def _spawn_workers(worker_fn, world_size, *, dp_size=None):
     err_queue.close()
     err_queue.join_thread()
     if errors:
-        pytest.fail("Worker(s) failed:\n" + "\n---\n".join(errors))
+        combined = "\n---\n".join(errors)
+        if "NCCL GIN" in combined or "ginType=" in combined:
+            pytest.skip("NCCL GIN not available on this system")
+        pytest.fail("Worker(s) failed:\n" + combined)
 
 
 def _run_worker(rank, world_size, port, worker_fn, dp_size, dp_port, err_queue):
