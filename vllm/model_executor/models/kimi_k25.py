@@ -14,6 +14,7 @@ import torch
 from torch import nn
 from transformers import BatchFeature
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs import MultiModalDataDict
@@ -108,11 +109,24 @@ class KimiK25ProcessingInfo(BaseProcessingInfo):
         self.hf_config = hf_config = self.get_hf_config()
 
         tokenizer = self.get_tokenizer()
-        image_processor = cached_get_image_processor(
-            self.ctx.model_config.model,
-            revision=self.ctx.model_config.revision,
-            trust_remote_code=self.ctx.model_config.trust_remote_code,
-        )
+        if envs.VLLM_KIMI_K25_FUSED_IMAGE_PREPROCESS:
+            from vllm.transformers_utils.processors.kimi_k25_vision_fused import (
+                KimiK25FusedVisionProcessor,
+            )
+
+            logger.info_once(
+                "Using fused CPU image preprocessing for Kimi-K2.5/K2.6 vision chunks."
+            )
+            image_processor = KimiK25FusedVisionProcessor.from_model(
+                self.ctx.model_config.model,
+                revision=self.ctx.model_config.revision,
+            )
+        else:
+            image_processor = cached_get_image_processor(
+                self.ctx.model_config.model,
+                revision=self.ctx.model_config.revision,
+                trust_remote_code=self.ctx.model_config.trust_remote_code,
+            )
 
         # Resolve token ID from the tokenizer because transformers v5
         # may remap token IDs vs config.json.

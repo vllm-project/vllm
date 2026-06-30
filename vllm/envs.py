@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     VLLM_PORT: int | None = None
     VLLM_RPC_BASE_PATH: str = tempfile.gettempdir()
     VLLM_USE_MODELSCOPE: bool = False
+    VLLM_KIMI_K25_FUSED_IMAGE_PREPROCESS: bool = False
     VLLM_USE_FASTOKENS: bool = False
     VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
     VLLM_NCCL_SO_PATH: str | None = None
@@ -665,6 +666,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # note that the value is true or false, not numbers
     "VLLM_USE_MODELSCOPE": lambda: (
         os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true"
+    ),
+    # If set, use vLLM's fused CPU image preprocessing path for
+    # Kimi-K2.5/K2.6 vision chunks instead of the remote HF image processor.
+    "VLLM_KIMI_K25_FUSED_IMAGE_PREPROCESS": lambda: bool(
+        int(os.getenv("VLLM_KIMI_K25_FUSED_IMAGE_PREPROCESS", "0"))
     ),
     # If true, replace the Rust BPE backend that powers HF fast tokenizers
     # with the `fastokens` (https://github.com/crusoecloud/fastokens) shim.
@@ -2043,6 +2049,7 @@ def compile_factors() -> dict[str, object]:
 
     ignored_factors: set[str] = {
         "MAX_JOBS",
+        "VLLM_KIMI_K25_FUSED_IMAGE_PREPROCESS",
         "VLLM_RPC_BASE_PATH",
         "VLLM_USE_MODELSCOPE",
         "VLLM_RINGBUFFER_WARNING_INTERVAL",
