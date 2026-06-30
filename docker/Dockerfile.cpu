@@ -193,9 +193,9 @@ FROM base AS vllm-test-deps
 
 WORKDIR /vllm-workspace
 
-# Test requirements are generated from requirements/test/cuda.in by
-# tools/pre_commit/generate_cpu_test.py and compiled into requirements/test/cpu.txt
-# by the pip-compile-cpu pre-commit hook. CPU-specific overrides live there.
+# Test requirements are compiled from requirements/test/cuda.in into
+# requirements/test/cpu.txt by the pip-compile-cpu pre-commit hook, which
+# resolves CPU wheels via uv's --torch-backend cpu.
 COPY requirements/test/cpu.txt requirements/test/cpu.txt
 
 # cpu.txt is compiled for x86_64, so platform markers are resolved away. Drop

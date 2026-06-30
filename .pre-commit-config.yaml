@@ -135,14 +135,14 @@ repos:
       alias: pip-compile-cpu
       name: pip-compile-cpu
       args: [
-        requirements/test/cpu.in,
+        requirements/test/cuda.in,
         -o, requirements/test/cpu.txt,
         --index-strategy, unsafe-best-match,
         --torch-backend, cpu,
         --python-platform, x86_64-manylinux_2_28,
         --python-version, "3.12",
       ]
-      files: ^requirements/(common|cpu|test/cpu)\.(in|txt)$
+      files: ^requirements/(common|cuda|test/cuda|test/cpu)\.(in|txt)$
     - id: pip-compile
       alias: pip-compile-docs
       name: pip-compile-docs
@@ -160,13 +160,6 @@ repos:
     language: python
     entry: python tools/pre_commit/generate_nightly_torch_test.py
     files: ^requirements/test/cuda\.(in|txt)$
-  - id: generate-cpu-test
-    name: regenerate test/cpu.in from test/cuda.in
-    language: python
-    entry: python tools/pre_commit/generate_cpu_test.py
-    files: ^requirements/test/cuda\.in$
-    pass_filenames: false
-    additional_dependencies: [regex]
   - id: mypy-3.10 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.10
     entry: python tools/pre_commit/mypy.py "3.10"
