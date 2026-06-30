@@ -20,7 +20,7 @@ import torch.nn.functional as F
 import torchaudio
 import yaml
 from einops import rearrange, repeat
-from huggingface_hub import hf_hub_download
+
 from torch.nn.utils import weight_norm
 
 try:
@@ -1785,51 +1785,28 @@ class WavTokenizer40(WavTokenizerBase):
             ckpt_name = "wavtokenizer_large_unify_600_24k.ckpt"
             sf_name = "wavtokenizer_large_unify_600_24k.safetensors"
             if self.checkpoint:
-                is_repo = (
-                    not os.path.exists(self.checkpoint)
-                    and "/" in self.checkpoint
-                    and not os.path.isabs(self.checkpoint)
-                )
                 if os.path.isdir(self.checkpoint):
                     sf_path = os.path.join(self.checkpoint, sf_name)
                     ckpt_path = os.path.join(self.checkpoint, ckpt_name)
                     if os.path.exists(sf_path):
                         model_path = sf_path
-                    else:
+                    elif os.path.exists(ckpt_path):
                         model_path = ckpt_path
-                elif is_repo:
-                    logger.info(
-                        "Downloading WavTokenizer from HF repo %s...",
-                        self.checkpoint,
-                    )
-                    try:
-                        model_path = hf_hub_download(
-                            repo_id=self.checkpoint,
-                            filename=sf_name,
+                    else:
+                        raise FileNotFoundError(
+                            f"Neither '{sf_name}' nor '{ckpt_name}' was found in directory '{self.checkpoint}'."
                         )
-                    except Exception:
-                        model_path = hf_hub_download(
-                            repo_id=self.checkpoint,
-                            filename=ckpt_name,
-                        )
-                    logger.info("Downloaded to %s", model_path)
-                else:
+                elif os.path.isfile(self.checkpoint):
                     model_path = self.checkpoint
+                else:
+                    raise FileNotFoundError(
+                        f"WavTokenizer checkpoint path '{self.checkpoint}' does not exist or is not a file/directory."
+                    )
             else:
-                logger.info(
-                    "Downloading WavTokenizer large-600 (40 tokens/s) from HF..."
+                raise ValueError(
+                    "WavTokenizer checkpoint path must be specified. "
+                    "Dynamic downloading on the fly is disabled."
                 )
-                try:
-                    model_path = hf_hub_download(
-                        repo_id="novateur/WavTokenizer-large-unify-40token",
-                        filename=sf_name,
-                    )
-                except Exception:
-                    model_path = hf_hub_download(
-                        repo_id="novateur/WavTokenizer-large-unify-40token",
-                        filename=ckpt_name,
-                    )
-                logger.info("Downloaded to %s", model_path)
 
             logger.info(
                 "Loading WavTokenizer large-600 (40 tokens/s) from %s", model_path
@@ -1837,11 +1814,6 @@ class WavTokenizer40(WavTokenizerBase):
 
             config_path = None
             if self.checkpoint:
-                is_repo = (
-                    not os.path.exists(self.checkpoint)
-                    and "/" in self.checkpoint
-                    and not os.path.isabs(self.checkpoint)
-                )
                 if os.path.isdir(self.checkpoint):
                     possible_yaml = os.path.join(self.checkpoint, "config.yaml")
                     possible_json = os.path.join(self.checkpoint, "config.json")
@@ -1849,21 +1821,7 @@ class WavTokenizer40(WavTokenizerBase):
                         config_path = possible_yaml
                     elif os.path.exists(possible_json):
                         config_path = possible_json
-                elif is_repo:
-                    try:
-                        config_path = hf_hub_download(
-                            repo_id=self.checkpoint,
-                            filename="config.json",
-                        )
-                    except Exception:
-                        try:
-                            config_path = hf_hub_download(
-                                repo_id=self.checkpoint,
-                                filename="config.yaml",
-                            )
-                        except Exception:
-                            config_path = None
-                else:
+                elif os.path.isfile(self.checkpoint):
                     possible_yaml = os.path.join(
                         os.path.dirname(self.checkpoint), "config.yaml"
                     )

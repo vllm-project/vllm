@@ -245,11 +245,6 @@ class ApertusMultiModalProcessor(
                 if os.path.exists(os.path.join(model_path_abs, "wavtokenizer_large_unify_600_24k.safetensors")):
                     if "apertus_audio_tokenizer_path" not in merged_mm_processor_kwargs:
                         merged_mm_processor_kwargs["apertus_audio_tokenizer_path"] = model_path_abs
-            elif "/" in model_path and not os.path.isabs(model_path):
-                if "apertus_vq_hub" not in merged_mm_processor_kwargs:
-                    merged_mm_processor_kwargs["apertus_vq_hub"] = model_path
-                if "apertus_audio_tokenizer_path" not in merged_mm_processor_kwargs:
-                    merged_mm_processor_kwargs["apertus_audio_tokenizer_path"] = model_path
 
         num_images = inputs.mm_data_items.get_count("image", strict=False)
         num_audios = inputs.mm_data_items.get_count("audio", strict=False)
@@ -437,9 +432,6 @@ class ApertusForConditionalGeneration(
             model_path_abs = os.path.abspath(model_path)
             mm_processor_kwargs["apertus_vq_hub"] = model_path_abs
             mm_processor_kwargs["apertus_audio_tokenizer_path"] = model_path_abs
-        elif model_path and "/" in model_path and not os.path.isabs(model_path):
-            mm_processor_kwargs["apertus_vq_hub"] = model_path
-            mm_processor_kwargs["apertus_audio_tokenizer_path"] = model_path
 
         try:
             device = next(self.parameters()).device

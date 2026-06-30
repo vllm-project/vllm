@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-import huggingface_hub
+
 import numpy as np
 import torch
 from PIL import Image
@@ -40,65 +40,18 @@ def ensure_local_emu35_weights(
     if expanded_path.exists() and expanded_path.is_dir():
         if (expanded_path / "emu35_vison_tokenizer.safetensors").is_file():
             return str(expanded_path.resolve())
-        if not has_required_files(expanded_path, required_files):
-            raise ValueError(
-                f"Local checkpoint at {expanded_path} is missing required "
-                f"files: {list(required_files)}."
-            )
-        return str(expanded_path.resolve())
-
-    local_only = huggingface_hub.constants.HF_HUB_OFFLINE
-    is_repo = not expanded_path.exists() and "/" in path and not os.path.isabs(path)
-    repo_to_use = path if is_repo else hf_repo_id
-
-    if local_only:
-        logger.info("Using cached weights for %s (cache_dir=%s)", repo_to_use, cache_dir)
-    else:
-        logger.info("Downloading %s (cache_dir=%s)", repo_to_use, cache_dir)
-
-    try:
-        hf_folder = huggingface_hub.snapshot_download(
-            repo_id=repo_to_use,
-            allow_patterns=["config.json", "emu35_vison_tokenizer.safetensors"],
-            cache_dir=cache_dir,
-            local_files_only=local_only,
+        if has_required_files(expanded_path, required_files):
+            return str(expanded_path.resolve())
+        raise ValueError(
+            f"Local checkpoint at {expanded_path} is missing required "
+            f"files (either 'emu35_vison_tokenizer.safetensors' or "
+            f"both {list(required_files)})."
         )
-        resolved = Path(hf_folder)
-        if (resolved / "emu35_vison_tokenizer.safetensors").is_file():
-            return str(resolved.resolve())
-    except Exception as e:
-        logger.warning("Failed downloading vision tokenizer from %s: %s", repo_to_use, e)
 
-    if repo_to_use != hf_repo_id:
-        try:
-            logger.info("Downloading fallback %s (cache_dir=%s)", hf_repo_id, cache_dir)
-            hf_folder = huggingface_hub.snapshot_download(
-                repo_id=hf_repo_id,
-                allow_patterns=["config.json", "emu35_vison_tokenizer.safetensors"],
-                cache_dir=cache_dir,
-                local_files_only=local_only,
-            )
-            resolved = Path(hf_folder)
-            if (resolved / "emu35_vison_tokenizer.safetensors").is_file():
-                return str(resolved.resolve())
-        except Exception:
-            pass
-
-    hf_folder = huggingface_hub.snapshot_download(
-        repo_id=hf_repo_id,
-        allow_patterns=list(required_files),
-        cache_dir=cache_dir,
-        local_files_only=local_only,
+    raise FileNotFoundError(
+        f"Apertus vision tokenizer path '{path}' does not exist or is not a directory. "
+        "Dynamic weight downloading is disabled."
     )
-
-    resolved = Path(hf_folder)
-    if not has_required_files(resolved, required_files):
-        raise RuntimeError(
-            f"Resolved checkpoint at {resolved} is missing required "
-            f"files: {list(required_files)}."
-        )
-
-    return str(resolved.resolve())
 
 
 def build_emu35_vision_tokenizer(
