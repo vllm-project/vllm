@@ -534,8 +534,13 @@ else
   echo "--- Single-node job"
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
 
-  # Disable core dumps in the ROCm test container unless the ROCm debug agent is enabled
-  coredump_flags="--ulimit core=0:$(ulimit -H -c)"
+  ulimit_core_hard=$(ulimit -H -c)
+  if [[ "$ulimit_core_hard" == "unlimited" ]]; then
+    # docker run can't pass "unlimited" to --ulimit
+    ulimit_core_hard="-1"
+  fi
+   # Disable core dumps in the ROCm test container unless the ROCm debug agent is enabled
+  coredump_flags="--ulimit core=0:$ulimit_core_hard"
   if [[ "$commands" == *"ROCm debug agent enabled"* ]]; then
     # Works around https://github.com/rocm/rocm-systems/issues/6206
     coredump_flags='-e HSA_COREDUMP_PATTERN="/tmp/gpucore.%p"'
