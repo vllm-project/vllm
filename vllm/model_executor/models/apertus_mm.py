@@ -25,7 +25,8 @@
 # limitations under the License.
 """Multimodal Apertus model compatible with HuggingFace weights."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+import os
 
 import torch
 from torch import nn
@@ -229,8 +230,26 @@ class ApertusMultiModalProcessor(
         prompt_text = (
             inputs.prompt if isinstance(inputs.prompt, str) else
             tokenizer.decode(inputs.prompt))
-        merged_mm_processor_kwargs = self.info.ctx.get_merged_mm_kwargs(
-            inputs.hf_processor_mm_kwargs)
+        merged_mm_processor_kwargs = dict(self.info.ctx.get_merged_mm_kwargs(
+            inputs.hf_processor_mm_kwargs))
+        if "model_name_or_path" not in merged_mm_processor_kwargs:
+            merged_mm_processor_kwargs["model_name_or_path"] = self.info.ctx.model_config.model
+
+        model_path = merged_mm_processor_kwargs.get("model_name_or_path")
+        if model_path and isinstance(model_path, str):
+            model_path_abs = os.path.abspath(model_path)
+            if os.path.isdir(model_path_abs):
+                if os.path.exists(os.path.join(model_path_abs, "emu35_vison_tokenizer.safetensors")):
+                    if "apertus_vq_hub" not in merged_mm_processor_kwargs:
+                        merged_mm_processor_kwargs["apertus_vq_hub"] = model_path_abs
+                if os.path.exists(os.path.join(model_path_abs, "wavtokenizer_large_unify_600_24k.safetensors")):
+                    if "apertus_audio_tokenizer_path" not in merged_mm_processor_kwargs:
+                        merged_mm_processor_kwargs["apertus_audio_tokenizer_path"] = model_path_abs
+            elif "/" in model_path and not os.path.isabs(model_path):
+                if "apertus_vq_hub" not in merged_mm_processor_kwargs:
+                    merged_mm_processor_kwargs["apertus_vq_hub"] = model_path
+                if "apertus_audio_tokenizer_path" not in merged_mm_processor_kwargs:
+                    merged_mm_processor_kwargs["apertus_audio_tokenizer_path"] = model_path
 
         num_images = inputs.mm_data_items.get_count("image", strict=False)
         num_audios = inputs.mm_data_items.get_count("audio", strict=False)
@@ -395,6 +414,49 @@ class ApertusForConditionalGeneration(
         ApertusForCausalLM,
         SupportsMultiModal,
 ):
+
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ) -> None:
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        self.image_tokenizer = ApertusImageTokenizer()
+        self.audio_tokenizer = ApertusAudioTokenizer()
+        self.vision_tower = None
+        self.audio_tower = None
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loaded_keys = super().load_weights(weights)
+
+        model_path = getattr(self.config, "_name_or_path", "")
+        mm_processor_kwargs = {"model_name_or_path": model_path}
+
+        if model_path and os.path.isdir(model_path):
+            model_path_abs = os.path.abspath(model_path)
+            mm_processor_kwargs["apertus_vq_hub"] = model_path_abs
+            mm_processor_kwargs["apertus_audio_tokenizer_path"] = model_path_abs
+        elif model_path and "/" in model_path and not os.path.isabs(model_path):
+            mm_processor_kwargs["apertus_vq_hub"] = model_path
+            mm_processor_kwargs["apertus_audio_tokenizer_path"] = model_path
+
+        try:
+            device = next(self.parameters()).device
+        except StopIteration:
+            device = torch.device("cuda")
+        device_str = str(device)
+        mm_processor_kwargs["apertus_vision_tokenizer_device"] = device_str
+        mm_processor_kwargs["apertus_audio_tokenizer_device"] = device_str
+
+        logger.info("[Apertus MM] Loading vision tokenizer onto device %s in load_weights...", device_str)
+        self.vision_tower = self.image_tokenizer.load_vision_tokenizer(mm_processor_kwargs)
+
+        logger.info("[Apertus MM] Loading audio tokenizer onto device %s in load_weights...", device_str)
+        self.audio_tower = self.audio_tokenizer.get_audio_tokenizer(mm_processor_kwargs)
+
+        return loaded_keys
+
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
