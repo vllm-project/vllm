@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import enum
-import math
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import field, fields
@@ -1326,7 +1325,6 @@ class CompilationConfig:
         kv_cache_config: "KVCacheConfig | None" = None,
         max_num_reqs: int | None = None,
         is_profiling: bool = False,
-        sp_capture_min_tokens: int | None = None,
     ) -> CUDAGraphMode:
         from vllm.v1.attention.backend import AttentionCGSupport
 
@@ -1460,35 +1458,6 @@ class CompilationConfig:
                 f"{kv_cache_config.num_blocks} or increase "
                 "gpu_memory_utilization."
             )
-
-        # DSV4 eager mHC sequence parallelism shards the token dim across the TP
-        # group, so a captured size that engages SP (>= sp_capture_min_tokens)
-        # must be a multiple of tensor_parallel_size (matching the runner's token
-        # padding) for the chunk to be exact. Smaller sizes (e.g. decode) run
-        # plain TP and are left at their natural size. With FULL-decode spec
-        # decode the sizes are also rounded to uniform_decode_query_len above;
-        # use the lcm so both hold.
-        if (
-            sp_capture_min_tokens is not None
-            and tensor_parallel_size > 1
-            and self.cudagraph_capture_sizes
-        ):
-            assert self.max_cudagraph_capture_size is not None
-            multiple_of = tensor_parallel_size
-            if (
-                cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
-                and uniform_decode_query_len > 1
-            ):
-                multiple_of = math.lcm(tensor_parallel_size, uniform_decode_query_len)
-            aligned_sizes = set()
-            for size in self.cudagraph_capture_sizes:
-                if size >= sp_capture_min_tokens:
-                    size = round_up(size, multiple_of)
-                if size <= self.max_cudagraph_capture_size:
-                    aligned_sizes.add(size)
-            if aligned_sizes:
-                self.cudagraph_capture_sizes = sorted(aligned_sizes)
-                self.max_cudagraph_capture_size = self.cudagraph_capture_sizes[-1]
 
         self.cudagraph_mode = cudagraph_mode
         return cudagraph_mode

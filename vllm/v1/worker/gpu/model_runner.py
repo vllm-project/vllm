@@ -463,8 +463,26 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.parallel_config.tensor_parallel_size,
             self.kv_cache_config,
             self.max_num_reqs,
-            sp_capture_min_tokens=self.parallel_config.sp_threshold,
         )
+        # DSV4 eager mHC sequence parallelism shards the token dim across the TP
+        # group, so a captured (and later replayed) cudagraph size that engages
+        # SP would need its chunk to stay exact across capture/replay. Require SP
+        # to never engage on a captured size: sp_threshold must exceed the
+        # largest captured size, so every captured size runs plain TP. Larger
+        # forwards run eager and engage SP.
+        sp_threshold = self.parallel_config.sp_threshold
+        max_cg_size = self.compilation_config.max_cudagraph_capture_size
+        if (
+            sp_threshold is not None
+            and self.parallel_config.tensor_parallel_size > 1
+            and max_cg_size is not None
+            and sp_threshold <= max_cg_size
+        ):
+            raise ValueError(
+                f"sp_threshold ({sp_threshold}) must be larger than the max "
+                f"cudagraph capture size ({max_cg_size}) so that sequence "
+                "parallelism never engages on a captured cudagraph size."
+            )
         self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,
             self.device,
