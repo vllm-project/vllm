@@ -407,6 +407,18 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
 
+    return_assistant_tokens_mask: bool = Field(
+        default=False,
+        description=(
+            "If true, the /render response will include an "
+            "``assistant_tokens_mask`` field — a per-token list of 0/1 "
+            "values indicating which tokens were assistant-generated. "
+            "Requires the chat template to use ``{% generation %}`` "
+            "tags.  When the template does not support it, "
+            "``assistant_tokens_mask`` will be ``null``."
+        ),
+    )
+
     cache_salt: str | None = Field(
         default=None,
         description=(
@@ -520,6 +532,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 extra_kwargs,
             ),
             media_io_kwargs=self.media_io_kwargs,
+            return_assistant_tokens_mask=bool(self.return_assistant_tokens_mask),
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
