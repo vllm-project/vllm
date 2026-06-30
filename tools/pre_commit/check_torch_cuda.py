@@ -21,6 +21,7 @@ ALLOWED_FILES = {
     "vllm/device_allocator/",
     "vllm/distributed/weight_transfer/ipc_engine.py",
     "tests/distributed/test_packed_tensor.py",
+    "tools/pre_commit/check_torch_cuda.py",
 }
 
 
