@@ -160,6 +160,13 @@ impl TestTokenizer {
         u8::try_from(id).ok().map(|byte| String::from_utf8_lossy(&[byte]).into_owned())
     }
 
+    fn flush_bytes(bytes: &mut Vec<u8>, output: &mut String) {
+        if !bytes.is_empty() {
+            output.push_str(&String::from_utf8_lossy(bytes));
+            bytes.clear();
+        }
+    }
+
     fn configured_token_prefix(&self, text: &str) -> Option<(&str, u32)> {
         self.token_to_id
             .iter()
@@ -200,14 +207,17 @@ impl Tokenizer for TestTokenizer {
 
     fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> Result<String> {
         let mut output = String::new();
+        let mut pending_bytes = Vec::new();
         for &id in token_ids {
             if let Some(token) = self.id_to_token.get(&id) {
+                Self::flush_bytes(&mut pending_bytes, &mut output);
                 if !(skip_special_tokens && token.kind.is_special()) {
                     output.push_str(&token.text);
                 }
-            } else if let Some(token) = Self::byte_to_token(id) {
-                output.push_str(&token);
+            } else if let Ok(byte) = u8::try_from(id) {
+                pending_bytes.push(byte);
             } else {
+                Self::flush_bytes(&mut pending_bytes, &mut output);
                 match self.unknown_decode {
                     UnknownDecode::Error => {
                         return Err(TokenizerError(format!(
@@ -219,6 +229,7 @@ impl Tokenizer for TestTokenizer {
                 }
             }
         }
+        Self::flush_bytes(&mut pending_bytes, &mut output);
         Ok(output)
     }
 
@@ -281,6 +292,60 @@ mod tests {
             Some("<image></image>")
         );
         assert_eq!(tokenizer.vocab_size(), 1001);
+    }
+
+    #[test]
+    fn non_ascii_text_roundtrips_through_buffered_byte_decode() {
+        let tokenizer = TestTokenizer::new();
+        let text = "你好, café, 🚀";
+
+        let ids = tokenizer.encode(text, false).unwrap();
+        assert_eq!(
+            ids,
+            text.as_bytes().iter().copied().map(u32::from).collect::<Vec<_>>()
+        );
+        assert_eq!(tokenizer.decode(&ids, false).unwrap(), text);
+    }
+
+    #[test]
+    fn buffered_byte_decode_flushes_around_configured_tokens() {
+        let tokenizer = TestTokenizer::new()
+            .with_regular_token("<image>", 999)
+            .with_special_token("<skip>", 1000);
+
+        assert_eq!(
+            tokenizer.encode("你<image>好<skip>🚀", false).unwrap(),
+            vec![228, 189, 160, 999, 229, 165, 189, 1000, 240, 159, 154, 128]
+        );
+        assert_eq!(
+            tokenizer
+                .decode(
+                    &[228, 189, 160, 999, 229, 165, 189, 1000, 240, 159, 154, 128],
+                    false
+                )
+                .unwrap(),
+            "你<image>好<skip>🚀"
+        );
+        assert_eq!(
+            tokenizer
+                .decode(
+                    &[228, 189, 160, 999, 229, 165, 189, 1000, 240, 159, 154, 128],
+                    true
+                )
+                .unwrap(),
+            "你<image>好🚀"
+        );
+    }
+
+    #[test]
+    fn invalid_utf8_bytes_decode_lossily_as_a_sequence() {
+        let tokenizer = TestTokenizer::new();
+
+        assert_eq!(tokenizer.decode(&[0xE4, 0xBD], false).unwrap(), "\u{FFFD}");
+        assert_eq!(
+            tokenizer.decode(&[0xFF, b'a' as u32], false).unwrap(),
+            "\u{FFFD}a"
+        );
     }
 
     #[test]
