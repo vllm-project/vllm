@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import sys
+import threading
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from functools import lru_cache
@@ -112,18 +113,28 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 logger = init_logger(__name__)
 
 
+# Serializes the process-global resolve_trust_remote_code patch in
+# _inherit_trust_remote_code so concurrent OV2 loads never observe each other's
+# transient patched state.
+_TRUST_REMOTE_CODE_PATCH_LOCK = threading.Lock()
+
+
 @contextmanager
-def _inherit_trust_remote_code():
-    """Propagate ``trust_remote_code=True`` to nested HF auto-loads.
+def _inherit_trust_remote_code(allowed_model: str):
+    """Let OV2's own nested HF auto-loads inherit ``trust_remote_code=True``.
 
     OV2's remote processing code pops ``trust_remote_code`` before building its
     nested tokenizer, so the inner ``AutoConfig`` load receives ``None`` and
     transformers falls back to an interactive stdin prompt ("Do you wish to run
     the custom code? [y/N]") that blocks forever in non-interactive CI. Loading
     this processor at all already requires the user to opt into
-    ``trust_remote_code=True``, so we temporarily make ``resolve_trust_remote_code``
-    inherit that decision for the exact case that would otherwise prompt
-    (remote code present, no local implementation, value unset).
+    ``trust_remote_code=True``, so we let the nested loads inherit that decision
+    -- but only for ``allowed_model`` (OV2's own repo, which the user explicitly
+    trusted) and only for the exact case that would otherwise prompt (remote
+    code present, no local implementation, value unset). Any other repository
+    pulled in transitively is left untouched and still goes through the normal
+    transformers trust resolution. The patch is process-global while active, so
+    it is serialized with a lock and restored immediately afterwards.
     """
     import transformers.dynamic_module_utils as dmu
 
@@ -141,7 +152,17 @@ def _inherit_trust_remote_code():
     def patched(
         trust_remote_code, model_name, has_local_code, has_remote_code, *args, **kwargs
     ):
-        if trust_remote_code is None and has_remote_code and not has_local_code:
+        if (
+            trust_remote_code is None
+            and has_remote_code
+            and not has_local_code
+            and model_name == allowed_model
+        ):
+            logger.debug(
+                "Inheriting trust_remote_code=True for nested load of %s during "
+                "OV2 processor initialization",
+                model_name,
+            )
             trust_remote_code = True
         return orig(
             trust_remote_code,
@@ -152,17 +173,18 @@ def _inherit_trust_remote_code():
             **kwargs,
         )
 
-    saved = []
-    for name in modnames:
-        mod = sys.modules.get(name)
-        if mod is not None and hasattr(mod, "resolve_trust_remote_code"):
-            saved.append((mod, mod.resolve_trust_remote_code))
-            mod.resolve_trust_remote_code = patched
-    try:
-        yield
-    finally:
-        for mod, fn in saved:
-            mod.resolve_trust_remote_code = fn
+    with _TRUST_REMOTE_CODE_PATCH_LOCK:
+        saved = []
+        for name in modnames:
+            mod = sys.modules.get(name)
+            if mod is not None and hasattr(mod, "resolve_trust_remote_code"):
+                saved.append((mod, mod.resolve_trust_remote_code))
+                mod.resolve_trust_remote_code = patched
+        try:
+            yield
+        finally:
+            for mod, fn in saved:
+                mod.resolve_trust_remote_code = fn
 
 
 @lru_cache
@@ -174,11 +196,12 @@ def _load_ov2_processor(
 ):
     # OV2's trust_remote_code processor is a bare class (not a ProcessorMixin),
     # so the shared type-checked get_hf_processor rejects it; load it directly.
-    # _inherit_trust_remote_code prevents the nested tokenizer load from hanging
-    # on an interactive trust_remote_code prompt in non-interactive CI.
-    with _inherit_trust_remote_code():
+    # _inherit_trust_remote_code prevents OV2's own nested tokenizer load from
+    # hanging on an interactive trust_remote_code prompt in non-interactive CI.
+    path = convert_model_repo_to_path(model)
+    with _inherit_trust_remote_code(path):
         return AutoProcessor.from_pretrained(
-            convert_model_repo_to_path(model),
+            path,
             revision=revision or "main",
             trust_remote_code=trust_remote_code,
             **kwargs,
