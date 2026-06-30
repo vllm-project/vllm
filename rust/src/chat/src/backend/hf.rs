@@ -154,7 +154,8 @@ mod tests {
     use thiserror_ext::AsReport as _;
     use vllm_text::Prompt;
     use vllm_text::backend::hf::TokenizerSource;
-    use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
+    use vllm_text::tokenizer::DynTokenizer;
+    use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::HfChatBackend;
     use crate::backend::{ChatBackend, LoadModelBackendsOptions, NewChatOutputProcessorOptions};
@@ -196,32 +197,8 @@ mod tests {
         }
     }
 
-    struct TestTokenizer;
-
-    impl Tokenizer for TestTokenizer {
-        fn encode(
-            &self,
-            _text: &str,
-            _add_special_tokens: bool,
-        ) -> vllm_text::tokenizer::Result<Vec<u32>> {
-            Ok(Vec::new())
-        }
-
-        fn decode(
-            &self,
-            _token_ids: &[u32],
-            _skip_special_tokens: bool,
-        ) -> vllm_text::tokenizer::Result<String> {
-            Ok(String::new())
-        }
-
-        fn token_to_id(&self, _token: &str) -> Option<u32> {
-            None
-        }
-    }
-
     fn test_tokenizer() -> DynTokenizer {
-        Arc::new(TestTokenizer)
+        Arc::new(TestTokenizer::new())
     }
 
     fn backend_for_selection(
