@@ -212,6 +212,7 @@ def flash_attn_varlen_func(
     mask_mod=None,
     block_sparse_tensors=None,
     aux_tensors=None,
+    aux_tensor_leading_dims=None,
     dynamic_causal: "torch.Tensor | None" = None,
 ):
     """dropout_p should be set to 0.0 during evaluation
@@ -425,6 +426,7 @@ def flash_attn_varlen_func(
             mask_mod=mask_mod,
             block_sparse_tensors=block_sparse_tensors,
             aux_tensors=aux_tensors,
+            aux_tensor_leading_dims=aux_tensor_leading_dims,
             output_scale=output_scale,
         )
     else:

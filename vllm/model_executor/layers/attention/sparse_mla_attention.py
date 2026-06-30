@@ -464,6 +464,7 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
                     mask_mod=dense_mask_mod,
                     block_sparse_tensors=block_sparse_tensors,
                     aux_tensors=[dense_mask],
+                    aux_tensor_leading_dims=[2],
                 )
             else:
                 attn_out, _ = flash_attn_varlen_func(
@@ -480,6 +481,7 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
                     fa_version=4,
                     mask_mod=dense_mask_mod,
                     aux_tensors=[dense_mask],
+                    aux_tensor_leading_dims=[2],
                 )
 
         attn_out = attn_out[..., : self.v_head_dim]
