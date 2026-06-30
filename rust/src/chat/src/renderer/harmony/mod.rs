@@ -20,6 +20,7 @@ use crate::{AssistantMessageExt as _, ReasoningEffort};
 
 const SYSTEM_START_DATE_ENV: &str = "VLLM_SYSTEM_START_DATE";
 const HARMONY_SYSTEM_INSTRUCTIONS_ENV: &str = "VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS";
+const MAX_SYSTEM_IDENTITY_LENGTH: usize = 4096;
 
 /// GPT-OSS renderer backed by the official Harmony encoding.
 pub struct HarmonyChatRenderer {
@@ -238,9 +239,16 @@ fn system_content(
     }
 
     if let Some(instructions) = instructions.filter(|text| !text.is_empty()) {
+        let truncated = if instructions.len() > MAX_SYSTEM_IDENTITY_LENGTH {
+            let mut t = instructions[..MAX_SYSTEM_IDENTITY_LENGTH].to_string();
+            t.push_str("... [truncated]");
+            t
+        } else {
+            instructions.to_string()
+        };
         let model_identity = match content.model_identity.as_deref() {
-            Some(identity) if !identity.is_empty() => format!("{identity}\n{instructions}"),
-            _ => instructions.to_string(),
+            Some(identity) if !identity.is_empty() => format!("{identity}\n{truncated}"),
+            _ => truncated,
         };
         content = content.with_model_identity(model_identity);
     }
