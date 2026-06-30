@@ -38,8 +38,8 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
+from .utils import AutoWeightsLoader, WeightsMapper
 from .vision import is_vit_use_data_parallel, run_dp_sharded_vision_model
 
 
@@ -352,6 +352,14 @@ class Idefics2Encoder(nn.Module):
 
 
 class Idefics2VisionTransformer(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+        }
+    )
+
     def __init__(
         self,
         config: Idefics2VisionConfig,
@@ -453,42 +461,22 @@ class Idefics2VisionTransformer(nn.Module):
         return last_hidden_state
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
+        # head is a pooling header absent from this model.
+        skip_prefixes = ["head."]
+        if not self.require_post_norm:
+            skip_prefixes.append("post_layernorm.")
+        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+
         layer_count = len(self.encoder.layers)
 
-        for name, loaded_weight in weights:
-            # skip pooling header
-            if name.startswith("head."):
-                continue
-
-            # post_layernorm is optional
-            if name.startswith("post_layernorm.") and not self.require_post_norm:
-                continue
-
-            # omit layers when num_hidden_layers_override is set
-            if name.startswith("encoder.layers."):
-                layer_idx = int(name.split(".")[2])
-                if layer_idx >= layer_count:
+        def _filter(ws: Iterable[tuple[str, torch.Tensor]]):
+            # Drop layers beyond num_hidden_layers_override.
+            for name, w in ws:
+                if (
+                    name.startswith("encoder.layers.")
+                    and int(name.split(".")[2]) >= layer_count
+                ):
                     continue
+                yield name, w
 
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name or self.use_data_parallel:
-                    continue
-                name = name.replace(weight_name, param_name)
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        return loader.load_weights(_filter(weights), mapper=self.hf_to_vllm_mapper)
