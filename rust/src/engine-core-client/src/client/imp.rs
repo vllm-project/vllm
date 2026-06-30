@@ -415,6 +415,14 @@ pub(crate) async fn run_output_dispatcher_loop(
                                         event,
                                     );
                                 }
+                                EngineNotification::Custom(custom) => {
+                                    // Plugin-defined payload; this frontend
+                                    // has no consumer for it, so ignore.
+                                    trace!(
+                                        key = %custom.key,
+                                        "ignoring custom engine notification"
+                                    );
+                                }
                             }
                         }
                     }

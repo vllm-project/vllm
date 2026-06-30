@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// The set of loaded LoRA adapters changed.
@@ -25,6 +27,28 @@ pub struct LoraLoadEvent {
     pub pinned_adapters: Vec<String>,
 }
 
+/// An open-schema notification reserved for out-of-tree producers (plugins).
+///
+/// The union fails fast on unknown tags, so a plugin can't add its own struct
+/// type without forking the protocol. This reserved `custom` tag is the
+/// escape hatch: the producer namespaces its event under `key` and carries an
+/// arbitrary msgpack `payload`. Frontends that don't recognize `key` ignore
+/// the event (the channel is additive, so an unapplied delta is a no-op).
+///
+/// Python models `payload` as `dict[str, Any]` with `omit_defaults=True`, so
+/// it needs `#[serde(default)]`.
+///
+/// Original Python definition:
+/// <https://github.com/vllm-project/vllm/blob/main/vllm/v1/notifications.py>
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CustomNotification {
+    /// Producer-chosen namespace (e.g. the plugin name).
+    pub key: String,
+    /// Arbitrary msgpack-encodable event data, opaque to this frontend.
+    #[serde(default)]
+    pub payload: BTreeMap<String, rmpv::Value>,
+}
+
 /// Rare engine-level event notifications carried on
 /// `EngineCoreOutputs::engine_notifications`.
 ///
@@ -41,6 +65,7 @@ pub struct LoraLoadEvent {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EngineNotification {
     LoraLoadEvent(LoraLoadEvent),
+    Custom(CustomNotification),
 }
 
 #[cfg(test)]
@@ -92,6 +117,39 @@ mod tests {
         assert_eq!(
             event,
             EngineNotification::LoraLoadEvent(LoraLoadEvent::default())
+        );
+    }
+
+    /// Captured from Python:
+    /// `msgspec.msgpack.encode(CustomNotification(key="my_plugin",
+    /// payload={"count": 5, "name": "foo"}))`
+    const PYTHON_CUSTOM: &str = "83a474797065a6637573746f6da36b6579a96d795f706c7567696ea77061796c6f616482a5636f756e7405a46e616d65a3666f6f";
+
+    /// Captured from Python:
+    /// `msgspec.msgpack.encode(CustomNotification(key="my_plugin"))`,
+    /// where `omit_defaults=True` strips the empty payload.
+    const PYTHON_CUSTOM_EMPTY: &str = "82a474797065a6637573746f6da36b6579a96d795f706c7567696e";
+
+    #[test]
+    fn engine_event_decodes_python_custom_notification() {
+        let event: EngineNotification = decode_msgpack(&hex_bytes(PYTHON_CUSTOM)).unwrap();
+        let EngineNotification::Custom(custom) = event else {
+            panic!("expected custom notification, got {event:?}");
+        };
+        assert_eq!(custom.key, "my_plugin");
+        assert_eq!(custom.payload["count"], rmpv::Value::from(5));
+        assert_eq!(custom.payload["name"], rmpv::Value::from("foo"));
+    }
+
+    #[test]
+    fn engine_event_decodes_custom_omitted_payload() {
+        let event: EngineNotification = decode_msgpack(&hex_bytes(PYTHON_CUSTOM_EMPTY)).unwrap();
+        assert_eq!(
+            event,
+            EngineNotification::Custom(CustomNotification {
+                key: "my_plugin".to_string(),
+                payload: BTreeMap::new(),
+            })
         );
     }
 
