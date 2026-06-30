@@ -114,11 +114,16 @@ direct_register_custom_op(
 
 
 class TransformersRoutedExperts(RoutedExperts):
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        common = super().get_expert_mapping("gate_proj", "down_proj", "up_proj")
-        common_fused, common_unfused = common[:3], common[3:]
-        mixtral = super().get_expert_mapping("w1", "w2", "w3")
-        mixtral_fused, mixtral_unfused = mixtral[:3], mixtral[3:]
+    def get_expert_mapping(
+        self, include_fused: bool = False
+    ) -> list[tuple[str, str, int, str]]:
+        common_names = ("gate_proj", "down_proj", "up_proj")
+        common_map = super().get_expert_mapping(*common_names, include_fused)
+        mixtral_map = super().get_expert_mapping("w1", "w2", "w3", include_fused)
+        if not include_fused:
+            return common_map + mixtral_map
+        common_fused, common_unfused = common_map[:3], common_map[3:]
+        mixtral_fused, mixtral_unfused = mixtral_map[:3], mixtral_map[3:]
         return common_fused + mixtral_fused + common_unfused + mixtral_unfused
 
 

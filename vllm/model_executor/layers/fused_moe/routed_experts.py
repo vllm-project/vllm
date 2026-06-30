@@ -869,7 +869,7 @@ class RoutedExperts(PluggableLayer):
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
-        expert_mapping = self.get_expert_mapping()
+        expert_mapping = self.get_expert_mapping(include_fused=True)
         unpadded_hidden = self.moe_config.hidden_dim_unpadded
         for expert_name, loaded_weight in weights:
             qual_name = f"{self.layer_name}.{expert_name}"
@@ -930,6 +930,7 @@ class RoutedExperts(PluggableLayer):
         ckpt_gate_proj_name: str | None = None,
         ckpt_down_proj_name: str | None = None,
         ckpt_up_proj_name: str | None = None,
+        include_fused: bool = False,
     ) -> list[tuple[str, str, int, str]]:
         moe_config = self.moe_config
         num_redundant_experts = moe_config.num_experts - moe_config.num_logical_experts
@@ -941,7 +942,7 @@ class RoutedExperts(PluggableLayer):
             num_redundant_experts=num_redundant_experts,
             routed_experts_prefix="",
             lora_base_layer_prefix=self.lora_base_layer_prefix,
-            include_fused=True,
+            include_fused=include_fused,
         )
 
     @staticmethod
