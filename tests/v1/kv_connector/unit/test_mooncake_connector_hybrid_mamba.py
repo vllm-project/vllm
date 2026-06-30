@@ -205,14 +205,7 @@ def test_register_kv_caches_deduplicates_shared_backing_memory(monkeypatch):
         batch_register_memory.assert_called_once()
         registered_ptrs, registered_lens = batch_register_memory.call_args[0]
         assert registered_ptrs == [backing.data_ptr()]
-        assert registered_lens == [
-            max(
-                fa_cache.shape[0] * fa_cache.stride(0) * fa_cache.element_size(),
-                gdn_conv_state.shape[0]
-                * gdn_conv_state.stride(0)
-                * gdn_conv_state.element_size(),
-            )
-        ]
+        assert registered_lens == [backing.untyped_storage().nbytes()]
 
         worker.shutdown()
         worker.shutdown = noop_shutdown

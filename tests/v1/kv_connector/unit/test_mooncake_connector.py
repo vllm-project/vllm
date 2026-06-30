@@ -292,6 +292,7 @@ async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
         kv_half = block_len // 2
         prefill_worker.kv_caches_base_addr = [0x1000]
         prefill_worker.block_len_per_layer = [block_len]
+        prefill_worker.kv_block_len_per_layer = [kv_half]
         prefill_worker.registered_layer_names = ["model.layers.1.self_attn"]
         prefill_worker.registered_layer_indices = [1]
 
@@ -320,7 +321,7 @@ async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
             req_blocks={"d-req-layer-align": (transfer_id, [[20]])},
             kv_caches_base_addr=[0xA000, 0xB000],
             block_lens=[block_len, block_len],
-            kv_block_lens=[block_len, block_len],
+            kv_block_lens=[kv_half, kv_half],
             registered_layer_names=[
                 "model.layers.0.self_attn",
                 "model.layers.1.self_attn",
@@ -831,7 +832,9 @@ async def test_kv_producer(monkeypatch):
         prefill_worker = prefill_connector.connector_worker
         prefill_worker.kv_caches_base_addr = [0x1000]
         block_len = 4096
+        kv_half = block_len // 2
         prefill_worker.block_len_per_layer = [block_len]
+        prefill_worker.kv_block_len_per_layer = [kv_half]
         prefill_worker.registered_layer_names = ["model.layers.0.self_attn"]
         prefill_worker.registered_layer_indices = [0]
 
@@ -859,7 +862,7 @@ async def test_kv_producer(monkeypatch):
             req_blocks={"d-req-1": (transfer_id, [[20, 21]])},
             kv_caches_base_addr=[0x2000],
             block_lens=[block_len],
-            kv_block_lens=[block_len],
+            kv_block_lens=[kv_half],
             registered_layer_names=["model.layers.0.self_attn"],
             registered_layer_indices=[0],
         )
@@ -873,8 +876,6 @@ async def test_kv_producer(monkeypatch):
         ) as mock_send_blocks:
             # With blocks-first layout, each block is virtually split
             # into K and V halves, producing non-coalesced transfers.
-            kv_half = block_len // 2
-
             def expected_split_transfers(src_base, dst_base, src_blocks, dst_blocks):
                 """Build expected (src_ptrs, dst_ptrs, lengths) for
                 virtual-split K/V transfers."""
@@ -1009,6 +1010,7 @@ async def test_kv_consumuer(monkeypatch):
         decode_worker = decode_connector.connector_worker
         decode_worker.kv_caches_base_addr = [0x1000]
         decode_worker.block_len_per_layer = [4096]
+        decode_worker.kv_block_len_per_layer = [4096]
         decode_worker.registered_layer_names = ["model.layers.0.self_attn"]
         decode_worker.registered_layer_indices = [0]
         decode_worker.rpc_port = 54321
@@ -1264,6 +1266,7 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
 
         prefill_worker.kv_caches_base_addr = [0x1000]
         prefill_worker.block_len_per_layer = [local_block_len]
+        prefill_worker.kv_block_len_per_layer = [local_block_len // 2]
         prefill_worker.registered_layer_names = ["model.layers.0.self_attn"]
         prefill_worker.registered_layer_indices = [0]
 
@@ -1311,7 +1314,7 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
                     },
                     kv_caches_base_addr=[0x2000],
                     block_lens=[remote_block_len],
-                    kv_block_lens=[remote_block_len],
+                    kv_block_lens=[remote_block_len // 2],
                     registered_layer_names=["model.layers.0.self_attn"],
                     registered_layer_indices=[0],
                 )
