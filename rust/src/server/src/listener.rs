@@ -1,26 +1,47 @@
-//! Unified HTTP listener wrapper for the Rust frontend.
+//! Unified listener wrapper for the Rust frontend.
 //!
 //! This module hides the difference between TCP and Unix-domain listeners so
 //! the rest of the server can bind or inherit one socket and pass it to
 //! `axum::serve(...)` through a single type.
 
 use std::io::Result;
-use std::net::TcpListener as StdTcpListener;
+use std::net::{SocketAddr, TcpListener as StdTcpListener};
 use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
 use std::os::unix::net::UnixListener as StdUnixListener;
+use std::pin::Pin;
+use std::task::{Context, Poll, ready};
 
+use auto_enums::enum_derive;
 use socket2::Socket;
+use tls_listener::{AsyncAccept, AsyncListener};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
-use tokio_util::either::Either;
+use tonic::transport::server::{Connected, TcpConnectInfo};
+use tracing::trace;
 
 use crate::HttpListenerMode;
 
-/// Runtime listener type used by the OpenAI-compatible HTTP server, which is
-/// either a TCP listener or a Unix-domain listener.
+/// Runtime listener type used by the OpenAI-compatible HTTP or gRPC server,
+/// which is either a TCP listener or a Unix-domain listener.
 #[derive(Debug)]
 pub enum Listener {
     Tcp(TcpListener),
     Unix(UnixListener),
+}
+
+/// Runtime listener I/O type which is either a TCP stream or a Unix-domain stream.
+#[derive(Debug)]
+#[enum_derive(tokio1::AsyncRead, tokio1::AsyncWrite)]
+pub enum ListenerIo {
+    Tcp(TcpStream),
+    Unix(UnixStream),
+}
+
+/// Runtime listener address type which is either a TCP address or a Unix-domain address.
+#[derive(Debug)]
+#[allow(dead_code)]
+pub enum ListenerAddr {
+    Tcp(SocketAddr),
+    Unix(tokio::net::unix::SocketAddr),
 }
 
 impl Listener {
@@ -70,31 +91,92 @@ impl Listener {
             Ok(Self::Tcp(TcpListener::from_std(std_listener)?))
         }
     }
+
+    fn listener_addr(&self) -> Result<ListenerAddr> {
+        match self {
+            Self::Tcp(listener) => listener.local_addr().map(ListenerAddr::Tcp),
+            Self::Unix(listener) => listener.local_addr().map(ListenerAddr::Unix),
+        }
+    }
+}
+
+impl Connected for ListenerIo {
+    type ConnectInfo = TcpConnectInfo;
+
+    fn connect_info(&self) -> TcpConnectInfo {
+        match self {
+            Self::Tcp(stream) => stream.connect_info(),
+            Self::Unix(_) => TcpConnectInfo {
+                local_addr: None,
+                remote_addr: None,
+            },
+        }
+    }
+}
+
+/// Attempt to set `TCP_NODELAY` on the accepted TCP stream.
+fn enable_tcp_nodelay(stream: TcpStream) -> TcpStream {
+    if let Err(err) = stream.set_nodelay(true) {
+        trace!(error = %err, "failed to enable TCP_NODELAY on accepted TCP connection");
+    }
+    stream
 }
 
 /// Allow the unified listener to plug directly into `axum::serve(...)`.
 impl axum::serve::Listener for Listener {
-    type Addr = Either<std::net::SocketAddr, tokio::net::unix::SocketAddr>;
-    type Io = Either<TcpStream, UnixStream>;
+    type Addr = ListenerAddr;
+    type Io = ListenerIo;
 
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
         match self {
             Self::Tcp(listener) => {
-                let (io, addr) = listener.accept().await;
-                (Either::Left(io), Either::Left(addr))
+                let (io, addr) = axum::serve::Listener::accept(listener).await;
+                (
+                    ListenerIo::Tcp(enable_tcp_nodelay(io)),
+                    ListenerAddr::Tcp(addr),
+                )
             }
             Self::Unix(listener) => {
-                let (io, addr) = listener.accept().await;
-                (Either::Right(io), Either::Right(addr))
+                let (io, addr) = axum::serve::Listener::accept(listener).await;
+                (ListenerIo::Unix(io), ListenerAddr::Unix(addr))
             }
         }
     }
 
     fn local_addr(&self) -> Result<Self::Addr> {
-        match self {
-            Self::Tcp(listener) => listener.local_addr().map(Either::Left),
-            Self::Unix(listener) => listener.local_addr().map(Either::Right),
+        self.listener_addr()
+    }
+}
+
+/// Allow the unified listener to be adaptable to `tls_listener`.
+impl AsyncAccept for Listener {
+    type Connection = ListenerIo;
+    type Address = ListenerAddr;
+    type Error = std::io::Error;
+
+    fn poll_accept(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(Self::Connection, Self::Address)>> {
+        match self.get_mut() {
+            Self::Tcp(listener) => {
+                let (io, addr) = ready!(listener.poll_accept(cx))?;
+                Poll::Ready(Ok((
+                    ListenerIo::Tcp(enable_tcp_nodelay(io)),
+                    ListenerAddr::Tcp(addr),
+                )))
+            }
+            Self::Unix(listener) => {
+                let (io, addr) = ready!(listener.poll_accept(cx))?;
+                Poll::Ready(Ok((ListenerIo::Unix(io), ListenerAddr::Unix(addr))))
+            }
         }
+    }
+}
+
+impl AsyncListener for Listener {
+    fn local_addr(&self) -> Result<Self::Address> {
+        self.listener_addr()
     }
 }
 
