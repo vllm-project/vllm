@@ -43,6 +43,9 @@ logger = init_logger(__name__)
 
 
 def kernel_warmup(worker: "Worker"):
+    from vllm.model_executor.warmup.hybrid_gdn_mamba_mrope_warmup import (
+        hybrid_gdn_mamba_mrope_warmup,
+    )
     from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
         minimax_m3_msa_warmup,
     )
@@ -83,6 +86,11 @@ def kernel_warmup(worker: "Worker"):
         deep_gemm_warmup(model, max_tokens)
 
     minimax_m3_msa_warmup(worker)
+
+    hybrid_gdn_mamba_mrope_warmup(
+        worker.get_model(),
+        model_dtype=worker.model_runner.dtype,
+    )
 
     enable_flashinfer_autotune = (
         worker.vllm_config.kernel_config.enable_flashinfer_autotune
