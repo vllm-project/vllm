@@ -45,9 +45,9 @@ models: dict[str, str | None] = {
 def granite_speech_attention_config():
     """Return attention config for Granite Speech tests on ROCm."""
     if current_platform.is_rocm():
-        from vllm.platforms.rocm import on_mi3or4
+        from vllm.platforms.rocm import get_cdna_version
 
-        if on_mi3or4():
+        if get_cdna_version():
             return {"backend": "ROCM_AITER_FA"}
         return {"backend": "TRITON_ATTN"}
     return None

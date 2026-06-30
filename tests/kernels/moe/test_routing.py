@@ -23,9 +23,9 @@ def _is_aiter_capable() -> bool:
     if not current_platform.is_rocm():
         return False
     try:
-        from vllm.platforms.rocm import _on_mi3or4
+        from vllm.platforms.rocm import get_cdna_version
 
-        return _on_mi3or4()
+        return get_cdna_version() > 2
     except ImportError:
         return False
 

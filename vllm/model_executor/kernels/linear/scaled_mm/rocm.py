@@ -79,10 +79,10 @@ class ROCmFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if not current_platform.is_rocm():
             return False, "requires ROCm."
 
-        from vllm.platforms.rocm import on_gfx12x, on_mi3or4
+        from vllm.platforms.rocm import get_cdna_version
 
-        if not (on_mi3or4() or on_gfx12x()):
-            return False, "requires MI3or4 or gfx12x"
+        if get_cdna_version() <= 2:
+            return False, "requires CDNA capabilities greater than 2"
 
         if not envs.VLLM_ROCM_USE_SKINNY_GEMM:
             return False, "requires VLLM_ROCM_USE_SKINNY_GEMM to be enabled."

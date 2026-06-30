@@ -64,9 +64,9 @@ class QuarkW4A8_MXFP4_FP8(QuarkScheme):
 
         kernel_supported_gpu = False
         if current_platform.is_rocm():
-            from vllm.platforms.rocm import on_gfx950, on_gfx1250
+            from vllm.platforms.rocm import get_cdna_version
 
-            kernel_supported_gpu = on_gfx950() or on_gfx1250()
+            kernel_supported_gpu = get_cdna_version() > 3
 
         self.use_aiter_kernel = (
             is_aiter_found_and_supported()
