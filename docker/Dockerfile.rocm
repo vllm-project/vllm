@@ -822,9 +822,6 @@ ENV SAFETENSORS_FAST_GPU=1
 # Performance environment variable.
 ENV HIP_FORCE_DEV_KERNARG=1
 
-# Keep torch.cuda.is_available() fork-safe (see vllm/env_override.py).
-ENV PYTORCH_NVML_BASED_CUDA_CHECK=1
-
 # Workaround for ROCm profiler limits
 RUN echo "ROCTRACER_MAX_EVENTS=10000000" > ${COMMON_WORKDIR}/libkineto.conf
 ENV KINETO_CONFIG="${COMMON_WORKDIR}/libkineto.conf"
