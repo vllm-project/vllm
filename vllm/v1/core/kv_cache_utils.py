@@ -31,6 +31,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
+    SlidingWindowMomeSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -1312,7 +1313,23 @@ def _get_kv_cache_config_packed(
     return num_blocks, kv_cache_tensors
 
 
-_get_kv_cache_config_deepseek_v4 = _get_kv_cache_config_packed
+def _get_kv_cache_config_separated(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    available_memory: int,
+) -> tuple[int, list[KVCacheTensor]]:
+    buckets = _bucket_layers_by_page_size(kv_cache_groups)
+    total_num_bytes_per_block = sum(ps * len(slots) for ps, slots in buckets.items())
+
+    num_blocks = available_memory // total_num_bytes_per_block
+    num_blocks = may_override_num_blocks(vllm_config, num_blocks)
+
+    kv_cache_tensors: list[KVCacheTensor] = []
+    for ps, slots in buckets.items():
+        for slot in slots:
+            kv_cache_tensors.append(KVCacheTensor(size=ps * num_blocks, shared_by=slot))
+
+    return num_blocks, kv_cache_tensors
 
 
 def get_kv_cache_config_from_groups(
@@ -1359,12 +1376,28 @@ def get_kv_cache_config_from_groups(
             )
             for layer_name in kv_cache_groups[0].layer_names
         ]
+    elif all(
+        isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+        for group in kv_cache_groups
+    ) and any(
+        any(
+            isinstance(layer_spec, SlidingWindowMomeSpec)
+            for layer_spec in cast(
+                UniformTypeKVCacheSpecs, group.kv_cache_spec
+            ).kv_cache_specs.values()
+        )
+        for group in kv_cache_groups
+    ):
+        num_blocks, kv_cache_tensors = _get_kv_cache_config_separated(
+            vllm_config, kv_cache_groups, available_memory
+        )
     elif _use_packed_kv_cache_config(vllm_config, kv_cache_groups):
         # DeepSeek V4 uses the packed layout by default. Other multi-group
         # layouts can opt in with --enable-cross-layers.
         num_blocks, kv_cache_tensors = _get_kv_cache_config_packed(
             vllm_config, kv_cache_groups, available_memory
         )
+
     else:
         # General case:
         # We will have group_size memory pools, each is shared by one layer from
