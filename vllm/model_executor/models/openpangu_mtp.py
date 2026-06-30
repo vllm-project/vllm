@@ -48,6 +48,7 @@ from vllm.sequence import IntermediateTensors
 from .openpangu import OpenPanguDecoderLayer
 
 
+@support_torch_compile
 class OpenPanguMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
     def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
         nn.Module.__init__(self)
@@ -66,6 +67,29 @@ class OpenPanguMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
         )
         self.mtp_block = OpenPanguDecoderLayer(config, prefix, vllm_config)
 
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        previous_hidden_states: torch.Tensor,
+        inputs_embeds: torch.Tensor | None = None,
+        spec_step_index: int = 0,
+    ) -> torch.Tensor:
+        assert inputs_embeds is not None
+
+        inputs_embeds = self.enorm(inputs_embeds)
+        previous_hidden_states = self.hnorm(previous_hidden_states)
+
+        hidden_states = self.eh_proj(
+            torch.cat([inputs_embeds, previous_hidden_states], dim=-1)
+        )
+
+        hidden_states, residual = self.mtp_block(
+            positions=positions, hidden_states=hidden_states, residual=None
+        )
+        hidden_states = residual + hidden_states
+        return hidden_states
+
 
 class OpenPanguMultiTokenPredictor(DeepSeekMultiTokenPredictor):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -77,7 +101,8 @@ class OpenPanguMultiTokenPredictor(DeepSeekMultiTokenPredictor):
         self.layers = torch.nn.ModuleDict(
             {
                 str(idx): OpenPanguMultiTokenPredictorLayer(
-                    vllm_config, f"{prefix}.layers.{idx}"
+                    vllm_config=vllm_config,
+                    prefix=f"{prefix}.layers.{idx}",
                 )
                 for idx in range(
                     self.mtp_start_layer_idx,
@@ -225,6 +250,25 @@ class OpenPanguMTP(nn.Module):
                         and ".layers" not in name
                     ):
                         continue
+                    if name.endswith("e_score_correction_bias"):
+                        name = name.replace(
+                            "e_score_correction_bias", "gate.e_score_correction_bias"
+                        )
+                    if ".self_attn.qa_conv.weight" in name:
+                        name = name.replace(
+                            ".self_attn.qa_conv.weight",
+                            ".self_attn.mome_attn.qa_conv.weight",
+                        )
+                    if ".self_attn.compresskv_conv.weight" in name:
+                        name = name.replace(
+                            ".self_attn.compresskv_conv.weight",
+                            ".self_attn.mome_attn.compresskv_conv.weight",
+                        )
+                    if ".self_attn.o_conv.weight" in name:
+                        name = name.replace(
+                            ".self_attn.o_conv.weight",
+                            ".self_attn.mome_attn.o_conv.weight",
+                        )
 
                     param = params_dict[name]
                     weight_loader = getattr(

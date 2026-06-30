@@ -298,21 +298,7 @@ def mome_attention(
         assert decode_state_indices is not None
         assert decode_block_idx_last_scheduled_token is not None
         assert decode_block_idx_last_computed_token is not None
-        if query_start_loc_d is not None and num_accepted_tokens is not None:
-            assert mome_metadata.max_decode_query_len is not None
-            conv_state_indices = decode_state_indices.contiguous()
-            block_idx_last_scheduled_token = decode_block_idx_last_scheduled_token
-            initial_state_idx = decode_block_idx_last_computed_token
-            max_query_len = mome_metadata.max_decode_query_len
-        else:
-            conv_state_indices = decode_state_indices[:num_decodes].contiguous()
-            block_idx_last_scheduled_token = decode_block_idx_last_scheduled_token[
-                :num_decodes
-            ]
-            initial_state_idx = decode_block_idx_last_computed_token[:num_decodes]
-            num_accepted_tokens = None
-            query_start_loc_d = None
-            max_query_len = -1
+        max_query_len = mome_metadata.max_decode_query_len
 
         decode_output = causal_conv1d_update(
             decode_hidden_states,
@@ -320,9 +306,9 @@ def mome_attention(
             conv_weight,
             bias=None,
             activation=None,
-            conv_state_indices=conv_state_indices,
-            block_idx_last_scheduled_token=block_idx_last_scheduled_token,
-            initial_state_idx=initial_state_idx,
+            conv_state_indices=decode_state_indices,
+            block_idx_last_scheduled_token=decode_block_idx_last_scheduled_token,
+            initial_state_idx=decode_block_idx_last_computed_token,
             num_accepted_tokens=num_accepted_tokens,
             query_start_loc=query_start_loc_d,
             max_query_len=max_query_len,
@@ -357,16 +343,12 @@ def mome_attention(
             activation=None,
             conv_states=conv_state_,
             has_initial_state=mome_metadata.has_initial_states_p,
-            cache_indices=prefill_state_indices[:num_prefills].contiguous(),
+            cache_indices=prefill_state_indices,
             query_start_loc=query_start_loc,
-            block_idx_first_scheduled_token=(
-                prefill_block_idx_first_scheduled_token[:num_prefills]
-            ),
-            block_idx_last_scheduled_token=(
-                prefill_block_idx_last_scheduled_token[:num_prefills]
-            ),
-            initial_state_idx=prefill_block_idx_last_computed_token[:num_prefills],
-            num_computed_tokens=num_computed_tokens_p[:num_prefills],
+            block_idx_first_scheduled_token=prefill_block_idx_first_scheduled_token,
+            block_idx_last_scheduled_token=prefill_block_idx_last_scheduled_token,
+            initial_state_idx=prefill_block_idx_last_computed_token,
+            num_computed_tokens=num_computed_tokens_p,
             block_size_to_align=conv_state_.size(-1),
             metadata=mome_metadata,
             zero_initial_state_output=True,
@@ -491,8 +473,7 @@ class StaticSinkMultiHeadLatentAttentionWrapper(PluggableLayer):
                 dim=-1,
             )
             if self.mome_attn is not None:
-                mome_output = self.mome_attn(q_c, state_indice=0)
-                q_c = mome_output + q_c
+                q_c = self.mome_attn(q_c, state_indice=0) + q_c
             q_c = self.q_a_layernorm(q_c)
             q = self.q_b_proj(q_c)[0]
         else:
@@ -1858,6 +1839,7 @@ class OpenPanguModel(nn.Module):
                 hidden_states + residual if residual is not None else hidden_states
             )
 
+        hidden_states = self.norm(hidden_states)
         return hidden_states
 
     def load_attn_mlp_weight(
@@ -2109,7 +2091,7 @@ class OpenPanguModelBase(nn.Module, SupportsPP, SupportsLoRA):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        logits = self.logits_processor(self.lm_head, self.model.norm(hidden_states))
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

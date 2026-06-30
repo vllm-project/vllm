@@ -947,6 +947,7 @@ class SpecDecodeBaseProposer:
         requests: dict[str, CachedRequestState],
         gpu_input_batch: InputBatch,
         discard_request_mask: torch.Tensor,
+        common_attn_metadata: CommonAttentionMetadata | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         This function is used to prepare the inputs for speculative decoding.
@@ -1047,6 +1048,7 @@ class SpecDecodeBaseProposer:
             slot_mapping=common_attn_metadata.slot_mapping[:total_num_tokens],
             causal=True,
             dcp_local_seq_lens=common_attn_metadata.dcp_local_seq_lens,
+            is_prefilling=common_attn_metadata.is_prefilling,
         )
 
         return (

@@ -723,10 +723,11 @@ class SpeculativeConfig:
                     MTPModelTypes
                 ):
                     self.method = "mtp"
-                    if (
-                        self.num_speculative_tokens > 1
-                        and self.draft_model_config.hf_config.model_type
-                        != "step3p5_mtp"
+                    n_predict = getattr(
+                        self.draft_model_config.hf_config, "n_predict", None
+                    )
+                    if self.num_speculative_tokens > 1 and (
+                        n_predict is None or n_predict <= 1
                     ):
                         logger.warning(
                             "Enabling num_speculative_tokens > 1 will run "
@@ -1074,6 +1075,14 @@ class SpeculativeConfig:
             and self.draft_model_config is not None
             and getattr(self.draft_model_config.hf_config, "model_type", None)
             == "step3p5_mtp"
+        )
+
+    def use_openpangu_v2_mtp(self) -> bool:
+        return (
+            self.method == "mtp"
+            and self.draft_model_config is not None
+            and getattr(self.draft_model_config.hf_config, "model_type", None)
+            == "openpangu_mtp"
         )
 
     def use_eagle(self) -> bool:

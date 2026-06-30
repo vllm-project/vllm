@@ -309,6 +309,7 @@ class ExtractHiddenStatesProposer:
         requests: dict[str, CachedRequestState],
         gpu_input_batch: InputBatch,
         discard_request_mask: torch.Tensor,
+        common_attn_metadata: CommonAttentionMetadata | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Prepare next token IDs for speculative decoding.

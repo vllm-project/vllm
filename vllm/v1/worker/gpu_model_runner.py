@@ -190,6 +190,7 @@ from vllm.v1.spec_decode.ngram_proposer_gpu import (
     update_ngram_gpu_tensors_incremental,
     update_scheduler_for_invalid_drafts,
 )
+from vllm.v1.spec_decode.openpangu_v2 import OpenPanguV2MTPProposer
 from vllm.v1.spec_decode.step3p5 import Step3p5MTPProposer
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.spec_decode.utils import update_num_computed_tokens_for_batch_change
@@ -556,6 +557,7 @@ class GPUModelRunner(
                 | ExtractHiddenStatesProposer
                 | Gemma4Proposer
                 | Step3p5MTPProposer
+                | OpenPanguV2MTPProposer
             )
             if self.speculative_config.method == "custom_class":
                 self.drafter = create_custom_proposer(  # type: ignore[assignment]
@@ -592,6 +594,10 @@ class GPUModelRunner(
                 self.drafter = Gemma4Proposer(self.vllm_config, self.device, self)
             elif self.speculative_config.use_step3p5_mtp():
                 self.drafter = Step3p5MTPProposer(self.vllm_config, self.device, self)
+            elif self.speculative_config.use_openpangu_v2_mtp():
+                self.drafter = OpenPanguV2MTPProposer(
+                    self.vllm_config, self.device, self
+                )
             elif self.speculative_config.use_dflash():
                 self.drafter = DFlashProposer(self.vllm_config, self.device, self)
                 self.use_aux_hidden_state_outputs = True
@@ -689,6 +695,7 @@ class GPUModelRunner(
             cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
             reasoning_config=self.vllm_config.reasoning_config,
         )
+        self._maybe_init_multi_mtp_cache()
 
         # Separate cuda stream for overlapping transfer of sampled token ids from
         # GPU to CPU when async scheduling is enabled.
@@ -907,6 +914,23 @@ class GPUModelRunner(
                 self.max_num_reqs, dtype=torch.int32
             )
         self.layerwise_nvtx_hooks_registered = False
+
+    def _maybe_init_multi_mtp_cache(self) -> None:
+        drafter = getattr(self, "drafter", None)
+        if not getattr(drafter, "fix_multi_mtp_kvcache", False):
+            return
+        assert drafter is not None
+        hidden_size = getattr(drafter, "hidden_size", None)
+        if hidden_size is None:
+            hidden_size = self.model_config.get_hidden_size()
+        n_predict = getattr(drafter, "n_predict", self.num_spec_tokens)
+        self.input_batch.init_multi_mtp_target_cache(
+            n_predict,
+            hidden_size,
+            self.dtype,
+            self.device,
+        )
+        drafter.input_batch = self.input_batch
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
@@ -2485,12 +2509,16 @@ class GPUModelRunner(
                         spec_decode_common_attn_metadata = cm
                 else:
                     spec_decode_common_attn_metadata = cm
-            # Capture per-group block tables for multi-group proposers.
-            if self.speculative_config and isinstance(self.drafter, Step3p5MTPProposer):
+            # Capture per-group metadata for multi-group proposers.
+            if self.speculative_config and hasattr(
+                self.drafter, "set_per_group_attn_metadata"
+            ):
                 self.drafter.set_per_group_attn_metadata(
                     kv_cache_gid, cm.block_table_tensor, cm.slot_mapping
                 )
-            elif self.speculative_config and isinstance(self.drafter, Gemma4Proposer):
+            elif self.speculative_config and hasattr(
+                self.drafter, "set_per_group_block_table"
+            ):
                 self.drafter.set_per_group_block_table(
                     kv_cache_gid, cm.block_table_tensor
                 )
@@ -4535,6 +4563,7 @@ class GPUModelRunner(
                             self.requests,
                             self.input_batch,
                             self.discard_request_mask.gpu,
+                            spec_decode_common_attn_metadata,
                         )
                     )
                     self._copy_valid_sampled_token_count(
@@ -4993,6 +5022,7 @@ class GPUModelRunner(
                     self.requests,
                     self.input_batch,
                     self.discard_request_mask.gpu,
+                    common_attn_metadata,
                 )
             )
             self._copy_valid_sampled_token_count(
@@ -5008,6 +5038,12 @@ class GPUModelRunner(
                 self.drafter,
                 EagleProposer | DFlashProposer | DraftModelProposer | Gemma4Proposer,
             )
+
+            num_reqs = self.input_batch.num_reqs
+            if hasattr(self.drafter, "set_draft_attention_metadata"):
+                self.drafter.set_draft_attention_metadata(
+                    self.num_accepted_tokens.gpu[:num_reqs],
+                )
 
             if spec_config.disable_padded_drafter_batch:
                 # When padded-batch is disabled, the sampled_token_ids should be
@@ -5038,6 +5074,7 @@ class GPUModelRunner(
                         self.requests,
                         self.input_batch,
                         self.discard_request_mask.gpu,
+                        common_attn_metadata,
                     )
                 )
                 self._copy_valid_sampled_token_count(
@@ -5127,6 +5164,7 @@ class GPUModelRunner(
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
                 slot_mappings=slot_mappings,
             )
+
             if hasattr(self.drafter, "take_last_draft_probs"):
                 draft_probs = self.drafter.take_last_draft_probs()
                 if draft_probs is not None:
@@ -7012,6 +7050,7 @@ class GPUModelRunner(
                 is_pooling_model=self.is_pooling_model,
                 reasoning_config=self.vllm_config.reasoning_config,
             )
+            self._maybe_init_multi_mtp_cache()
 
         assert self._init_block_sizes == block_sizes, (
             f"InputBatch block_sizes {self._init_block_sizes} != "
