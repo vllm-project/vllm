@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import sys
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextlib import contextmanager
 from functools import lru_cache
 from typing import (
     Annotated,
@@ -110,6 +112,59 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 logger = init_logger(__name__)
 
 
+@contextmanager
+def _inherit_trust_remote_code():
+    """Propagate ``trust_remote_code=True`` to nested HF auto-loads.
+
+    OV2's remote processing code pops ``trust_remote_code`` before building its
+    nested tokenizer, so the inner ``AutoConfig`` load receives ``None`` and
+    transformers falls back to an interactive stdin prompt ("Do you wish to run
+    the custom code? [y/N]") that blocks forever in non-interactive CI. Loading
+    this processor at all already requires the user to opt into
+    ``trust_remote_code=True``, so we temporarily make ``resolve_trust_remote_code``
+    inherit that decision for the exact case that would otherwise prompt
+    (remote code present, no local implementation, value unset).
+    """
+    import transformers.dynamic_module_utils as dmu
+
+    modnames = (
+        "transformers.dynamic_module_utils",
+        "transformers.models.auto.configuration_auto",
+        "transformers.models.auto.tokenization_auto",
+        "transformers.models.auto.image_processing_auto",
+        "transformers.models.auto.feature_extraction_auto",
+        "transformers.models.auto.processing_auto",
+        "transformers.models.auto.modeling_auto",
+    )
+    orig = dmu.resolve_trust_remote_code
+
+    def patched(
+        trust_remote_code, model_name, has_local_code, has_remote_code, *args, **kwargs
+    ):
+        if trust_remote_code is None and has_remote_code and not has_local_code:
+            trust_remote_code = True
+        return orig(
+            trust_remote_code,
+            model_name,
+            has_local_code,
+            has_remote_code,
+            *args,
+            **kwargs,
+        )
+
+    saved = []
+    for name in modnames:
+        mod = sys.modules.get(name)
+        if mod is not None and hasattr(mod, "resolve_trust_remote_code"):
+            saved.append((mod, mod.resolve_trust_remote_code))
+            mod.resolve_trust_remote_code = patched
+    try:
+        yield
+    finally:
+        for mod, fn in saved:
+            mod.resolve_trust_remote_code = fn
+
+
 @lru_cache
 def _load_ov2_processor(
     model: str,
@@ -119,12 +174,15 @@ def _load_ov2_processor(
 ):
     # OV2's trust_remote_code processor is a bare class (not a ProcessorMixin),
     # so the shared type-checked get_hf_processor rejects it; load it directly.
-    return AutoProcessor.from_pretrained(
-        convert_model_repo_to_path(model),
-        revision=revision or "main",
-        trust_remote_code=trust_remote_code,
-        **kwargs,
-    )
+    # _inherit_trust_remote_code prevents the nested tokenizer load from hanging
+    # on an interactive trust_remote_code prompt in non-interactive CI.
+    with _inherit_trust_remote_code():
+        return AutoProcessor.from_pretrained(
+            convert_model_repo_to_path(model),
+            revision=revision or "main",
+            trust_remote_code=trust_remote_code,
+            **kwargs,
+        )
 
 
 # Upper bound on frames used when profiling the worst-case video item, mirroring

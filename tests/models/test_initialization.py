@@ -133,18 +133,9 @@ def can_initialize(
         # has cc==8.9 which hasn't supported FA3 yet. Remove this hack when
         # L4 supports FA3.
         # Step1ForCausalLM requires TRITON_ATTN for use_alibi_sqrt support.
-        # LlavaOnevision2ForConditionalGeneration: the Qwen3 backbone hangs
-        # during the core FA3 ``FlashAttentionImpl`` construction on H200 (FA3
-        # is selected); forcing TRITON_ATTN skips that path for this
-        # construction-only test. Tracked separately for a proper root-cause.
         attention_config = (
             {"backend": "TRITON_ATTN"}
-            if model_arch
-            in (
-                "GptOssForCausalLM",
-                "Step1ForCausalLM",
-                "LlavaOnevision2ForConditionalGeneration",
-            )
+            if model_arch in ("GptOssForCausalLM", "Step1ForCausalLM")
             else None
         )
         if model_arch == "WhisperForConditionalGeneration":

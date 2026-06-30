@@ -164,14 +164,6 @@ def test_model_tensor_schema(model_id: str):
             "Kimi-K2.5's offline inference has issues about vision chunks. Fix later."
         )
 
-    if model_id == "lmms-lab-encoder/LLaVA-OneVision-2-8B-Instruct":
-        # OV2's Qwen3 backbone deadlocks during attention-layer construction on
-        # H200 in this fork-based dummy-model harness, independent of the
-        # attention backend (FA3 and TRITON_ATTN both hang at the same point).
-        # Skip until the H200 construction stall is root-caused; tracked
-        # separately.
-        pytest.skip("OV2 hangs during attention-layer construction on H200.")
-
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(
