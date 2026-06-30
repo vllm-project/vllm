@@ -575,6 +575,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ENV HF_XET_HIGH_PERFORMANCE=1
 ENV HF_HUB_DOWNLOAD_TIMEOUT=60
 
+# Keep torch.cuda.is_available() fork-safe (see vllm/env_override.py).
+ENV PYTORCH_NVML_BASED_CUDA_CHECK=1
+
 # Pre-install vLLM test dependencies.
 COPY requirements/test/rocm.txt /tmp/rocm-test-reqs.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -694,6 +697,9 @@ ENV SAFETENSORS_FAST_GPU=1
 
 # Performance environment variable.
 ENV HIP_FORCE_DEV_KERNARG=1
+
+# Keep torch.cuda.is_available() fork-safe (see vllm/env_override.py).
+ENV PYTORCH_NVML_BASED_CUDA_CHECK=1
 
 # Workaround for ROCm profiler limits
 RUN echo "ROCTRACER_MAX_EVENTS=10000000" > ${COMMON_WORKDIR}/libkineto.conf
