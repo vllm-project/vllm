@@ -286,12 +286,15 @@ impl JsonParamType {
 
 /// Convert one parameter input to a normalized JSON value.
 fn convert_with_optional_schema(param_type: Option<&JsonParamType>, input: &ParamInput) -> Value {
-    // Coerce the literal text `null` to JSON null, except for `string`-typed
-    // params, where it must stay the string "null": a model emitting the literal
-    // text "null" for a string field means the string, not a missing value.
+    // Coerce the literal text `null` to JSON null, except when a `string` type is
+    // admissible, where it must stay the string "null": a model emitting the
+    // literal text "null" for a string field means the string, not a missing
+    // value. This covers a bare `string` type and any union containing one,
+    // mirroring Python's precedence where a `string` member resolves "null" to
+    // the string before the null fallback is reached.
     if let ParamInput::Text(value) = input
         && value.eq_ignore_ascii_case("null")
-        && param_type != Some(&JsonParamType::String)
+        && !param_type.is_some_and(admits_string)
     {
         return Value::Null;
     }
@@ -334,9 +337,9 @@ fn try_convert_text_value(param_type: &JsonParamType, value: &str) -> Option<Val
             serde_json::from_str(value).ok()
         }
         JsonParamType::Null => value.eq_ignore_ascii_case("null").then_some(Value::Null),
-        JsonParamType::OneOf(types) => {
-            types.iter().find_map(|param_type| try_convert_text_value(param_type, value))
-        }
+        JsonParamType::OneOf(types) => one_of_by_precedence(types)
+            .into_iter()
+            .find_map(|param_type| try_convert_text_value(param_type, value)),
     }
 }
 
@@ -361,8 +364,8 @@ fn try_convert_elements_value(
                 .map(|element| convert_with_optional_schema(items.as_deref(), &element.value))
                 .collect(),
         )),
-        JsonParamType::OneOf(types) => types
-            .iter()
+        JsonParamType::OneOf(types) => one_of_by_precedence(types)
+            .into_iter()
             .find_map(|param_type| try_convert_elements_value(param_type, elements)),
 
         // Primitive types can't be converted from structured input.
@@ -402,6 +405,49 @@ fn insert_object_value(object: &mut Map<String, Value>, key: String, value: Valu
         }
     } else {
         object.insert(key, value);
+    }
+}
+
+/// Whether a `string` value is admissible for this type (a bare `string` or a
+/// union containing one). Used to keep the literal text "null" as a string when
+/// the schema allows strings, matching Python's coercion precedence.
+fn admits_string(param_type: &JsonParamType) -> bool {
+    match param_type {
+        JsonParamType::String => true,
+        JsonParamType::OneOf(types) => types.iter().any(admits_string),
+        _ => false,
+    }
+}
+
+/// Order union member types by Python's fixed coercion precedence.
+///
+/// Python's `coerce_to_schema_type` tries candidate types in a fixed priority
+/// order (`null > integer > number > boolean > object > array > string`) rather
+/// than schema declaration order, returning the first successful coercion. We
+/// mirror that here so a union like `["string", "integer"]` and `["integer",
+/// "string"]` both coerce `"42"` to the integer `42`. Ties (e.g. nested unions)
+/// keep their original relative order via the stable sort.
+///
+/// Source: `vllm/tool_parsers/utils.py::coerce_to_schema_type`.
+fn one_of_by_precedence(types: &[JsonParamType]) -> Vec<&JsonParamType> {
+    let mut ordered: Vec<&JsonParamType> = types.iter().collect();
+    ordered.sort_by_key(|param_type| precedence_rank(param_type));
+    ordered
+}
+
+/// Rank one union member by Python's fixed coercion precedence (lower wins).
+fn precedence_rank(param_type: &JsonParamType) -> u8 {
+    match param_type {
+        JsonParamType::Null => 0,
+        JsonParamType::Integer => 1,
+        JsonParamType::Number => 2,
+        JsonParamType::Boolean => 3,
+        JsonParamType::Object { .. } => 4,
+        JsonParamType::Array { .. } => 5,
+        JsonParamType::String => 6,
+        // Nested unions are flattened only conceptually; rank them last and let
+        // the recursive conversion resolve their own members by precedence.
+        JsonParamType::OneOf(_) => 7,
     }
 }
 
@@ -572,7 +618,11 @@ mod tests {
     }
 
     #[test]
-    fn preserves_union_type_order() {
+    fn union_type_resolution_uses_fixed_precedence() {
+        // Union members are tried in Python's fixed precedence order
+        // (null > integer > number > boolean > object > array > string),
+        // not schema declaration order, so both orderings coerce "42" to the
+        // integer 42 (matching `coerce_to_schema_type` in utils.py).
         let integer_first = ToolSchema::from_schema(&json!({
             "type": "object",
             "properties": {
@@ -587,7 +637,31 @@ mod tests {
         }));
 
         assert_eq!(integer_first.convert("value", text("42")), json!(42));
-        assert_eq!(string_first.convert("value", text("42")), json!("42"));
+        assert_eq!(string_first.convert("value", text("42")), json!(42));
+    }
+
+    #[test]
+    fn union_type_precedence_prefers_number_over_string_and_bool_over_string() {
+        // A value that could be several types resolves to the highest-precedence
+        // member present, regardless of declaration order.
+        let number_or_string = ToolSchema::from_schema(&json!({
+            "type": "object",
+            "properties": { "value": { "type": ["string", "number"] } }
+        }));
+        let bool_or_string = ToolSchema::from_schema(&json!({
+            "type": "object",
+            "properties": { "value": { "type": ["string", "boolean"] } }
+        }));
+
+        // "1" is integer-parseable -> number wins over string.
+        assert_eq!(number_or_string.convert("value", text("1.5")), json!(1.5));
+        // "true" is not a number but is a boolean -> boolean wins over string.
+        assert_eq!(bool_or_string.convert("value", text("true")), json!(true));
+        // A value that matches no higher-precedence member falls back to string.
+        assert_eq!(
+            bool_or_string.convert("value", text("maybe")),
+            json!("maybe")
+        );
     }
 
     #[test]
@@ -912,6 +986,251 @@ mod tests {
                     "nil": null
                 }
             })
+        );
+    }
+}
+
+/// Differential parity tests for union-type coercion against the Python oracle.
+///
+/// Issue: <https://github.com/vllm-project/vllm/issues/47179> reported that the
+/// Rust parser resolved union (`anyOf`/`["a","b"]`) types by schema declaration
+/// order, while Python's `coerce_to_schema_type` uses a fixed precedence. Rather
+/// than hand-curating cases, this suite ports Python's coercion into a Rust
+/// reference oracle and fuzzes `(value, types)` pairs with `proptest`, asserting
+/// the Rust schema conversion agrees with the oracle for every generated case.
+///
+/// Scope: this pins union member *selection* (which precedence wins), the axis
+/// the issue is about. It deliberately excludes number-spelling normalization
+/// (Python's number branch collapses `"1.0"` to `1`, while Rust preserves the
+/// JSON spelling as `1.0` on purpose; see
+/// `number_conversion_preserves_json_number_spelling_with_legacy_fallback`).
+/// Generated values therefore never have an integer-valued decimal spelling, so
+/// the two implementations are expected to agree exactly.
+#[cfg(test)]
+mod proptest_differential {
+    use proptest::prelude::*;
+    use serde_json::{Value, json};
+
+    use super::{ParamInput, ToolSchema};
+
+    /// Reference port of `vllm/tool_parsers/utils.py::coerce_to_schema_type`.
+    ///
+    /// Tries each type in the fixed priority order
+    /// (`null > integer > number > boolean > object > array > string`) and
+    /// returns the first successful coercion, falling back to a final
+    /// best-effort `json` parse and then the raw string. Kept structurally
+    /// close to the Python source so divergences are easy to audit.
+    fn python_coerce(value: &str, types: &[&str]) -> Value {
+        const PRIORITY: [&str; 7] = [
+            "null", "integer", "number", "boolean", "object", "array", "string",
+        ];
+
+        for candidate in PRIORITY {
+            if !types.contains(&candidate) {
+                continue;
+            }
+            match candidate {
+                "null" if value.eq_ignore_ascii_case("null") => return Value::Null,
+                "string" => return Value::String(value.to_string()),
+                "integer" => {
+                    if let Some(v) = parse_python_int(value) {
+                        return json!(v);
+                    }
+                }
+                "number" => {
+                    if let Ok(v) = value.parse::<f64>()
+                        && v.is_finite()
+                    {
+                        // Python: `val if val != int(val) else int(val)`.
+                        if v.fract() == 0.0 && v.abs() < i64::MAX as f64 {
+                            return json!(v as i64);
+                        }
+                        return json!(v);
+                    }
+                }
+                "boolean" => {
+                    let lower = value.trim().to_ascii_lowercase();
+                    if lower == "true" || lower == "1" {
+                        return Value::Bool(true);
+                    }
+                    if lower == "false" || lower == "0" {
+                        return Value::Bool(false);
+                    }
+                }
+                "object" | "array" => {
+                    if let Ok(parsed) = serde_json::from_str::<Value>(value)
+                        && is_json_finite(&parsed)
+                    {
+                        return parsed;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Final fallback: best-effort JSON parse, else raw string.
+        match serde_json::from_str::<Value>(value) {
+            Ok(parsed) if is_json_finite(&parsed) => parsed,
+            _ => Value::String(value.to_string()),
+        }
+    }
+
+    /// Mirror Python's `int(value)`: base-10 integer, no fractional part.
+    fn parse_python_int(value: &str) -> Option<i64> {
+        value.trim().parse::<i64>().ok()
+    }
+
+    /// Mirror Python's `_is_json_finite`: reject non-finite floats anywhere.
+    fn is_json_finite(value: &Value) -> bool {
+        match value {
+            Value::Number(n) => n.as_f64().is_none_or(f64::is_finite),
+            Value::Array(items) => items.iter().all(is_json_finite),
+            Value::Object(map) => map.values().all(is_json_finite),
+            _ => true,
+        }
+    }
+
+    /// Build a one-property schema whose value is the given union of types.
+    fn union_schema(types: &[&str]) -> ToolSchema {
+        ToolSchema::from_schema(&json!({
+            "type": "object",
+            "properties": { "value": { "type": types } }
+        }))
+    }
+
+    /// The primitive schema types the Rust converter understands and Python
+    /// ranks. (`object`/`array` are covered separately via JSON-shaped values.)
+    fn arb_type() -> impl Strategy<Value = &'static str> {
+        prop_oneof![
+            Just("null"),
+            Just("integer"),
+            Just("number"),
+            Just("boolean"),
+            Just("string"),
+            Just("object"),
+            Just("array"),
+        ]
+    }
+
+    /// A union that always admits `string`, plus 0-3 other randomly ordered
+    /// members. Including `string` guarantees Python resolves via a declared
+    /// type (string returns the raw value as a last resort) rather than its
+    /// unconditional `json.loads` fallback, so generated cases are not rejected
+    /// while still exercising whether a higher-precedence member wins over
+    /// `string`. The `string` position is randomized to confirm precedence does
+    /// not depend on declaration order.
+    fn arb_types() -> impl Strategy<Value = Vec<&'static str>> {
+        (prop::collection::vec(arb_type(), 0..=3), 0usize..=3).prop_map(|(mut types, at)| {
+            let at = at.min(types.len());
+            types.insert(at, "string");
+            types
+        })
+    }
+
+    /// Values spanning each coercion branch, plus adversarial tokens. No value
+    /// has an integer-valued decimal spelling (see module scope note).
+    fn arb_value() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just("null".to_string()),
+            Just("NULL".to_string()),
+            Just("42".to_string()),
+            Just("-7".to_string()),
+            Just("0".to_string()),
+            Just("1".to_string()),
+            Just("3.5".to_string()),
+            Just("-0.25".to_string()),
+            Just("true".to_string()),
+            Just("false".to_string()),
+            Just("1e999".to_string()),
+            Just("[1,2]".to_string()),
+            Just(r#"{"k":1}"#.to_string()),
+            Just("hello".to_string()),
+            // NB: the empty string is excluded — Rust has an `is_empty()`
+            // shortcut that coerces `""` to `{}`/`[]` for object/array members
+            // with no Python equivalent. That is a separate divergence from the
+            // union-ordering fix this suite pins (tracked in #47179).
+            "[a-z]{1,8}".prop_map(|s| s),
+            "-?[1-9][0-9]{0,5}".prop_map(|s| s),
+        ]
+    }
+
+    /// Whether Python resolves `(value, types)` via a declared-type branch
+    /// rather than its unconditional final `json.loads` fallback.
+    ///
+    /// Python's `coerce_to_schema_type` ends with a fallback that JSON-parses
+    /// the value regardless of the declared types, so e.g. `("[1,2]", ["null"])`
+    /// yields `[1, 2]`. Rust instead falls back to the raw string there. That
+    /// fallback gap is a *separate* divergence from the union member *selection*
+    /// this suite pins, so we only assert parity when a typed branch decides the
+    /// result (where both implementations are expected to agree).
+    fn decided_by_typed_branch(value: &str, types: &[&str]) -> bool {
+        const PRIORITY: [&str; 7] = [
+            "null", "integer", "number", "boolean", "object", "array", "string",
+        ];
+        for candidate in PRIORITY {
+            if !types.contains(&candidate) {
+                continue;
+            }
+            let decided = match candidate {
+                "null" => value.eq_ignore_ascii_case("null"),
+                "string" => true,
+                "integer" => parse_python_int(value).is_some(),
+                "number" => value.parse::<f64>().is_ok_and(f64::is_finite),
+                "boolean" => {
+                    let lower = value.trim().to_ascii_lowercase();
+                    matches!(lower.as_str(), "true" | "1" | "false" | "0")
+                }
+                "object" | "array" => serde_json::from_str::<Value>(value)
+                    .ok()
+                    .is_some_and(|parsed| is_json_finite(&parsed)),
+                _ => false,
+            };
+            if decided {
+                return true;
+            }
+        }
+        false
+    }
+
+    proptest! {
+        /// Rust union coercion must equal the Python oracle for every generated
+        /// `(value, types)` pair whose result a declared type decides. This is
+        /// the parity guard for the union member-selection fix in issue #47179.
+        #[test]
+        fn union_coercion_matches_python_oracle(
+            value in arb_value(),
+            types in arb_types(),
+        ) {
+            prop_assume!(decided_by_typed_branch(&value, &types));
+
+            let schema = union_schema(&types);
+            let rust = schema.convert("value", ParamInput::Text(value.clone()));
+            let python = python_coerce(&value, &types);
+            prop_assert_eq!(
+                rust,
+                python,
+                "union coercion diverged for value={:?} types={:?}",
+                value,
+                types
+            );
+        }
+    }
+
+    /// Golden cases copied from Python's actual output, guarding the reference
+    /// port itself against drift from `coerce_to_schema_type`.
+    #[test]
+    fn python_oracle_golden_cases() {
+        assert_eq!(python_coerce("42", &["string", "integer"]), json!(42));
+        assert_eq!(python_coerce("42", &["integer", "string"]), json!(42));
+        assert_eq!(python_coerce("3.5", &["string", "number"]), json!(3.5));
+        assert_eq!(python_coerce("true", &["string", "boolean"]), json!(true));
+        assert_eq!(python_coerce("1", &["boolean", "integer"]), json!(1));
+        assert_eq!(python_coerce("null", &["string", "null"]), json!(null));
+        assert_eq!(python_coerce("null", &["string"]), json!("null"));
+        assert_eq!(python_coerce("[1,2]", &["string", "array"]), json!([1, 2]));
+        assert_eq!(
+            python_coerce("maybe", &["boolean", "string"]),
+            json!("maybe")
         );
     }
 }
