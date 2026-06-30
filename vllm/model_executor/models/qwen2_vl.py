@@ -1798,7 +1798,10 @@ class Tarsier2Processor(Qwen2VLProcessor):
 class Tarsier2ProcessingInfo(Qwen2VLProcessingInfo):
     def get_hf_config(self) -> Qwen2VLConfig:
         model_path = self.ctx.model_config.model
-        correct_config = Qwen2VLConfig.from_pretrained(model_path)
+        correct_config = Qwen2VLConfig.from_pretrained(
+            model_path,
+            revision=self.ctx.model_config.revision,
+        )
 
         return correct_config
 
