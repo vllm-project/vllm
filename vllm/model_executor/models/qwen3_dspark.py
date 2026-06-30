@@ -28,7 +28,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 
 from .qwen3_dflash import DFlashQwen3ForCausalLM, DFlashQwen3Model
-from .utils import AutoWeightsLoader, maybe_prefix
+from .utils import AutoWeightsLoader, maybe_prefix, process_eagle_weight
 
 logger = init_logger(__name__)
 
@@ -81,9 +81,6 @@ class Qwen3DSparkModel(DFlashQwen3Model):
 
 
 class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
-    # Self-contained checkpoint: load own embed_tokens / lm_head (see load_dspark_model)
-    dspark_shares_target_embeddings = False
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
         self.draft_model_config = vllm_config.speculative_config.draft_model_config
@@ -128,14 +125,29 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         model_weights = {}
+        includes_embed_tokens = False
+        includes_lm_head = False
         for name, loaded_weight in weights:
             if "lm_head" not in name:
                 name = "model." + name
+            if "embed_tokens" in name:
+                includes_embed_tokens = True
+            if "lm_head" in name:
+                includes_lm_head = True
             model_weights[name] = loaded_weight
+            # Sets has_own_embed_tokens / has_own_lm_head so load_dspark_model
+            # knows whether to keep these or alias the target's.
+            process_eagle_weight(self, name)
+
         # mask_embedding is an unused placeholder param; DSpark masks via the vocab row.
         # confidence_head is not wired into inference yet; skip its weights.
-        loader = AutoWeightsLoader(
-            self, skip_substrs=["mask_embedding", "confidence_head"]
-        )
+        # embed_tokens / lm_head are optional; when omitted they are shared from
+        # the target by load_dspark_model, so skip the unloaded params here.
+        skip_substrs = ["mask_embedding", "confidence_head"]
+        if not includes_embed_tokens:
+            skip_substrs.append("embed_tokens")
+        if not includes_lm_head:
+            skip_substrs.append("lm_head")
+        loader = AutoWeightsLoader(self, skip_substrs=skip_substrs)
         loader.load_weights(model_weights.items())
         self.model._build_fused_kv_buffers()

@@ -261,8 +261,10 @@ def _insert_context_kv(
 
 
 class DSparkDeepseekV4ForCausalLM(nn.Module):
-    # Draft weights ship in the target checkpoint (mtp.*); see load_dspark_model
-    dspark_shares_target_embeddings = True
+    # Draft weights ship in the target checkpoint (mtp.*) without embed/head, so
+    # load_dspark_model always aliases the target's.
+    has_own_embed_tokens = False
+    has_own_lm_head = False
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()

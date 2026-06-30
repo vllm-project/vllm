@@ -758,8 +758,7 @@ class SpeculativeConfig:
                     self.method = "dflash"
                 elif (
                     "dspark" in self.draft_model_config.model.lower()
-                    or self.draft_model_config.hf_config.architectures[0]
-                    == "Qwen3DSparkModel"
+                    or "Qwen3DSparkModel" in self.draft_model_config.architectures
                 ):
                     self.method = "dspark"
                 elif self.draft_model_config.hf_config.model_type == "medusa":
@@ -809,8 +808,7 @@ class SpeculativeConfig:
                         self.update_arch_()
 
                 if self.method == "dspark" and (
-                    self.draft_model_config.hf_config.architectures[0]
-                    != "Qwen3DSparkModel"
+                    "Qwen3DSparkModel" not in self.draft_model_config.architectures
                 ):
                     # DeepSeek-V4 DSpark reuses the full DeepSeek-V4 config
                     # and its weights ship in the target checkpoint.
