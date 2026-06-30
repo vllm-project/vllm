@@ -123,7 +123,6 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     qwen3_5_moe="Qwen3_5MoeConfig",
     laguna="LagunaConfig",
     lfm2_moe="Lfm2MoeConfig",
-    tarsier2="Tarsier2Config",
     **{"unlimited-ocr": "UnlimitedOCRConfig"},
 )
 
