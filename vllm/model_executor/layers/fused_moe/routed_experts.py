@@ -933,12 +933,13 @@ class RoutedExperts(PluggableLayer):
         include_fused: bool = False,
     ) -> list[tuple[str, str, int, str]]:
         moe_config = self.moe_config
+        num_fused_shared_experts = self.expert_map_manager.num_fused_shared_experts
         num_redundant_experts = moe_config.num_experts - moe_config.num_logical_experts
         return self.build_expert_params_mapping(
             ckpt_gate_proj_name or self.ckpt_gate_proj_name,
             ckpt_down_proj_name or self.ckpt_down_proj_name,
             ckpt_up_proj_name or self.ckpt_up_proj_name,
-            num_experts=moe_config.num_logical_experts,
+            num_experts=moe_config.num_logical_experts + num_fused_shared_experts,
             num_redundant_experts=num_redundant_experts,
             routed_experts_prefix="",
             lora_base_layer_prefix=self.lora_base_layer_prefix,
