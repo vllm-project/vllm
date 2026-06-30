@@ -43,6 +43,7 @@ class HadamardTransform(torch.nn.Module):
         output_partition_sizes: list[int],
     ):
         super().__init__()
+        self._gemm_impl = dispatch_unquantized_gemm()
         self.transforms = transforms
         self.scales = {}
 
@@ -116,9 +117,9 @@ class HadamardTransform(torch.nn.Module):
             if self.transforms[part_id].scheme.head_dim is not None:
                 value = value.unflatten(-1, (-1, weight.size(0)))
                 value = (
-                    dispatch_unquantized_gemm()(
-                        self, value.to(weight.dtype), weight, None
-                    ).to(value.dtype)
+                    self._gemm_impl(self, value.to(weight.dtype), weight, None).to(
+                        value.dtype
+                    )
                     * scale
                 )
                 value = value.flatten(-2, -1)
@@ -126,9 +127,9 @@ class HadamardTransform(torch.nn.Module):
                 return value
 
             return (
-                dispatch_unquantized_gemm()(
-                    self, value.to(weight.dtype), weight, None
-                ).to(value.dtype)
+                self._gemm_impl(self, value.to(weight.dtype), weight, None).to(
+                    value.dtype
+                )
                 * scale
             )
 

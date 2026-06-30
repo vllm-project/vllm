@@ -29,9 +29,83 @@ _FLASHINFER_BF16_GEMM_BACKENDS = (
     "cutlass",
     "tgv",
     "cublaslt",
-    "tinygemm",
 )
-_FLASHINFER_BF16_GEMM_BACKENDS_REQUIRING_NINJA = ("cutlass", "tinygemm")
+_FLASHINFER_BF16_GEMM_BACKENDS_REQUIRING_NINJA = ("cutlass",)
+
+
+def _get_flashinfer_bf16_gemm_backends(
+    mm_bf16: Any,
+    compute_capability: int,
+    bias: torch.Tensor | None,
+    pdl: bool,
+) -> list[str]:
+    """Return supported BF16 GEMM backends, excluding TinyGEMM.
+
+    PDL is applied by runners that support it and ignored by the others. This
+    keeps CUTLASS and cuBLASLt eligible when TGV uses PDL.
+    """
+    candidates: tuple[str, ...]
+    if bias is not None:
+        candidates = ("tgv", "cudnn")
+    else:
+        candidates = ("cutlass", "tgv", "cudnn", "cublaslt")
+
+    return [
+        backend
+        for backend in candidates
+        if mm_bf16.is_backend_supported(backend, compute_capability)
+    ]
+
+
+def flashinfer_bf16_mm_impl(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    bias: torch.Tensor | None,
+    pdl: bool = False,
+) -> torch.Tensor:
+    """Execute BF16 GEMM without entering another Torch custom op.
+
+    The model-level ``cuda_flashinfer_bf16_gemm`` op calls this implementation
+    directly. Keeping exactly one custom-op boundary matches the FP4 path and
+    avoids a second dispatcher invocation for every linear layer.
+    """
+    from flashinfer import mm_bf16
+
+    # FlashInfer 0.6.12 has no public backend allowlist for auto dispatch.
+    # Use its pinned lower dispatcher until TinyGEMM is CUDA-graph safe.
+    from flashinfer.gemm.gemm_base import (
+        DEFAULT_WORKSPACE_SIZE,
+        bf16_gemm_sm100,
+    )
+    from flashinfer.utils import _get_cache_buf
+
+    major, minor = torch.cuda.get_device_capability(A.device)
+    backends = _get_flashinfer_bf16_gemm_backends(
+        mm_bf16,
+        major * 10 + minor,
+        bias,
+        pdl,
+    )
+    if not backends:
+        raise RuntimeError("No supported FlashInfer BF16 GEMM backend found.")
+
+    logger.info_once(
+        "FlashInfer BF16 GEMM candidates: %s (TinyGEMM disabled).",
+        tuple(backends),
+    )
+    out = torch.empty(
+        (A.shape[0], B.shape[1]),
+        dtype=torch.bfloat16,
+        device=A.device,
+    )
+    workspace = _get_cache_buf(
+        "mm_bf16_workspace",
+        DEFAULT_WORKSPACE_SIZE,
+        A.device,
+    )
+    bf16_gemm_sm100(A, B, bias, pdl, out, workspace, backends)
+    return out
+
 
 # This is the storage path for the cubins, it can be replaced
 # with a local path for testing.
@@ -623,18 +697,9 @@ if has_flashinfer():
         A: torch.Tensor,
         B: torch.Tensor,
         bias: torch.Tensor | None,
+        pdl: bool = False,
     ) -> torch.Tensor:
-        from flashinfer import mm_bf16 as flashinfer_mm_bf16_
-
-        return flashinfer_mm_bf16_(
-            A,
-            B,
-            bias=bias,
-            pdl=True,
-            out=None,
-            out_dtype=torch.bfloat16,
-            backend="auto",
-        )
+        return flashinfer_bf16_mm_impl(A, B, bias, pdl)
 
     @torch.library.register_fake(
         "vllm::flashinfer_mm_bf16",
@@ -643,6 +708,7 @@ if has_flashinfer():
         A: torch.Tensor,
         B: torch.Tensor,
         bias: torch.Tensor | None,
+        pdl: bool = False,
     ) -> torch.Tensor:
         return torch.empty(
             A.shape[0],
@@ -834,6 +900,7 @@ def flashinfer_bf16_mm(
     a: torch.Tensor,
     b: torch.Tensor,
     bias: torch.Tensor | None = None,
+    pdl: bool = False,
 ) -> torch.Tensor:
     """Dense BF16 MM helper for FlashInfer kernels.
 
@@ -851,7 +918,7 @@ def flashinfer_bf16_mm(
         assert bias.dtype == torch.bfloat16
         assert bias.device == a.device
 
-    return torch.ops.vllm.flashinfer_mm_bf16(a, b, bias)
+    return torch.ops.vllm.flashinfer_mm_bf16(a, b, bias, pdl)
 
 
 def flashinfer_mm_mxfp8(

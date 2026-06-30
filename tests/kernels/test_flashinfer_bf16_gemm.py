@@ -7,6 +7,8 @@ Targets the two failure modes that previously slipped through review:
      TypeError during torch.compile / fake dispatch).
   2. Wrong output shape from the fake impl (silently propagates bogus
      shape metadata into downstream compile passes).
+  3. TinyGEMM re-entering the BF16 auto-tuning candidate set while it is
+     unsafe under CUDA graphs.
 """
 
 import inspect
@@ -15,10 +17,15 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.utils import (
+    cuda_flashinfer_bf16_gemm,
     cuda_flashinfer_bf16_gemm_fake,
     cuda_flashinfer_bf16_gemm_impl,
 )
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import (
+    _get_flashinfer_bf16_gemm_backends,
+    flashinfer_bf16_mm,
+)
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda(),
@@ -32,6 +39,41 @@ def test_cuda_flashinfer_bf16_gemm_fake_matches_impl_signature():
     assert impl_params == fake_params, (
         f"fake/impl signature mismatch: impl={impl_params} fake={fake_params}"
     )
+
+
+def test_cuda_flashinfer_bf16_gemm_keeps_pdl_disabled_by_default():
+    functions = (
+        cuda_flashinfer_bf16_gemm_impl,
+        cuda_flashinfer_bf16_gemm_fake,
+        cuda_flashinfer_bf16_gemm,
+        flashinfer_bf16_mm,
+    )
+    assert all(
+        inspect.signature(function).parameters["pdl"].default is False
+        for function in functions
+    )
+
+
+def test_flashinfer_bf16_gemm_backends_exclude_tinygemm():
+    class FakeMM:
+        @staticmethod
+        def is_backend_supported(backend, compute_capability):
+            return (
+                backend in {"cudnn", "cutlass", "tgv", "cublaslt"}
+                and compute_capability == 100
+            )
+
+    pdl_backends = _get_flashinfer_bf16_gemm_backends(
+        FakeMM(), 100, bias=None, pdl=True
+    )
+    assert pdl_backends == ["cutlass", "tgv", "cudnn", "cublaslt"]
+    assert "tinygemm" not in pdl_backends
+
+    bias = torch.empty(8, device="cuda", dtype=torch.bfloat16)
+    bias_backends = _get_flashinfer_bf16_gemm_backends(
+        FakeMM(), 100, bias=bias, pdl=True
+    )
+    assert bias_backends == ["tgv", "cudnn"]
 
 
 @pytest.mark.parametrize(
