@@ -665,10 +665,70 @@ def test_dcp_filter_compacts_valid_slots_for_sparse_kernel():
     assert valid == 4
     assert (out[0, :valid] >= 0).all()
     assert (out[0, valid:] == -1).all()
-    torch.testing.assert_close(
-        out[0, :valid].cpu(),
-        torch.tensor([40, 41, 42, 43], dtype=torch.int32),
+    # In-kernel compaction packs valid slots to the front; prefix order is
+    # unspecified, so compare as a set.
+    assert set(out[0, :valid].cpu().tolist()) == {40, 41, 42, 43}
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize("interleave", [1, 2])
+@pytest.mark.parametrize("dcp_rank", [0, 1])
+def test_dcp_filter_compaction_matches_reference(interleave: int, dcp_rank: int):
+    """In-kernel compaction (atomic slot allocator across multiple column tiles)
+    must, for every row, produce exactly the rank-owned physical slots packed
+    into [0, valid_count) with -1 in the tail -- the same SET a reference filter
+    + sort/gather produces. Uses wide rows (> BLOCK_N valid slots) so the
+    cross-tile atomic allocation is exercised, with interior -1 gaps."""
+    device = torch.device("cuda")
+    torch.manual_seed(7)
+    dcp_size = 2
+    block_size = 8
+    num_topk = 1024  # > BLOCK_N(128) -> multiple tiles per row
+    num_rows = 5
+    max_blocks = 64
+    seq = max_blocks * block_size
+
+    req_id = torch.randint(0, 3, (num_rows,), dtype=torch.int32, device=device)
+    block_table = torch.randint(
+        0, 1000, (3, max_blocks), dtype=torch.int32, device=device
     )
+    # Each row: a dense valid prefix of distinct global token ids, then -1 pad.
+    token_indices = torch.full(
+        (num_rows, num_topk), -1, dtype=torch.int32, device=device
+    )
+    for r in range(num_rows):
+        n_valid = int(torch.randint(200, 600, (1,)).item())
+        perm = torch.randperm(seq, device=device)[:n_valid].to(torch.int32)
+        token_indices[r, :n_valid] = perm
+
+    out, valid_counts = triton_filter_and_convert_dcp_index(
+        req_id,
+        block_table,
+        token_indices,
+        dcp_size=dcp_size,
+        dcp_rank=dcp_rank,
+        cp_kv_cache_interleave_size=interleave,
+        BLOCK_SIZE=block_size,
+        NUM_TOPK_TOKENS=num_topk,
+        return_valid_counts=True,
+    )
+
+    for r in range(num_rows):
+        toks = token_indices[r]
+        toks = toks[toks >= 0]
+        owner = (toks // interleave) % dcp_size
+        owned = toks[owner == dcp_rank]
+        local = (owned // (dcp_size * interleave)) * interleave + owned % interleave
+        blk = local // block_size
+        off = local % block_size
+        expected = (
+            block_table[int(req_id[r].item()), blk].to(torch.int64) * block_size + off
+        )
+        n = int(valid_counts[r].item())
+        assert n == owned.numel()
+        assert (out[r, :n] >= 0).all()
+        assert (out[r, n:] == -1).all()
+        assert set(out[r, :n].cpu().tolist()) == set(expected.cpu().tolist())
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")

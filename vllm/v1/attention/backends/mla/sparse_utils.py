@@ -23,6 +23,12 @@ def _convert_req_index_to_global_index_kernel(
     BLOCK_N: tl.constexpr,  # tile width along columns
     HAS_PREFILL: tl.constexpr,
     COUNT_VALID: tl.constexpr,  # whether to count valid indices
+    # When set, scatter valid slots to a contiguous prefix [0, valid_count) using
+    # valid_count_ptr as an atomic slot allocator (DCP filtering leaves interior
+    # -1 gaps; the trtllm-gen sparse kernel reads the first valid_count entries).
+    # Requires COUNT_VALID and an out buffer pre-filled with -1. Order within the
+    # prefix is unspecified (only the selected set matters).
+    COMPACT_TO_FRONT: tl.constexpr,
     # DCP de-interleave: with DCP_SIZE == 1 these are an exact no-op
     DCP_SIZE: tl.constexpr,
     DCP_RANK: tl.constexpr,
@@ -88,14 +94,27 @@ def _convert_req_index_to_global_index_kernel(
         out_val = tl.where(is_prefill, prefill_out, out_val)
     out_val = tl.where(is_invalid_tok, -1, out_val)
 
-    # Store results
-    out_ptr_ij = out_ptr + token_id * out_stride0 + indice_id * out_stride1
-    tl.store(out_ptr_ij, out_val)
+    if COMPACT_TO_FRONT:
+        # Scatter valid slots to a contiguous prefix. A per-tile exclusive prefix
+        # sum gives each valid lane a distinct local offset; one atomic add of the
+        # tile's valid count reserves a contiguous base across racing tiles. The
+        # out buffer is pre-filled with -1, so unwritten tail slots stay -1.
+        is_valid = (~is_invalid_tok).to(tl.int32)
+        local_offset = tl.cumsum(is_valid) - is_valid
+        tile_valid_count = tl.sum(is_valid)
+        base = tl.atomic_add(valid_count_ptr + token_id, tile_valid_count)
+        dest = base + local_offset
+        out_ptr_dest = out_ptr + token_id * out_stride0 + dest * out_stride1
+        tl.store(out_ptr_dest, out_val, mask=is_valid == 1)
+    else:
+        # Store results in place (input column == output column).
+        out_ptr_ij = out_ptr + token_id * out_stride0 + indice_id * out_stride1
+        tl.store(out_ptr_ij, out_val)
 
-    # Count valid indices in this tile and atomically add to row total
-    if COUNT_VALID:
-        tile_valid_count = tl.sum((~is_invalid_tok).to(tl.int32))
-        tl.atomic_add(valid_count_ptr + token_id, tile_valid_count)
+        # Count valid indices in this tile and atomically add to row total
+        if COUNT_VALID:
+            tile_valid_count = tl.sum((~is_invalid_tok).to(tl.int32))
+            tl.atomic_add(valid_count_ptr + token_id, tile_valid_count)
 
 
 def triton_convert_req_index_to_global_index(
@@ -192,6 +211,7 @@ def triton_convert_req_index_to_global_index(
         BLOCK_N,
         HAS_PREFILL_WORKSPACE,
         return_valid_counts,
+        False,  # COMPACT_TO_FRONT: keep input column == output column
         # DCP disabled (no-op de-interleave)
         1,
         0,
@@ -211,15 +231,6 @@ def triton_convert_req_index_to_global_index(
     return out
 
 
-def _compact_valid_to_front(
-    slots: torch.Tensor,
-    valid_counts: torch.Tensor,
-) -> torch.Tensor:
-    is_invalid = (slots < 0).to(torch.int32)
-    sort_idx = torch.argsort(is_invalid, dim=-1, stable=True)
-    return torch.gather(slots, -1, sort_idx)
-
-
 def triton_filter_and_convert_dcp_index(
     req_id: torch.Tensor,
     block_table: torch.Tensor,
@@ -233,7 +244,16 @@ def triton_filter_and_convert_dcp_index(
     return_valid_counts: bool = False,
     compact_valid_to_front: bool = True,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """Filter global per-request indices to this DCP rank's local slots."""
+    """Filter global per-request indices to this DCP rank's local slots.
+
+    With ``compact_valid_to_front`` (default), the conversion kernel scatters
+    this rank's owned slots to a contiguous prefix ``[0, valid_count)`` and
+    leaves the rest ``-1``. DCP filtering marks non-owned slots ``-1`` and so
+    creates interior gaps; the trtllm-gen sparse kernel reads the first
+    ``valid_count`` entries of each row, so they must be a contiguous prefix.
+    Compaction is fused into the kernel (atomic slot allocator) rather than a
+    separate sort/gather pass. Prefix order is unspecified (only the set matters).
+    """
     assert dcp_size >= 1
     assert 0 <= dcp_rank < dcp_size
     # Interleave groups must align to KV blocks (globally enforced by
@@ -267,10 +287,17 @@ def triton_filter_and_convert_dcp_index(
     req_id_c = req_id.contiguous()
     block_table_c = block_table.contiguous()
     token_indices_c = token_indices.contiguous()
-    out = torch.empty_like(token_indices_c)
+
+    # The compaction uses the valid-count buffer as an atomic slot allocator, so
+    # it requires counting. Pre-fill out with -1 so the unwritten tail stays -1.
+    count_valid = return_valid_counts or compact_valid_to_front
+    if compact_valid_to_front:
+        out = torch.full_like(token_indices_c, -1)
+    else:
+        out = torch.empty_like(token_indices_c)
 
     valid_counts: torch.Tensor | None = None
-    if return_valid_counts:
+    if count_valid:
         valid_counts = torch.zeros(
             num_tokens, dtype=torch.int32, device=token_indices.device
         )
@@ -292,7 +319,8 @@ def triton_filter_and_convert_dcp_index(
         BLOCK_SIZE,
         BLOCK_N,
         False,  # HAS_PREFILL
-        return_valid_counts,
+        count_valid,
+        compact_valid_to_front,
         dcp_size,
         dcp_rank,
         cp_kv_cache_interleave_size,
@@ -303,10 +331,6 @@ def triton_filter_and_convert_dcp_index(
         out_stride0,
         out_stride1,
     )
-
-    if compact_valid_to_front and return_valid_counts:
-        assert valid_counts is not None
-        out = _compact_valid_to_front(out, valid_counts)
 
     if return_valid_counts:
         assert valid_counts is not None
