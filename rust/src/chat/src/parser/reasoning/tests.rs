@@ -35,11 +35,13 @@ fn factory_contains_and_lists_registered_parsers() {
     assert!(factory.contains(names::SEED_OSS));
     assert!(factory.contains(names::STEP3P5));
     assert!(factory.contains(names::MINIMAX_M3));
+    assert!(factory.contains(names::GEMMA4));
     assert!(factory.list().contains(&names::QWEN3.to_string()));
     assert!(factory.list().contains(&names::DEEPSEEK_V4.to_string()));
     assert!(factory.list().contains(&names::SEED_OSS.to_string()));
     assert!(factory.list().contains(&names::STEP3P5.to_string()));
     assert!(factory.list().contains(&names::MINIMAX_M3.to_string()));
+    assert!(factory.list().contains(&names::GEMMA4.to_string()));
 }
 
 #[test]

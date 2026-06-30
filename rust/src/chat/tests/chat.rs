@@ -1180,7 +1180,7 @@ async fn chat_stream_parses_tool_calls_automatically() {
                             ),
                             request_output(
                                 "chat-tool",
-                                bytes_to_token_ids(
+                                bytes_with_special_stop_token(
                                     b"\"arguments\":{\"city\":\"Paris\"}}\n</tool_call>",
                                 ),
                                 Some(EngineCoreFinishReason::Stop),
