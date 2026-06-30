@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
+use chrono::Local;
 use minijinja::Environment;
 use serde::{Deserialize, Serialize};
 use serde_json::{self};
@@ -22,6 +23,17 @@ use crate::renderer::hf::{TemplateMessage, TemplateTool};
 
 type Result<T> = std::result::Result<T, TemplateError>;
 
+fn raise_exception(message: String) -> std::result::Result<String, minijinja::Error> {
+    Err(minijinja::Error::new(
+        minijinja::ErrorKind::InvalidOperation,
+        message,
+    ))
+}
+
+fn strftime_now(format: String) -> String {
+    Local::now().format(&format).to_string()
+}
+
 /// Build a pre-configured environment with the given template string.
 fn build_environment(template: String) -> Result<Environment<'static>> {
     let mut env = Environment::new();
@@ -33,6 +45,8 @@ fn build_environment(template: String) -> Result<Environment<'static>> {
 
     env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
     env.add_filter("tojson", hf_tojson_filter);
+    env.add_function("strftime_now", strftime_now);
+    env.add_function("raise_exception", raise_exception);
 
     Ok(env)
 }
