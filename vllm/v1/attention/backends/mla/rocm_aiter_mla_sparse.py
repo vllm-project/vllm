@@ -89,9 +89,13 @@ def _convert_req_index_to_global_index_kernel(
     bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
     base = tl.load(bt_ptr, mask=valid_block, other=0)
 
-    # # If token == -1 OR block_id OOB, output 0; else base * BLOCK_SIZE + offset
+    # If token == -1 OR block_id OOB, output -1; else base*BLOCK_SIZE+offset.
+    # Downstream aiter mla_decode_fwd treats negative indices as "skip"; the
+    # sparse_utils.py copy of this kernel (and the pre-bc6 flashmla_sparse
+    # copy) both use -1.  Upstream PR #41217 set 0 here, which silently makes
+    # empty top-K slots attend to physical KV position 0.
     out_val = tl.where(
-        is_invalid_tok | (~valid_block), 0, base * BLOCK_SIZE + inblock_off
+        is_invalid_tok | (~valid_block), -1, base * BLOCK_SIZE + inblock_off
     )
     out_ptr_ij = out_ptr + seq_start + indice_id
     out_ptr_ij_mask = (seq_start + indice_id) < seq_end
