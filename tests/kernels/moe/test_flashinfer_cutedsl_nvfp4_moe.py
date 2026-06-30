@@ -93,9 +93,13 @@ def _torch_moe_reference(
         out[mask] = tmp @ w2[expert_id].transpose(0, 1)
 
     return (
-        out.view(m, topk, w2.shape[1]).to(torch.float32)
-        * topk_weights.view(m, topk, 1)
-    ).sum(dim=1).to(a.dtype)
+        (
+            out.view(m, topk, w2.shape[1]).to(torch.float32)
+            * topk_weights.view(m, topk, 1)
+        )
+        .sum(dim=1)
+        .to(a.dtype)
+    )
 
 
 def _dequantize_nvfp4_inputs_and_weights(

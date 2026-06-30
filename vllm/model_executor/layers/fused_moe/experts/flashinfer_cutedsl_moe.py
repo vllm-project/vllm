@@ -111,11 +111,15 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
     def _supports_activation(activation: MoEActivation) -> bool:
         if activation == MoEActivation.SILU:
             return True
-        return activation in (
-            MoEActivation.SWIGLUOAI,
-            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
-            MoEActivation.RELU2_NO_MUL,
-        ) and has_flashinfer_cutedsl_moe_nvfp4_activation_type()
+        return (
+            activation
+            in (
+                MoEActivation.SWIGLUOAI,
+                MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+                MoEActivation.RELU2_NO_MUL,
+            )
+            and has_flashinfer_cutedsl_moe_nvfp4_activation_type()
+        )
 
     @staticmethod
     def _supports_parallel_config(
@@ -178,8 +182,7 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
             )
         elif activation != MoEActivation.SILU:
             raise RuntimeError(
-                "FlashInfer CuteDSL NvFP4 MoE does not support "
-                "activation_type kwargs."
+                "FlashInfer CuteDSL NvFP4 MoE does not support activation_type kwargs."
             )
 
         swiglu_params: tuple[float, float, float] | None = None
