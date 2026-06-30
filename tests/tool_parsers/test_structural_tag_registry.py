@@ -102,45 +102,36 @@ def test_get_model_structural_tag_supports_vllm_hermes(
     )
 
     assert isinstance(tag, StructuralTag)
-    assert tag.model_dump() == {
-        "type": "structural_tag",
-        "format": {
-            "type": "tags_with_separator",
-            "tags": [
-                {
-                    "type": "tag",
-                    "begin": '<tool_call>\n{"name": "get_weather", "arguments": ',
-                    "content": {
-                        "type": "json_schema",
-                        "json_schema": {
-                            "type": "object",
-                            "properties": {"city": {"type": "string"}},
-                            "required": ["city"],
-                        },
-                        "style": "json",
-                    },
-                    "end": "}\n</tool_call>",
-                },
-                {
-                    "type": "tag",
-                    "begin": '<tool_call>{"name": "get_weather", "arguments": ',
-                    "content": {
-                        "type": "json_schema",
-                        "json_schema": {
-                            "type": "object",
-                            "properties": {"city": {"type": "string"}},
-                            "required": ["city"],
-                        },
-                        "style": "json",
-                    },
-                    "end": "}</tool_call>",
-                },
-            ],
-            "separator": "",
-            "at_least_one": True,
-            "stop_after_first": False,
-        },
+
+    # Assert the semantically meaningful structure rather than the full
+    # model_dump(), which gains version-specific keys across xgrammar releases
+    # (e.g. "any_order" was added to json_schema content in 0.2.3).
+    dump = tag.model_dump()
+    assert dump["type"] == "structural_tag"
+
+    fmt = dump["format"]
+    assert fmt["type"] == "tags_with_separator"
+    assert fmt["separator"] == ""
+    assert fmt["at_least_one"] is True
+    assert fmt["stop_after_first"] is False
+
+    expected_schema = {
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"],
     }
+    expected_tags = [
+        ('<tool_call>\n{"name": "get_weather", "arguments": ', "}\n</tool_call>"),
+        ('<tool_call>{"name": "get_weather", "arguments": ', "}</tool_call>"),
+    ]
+    assert len(fmt["tags"]) == len(expected_tags)
+    for tag_dump, (begin, end) in zip(fmt["tags"], expected_tags):
+        assert tag_dump["type"] == "tag"
+        assert tag_dump["begin"] == begin
+        assert tag_dump["end"] == end
+        content = tag_dump["content"]
+        assert content["type"] == "json_schema"
+        assert content["json_schema"] == expected_schema
 
 
 def test_hermes_required_tool_calls_use_empty_separator():
