@@ -31,22 +31,80 @@ def test_gemma4_routing_kernel_triton(
     gating = torch.randn(num_tokens, num_experts, dtype=dtype, device="cuda")
     scales = torch.rand(num_experts, dtype=torch.float32, device="cuda")
 
-    ref_w, ref_ids = gemma4_routing_function_torch(gating, topk, scales)
     tri_w, tri_ids = gemma4_fused_routing_kernel_triton(gating, topk, scales)
 
-    # Sort by expert id — to remove tie-breaking differences
+    # Used with gamma4_routing_function_torch, it doesn't use the
+    # first return value and the second value needs to be a LongTensor.
+    def topk_function(x, k, dim):
+        return None, tri_ids.long()
+
+    # The two properties needed will be checked separately, in this order:
+    # 1) Check that the tri_ids do constitute a valid top-k set.
+    #
+    # Use the top-k indices to check that the gating values were actually
+    # a valid top-k
+    #
+    # 2) Check that the Triton implementation computes weights correctly.
+    #
+    # To check that the weights returned have been computed correctly,
+    # take the returned ids, which were already checked and return them
+    # into the Torch implementation using the topk_function above.
+    #
+    # This process is used  because torch.topk is unstable and tl.sort
+    # uses Bitonic Mergesort, which is also unstable.
+    #
+    # Since scales are applied after the top-k computation, the
+    # scale * weight computation could be different for two unshared experts
+    # that tied for the same place since the scale could be different,
+    # but gating value the same.
+
+    ref_w, ref_ids = gemma4_routing_function_torch(
+        gating, topk, scales, topk_function=topk_function
+    )
+
+    assert ref_ids.shape == tri_ids.shape, (
+        f"Returned weights shape must match reference weights shape,"
+        f"ref_ids.shape={ref_ids.shape}, tri_ids.shape={tri_ids.shape}."
+    )
+    assert ref_ids.dtype == tri_ids.dtype, (
+        "Returned weights dtype must match reference dtype."
+    )
+
+    assert ref_w.shape == tri_w.shape, (
+        f"Returned weights shape must match reference weights shape,"
+        f"ref_w.shape={ref_w.shape}, tri_w.shape={tri_w.shape}."
+    )
+    assert ref_w.dtype == tri_w.dtype, (
+        "Returned weights dtype must match reference dtype."
+    )
+
+    # 1) Check for valid top-k.
+    #
+    # Get a stable sort of the gating values and take the top-k.
+    topk_values, topk_indices = torch.sort(gating, descending=True, stable=True, dim=-1)
+    topk_values = topk_values[:, :topk]
+    topk_indices = topk_indices[:, :topk]
+
+    # Gather all of the gating values corresponding to the selected top-k ids.
+    # Since softmax preserves the ordering of a monotonic sequence, this can
+    # be used do check that the ids returned from the Triton implementation
+    # form a valid top-k.
+    tri_gating_values = (
+        gating.gather(dim=-1, index=tri_ids)
+        .sort(descending=True, stable=True, dim=-1)
+        .values
+    )
+
+    # Check that the top-k gating values returned for each token.
+    torch.testing.assert_close(topk_values, tri_gating_values, atol=1e-2, rtol=1e-2)
+
+    # 2) Check for correct weight computation.
     ref_ws, ref_is = sort_by_id(ref_w, ref_ids)
     tri_ws, tri_is = sort_by_id(tri_w, tri_ids)
 
-    ids_match = (ref_is == tri_is).all().item()
     weights_match = torch.allclose(ref_ws, tri_ws, atol=1e-2, rtol=1e-2)
-    all_match = ids_match and weights_match
     max_err = (ref_ws - tri_ws).abs().max().item()
-    print(
-        f"T={num_tokens:5d} E={num_experts:4d} K={topk} "
-        f"{str(dtype).split('.')[-1]:7s} ids={ids_match} max_Δweight={max_err:.2e}"
-    )
-    if not all_match:
+    if not weights_match:
         bad = (ref_is != tri_is).any(dim=-1).nonzero(as_tuple=True)[0]
         if len(bad):
             r = bad[0].item()
@@ -54,4 +112,4 @@ def test_gemma4_routing_kernel_triton(
                 f"  first bad row {r}: ref_ids={ref_ids[r].tolist()} "
                 f"tri_ids={tri_ids[r].tolist()}"
             )
-        assert all_match
+        assert weights_match

@@ -18,7 +18,7 @@
 # limitations under the License.
 """Gemma 4 model implementation for vLLM."""
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import replace
 from itertools import islice
 
@@ -184,8 +184,9 @@ def gemma4_routing_function_torch(
     gating_output: torch.Tensor,
     topk: int,
     per_expert_scale: torch.Tensor,
+    topk_function: Callable = torch.topk,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    _, topk_ids = torch.topk(gating_output, k=topk, dim=-1)
+    _, topk_ids = topk_function(gating_output, k=topk, dim=-1)
     router_probabilities = torch.nn.functional.softmax(gating_output, dim=-1)
     indicator = torch.nn.functional.one_hot(
         topk_ids, num_classes=gating_output.size(-1)
