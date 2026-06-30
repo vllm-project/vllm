@@ -116,17 +116,18 @@ def vllm_topk_softplus_sqrt(
     from vllm.platforms import current_platform
 
     if current_platform.is_xpu():
-        return _topk_softplus_sqrt_torch(
+        torch.ops._moe_C.topk_softplus_sqrt(
             topk_weights,
             topk_indices,
             token_expert_indices,
             gating_output,
             renormalize,
+            routed_scaling_factor,
             e_score_correction_bias,
             input_tokens,
             hash_indices_table,
-            routed_scaling_factor,
         )
+        return topk_weights, topk_indices
 
     ops.topk_hash_softplus_sqrt(
         topk_weights,
