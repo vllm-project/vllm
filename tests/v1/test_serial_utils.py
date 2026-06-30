@@ -459,11 +459,10 @@ def test_engine_notifications_round_trip():
 
 
 def test_custom_notification_round_trip():
-    """The open `custom` tag survives the wire and namespaces its payload.
+    """The open `custom` tag survives the wire with its payload intact.
 
-    Plugins emit this when they can't add a struct type to the lockstep
-    union; the Rust frontend decodes the same bytes (see
-    rust/src/engine-core-client/src/protocol/notifications.rs).
+    What plugins emit when they can't add a struct to the lockstep union; Rust
+    decodes the same bytes (see notifications.rs).
     """
     from vllm.v1.engine import EngineCoreOutputs
     from vllm.v1.notifications import CustomNotification

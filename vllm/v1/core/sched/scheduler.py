@@ -105,10 +105,8 @@ class Scheduler(SchedulerInterface):
         # Track requests scheduled in prior step (MRV1-only).
         self.prev_step_scheduled_req_ids: set[str] = set()
 
-        # Engine notifications the scheduler emits this step. Drained by
-        # EngineCore via take_notifications() and forwarded on the additive
-        # EngineCoreOutputs.engine_notifications channel. Empty in the base
-        # scheduler; plugins call publish_notification() to populate it.
+        # Notifications the scheduler emits this step, drained by EngineCore.
+        # Empty unless a plugin calls publish_notification().
         self._pending_notifications: list[EngineNotification] = []
 
         # Scheduling constraints.
@@ -2324,12 +2322,10 @@ class Scheduler(SchedulerInterface):
         )
 
     def publish_notification(self, notification: EngineNotification) -> None:
-        """Queue an engine notification to forward on the next step.
+        """Queue a notification to forward on the next step.
 
-        Producer side of the scheduler notification hook: a plugin holding a
-        reference to the scheduler appends here, and EngineCore drains the
-        buffer via take_notifications(). Events accumulate additively, so a
-        producer may emit more than one per step.
+        Producer side: a plugin holding the scheduler appends here, EngineCore
+        drains via take_notifications(). Additive, so emit as many as you want.
         """
         self._pending_notifications.append(notification)
 
