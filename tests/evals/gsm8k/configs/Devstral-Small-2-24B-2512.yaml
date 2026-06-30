@@ -1,0 +1,8 @@
+model_name: "mistralai/Devstral-Small-2-24B-Instruct-2512"
+accuracy_threshold: 0.83
+num_questions: 1319
+num_fewshot: 5
+server_args: >-
+  --enforce-eager
+  --max-model-len 4096
+  --limit-mm-per-prompt '{"image":0}'
