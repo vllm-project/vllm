@@ -8,7 +8,6 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-
 import numpy as np
 import torch
 from PIL import Image
@@ -30,12 +29,12 @@ def has_required_files(path: Path, required_files: Sequence[str]) -> bool:
 
 
 def ensure_local_emu35_weights(
-    path: str,
-    hf_repo_id: str,
-    *,
-    required_files: Sequence[str] = _EMU35_VQ_REQUIRED_FILES,
-    cache_dir: str | None = None,
-) -> str:
+        path: str,
+        hf_repo_id: str,
+        *,
+        required_files: Sequence[str] = _EMU35_VQ_REQUIRED_FILES,
+        cache_dir: str | None = None,
+        ) -> str:
     expanded_path = Path(path).expanduser()
     if expanded_path.exists() and expanded_path.is_dir():
         if (expanded_path / "emu35_vison_tokenizer.safetensors").is_file():
@@ -43,36 +42,36 @@ def ensure_local_emu35_weights(
         if has_required_files(expanded_path, required_files):
             return str(expanded_path.resolve())
         raise ValueError(
-            f"Local checkpoint at {expanded_path} is missing required "
-            f"files (either 'emu35_vison_tokenizer.safetensors' or "
-            f"both {list(required_files)})."
-        )
+                f"Local checkpoint at {expanded_path} is missing required "
+                f"files (either 'emu35_vison_tokenizer.safetensors' or "
+                f"both {list(required_files)}).",
+                )
 
     raise FileNotFoundError(
-        f"Apertus vision tokenizer path '{path}' does not exist or is not a directory. "
-        "Dynamic weight downloading is disabled."
-    )
+            f"Apertus vision tokenizer path '{path}' does not exist or is not a directory. "
+            "Dynamic weight downloading is disabled.",
+            )
 
 
 def build_emu35_vision_tokenizer(
-    *,
-    vq_hub: str,
-    default_repo: str,
-    device: str,
-    vq_type: str = "ibq",
-    cache_dir: str | None = None,
-) -> Any:
+        *,
+        vq_hub: str,
+        default_repo: str,
+        device: str,
+        vq_type: str = "ibq",
+        cache_dir: str | None = None,
+        ) -> Any:
     local_vq_path = ensure_local_emu35_weights(
-        vq_hub,
-        default_repo,
-        required_files=_EMU35_VQ_REQUIRED_FILES,
-        cache_dir=cache_dir,
-    )
+            vq_hub,
+            default_repo,
+            required_files=_EMU35_VQ_REQUIRED_FILES,
+            cache_dir=cache_dir,
+            )
     return build_vision_tokenizer(
-        type=vq_type,
-        model_path=local_vq_path,
-        device=device,
-    ).eval()
+            type=vq_type,
+            model_path=local_vq_path,
+            device=device,
+            ).eval()
 
 
 class ApertusImageTokenizer:
@@ -109,14 +108,14 @@ class ApertusImageTokenizer:
             return torch.bfloat16
 
         mapping = {
-            "float16": torch.float16,
-            "fp16": torch.float16,
-            "half": torch.float16,
+            "float16":  torch.float16,
+            "fp16":     torch.float16,
+            "half":     torch.float16,
             "bfloat16": torch.bfloat16,
-            "bf16": torch.bfloat16,
-            "float32": torch.float32,
-            "fp32": torch.float32,
-        }
+            "bf16":     torch.bfloat16,
+            "float32":  torch.float32,
+            "fp32":     torch.float32,
+            }
         return mapping.get(str(value).lower().strip(), torch.bfloat16)
 
     @staticmethod
@@ -152,9 +151,9 @@ class ApertusImageTokenizer:
                 array_np = np.transpose(array_np, (1, 2, 0))
         else:
             raise TypeError(
-                "Apertus image adapter expects PIL images, numpy arrays, or "
-                "torch tensors in multi_modal_data['image']."
-            )
+                    "Apertus image adapter expects PIL images, numpy arrays, or "
+                    "torch tensors in multi_modal_data['image'].",
+                    )
 
         if np.issubdtype(array_np.dtype, np.floating):
             max_value = float(np.nanmax(array_np)) if array_np.size else 1.0
@@ -168,26 +167,26 @@ class ApertusImageTokenizer:
 
     @staticmethod
     def apertus_special_token(
-        tokenizer: TokenizerLike,
-        attr_name: str,
-        fallback: str,
-    ) -> str:
+            tokenizer: TokenizerLike,
+            attr_name: str,
+            fallback: str,
+            ) -> str:
         token = getattr(tokenizer, attr_name, None)
         return token if isinstance(token, str) and token else fallback
 
     @classmethod
     def placeholder_aliases(
-        cls,
-        tokenizer: TokenizerLike,
-        mm_processor_kwargs: Mapping[str, object],
-    ) -> list[str]:
+            cls,
+            tokenizer: TokenizerLike,
+            mm_processor_kwargs: Mapping[str, object],
+            ) -> list[str]:
         configured_placeholder = mm_processor_kwargs.get("apertus_image_placeholder")
         tokenizer_placeholder = getattr(tokenizer, "image_token", None)
         candidates = [
             configured_placeholder if isinstance(configured_placeholder, str) else "",
             tokenizer_placeholder if isinstance(tokenizer_placeholder, str) else "",
             cls.DEFAULT_IMAGE_PLACEHOLDER,
-        ]
+            ]
 
         seen: set[str] = set()
         aliases: list[str] = []
@@ -200,8 +199,8 @@ class ApertusImageTokenizer:
 
     @staticmethod
     def _resolve_vision_tokenizer_device(
-        mm_processor_kwargs: Mapping[str, object],
-    ) -> tuple[str, str]:
+            mm_processor_kwargs: Mapping[str, object],
+            ) -> tuple[str, str]:
         from_kwargs = mm_processor_kwargs.get("apertus_vision_tokenizer_device")
         if isinstance(from_kwargs, str) and from_kwargs.strip():
             return from_kwargs.strip(), "mm_processor_kwargs"
@@ -211,69 +210,69 @@ class ApertusImageTokenizer:
             return (
                 from_env.strip(),
                 f"env:{_APERTUS_VISION_TOKENIZER_DEVICE_ENV_VAR}",
-            )
+                )
 
         return "cuda", "default"
 
     def load_vision_tokenizer(
-        self,
-        mm_processor_kwargs: Mapping[str, object],
-    ) -> Any:
+            self,
+            mm_processor_kwargs: Mapping[str, object],
+            ) -> Any:
         vq_hub = str(
-            mm_processor_kwargs.get(
-                "apertus_vq_hub",
-                mm_processor_kwargs.get("vq_hub", self.DEFAULT_VQ_HUB),
-            )
-        )
+                mm_processor_kwargs.get(
+                        "apertus_vq_hub",
+                        mm_processor_kwargs.get("vq_hub", self.DEFAULT_VQ_HUB),
+                        ),
+                )
         vq_type = str(
-            mm_processor_kwargs.get(
-                "apertus_vq_type",
-                mm_processor_kwargs.get("vq_type", "ibq"),
-            )
-        )
+                mm_processor_kwargs.get(
+                        "apertus_vq_type",
+                        mm_processor_kwargs.get("vq_type", "ibq"),
+                        ),
+                )
         vision_device, vision_device_source = self._resolve_vision_tokenizer_device(
-            mm_processor_kwargs
-        )
+                mm_processor_kwargs,
+                )
         vision_dtype = self.coerce_dtype(
-            mm_processor_kwargs.get("apertus_vision_tokenizer_dtype")
-        )
+                mm_processor_kwargs.get("apertus_vision_tokenizer_dtype"),
+                )
         if vision_device == "cpu" and vision_dtype in (torch.float16, torch.bfloat16):
             vision_dtype = torch.float32
 
         apertus_mm_keys = sorted(
-            key for key in mm_processor_kwargs if key.startswith("apertus_")
-        )
+                key for key in mm_processor_kwargs if key.startswith("apertus_"),
+                )
         logger.info(
-            "[Apertus MM] received mm_processor_kwargs keys=%s",
-            apertus_mm_keys,
-        )
+                "[Apertus MM] received mm_processor_kwargs keys=%s",
+                apertus_mm_keys,
+                )
         logger.info(
-            "[Apertus MM] resolved apertus_vision_tokenizer_device=%r source=%r",
-            vision_device,
-            vision_device_source,
-        )
+                "[Apertus MM] resolved apertus_vision_tokenizer_device=%r source=%r",
+                vision_device,
+                vision_device_source,
+                )
         cache_key = (
             vq_hub,
             vq_type,
             vision_device,
             vision_dtype,
-        )
+            )
 
         if cache_key in self._vision_tokenizer_cache:
             return self._vision_tokenizer_cache[cache_key]
 
         cache_dir = mm_processor_kwargs.get("apertus_vq_cache_dir")
         logger.info(
-            "[Apertus MM] loading Emu3.5 vision tokenizer on device=%r",
-            vision_device,
-        )
+                "[Apertus MM] loading Emu3.5 vision tokenizer on device=%r",
+                vision_device,
+                )
         vision_tokenizer = build_emu35_vision_tokenizer(
-            vq_hub=vq_hub,
-            default_repo=self.DEFAULT_VQ_HUB,
-            device=vision_device,
-            vq_type=vq_type,
-            cache_dir=cache_dir if isinstance(cache_dir, str) else None,
-        )
+                vq_hub=vq_hub,
+                default_repo=self.DEFAULT_VQ_HUB,
+                device=vision_device,
+                vq_type=vq_type,
+                cache_dir=cache_dir if isinstance(cache_dir, str) else None,
+                )
         if isinstance(vision_dtype, torch.dtype):
             vision_tokenizer = vision_tokenizer.to(dtype=vision_dtype)
 
@@ -281,64 +280,64 @@ class ApertusImageTokenizer:
         return vision_tokenizer
 
     def build_apertus_image_prompt(
-        self,
-        image_tokens: torch.Tensor,
-        tokenizer: TokenizerLike,
-    ) -> str:
+            self,
+            image_tokens: torch.Tensor,
+            tokenizer: TokenizerLike,
+            ) -> str:
         if image_tokens.ndim != 2:
             raise ValueError(
-                f"Apertus image tokens must be 2D, got "
-                f"shape {tuple(image_tokens.shape)}"
-            )
+                    f"Apertus image tokens must be 2D, got "
+                    f"shape {tuple(image_tokens.shape)}",
+                    )
 
         height, width = image_tokens.shape
         rows = [
             "".join(
-                self.VISUAL_TEMPLATE.format(token_id=int(token_id)) for token_id in row
-            )
+                    self.VISUAL_TEMPLATE.format(token_id=int(token_id)) for token_id in row,
+                    )
             for row in image_tokens.detach().to("cpu").tolist()
-        ]
+            ]
         eol_token = self.apertus_special_token(
-            tokenizer, "eol_token", self.DEFAULT_EOL_TOKEN
-        )
+                tokenizer, "eol_token", self.DEFAULT_EOL_TOKEN,
+                )
         imgstr = eol_token.join(rows)
 
         boi_token = self.apertus_special_token(
-            tokenizer, "boi_token", self.DEFAULT_BOI_TOKEN
-        )
+                tokenizer, "boi_token", self.DEFAULT_BOI_TOKEN,
+                )
         img_token = self.apertus_special_token(
-            tokenizer, "img_token", self.DEFAULT_IMG_TOKEN
-        )
+                tokenizer, "img_token", self.DEFAULT_IMG_TOKEN,
+                )
         eoi_token = self.apertus_special_token(
-            tokenizer, "eoi_token", self.DEFAULT_EOI_TOKEN
-        )
+                tokenizer, "eoi_token", self.DEFAULT_EOI_TOKEN,
+                )
 
         return f"{boi_token}{height}*{width}{img_token}{imgstr}{eoi_token}"
 
     def encode_images(
-        self,
-        images: Sequence[object],
-        *,
-        tokenizer: TokenizerLike,
-        mm_processor_kwargs: Mapping[str, object],
-    ) -> list[str]:
+            self,
+            images: Sequence[object],
+            *,
+            tokenizer: TokenizerLike,
+            mm_processor_kwargs: Mapping[str, object],
+            ) -> list[str]:
         if not images:
             return []
 
         min_pixels = self.coerce_int(
-            mm_processor_kwargs.get(
-                "apertus_min_pixels",
-                mm_processor_kwargs.get("emu_min_pixels", self.DEFAULT_MIN_PIXELS),
-            ),
-            default=self.DEFAULT_MIN_PIXELS,
-        )
+                mm_processor_kwargs.get(
+                        "apertus_min_pixels",
+                        mm_processor_kwargs.get("emu_min_pixels", self.DEFAULT_MIN_PIXELS),
+                        ),
+                default=self.DEFAULT_MIN_PIXELS,
+                )
         max_pixels = self.coerce_int(
-            mm_processor_kwargs.get(
-                "apertus_max_pixels",
-                mm_processor_kwargs.get("emu_max_pixels", self.DEFAULT_MAX_PIXELS),
-            ),
-            default=self.DEFAULT_MAX_PIXELS,
-        )
+                mm_processor_kwargs.get(
+                        "apertus_max_pixels",
+                        mm_processor_kwargs.get("emu_max_pixels", self.DEFAULT_MAX_PIXELS),
+                        ),
+                default=self.DEFAULT_MAX_PIXELS,
+                )
 
         vision_tokenizer = self.load_vision_tokenizer(mm_processor_kwargs)
         vision_params = next(vision_tokenizer.parameters())
@@ -352,15 +351,15 @@ class ApertusImageTokenizer:
             current_area = width * height
             target_area = max(min(max_pixels, current_area), min_pixels)
             resized_image = self.smart_resize(
-                image, target_area, self.EMU35_DS_FACTOR
-            )
+                    image, target_area, self.EMU35_DS_FACTOR,
+                    )
             resized_w, resized_h = resized_image.size
 
             image_tensor = torch.tensor(
-                (np.array(resized_image) / 127.5 - 1.0),
-                device=vision_device,
-                dtype=vision_dtype,
-            ).permute(2, 0, 1)
+                    (np.array(resized_image) / 127.5 - 1.0),
+                    device=vision_device,
+                    dtype=vision_dtype,
+                    ).permute(2, 0, 1)
 
             with torch.inference_mode():
                 quant, emb_loss, info = vision_tokenizer.encode(image_tensor[None])
@@ -370,10 +369,21 @@ class ApertusImageTokenizer:
             token_w = resized_w // self.EMU35_DS_FACTOR
             image_token_grid = ind.view(token_h, token_w).to(dtype=torch.int64)
             image_prompts.append(
-                self.build_apertus_image_prompt(image_token_grid, tokenizer)
-            )
+                    self.build_apertus_image_prompt(image_token_grid, tokenizer),
+                    )
 
         return image_prompts
+
+    def preprocess_image_to_tensor(self, raw_image: object) -> tuple[torch.Tensor, int, int]:
+        """Returns Normalized Float32 Tensor [3, H, W] and Expected Grid Dimensions [h_tok, w_tok]."""
+        image = self.coerce_pil_image(raw_image)
+        w, h = image.size
+        target_area = max(min(self.DEFAULT_MAX_PIXELS, w * h), self.DEFAULT_MIN_PIXELS)
+        resized = self.smart_resize(image, target_area, self.EMU35_DS_FACTOR)
+
+        tensor = torch.tensor((np.array(resized) / 127.5 - 1.0), dtype=torch.float32).permute(2, 0, 1)
+        h_tok, w_tok = tensor.shape[1] // self.EMU35_DS_FACTOR, tensor.shape[2] // self.EMU35_DS_FACTOR
+        return tensor, h_tok, w_tok
 
 
 class ApertusAudioTokenizer:
@@ -455,9 +465,9 @@ class ApertusAudioTokenizer:
         return np.asarray(audio, dtype=np.float32)
 
     def normalize_audio_input(
-        self,
-        item: object,
-    ) -> np.ndarray:
+            self,
+            item: object,
+            ) -> np.ndarray:
         if isinstance(item, tuple) and len(item) == 2:
             return self.coerce_audio_waveform(item[0])
 
@@ -468,9 +478,9 @@ class ApertusAudioTokenizer:
                 return self.coerce_audio_waveform(item["audio_array"])
 
             raise TypeError(
-                "Unsupported mapping keys for Apertus audio input. "
-                f"Got keys: {sorted(item.keys())}"
-            )
+                    "Unsupported mapping keys for Apertus audio input. "
+                    f"Got keys: {sorted(item.keys())}",
+                    )
 
         return self.coerce_audio_waveform(item)
 
@@ -499,9 +509,9 @@ class ApertusAudioTokenizer:
         convert = getattr(tokenizer, "convert_tokens_to_ids", None)
         if not callable(convert):
             raise AttributeError(
-                "Tokenizer must expose convert_tokens_to_ids "
-                "for Apertus audio prompts."
-            )
+                    "Tokenizer must expose convert_tokens_to_ids "
+                    "for Apertus audio prompts.",
+                    )
 
         token_id = convert(token_str)
         unk_token_id = getattr(tokenizer, "unk_token_id", 1000)
@@ -512,37 +522,37 @@ class ApertusAudioTokenizer:
         return int(token_id)
 
     def get_audio_tokenizer(
-        self,
-        mm_processor_kwargs: Mapping[str, object],
-    ) -> Any:
+            self,
+            mm_processor_kwargs: Mapping[str, object],
+            ) -> Any:
         tokenizer_path = str(
-            mm_processor_kwargs.get(
-                "apertus_audio_tokenizer_path",
-                self.DEFAULT_AUDIO_TOKENIZER_PATH,
-            )
-        )
+                mm_processor_kwargs.get(
+                        "apertus_audio_tokenizer_path",
+                        self.DEFAULT_AUDIO_TOKENIZER_PATH,
+                        ),
+                )
         tokenizer_type = str(
-            mm_processor_kwargs.get(
-                "apertus_audio_tokenizer_type",
-                self.DEFAULT_AUDIO_TOKENIZER_TYPE,
-            )
-        ).lower()
+                mm_processor_kwargs.get(
+                        "apertus_audio_tokenizer_type",
+                        self.DEFAULT_AUDIO_TOKENIZER_TYPE,
+                        ),
+                ).lower()
         tokenizer_name = str(
-            mm_processor_kwargs.get(
-                "apertus_audio_tokenizer_name",
-                self.DEFAULT_AUDIO_TOKENIZER_NAME,
-            )
-        )
+                mm_processor_kwargs.get(
+                        "apertus_audio_tokenizer_name",
+                        self.DEFAULT_AUDIO_TOKENIZER_NAME,
+                        ),
+                )
         tokenizer_device = str(
-            mm_processor_kwargs.get(
-                "apertus_audio_tokenizer_device",
-                self.DEFAULT_AUDIO_TOKENIZER_DEVICE,
-            )
-        )
+                mm_processor_kwargs.get(
+                        "apertus_audio_tokenizer_device",
+                        self.DEFAULT_AUDIO_TOKENIZER_DEVICE,
+                        ),
+                )
         tokenizer_compile = self.coerce_bool(
-            mm_processor_kwargs.get("apertus_audio_tokenizer_compile"),
-            default=False,
-        )
+                mm_processor_kwargs.get("apertus_audio_tokenizer_compile"),
+                default=False,
+                )
 
         cache_key = (
             tokenizer_path,
@@ -550,21 +560,21 @@ class ApertusAudioTokenizer:
             tokenizer_compile,
             tokenizer_type,
             tokenizer_name,
-        )
+            )
         if cache_key in self._audio_tokenizer_cache:
             return self._audio_tokenizer_cache[cache_key]
 
         if tokenizer_type != "wavtokenizer" or tokenizer_name != "WavTokenizer40":
             raise ValueError(
-                "Apertus audio adapter currently supports only "
-                "audio_tokenizer_type=wavtokenizer and "
-                "audio_tokenizer_name=WavTokenizer40."
-            )
+                    "Apertus audio adapter currently supports only "
+                    "audio_tokenizer_type=wavtokenizer and "
+                    "audio_tokenizer_name=WavTokenizer40.",
+                    )
 
         kwargs: dict[str, object] = {
-            "device": tokenizer_device,
+            "device":        tokenizer_device,
             "torch_compile": tokenizer_compile,
-        }
+            }
         if tokenizer_path:
             kwargs["checkpoint"] = tokenizer_path
 
@@ -573,26 +583,26 @@ class ApertusAudioTokenizer:
         return audio_tokenizer
 
     def placeholder_aliases(
-        self,
-        mm_processor_kwargs: Mapping[str, object],
-    ) -> list[str]:
+            self,
+            mm_processor_kwargs: Mapping[str, object],
+            ) -> list[str]:
         configured_placeholder = mm_processor_kwargs.get("apertus_audio_placeholder")
         return self.dedupe(
-            [
-                (
-                    configured_placeholder
-                    if isinstance(configured_placeholder, str)
-                    else ""
-                ),
-                self.DEFAULT_AUDIO_PLACEHOLDER,
-            ]
-        )
+                [
+                    (
+                        configured_placeholder
+                        if isinstance(configured_placeholder, str)
+                        else ""
+                    ),
+                    self.DEFAULT_AUDIO_PLACEHOLDER,
+                    ],
+                )
 
     def serialize_audio_token_ids(
-        self,
-        token_ids: Sequence[int],
-        tokenizer: TokenizerLike,
-    ) -> str:
+            self,
+            token_ids: Sequence[int],
+            tokenizer: TokenizerLike,
+            ) -> str:
         convert_ids_to_tokens = getattr(tokenizer, "convert_ids_to_tokens", None)
         if callable(convert_ids_to_tokens):
             token_strs = convert_ids_to_tokens(list(token_ids))
@@ -605,32 +615,32 @@ class ApertusAudioTokenizer:
         return serialized
 
     def encode_audios(
-        self,
-        audios: Sequence[object],
-        *,
-        tokenizer: TokenizerLike,
-        mm_processor_kwargs: Mapping[str, object],
-    ) -> list[str]:
+            self,
+            audios: Sequence[object],
+            *,
+            tokenizer: TokenizerLike,
+            mm_processor_kwargs: Mapping[str, object],
+            ) -> list[str]:
         if not audios:
             return []
 
         token_offset = self.coerce_int(
-            mm_processor_kwargs.get("apertus_audio_token_offset"),
-            default=self.DEFAULT_AUDIO_TOKEN_OFFSET,
-        )
+                mm_processor_kwargs.get("apertus_audio_token_offset"),
+                default=self.DEFAULT_AUDIO_TOKEN_OFFSET,
+                )
         target_peak_dbfs = self.coerce_float(
-            mm_processor_kwargs.get("apertus_audio_target_peak_dbfs"),
-            default=self.DEFAULT_TARGET_PEAK_DBFS,
-        )
+                mm_processor_kwargs.get("apertus_audio_target_peak_dbfs"),
+                default=self.DEFAULT_TARGET_PEAK_DBFS,
+                )
 
         audio_tokenizer = self.get_audio_tokenizer(mm_processor_kwargs)
         audio_device = self.resolve_torch_device(audio_tokenizer)
         audio_start_id = self.load_special_token_id(
-            tokenizer, self.DEFAULT_AUDIO_START_TOKEN
-        )
+                tokenizer, self.DEFAULT_AUDIO_START_TOKEN,
+                )
         audio_end_id = self.load_special_token_id(
-            tokenizer, self.DEFAULT_AUDIO_END_TOKEN
-        )
+                tokenizer, self.DEFAULT_AUDIO_END_TOKEN,
+                )
 
         serialized_prompts: list[str] = []
         for raw_audio in audios:
@@ -650,17 +660,29 @@ class ApertusAudioTokenizer:
                 audio_codes = audio_codes.squeeze(0)
 
             shifted_codes = (
-                audio_codes.detach().to("cpu", dtype=torch.int64) + token_offset
+                    audio_codes.detach().to("cpu", dtype=torch.int64) + token_offset
             )
             prompt_ids = [audio_start_id]
             prompt_ids.extend(shifted_codes.tolist())
             prompt_ids.append(audio_end_id)
 
             serialized_prompts.append(
-                self.serialize_audio_token_ids(
-                    prompt_ids,
-                    tokenizer,
-                )
-            )
+                    self.serialize_audio_token_ids(
+                            prompt_ids,
+                            tokenizer,
+                            ),
+                    )
 
         return serialized_prompts
+
+    def preprocess_audio_to_tensor(self, raw_audio: object) -> tuple[torch.Tensor, int]:
+        """Returns Normalized Float32 Tensor [1, Length] and Expected Tokens Count."""
+        waveform = self.normalize_audio_input(raw_audio)
+        tensor = self.to_audio_tensor(waveform)
+
+        peak = tensor.abs().max().clamp(min=1e-10)
+        target = 10 ** (self.DEFAULT_TARGET_PEAK_DBFS / 20.0)
+        tensor = tensor * (target / peak)
+
+        num_tok = (tensor.shape[-1] + 600 - 1) // 600
+        return tensor, num_tok
