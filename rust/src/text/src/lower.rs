@@ -128,6 +128,12 @@ pub fn lower_sampling_params(
         prompt_len,
     )?;
     let min_tokens = min_tokens.unwrap_or(0);
+    if min_tokens > max_tokens {
+        return Err(Error::MinTokensExceedsMaxTokens {
+            min_tokens,
+            max_tokens,
+        });
+    }
     let thinking_token_budget = normalize_thinking_token_budget(thinking_token_budget)?;
     let frequency_penalty = frequency_penalty.unwrap_or(0.0);
     let presence_penalty = presence_penalty.unwrap_or(0.0);
@@ -269,6 +275,7 @@ mod tests {
     use std::collections::{BTreeSet, HashMap};
 
     use serial_test::file_serial;
+    use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::*;
     use crate::backend::hf::HfTextBackend;
@@ -276,60 +283,8 @@ mod tests {
     use crate::error::{LogprobsError, TokenIdsError};
     use crate::request::{Prompt, TextRequest};
 
-    /// Stub tokenizer that returns empty token IDs — sufficient for tests that
-    /// don't exercise bad-words tokenization.
-    struct StubTokenizer;
-
-    impl Tokenizer for StubTokenizer {
-        fn encode(
-            &self,
-            _text: &str,
-            _add_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<Vec<u32>> {
-            Ok(vec![])
-        }
-
-        fn decode(
-            &self,
-            _token_ids: &[u32],
-            _skip_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<String> {
-            Ok(String::new())
-        }
-
-        fn token_to_id(&self, _token: &str) -> Option<u32> {
-            None
-        }
-    }
-
-    fn stub_tokenizer() -> StubTokenizer {
-        StubTokenizer
-    }
-
-    struct FixedTokenizer {
-        token_ids: Vec<u32>,
-    }
-
-    impl Tokenizer for FixedTokenizer {
-        fn encode(
-            &self,
-            _text: &str,
-            _add_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<Vec<u32>> {
-            Ok(self.token_ids.clone())
-        }
-
-        fn decode(
-            &self,
-            _token_ids: &[u32],
-            _skip_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<String> {
-            Ok(String::new())
-        }
-
-        fn token_to_id(&self, _token: &str) -> Option<u32> {
-            None
-        }
+    fn stub_tokenizer() -> TestTokenizer {
+        TestTokenizer::new()
     }
 
     fn sample_request() -> TextRequest {
@@ -411,6 +366,27 @@ mod tests {
         assert!(matches!(
             lower(Some(-2)),
             Err(Error::InvalidThinkingTokenBudget)
+        ));
+    }
+
+    #[test]
+    fn lower_sampling_params_rejects_min_tokens_above_resolved_max_tokens() {
+        let error = lower_sampling_params_with_limits(
+            SamplingParams {
+                max_tokens: Some(4),
+                min_tokens: Some(5),
+                ..SamplingParams::default()
+            },
+            sample_sampling_limits(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::MinTokensExceedsMaxTokens {
+                min_tokens: 5,
+                max_tokens: 4,
+            }
         ));
     }
 
@@ -925,9 +901,7 @@ mod tests {
 
     #[test]
     fn lower_sampling_params_rejects_out_of_vocab_bad_words() {
-        let tokenizer = FixedTokenizer {
-            token_ids: vec![1999, 2000],
-        };
+        let tokenizer = TestTokenizer::new().with_regular_token("blocked", 2000);
         let error = lower_sampling_params(
             SamplingParams {
                 bad_words: Some(vec!["blocked".to_string()]),

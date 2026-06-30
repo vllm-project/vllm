@@ -1279,11 +1279,19 @@ class FusedMoEConfig:
     hidden_dim_unpadded: int | None = None
     # Defaults to intermediate_size_per_partition if not specified.
     intermediate_size_per_partition_unpadded: int | None = None
+    # Model specific override
+    intermediate_pad: int | None = None
 
     moe_backend: MoEBackend = "auto"
     max_num_tokens: int = SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS_FOR_BATCHED_DP
     has_bias: bool = False
     is_lora_enabled: bool = False
+
+    # When True, the MoE skips its final cross-rank all-reduce (and the separate
+    # shared-expert reduce), returning the partial per-rank sum. The caller is
+    # then responsible for the reduction (e.g. fusing it into the next RMSNorm).
+    # Only honored on the non-reduced (late-AR) TP path. Default False.
+    skip_final_all_reduce: bool = False
 
     # SwiGLU clamp limit. When set, backends that do not implement the clamp
     # are filtered out by `FusedMoEExperts.is_supported_config` so the oracle

@@ -334,6 +334,8 @@ class FusedTopKBiasRouter(BaseRouter):
         *,
         scoring_func: str = "sigmoid",
         hash_indices_table: torch.Tensor | None = None,
+        num_fused_shared_experts: int = 0,
+        shared_expert_weight: float = 1.0,
     ):
         super().__init__(
             top_k=top_k,
@@ -346,6 +348,11 @@ class FusedTopKBiasRouter(BaseRouter):
         self.routed_scaling_factor = routed_scaling_factor
         self.scoring_func = scoring_func
         self._hash_indices_table = hash_indices_table
+        # Fused shared experts: append constant slots (ids immediately after
+        # the routed experts, [global, global+n)) routed to by every token at
+        # ``shared_expert_weight``, AFTER the routed top-k is renormalized.
+        self.num_fused_shared_experts = num_fused_shared_experts
+        self.shared_expert_weight = shared_expert_weight
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
@@ -381,5 +388,24 @@ class FusedTopKBiasRouter(BaseRouter):
             hash_indices_table=self._hash_indices_table,
             routed_scaling_factor=self.routed_scaling_factor,
         )
+
+        if self.num_fused_shared_experts > 0:
+            m = topk_ids.shape[0]
+            n = self.num_fused_shared_experts
+            # global_num_experts counts only the routed experts; the fused
+            # shared experts occupy the slots immediately after them, i.e. ids
+            # [global_num_experts, global_num_experts + n).
+            base = self.global_num_experts
+            shared_ids = torch.arange(
+                base, base + n, dtype=topk_ids.dtype, device=topk_ids.device
+            ).expand(m, n)
+            shared_w = torch.full(
+                (m, n),
+                self.shared_expert_weight,
+                dtype=topk_weights.dtype,
+                device=topk_weights.device,
+            )
+            topk_ids = torch.cat([topk_ids, shared_ids], dim=-1)
+            topk_weights = torch.cat([topk_weights, shared_w], dim=-1)
 
         return topk_weights, topk_ids
