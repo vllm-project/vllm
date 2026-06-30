@@ -6,6 +6,7 @@
 import csv
 import json
 import math
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -163,6 +164,7 @@ class MockIndexer:
         num_tokens: int,
         max_kv_len: int,
         pattern: str = "random",
+        requests: Sequence[Any] | None = None,
     ):
         if pattern == "random":
             self.fill_random_indices(num_tokens, max_kv_len)
@@ -175,6 +177,39 @@ class MockIndexer:
             )
             indices = (indices % max_kv_len).expand(num_tokens, -1)
             self.topk_indices_buffer[:num_tokens] = indices
+            return
+        if pattern == "sliding_window":
+            if requests is None:
+                start = max(max_kv_len - self.topk_tokens, 0)
+                indices = torch.arange(
+                    start,
+                    start + self.topk_tokens,
+                    dtype=torch.int32,
+                    device=self.topk_indices_buffer.device,
+                )
+                indices = indices.clamp(max=max_kv_len - 1).expand(num_tokens, -1)
+                self.topk_indices_buffer[:num_tokens] = indices
+                return
+
+            rows = []
+            offsets = torch.arange(
+                self.topk_tokens,
+                dtype=torch.int32,
+                device=self.topk_indices_buffer.device,
+            ) - (self.topk_tokens - 1)
+            for request in requests:
+                q_len = request.q_len
+                kv_len = request.kv_len
+                context_len = kv_len - q_len
+                positions = torch.arange(
+                    context_len,
+                    kv_len,
+                    dtype=torch.int32,
+                    device=self.topk_indices_buffer.device,
+                )
+                row_indices = positions[:, None] + offsets[None, :]
+                rows.append(row_indices.clamp(min=0, max=kv_len - 1))
+            self.topk_indices_buffer[:num_tokens] = torch.cat(rows, dim=0)
             return
         raise ValueError(f"Unknown sparse MLA topk pattern: {pattern}")
 
@@ -296,7 +331,7 @@ class BenchmarkConfig:
     sparse_mla_mha_mode: str = "auto"  # "auto", "dense", or "masked"
     sparse_mla_dense_mha_max_seq_len: int | None = None
     sparse_mla_masked_mha_max_seq_len: int | None = None
-    sparse_mla_topk_pattern: str = "random"  # "random" or "prefix"
+    sparse_mla_topk_pattern: str = "random"  # "random", "prefix", "sliding_window"
     num_splits: int | None = None  # FlashAttention split-K (0=auto, 1=disabled)
 
 
