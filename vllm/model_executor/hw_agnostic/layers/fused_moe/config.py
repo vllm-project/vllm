@@ -467,6 +467,29 @@ def fp8_w8a8_moe_quant_config(
     )
 
 
+def mxfp4_w4a16_moe_quant_config(
+    w1_scale: Union[torch.Tensor, "PrecisionConfig"],
+    w2_scale: Union[torch.Tensor, "PrecisionConfig"],
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
+    gemm1_clamp_limit: float | None = None,
+) -> FusedMoEQuantConfig:
+    """Quant config for unquantized (BF16) activations and MXFP4 weights.
+
+    The OAI Triton MXFP4 path stores the swizzled scale tensor inside a
+    ``PrecisionConfig`` (a wrapper from ``triton_kernels.matmul_ogs``)
+    rather than a plain ``torch.Tensor``; the modular pipeline only reads
+    it back through ``FusedMoEQuantConfig.w{1,2}_precision``.
+    """
+    return FusedMoEQuantConfig(
+        _a1=FusedMoEQuantDesc(),
+        _a2=FusedMoEQuantDesc(),
+        _w1=FusedMoEQuantDesc("mxfp4", None, w1_scale, None, None, w1_bias),
+        _w2=FusedMoEQuantDesc("mxfp4", None, w2_scale, None, None, w2_bias),
+        gemm1_clamp_limit=gemm1_clamp_limit,
+    )
+
+
 def int8_w8a8_moe_quant_config(
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,

@@ -491,5 +491,12 @@ def process_fp8_weight_block_strategy(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Block-wise FP8 weight processing (passthrough)."""
+    """Block-wise FP8 weight processing.
+
+    Upcast e8m0fnu scales to float32 before the Triton kernel sees them:
+    Triton's frontend has no mapping for ``float8_e8m0fnu`` and raises
+    ``KeyError('float8_e8m0fnu')`` while resolving the tensor dtype.
+    """
+    if weight_scale.dtype == torch.float8_e8m0fnu:
+        weight_scale = weight_scale.to(torch.float32)
     return weight, weight_scale
