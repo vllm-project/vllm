@@ -478,6 +478,7 @@ def sparse_attn_indexer(
             and num_rows <= 32
             and logits.stride(0) % 4 == 0  # TMA 16-byte alignment
             and current_platform.has_device_capability(90)
+            and not current_platform.is_device_capability_family(120)
         )
         use_persistent_topk = current_platform.is_cuda() and topk_tokens in (
             512,
