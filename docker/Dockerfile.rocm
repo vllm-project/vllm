@@ -832,6 +832,14 @@ RUN echo "VLLM_BASE_IMAGE=${BASE_IMAGE}" >> ${COMMON_WORKDIR}/versions.txt \
     && echo "MORI_NIC_BACKEND=${NIC_BACKEND}" >> ${COMMON_WORKDIR}/versions.txt \
     && echo "AINIC_VERSION=${AINIC_VERSION}" >> ${COMMON_WORKDIR}/versions.txt
 
+
+### Install triton from upstream for AITER Deps TODO: (JPVILLAM) If possible to get this on whls it would be better
+RUN pip3 uninstall -y triton && \
+    git clone https://github.com/triton-lang/triton.git && \
+    cd triton && \
+    git checkout c517f38c && \
+    TRITON_APPEND_CMAKE_ARGS="-DCMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH=FALSE" pip3 install .
+
 CMD ["/bin/bash"]
 
 #Set entrypoint for vllm-openai official images
