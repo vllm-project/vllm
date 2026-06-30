@@ -572,7 +572,7 @@ def _decode_grouped_att_m_fwd(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize_on_alignment=["B_Seqlen"])
 def _fwd_kernel_stage2(
     Mid_O,
     o,
