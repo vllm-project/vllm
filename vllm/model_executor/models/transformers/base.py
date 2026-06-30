@@ -51,6 +51,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsQuant,
 )
 from vllm.model_executor.models.interfaces_base import VllmModel
+from vllm.model_executor.models.transformers.fusion import BaseFuser, Fusers
 from vllm.model_executor.models.transformers.utils import (
     can_enable_torch_compile,
     get_feature_request_tip,
@@ -426,7 +427,10 @@ class Base(
 
         Currently, this replaces:
 
+        - GLUs with a fused `MergedColumnParallelLinear` + `...AndMul`
+        - Attention QKV projections with a fused `QKVParallelLinear` + split
         - `nn.Linear` with vLLM's tensor parallel linear classes
+        - `nn.Conv2d` / `nn.Conv3d` with vLLM's `Conv2d` / `Conv3d`
         - `*RMSNorm` with vLLM's `RMSNorm`
         """
         tp_plan = self.model.tp_plan
@@ -441,6 +445,18 @@ class Base(
 
         # Prefix the patterns because we always start from `self.model`
         tp_plan = {maybe_prefix("model", k): v for k, v in tp_plan.items()}
+        # Get possible fusers for this model (cached per class, so this is cheap)
+        kwargs = dict(model_config=self.model_config, quant_config=self.quant_config)
+        fusers = Fusers(self.model, **kwargs)
+        orig_to_new_stacked = self.hf_to_vllm_mapper.orig_to_new_stacked
+
+        def update_fuser_mappings(fuser: BaseFuser):
+            # Only update and apply fuser mappings once per fuser
+            if fuser.orig_to_new_stacked.items() <= orig_to_new_stacked.items():
+                return
+            # Fuser weight mappings must be updated before fusion
+            orig_to_new_stacked.update(fuser.orig_to_new_stacked)
+            self._maybe_apply_model_mapping()
 
         def _recursive_replace(module: nn.Module, prefix: str):
             for child_name, child_module in module.named_children():
@@ -483,6 +499,10 @@ class Base(
                     new_module = replace_rms_norm_class(
                         child_module, self.text_config.hidden_size
                     )
+                elif (fuser := fusers[child_module]) is not None:
+                    update_fuser_mappings(fuser)
+                    new_module = fuser.fuse(child_module, qual_name)
+                    _recursive_replace(new_module, prefix=qual_name)
                 else:
                     _recursive_replace(child_module, prefix=qual_name)
 
