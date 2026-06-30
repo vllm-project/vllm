@@ -314,23 +314,22 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _unpermute_activation(
-        act_permuted, idx_map, num_tokens, top_k, intermediate_size
-    ):
+        act_permuted: torch.Tensor,
+        idx_map: torch.Tensor,
+        num_tokens: int,
+        top_k: int,
+        intermediate_size: int,
+    ) -> torch.Tensor:
         """Permuted FC1 activation -> (num_tokens*top_k, I).
 
         expanded_idx = token*top_k + k; idx_map[expanded_idx] = permuted_idx or -1.
-        TODO(verify): idx_map semantics/dtype, whether the activation is
-          post-SwiGLU, and its dtype (bf16 vs uint8).
+        TODO optimize these operations
         """
-        act = torch.zeros(
-            num_tokens * top_k,
-            intermediate_size,
-            dtype=act_permuted.dtype,
-            device=act_permuted.device,
-        )
+
         valid = idx_map >= 0
-        act[valid] = act_permuted[idx_map[valid].long()]
-        return act
+        safe_idx = idx_map.clamp_min(0).long()
+        gathered = act_permuted[safe_idx]
+        return gathered * valid.unsqueeze(1).to(act_permuted.dtype)
 
 
 # --------------------------------------------------------------------------- #
