@@ -647,7 +647,8 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
 ) -> tuple[int, int]:
     """Round up hidden_size and intermediate_size based on backend requirements."""
     if backend == Mxfp4MoeBackend.TOKENSPEED:
-        return hidden_size, intermediate_size
+        intermediate_size = round_up(intermediate_size, 32)
+        hidden_size = round_up(hidden_size, 32)
     elif backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
         # DeepGEMM requires M/N/K alignment
         intermediate_size = round_up(intermediate_size, 128)

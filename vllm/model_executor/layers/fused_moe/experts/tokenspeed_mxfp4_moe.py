@@ -18,7 +18,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Static,
 )
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op
 
 _DTYPE_TO_CODE = {
     torch.bfloat16: 0,
@@ -61,34 +60,6 @@ def _tokenspeed_mxfp4_moe(
         swiglu_alpha=swiglu_alpha,
         swiglu_limit=swiglu_limit,
     )
-
-
-def _tokenspeed_mxfp4_moe_fake(
-    hidden_states: torch.Tensor,
-    router_logits: torch.Tensor,
-    w13_weight: torch.Tensor,
-    w2_weight: torch.Tensor,
-    w13_mx_scale: torch.Tensor,
-    w2_mx_scale: torch.Tensor,
-    w13_act_scale: torch.Tensor,
-    w2_act_scale: torch.Tensor,
-    w13_bias: torch.Tensor | None,
-    w2_bias: torch.Tensor | None,
-    top_k: int,
-    out_dtype_code: int,
-    enable_warp_decode: bool,
-    swiglu_alpha: float,
-    swiglu_limit: float,
-) -> torch.Tensor:
-    return torch.empty_like(hidden_states)
-
-
-direct_register_custom_op(
-    op_name="tokenspeed_mxfp4_moe",
-    op_func=_tokenspeed_mxfp4_moe,
-    fake_impl=_tokenspeed_mxfp4_moe_fake,
-    tags=(torch.Tag.needs_fixed_stride_order,),
-)
 
 
 class TokenSpeedMxfp4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
@@ -196,7 +167,7 @@ class TokenSpeedMxfp4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         enable_warp_decode = True
         out_dtype_code = _DTYPE_TO_CODE[torch.bfloat16]
 
-        return torch.ops.vllm.tokenspeed_mxfp4_moe(
+        return _tokenspeed_mxfp4_moe(
             hidden_states,
             router_logits,
             w1,
