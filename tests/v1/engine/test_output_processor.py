@@ -1345,16 +1345,9 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
             output_processor.abort_requests([request.external_req_id], internal=False)
 
 
-def test_streaming_input_length_finish_is_terminal(dummy_test_vectors):
-    # A terminal length cap on a streaming session must reach the client:
-    # finished=True and the request freed, else AsyncLLM.generate() hangs.
-    output_processor = OutputProcessor(
-        dummy_test_vectors.tokenizer,
-        log_stats=False,
-    )
-
-    request = EngineCoreRequest(
-        request_id="request-int",
+def _make_streaming_request(request_id="request-int"):
+    return EngineCoreRequest(
+        request_id=request_id,
         external_req_id="request",
         prompt_token_ids=[1, 2, 3],
         mm_features=None,
@@ -1371,6 +1364,14 @@ def test_streaming_input_length_finish_is_terminal(dummy_test_vectors):
         resumable=True,
     )
 
+
+def test_streaming_input_length_finish_is_not_terminal(dummy_test_vectors):
+    # A per-step LENGTH finish is the normal chunk boundary of a streaming
+    # session, not a terminal end: the session must stay alive for the next
+    # audio chunk (a genuine max_model_len cap is delivered separately by the
+    # scheduler). Treating LENGTH as terminal ends the session after one token.
+    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
+    request = _make_streaming_request()
     queue = RequestOutputCollector(RequestOutputKind.DELTA, request.request_id)
     output_processor.add_request(request, prompt="hello", queue=queue)
 
@@ -1385,7 +1386,29 @@ def test_streaming_input_length_finish_is_terminal(dummy_test_vectors):
     )
 
     request_output = queue.get_nowait()
+    assert request_output is None or request_output.finished is False
+    assert output_processor.get_num_unfinished_requests() == 1
+
+
+def test_streaming_input_error_finish_is_terminal(dummy_test_vectors):
+    # A real ERROR/ABORT does end the streaming session: deliver finished=True
+    # and free the request, else AsyncLLM.generate() hangs.
+    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
+    request = _make_streaming_request()
+    queue = RequestOutputCollector(RequestOutputKind.DELTA, request.request_id)
+    output_processor.add_request(request, prompt="hello", queue=queue)
+
+    output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id="request-int",
+                new_token_ids=[],
+                finish_reason=FinishReason.ERROR,
+            )
+        ]
+    )
+
+    request_output = queue.get_nowait()
     assert request_output is not None
     assert request_output.finished is True
-    assert request_output.outputs[0].finish_reason == "length"
     assert output_processor.get_num_unfinished_requests() == 0
