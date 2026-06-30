@@ -21,9 +21,28 @@ class ScenarioSelection:
     constraints_file: str = ""
     same_spec_spec_file: str = ""
     same_spec_constraints_file: str = ""
+    perfgate_mode: str = ""
 
 
 LABEL_SCENARIOS: dict[str, ScenarioSelection] = {
+    "ascend-targeted-test": ScenarioSelection(
+        scenario="random-online",
+        reason=(
+            "PR label ascend-targeted-test selected random-online targeted verification"
+        ),
+        mode="l2-targeted",
+        trigger_label="ascend-targeted-test",
+    ),
+    "ascend-targeted-required": ScenarioSelection(
+        scenario="random-online",
+        reason=(
+            "PR label ascend-targeted-required selected required "
+            "random-online targeted verification"
+        ),
+        mode="l2-required",
+        trigger_label="ascend-targeted-required",
+        perfgate_mode="enforce",
+    ),
     "ascend-benchmark:l2-random": ScenarioSelection(
         scenario="random-online",
         reason=(
@@ -46,6 +65,7 @@ LABEL_SCENARIOS: dict[str, ScenarioSelection] = {
 
 SUPPORTED_MANUAL_SCENARIOS = {"random-online", "sharegpt-online"}
 L2_LABEL_PREFIX = "ascend-benchmark:l2-"
+TARGETED_LABEL_PREFIX = "ascend-targeted-"
 
 
 def parse_labels(raw_labels: str) -> list[str]:
@@ -121,7 +141,11 @@ def select_scenario(
         unknown_l2_labels = [
             label
             for label in pr_labels
-            if label.startswith(L2_LABEL_PREFIX) and label not in LABEL_SCENARIOS
+            if (
+                label.startswith(L2_LABEL_PREFIX)
+                or label.startswith(TARGETED_LABEL_PREFIX)
+            )
+            and label not in LABEL_SCENARIOS
         ]
         if unknown_l2_labels:
             supported = ", ".join(sorted(LABEL_SCENARIOS))
@@ -147,6 +171,7 @@ def select_scenario(
                     constraints_file=default_constraints_file,
                     same_spec_spec_file=same_spec_spec_file,
                     same_spec_constraints_file=same_spec_constraints_file,
+                    perfgate_mode=selected.perfgate_mode,
                 )
             )
         return _validate_selection(
@@ -255,6 +280,8 @@ def main() -> int:
         "L2_SCENARIO_LABEL": selection.trigger_label,
         "L2_SCENARIO_REASON": selection.reason,
     }
+    if selection.perfgate_mode:
+        values["PERFGATE_MODE"] = selection.perfgate_mode
     write_env_file(args.github_env, values)
     write_env_file(args.github_output, values)
     print(f"Resolved Ascend benchmark scenario: {selection.scenario}")

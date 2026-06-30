@@ -91,6 +91,7 @@ if [[ "$rebase_rc" -ne 0 ]]; then
 fi
 
 if [[ -n "${PYTHON_BIN:-}" ]]; then
+  "$PYTHON_BIN" -m pip install --upgrade "setuptools>=77.0.3,<81.0.0" "setuptools-scm>=8.0" "wheel" "packaging>=24.2"
   VLLM_TARGET_DEVICE=empty VLLM_USE_PRECOMPILED=0 "$PYTHON_BIN" -m pip install -e . --no-build-isolation --no-deps
 fi
 

@@ -22,24 +22,24 @@ BENCH_SCENARIO=${BENCH_SCENARIO:-random-online}
 BENCH_DATASET_PATH=${BENCH_DATASET_PATH:-}
 BENCH_CONSTRAINTS_FILE=${BENCH_CONSTRAINTS_FILE:-}
 SAME_SPEC_BENCHMARK_ENABLED=${SAME_SPEC_BENCHMARK_ENABLED:-1}
-SAME_SPEC_SPEC_FILE=${SAME_SPEC_SPEC_FILE:-$VLLM_HUST_BENCHMARK_REPO/docs/official-baselines/perfgate-ascend-qwen25-3b-910b3.json}
+SAME_SPEC_SPEC_FILE=${SAME_SPEC_SPEC_FILE:-$VLLM_HUST_BENCHMARK_REPO/docs/official-baselines/official-ascend-jan-2026-v0180-random-online-qwen25-14b-910b2.json}
 SAME_SPEC_CONSTRAINTS_FILE=${SAME_SPEC_CONSTRAINTS_FILE:-$VLLM_HUST_BENCHMARK_REPO/docs/official-baselines/official-ascend-constraints.stub.json}
 SAME_SPEC_READY_TIMEOUT_SECONDS=${SAME_SPEC_READY_TIMEOUT_SECONDS:-600}
 ALLOW_RANDOM_HF_PUBLISH=${ALLOW_RANDOM_HF_PUBLISH:-0}
 
-MODEL_NAME=${MODEL_NAME:-Qwen/Qwen2.5-3B-Instruct}
-MODEL_PARAMETERS=${MODEL_PARAMETERS:-3B}
-MODEL_PRECISION=${MODEL_PRECISION:-BF16}
+MODEL_NAME=${MODEL_NAME:-Qwen/Qwen2.5-14B-Instruct}
+MODEL_PARAMETERS=${MODEL_PARAMETERS:-14B}
+MODEL_PRECISION=${MODEL_PRECISION:-FP16}
 HOST=${HOST:-127.0.0.1}
 PORT=${PORT:-}
-DTYPE=${DTYPE:-bfloat16}
-MAX_MODEL_LEN=${MAX_MODEL_LEN:-256}
+DTYPE=${DTYPE:-float16}
+MAX_MODEL_LEN=${MAX_MODEL_LEN:-}
 MAX_NUM_SEQS=${MAX_NUM_SEQS:-1}
-BENCH_NUM_PROMPTS=${BENCH_NUM_PROMPTS:-8}
-BENCH_RANDOM_INPUT_LEN=${BENCH_RANDOM_INPUT_LEN:-64}
-BENCH_RANDOM_OUTPUT_LEN=${BENCH_RANDOM_OUTPUT_LEN:-16}
+BENCH_NUM_PROMPTS=${BENCH_NUM_PROMPTS:-200}
+BENCH_RANDOM_INPUT_LEN=${BENCH_RANDOM_INPUT_LEN:-1024}
+BENCH_RANDOM_OUTPUT_LEN=${BENCH_RANDOM_OUTPUT_LEN:-256}
 BENCH_RANDOM_BATCH_SIZE=${BENCH_RANDOM_BATCH_SIZE:-1}
-BENCH_REQUEST_RATE=${BENCH_REQUEST_RATE:-inf}
+BENCH_REQUEST_RATE=${BENCH_REQUEST_RATE:-1}
 BENCH_MAX_CONCURRENCY=${BENCH_MAX_CONCURRENCY:-4}
 BENCH_INPUT_LEN=${BENCH_INPUT_LEN:-}
 BENCH_OUTPUT_LEN=${BENCH_OUTPUT_LEN:-}
@@ -1021,6 +1021,11 @@ run_same_spec_current_benchmark() {
 }
 
 start_server() {
+  local max_model_len_args=()
+  if [[ -n "$MAX_MODEL_LEN" ]]; then
+    max_model_len_args=(--max-model-len "$MAX_MODEL_LEN")
+  fi
+
   if command -v setsid >/dev/null 2>&1; then
     if [[ "$ASCEND_BENCHMARK_USE_SUDO" == "1" ]]; then
       local preserve_list
@@ -1038,7 +1043,7 @@ start_server() {
         --host "$HOST" \
         --port "$PORT" \
         --dtype "$DTYPE" \
-        --max-model-len "$MAX_MODEL_LEN" \
+        "${max_model_len_args[@]}" \
         --max-num-seqs "$MAX_NUM_SEQS" \
         --enforce-eager >"$SERVER_LOG" 2>&1 &
     fi
@@ -1052,7 +1057,7 @@ start_server() {
         --host "$HOST" \
         --port "$PORT" \
         --dtype "$DTYPE" \
-        --max-model-len "$MAX_MODEL_LEN" \
+        "${max_model_len_args[@]}" \
         --max-num-seqs "$MAX_NUM_SEQS" \
         --enforce-eager >"$SERVER_LOG" 2>&1 &
     fi

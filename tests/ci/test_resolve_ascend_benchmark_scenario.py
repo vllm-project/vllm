@@ -107,6 +107,44 @@ def test_pr_l2_sharegpt_label_selects_sharegpt_scenario():
     assert "l2-sharegpt" in selected.reason
 
 
+def test_pr_targeted_test_label_selects_l2_targeted_mode():
+    resolver = load_resolver()
+    selected = resolver.select_scenario(
+        event_name="pull_request",
+        manual_scenario="",
+        pr_labels=["ready", "ascend-targeted-test"],
+        default_scenario="random-online",
+        default_dataset_path="",
+        default_constraints_file="",
+        same_spec_spec_file="",
+        same_spec_constraints_file="",
+    )
+
+    assert selected.scenario == "random-online"
+    assert selected.mode == "l2-targeted"
+    assert selected.trigger_label == "ascend-targeted-test"
+    assert selected.perfgate_mode == ""
+
+
+def test_pr_targeted_required_label_selects_required_mode():
+    resolver = load_resolver()
+    selected = resolver.select_scenario(
+        event_name="pull_request",
+        manual_scenario="",
+        pr_labels=["ready", "ascend-targeted-required"],
+        default_scenario="random-online",
+        default_dataset_path="",
+        default_constraints_file="",
+        same_spec_spec_file="",
+        same_spec_constraints_file="",
+    )
+
+    assert selected.scenario == "random-online"
+    assert selected.mode == "l2-required"
+    assert selected.trigger_label == "ascend-targeted-required"
+    assert selected.perfgate_mode == "enforce"
+
+
 def test_pr_l2_sharegpt_requires_dataset_and_constraints():
     resolver = load_resolver()
 
@@ -157,7 +195,7 @@ def test_unknown_l2_label_is_rejected():
         resolver.select_scenario(
             event_name="pull_request",
             manual_scenario="",
-            pr_labels=["ascend-benchmark:l2-moe"],
+            pr_labels=["ascend-targeted-moe"],
             default_scenario="random-online",
             default_dataset_path="",
             default_constraints_file="",
@@ -166,7 +204,7 @@ def test_unknown_l2_label_is_rejected():
         )
     except ValueError as exc:
         assert "unsupported L2 benchmark scenario label" in str(exc)
-        assert "ascend-benchmark:l2-random" in str(exc)
+        assert "ascend-targeted-test" in str(exc)
     else:
         raise AssertionError("expected unknown L2 label to be rejected")
 
@@ -207,3 +245,35 @@ def test_write_env_file_uses_collision_safe_multiline_format(tmp_path):
     assert content.startswith("L2_SCENARIO_REASON<<_")
     assert "first line\ncontains __L2_SCENARIO_REASON_EOF__\n" in content
     assert content.rstrip().endswith("_")
+
+
+def test_required_label_writes_perfgate_enforce_mode(tmp_path):
+    resolver = load_resolver()
+    env_file = tmp_path / "github-env"
+    selected = resolver.select_scenario(
+        event_name="pull_request",
+        manual_scenario="",
+        pr_labels=["ascend-targeted-required"],
+        default_scenario="random-online",
+        default_dataset_path="",
+        default_constraints_file="",
+        same_spec_spec_file="",
+        same_spec_constraints_file="",
+    )
+
+    values = {
+        "L2_SCENARIO_MODE": selected.mode,
+        "L2_SCENARIO_LABEL": selected.trigger_label,
+    }
+    if selected.perfgate_mode:
+        values["PERFGATE_MODE"] = selected.perfgate_mode
+    resolver.write_env_file(str(env_file), values)
+
+    content = env_file.read_text(encoding="utf-8")
+
+    assert "L2_SCENARIO_MODE<<__L2_SCENARIO_MODE_EOF__\nl2-required\n" in content
+    assert (
+        "L2_SCENARIO_LABEL<<__L2_SCENARIO_LABEL_EOF__\nascend-targeted-required\n"
+        in content
+    )
+    assert "PERFGATE_MODE<<__PERFGATE_MODE_EOF__\nenforce\n" in content

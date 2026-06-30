@@ -5,19 +5,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shlex
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-SCENARIO_ALIASES = {
-    "random": "random-online",
-    "random-online": "random-online",
-    "sharegpt": "sharegpt-online",
-    "sharegpt-online": "sharegpt-online",
-}
-SUPPORTED_SCENARIOS = sorted(set(SCENARIO_ALIASES.values()))
+from ascend_targeted_scenarios import load_targeted_scenario_registry
+
+TARGETED_SCENARIOS = load_targeted_scenario_registry()
+SUPPORTED_SCENARIOS = TARGETED_SCENARIOS.supported_scenarios
+SUPPORTED_GROUPS = TARGETED_SCENARIOS.supported_groups
 DEFAULT_MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"
 ALLOWED_AUTHOR_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
 ALLOWED_SHAREGPT_PATH_PREFIXES = ("/data/", "/mnt/data/")
@@ -102,21 +101,38 @@ def _command_line(comment_body: str) -> str | None:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="/ascend",
-        description="Parse Ascend benchmark PR comment command.",
+        prog="/ascend", description="Parse Ascend benchmark PR comment command."
     )
     subparsers = parser.add_subparsers(dest="action", required=True)
     subparsers.add_parser("help")
+    smoke = subparsers.add_parser("smoke")
+    _add_preview_options(smoke)
+
     benchmark = subparsers.add_parser("benchmark")
     benchmark.add_argument("scenario")
-    benchmark.add_argument("--dataset-path", default="")
-    benchmark.add_argument("--constraints-file", default="")
-    benchmark.add_argument("--num-prompts", default="8")
-    benchmark.add_argument("--request-rate", default="inf")
-    benchmark.add_argument("--max-concurrency", default="4")
-    benchmark.add_argument("--input-length", default="")
-    benchmark.add_argument("--output-length", default="")
+    _add_preview_options(benchmark)
+
+    scenario = subparsers.add_parser("scenario")
+    scenario.add_argument("scenario")
+    _add_preview_options(scenario)
+
+    group = subparsers.add_parser("group")
+    group.add_argument("group")
+    _add_preview_options(group)
+
+    official = subparsers.add_parser("official")
+    official.add_argument("spec_id")
     return parser
+
+
+def _add_preview_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--dataset-path", default="")
+    parser.add_argument("--constraints-file", default="")
+    parser.add_argument("--num-prompts", default="8")
+    parser.add_argument("--request-rate", default="inf")
+    parser.add_argument("--max-concurrency", default="4")
+    parser.add_argument("--input-length", default="")
+    parser.add_argument("--output-length", default="")
 
 
 def _parse_bounded_int(value: str, name: str, minimum: int, maximum: int) -> str:
@@ -136,7 +152,7 @@ def _parse_request_rate(value: str) -> str:
         parsed = float(value)
     except ValueError as exc:
         raise ValueError("--request-rate must be 'inf' or a positive number") from exc
-    if parsed <= 0 or parsed > MAX_COMMENT_REQUEST_RATE:
+    if not math.isfinite(parsed) or parsed <= 0 or parsed > MAX_COMMENT_REQUEST_RATE:
         raise ValueError(
             "--request-rate must be 'inf' or between 0 and "
             f"{MAX_COMMENT_REQUEST_RATE:g}"
@@ -162,10 +178,7 @@ def _validate_sharegpt_path(path: str, name: str) -> str:
 def _validate_command_args(args: argparse.Namespace, scenario: str) -> dict[str, str]:
     validated = {
         "num_prompts": _parse_bounded_int(
-            args.num_prompts,
-            "--num-prompts",
-            1,
-            MAX_COMMENT_NUM_PROMPTS,
+            args.num_prompts, "--num-prompts", 1, MAX_COMMENT_NUM_PROMPTS
         ),
         "request_rate": _parse_request_rate(args.request_rate),
         "max_concurrency": _parse_bounded_int(
@@ -181,10 +194,7 @@ def _validate_command_args(args: argparse.Namespace, scenario: str) -> dict[str,
     }
     if args.input_length:
         validated["input_length"] = _parse_bounded_int(
-            args.input_length,
-            "--input-length",
-            1,
-            MAX_COMMENT_LOGICAL_LEN,
+            args.input_length, "--input-length", 1, MAX_COMMENT_LOGICAL_LEN
         )
     if args.output_length:
         validated["output_length"] = _parse_bounded_int(
@@ -195,12 +205,10 @@ def _validate_command_args(args: argparse.Namespace, scenario: str) -> dict[str,
         )
     if scenario == "sharegpt-online":
         validated["dataset_path"] = _validate_sharegpt_path(
-            args.dataset_path,
-            "--dataset-path",
+            args.dataset_path, "--dataset-path"
         )
         validated["constraints_file"] = _validate_sharegpt_path(
-            args.constraints_file,
-            "--constraints-file",
+            args.constraints_file, "--constraints-file"
         )
     elif args.dataset_path or args.constraints_file:
         raise ValueError(
@@ -225,7 +233,23 @@ def parse_comment_command(comment_body: str) -> AscendCommentCommand | None:
     if args.action == "help":
         return AscendHelpCommand()
 
-    scenario = SCENARIO_ALIASES.get(args.scenario)
+    if args.action == "official":
+        raise ValueError(
+            "/ascend official is reserved for future formal leaderboard runs "
+            "and is not supported yet"
+        )
+
+    if args.action == "smoke":
+        scenario = TARGETED_SCENARIOS.resolve_group("smoke")
+    elif args.action == "group":
+        scenario = TARGETED_SCENARIOS.resolve_group(args.group)
+        if scenario is None:
+            supported = ", ".join(SUPPORTED_GROUPS)
+            raise ValueError(
+                f"unsupported benchmark group {args.group!r}; supported: {supported}"
+            )
+    else:
+        scenario = TARGETED_SCENARIOS.resolve_scenario(args.scenario)
     if scenario is None:
         supported = ", ".join(SUPPORTED_SCENARIOS)
         raise ValueError(
@@ -367,12 +391,10 @@ def main() -> int:
     )
     parser.add_argument("--comment-body", default=os.environ.get("COMMENT_BODY", ""))
     parser.add_argument(
-        "--event-payload",
-        default=os.environ.get("GITHUB_EVENT_PATH", ""),
+        "--event-payload", default=os.environ.get("GITHUB_EVENT_PATH", "")
     )
     parser.add_argument(
-        "--pr-payload",
-        default=os.environ.get("ISSUE_COMMENT_PR_PAYLOAD", ""),
+        "--pr-payload", default=os.environ.get("ISSUE_COMMENT_PR_PAYLOAD", "")
     )
     parser.add_argument("--github-env", default=os.environ.get("GITHUB_ENV", ""))
     parser.add_argument("--github-output", default=os.environ.get("GITHUB_OUTPUT", ""))
