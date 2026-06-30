@@ -279,12 +279,32 @@ class AsyncLLM(EngineClient):
 
         return self._supported_tasks
 
+    def _ensure_disagg_transfer_id(
+        self,
+        request_id: str,
+        params: SamplingParams | PoolingParams,
+    ) -> None:
+        """Stamp a shared transfer_id so the prefill pin and the connector's
+        decode-side hash key off the same string (else the connector synthesizes
+        a divergent ``sidecar-<rid>`` key and the legs split across DP ranks).
+        The sole intentional mutation, kept out of the pure rank pick.
+        """
+        extra = getattr(params, "extra_args", None)
+        if extra is None:
+            return
+        ktp = extra.setdefault("kv_transfer_params", {})
+        if isinstance(ktp.get("dp_rank_hint"), int):
+            return
+        ktp.setdefault("transfer_id", request_id)
+
     def _pick_dp_rank_for_request(
         self,
         request_id: str,
         params: SamplingParams | PoolingParams,
     ) -> int | None:
-        """Pick stable DP rank via dp_rank_hint or hash(transfer_id/request_id)."""
+        """Pick a stable DP rank (pure/read-only): dp_rank_hint if set, else
+        ``blake2s(transfer_id or request_id) % dp_size``.
+        """
         pc = self.vllm_config.parallel_config
         try:
             dp_size = getattr(pc, "data_parallel_size", 1)
@@ -298,34 +318,24 @@ class AsyncLLM(EngineClient):
         except (AttributeError, TypeError, ValueError) as e:
             logger.debug(
                 "_pick_dp_rank_for_request: config parse failed, "
-                "using default routing: %s", e
+                "using default routing: %s",
+                e,
             )
             return None
         if dp_size <= 1:
             return None
 
+        hash_key = request_id
         extra = getattr(params, "extra_args", None)
-        if extra is None:
-            # No extra_args = not a disagg request, just hash request_id
-            digest = hashlib.blake2s(
-                request_id.encode("utf-8"), digest_size=8
-            ).digest()
-            return int.from_bytes(digest, "big") % dp_size
+        if extra is not None:
+            ktp = extra.get("kv_transfer_params")
+            if ktp is not None:
+                hint = ktp.get("dp_rank_hint")
+                if isinstance(hint, int) and 0 <= hint < dp_size:
+                    return hint
+                hash_key = ktp.get("transfer_id", request_id)
 
-        # Disagg request - ensure kv_transfer_params exists for MoRI-IO
-        ktp = extra.setdefault("kv_transfer_params", {})
-
-        # Check for explicit dp_rank_hint from sidecar
-        hint = ktp.get("dp_rank_hint")
-        if isinstance(hint, int) and 0 <= hint < dp_size:
-            return hint
-
-        # Use existing transfer_id or synthesize from request_id (for MoRI-IO)
-        hash_key = ktp.setdefault("transfer_id", request_id)
-
-        digest = hashlib.blake2s(
-            str(hash_key).encode("utf-8"), digest_size=8
-        ).digest()
+        digest = hashlib.blake2s(str(hash_key).encode("utf-8"), digest_size=8).digest()
         return int.from_bytes(digest, "big") % dp_size
 
     async def add_request(
@@ -349,9 +359,13 @@ class AsyncLLM(EngineClient):
         """Add new request to the AsyncLLM."""
 
         # ROCm P/D: auto-route disagg pairs to matching DP rank.
-        if (current_platform.is_rocm()
+        if (
+            current_platform.is_rocm()
             and data_parallel_rank is None
-            and self.vllm_config.kv_transfer_config is not None):
+            and self.vllm_config.kv_transfer_config is not None
+        ):
+            # Stamp shared transfer_id, then pick the rank (pure).
+            self._ensure_disagg_transfer_id(request_id, params)
             data_parallel_rank = self._pick_dp_rank_for_request(request_id, params)
             if data_parallel_rank is not None:
                 logger.debug(
