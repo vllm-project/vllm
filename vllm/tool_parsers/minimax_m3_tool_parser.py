@@ -1,11 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import re
 from collections.abc import Sequence
 from typing import Any
 
+from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.engine.protocol import (
+    ExtractedToolCallInformation,
+    FunctionCall,
+    ToolCall,
+)
 from vllm.logger import init_logger
 from vllm.tool_parsers.rust_tool_parser import RustToolParser
 
@@ -14,149 +21,223 @@ logger = init_logger(__name__)
 # The MiniMax M3 namespace prefix that must precede every structural tag.
 _NS = "]<]minimax[>["
 _TOOL_CALL_OPEN = _NS + "<tool_call>"
+_TOOL_CALL_CLOSE = _NS + "</tool_call>"
 _NS_ESC = re.escape(_NS)
 
-# Matches any XML-like tag that is NOT already preceded by the namespace
-# prefix.  Used to normalise model output that drops the prefix on inner tags.
+# Streaming: normalise any tag that is missing the NS prefix.
 _MISSING_NS_RE = re.compile(
     r"(?<!" + _NS_ESC + r")(</?[A-Za-z_][A-Za-z0-9_.:-]*(?:\s[^>]*)?>)"
 )
 
-# Used by _repair_unclosed_params to track open/close param tags inside <invoke>.
+_NS_INVOKE_OPEN_RE = re.compile(_NS_ESC + r'<invoke name="([^"]+)">')
+_NS_INVOKE_CLOSE = _NS + "</invoke>"
 _NS_OPEN_TAG_RE = re.compile(_NS_ESC + r"<([A-Za-z_][A-Za-z0-9_-]*)>")
 _NS_CLOSE_TAG_RE = re.compile(_NS_ESC + r"</([A-Za-z_][A-Za-z0-9_-]*)>")
-_NS_INVOKE_OPEN_RE = re.compile(_NS_ESC + r"<invoke\b[^>]*>")
-_NS_INVOKE_CLOSE = _NS + "</invoke>"
 
 
-def _normalise_ns(text: str) -> str:
-    """Re-add the MiniMax namespace prefix to any tag inside the tool_call
-    block that is missing it.
+def _coerce_param(value: str, schema: dict | None) -> Any:
+    """Type-coerce a raw string parameter value using its JSON Schema type."""
+    if schema is None:
+        return value
+    t = schema.get("type")
+    if t == "integer":
+        try:
+            return int(value)
+        except (ValueError, TypeError):
+            return value
+    if t == "number":
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return value
+    if t == "boolean":
+        return value.strip().lower() in ("true", "1", "yes")
+    if t in ("array", "object"):
+        v = value.strip()
+        if not v:
+            return [] if t == "array" else {}
+        try:
+            return json.loads(v)
+        except (json.JSONDecodeError, ValueError):
+            return v
+    return value
 
-    The model occasionally emits inner tags (``<invoke>``, ``</invoke>``,
-    ``<param-name>``, ``</param-name>``) without the ``]<]minimax[>[`` prefix.
-    The Rust parser requires every structural tag to carry it.  This function
-    scopes the fix to the content *after* the opening ``]<]minimax[>[<tool_call>``
-    token to avoid accidentally prefixing unrelated text.
+
+def _python_extract_tool_calls(
+    model_output: str,
+    tools_by_name: dict[str, dict],
+) -> ExtractedToolCallInformation | None:
+    """Parse MiniMax M3 tool-call XML entirely in Python.
+
+    The MiniMax M3 model wraps every structural tag with the ``]<]minimax[>[``
+    namespace prefix.  This pure-Python implementation handles all the
+    malformed-output variants that defeat the Rust parser:
+
+    * Unclosed parameter tags before ``</invoke>``
+    * Missing namespace prefixes on inner tags (normalised before parsing)
+    * Truncated outputs (partial tool calls are parsed as far as possible)
+    * Mixed text + tool-call output
+
+    Returns ``None`` if no tool-call start token is found.
     """
-    start = text.find(_TOOL_CALL_OPEN)
-    if start == -1:
-        return text
-    before = text[: start + len(_TOOL_CALL_OPEN)]
-    inside = text[start + len(_TOOL_CALL_OPEN) :]
-    return before + _MISSING_NS_RE.sub(_NS + r"\1", inside)
+    tc_start = model_output.find(_TOOL_CALL_OPEN)
+    if tc_start == -1:
+        return None
 
+    tc_close = model_output.find(_TOOL_CALL_CLOSE, tc_start + len(_TOOL_CALL_OPEN))
+    tc_body = model_output[
+        tc_start + len(_TOOL_CALL_OPEN) : tc_close if tc_close != -1 else len(model_output)
+    ]
 
-def _repair_unclosed_params(text: str) -> str:
-    """Insert missing NS</param> closing tags before each NS</invoke>.
-
-    The model occasionally opens a parameter tag (e.g. ``]<]minimax[>[<ranges>``)
-    inside an ``<invoke>`` block but omits the matching closing tag, going
-    directly to ``]<]minimax[>[</invoke>``.  The Rust parser rejects such output
-    with a blank ``ValueError``.  This function detects unclosed parameter tags
-    inside each ``<invoke>…</invoke>`` pair and injects the missing closers.
-    """
-    if _NS_INVOKE_CLOSE not in text:
-        return text
-    start = text.find(_TOOL_CALL_OPEN)
-    if start == -1:
-        return text
-
-    result = text[: start + len(_TOOL_CALL_OPEN)]
-    rest = text[start + len(_TOOL_CALL_OPEN) :]
+    tool_calls: list[ToolCall] = []
     pos = 0
-    while pos < len(rest):
-        m = _NS_INVOKE_OPEN_RE.search(rest, pos)
+    while pos < len(tc_body):
+        m = _NS_INVOKE_OPEN_RE.search(tc_body, pos)
         if m is None:
-            result += rest[pos:]
             break
-        result += rest[pos : m.end()]
-        close_pos = rest.find(_NS_INVOKE_CLOSE, m.end())
-        if close_pos == -1:
-            result += rest[m.end() :]
-            break
+        tool_name = m.group(1)
 
-        invoke_body = rest[m.end() : close_pos]
+        inv_close_pos = tc_body.find(_NS_INVOKE_CLOSE, m.end())
+        inv_body = tc_body[m.end() : inv_close_pos if inv_close_pos != -1 else len(tc_body)]
 
-        # Walk the body tracking open/close param tags.
-        open_tags: list[str] = []
-        scan = 0
-        while scan < len(invoke_body):
-            cm = _NS_CLOSE_TAG_RE.search(invoke_body, scan)
-            om = _NS_OPEN_TAG_RE.search(invoke_body, scan)
-            if om is None and cm is None:
+        schema_props: dict = {}
+        if tool_name in tools_by_name:
+            schema_props = tools_by_name[tool_name].get("properties") or {}
+
+        params: dict[str, Any] = {}
+        ppos = 0
+        while ppos < len(inv_body):
+            om = _NS_OPEN_TAG_RE.search(inv_body, ppos)
+            if om is None:
                 break
-            if om is not None and (cm is None or om.start() < cm.start()):
-                open_tags.append(om.group(1))
-                scan = om.end()
+            pname = om.group(1)
+            # Find the matching close tag — next occurrence of </pname>
+            close_pattern = re.compile(_NS_ESC + re.escape("</" + pname + ">"))
+            cm = close_pattern.search(inv_body, om.end())
+            if cm:
+                raw_val = inv_body[om.end() : cm.start()]
+                ppos = cm.end()
             else:
-                assert cm is not None
-                tag = cm.group(1)
-                if open_tags and open_tags[-1] == tag:
-                    open_tags.pop()
-                scan = cm.end()
+                # No closing tag: value runs to the next opening tag or end.
+                next_open = _NS_OPEN_TAG_RE.search(inv_body, om.end())
+                raw_val = inv_body[om.end() : next_open.start() if next_open else len(inv_body)]
+                ppos = next_open.start() if next_open else len(inv_body)
 
-        if open_tags:
-            # Close unclosed tags in LIFO order before </invoke>.
-            result += invoke_body + "".join(
-                _NS + "</" + t + ">" for t in reversed(open_tags)
+            # Strip any residual NS prefixes embedded in the value (nested XML).
+            raw_val = raw_val.replace(_NS, "").strip()
+            params[pname] = _coerce_param(raw_val, schema_props.get(pname))
+
+        tool_calls.append(
+            ToolCall(
+                id=make_tool_call_id(),
+                type="function",
+                function=FunctionCall(name=tool_name, arguments=json.dumps(params)),
             )
-        else:
-            result += invoke_body
+        )
+        pos = inv_close_pos + len(_NS_INVOKE_CLOSE) if inv_close_pos != -1 else len(tc_body)
 
-        result += _NS_INVOKE_CLOSE
-        pos = close_pos + len(_NS_INVOKE_CLOSE)
+    if not tool_calls:
+        return None
 
-    return result
+    normal_text = model_output[:tc_start].strip() or None
+    return ExtractedToolCallInformation(
+        tools_called=True,
+        tool_calls=tool_calls,
+        content=normal_text,
+    )
 
 
 class MinimaxM3ToolParser(RustToolParser):
     """Adapter from the Rust MiniMax M3 parser to vLLM ToolParser.
 
-    The real M3 grammar lives in the Rust tool-parser crate. This class only
-    configures the generic Rust bridge with the MiniMax M3 parser name.
+    For complete (non-streaming) output: uses a pure-Python primary parser
+    that tolerates all the malformed-output variants the model generates
+    (missing NS prefix, unclosed param tags, truncated output).  Falls back
+    to the Rust parser only if Python parsing yields nothing.
 
-    M3 is not M2 with renamed tags: it prefixes each structural tag with the
-    MiniMax namespace marker, allows multiple ``<invoke>`` tags in one wrapper,
-    and represents nested arguments with parameter-name XML tags.
-
-    Fallback — applied in order, retry after each transformation:
-    1. Missing namespace prefix on inner tags: ``_normalise_ns`` re-adds it.
-    2. Unclosed parameter tag before ``</invoke>``: ``_repair_unclosed_params``
-       injects the missing close tag.
+    For streaming output: delegates to the Rust incremental parser after
+    normalising any missing NS prefixes on the incoming delta.
     """
 
     rust_parser_name = "MinimaxM3ToolParser"
     tool_call_start_token = _TOOL_CALL_OPEN
 
-    # ------------------------------------------------------------------
-    # _parse_complete: repair-and-retry on Rust parse failure
-    # ------------------------------------------------------------------
-
-    def _parse_complete(
-        self, model_output: str
-    ) -> tuple[Any, dict[int, str]] | None:
-        result = super()._parse_complete(model_output)
-        if result is not None:
+    def _tools_by_name(self) -> dict[str, dict]:
+        result: dict[str, dict] = {}
+        if not self.tools:
             return result
-
-        if _TOOL_CALL_OPEN not in model_output:
-            return None
-
-        # Apply both repair passes and retry once.
-        fixed = _normalise_ns(model_output)
-        fixed = _repair_unclosed_params(fixed)
-        if fixed == model_output:
-            return None
-
-        logger.debug(
-            "MinimaxM3ToolParser: Rust parse failed; retrying after "
-            "namespace/structure repair"
-        )
-        return super()._parse_complete(fixed)
+        for tool in self.tools:
+            try:
+                name = tool.function.name
+                params = tool.function.parameters or {}
+            except AttributeError:
+                try:
+                    name = tool.name
+                    params = getattr(tool, "parameters", {}) or {}
+                except AttributeError:
+                    continue
+            result[name] = params
+        return result
 
     # ------------------------------------------------------------------
-    # extract_tool_calls_streaming: normalise delta before Rust parse
+    # Non-streaming: pure-Python primary path
+    # ------------------------------------------------------------------
+
+    def extract_tool_calls(
+        self,
+        model_output: str,
+        request: ChatCompletionRequest,
+    ) -> ExtractedToolCallInformation:
+        if _TOOL_CALL_OPEN not in model_output:
+            return ExtractedToolCallInformation(
+                tools_called=False, tool_calls=[], content=model_output
+            )
+
+        # Primary: pure-Python parser (handles all model output variants).
+        py_result = _python_extract_tool_calls(model_output, self._tools_by_name())
+        if py_result is not None:
+            return py_result
+
+        # Fallback: Rust parser (may handle edge cases the Python parser misses).
+        parse_result = self._parse_complete(model_output)
+        if parse_result is None:
+            logger.warning(
+                "MinimaxM3ToolParser: both Python and Rust parsers failed. "
+                "Returning raw output as content."
+            )
+            return ExtractedToolCallInformation(
+                tools_called=False, tool_calls=[], content=model_output
+            )
+
+        parsed, tool_call_ids = parse_result
+        tool_calls: list[ToolCall] = []
+        self.prev_tool_call_arr.clear()
+        for ptc in parsed.calls:
+            name = ptc.name
+            arguments = ptc.arguments or "{}"
+            if name is None:
+                continue
+            tool_calls.append(
+                ToolCall(
+                    id=tool_call_ids.get(ptc.tool_index) or make_tool_call_id(),
+                    type="function",
+                    function=FunctionCall(name=name, arguments=arguments),
+                )
+            )
+            self.prev_tool_call_arr.append({"name": name, "arguments": arguments})
+
+        if not tool_calls:
+            return ExtractedToolCallInformation(
+                tools_called=False, tool_calls=[], content=model_output
+            )
+        return ExtractedToolCallInformation(
+            tools_called=True,
+            tool_calls=tool_calls,
+            content=parsed.normal_text or None,
+        )
+
+    # ------------------------------------------------------------------
+    # Streaming: Rust incremental parser with NS normalisation
     # ------------------------------------------------------------------
 
     def extract_tool_calls_streaming(
@@ -169,8 +250,6 @@ class MinimaxM3ToolParser(RustToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ):
-        # If we are inside a tool_call block, normalise the delta to add any
-        # missing namespace prefixes before the Rust incremental parser sees it.
         if _TOOL_CALL_OPEN in current_text:
             delta_text = _MISSING_NS_RE.sub(_NS + r"\1", delta_text)
 
