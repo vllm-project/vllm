@@ -940,7 +940,8 @@ class RoutedExperts(PluggableLayer):
             num_experts=moe_config.num_logical_experts,
             num_redundant_experts=num_redundant_experts,
             routed_experts_prefix="",
-            base_layer=self.lora_base_layer_prefix,
+            lora_base_layer_prefix=self.lora_base_layer_prefix,
+            include_fused=True,
         )
 
     @staticmethod
@@ -980,7 +981,8 @@ class RoutedExperts(PluggableLayer):
         num_experts: int,
         num_redundant_experts: int = 0,
         routed_experts_prefix: str = "routed_experts",
-        base_layer: str = "",
+        lora_base_layer_prefix: str = "",
+        include_fused: bool = False,
     ) -> list[tuple[str, str, int, str]]:
         """
         Create expert parameter mapping for weight loading with redundant experts.
@@ -988,17 +990,14 @@ class RoutedExperts(PluggableLayer):
         This mapping handles the physical-to-logical expert ID conversion needed
         when loading weights with EPLB redundant experts.
 
-        The mapping begins with three fused entries that match pre-fused expert weights
-        (e.g. `experts.gate_up_proj` and `experts.down_proj`) followed by the per-expert
-        entries. The fused entries do not affect the loading of per-expert checkpoints.
-
         Args:
             ckpt_gate_proj_name: Name of gate projection in checkpoint
             ckpt_down_proj_name: Name of down projection in checkpoint
             ckpt_up_proj_name: Name of up projection in checkpoint
             num_experts: Number of logical (non-redundant) experts
             num_redundant_experts: Number of redundant experts
-            base_layer: Prefix to add if this layer is a LoRA base layer
+            lora_base_layer_prefix: Prefix to add if this layer is a LoRA base layer
+            include_fused: Prepend the fused pre-fused-checkpoint entries
 
         Returns:
             List of tuples (param_name, weight_name, expert_id, shard_id)
@@ -1023,35 +1022,36 @@ class RoutedExperts(PluggableLayer):
         if routed_experts_prefix != "":
             routed_experts_prefix = f"{routed_experts_prefix}."
 
-        w13 = f"experts.{routed_experts_prefix}{base_layer}w13_"
-        w2 = f"experts.{routed_experts_prefix}{base_layer}w2_"
+        w13 = f"experts.{routed_experts_prefix}{lora_base_layer_prefix}w13_"
+        w2 = f"experts.{routed_experts_prefix}{lora_base_layer_prefix}w2_"
 
         fused_mapping = []
-        gate_up = None
-        if ckpt_gate_proj_name == "gate_proj" and ckpt_up_proj_name == "up_proj":
-            gate_up = "gate_up_proj"
-        elif ckpt_gate_proj_name == "w1" and ckpt_up_proj_name == "w3":
-            gate_up = "w13"
-        else:
-            logger.warning(
-                "Unexpected gate/up projection names: %s, %s. "
-                "Fused gate/up mapping will be skipped.",
-                ckpt_gate_proj_name,
-                ckpt_up_proj_name,
-            )
-        if gate_up is not None:
-            fused_mapping = [
-                # (param_name, weight_name, expert_id, shard_id)
-                (f"{w13}weight", f"experts.{gate_up}", 0, "w1"),
-                (f"{w13}weight", f"experts.{gate_up}", 1, "w3"),
-                (f"{w2}weight", f"experts.{ckpt_down_proj_name}", 0, "w2"),
-            ]
+        if include_fused:
+            gate_up = None
+            if ckpt_gate_proj_name == "gate_proj" and ckpt_up_proj_name == "up_proj":
+                gate_up = "gate_up_proj"
+            elif ckpt_gate_proj_name == "w1" and ckpt_up_proj_name == "w3":
+                gate_up = "w13"
+            else:
+                logger.warning(
+                    "Unexpected gate/up projection names: %s, %s. "
+                    "Fused gate/up mapping will be skipped.",
+                    ckpt_gate_proj_name,
+                    ckpt_up_proj_name,
+                )
+            if gate_up is not None:
+                fused_mapping = [
+                    # (param_name, weight_name, expert_id, shard_id)
+                    (f"{w13}weight", f"experts.{gate_up}", 0, "w1"),
+                    (f"{w13}weight", f"experts.{gate_up}", 1, "w3"),
+                    (f"{w2}weight", f"experts.{ckpt_down_proj_name}", 0, "w2"),
+                ]
 
         per_expert_mapping = [
             # (param_name, weight_name, expert_id, shard_id)
             (
                 w13 if weight_name in [ckpt_gate_proj_name, ckpt_up_proj_name] else w2,
-                f"experts.{physical_to_logical_map[expert_id]}.{weight_name}.{base_layer}",
+                f"experts.{physical_to_logical_map[expert_id]}.{weight_name}.{lora_base_layer_prefix}",
                 expert_id,
                 shard_id,
             )
