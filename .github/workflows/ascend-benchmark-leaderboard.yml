@@ -508,8 +508,31 @@ jobs:
           PR_BASE_SHA: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.pr_base_sha || github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          git fetch --deepen=500 origin main || git fetch --unshallow origin main || true
-          git fetch --no-tags origin "$PR_HEAD_SHA" "$PR_BASE_SHA"
+
+          fetch_with_retry() {
+            local attempts=4
+            local delay_seconds=15
+            local try=1
+
+            while [[ "$try" -le "$attempts" ]]; do
+              echo "Fetch attempt ${try}/${attempts}: git fetch $*"
+              if git fetch "$@"; then
+                return 0
+              fi
+              echo "Fetch failed (${try}/${attempts}): git fetch $*" >&2
+              if [[ "$try" -lt "$attempts" ]]; then
+                sleep "$delay_seconds"
+              fi
+              try=$((try + 1))
+              delay_seconds=$((delay_seconds * 2))
+            done
+
+            echo "Failed to fetch after ${attempts} attempts: git fetch $*" >&2
+            return 1
+          }
+
+          fetch_with_retry --deepen=500 origin main || fetch_with_retry --unshallow origin main || true
+          fetch_with_retry --no-tags origin "$PR_HEAD_SHA" "$PR_BASE_SHA"
           git checkout --force "$PR_HEAD_SHA"
           fork_point="$(git merge-base "$PR_HEAD_SHA" "$PR_BASE_SHA")"
           echo "FORK_POINT=$fork_point" >> "$GITHUB_ENV"
@@ -534,6 +557,7 @@ jobs:
             mkdir -p "$parent_dir"
             rm -rf "$target_dir" "$temp_dir"
             while [[ "$try" -le "$attempts" ]]; do
+              echo "Clone attempt ${try}/${attempts}: $repo_url"
               if git clone --depth 1 "$repo_url" "$temp_dir"; then
                 if [[ -n "$target_ref" ]]; then
                   checkout_ref="$target_ref"
