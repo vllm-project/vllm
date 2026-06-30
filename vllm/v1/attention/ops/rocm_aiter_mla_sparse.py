@@ -898,7 +898,7 @@ def rocm_aiter_sparse_attn_indexer(
                 pynccl_comm = getattr(
                     get_tp_group().device_communicator, "pynccl_comm", None
                 )
-                assert pynccl_comm is not None
+                assert pynccl_comm is not None and not pynccl_comm.disabled
                 pynccl_comm.group_start()
                 for gs, ge, owner in second_groups:
                     if ge > gs:
