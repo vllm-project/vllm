@@ -346,3 +346,110 @@ class TestPerTensorScaleCoercion:
         # numel > 1 must fail loudly instead of silently picking an element.
         with pytest.raises(RuntimeError):
             RoutedExperts._to_scalar(torch.tensor([0.1, 0.2]))
+
+
+class TestBlockQuantIntermediatePadding:
+    """Block-FP8 MoE: pad the per-partition intermediate size to a multiple of
+    block_n and slice the checkpoint block-aligned under TP.
+
+    Example (intermediate_size=1536, block_n=128, TP=8): per-rank
+    unpadded 1536/8 = 192 is not a multiple of 128, so it is padded to 256 and
+    the checkpoint is sliced with the padded, block-aligned per-rank size. The
+    first 6 ranks each own 256 real rows (6 * 256 = 1536); the last 2 ranks are
+    entirely padding (all-zero) and are skipped by the ``available <= 0`` guard.
+    """
+
+    BLOCK_N = 128
+    TP_SIZE = 8
+    HIDDEN = 64
+    INTERMEDIATE_PADDED = 256  # ceil(192 / 128) * 128
+    GLOBAL_INTER = 1536  # 192 * 8, i.e. 6 * 256
+
+    def _make_loader(self):
+        from types import SimpleNamespace
+
+        # Minimal stand-in for a RoutedExperts instance: the loader only reads
+        # these attributes and calls the two static helpers.
+        return SimpleNamespace(
+            block_aligned_tp_shard=True,
+            moe_config=SimpleNamespace(
+                is_act_and_mul=True,
+                moe_parallel_config=SimpleNamespace(tp_size=self.TP_SIZE),
+            ),
+            _get_hidden_dim=RoutedExperts._get_hidden_dim,
+            _narrow_expert_data_for_padding=(
+                RoutedExperts._narrow_expert_data_for_padding
+            ),
+        )
+
+    def test_w13_block_aligned_slicing_and_padding(self):
+        moe = self._make_loader()
+        # gate (w1) checkpoint: (global_intermediate, hidden)
+        gate = torch.randn(self.GLOBAL_INTER, self.HIDDEN)
+        for tp_rank in range(self.TP_SIZE):
+            # w13 param holds gate+up stacked on the (padded) intermediate dim.
+            expert_data = torch.zeros(2 * self.INTERMEDIATE_PADDED, self.HIDDEN)
+            RoutedExperts._load_w13(
+                moe,
+                expert_data=expert_data,
+                shard_dim=0,
+                shard_id="w1",
+                loaded_weight=gate,
+                tp_rank=tp_rank,
+            )
+            start = tp_rank * self.INTERMEDIATE_PADDED
+            n_real = min(self.INTERMEDIATE_PADDED, self.GLOBAL_INTER - start)
+            w1 = expert_data[: self.INTERMEDIATE_PADDED]
+            if n_real <= 0:
+                # All-padding rank: nothing loaded, stays zero.
+                assert torch.all(expert_data == 0)
+                continue
+            # Real rows come from the block-aligned checkpoint slice.
+            assert torch.equal(w1[:n_real], gate[start : start + n_real])
+            # Intra-rank padded tail (if any) and the up (w3) half stay zero.
+            assert torch.all(w1[n_real:] == 0)
+            assert torch.all(expert_data[self.INTERMEDIATE_PADDED :] == 0)
+
+    def test_w2_block_aligned_slicing_and_padding(self):
+        moe = self._make_loader()
+        # down (w2) checkpoint: (hidden, global_intermediate); intermediate is
+        # the input (shard) dim.
+        down = torch.randn(self.HIDDEN, self.GLOBAL_INTER)
+        for tp_rank in range(self.TP_SIZE):
+            expert_data = torch.zeros(self.HIDDEN, self.INTERMEDIATE_PADDED)
+            RoutedExperts._load_w2(
+                moe,
+                expert_data=expert_data,
+                shard_dim=1,
+                loaded_weight=down,
+                tp_rank=tp_rank,
+            )
+            start = tp_rank * self.INTERMEDIATE_PADDED
+            n_real = min(self.INTERMEDIATE_PADDED, self.GLOBAL_INTER - start)
+            if n_real <= 0:
+                assert torch.all(expert_data == 0)
+                continue
+            assert torch.equal(expert_data[:, :n_real], down[:, start : start + n_real])
+            assert torch.all(expert_data[:, n_real:] == 0)
+
+    def test_no_padding_matches_plain_tp_shard(self):
+        """When the per-rank size is already block-aligned, block-aligned
+        slicing must reproduce the plain ``global // tp`` sharding."""
+        moe = self._make_loader()
+        # global 2048, TP=8 -> 256 per rank, already a multiple of block_n.
+        global_inter = 2048
+        per_rank = global_inter // self.TP_SIZE  # 256, == INTERMEDIATE_PADDED
+        gate = torch.randn(global_inter, self.HIDDEN)
+        for tp_rank in range(self.TP_SIZE):
+            expert_data = torch.zeros(2 * per_rank, self.HIDDEN)
+            RoutedExperts._load_w13(
+                moe,
+                expert_data=expert_data,
+                shard_dim=0,
+                shard_id="w1",
+                loaded_weight=gate,
+                tp_rank=tp_rank,
+            )
+            expected = gate[tp_rank * per_rank : (tp_rank + 1) * per_rank]
+            assert torch.equal(expert_data[:per_rank], expected)
+            assert torch.all(expert_data[per_rank:] == 0)

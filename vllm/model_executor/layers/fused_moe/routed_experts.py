@@ -469,7 +469,14 @@ class RoutedExperts(PluggableLayer):
             # the *unpadded* per-rank size so that every TP rank lands at
             # the correct slice.
             tp_size = self.moe_config.moe_parallel_config.tp_size
-            loaded_per_rank = loaded_weight.shape[shard_dim] // tp_size
+            if getattr(self, "block_aligned_tp_shard", False):
+                # Block-quant padding (e.g. block-FP8): slice the checkpoint
+                # with the padded, block-aligned per-rank size so the weights
+                # and block scales stay aligned. shard_size is the padded
+                # per-rank size for this logical (gate/up) weight.
+                loaded_per_rank = shard_size
+            else:
+                loaded_per_rank = loaded_weight.shape[shard_dim] // tp_size
             start_offset = loaded_per_rank * tp_rank
             available = loaded_weight.shape[shard_dim] - start_offset
             if available <= 0:
@@ -511,7 +518,12 @@ class RoutedExperts(PluggableLayer):
         if not load_full and loaded_weight.ndim > 0:
             # Same padding fix as _load_w13: use unpadded per-rank size.
             tp_size = self.moe_config.moe_parallel_config.tp_size
-            loaded_per_rank = loaded_weight.shape[shard_dim] // tp_size
+            if getattr(self, "block_aligned_tp_shard", False):
+                # Block-quant padding: slice with the padded, block-aligned
+                # per-rank size (the down-proj input / intermediate dim).
+                loaded_per_rank = expert_data.shape[shard_dim]
+            else:
+                loaded_per_rank = loaded_weight.shape[shard_dim] // tp_size
             start_offset = loaded_per_rank * tp_rank
             available = loaded_weight.shape[shard_dim] - start_offset
             if available <= 0:
