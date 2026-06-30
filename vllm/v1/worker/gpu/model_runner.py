@@ -701,7 +701,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         start_time = time.perf_counter()
         gc.collect()
         torch.accelerator.empty_cache()
-        start_free_gpu_memory = torch.cuda.mem_get_info()[0]
+        start_free_gpu_memory = torch.accelerator.get_memory_info()[0]
 
         with self.maybe_setup_dummy_loras(self.lora_config):
             attn_states = self.cudagraph_manager.capture(
@@ -720,7 +720,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.speculator.capture(attn_states)
 
         end_time = time.perf_counter()
-        end_free_gpu_memory = torch.cuda.mem_get_info()[0]
+        end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
         elapsed_time = end_time - start_time
         cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
         # This usually takes 5~20 seconds.
@@ -1111,7 +1111,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.total_len.gpu,
         )
 
-        self.model_state.postprocess_state(idx_mapping, num_sampled)
+        self.model_state.postprocess_state(
+            idx_mapping, num_sampled, self.req_states.num_computed_tokens.gpu
+        )
 
     @torch.inference_mode()
     def execute_model(
@@ -1176,6 +1178,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Prepare all the inputs and copy to the input buffers.
             input_batch = self.prepare_inputs(scheduler_output, batch_desc)
             block_tables, slot_mappings = self.prepare_attn(input_batch)
+            # Mamba "align" pre-copy: migrate recurrent state across block
+            # boundaries before the forward. Runs only on real batches, and
+            # before model_state.prepare_attn gathers num_accepted_tokens so the
+            # boundary reset is visible to the attention metadata.
+            self.model_state.preprocess_state(
+                input_batch,
+                block_tables,
+                self.kv_cache_config,
+                self.req_states.num_computed_tokens.gpu,
+            )
 
             if self.lora_config:
                 # Activate LoRA adapters.

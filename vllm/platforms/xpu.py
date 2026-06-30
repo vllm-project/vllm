@@ -243,6 +243,16 @@ class XPUPlatform(Platform):
         if "VLLM_WORKER_MULTIPROC_METHOD" not in os.environ:
             os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
+        # XPU requires graceful shutdown to allow oneCCL/Level Zero resources
+        # to be properly released. Without this, subsequent server startups on
+        # the same devices may hang during CCL initialization.
+        if vllm_config.shutdown_timeout == 0:
+            vllm_config.shutdown_timeout = 5
+            logger.info(
+                "XPU platform: set server shutdown_timeout=%d.",
+                vllm_config.shutdown_timeout,
+            )
+
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
         super().update_block_size_for_backend(vllm_config)

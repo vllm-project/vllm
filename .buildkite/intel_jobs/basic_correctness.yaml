@@ -23,4 +23,5 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
       export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
+      pytest -v -s basic_correctness/test_cpu_offload.py &&
       pytest -v -s basic_correctness/test_mem.py::test_end_to_end'
