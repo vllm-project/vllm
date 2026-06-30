@@ -40,6 +40,11 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponsesRequest,
 )
+from vllm.entrypoints.openai.responses.utils import (
+    extract_instructions_from_messages,
+    has_custom_tools,
+    unflatten_tool_name,
+)
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 
@@ -306,17 +311,19 @@ def _parse_browser_tool_call(message: Message, recipient: str) -> ResponseOutput
     )
 
 
-def _parse_function_call(message: Message, recipient: str) -> list[ResponseOutputItem]:
+def _parse_function_call(message: Message, recipient: str, tools: list[Any] | None = None) -> list[ResponseOutputItem]:
     """Parse function calls into function tool call items."""
     function_name = extract_function_from_recipient(recipient)
     output_items = []
     for content in message.content:
         random_id = random_uuid()
+        unflattened_name, namespace = unflatten_tool_name(function_name, tools)
         response_item = ResponseFunctionToolCall(
             arguments=content.text,
             call_id=f"call_{random_id}",
             type="function_call",
-            name=function_name,
+            name=unflattened_name,
+            namespace=namespace,
             id=f"fc_{random_id}",
             status="completed",
         )
@@ -428,6 +435,7 @@ def _parse_message_no_recipient(
 def harmony_to_response_output(
     message: Message,
     function_tool_names: frozenset[str] | None = None,
+    tools: list[Any] | None = None,
 ) -> list[ResponseOutputItem]:
     """Parse a Harmony message into a list of output response items.
 
@@ -449,7 +457,7 @@ def harmony_to_response_output(
 
         # Function calls (with or without "functions." prefix)
         elif is_function_recipient(recipient, function_tool_names):
-            output_items.extend(_parse_function_call(message, recipient))
+            output_items.extend(_parse_function_call(message, recipient, tools))
 
         # Built-in MCP tools (python, browser, container)
         elif recipient in BUILTIN_TOOL_TO_MCP_SERVER_LABEL:
@@ -469,6 +477,7 @@ def harmony_to_response_output(
 def parser_state_to_response_output(
     parser: StreamableParser,
     function_tool_names: frozenset[str] | None = None,
+    tools: list[Any] | None = None,
 ) -> list[ResponseOutputItem]:
     """Extract in-progress response items from incomplete parser state.
 
@@ -486,12 +495,14 @@ def parser_state_to_response_output(
     if current_recipient:
         if is_function_recipient(current_recipient, function_tool_names):
             rid = random_uuid()
+            unflattened_name, namespace = unflatten_tool_name(extract_function_from_recipient(current_recipient), tools)
             return [
                 ResponseFunctionToolCall(
                     arguments=parser.current_content,
                     call_id=f"call_{rid}",
                     type="function_call",
-                    name=extract_function_from_recipient(current_recipient),
+                    name=unflattened_name,
+                    namespace=namespace,
                     id=f"fc_{rid}",
                     status="in_progress",
                 )
