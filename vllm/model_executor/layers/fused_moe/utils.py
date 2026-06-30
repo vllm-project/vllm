@@ -16,12 +16,14 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     quant_dequant_mxfp4,
+    xpu_mxfp4_quantize,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp6_utils import (
     quant_dequant_mxfp6,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
+    xpu_mxfp8_quantize,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     ref_nvfp4_quant_dequant,
@@ -191,6 +193,8 @@ def _mxfp4_quantize(
     per_act_token_quant: bool,
     block_shape: list[int] | None = None,
 ) -> tuple[torch.Tensor, None]:
+    if current_platform.is_xpu():
+        return xpu_mxfp4_quantize(A)
     assert block_shape is None
     # TODO: native mxfp4 is currently not integrated in vllm,
     # so simulating even on devices supporting this data type natively.
@@ -219,6 +223,8 @@ def _mxfp8_e4m3_quantize(
     is_sf_swizzled_layout: bool = False,
     mx_alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if current_platform.is_xpu():
+        return xpu_mxfp8_quantize(A)
     assert A_scale is None
     assert not per_act_token_quant
     assert block_shape is None or block_shape == [1, 32]
@@ -305,7 +311,7 @@ def moe_kernel_quantize_input(
             A = ref_nvfp4_quant_dequant(A, A_scale, block_size=16)
             return A, None
     elif quant_dtype == "mxfp4":
-        if not quantization_emulation:
+        if not current_platform.is_xpu() and not quantization_emulation:
             raise NotImplementedError(
                 "moe_kernel_quantize_input should not be used for native"
                 " quant_dtype='mxfp4' MOE. Please open an issue."
@@ -314,7 +320,7 @@ def moe_kernel_quantize_input(
     elif quant_dtype == "mxfp8":
         # TODO: `quant_dtype == "mxfp8"` is ambiguous,
         # should be fp8_e4m3. OCP MX also defines `fp8_e5m2`.
-        if quantization_emulation:
+        if not current_platform.is_xpu() and not quantization_emulation:
             raise NotImplementedError(
                 "moe_kernel_quantize_input does not support quant_dtype='mxfp8' MOE "
                 "quantization emulation. Please open an issue."
