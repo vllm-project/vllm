@@ -10,11 +10,8 @@ The parallel backbone is a standard Qwen3 decoder stack reused from the
 DFlash Qwen3 draft (see qwen3_dflash.py). DSpark adds:
   * ``markov_head``: low-rank V x r / r x V transition bias added to the base
     logits, sampled left-to-right by the speculator (the sequential stage).
-  * ``confidence_head``: per-position acceptance-probability estimate (built
-    here; consumed in the confidence-scheduled verification phase, currently
-    unused at inference).
 
-DSparkMarkovHead and DSparkConfidenceHead are shared with the DSV4-style DSpark model.
+DSparkMarkovHead is shared with the DSV4-style DSpark model.
 """
 
 from collections.abc import Iterable
@@ -24,7 +21,6 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -63,32 +59,8 @@ class DSparkMarkovHead(nn.Module):
         return logits_processor(self.markov_w2, markov_embed)
 
 
-class DSparkConfidenceHead(nn.Module):
-    """Per-position acceptance-probability head: w^T [h_k; W1[x_{k-1}]] (+ bias).
-
-    Returns the pre-sigmoid score; the scheduler applies the sigmoid + temperature
-    calibration. fp32 for a stable confidence estimate. ``bias`` differs across
-    checkpoints (DeepSeek-V4 DSpark: no bias; Qwen3 DSpark: bias).
-    """
-
-    def __init__(self, input_dim: int, prefix: str, bias: bool = False) -> None:
-        super().__init__()
-        self.proj = ReplicatedLinear(
-            input_dim,
-            1,
-            bias=bias,
-            return_bias=False,
-            params_dtype=torch.float32,
-            prefix=maybe_prefix(prefix, "proj"),
-        )
-
-    def forward(self, hidden: torch.Tensor, markov_embed: torch.Tensor) -> torch.Tensor:
-        x = torch.cat([hidden, markov_embed], dim=-1).float()
-        return self.proj(x).squeeze(-1)
-
-
 class Qwen3DSparkModel(DFlashQwen3Model):
-    """DFlash Qwen3 backbone + DSpark Markov / confidence heads."""
+    """DFlash Qwen3 backbone + DSpark Markov head."""
 
     def __init__(
         self,
@@ -106,16 +78,6 @@ class Qwen3DSparkModel(DFlashQwen3Model):
             config.markov_rank,
             prefix=maybe_prefix(prefix, "markov_head"),
         )
-        self.confidence_head: DSparkConfidenceHead | None = None
-        if getattr(config, "enable_confidence_head", False):
-            input_dim = config.hidden_size
-            if getattr(config, "confidence_head_with_markov", False):
-                input_dim += config.markov_rank
-            self.confidence_head = DSparkConfidenceHead(
-                input_dim,
-                prefix=maybe_prefix(prefix, "confidence_head"),
-                bias=True,
-            )
 
 
 class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
@@ -164,11 +126,6 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
     def markov_bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
         return self.model.markov_head.bias(markov_embed, self.logits_processor)
 
-    def compute_confidence(
-        self, head_hidden: torch.Tensor, markov_embed: torch.Tensor
-    ) -> torch.Tensor:
-        return self.model.confidence_head(head_hidden, markov_embed)
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         model_weights = {}
         for name, loaded_weight in weights:
@@ -176,6 +133,9 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
                 name = "model." + name
             model_weights[name] = loaded_weight
         # mask_embedding is an unused placeholder param; DSpark masks via the vocab row.
-        loader = AutoWeightsLoader(self, skip_substrs=["mask_embedding"])
+        # confidence_head is not wired into inference yet; skip its weights.
+        loader = AutoWeightsLoader(
+            self, skip_substrs=["mask_embedding", "confidence_head"]
+        )
         loader.load_weights(model_weights.items())
         self.model._build_fused_kv_buffers()
