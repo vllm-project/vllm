@@ -920,12 +920,12 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
         from vllm.utils.nccl import query_nccl_gin_type
 
         gin_type = query_nccl_gin_type(group)
-        if gin_type is not None and gin_type == 0:
+        if gin_type is None or gin_type == 0:
             raise RuntimeError(
                 "DeepEPv2 requires NCCL GIN (GPU-Initiated Networking) but "
-                "the current environment reports ginType=NONE. This usually "
-                "means IBGDA-capable InfiniBand NICs or drivers are not "
-                "available. See tools/ep_kernels/README.md for requirements."
+                f"ginType={gin_type}. This usually means IBGDA-capable "
+                "InfiniBand NICs or drivers are not available. "
+                "See tools/ep_kernels/README.md for requirements."
             )
 
     def get_handle(self, kwargs):

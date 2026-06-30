@@ -102,24 +102,27 @@ def query_nccl_gin_type(
     try:
         backend = group._get_backend(torch.device("cuda"))
         if not hasattr(backend, "_comm_ptr"):
-            logger.debug("PyTorch NCCL backend does not expose _comm_ptr")
+            logger.warning("PyTorch NCCL backend does not expose _comm_ptr")
             return None
         comm_ptr = backend._comm_ptr()
     except Exception:
-        logger.debug(
-            "Failed to extract NCCL comm pointer from process group", exc_info=True
+        logger.warning(
+            "Failed to extract NCCL comm pointer from process group",
+            exc_info=True,
         )
         return None
 
     try:
         nccl = NCCLLibrary()
     except Exception:
-        logger.debug("Failed to load NCCL library", exc_info=True)
+        logger.warning("Failed to load NCCL library", exc_info=True)
         return None
 
     query_fn = nccl._funcs.get("ncclCommQueryProperties")
     if query_fn is None:
-        logger.debug("ncclCommQueryProperties not available (NCCL < 2.29)")
+        logger.warning(
+            "ncclCommQueryProperties not available (NCCL < 2.29)"
+        )
         return None
 
     props = ncclCommProperties()
@@ -128,11 +131,16 @@ def query_nccl_gin_type(
     try:
         result = query_fn(ctypes.c_void_p(comm_ptr), ctypes.byref(props))
     except Exception:
-        logger.debug("ncclCommQueryProperties call failed", exc_info=True)
+        logger.warning(
+            "ncclCommQueryProperties call failed", exc_info=True
+        )
         return None
 
     if result != 0:
-        logger.debug("ncclCommQueryProperties returned error %d", result)
+        logger.warning(
+            "ncclCommQueryProperties returned error %d", result
+        )
         return None
 
+    logger.info("NCCL GIN type: %d", props.ginType)
     return props.ginType
