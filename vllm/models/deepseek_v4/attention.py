@@ -332,8 +332,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             device=hidden_states.device,
         )
 
-        # Metadata-independent input GEMMs + RMSNorm stay in the captured
-        # graph; the metadata-dependent rest (q up-proj + kv-insert, indexer,
+        # Metadata-independent input GEMMs, RMSNorm, and q up-proj stay in the
+        # captured graph; the metadata-dependent rest (kv-insert, indexer,
         # compressor, MLA attention) runs in the eager break.
         qr_kv, kv_score, indexer_kv_score, indexer_weights = (
             self.attn_gemm_parallel_execute(hidden_states)
@@ -346,6 +346,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             self.kv_norm.weight.data,
             self.eps,
         )
+        q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
 
         # attention_impl is wrapped with @eager_break_during_capture: this is
         # where the breakable cudagraph capture breaks (the attention op runs
@@ -353,6 +354,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         self.attention_impl(
             hidden_states,
             qr,
+            q,
             kv,
             kv_score,
             indexer_kv_score,
@@ -430,6 +432,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         self,
         hidden_states: torch.Tensor,
         qr: torch.Tensor,
+        q: torch.Tensor,
         kv: torch.Tensor,
         kv_score: torch.Tensor,
         indexer_kv_score: torch.Tensor,
@@ -440,10 +443,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
 
-        # wq_b + kv_insert (+ MLA compressor when an indexer is present) ride
+        # Q norm + kv_insert (+ MLA compressor when an indexer is present) ride
         # on the default stream so q stays on its consumer stream (forward_mqa
         # downstream reads q on default). Indexer/compressor go on aux for
-        # overlap with default's GEMM + cache write.
+        # overlap with default's cache write.
         if self.indexer is not None:
             aux_streams = self.aux_stream_list
             indexer = self.indexer
@@ -451,17 +454,15 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             assert self.compressor is not None
             compressor = self.compressor
 
-            def wq_b_kv_insert() -> torch.Tensor:
-                q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
-                q = self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
-                return q
+            def qnorm_rope_kv_insert() -> torch.Tensor:
+                return self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
 
             # 3-way overlap (matches TRT-LLM PR #14142 Level 1): default runs
-            # wq_b+kv_insert; slot [0] runs the full indexer; slot [1] runs the
-            # MLA compressor. Slot [2] is reserved for the indexer's inner
+            # qnorm+kv_insert; slot [0] runs the full indexer; slot [1] runs
+            # the MLA compressor. Slot [2] is reserved for the indexer's inner
             # overlap. ROCm (aux_streams is None) falls back to sequential.
             q, _ = execute_in_parallel(
-                wq_b_kv_insert,
+                qnorm_rope_kv_insert,
                 [
                     lambda: indexer(
                         hidden_states,
@@ -485,13 +486,11 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             )
             compressor = self.compressor
 
-            def wq_b_kv_insert() -> torch.Tensor:
-                q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
-                q = self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
-                return q
+            def qnorm_rope_kv_insert() -> torch.Tensor:
+                return self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
 
             q, _ = maybe_execute_in_parallel(
-                wq_b_kv_insert,
+                qnorm_rope_kv_insert,
                 lambda: compressor(kv_score, positions, self.rotary_emb),
                 self.ln_events[0],
                 self.ln_events[1],
@@ -499,7 +498,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             )
         else:
             # SWA-only layer: no compressor, no overlap.
-            q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
             q = self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
 
         # MLA attention writes into the pre-allocated `out` buffer
