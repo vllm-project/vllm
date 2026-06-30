@@ -812,17 +812,6 @@ class Llama4ForConditionalGeneration(
         )
         return self.language_model.get_eagle3_default_aux_hidden_state_layers()
 
-    def set_eplb_state(
-        self,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
-    ):
-        self.language_model.set_eplb_state(
-            expert_load_view, logical_to_physical_map, logical_replica_count
-        )
-        self.expert_weights = self.language_model.expert_weights
-
     def update_physical_experts_metadata(
         self, num_physical_experts: int, num_local_physical_experts: int
     ):

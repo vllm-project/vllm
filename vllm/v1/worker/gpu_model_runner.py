@@ -4319,6 +4319,13 @@ class GPUModelRunner(
         # When spec decode is enabled, defer connector finalization
         # (wait_for_save + clear metadata) until after draft model runs.
         defer_kv_connector_finalize = self.speculative_config is not None
+        # Update the EPLB meta.
+        if self.eplb_state is not None:
+            self.eplb_state.prepare_forward(
+                self.model_config,
+                num_tokens_unpadded,
+                ubatch_slices_padded,
+            )
         with (
             set_forward_context(
                 attn_metadata,
@@ -5215,6 +5222,8 @@ class GPUModelRunner(
                             self.drafter.model,
                             spec_config.draft_model_config,
                         )
+                        assert hasattr(self.drafter, "set_eplb_state")
+                        self.drafter.set_eplb_state(self.eplb_state)
                         eplb_models += 1
 
                 self._setup_eagle3_aux_hidden_state_outputs()

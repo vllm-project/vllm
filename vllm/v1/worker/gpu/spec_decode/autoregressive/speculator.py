@@ -213,6 +213,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             need_eager=is_profile,
         )
 
+        self._prepare_eplb_forward(input_batch.num_tokens)
+
         if prefill_batch_desc.cg_mode == CUDAGraphMode.FULL:
             # Replay the full graph for draft prefill.
             assert self.prefill_cudagraph_manager is not None
@@ -424,6 +426,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     ) -> None:
+        self._prepare_eplb_forward(num_reqs)
+
         idx_mapping = self.idx_mapping[:num_reqs]
         positions = self.input_buffers.positions[:num_reqs]
         # Run the draft model forward pass.
