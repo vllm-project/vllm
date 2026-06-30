@@ -347,7 +347,7 @@ class HarmonyParser(DelegatingParser):
 # <|return|> is represented as `""` since it's an xgrammar stop token
 _END_TAG = ["<|end|>", "<|call|>", "<|endoftext|>", ""]
 _FINAL_CONSTRAIN_BEGINS = [
-    "<|channel|>final json<|message|>",
+    # "<|channel|>final json<|message|>", # disabled to trigger _normalize_recipient
     "<|channel|>final <|constrain|>json<|message|>",
 ]
 _TOOL_CALL_CHANNELS = [
