@@ -659,6 +659,86 @@ class DFlashQwen3Model(nn.Module):
         return loaded_params
 
 
+class DominoHead(nn.Module):
+    def __init__(
+        self, *, config, vllm_config: VllmConfig, quant_config, prefix: str = ""
+    ):
+        super().__init__()
+        dflash_config = getattr(config, "dflash_config", {}) or {}
+
+        self.gru_hidden_dim = int(dflash_config["gru_hidden_dim"])
+        self.emb_dim = int(dflash_config["emb_dim"])
+
+        self.prefix_gru = nn.GRU(
+            input_size=config.hidden_size,
+            hidden_size=self.gru_hidden_dim,
+            num_layers=1,
+            batch_first=True,
+            bias=False,
+        )
+
+        self.embed_proj = nn.Sequential(
+            ReplicatedLinear(
+                input_size=config.hidden_size + self.gru_hidden_dim,
+                output_size=self.emb_dim,
+                bias=False,
+                params_dtype=vllm_config.model_config.dtype,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "embed_proj.0"),
+                return_bias=False,
+            ),
+            nn.SiLU(),
+            ReplicatedLinear(
+                input_size=self.emb_dim,
+                output_size=config.vocab_size,
+                bias=False,
+                params_dtype=vllm_config.model_config.dtype,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "embed_proj.2"),
+                return_bias=False,
+            ),
+        )
+
+    def init_state(self, embed_input_ids, prefix_token_ids: torch.Tensor):
+        prefix_embeds = embed_input_ids(prefix_token_ids)
+        _, gru_hidden = self.prefix_gru(prefix_embeds)
+        return gru_hidden
+
+    def advance_state(
+        self,
+        embed_input_ids,
+        token_ids: torch.Tensor,
+        gru_hidden: torch.Tensor,
+    ):
+        if token_ids.dim() == 1:
+            token_ids = token_ids.unsqueeze(-1)
+        token_embeds = embed_input_ids(token_ids)
+        _, gru_hidden = self.prefix_gru(token_embeds, gru_hidden)
+        return gru_hidden
+
+    def compute_logits(
+        self,
+        parallel_hidden: torch.Tensor,
+        gru_hidden: torch.Tensor,
+        base_logits: torch.Tensor,
+    ):
+        squeeze_time_dim = parallel_hidden.dim() == 2
+        if squeeze_time_dim:
+            parallel_hidden = parallel_hidden.unsqueeze(1)
+
+        if base_logits.dim() == 2:
+            base_logits = base_logits.unsqueeze(1)
+
+        state = gru_hidden.transpose(0, 1)
+        correction_input = torch.cat([parallel_hidden, state], dim=-1)
+        correction_bias = self.embed_proj(correction_input)
+
+        logits = base_logits + correction_bias
+        if squeeze_time_dim:
+            logits = logits.squeeze(1)
+        return logits
+
+
 class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
@@ -692,6 +772,20 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             )
         else:
             self.draft_id_to_target_id = None
+
+        dflash_config = getattr(self.config, "dflash_config", {}) or {}
+        self.projector_type = dflash_config.get("projector_type")
+        self.is_domino = self.projector_type == "domino"
+
+        if self.is_domino:
+            self.domino_head = DominoHead(
+                config=self.config,
+                vllm_config=vllm_config,
+                quant_config=self.model.quant_config,
+                prefix=maybe_prefix(prefix, "domino_head"),
+            )
+        else:
+            self.domino_head = None
 
     def embed_input_ids(
         self,
@@ -755,12 +849,24 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         model_weights = {}
         includes_draft_id_mapping = False
         includes_embed_tokens = False
+
+        # Domino-only weights should be loaded into self.domino_head, not into the
+        # DFlash backbone.
+        domino_weights = []
+
         for name, loaded_weight in weights:
             assert "mask_hidden" not in name, (
                 "DFlash embeds masked slots via mask_token_id (optionally "
                 "overridden by a mask_embedding.pt file); it should not ship a "
                 "mask_hidden weight."
             )
+
+            if getattr(self, "is_domino", False) and (
+                name.startswith("prefix_gru.") or name.startswith("embed_proj.")
+            ):
+                domino_weights.append((f"domino_head.{name}", loaded_weight))
+                continue
+
             if "t2d" in name:
                 continue
             if "d2t" in name:
@@ -795,6 +901,25 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             skip_substrs=skip_substrs,
         )
         loader.load_weights(model_weights.items())
+
+        if getattr(self, "is_domino", False):
+            loader = AutoWeightsLoader(self)
+            loader.load_weights(domino_weights)
+
+            domino_param_names = {
+                name
+                for name, _ in self.named_parameters()
+                if name.startswith("domino_head.")
+            }
+            loaded_domino_names = {name for name, _ in domino_weights}
+            missing_domino_names = domino_param_names - loaded_domino_names
+
+            if missing_domino_names:
+                raise RuntimeError(
+                    "Domino weight loading is incomplete. Missing: "
+                    f"{sorted(missing_domino_names)}"
+                )
+
         self.model._build_fused_kv_buffers()
 
     def _read_mask_embedding(self) -> torch.Tensor | None:
@@ -835,3 +960,35 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             MASK_EMBEDDING_FILENAME,
         )
         return state.reshape(-1)
+
+    def init_domino_state(self, prefix_token_ids: torch.Tensor) -> torch.Tensor:
+        if self.domino_head is None:
+            raise RuntimeError("Domino head is not enabled.")
+        return self.domino_head.init_state(self.embed_input_ids, prefix_token_ids)
+
+    def advance_domino_state(
+        self,
+        token_ids: torch.Tensor,
+        gru_hidden: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.domino_head is None:
+            raise RuntimeError("Domino head is not enabled.")
+        return self.domino_head.advance_state(
+            self.embed_input_ids,
+            token_ids,
+            gru_hidden,
+        )
+
+    def compute_domino_logits(
+        self,
+        parallel_hidden: torch.Tensor,
+        gru_hidden: torch.Tensor,
+        base_logits: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.domino_head is None:
+            raise RuntimeError("Domino head is not enabled.")
+        return self.domino_head.compute_logits(
+            parallel_hidden,
+            gru_hidden,
+            base_logits,
+        )

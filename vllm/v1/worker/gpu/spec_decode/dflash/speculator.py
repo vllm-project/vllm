@@ -17,6 +17,7 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManager
 from vllm.v1.worker.gpu.spec_decode.dflash.utils import (
     get_dflash_causal,
@@ -189,6 +190,137 @@ class DFlashSpeculator(DraftModelSpeculator):
             )
         return last_hidden_states
 
+    def _sample_domino_logits(
+        self,
+        logits: torch.Tensor,
+        positions: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        draft_step: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.draft_logits is not None:
+            return gumbel_sample(
+                logits,
+                idx_mapping,
+                self.temperature,
+                self.seeds,
+                positions + 1,
+                apply_temperature=True,
+                output_processed_logits=self.draft_logits,
+                output_processed_logits_col=draft_step,
+                use_fp64=self.use_fp64_gumbel,
+            )
+        return logits.argmax(dim=-1)
+
+    def _generate_domino_draft(
+        self,
+        last_hidden_states: torch.Tensor,
+        num_reqs: int,
+    ) -> None:
+        dflash_config = getattr(self.model.config, "dflash_config", {}) or {}
+        shift_label = bool(dflash_config.get("shift_label", False))
+        prefix_len = min(
+            int(dflash_config.get("pure_draft_prefix_len", 0)),
+            self.num_speculative_steps,
+        )
+
+        num_sample = num_reqs * self.num_speculative_steps
+        sample_hidden_states = last_hidden_states[
+            self.sample_indices[:num_sample]
+        ].view(num_reqs, self.num_speculative_steps, -1)
+        sample_pos = self.sample_pos[:num_sample].view(
+            num_reqs, self.num_speculative_steps
+        )
+        sample_idx_mapping = self.sample_idx_mapping[:num_sample].view(
+            num_reqs, self.num_speculative_steps
+        )
+        sample_col = self.sample_col[:num_sample].view(
+            num_reqs, self.num_speculative_steps
+        )
+
+        anchor_indices = (
+            torch.arange(num_reqs, device=self.device, dtype=torch.long)
+            * self.num_query_per_req
+        )
+        anchor_token_ids = self.input_buffers.input_ids[anchor_indices].unsqueeze(-1)
+
+        if shift_label:
+            sample_hidden_states = torch.cat(
+                [
+                    last_hidden_states[anchor_indices].unsqueeze(1),
+                    sample_hidden_states,
+                ],
+                dim=1,
+            )[:, : self.num_speculative_steps, :]
+            sample_pos = torch.cat(
+                [
+                    self.input_buffers.positions[anchor_indices].unsqueeze(1),
+                    sample_pos,
+                ],
+                dim=1,
+            )[:, : self.num_speculative_steps]
+            sample_idx_mapping = torch.cat(
+                [
+                    sample_idx_mapping[:, :1],
+                    sample_idx_mapping,
+                ],
+                dim=1,
+            )[:, : self.num_speculative_steps]
+
+        base_logits = self.model.compute_logits(
+            sample_hidden_states.reshape(
+                num_reqs * self.num_speculative_steps,
+                -1,
+            )
+        )
+        if base_logits is None:
+            raise RuntimeError(
+                "Domino speculative decoding requires full draft logits on this rank."
+            )
+        base_logits = base_logits.view(
+            num_reqs,
+            self.num_speculative_steps,
+            -1,
+        )
+
+        if prefix_len > 0:
+            prefix_logits = base_logits[:, :prefix_len, :]
+            prefix_token_ids = self._sample_domino_logits(
+                prefix_logits.reshape(-1, prefix_logits.shape[-1]),
+                sample_pos[:, :prefix_len].reshape(-1),
+                sample_idx_mapping[:, :prefix_len].reshape(-1),
+                sample_col[:, :prefix_len].reshape(-1),
+            ).view(num_reqs, prefix_len)
+
+            self.draft_tokens[:num_reqs, :prefix_len] = prefix_token_ids
+            realized_prefix_ids = torch.cat(
+                [anchor_token_ids, prefix_token_ids],
+                dim=1,
+            )
+        else:
+            realized_prefix_ids = anchor_token_ids
+
+        gru_hidden = self.model.init_domino_state(realized_prefix_ids)
+
+        for step in range(prefix_len, self.num_speculative_steps):
+            hidden_step = sample_hidden_states[:, step, :]
+            base_step_logits = base_logits[:, step, :]
+
+            logits = self.model.compute_domino_logits(
+                hidden_step,
+                gru_hidden,
+                base_step_logits,
+            )
+            token = self._sample_domino_logits(
+                logits,
+                sample_pos[:, step],
+                sample_idx_mapping[:, step],
+                sample_col[:, step],
+            )
+            self.draft_tokens[:num_reqs, step] = token
+
+            if step + 1 < self.num_speculative_steps:
+                gru_hidden = self.model.advance_domino_state(token, gru_hidden)
+
     def _generate_draft(
         self,
         num_reqs: int,
@@ -205,6 +337,11 @@ class DFlashSpeculator(DraftModelSpeculator):
             num_tokens_across_dp,
             cudagraph_runtime_mode,
         )
+
+        projector_type = getattr(self.model, "projector_type", None)
+        if projector_type == "domino":
+            self._generate_domino_draft(last_hidden_states, num_reqs)
+            return
 
         num_sample = num_reqs * self.num_speculative_steps
         sample_hidden_states = last_hidden_states[self.sample_indices[:num_sample]]
