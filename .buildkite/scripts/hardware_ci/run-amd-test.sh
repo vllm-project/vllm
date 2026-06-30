@@ -534,6 +534,15 @@ else
   echo "--- Single-node job"
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
 
+  # Disable core dumps in the ROCm test container unless the ROCm debug agent is enabled
+  coredump_flags="--ulimit core=0:$(ulimit -H -c)"
+  if [[ "$commands" == *"ROCm debug agent enabled"* ]]; then
+    # Works around https://github.com/rocm/rocm-systems/issues/6206
+    coredump_flags='-e HSA_COREDUMP_PATTERN="/tmp/gpucore.%p"'
+  else
+    echo "ROCm debug agent not enabled, coredumps are disabled in the test container."
+  fi
+
   docker run \
     --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
     $RDMA_FLAGS \
@@ -541,6 +550,7 @@ else
     --shm-size=16gb \
     --group-add "$render_gid" \
     --rm \
+    $coredump_flags \
     -e HF_TOKEN \
     -e "HF_HUB_DOWNLOAD_TIMEOUT=${HF_HUB_DOWNLOAD_TIMEOUT}" \
     -e "HF_HUB_ETAG_TIMEOUT=${HF_HUB_ETAG_TIMEOUT}" \
