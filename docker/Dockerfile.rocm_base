@@ -159,12 +159,6 @@ ENV SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION_NAME}}
 ENV SCCACHE_S3_NO_CREDENTIALS=${USE_SCCACHE:+${SCCACHE_S3_NO_CREDENTIALS}}
 ENV SCCACHE_IDLE_TIMEOUT=${USE_SCCACHE:+0}
 
-### Install triton from upstream for AITER Deps TODO: (JPVILLAM) If possible to get this on whls it would be better
-RUN pip3 uninstall -y triton && \
-    git clone https://github.com/triton-lang/triton.git && \
-    cd triton && \
-    git checkout c517f38c && \
-    TRITON_APPEND_CMAKE_ARGS="-DCMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH=FALSE" pip3 install .
 
 ###
 ### AMD SMI Build
