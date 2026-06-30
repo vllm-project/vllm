@@ -749,10 +749,11 @@ class Indexer(nn.Module):
             )
 
             # rotate only the MQA K
-            q_dummy = torch.empty_like(k_pe.unsqueeze(1))
-            _, k_pe = rotary_emb(positions, q_dummy, k_pe.unsqueeze(1))
-            k_pe = k_pe.reshape(-1, 1, self.rope_dim)
-            k = torch.cat([k_pe.squeeze(-2), k_nope], dim=-1)
+            k_pe = k_pe.unsqueeze(1)
+            q_dummy = torch.empty_like(k_pe)
+            _, k_pe = rotary_emb(positions, q_dummy, k_pe)
+            k_pe = k_pe.reshape(-1, self.rope_dim)
+            k = torch.cat([k_pe, k_nope], dim=-1)
 
             return self.indexer_op(hidden_states, q_fp8, k, weights)
         else:
@@ -773,13 +774,13 @@ class Indexer(nn.Module):
             # Note: RoPE (NeoX) can introduce extra leading dimensions during
             # compilation so we need to reshape back to token-flattened shapes
             q_pe = q_pe.reshape(-1, self.n_head, self.rope_dim)
-            k_pe = k_pe.reshape(-1, 1, self.rope_dim)
+            k_pe = k_pe.reshape(-1, self.rope_dim)
 
             # `rotary_emb` is shape-preserving; `q_pe` is already
             # [num_tokens, n_head, rope_dim].
             q = torch.cat([q_pe, q_nope], dim=-1)
-            # `k_pe` is [num_tokens, 1, rope_dim] (MQA).
-            k = torch.cat([k_pe.squeeze(-2), k_nope], dim=-1)
+            # `k_pe` is [num_tokens, rope_dim] (MQA).
+            k = torch.cat([k_pe, k_nope], dim=-1)
 
         # we only quant q here since k quant is fused with cache insertion
         q = q.view(-1, self.head_dim)
@@ -790,12 +791,9 @@ class Indexer(nn.Module):
             use_ue8m0=self.scale_fmt is not None,
         )
         q_fp8 = q_fp8.view(-1, self.n_head, self.head_dim)
-        q_scale = q_scale.view(-1, self.n_head, 1)
+        q_scale = q_scale.view(-1, self.n_head)
 
-        weights = (
-            weights.unsqueeze(-1) * q_scale * self.softmax_scale * self.n_head_scale
-        )
-        weights = weights.squeeze(-1)
+        weights = weights * q_scale * self.softmax_scale * self.n_head_scale
 
         return self.indexer_op(hidden_states, q_fp8, k, weights)
 
