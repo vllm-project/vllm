@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""DeepSeek V3.2 causal LM for ROCm.
+
+Identical to the NVIDIA backbone (nvidia/model.py) except DeepseekV32DecoderLayer
+instantiates DeepseekV32ROCMAiterMLAAttention instead of DeepseekV32Attention.
+Weight loading, MoE routing, and pipeline-parallel logic are unchanged.
+"""
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
@@ -35,11 +41,11 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.sequence import IntermediateTensors
 
-from ..common.attention import DeepseekV32Attention
 from ..common.fused_ops import fused_allreduce_rms_norm
+from .rocm import DeepseekV32ROCMAiterMLAAttention
 
 
-class DeepseekV32DecoderLayer(torch.nn.Module):
+class DeepseekV32ROCMAiterDecoderLayer(torch.nn.Module):
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -60,7 +66,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         self.layer_idx = layer_idx
         self.use_mha = False
 
-        self.self_attn = DeepseekV32Attention(
+        self.self_attn = DeepseekV32ROCMAiterMLAAttention(
             vllm_config=vllm_config,
             config=config,
             prefix=f"{prefix}.self_attn",
@@ -78,9 +84,6 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
             )
-            # Defer the MoE cross-rank all-reduce; it is fused into the next
-            # layer's input_layernorm (or the final norm) via
-            # fused_allreduce_rms_norm. self.mlp.experts is the MoERunner.
             self.mlp.experts.moe_config.skip_final_all_reduce = True
         else:
             self.mlp = DeepseekV2MLP(
@@ -104,28 +107,21 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
-            # First layer: hidden_states is the (already reduced) embedding.
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            # The previous layer's MLP/MoE output is left un-reduced; fuse its
-            # all-reduce into this input_layernorm.
             hidden_states, residual = fused_allreduce_rms_norm(
                 hidden_states, residual, self.input_layernorm
             )
-        # self_attn's o_proj runs reduce_results=False; fuse its all-reduce with
-        # the post-attention RMSNorm.
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
         hidden_states, residual = fused_allreduce_rms_norm(
             hidden_states, residual, self.post_attention_layernorm
         )
-        # MLP/MoE runs un-reduced; its all-reduce is fused into the next layer's
-        # input_layernorm (or the model's final norm).
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
 
-class DeepseekV32Model(torch.nn.Module):
+class DeepseekV32ROCMAiterModel(torch.nn.Module):
     fall_back_to_pt_during_load = False
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -139,8 +135,6 @@ class DeepseekV32Model(torch.nn.Module):
         self.device = current_platform.device_type
 
         self.vocab_size = config.vocab_size
-        # DSA is always sparse (has index_topk); allocate the shared top-k
-        # buffer the indexer writes and the sparse MLA backend reads.
         self.is_v32 = True
         topk_indices_buffer = torch.empty(
             vllm_config.scheduler_config.max_num_batched_tokens,
@@ -161,7 +155,7 @@ class DeepseekV32Model(torch.nn.Module):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: DeepseekV32DecoderLayer(
+            lambda prefix: DeepseekV32ROCMAiterDecoderLayer(
                 vllm_config=vllm_config,
                 prefix=prefix,
                 topk_indices_buffer=topk_indices_buffer,
@@ -218,15 +212,12 @@ class DeepseekV32Model(torch.nn.Module):
                 {"hidden_states": hidden_states, "residual": residual}
             )
 
-        # Last layer's MoE output is un-reduced; fuse its all-reduce into norm.
         hidden_states, _ = fused_allreduce_rms_norm(hidden_states, residual, self.norm)
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # DSA-only: MLA (fused_qkv_a_proj) + the fused indexer wk/weights_proj +
-        # routed experts. No MHA (qkv_proj) or ROCm shared-expert-fusion paths.
         stacked_params_mapping = [
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
@@ -251,7 +242,6 @@ class DeepseekV32Model(torch.nn.Module):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
-            # MTP / nextn layers are loaded by the MTP model, not here.
             if get_spec_layer_idx_from_weight_name(self.config, name) is not None:
                 continue
             if _try_load_fp8_indexer_wk(
@@ -267,7 +257,6 @@ class DeepseekV32Model(torch.nn.Module):
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-                # Experts are handled below; skip here before the name rewrite.
                 if ("mlp.experts." in name) and name not in params_dict:
                     continue
                 name_mapped = name.replace(weight_name, param_name)
@@ -325,17 +314,12 @@ class DeepseekV32Model(torch.nn.Module):
         return loaded_params
 
 
-class DeepseekV32ForCausalLM(DeepseekV2ForCausalLM):
-    """DSA causal LM — DeepSeek V2/V3 orchestration with the DSA backbone.
+class DeepseekV32ROCMAiterForCausalLM(DeepseekV2ForCausalLM):
+    """DSA causal LM for ROCm — DeepSeek V3.2 backbone with ROCm sparse MLA."""
 
-    Serves DeepSeek V3.2 and any architecture reusing DSA (e.g. GLM-5.2).
-    """
-
-    model_cls = DeepseekV32Model
+    model_cls = DeepseekV32ROCMAiterModel
 
     def set_moe_parameters(self):
-        # Same as the base, but keyed on the MoE block type rather than the
-        # decoder-layer type (DeepseekV32DecoderLayer is a plain nn.Module).
         self.num_expert_groups = getattr(self.config, "n_group", 1)
         self.moe_layers = []
         self.moe_mlp_layers = []
