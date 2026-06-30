@@ -385,12 +385,31 @@ class SamplingParams(
         repetition_detection: RepetitionDetectionParams | None = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
-            # Convert token_id to integer
-            # Clamp the bias between -100 and 100 per OpenAI API spec
-            logit_bias = {
-                int(token): min(100.0, max(-100.0, bias))
-                for token, bias in logit_bias.items()
-            }
+            # Fast path uses a dict comprehension; on failure we iterate once
+            # to identify the exact offending entry for the error message.
+            try:
+                logit_bias = {
+                    int(token): min(100.0, max(-100.0, bias))
+                    for token, bias in logit_bias.items()
+                }
+            except (ValueError, TypeError):
+                invalid_keys = []
+                converted_logit_bias = {}
+                for token, bias in logit_bias.items():
+                    try:
+                        token_id = int(token)
+                    except (ValueError, TypeError):
+                        invalid_keys.append(token)
+                        continue
+                    converted_logit_bias[token_id] = min(100.0, max(-100.0, bias))
+                if invalid_keys:
+                    raise VLLMValidationError(
+                        f"logit_bias contains key(s) that cannot be "
+                        f"converted to integer token IDs: {invalid_keys!r}",
+                        parameter="logit_bias",
+                        value=invalid_keys,
+                    ) from None
+                logit_bias = converted_logit_bias
 
         return SamplingParams(
             n=1 if n is None else n,
