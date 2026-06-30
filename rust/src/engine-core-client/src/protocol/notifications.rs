@@ -27,24 +27,20 @@ pub struct LoraLoadEvent {
     pub pinned_adapters: Vec<String>,
 }
 
-/// An open-schema notification reserved for out-of-tree producers (plugins).
+/// Open escape hatch for out-of-tree producers (plugins).
 ///
-/// The union fails fast on unknown tags, so a plugin can't add its own struct
-/// type without forking the protocol. This reserved `custom` tag is the
-/// escape hatch: the producer namespaces its event under `key` and carries an
-/// arbitrary msgpack `payload`. Frontends that don't recognize `key` ignore
-/// the event (the channel is additive, so an unapplied delta is a no-op).
-///
-/// Python models `payload` as `dict[str, Any]` with `omit_defaults=True`, so
-/// it needs `#[serde(default)]`.
+/// The union fails fast on unknown tags, so plugins can't add their own struct
+/// type. They emit this instead: namespace under `key`, arbitrary `payload`.
+/// Frontends that don't know the `key` ignore it. `payload` is Python's
+/// `dict[str, Any]` with `omit_defaults=True`, hence `#[serde(default)]`.
 ///
 /// Original Python definition:
 /// <https://github.com/vllm-project/vllm/blob/main/vllm/v1/notifications.py>
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CustomNotification {
-    /// Producer-chosen namespace (e.g. the plugin name).
+    /// Producer-chosen namespace, e.g. the plugin name.
     pub key: String,
-    /// Arbitrary msgpack-encodable event data, opaque to this frontend.
+    /// Arbitrary msgpack data, opaque to this frontend.
     #[serde(default)]
     pub payload: BTreeMap<String, rmpv::Value>,
 }

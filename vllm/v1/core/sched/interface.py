@@ -243,12 +243,12 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     def take_notifications(self) -> list["EngineNotification"]:
-        """Drain engine notifications the scheduler produced this step.
+        """Drain notifications the scheduler emitted this step.
 
-        EngineCore calls this each step and forwards the result on
-        `EngineCoreOutputs.engine_notifications` (the same additive channel
-        the worker uses). The base scheduler produces none; override to emit
-        engine-scoped events (e.g. plugin metrics) from the scheduler.
+        EngineCore calls this each step and forwards them on
+        `EngineCoreOutputs.engine_notifications`, same channel the worker uses.
+        Base scheduler emits none; override to push events (e.g. plugin
+        metrics) from the scheduler.
         """
         return []
 

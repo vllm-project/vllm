@@ -270,9 +270,8 @@ class ModelRunnerOutput:
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 
-    # Rare worker-originated engine events (e.g. LoRA load events),
-    # forwarded by the engine core to frontends on
-    # EngineCoreOutputs.engine_notifications. None on the vast majority of steps.
+    # Worker-originated engine events (e.g. LoRA load events), forwarded by the
+    # engine core to frontends on EngineCoreOutputs.engine_notifications.
     worker_notifications: list[EngineNotification] | None = None
 
     # Per-step routed experts data captured by the worker.

@@ -228,12 +228,10 @@ class EngineCore:
 
         self._idle_state_callbacks: list[Callable] = []
 
-        # Engine notifications awaiting delivery to the in-process frontend
-        # (EngineCoreProc overrides _publish_notifications to broadcast
-        # immediately instead). Accumulated additively in emission order,
-        # like scheduler_stats: every queued event is delivered, nothing is
-        # dropped. Producers throttle their own emission (e.g. LoRA only
-        # emits on a change), so the buffer stays bounded while idle.
+        # Notifications waiting on the in-process frontend (EngineCoreProc
+        # overrides _publish_notifications to broadcast instead). Additive in
+        # emission order, like scheduler_stats: nothing dropped. Producers
+        # throttle themselves, so this stays bounded while idle.
         self._pending_notifications: list[EngineNotification] = []
 
         # Mark the startup heap as static so that it's ignored by GC.
@@ -643,13 +641,11 @@ class EngineCore:
         return engine_core_outputs, model_executed
 
     def _publish_notifications(self, notifications: list[EngineNotification]) -> None:
-        """Queue engine notifications for delivery to the frontend.
+        """Queue notifications for the frontend.
 
-        Notifications accumulate additively (like scheduler_stats), so
-        delivery must not silently drop them: every queued event is sent in
-        emission order. The in-process engine buffers them until the next
-        step's outputs; EngineCoreProc overrides this to broadcast to every
-        connected frontend immediately.
+        Additive (like scheduler_stats): nothing gets dropped. The in-process
+        engine buffers until the next step's outputs; EngineCoreProc overrides
+        this to broadcast to every frontend right away.
         """
         self._pending_notifications.extend(notifications)
 
