@@ -10,8 +10,14 @@ attend. The same model code serves any DSA checkpoint, including GLM-5.2
 
 from vllm.platforms import current_platform
 
-if current_platform.is_rocm() or current_platform.is_xpu():
-    raise NotImplementedError("deepseek_v32 currently supports NVIDIA SM100 only.")
+if current_platform.is_rocm():
+    from .amd.model import DeepseekV32ROCMAiterForCausalLM as DeepseekV32ForCausalLM
+    from .amd.mtp import DeepseekV32ROCMAiterMTP as DeepseekV32MTP
+elif current_platform.is_xpu():
+    raise NotImplementedError("deepseek_v32 does not yet support XPU.")
+elif current_platform.is_cuda() and current_platform.is_device_capability_family(100):
+    from .nvidia.model import DeepseekV32ForCausalLM
+    from .nvidia.mtp import DeepseekV32MTP
 
 from .nvidia.model import DeepseekV32ForCausalLM
 from .nvidia.mtp import DeepseekV32MTP
