@@ -181,6 +181,29 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         backend_key = "Flashinfer" if is_flashinfer else "Marlin"
         return shape_map[weight_name][backend_key]
 
+    @staticmethod
+    def _w2_scale_sharding(
+        actorder,
+        group_size: int,
+        intermediate_size_per_partition: int,
+        intermediate_size_full: int,
+    ) -> tuple[bool, int, bool]:
+        """Decide how to shard w2 group scales across TP for WNA16 Marlin MoE.
+
+        Only ``actorder="group"`` permutes activations by ``g_idx`` at runtime
+        and therefore needs the full-K (unsharded) w2 scales plus ``is_k_full``.
+        ``actorder="weight"``/``"static"`` (and ``None``) reorder weights at
+        quantization time, so scales shard normally per TP rank.
+        """
+        load_full_w2 = (actorder == "group") and group_size != -1
+        w2_scales_size = (
+            intermediate_size_full if load_full_w2 else intermediate_size_per_partition
+        )
+        is_k_full = (actorder != "group") or (
+            intermediate_size_per_partition == intermediate_size_full
+        )
+        return load_full_w2, w2_scales_size, is_k_full
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -230,21 +253,36 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         layer.register_parameter("w2_weight_packed", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
-        # In the case where we have actorder/g_idx,
-        # we do not partition the w2 scales
-        load_full_w2 = self.actorder and self.group_size != -1
-        w2_scales_size = (
-            intermediate_size_full if load_full_w2 else intermediate_size_per_partition
-        )
-
-        self.is_k_full = (not self.actorder) or (
-            intermediate_size_per_partition == intermediate_size_full
+        load_full_w2, w2_scales_size, self.is_k_full = self._w2_scale_sharding(
+            self.actorder,
+            self.group_size,
+            intermediate_size_per_partition,
+            intermediate_size_full,
         )
 
         if self.strategy == "channel":
             num_groups_w2 = num_groups_w13 = 1
             self.group_size = -1
         else:
+            if hidden_size % self.group_size != 0:
+                raise ValueError(
+                    "CompressedTensors WNA16 Marlin MoE requires hidden_size "
+                    f"({hidden_size}) to be divisible by group_size "
+                    f"({self.group_size})."
+                )
+            if (
+                not load_full_w2
+                and intermediate_size_per_partition % self.group_size != 0
+            ):
+                raise ValueError(
+                    "CompressedTensors WNA16 Marlin MoE with static group "
+                    "scales requires the MoE intermediate size per "
+                    "tensor-parallel partition "
+                    f"({intermediate_size_per_partition}) to be divisible by "
+                    f"group_size ({self.group_size}). Scale groups would "
+                    "otherwise cross TP shard boundaries; use a compatible TP "
+                    "size or enable expert parallelism."
+                )
             num_groups_w2 = w2_scales_size // self.group_size
             num_groups_w13 = hidden_size // self.group_size
 

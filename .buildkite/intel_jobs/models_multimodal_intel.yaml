@@ -1,5 +1,5 @@
 group: Models - Multimodal
-depends_on: 
+depends_on:
   - image-build-xpu
 steps:
 - label: "Multi-Modal Models (Standard) 1: qwen2"
@@ -125,7 +125,5 @@ steps:
       pip install open-clip-torch --no-deps &&
       cd tests &&
       pytest -v -s models/multimodal/processing/test_tensor_schema.py
-      --deselect "tests/models/multimodal/processing/test_tensor_schema.py::test_model_tensor_schema[mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4]"
-      --deselect "tests/models/multimodal/processing/test_tensor_schema.py::test_model_tensor_schema[Qwen/Qwen2.5-Omni-7B-AWQ]"
       --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB'
   parallelism: 4

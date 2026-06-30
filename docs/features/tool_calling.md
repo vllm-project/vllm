@@ -338,7 +338,7 @@ Supported models:
 
 Flags: `--tool-call-parser deepseek_v31 --chat-template {see_above}`
 
-### OpenAI OSS Models ('openai`)
+### OpenAI OSS Models (`openai`)
 
 Supported models:
 

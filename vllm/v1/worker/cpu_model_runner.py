@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import sys
 from contextlib import contextmanager
 from typing import Any
 
@@ -12,7 +13,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.tracing import instrument
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -78,7 +79,7 @@ class CPUModelRunner(GPUModelRunner):
         # Speculative decoding fallbacks
         import vllm.v1.sample.rejection_sampler
         import vllm.v1.spec_decode.llm_base_proposer
-        import vllm.v1.spec_decode.utils
+        import vllm.v1.spec_decode.utils as spec_decode_utils
 
         vllm.v1.spec_decode.llm_base_proposer.eagle_prepare_inputs_padded_kernel = (
             cpu_tl.eagle_prepare_inputs_padded_kernel
@@ -89,7 +90,18 @@ class CPUModelRunner(GPUModelRunner):
         vllm.v1.spec_decode.llm_base_proposer.copy_and_expand_eagle_inputs_kernel = (
             cpu_tl.copy_and_expand_eagle_inputs_kernel
         )
-        vllm.v1.spec_decode.utils.eagle_step_slot_mapping_metadata_kernel = (
+        spec_decode_utils.copy_and_expand_dflash_inputs_kernel = (
+            cpu_tl.copy_and_expand_dflash_inputs_kernel
+        )
+        dflash_module = sys.modules.get("vllm.v1.spec_decode.dflash")
+        if dflash_module is not None:
+            dflash_kernel_name = "copy_and_expand_dflash_inputs_kernel"
+            setattr(
+                dflash_module,
+                dflash_kernel_name,
+                cpu_tl.copy_and_expand_dflash_inputs_kernel,
+            )
+        spec_decode_utils.eagle_step_slot_mapping_metadata_kernel = (
             cpu_tl.eagle_step_slot_mapping_metadata_kernel
         )
         vllm.v1.sample.rejection_sampler.rejection_greedy_sample_kernel = (
@@ -102,6 +114,10 @@ class CPUModelRunner(GPUModelRunner):
         vllm.v1.sample.rejection_sampler.sample_recovered_tokens_kernel = (
             cpu_tl.sample_recovered_tokens_kernel
         )
+
+        import vllm.v1.worker.mamba_utils
+
+        vllm.v1.worker.mamba_utils.batch_memcpy_kernel = cpu_tl.batch_memcpy_kernel
 
     @instrument(span_name="Loading (CPU)")
     def load_model(self, load_dummy_weights: bool = False) -> None:
@@ -153,9 +169,25 @@ class CPUModelRunner(GPUModelRunner):
         pass
 
     def _zero_block_ids(self, block_ids: list[int]) -> None:
-        # CPU attention assigns -INF to logits at invalid positions,
-        # so stale KV cache data never affects computation.
-        pass
+        # Zero full-attention blocks to prevent stale data corruption on partial writes.
+        # Encoder-only (runner-only) layers are not FullAttentionSpec, so the
+        # spec filter below already excludes them; no runner-only skip needed.
+        seen_ptrs: set[int] = set()
+        for group in self.kv_cache_config.kv_cache_groups:
+            if not isinstance(group.kv_cache_spec, FullAttentionSpec):
+                continue
+            for layer_name in group.layer_names:
+                ctx = self.compilation_config.static_forward_context.get(layer_name)
+                if ctx is None:
+                    continue
+                kv = ctx.kv_cache
+                if not isinstance(kv, torch.Tensor):
+                    continue
+                if kv.data_ptr() in seen_ptrs:
+                    continue
+                seen_ptrs.add(kv.data_ptr())
+                for block_id in block_ids:
+                    kv[block_id].zero_()
 
     # =========================================================================
     # CPU-safe overrides for speculative decoding methods

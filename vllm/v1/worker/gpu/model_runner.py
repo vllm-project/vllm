@@ -27,6 +27,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -222,7 +223,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_tokens=self.max_num_tokens,
             device=self.device,
         )
-
         if self.use_pp:
             self.pp_handler = PPHandler(
                 max_num_reqs=self.max_num_reqs,
@@ -408,10 +408,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         block_table_max_model_len = self.max_model_len
         if self.is_encoder_decoder:
-            # Cross-attention block tables need to index encoder tokens
-            # (e.g., Whisper ~1500), which can exceed decoder max_model_len.
+            # Cross-attention block tables need to index encoder tokens, which
+            # can exceed the decoder's max_model_len.
             block_table_max_model_len = max(
                 block_table_max_model_len,
+                self.scheduler_config.max_num_encoder_input_tokens,
                 getattr(self.model_config.hf_config, "max_source_positions", 0),
             )
 
@@ -700,7 +701,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         start_time = time.perf_counter()
         gc.collect()
         torch.accelerator.empty_cache()
-        start_free_gpu_memory = torch.cuda.mem_get_info()[0]
+        start_free_gpu_memory = torch.accelerator.get_memory_info()[0]
 
         with self.maybe_setup_dummy_loras(self.lora_config):
             attn_states = self.cudagraph_manager.capture(
@@ -719,7 +720,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.speculator.capture(attn_states)
 
         end_time = time.perf_counter()
-        end_free_gpu_memory = torch.cuda.mem_get_info()[0]
+        end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
         elapsed_time = end_time - start_time
         cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
         # This usually takes 5~20 seconds.
@@ -847,6 +848,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_tokens = scheduler_output.total_num_scheduled_tokens
         num_tokens_after_padding = batch_desc.num_tokens
         assert num_tokens > 0
+        if envs.VLLM_MOE_SKIP_PADDING:
+            # Mark trailing cudagraph-padding rows so kernels can skip work for
+            # them when supported.
+            self.input_buffers.is_padding[:num_tokens].fill_(False)
+            self.input_buffers.is_padding[num_tokens:num_tokens_after_padding].fill_(
+                True
+            )
         num_tokens_per_req = scheduler_output.num_scheduled_tokens
         num_reqs = len(num_tokens_per_req)
 
@@ -976,6 +984,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.use_pp:
             # max_seq_len is only consumed by the PP `compute_need_sampled_mask`
             max_seq_len_np = self.req_states.max_seq_len[idx_mapping_np]
+
+        prompt_lens = None
+        if self.model_config.rswa_window is not None:
+            # prompt_lens is only used in R-SWA case.
+            prompt_lens = self.req_states.prompt_len.gpu[idx_mapping]
+
         return InputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -1001,10 +1015,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_seq_len_np=max_seq_len_np,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
+            is_padding=self.input_buffers.is_padding[:num_tokens_after_padding],
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
             has_structured_output_reqs=scheduler_output.has_structured_output_requests,
+            prompt_lens=prompt_lens,
         )
 
     def prepare_attn(
@@ -1095,7 +1111,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.total_len.gpu,
         )
 
-        self.model_state.postprocess_state(idx_mapping, num_sampled)
+        self.model_state.postprocess_state(
+            idx_mapping, num_sampled, self.req_states.num_computed_tokens.gpu
+        )
 
     @torch.inference_mode()
     def execute_model(
@@ -1160,6 +1178,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Prepare all the inputs and copy to the input buffers.
             input_batch = self.prepare_inputs(scheduler_output, batch_desc)
             block_tables, slot_mappings = self.prepare_attn(input_batch)
+            # Mamba "align" pre-copy: migrate recurrent state across block
+            # boundaries before the forward. Runs only on real batches, and
+            # before model_state.prepare_attn gathers num_accepted_tokens so the
+            # boundary reset is visible to the attention metadata.
+            self.model_state.preprocess_state(
+                input_batch,
+                block_tables,
+                self.kv_cache_config,
+                self.req_states.num_computed_tokens.gpu,
+            )
 
             if self.lora_config:
                 # Activate LoRA adapters.
@@ -1208,20 +1236,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.supports_mm_inputs and self.is_first_pp_rank:
             # Run MM encoder (if needed) and get multimodal embeddings.
             # Only first PP rank prepares multimodal embeddings.
-            # NOTE(woosuk): We must call get_mm_embeddings even during dummy runs
-            # to obtain inputs_embeds, because the compiled model expects this input.
-            if self.lora_config is not None:
-                set_active_mm_loras(
-                    model=self.model,
-                    lora_manager=self.lora_manager,
-                    encoder_cache=self.encoder_cache,
-                    req_id_to_index=self.req_states.req_id_to_index,
-                    lora_state=self.lora_state,
-                    scheduled_encoder_inputs=scheduler_output.scheduled_encoder_inputs,
+            if dummy_run:
+                # Obtain mm embeddings of correct shape for compiled model.
+                inputs_embeds = self.model_state.dummy_inputs_embeds(
+                    input_batch.num_tokens_after_padding
                 )
-            inputs_embeds = self.model_state.get_mm_embeddings(
-                scheduler_output.scheduled_encoder_inputs, input_batch
-            )
+            else:
+                scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
+                if self.lora_config is not None:
+                    set_active_mm_loras(
+                        model=self.model,
+                        lora_manager=self.lora_manager,
+                        encoder_cache=self.encoder_cache,
+                        req_id_to_index=self.req_states.req_id_to_index,
+                        lora_state=self.lora_state,
+                        scheduled_encoder_inputs=scheduled_encoder_inputs,
+                    )
+                inputs_embeds = self.model_state.get_mm_embeddings(
+                    scheduled_encoder_inputs, input_batch, self.req_states
+                )
             if inputs_embeds is not None and not self.model.requires_raw_input_tokens:
                 input_ids = None
 
@@ -1252,6 +1285,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             model_inputs["intermediate_tensors"] = IntermediateTensors(new_tensors)
             del intermediate_tensors
 
+        # Update the EPLB meta.
+        self.eplb.prepare_forward(self.model_config, input_batch.num_tokens)
+
         # Run model.
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
             # Use explicit cudagraph replay for FULL mode.
@@ -1277,6 +1313,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 batch_descriptor=batch_descriptor,
                 slot_mapping=slot_mappings_by_layer,
                 skip_compiled=skip_compiled,
+                is_padding=input_batch.is_padding,
             ):
                 self.kv_connector.pre_forward(scheduler_output)
                 if batch_desc.cg_mode == CUDAGraphMode.PIECEWISE:
@@ -1403,14 +1440,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Get cached multimodal embeddings for draft forward.
             # NOTE: This is done here because postprocess updates
             # num_computed_prefill_tokens.
-            mm_inputs = self.model_state.encoder_runner.gather_mm_embeddings(
-                input_batch.req_ids,
-                input_batch.num_tokens,
-                input_batch.num_scheduled_tokens,
-                input_batch.query_start_loc_np,
-                input_batch.prefill_len_np,
-                # +1 to consider the skew in eagle
-                input_batch.num_computed_prefill_tokens_np + 1,
+            # The EAGLE/MTP drafter reads one position ahead of the target.
+            mm_inputs = self.model_state.gather_mm_embeddings(
+                input_batch, draft_lookahead=1
             )
 
         # Postprocess results and update request states.

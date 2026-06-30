@@ -2335,6 +2335,13 @@ class GPUModelRunner(
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 req_doc_ranges[req_idx] = image_doc_ranges
 
+        # Reference Sliding Window Attention (R-SWA): pass per-request prompt
+        # lengths so the attention backend can keep the prefix globally visible.
+        # The backend owns the persistent CUDA-graph-safe GPU buffer.
+        rswa_prefix_lens = None
+        if self.model_config.rswa_window is not None:
+            rswa_prefix_lens = num_prompt_tokens_cpu
+
         cm_base = CommonAttentionMetadata(
             query_start_loc=self.query_start_loc.gpu[: num_reqs_padded + 1],
             query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs_padded + 1],
@@ -2352,6 +2359,7 @@ class GPUModelRunner(
             is_prefilling=is_prefilling,
             positions=self.positions[:num_tokens_padded],
             mm_req_doc_ranges=req_doc_ranges,
+            rswa_prefix_lens=rswa_prefix_lens,
         )
 
         if self.dcp_world_size > 1:
@@ -3152,7 +3160,16 @@ class GPUModelRunner(
 
                 mm_hash = mm_feature.identifier
                 encoder_output = self.encoder_cache.get(mm_hash, None)
-                assert encoder_output is not None, f"Encoder cache miss for {mm_hash}."
+                if encoder_output is None:
+                    # A feature starting at/after the processed boundary is only
+                    # reached via the drafter's +1 look-ahead and might not be
+                    # encoded yet; fall back to the token embedding for drafting.
+                    if (
+                        start_pos
+                        >= req_state.num_computed_tokens + num_scheduled_tokens
+                    ):
+                        continue
+                    raise RuntimeError(f"Encoder cache miss for {mm_hash}.")
 
                 if (is_embed := pos_info.is_embed) is not None:
                     is_embed = is_embed[start_idx:end_idx]
@@ -4302,6 +4319,13 @@ class GPUModelRunner(
         # When spec decode is enabled, defer connector finalization
         # (wait_for_save + clear metadata) until after draft model runs.
         defer_kv_connector_finalize = self.speculative_config is not None
+        # Update the EPLB meta.
+        if self.eplb_state is not None:
+            self.eplb_state.prepare_forward(
+                self.model_config,
+                num_tokens_unpadded,
+                ubatch_slices_padded,
+            )
         with (
             set_forward_context(
                 attn_metadata,
@@ -5198,6 +5222,8 @@ class GPUModelRunner(
                             self.drafter.model,
                             spec_config.draft_model_config,
                         )
+                        assert hasattr(self.drafter, "set_eplb_state")
+                        self.drafter.set_eplb_state(self.eplb_state)
                         eplb_models += 1
 
                 self._setup_eagle3_aux_hidden_state_outputs()
@@ -6359,7 +6385,7 @@ class GPUModelRunner(
         _ROPE_DICT.clear()
 
         reset_workspace_manager()
-        if current_platform.is_rocm():
+        if current_platform.is_rocm() or current_platform.is_xpu():
             gc.collect()
             torch.accelerator.empty_cache()
             torch.accelerator.synchronize()
@@ -6501,7 +6527,7 @@ class GPUModelRunner(
                     mem_samples: list[int] = []
 
                     for i, desc in enumerate(profile_descs):
-                        mem_before = torch.cuda.mem_get_info()[0]
+                        mem_before = torch.accelerator.get_memory_info()[0]
                         self._warmup_and_capture(
                             desc,
                             cudagraph_runtime_mode=mode,
@@ -6515,7 +6541,7 @@ class GPUModelRunner(
                             ),
                         )
                         torch.accelerator.synchronize()
-                        free_after = torch.cuda.mem_get_info()[0]
+                        free_after = torch.accelerator.get_memory_info()[0]
                         mem_samples.append(mem_before - free_after)
 
                     first_capture = mem_samples[0]
@@ -6537,10 +6563,10 @@ class GPUModelRunner(
                     )
 
                 if encoder_cudagraph_manager is not None:
-                    mem_before = torch.cuda.mem_get_info()[0]
+                    mem_before = torch.accelerator.get_memory_info()[0]
                     encoder_cudagraph_manager.capture(graph_pool=encoder_profiling_pool)
                     torch.accelerator.synchronize()
-                    free_after = torch.cuda.mem_get_info()[0]
+                    free_after = torch.accelerator.get_memory_info()[0]
                     encoder_memory_estimate = max(mem_before - free_after, 0)
 
                     logger.debug(
@@ -6606,7 +6632,7 @@ class GPUModelRunner(
         with self._freeze_gc(), graph_capture(device=self.device):
             torch.accelerator.synchronize()
             torch.accelerator.empty_cache()
-            start_free_gpu_memory = torch.cuda.mem_get_info()[0]
+            start_free_gpu_memory = torch.accelerator.get_memory_info()[0]
 
             for (
                 runtime_mode,
@@ -6624,7 +6650,7 @@ class GPUModelRunner(
                 self.encoder_cudagraph_manager.capture(graph_pool=encoder_graph_pool)
 
             torch.accelerator.synchronize()
-            end_free_gpu_memory = torch.cuda.mem_get_info()[0]
+            end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
 
         # Disable cudagraph capturing globally, so any unexpected cudagraph
         # capturing will be detected and raise an error after here.
