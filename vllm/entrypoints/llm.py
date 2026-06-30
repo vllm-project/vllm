@@ -887,9 +887,13 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         update_info_dict = (
             request["update_info"] if isinstance(request, dict) else request.update_info
         )
+        options_dict = (
+            request.get("options", {}) if isinstance(request, dict) else request.options
+        )
 
         self.llm_engine.collective_rpc(
-            "update_weights", kwargs={"update_info": update_info_dict}
+            "update_weights",
+            kwargs={"update_info": update_info_dict, "options": options_dict},
         )
 
     def finish_weight_update(self) -> None:

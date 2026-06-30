@@ -157,6 +157,7 @@ class Worker(WorkerBase):
         # is available, since the engine needs a reference to the model.
         self.weight_transfer_engine: WeightTransferEngine | None = None
         self._weight_update_active = False
+        self._draft_weight_update_active = False
 
         # Torch/CUDA profiler. Enabled and configured through profiler_config.
         # Profiler wrapper is created lazily in profile() when start is called,
@@ -988,6 +989,68 @@ class Worker(WorkerBase):
             return
         draft_model.load_weights(iter(weights))
 
+    @staticmethod
+    def _get_weight_update_target(options: dict | None) -> str:
+        if not options:
+            return "model"
+        if not isinstance(options, dict):
+            raise TypeError(
+                f"Weight update options must be a dictionary, got {type(options)}."
+            )
+        unsupported_options = set(options) - {"include_draft"}
+        if unsupported_options:
+            raise ValueError(
+                f"Unsupported weight update option(s): {sorted(unsupported_options)}."
+            )
+
+        return "draft" if options.get("include_draft", False) else "model"
+
+    def _load_draft_model_weights(
+        self,
+        weights: list[tuple[str, torch.Tensor]],
+    ) -> None:
+        draft_model = self.get_draft_model()
+        if draft_model is None:
+            raise RuntimeError(
+                "Draft model weight update requested, but no draft model is configured."
+            )
+        draft_model.load_weights(iter(weights))
+
+    def _initialize_draft_weight_update(self) -> nn.Module:
+        draft_model = self.get_draft_model()
+        if draft_model is None:
+            raise RuntimeError(
+                "Draft model weight update requested, but no draft model is configured."
+            )
+
+        if not getattr(self, "_draft_weight_update_active", False):
+            from vllm.model_executor.model_loader.reload import (
+                initialize_layerwise_reload,
+            )
+
+            initialize_layerwise_reload(draft_model)
+            self._draft_weight_update_active = True
+
+        return draft_model
+
+    def _update_draft_weights(self, update_info: dict) -> None:
+        assert self.weight_transfer_engine is not None
+
+        typed_update_info = self.weight_transfer_engine.parse_update_info(update_info)
+        if getattr(typed_update_info, "num_updates_list", None) is not None:
+            raise ValueError(
+                "Sparse weight updates for the draft model are not supported."
+            )
+
+        draft_model = self._initialize_draft_weight_update()
+        original_model = self.weight_transfer_engine.model
+        try:
+            self.weight_transfer_engine.model = draft_model
+            self.weight_transfer_engine.receive_weights(typed_update_info)
+            torch.accelerator.synchronize()
+        finally:
+            self.weight_transfer_engine.model = original_model
+
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_runner.get_supported_tasks()
 
@@ -1263,8 +1326,9 @@ class Worker(WorkerBase):
 
         self.weight_transfer_engine.start_weight_update()
         self._weight_update_active = True
+        self._draft_weight_update_active = False
 
-    def update_weights(self, update_info: dict) -> None:
+    def update_weights(self, update_info: dict, options: dict | None = None) -> None:
         """
         Receive one weight update chunk from the trainer.
 
@@ -1273,6 +1337,9 @@ class Worker(WorkerBase):
 
         Args:
             update_info: Dictionary containing backend-specific update info
+            options: Optional controls for the update. ``include_draft=True``
+                loads the received weights into the speculative draft model
+                instead of the target model.
         """
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
@@ -1283,9 +1350,14 @@ class Worker(WorkerBase):
             )
 
         try:
-            self.weight_transfer_engine.update_weights(update_info)
+            target_model = self._get_weight_update_target(options)
+            if target_model == "model":
+                self.weight_transfer_engine.update_weights(update_info)
+            else:
+                self._update_draft_weights(update_info)
         except BaseException:
             self._weight_update_active = False
+            self._draft_weight_update_active = False
             raise
 
     def finish_weight_update(self) -> None:
@@ -1298,8 +1370,22 @@ class Worker(WorkerBase):
                 "finish_weight_update called without a matching start_weight_update."
             )
 
+        if self._draft_weight_update_active:
+            from vllm.model_executor.model_loader.reload import (
+                finalize_layerwise_reload,
+            )
+
+            draft_model = self.get_draft_model()
+            if draft_model is None:
+                raise RuntimeError(
+                    "Draft model weight update requested, but no draft model "
+                    "is configured."
+                )
+            finalize_layerwise_reload(draft_model, self.model_config)
+
         self.weight_transfer_engine.finish_weight_update()
         self._weight_update_active = False
+        self._draft_weight_update_active = False
 
     def shutdown(self) -> None:
         gc.unfreeze()
