@@ -429,15 +429,18 @@ def _run_fused_moe_lora_one_shot(
     # Tried BLOCK_N=64 for w13 (N=192) to avoid the half-wasted second
     # tile: regressed 11-29% because the "waste" was just masked stores
     # (cheap) and the extra iteration added load + index overhead.
+    if npid > 1:
+        block_n, nw, ns = 128, 8, 3
+    else:
+        block_n, nw, ns = 128, 4, 3
 
     # Devices with max shmem size less than 68KB can't support 3-stage
     # pipeline. Fall back to a 2-stage on such devices
-    max_smem = get_max_shared_memory_bytes(device.index)
-    ns = 3 if max_smem >= 68 * 1024 else 2
-    if npid > 1:
-        block_n, nw = 128, 8
-    else:
-        block_n, nw = 128, 4
+    if current_platform.is_cuda_alike():
+        max_shmem_bytes = 68 * 1024
+        if get_max_shared_memory_bytes(device.index) < max_shmem_bytes:
+            ns = min(ns, 2)
+
     # BLOCK_K choice: for hidden-sized K (≥256, i.e. the K=hidden_size
     # shrink input on w13) force BLOCK_K=128 -- the wider tile halves the
     # K-loop trip count and removes the scoreboard stalls that dominated
