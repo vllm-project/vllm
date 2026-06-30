@@ -31,6 +31,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path
+from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -58,7 +59,7 @@ class NixlBaseConnectorScheduler:
         kv_cache_config: "KVCacheConfig",
     ):
         self.vllm_config = vllm_config
-        self.block_size = vllm_config.cache_config.block_size
+        self.block_size, _ = resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
         self.engine_id: EngineId = engine_id
         self.kv_cache_config = kv_cache_config
         self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
@@ -122,8 +123,15 @@ class NixlBaseConnectorScheduler:
 
         # Gather Sliding Window sizes for each kv cache group (if any) in number of
         # blocks per KV cache group. This is used to clip the local attention window.
+        cp_world_size = (
+            vllm_config.parallel_config.decode_context_parallel_size
+            * vllm_config.parallel_config.prefill_context_parallel_size
+        )
         sw_sizes_tokens: list[tuple[int, int]] = [
-            (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
+            (
+                g.kv_cache_spec.sliding_window,
+                g.kv_cache_spec.block_size * cp_world_size,
+            )
             if isinstance(g.kv_cache_spec, SlidingWindowSpec)
             else (0, self.block_size)
             for g in kv_cache_config.kv_cache_groups

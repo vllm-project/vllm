@@ -52,6 +52,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
+from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
 from vllm.v1.request import RequestStatus
@@ -563,7 +564,7 @@ class MooncakeConnectorScheduler:
         kv_cache_config: "KVCacheConfig",
     ):
         self.vllm_config = vllm_config
-        self.block_size = vllm_config.cache_config.block_size
+        self.block_size, _ = resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
 
         assert vllm_config.kv_transfer_config
         self.is_kv_producer: bool = (
@@ -592,8 +593,15 @@ class MooncakeConnectorScheduler:
         self._reqs_not_processed: set[TransferId] = set()
 
         # Compute sliding window block counts per KV cache group.
+        cp_world_size = (
+            vllm_config.parallel_config.decode_context_parallel_size
+            * vllm_config.parallel_config.prefill_context_parallel_size
+        )
         sw_sizes_tokens: list[tuple[int, int]] = [
-            (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
+            (
+                g.kv_cache_spec.sliding_window,
+                g.kv_cache_spec.block_size * cp_world_size,
+            )
             if isinstance(g.kv_cache_spec, SlidingWindowSpec)
             else (0, self.block_size)
             for g in kv_cache_config.kv_cache_groups
