@@ -4155,8 +4155,21 @@ class ASRDataset(HuggingFaceDataset):
         **kwargs,
     ) -> list[SampleRequest]:
         output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
-        if "openai" in getattr(tokenizer, "name_or_path", ""):
+        name_or_path = getattr(tokenizer, "name_or_path", "")
+        tok_class = type(tokenizer).__name__
+        if "openai" in name_or_path:
             prompt = "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>"
+        elif tok_class == "CohereAsrTokenizer" or "cohere" in name_or_path.lower():
+            # CohereAsrTokenizer does not inject a decoder start token, so the
+            # decoder prompt must supply the full control-token sequence.
+            # Token order: context boundary, transcript start, emotion (default
+            # undefined), language (en), transcription directive (en), punctuation
+            # enabled, no ITN, no timestamp, no diarization.
+            prompt = (
+                "<|startofcontext|><|startoftranscript|>"
+                "<|emo:undefined|><|en|><|en|><|pnc|><|noitn|>"
+                "<|notimestamp|><|nodiarize|>"
+            )
         else:
             prompt = ""
         prompt_len = len(tokenizer(prompt).input_ids)
