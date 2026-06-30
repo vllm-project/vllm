@@ -1,14 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Multi-Token Predictor for DeepSeek V3.2 on ROCm.
+
+Extends the NVIDIA MTP (nvidia/mtp.py) with:
+  - ROCm aiter shared-expert fusion in load_weights
+  - DeepseekV32ROCMAiterDecoderLayer for the decoder block inside the MTP layer
+"""
 import typing
 from collections.abc import Callable, Iterable
 
 import torch
 import torch.nn as nn
 
-import vllm._custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
+from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -17,17 +23,11 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.mtp_validation import (
-    is_mtp_completeness_check_enabled,
-)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.deepseek_mtp import (
-    SharedHead,
-    _restore_full_token_layout_if_needed,
-)
+from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2MixtureOfExperts,
     DeepseekV2MoE,
@@ -40,17 +40,12 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.v1.attention.backends.mla.sparse_utils import (
-    phys_shadow,
-    register_phys_shadow,
-)
 
-from vllm.models.deepseek_v32.common.fused_ops import fused_allreduce_rms_norm
-from vllm.models.deepseek_v32.common.kernels import fused_eh_norm
-from .model import DeepseekV32DecoderLayer
+from ..common.kernels import fused_eh_norm
+from .model import DeepseekV32ROCMAiterDecoderLayer
 
 
-class DeepseekV32MultiTokenPredictorLayer(nn.Module):
+class DeepseekV32ROCMAiterMultiTokenPredictorLayer(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None
@@ -61,19 +56,6 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
-        # bf16 skinny GEMM for the eh_proj, B300+B200 measured: GLM-5.2
-        # (6144, 12288) wins at M <= 3, DSv3.2 (7168, 14336) at M <= 2;
-        # cuBLAS holds above (the 151/205MB weights stream at ~5.7TB/s).
-        eh_dispatch = {(6144, 12288): 3, (7168, 14336): 2}
-        eh_weight = getattr(self.eh_proj, "weight", None)
-        self._eh_skinny_max = (
-            eh_dispatch.get(tuple(eh_weight.shape), 0)
-            if current_platform.is_device_capability_family(100)
-            and hasattr(torch.ops._C, "bf16_skinny_gemm")
-            and eh_weight is not None
-            and eh_weight.dtype == torch.bfloat16
-            else 0
-        )
 
         topk_indices_buffer = torch.empty(
             vllm_config.scheduler_config.max_num_batched_tokens,
@@ -81,11 +63,10 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
             dtype=torch.int32,
             device=current_platform.device_type,
         )
-        register_phys_shadow(topk_indices_buffer)
         self.shared_head = SharedHead(
             config=config, prefix=prefix, quant_config=quant_config
         )
-        self.mtp_block = DeepseekV32DecoderLayer(
+        self.mtp_block = DeepseekV32ROCMAiterDecoderLayer(
             vllm_config,
             prefix,
             config=config,
@@ -101,7 +82,6 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         spec_step_index: int = 0,
     ) -> torch.Tensor:
         assert inputs_embeds is not None
-        # Fused: zero pos-0 embeds + enorm(embeds) + hnorm(prev) + cat -> [N, 2H].
         eh_input = fused_eh_norm(
             positions,
             inputs_embeds,
@@ -110,44 +90,15 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
             self.hnorm.weight,
             self.enorm.variance_epsilon,
         )
-        if (
-            eh_input.shape[0] <= self._eh_skinny_max
-            and eh_input.dtype == torch.bfloat16
-        ):
-            hidden_states = ops.bf16_skinny_gemm(eh_input, self.eh_proj.weight)
-        else:
-            hidden_states = self.eh_proj(eh_input)
+        hidden_states = self.eh_proj(eh_input)
         hidden_states, residual = self.mtp_block(
             positions=positions, hidden_states=hidden_states, residual=None
         )
-        hidden_states, residual = _restore_full_token_layout_if_needed(
-            hidden_states,
-            residual,
-            positions.shape[0],
-            is_sequence_parallel=self.mtp_block.use_sequence_parallel_moe,
-        )
-        # Recycle the POST-final-norm hidden into the next draft step. The
-        # residual-add is fused into the final RMSNorm so it is computed
-        # exactly once, and the result is returned for both tuple positions:
-        # the draft-logits hidden (compute_logits applies the LM head only) and
-        # the recycled previous_hidden_states. Recycling the pre-final-norm
-        # hidden mismatches the draft model's hnorm and lowers MTP acceptance;
-        # post-norm recycle matches deepseek_mtp.py (PR #45895). The tuple form
-        # is understood by both the V2 speculator (isinstance-tuple check) and
-        # the legacy proposer (model_returns_tuple is True for the
-        # DeepSeekMTPModel architecture).
-        if self.mtp_block.use_sequence_parallel_moe:
-            hidden_states, _ = self.shared_head.norm(hidden_states, residual)
-        else:
-            # The MoE output is left un-reduced; fuse its all-reduce into the
-            # final norm, as the main model does at layer boundaries.
-            hidden_states, _ = fused_allreduce_rms_norm(
-                hidden_states, residual, self.shared_head.norm
-            )
-        return hidden_states, hidden_states
+        hidden_states = tensor_model_parallel_all_reduce(hidden_states)
+        return residual + hidden_states
 
 
-class DeepseekV32MultiTokenPredictor(nn.Module):
+class DeepseekV32ROCMAiterMultiTokenPredictor(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -155,7 +106,7 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
         self.num_mtp_layers = config.num_nextn_predict_layers
         self.layers = torch.nn.ModuleDict(
             {
-                str(idx): DeepseekV32MultiTokenPredictorLayer(
+                str(idx): DeepseekV32ROCMAiterMultiTokenPredictorLayer(
                     vllm_config, f"{prefix}.layers.{idx}"
                 )
                 for idx in range(
@@ -172,29 +123,10 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
     def set_skip_topk(self, skip: bool):
-        # index_share_for_mtp_iteration: step 0 computes top-k, steps 1+ reuse.
         for layer in self.layers.values():
             self_attn = getattr(layer.mtp_block, "self_attn", None)
             if self_attn is not None and hasattr(self_attn, "skip_topk"):
                 self_attn.skip_topk = skip
-
-    def compact_topk_indices(self, slot_ids: torch.Tensor):
-        """Gather the top-k index rows at ``slot_ids`` to the front of the buffer."""
-        num_slots = slot_ids.numel()
-        for layer in self.layers.values():
-            self_attn = getattr(layer.mtp_block, "self_attn", None)
-            if self_attn is not None and hasattr(self_attn, "topk_indices_buffer"):
-                topk_indices_buffer = self_attn.topk_indices_buffer
-                topk_indices_buffer[:num_slots] = topk_indices_buffer[slot_ids]
-                # The physical-index shadow mirrors this buffer row-wise
-                # (shadow[j] == convert(logical[j])); re-arrange it the same
-                # way or skip_topk draft steps read the step-0 multi-token
-                # layout's rows for the wrong tokens/requests.
-                shadow = phys_shadow(topk_indices_buffer)
-                if shadow is not None:
-                    phys, seq = shadow
-                    phys[:num_slots] = phys[slot_ids]
-                    seq[:num_slots] = seq[slot_ids]
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -225,31 +157,17 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
     ) -> torch.Tensor:
         current_step_idx = spec_step_idx % self.num_mtp_layers
         mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]
-        # hidden_states is already post-final-norm (produced in the layer
-        # forward and recycled as-is); apply the LM head only, without a
-        # second RMSNorm.
-        return self.logits_processor(mtp_layer.shared_head.head, hidden_states)
-
-    def get_top_tokens(
-        self,
-        hidden_states: torch.Tensor,
-        spec_step_idx: int = 0,
-    ) -> torch.Tensor:
-        # Greedy draft token ids via vocab-parallel local argmax: skips the
-        # full-vocab logits all-gather (use_local_argmax_reduction).
-        current_step_idx = spec_step_idx % self.num_mtp_layers
-        mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]
-        return self.logits_processor.get_top_tokens(
-            mtp_layer.shared_head.head, hidden_states
+        return self.logits_processor(
+            mtp_layer.shared_head.head, mtp_layer.shared_head(hidden_states)
         )
 
 
-class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
+class DeepseekV32ROCMAiterMTP(nn.Module, DeepseekV2MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
-        self.model = DeepseekV32MultiTokenPredictor(
+        self.model = DeepseekV32ROCMAiterMultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         self.set_moe_parameters()
@@ -291,25 +209,6 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
     ) -> torch.Tensor | None:
         return self.model.compute_logits(hidden_states, spec_step_idx)
 
-    def get_top_tokens(
-        self,
-        hidden_states: torch.Tensor,
-        spec_step_idx: int | None = None,
-    ) -> torch.Tensor:
-        # The V2 speculator calls this without spec_step_idx; that is only
-        # correct while a single MTP layer is cycled for every draft step
-        # (num_nextn_predict_layers == 1, as in GLM-5.2/DSV3.2). Guard the
-        # assumption so a future multi-layer MTP fails loudly instead of
-        # silently using step 0's head for every step.
-        if spec_step_idx is None:
-            assert self.model.num_mtp_layers == 1, (
-                "get_top_tokens called without spec_step_idx on a "
-                "multi-layer MTP; thread the draft step index through "
-                "the speculator."
-            )
-            spec_step_idx = 0
-        return self.model.get_top_tokens(hidden_states, spec_step_idx)
-
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
         spec_layer_weight_names = [
             "embed_tokens",
@@ -336,6 +235,9 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
         return name
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        rocm_aiter_moe_shared_expert_enabled = (
+            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+        )
         stacked_params_mapping = [
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
@@ -349,7 +251,12 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts,
+            num_experts=self.config.n_routed_experts
+            + (
+                self.config.n_shared_experts
+                if rocm_aiter_moe_shared_expert_enabled
+                else 0
+            ),
         )
 
         pp_missing_layer_names = get_pp_missing_layer_names(self)
@@ -362,6 +269,9 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is None:
                 continue
+            is_fusion_moe_shared_experts_layer = (
+                rocm_aiter_moe_shared_expert_enabled and ("mlp.shared_experts" in name)
+            )
             name = self._rewrite_spec_layer_name(spec_layer, name)
 
             if _try_load_fp8_indexer_wk(
@@ -379,6 +289,8 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
                     continue
                 if ("mlp.experts." in name) and name not in params_dict:
                     continue
+                if is_fusion_moe_shared_experts_layer:
+                    continue
                 name_mapped = name.replace(weight_name, param_name)
                 if (
                     param_name == "fused_qkv_a_proj"
@@ -393,47 +305,79 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                is_expert_weight = False
-                for mapping in expert_params_mapping:
-                    param_name, weight_name, expert_id, shard_id = mapping  # type: ignore[assignment]
-                    if weight_name not in name:
-                        continue
-                    is_expert_weight = True
-                    name_mapped = name.replace(weight_name, param_name)
-                    param = params_dict[name_mapped]
-                    weight_loader = typing.cast(
-                        Callable[..., bool], param.weight_loader
+                num_chunks = 1
+                if is_fusion_moe_shared_experts_layer:
+                    num_chunks = getattr(self.config, "n_shared_experts", 1) or 1
+                    split_dim = (
+                        1
+                        if ("down_proj.weight" in name and loaded_weight.ndim > 1)
+                        else 0
                     )
-                    success = weight_loader(
-                        param,
-                        loaded_weight,
-                        name_mapped,
-                        shard_id=shard_id,
-                        expert_id=expert_id,
-                        return_success=True,
-                    )
-                    if success:
-                        name = name_mapped
-                        break
-                else:
-                    if is_expert_weight:
-                        continue
-                    if name.endswith(".bias") and name not in params_dict:
-                        continue
-                    name = maybe_remap_kv_scale_name(name, params_dict)  # type: ignore[assignment]
-                    if name is None:
-                        continue
-                    if (
-                        spec_layer != self.model.mtp_start_layer_idx
-                        and ".layers" not in name
-                    ):
-                        continue
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
-            loaded_params.add(name)
+                    total = loaded_weight.shape[split_dim]
+                    assert total % num_chunks == 0
+                    chunk_size = total // num_chunks
+
+                for j in range(num_chunks):
+                    chunk_name = name
+                    weight_to_load = loaded_weight
+                    if is_fusion_moe_shared_experts_layer:
+                        chunk_slice = slice(j * chunk_size, (j + 1) * chunk_size)
+                        if loaded_weight.ndim == 1:
+                            weight_to_load = loaded_weight[chunk_slice]
+                        elif split_dim == 0:
+                            weight_to_load = loaded_weight[chunk_slice, :]
+                        else:
+                            weight_to_load = loaded_weight[:, chunk_slice]
+                        chunk_name = name.replace(
+                            "mlp.shared_experts",
+                            f"mlp.experts.{self.config.n_routed_experts + j}",
+                        )
+
+                    is_expert_weight = False
+                    for mapping in expert_params_mapping:
+                        param_name, weight_name, expert_id, shard_id = mapping  # type: ignore[assignment]
+                        if weight_name not in chunk_name:
+                            continue
+                        is_expert_weight = True
+                        name_mapped = chunk_name.replace(weight_name, param_name)
+                        param = params_dict[name_mapped]
+                        weight_loader = typing.cast(
+                            Callable[..., bool], param.weight_loader
+                        )
+                        success = weight_loader(
+                            param,
+                            weight_to_load,
+                            name_mapped,
+                            shard_id=shard_id,
+                            expert_id=expert_id,
+                            return_success=True,
+                        )
+                        if success:
+                            if not is_fusion_moe_shared_experts_layer:
+                                name = name_mapped
+                            else:
+                                loaded_params.add(name_mapped)
+                            break
+                    else:
+                        if is_expert_weight:
+                            continue
+                        if name.endswith(".bias") and name not in params_dict:
+                            continue
+                        name = maybe_remap_kv_scale_name(name, params_dict)  # type: ignore[assignment]
+                        if name is None:
+                            continue
+                        if (
+                            spec_layer != self.model.mtp_start_layer_idx
+                            and ".layers" not in name
+                        ):
+                            continue
+                        param = params_dict[name]
+                        weight_loader = getattr(
+                            param, "weight_loader", default_weight_loader
+                        )
+                        weight_loader(param, loaded_weight)
+                if not is_fusion_moe_shared_experts_layer:
+                    loaded_params.add(name)
 
         loaded_layers: set[int] = set()
         for param_name in loaded_params:
@@ -444,7 +388,7 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
             self.model.mtp_start_layer_idx,
             self.model.mtp_start_layer_idx + self.model.num_mtp_layers,
         ):
-            if layer_idx not in loaded_layers and is_mtp_completeness_check_enabled():
+            if layer_idx not in loaded_layers:
                 raise ValueError(
                     f"MTP speculative decoding layer {layer_idx} weights "
                     f"missing from checkpoint."
