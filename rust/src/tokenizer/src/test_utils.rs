@@ -145,7 +145,7 @@ impl TestTokenizer {
             "configured test token id {id} overlaps byte fallback range 0..=255"
         );
         assert!(
-            token.as_bytes().len() > 1,
+            token.len() > 1,
             "configured test token text {token:?} overlaps byte fallback token text"
         );
         if self.token_to_id.insert(token.clone(), id).is_some() {
