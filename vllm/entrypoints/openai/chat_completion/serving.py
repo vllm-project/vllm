@@ -863,10 +863,23 @@ class OpenAIServingChat(OpenAIServing):
                 )
                 if not request.include_reasoning:
                     reasoning = None
+                # Reasoning parsers that extract grounding citations
+                # (Cohere Command family) cache them on the parser
+                # instance after ``parse``. We surface them here so
+                # grounded surfaces (e.g. /cohere/v2/chat) can attach
+                # them to the response message. Non-citation parsers
+                # leave the attribute absent and ``citations`` stays
+                # ``None`` so it round-trips out of the OpenAI envelope.
+                citations = getattr(
+                    getattr(parser, "reasoning_parser", None),
+                    "last_unary_citations",
+                    None,
+                )
             else:
                 reasoning = None
                 content = output.text
                 tool_calls = []
+                citations = None
 
             auto_tools_called = False
             is_named_tool_choice = (
@@ -930,6 +943,10 @@ class OpenAIServingChat(OpenAIServing):
                     "completion."
                 )
                 message = ChatMessage(role=role, reasoning=reasoning, content=content)
+
+            if citations:
+                message.citations = citations
+
             # In OpenAI's API, when a tool is called, the finish_reason is:
             # "tool_calls" for "auto" or "required" tool calls,
             # and "stop" for named tool calls.

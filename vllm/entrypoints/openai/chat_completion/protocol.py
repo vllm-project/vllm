@@ -21,6 +21,7 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.entrypoints.openai.engine.protocol import (
     AnyResponseFormat,
+    Citation,
     DeltaMessage,
     FunctionCall,
     FunctionDefinition,
@@ -65,6 +66,11 @@ class ChatMessage(OpenAIBaseModel):
 
     # vLLM-specific fields that are not in OpenAI spec
     reasoning: str | None = None
+    # Citations grounding the message content in source material. Populated
+    # by parsers/renderers for grounded models (e.g. Cohere Command). Left
+    # unset (and therefore omitted from JSON) for ungrounded models so
+    # OpenAI-compatible clients see the standard shape.
+    citations: list[Citation] | None = None
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler):

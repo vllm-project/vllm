@@ -347,11 +347,58 @@ class ExtractedToolCallInformation(BaseModel):
     content: str | None = None
 
 
+class CitationSource(OpenAIBaseModel):
+    """Source attribution for a :class:`Citation`.
+
+    Mirrors the shape used by Cohere's Chat v2 API. ``type`` is the source
+    discriminator (``document`` or ``tool``); ``id`` is the citing
+    document/tool-output identifier; ``document`` and ``tool_output`` carry
+    the original payload that produced the citation.
+    """
+
+    type: Literal["document", "tool"]
+    id: str | None = None
+    document: dict[str, Any] | None = None
+    tool_output: dict[str, Any] | None = None
+
+
+class Citation(OpenAIBaseModel):
+    """A citation grounding a span of generated text in source material.
+
+    This is a vLLM-specific extension to the OpenAI chat completion shape
+    so that grounded models (e.g. Cohere Command-family) can surface
+    citation metadata through the standard chat completion responses. It is
+    consumed by surfaces that expose citations (such as Cohere's
+    ``/cohere/v2/chat`` endpoint).
+    """
+
+    start: int | None = None
+    """Start character offset in the surrounding text content."""
+    end: int | None = None
+    """End character offset (exclusive) in the surrounding text content."""
+    text: str | None = None
+    """The cited text snippet."""
+    sources: list[CitationSource] = Field(default_factory=list)
+    """Source documents / tool outputs that ground this citation."""
+    content_index: int | None = None
+    """Index of the content block this citation refers to (when the message
+    has multiple content blocks)."""
+    type: Literal["TEXT_CONTENT", "THINKING_CONTENT", "PLAN"] | None = None
+    """Which kind of content block this citation grounds: the user-visible
+    text (``TEXT_CONTENT``), a thinking block (``THINKING_CONTENT``), or a
+    tool-plan block (``PLAN``). ``None`` means unspecified."""
+
+
 class DeltaMessage(OpenAIBaseModel):
     role: str | None = None
     content: str | None = None
     reasoning: str | None = None
     tool_calls: list[DeltaToolCall] = Field(default_factory=list)
+    # vLLM-specific extension: citations grounding the streamed content.
+    # Surfaces (e.g. Cohere Chat v2) consume this when present; OpenAI
+    # clients ignore it. Default is ``None`` so it is omitted from the wire
+    # for non-grounded models.
+    citations: list[Citation] | None = None
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler):

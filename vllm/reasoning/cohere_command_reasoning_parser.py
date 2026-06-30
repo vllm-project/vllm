@@ -25,6 +25,8 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.entrypoints.openai.engine.protocol import (
     AnyResponseFormat,
+    Citation,
+    CitationSource,
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -404,6 +406,59 @@ def _schema_dict_from_structured_outputs(
     )
 
 
+def _melody_sources_to_vllm(raw_sources: Any) -> list[CitationSource]:
+    """Convert melody's ``Source`` objects into :class:`CitationSource`.
+
+    melody's ``Source`` shape is ``{tool_call_index, tool_result_indices,
+    document_ids}``. ``document_ids`` may not be set; if it is empty and
+    we have no resolvable identifier then we fall back to a generic
+    ``tool``-style source carrying the tool-call index for visibility.
+    """
+    out: list[CitationSource] = []
+    for s in raw_sources or []:
+        # TODO Verify the tool vs doc logic
+        doc_ids: list[str] = list(getattr(s, "document_ids", None) or [])
+        if doc_ids:
+            for did in doc_ids:
+                if did:
+                    out.append(CitationSource(type="document", id=did))
+            continue
+        tool_call_index = getattr(s, "tool_call_index", None)
+        out.append(
+            CitationSource(
+                type="tool",
+                id=(
+                    str(tool_call_index)
+                    if tool_call_index is not None
+                    else None
+                ),
+            )
+        )
+    return out
+
+
+def _melody_citations_to_vllm(raw_citations: Any) -> list[Citation] | None:
+    """Convert melody's ``FilterCitation`` objects into :class:`Citation`."""
+    if not raw_citations:
+        return None
+    out: list[Citation] = []
+    for c in raw_citations:
+        out.append(
+            Citation(
+                start=getattr(c, "start_index", None),
+                end=getattr(c, "end_index", None),
+                text=getattr(c, "text", None),
+                sources=_melody_sources_to_vllm(getattr(c, "sources", None)),
+                type=(
+                    "THINKING_CONTENT"
+                    if getattr(c, "is_thinking", False)
+                    else "TEXT_CONTENT"
+                ),
+            )
+        )
+    return out
+
+
 class BaseCohereCommandReasoningParser(ReasoningParser):
     def __init__(
         self,
@@ -418,6 +473,13 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
         self.unary_opts = unary_opts
         self.melody_unary = PyFilter(unary_opts)
         self.melody_streaming = PyFilter(streaming_opts)
+        # Citations extracted by the most recent ``extract_reasoning`` call.
+        # The non-streaming chat-completion path reads this back from the
+        # parser instance (which is constructed per-request) and attaches
+        # the result to ``ChatMessage.citations`` so grounded surfaces
+        # (e.g. ``/cohere/v2/chat``) can surface them. ``None`` when the
+        # last parse produced no citations.
+        self.last_unary_citations: list[Citation] | None = None
 
     @property
     def reasoning_start_str(self) -> str | None:
@@ -437,7 +499,13 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
         r = self.melody_streaming.write_decoded(delta_text)
-        if r.content is None and r.reasoning is None and not r.tool_calls:
+        citations = _melody_citations_to_vllm(getattr(r, "citations", None))
+        if (
+            r.content is None
+            and r.reasoning is None
+            and not r.tool_calls
+            and not citations
+        ):
             return None
         msg = DeltaMessage()
         if r.content is not None:
@@ -454,12 +522,22 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
                 )
                 for tc in r.tool_calls
             ]
+        if citations:
+            msg.citations = citations
         return msg
 
     def extract_reasoning(
         self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
     ) -> tuple[str | None, str | None]:
         result = self.melody_unary.process_full_text(model_output)
+        # Cache citations so the non-streaming chat-completion path can
+        # surface them on ``ChatMessage.citations`` (the ``parse`` return
+        # tuple is locked to ``(reasoning, content, tool_calls)`` across
+        # all parsers, so we ferry citations via parser-instance state --
+        # safe because the parser is constructed per-request).
+        self.last_unary_citations = _melody_citations_to_vllm(
+            getattr(result, "citations", None)
+        )
         return result.reasoning, result.content
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
@@ -533,12 +611,25 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
         return request
 
 
+# melody's streaming filter only buffers a partial ``<co: ...>`` citation
+# across ``write_decoded`` calls when ``stream_non_grounded_answer`` is
+# set: otherwise, the moment an opening ``<co`` is seen without a
+# closing ``</co: ...>`` in the same delta, the filter emits the partial
+# marker bytes verbatim as plain content. In vLLM's streaming path the
+# parser is fed one token (1-4 chars) per call, so an unbuffered filter
+# will leak ``<co: 0>``-style markers into ``delta.content`` and never
+# emit a ``FilterCitation`` for them. Enabling the flag flips the
+# partial-match branch in melody's ``parse_citations`` (see
+# ``src/parsing/citations_filter.rs``) to ``return (None, 0)`` -- i.e.
+# keep buffering -- which lets a full citation eventually resolve.
+# Non-streaming (unary) parsing receives the whole output in one call so
+# the flag is a no-op there and we leave ``unary_opts`` alone.
 class CohereCommand3ReasoningParser(BaseCohereCommandReasoningParser):
     def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
         super().__init__(
             tokenizer,
             *args,
-            streaming_opts=PyFilterOptions().cmd3(),
+            streaming_opts=PyFilterOptions().cmd3().stream_non_grounded_answer(),
             unary_opts=PyFilterOptions().cmd3().no_tools(),
             **kwargs,
         )
@@ -549,7 +640,7 @@ class CohereCommand4ReasoningParser(BaseCohereCommandReasoningParser):
         super().__init__(
             tokenizer,
             *args,
-            streaming_opts=PyFilterOptions().cmd4(),
+            streaming_opts=PyFilterOptions().cmd4().stream_non_grounded_answer(),
             unary_opts=PyFilterOptions().cmd4().no_tools(),
             **kwargs,
         )
