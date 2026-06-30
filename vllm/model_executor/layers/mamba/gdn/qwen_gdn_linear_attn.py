@@ -83,6 +83,140 @@ if GDN_AITER_TRITON_AVAILABLE:
 logger = init_logger(__name__)
 
 
+# Attribute names used across vLLM quantization configs to expose the
+# "do not quantize these layers" list. We probe all of them so the detection
+# works for fp8/fbgemm/mxfp4 (``ignored_layers``), compressed-tensors
+# (``ignore``), modelopt FP8/NVFP4 (``exclude_modules``), awq/awq_marlin/
+# fp_quant/cpu_wna16/moe_wna16 (``modules_to_not_convert``), and torchao
+# (``skip_modules``). Any future config following the same
+# ``is_layer_skipped``-style pattern is also defended by the try/except
+# fallback in ``QwenGatedDeltaNetAttention.__init__``.
+_QUANT_SKIP_LIST_ATTRS: tuple[str, ...] = (
+    "ignored_layers",
+    "ignore",
+    "exclude_modules",
+    "modules_to_not_convert",
+    "skip_modules",
+)
+
+
+def _quant_skip_list(quant_config: QuantizationConfig | None) -> list[str] | None:
+    if quant_config is None:
+        return None
+    for attr in _QUANT_SKIP_LIST_ATTRS:
+        v = getattr(quant_config, attr, None)
+        if v:
+            return v
+    return None
+
+
+_IN_PROJ_SUBS = ("in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a")
+
+
+def _normalize_target(pattern: str) -> str:
+    """Reduce a compressed-tensors target/ignore entry to a plain module path.
+
+    Entries may be literal (``...layers.0.linear_attn.in_proj_a``) or regex
+    (``re:^...layers[.]18[.]linear_attn[.]in_proj_qkv$``); strip the ``re:``
+    prefix, ``^``/``$`` anchors and escaped dots so suffix matching works.
+    """
+    p = pattern
+    if p.startswith("re:"):
+        p = p[3:]
+    p = p.strip("^$")
+    return p.replace("[.]", ".").replace("\\.", ".")
+
+
+def qwen_in_proj_uniform_precision(quant_config: QuantizationConfig | None) -> bool:
+    """True iff every GDN layer treats its four input-projection sub-modules
+    (in_proj_qkv, in_proj_z, in_proj_b, in_proj_a) with one quantization scheme.
+
+    The 6-way fused ``in_proj`` MergedColumnParallelLinear packs all four into a
+    single GEMM, and ``Qwen3_5Model.load_weights`` is all-or-nothing: it picks
+    one stacked-params layout (fused vs qkvz+ba) for *every* GDN layer. So
+    fusion is only correct when no layer mixes precision across its in_proj
+    sub-modules.
+
+    Non-uniformity shows up two ways:
+      * a flat skip-list that names only some of the four sub-modules — e.g.
+        Qwen/Qwen3.5-27B-FP8 keeps in_proj_a/b in bf16 while quantizing qkv/z;
+      * compressed-tensors 'mixed-precision' config_groups that quantize only
+        some sub-modules of some layers — e.g. Qwopus3.6-35B NVFP4 quantizes
+        in_proj_qkv/z on 8 layers while in_proj_b/a stay bf16. A flat skip-list
+        view misses this: aggregated across layers the ignore list names all
+        four sub-modules, so per-layer awareness is required.
+    """
+    # Per-layer view for configs that expose targets/ignore by module path
+    # (compressed-tensors). Map each layer's in_proj sub-modules to whether
+    # they are quantized ("quant", via a config-group target) or left in the
+    # source dtype ("skip", via the ignore list); a layer that mixes the two
+    # -- or only names a subset, leaving the rest to a differing default --
+    # cannot share one fused shard scheme.
+    ignore = getattr(quant_config, "ignore", None)
+    target_scheme_map = getattr(quant_config, "target_scheme_map", None)
+    if ignore or target_scheme_map:
+        per_layer: dict[str, dict[str, str]] = {}
+
+        def _record(pattern: str, bucket: str) -> None:
+            path = _normalize_target(pattern)
+            for sub in _IN_PROJ_SUBS:
+                if path == sub or path.endswith(f".{sub}"):
+                    layer_key = path[: len(path) - len(sub)]
+                    per_layer.setdefault(layer_key, {})[sub] = bucket
+
+        for pat in ignore or ():
+            _record(pat, "skip")
+        for pat in target_scheme_map or ():
+            _record(pat, "quant")
+
+        for buckets in per_layer.values():
+            if len(set(buckets.values())) > 1 or 0 < len(buckets) < len(_IN_PROJ_SUBS):
+                return False
+
+    # Flat skip-list fallback (fp8/awq/modelopt is_layer_skipped style):
+    # uniform iff the skip-list touches none of the four sub-modules or all of
+    # them. (Aggregating across layers is sufficient here because these configs
+    # apply a single scheme per sub-module name model-wide.)
+    skip_list = _quant_skip_list(quant_config)
+    if not skip_list:
+        return True
+    seen: set[str] = set()
+    for entry in skip_list:
+        for sub in _IN_PROJ_SUBS:
+            if entry == sub or entry.endswith(f".{sub}"):
+                seen.add(sub)
+    return not seen or seen == set(_IN_PROJ_SUBS)
+
+
+def qwen_ba_proj_replicated(quant_config: QuantizationConfig | None) -> bool:
+    """Whether in_proj_ba is TP-replicated rather than sharded.
+
+    Marlin requires output_size_per_partition >= MIN_THREAD_N=64, which the
+    Qwen3.5 non-interleaved [num_v_heads]*2 layout violates at TP>=2. For
+    AWQMarlin/AutoGPTQ/INC the projection is replicated instead (issue #35924).
+    The 6-way fuse cannot honor that, so fusion is disabled when this is True.
+    """
+    return current_platform.is_cuda() and isinstance(
+        quant_config, (AutoAWQConfig, AutoGPTQConfig, INCConfig)
+    )
+
+
+def qwen_should_fuse_in_proj(vllm_config: VllmConfig) -> bool:
+    """Whether Qwen3.5 GDN fuses in_proj_qkvz + in_proj_ba into one 6-way
+    in_proj. CUDA-only (forward_cuda is the only path with the fused branch);
+    disabled under LoRA, mixed-precision quant (in_proj_* partially skipped),
+    and the Marlin/GPTQ/INC ba-replication case (#35924).
+    """
+    if vllm_config.lora_config is not None:
+        return False
+    if not current_platform.is_cuda():
+        return False
+    quant_config = vllm_config.quant_config
+    return qwen_in_proj_uniform_precision(quant_config) and not qwen_ba_proj_replicated(
+        quant_config
+    )
+
+
 # TODO(arpera): remove ``_is_libs_cu13_install_intact`` and its caller in
 # ``_resolve_gdn_prefill_backend`` once the upstream packaging bug is
 # fixed and the broken wheels are yanked / superseded on PyPI:
@@ -437,6 +571,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         vllm_config: VllmConfig,
         prefix: str = "",
         gqa_interleaved_layout=False,
+        fuse_in_proj_ba: bool = False,
     ) -> None:
         super().__init__(config, vllm_config, prefix)
 
@@ -472,29 +607,91 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
         self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
 
-        # projection of the input hidden states
-        # Qwen3-Next and Qwen3.5 has a different qkv_proj layout,
-        # we need to create qkvz_proj adaptively here.
-        # When create_in_proj_qkvz is False (e.g. LoRA enabled in Qwen3.5),
-        # in_proj_qkv and in_proj_z are created separately instead.
-        self.in_proj_qkvz = self.create_qkvz_proj(
-            hidden_size=self.hidden_size,
-            key_dim=self.key_dim,
-            value_dim=self.value_dim,
-            quant_config=self.quant_config,
-            prefix=f"{prefix}.in_proj_qkvz",
-        )
-
-        # ba_proj doesn't support blockwise fp8 quantization.
-        # Qwen3-Next and Qwen3.5 have different in_proj_ba checkpoint
-        # layouts, so we use a factory method to create the projection.
-        self.in_proj_ba = self.create_ba_proj(
-            hidden_size=self.hidden_size,
-            num_v_heads=self.num_v_heads,
-            quant_config=self.quant_config,
-            prefix=f"{prefix}.in_proj_ba",
-        )
+        # For AWQMarlin/AutoGPTQ/INC, in_proj_ba is replicated rather than
+        # TP-sharded (Marlin MIN_THREAD_N=64, issue #35924). The 6-way fuse
+        # cannot honor that per-shard replication, so qwen_should_fuse_in_proj
+        # gates fusion off in that case and this stays False on the fused path.
         self.disable_tp_for_ba_proj = self.maybe_disable_tp(self.quant_config)
+
+        # Two layouts for the input hidden-state projection:
+        # 1. Fused 6-way merge (fuse_in_proj_ba, Qwen3.5 non-interleaved): a
+        #    single MergedColumnParallelLinear covering [q, k, v, z, b, a] in
+        #    one GEMM. in_proj_ba's output dim is ~0.5% of in_proj_qkvz, so
+        #    fusing costs ~nothing and recovers the projection-overlap win
+        #    without any dual-stream / custom-op dispatch.
+        # 2. Separate in_proj_qkvz + in_proj_ba (Qwen3-Next interleaved, or
+        #    Qwen3.5 under LoRA / mixed-precision quant / ba replication).
+        self._fuse_in_proj = fuse_in_proj_ba and not self.gqa_interleaved_layout
+
+        if self._fuse_in_proj:
+            try:
+                self.in_proj = MergedColumnParallelLinear(
+                    input_size=self.hidden_size,
+                    output_sizes=[
+                        self.key_dim,
+                        self.key_dim,
+                        self.value_dim,
+                        self.value_dim,
+                        self.num_v_heads,
+                        self.num_v_heads,
+                    ],
+                    bias=False,
+                    quant_config=self.quant_config,
+                    prefix=f"{prefix}.in_proj",
+                )
+            except ValueError as e:
+                # Defense in depth: if the model class did not detect that the
+                # four packed sub-modules (in_proj_qkv/z/b/a) have non-uniform
+                # quantization-skip status (e.g. a future quant config whose
+                # skip-list attribute name qwen_in_proj_uniform_precision does
+                # not probe), MergedColumnParallelLinear raises here.
+                # is_layer_skipped (fp8/awq/modelopt/...) and compressed-tensors
+                # should_ignore_layer use distinct messages; match both, fall
+                # back to the unfused layout, and repair the quant config's
+                # packed_modules_mapping so the qkvz/ba modules resolve shards.
+                err_msg = str(e)
+                if not (
+                    "All shards of fused layers" in err_msg
+                    or "different quantization schemes" in err_msg
+                ):
+                    raise
+                self._fuse_in_proj = False
+                pmm = getattr(self.quant_config, "packed_modules_mapping", None)
+                if pmm is not None:
+                    pmm.pop("in_proj", None)
+                    pmm["in_proj_qkvz"] = ["in_proj_qkv", "in_proj_z"]
+                    pmm["in_proj_ba"] = ["in_proj_b", "in_proj_a"]
+
+        if self._fuse_in_proj:
+            # Per-rank split sizes to peel mixed_qkvzba -> (mixed_qkvz, ba)
+            # -> (mixed_qkv, z) on every forward; static for the module's life.
+            self._fused_qkvz_size = (
+                2 * self.key_dim + 2 * self.value_dim
+            ) // self.tp_size
+            self._fused_ba_size = (2 * self.num_v_heads) // self.tp_size
+            self._fused_qkv_size = (2 * self.key_dim + self.value_dim) // self.tp_size
+            self._fused_z_size = self.value_dim // self.tp_size
+        else:
+            # projection of the input hidden states
+            # Qwen3-Next and Qwen3.5 have a different qkv_proj layout,
+            # we need to create qkvz_proj adaptively here.
+            self.in_proj_qkvz = self.create_qkvz_proj(
+                hidden_size=self.hidden_size,
+                key_dim=self.key_dim,
+                value_dim=self.value_dim,
+                quant_config=self.quant_config,
+                prefix=f"{prefix}.in_proj_qkvz",
+            )
+
+            # ba_proj doesn't support blockwise fp8 quantization.
+            # Qwen3-Next and Qwen3.5 have different in_proj_ba checkpoint
+            # layouts, so we use a factory method to create the projection.
+            self.in_proj_ba = self.create_ba_proj(
+                hidden_size=self.hidden_size,
+                num_v_heads=self.num_v_heads,
+                quant_config=self.quant_config,
+                prefix=f"{prefix}.in_proj_ba",
+            )
 
         query_key_settings = (self.key_dim, 0, False)
         value_settings = (self.value_dim, 0, False)
@@ -625,11 +822,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         See https://github.com/vllm-project/vllm/issues/35924
         """
-        return (
-            current_platform.is_cuda()
-            and not self.gqa_interleaved_layout
-            and isinstance(quant_config, (AutoAWQConfig, AutoGPTQConfig, INCConfig))
-        )
+        return not self.gqa_interleaved_layout and qwen_ba_proj_replicated(quant_config)
 
     def split_ba(self, ba: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         b, a = ba.chunk(2, dim=-1)
@@ -920,27 +1113,45 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        ba, _ = self.in_proj_ba(hidden_states)
-
-        if self.gqa_interleaved_layout:
-            # Qwen3-Next: unpack the interleaved GQA layout
-            query, key, value, z, b, a = self.fix_query_key_value_ordering(
-                mixed_qkvz, ba
+        if self._fuse_in_proj:
+            # Fused 6-way path (Qwen3.5): one GEMM covering [q, k, v, z, b, a];
+            # split the result and continue with non-interleaved unpacking.
+            # Split sizes are computed once in __init__. ba is never replicated
+            # on this path (qwen_should_fuse_in_proj gates that case off), so a
+            # plain chunk(2) is correct here (no split_ba TP slicing needed).
+            mixed, _ = self.in_proj(hidden_states)
+            mixed_qkvz, ba = mixed.split(
+                [self._fused_qkvz_size, self._fused_ba_size], dim=-1
             )
-            query, key, value = map(
-                lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value)
+            mixed_qkv, z = mixed_qkvz.split(
+                [self._fused_qkv_size, self._fused_z_size], dim=-1
             )
-            mixed_qkv = torch.cat((query, key, value), dim=-1)
-        else:
-            # Qwen3.5: weights are already in [q, k, v, z] and [b, a] order
-            qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
-            z_size = self.value_dim // self.tp_size
-            mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
             z = z.reshape(z.size(0), -1, self.head_v_dim)
-            b, a = self.split_ba(ba)
+            b, a = ba.chunk(2, dim=-1)
             b = b.contiguous()
             a = a.contiguous()
+        else:
+            mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+            ba, _ = self.in_proj_ba(hidden_states)
+
+            if self.gqa_interleaved_layout:
+                # Qwen3-Next: unpack the interleaved GQA layout
+                query, key, value, z, b, a = self.fix_query_key_value_ordering(
+                    mixed_qkvz, ba
+                )
+                query, key, value = map(
+                    lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value)
+                )
+                mixed_qkv = torch.cat((query, key, value), dim=-1)
+            else:
+                # Qwen3.5: weights are already in [q, k, v, z] and [b, a] order
+                qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
+                z_size = self.value_dim // self.tp_size
+                mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
+                z = z.reshape(z.size(0), -1, self.head_v_dim)
+                b, a = self.split_ba(ba)
+                b = b.contiguous()
+                a = a.contiguous()
 
         # ============================================================
         # Part 2: Core Attention (Custom Op)
