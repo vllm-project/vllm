@@ -973,7 +973,9 @@ class DiffusionGemmaModelState(ModelState):
         # so the captured graph and runtime point to identical addresses.
         return {"inputs_embeds": self._inputs_embeds_buf[:num_tokens]}
 
-    def postprocess_state(self, idx_mapping, num_sampled) -> None:
+    def postprocess_state(
+        self, idx_mapping, num_sampled, num_computed_tokens=None
+    ) -> None:
         return None
 
     def prepare_attn(
