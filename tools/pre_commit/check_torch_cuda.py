@@ -13,6 +13,7 @@ _TORCH_CUDA_PATTERNS = [
     r"\bwith\storch\.cuda\.device\b",
     # Calls torch.cuda.{_is_compiled/_device_count_amdsmi/_device_count_nvml} internally
     r"\bcuda_device_count_stateless\(\)\b",
+    r"\bcurrent_platform\.mem_get_info\(\)\b",
 ]
 
 ALLOWED_FILES = {
