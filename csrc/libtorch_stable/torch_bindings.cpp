@@ -450,10 +450,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
 
 #ifndef USE_ROCM
   ops.def(
-      "minimax_allreduce_rms("
-      "Tensor input, Tensor norm_weight, Tensor workspace, "
-      "int rank, int nranks, float eps) -> Tensor");
-  ops.def(
       "minimax_allreduce_rms_qk("
       "Tensor qkv, Tensor norm_weight_q, Tensor norm_weight_k, "
       "Tensor workspace, int q_size, int kv_size, int rank, int nranks, "
@@ -705,7 +701,6 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
       "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert",
       TORCH_BOX(&fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert));
 #ifndef USE_ROCM
-  ops.impl("minimax_allreduce_rms", TORCH_BOX(&minimax_allreduce_rms));
   ops.impl("minimax_allreduce_rms_qk", TORCH_BOX(&minimax_allreduce_rms_qk));
 #endif
   ops.impl("fused_minimax_m3_qknorm_rope_kv_insert",
