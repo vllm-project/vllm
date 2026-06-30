@@ -154,6 +154,7 @@ pub async fn decoded_text_event_stream(
         let decoder = decoder.as_mut().unwrap();
 
         let kv_transfer_params = output.kv_transfer_params;
+        let ec_transfer_params = output.ec_transfer_params;
         let mut finish_reason = output.finish_reason;
         let mut stop_str_matched = false;
         let suppress_terminal_stop_token = finish_reason.as_ref().is_some_and(|r| r.is_stop())
@@ -278,6 +279,7 @@ pub async fn decoded_text_event_stream(
                     },
                     finish_reason: reason,
                     kv_transfer_params,
+                    ec_transfer_params,
                 }),
             })
             .await;

@@ -598,6 +598,7 @@ mod tests {
             },
             finish_reason: reason,
             kv_transfer_params: None,
+            ec_transfer_params: None,
         }
     }
 

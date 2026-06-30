@@ -266,6 +266,7 @@ fn collect_generate(
         }],
         prompt_logprobs,
         kv_transfer_params: collected.kv_transfer_params,
+        ec_transfer_params: collected.ec_transfer_params,
     })
 }
 

@@ -300,7 +300,9 @@ pub(crate) async fn structured_chat_event_stream(
                 kv_transfer_params,
                 ec_transfer_params,
             } => {
-                for next in state.finish(usage, finish_reason, kv_transfer_params, ec_transfer_params)? {
+                for next in
+                    state.finish(usage, finish_reason, kv_transfer_params, ec_transfer_params)?
+                {
                     y.yield_ok(next).await;
                 }
             }

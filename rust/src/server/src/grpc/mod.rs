@@ -71,6 +71,7 @@ impl pb::generate_server::Generate for GenerateServiceImpl {
             usage: collected.usage,
             finish_reason: collected.finish_reason,
             kv_transfer_params: collected.kv_transfer_params,
+            ec_transfer_params: collected.ec_transfer_params,
         };
 
         let outputs = convert::to_sequence_output(

@@ -161,6 +161,7 @@ mod tests {
                     },
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
+                    ec_transfer_params: None,
                 }),
             }),
         ]);
@@ -278,6 +279,7 @@ mod tests {
                     },
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
+                    ec_transfer_params: None,
                 }),
             }),
         ]);

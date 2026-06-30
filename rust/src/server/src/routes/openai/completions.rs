@@ -212,6 +212,7 @@ async fn collect_completion(
         usage: Some(usage),
         system_fingerprint: None,
         kv_transfer_params: collected.kv_transfer_params,
+        ec_transfer_params: collected.ec_transfer_params,
     })
 }
 
@@ -672,6 +673,7 @@ mod tests {
                     },
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
+                    ec_transfer_params: None,
                 }),
             }),
         ]);
@@ -762,6 +764,7 @@ mod tests {
                     },
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
+                    ec_transfer_params: None,
                 }),
             }),
         ]);
@@ -813,6 +816,7 @@ mod tests {
                     },
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
+                    ec_transfer_params: None,
                 }),
             }),
         ]);
@@ -867,6 +871,7 @@ mod tests {
                     },
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
+                    ec_transfer_params: None,
                 }),
             }),
         ]);
@@ -938,6 +943,7 @@ mod tests {
                     },
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
+                    ec_transfer_params: None,
                 }),
             }),
         ]);
@@ -1011,6 +1017,7 @@ mod tests {
                     },
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
+                    ec_transfer_params: None,
                 }),
             }),
         ]);

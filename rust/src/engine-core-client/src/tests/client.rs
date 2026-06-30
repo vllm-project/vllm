@@ -2564,6 +2564,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                     stop_reason: None,
                     events: None,
                     kv_transfer_params: None,
+                    ec_transfer_params: None,
                     trace_headers: None,
                     prefill_stats: None,
                     routed_experts: None,
