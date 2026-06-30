@@ -2727,7 +2727,9 @@ class rocm_aiter_ops:
 
     @staticmethod
     def is_triton_gemm_w8a8_tuned(n: int, k: int) -> bool:
-        return (n, k) in [
+        from vllm.platforms.rocm import on_gfx1250
+
+        return on_gfx1250() or (n, k) in [
             (1024, 8192),
             (2112, 7168),
             (3072, 1536),

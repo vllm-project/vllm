@@ -297,12 +297,12 @@ def test_mla_backend_selection(
 
 
 def test_aiter_fa_requires_mi3xx(mock_vllm_config):
-    """Test that ROCM_AITER_FA requires mi3xx architecture."""
+    """Test that ROCM_AITER_FA requires CDNA3+ architecture."""
     from vllm.platforms.rocm import RocmPlatform
 
-    # Mock on_mi3or4 to return False (used by supports_compute_capability)
+    # Mock cdna version to return 1 (used by supports_compute_capability)
     with (
-        patch("vllm.platforms.rocm.on_mi3or4", return_value=False),
+        patch("vllm.platforms.rocm.get_cdna_version", return_value=1),
         pytest.raises(
             ValueError,
             match="compute capability not supported",
