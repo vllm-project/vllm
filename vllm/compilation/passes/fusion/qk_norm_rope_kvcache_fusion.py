@@ -262,9 +262,9 @@ class QkNormRopeKvCachePattern:
             scale=q_scale,
             is_dynamic=False,
         )
-        # The op marks `scale` mutable, so the model graph also reads the scale
-        # output ([2]) and copies it back into the _q_scale buffer.
-        q_rope_fp8 = q_quant[1].view(-1, self.num_heads, self.head_size)
+        # `scale` is mutable: its copy_ write-back to _q_scale bumps the mutation
+        # region, so keep q flat (a reshape lands past the barrier and won't match).
+        q_rope_fp8 = q_quant[1]
         q_scale_out = q_quant[2]
 
         k_rope = k_rope.view(-1, self.num_kv_heads, self.head_size)
@@ -322,7 +322,7 @@ class QkNormRopeKvCachePattern:
             scale=q_scale,
             is_dynamic=False,
         )
-        q_fp8 = q_requant[1].view(-1, self.num_heads, self.head_size)
+        q_fp8 = q_requant[1]  # flat to mirror the pattern (see note above)
         q_scale_out = q_requant[2]
         return results[0], q_fp8, results[2], v, q_scale_out
 

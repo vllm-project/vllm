@@ -208,9 +208,11 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
             self.kv_cache_dtype != self.dtype
             and self.attn.impl.supports_quant_query_input
         ):
-            q = torch.ops.vllm.rocm_aiter_per_tensor_quant(
-                q, FP8_DTYPE, self.attn._q_scale
-            )[0]
+            q_fp8 = torch.empty_like(q, dtype=FP8_DTYPE)
+            torch.ops.vllm.rocm_aiter_per_tensor_quant(
+                q_fp8, q, self.attn._q_scale, False
+            )
+            q = q_fp8
 
         # Final views + KV cache update
         q = q.view(-1, self.num_heads, self.head_size)
