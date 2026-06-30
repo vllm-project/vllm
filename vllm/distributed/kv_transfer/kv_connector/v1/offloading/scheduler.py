@@ -419,43 +419,62 @@ class OffloadingConnectorScheduler:
     def _handle_stalled_job(self, job_id: int, status: TransferJobStatus) -> None:
         """Clean up a stalled transfer job.
 
-        Mirrors the completion path in update_connector_output() to ensure
-        all state (manager, blocks_being_loaded, pending_jobs, request
-        state) is properly released.
+        Delegates to ``_complete_job`` with ``success=False`` (data may
+        be incomplete), then records the job in ``_stalled_job_ids`` so
+        late worker reports are skipped instead of causing KeyError.
+        """
+        self._complete_job(job_id, status, success=False)
+        # Track remaining workers so late reports decrement cleanly to 0.
+        self._stalled_job_ids[job_id] = status.pending_count
+
+    def _complete_job(
+        self,
+        job_id: int,
+        status: TransferJobStatus,
+        success: bool = True,
+    ) -> None:
+        """Complete a transfer job and release all associated state.
+
+        Shared cleanup path for normal job completion and stalled
+        job cleanup. ``success=False`` marks store data as unreliable
+        so blocks can be re-offloaded.
+
+        Does NOT call ``on_request_finished`` — that is the
+        ``request_finished()`` caller's responsibility.
         """
         req_status = self._req_status.get(status.req_id)
 
-        # 1. Notify manager (same as normal completion path)
+        # 1. Notify manager: store passes success flag, load does not need it.
         if req_status is not None:
             if status.is_store:
                 self.manager.complete_store(
                     status.keys,
                     req_status.req_context,
-                    success=False,
+                    success=success,
                 )
             else:
                 self.manager.complete_load(status.keys, req_status.req_context)
 
-        # 2. Clean up _blocks_being_loaded (load only)
+        # 2. Release _blocks_being_loaded so other requests can retry.
         if not status.is_store and self._blocks_being_loaded:
             self._blocks_being_loaded.difference_update(status.keys)
 
-        # 3. Clean up _block_id_to_pending_jobs
+        # 3. Remove from block→job fence.  Sliding-window blocks are
+        #    tracked from store creation; non-sliding only after
+        #    request_finished.
         if self._block_id_to_pending_jobs:
             self._remove_pending_job(job_id, status.sliding_window_block_ids)
             if req_status is not None and req_status.req.is_finished():
                 self._remove_pending_job(job_id, status.non_sliding_window_block_ids)
 
-        # 4. Remove job from _jobs, track for stale worker report skipping.
-        # Store pending_count so we know how many late worker reports to expect.
+        # 4. Remove job from active dict.
         del self._jobs[job_id]
-        self._stalled_job_ids[job_id] = status.pending_count
 
-        # 5. Clean up request state
+        # 5. Detach from request.  If this was the last in-flight job
+        #    for a finished request, drop req_status entirely.
         if req_status is not None:
             req_status.transfer_jobs.discard(job_id)
             if not req_status.transfer_jobs and req_status.req.is_finished():
-                self.manager.on_request_finished(req_status.req_context)
                 del self._req_status[status.req_id]
 
     def _maximal_prefix_lookup(
@@ -1207,28 +1226,7 @@ class OffloadingConnectorScheduler:
                 continue
             assert job_status.pending_count == 0
 
-            req_status = self._req_status[job_status.req_id]
-            if job_status.is_store:
-                self.manager.complete_store(job_status.keys, req_status.req_context)
-            else:
-                self.manager.complete_load(job_status.keys, req_status.req_context)
-                if self._blocks_being_loaded:
-                    self._blocks_being_loaded.difference_update(job_status.keys)
-            if self._block_id_to_pending_jobs:
-                # Sliding window blocks are tracked from store creation
-                # and must be cleaned up unconditionally.
-                self._remove_pending_job(job_id, job_status.sliding_window_block_ids)
-                # Non-sliding-window blocks are only tracked after
-                # request_finished, so only clean up for finished requests.
-                if req_status.req.is_finished():
-                    self._remove_pending_job(
-                        job_id, job_status.non_sliding_window_block_ids
-                    )
-
-            del self._jobs[job_id]
-            req_status.transfer_jobs.remove(job_id)
-            if not req_status.transfer_jobs and req_status.req.is_finished():
-                del self._req_status[job_status.req_id]
+            self._complete_job(job_id, job_status)
 
         now = time.monotonic()
         if now - self._last_stall_check > self._stall_check_interval:

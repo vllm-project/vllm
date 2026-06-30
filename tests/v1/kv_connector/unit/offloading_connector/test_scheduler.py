@@ -2965,3 +2965,288 @@ def test_stall_check_is_throttled(request_runner):
 
     # Verify _last_stall_check was updated
     assert runner.connector_scheduler._last_stall_check > 0
+
+
+def test_stalled_job_no_double_on_request_finished(request_runner):
+    """Stalled job cleanup must NOT call on_request_finished.
+
+    request_finished() already called on_request_finished() when the
+    request completed. The stalled cleanup path only needs to release
+    job-level state (_jobs, _blocks_being_loaded, etc.) and the final
+    _req_status entry — it must not re-notify the manager.
+    """
+    block_size = 4
+    offloaded_block_size = block_size
+    num_gpu_blocks = 100
+
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=True,
+    )
+
+    # Create a store job with a finished request
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[0] * offloaded_block_size + [EOS_TOKEN_ID],
+        complete_transfers=False,
+    )
+
+    assert len(runner.connector_scheduler._jobs) >= 1
+    job_id = next(iter(runner.connector_scheduler._jobs.keys()))
+
+    # request_finished() is called during runner.run() with EOS_TOKEN_ID,
+    # which calls on_request_finished(). Reset the mock to track new calls.
+    runner.manager.on_request_finished.reset_mock()
+
+    # Simulate timeout and trigger stall check
+    import time
+
+    runner.connector_scheduler._jobs[job_id].submitted_at = time.monotonic() - 400.0
+    runner.connector_scheduler._check_stalled_jobs()
+
+    # Job should be cleaned up
+    assert job_id not in runner.connector_scheduler._jobs
+    assert job_id in runner.connector_scheduler._stalled_job_ids
+
+    # on_request_finished must NOT be called again
+    runner.manager.on_request_finished.assert_not_called()
+
+
+def test_normal_load_completes_clears_blocks_being_loaded(request_runner):
+    """Normal load completion (via update_connector_output) clears
+    _blocks_being_loaded through _complete_job.
+
+    This verifies the refactored normal path releases the load fence
+    so other requests can retry those blocks.
+    """
+    block_size = 4
+    offloaded_block_size = block_size
+    num_gpu_blocks = 100
+
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=True,
+    )
+
+    # First request: store some blocks
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[0] * offloaded_block_size + [EOS_TOKEN_ID],
+        expected_stored=(0,),
+    )
+
+    # Second request: load the stored blocks
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: 1
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output([])
+    )
+    runner.run(decoded_tokens=[], complete_transfers=False)
+
+    # Verify a load job was created and _blocks_being_loaded is populated
+    load_job_ids = [
+        jid
+        for jid, status in runner.connector_scheduler._jobs.items()
+        if not status.is_store
+    ]
+    assert load_job_ids, "Expected at least one load job"
+    assert runner.connector_scheduler._blocks_being_loaded
+    blocks_before = runner.connector_scheduler._blocks_being_loaded.copy()
+
+    # Simulate normal worker completion
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+        OffloadingWorkerMetadata,
+    )
+    from vllm.v1.outputs import KVConnectorOutput
+
+    meta = OffloadingWorkerMetadata()
+    for jid in load_job_ids:
+        meta.completed_jobs[jid] = 1
+    output = KVConnectorOutput(kv_connector_worker_meta=meta)
+
+    runner.connector_scheduler.update_connector_output(output)
+
+    # Verify load jobs were removed
+    for jid in load_job_ids:
+        assert jid not in runner.connector_scheduler._jobs
+
+    # Verify _blocks_being_loaded was cleared
+    assert not (runner.connector_scheduler._blocks_being_loaded & blocks_before)
+
+    # Verify complete_load was called (no success param)
+    runner.manager.complete_load.assert_called()
+
+
+def test_normal_last_job_deletes_req_status(request_runner):
+    """When the last in-flight job completes normally, _req_status is deleted.
+
+    This verifies the refactored normal path releases _req_status when
+    the request is finished and no more transfer jobs remain.
+    """
+    block_size = 4
+    offloaded_block_size = block_size
+    num_gpu_blocks = 100
+
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=True,
+    )
+
+    # Create a store job with a finished request
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[0] * offloaded_block_size + [EOS_TOKEN_ID],
+        complete_transfers=False,
+    )
+
+    assert len(runner.connector_scheduler._jobs) >= 1
+    all_job_ids = list(runner.connector_scheduler._jobs.keys())
+    req_id = runner.connector_scheduler._jobs[all_job_ids[0]].req_id
+
+    # Request is finished but req_status is retained because jobs are in-flight
+    assert req_id in runner.connector_scheduler._req_status
+
+    # Simulate normal worker completion for ALL in-flight jobs
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+        OffloadingWorkerMetadata,
+    )
+    from vllm.v1.outputs import KVConnectorOutput
+
+    meta = OffloadingWorkerMetadata()
+    for jid in all_job_ids:
+        meta.completed_jobs[jid] = 1
+    output = KVConnectorOutput(kv_connector_worker_meta=meta)
+
+    runner.connector_scheduler.update_connector_output(output)
+
+    # All jobs removed
+    for jid in all_job_ids:
+        assert jid not in runner.connector_scheduler._jobs
+    # Last job for a finished request → req_status deleted
+    assert req_id not in runner.connector_scheduler._req_status
+
+
+def test_complete_job_clears_block_id_to_pending_jobs(request_runner):
+    """_complete_job removes entries from _block_id_to_pending_jobs.
+
+    For a finished request, both sliding-window and non-sliding-window
+    block IDs should be cleaned up.
+    """
+    block_size = 4
+    offloaded_block_size = block_size
+    num_gpu_blocks = 100
+
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=True,
+    )
+
+    # Create a store job with a finished request
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[0] * offloaded_block_size + [EOS_TOKEN_ID],
+        complete_transfers=False,
+    )
+
+    assert len(runner.connector_scheduler._jobs) >= 1
+    job_id = next(iter(runner.connector_scheduler._jobs.keys()))
+
+    # Manually populate _block_id_to_pending_jobs to verify cleanup
+    status = runner.connector_scheduler._jobs[job_id]
+    if status.sliding_window_block_ids:
+        for bid in status.sliding_window_block_ids:
+            runner.connector_scheduler._block_id_to_pending_jobs.setdefault(
+                bid, set()
+            ).add(job_id)
+    if status.non_sliding_window_block_ids:
+        for bid in status.non_sliding_window_block_ids:
+            runner.connector_scheduler._block_id_to_pending_jobs.setdefault(
+                bid, set()
+            ).add(job_id)
+
+    assert runner.connector_scheduler._block_id_to_pending_jobs
+
+    # Trigger _complete_job via stalled path (works the same as normal)
+    import time
+
+    status.submitted_at = time.monotonic() - 400.0
+    runner.connector_scheduler._check_stalled_jobs()
+
+    # Job removed
+    assert job_id not in runner.connector_scheduler._jobs
+    # All pending job entries for this job_id are cleaned up
+    for entries in runner.connector_scheduler._block_id_to_pending_jobs.values():
+        assert job_id not in entries
+
+
+def test_stalled_load_does_not_pass_success(request_runner):
+    """Stalled load cleanup calls complete_load without success kwarg.
+
+    complete_load has no success parameter — only complete_store does.
+    The _complete_job method must not pass success= to complete_load.
+    """
+    block_size = 4
+    offloaded_block_size = block_size
+    num_gpu_blocks = 100
+
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=True,
+    )
+
+    # First request: store some blocks
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[0] * offloaded_block_size + [EOS_TOKEN_ID],
+        expected_stored=(0,),
+    )
+
+    # Second request: load the stored blocks
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: 1
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output([])
+    )
+    runner.run(decoded_tokens=[], complete_transfers=False)
+
+    load_job_ids = [
+        jid
+        for jid, status in runner.connector_scheduler._jobs.items()
+        if not status.is_store
+    ]
+    assert load_job_ids, "Expected at least one load job"
+
+    # Simulate timeout
+    import time
+
+    for jid in load_job_ids:
+        runner.connector_scheduler._jobs[jid].submitted_at = time.monotonic() - 400.0
+    runner.connector_scheduler._check_stalled_jobs()
+
+    # complete_load was called — verify no success kwarg was passed
+    runner.manager.complete_load.assert_called()
+    for call in runner.manager.complete_load.call_args_list:
+        args, kwargs = call
+        assert "success" not in kwargs, (
+            "complete_load should not receive success parameter"
+        )
