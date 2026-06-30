@@ -84,9 +84,9 @@ void cutlass_scaled_mm_sm100(torch::stable::Tensor& c,
                              std::optional<torch::stable::Tensor> const& bias);
 #endif
 
-#if (defined(ENABLE_CUTLASS_MOE_SM90) && ENABLE_CUTLASS_MOE_SM90) ||       \
-    (defined(ENABLE_CUTLASS_MOE_SM10X_OR_SM11X) &&                         \
-     ENABLE_CUTLASS_MOE_SM10X_OR_SM11X) ||                                 \
+#if (defined(ENABLE_CUTLASS_MOE_SM90) && ENABLE_CUTLASS_MOE_SM90) || \
+    (defined(ENABLE_CUTLASS_MOE_SM10X_OR_SM11X) &&                   \
+     ENABLE_CUTLASS_MOE_SM10X_OR_SM11X) ||                           \
     (defined(ENABLE_CUTLASS_MOE_SM120) && ENABLE_CUTLASS_MOE_SM120)
 void get_cutlass_moe_mm_data_caller(
     const torch::stable::Tensor& topk_ids,
@@ -324,9 +324,9 @@ void get_cutlass_moe_mm_data(
   // This function currently gets compiled only if we have a valid cutlass moe
   // mm to run it for.
   int32_t version_num = get_sm_version_num();
-#if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90) ||       \
-    (defined ENABLE_CUTLASS_MOE_SM10X_OR_SM11X &&                         \
-     ENABLE_CUTLASS_MOE_SM10X_OR_SM11X) ||                                \
+#if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90) || \
+    (defined ENABLE_CUTLASS_MOE_SM10X_OR_SM11X &&                   \
+     ENABLE_CUTLASS_MOE_SM10X_OR_SM11X) ||                          \
     (defined ENABLE_CUTLASS_MOE_SM120 && ENABLE_CUTLASS_MOE_SM120)
   get_cutlass_moe_mm_data_caller(topk_ids, expert_offsets, problem_sizes1,
                                  problem_sizes2, input_permutation,
@@ -347,9 +347,9 @@ void get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
     torch::stable::Tensor& problem_sizes2, const int64_t n, const int64_t k,
     const bool swap_ab) {
   int32_t version_num = get_sm_version_num();
-#if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90) ||       \
-    (defined ENABLE_CUTLASS_MOE_SM10X_OR_SM11X &&                         \
-     ENABLE_CUTLASS_MOE_SM10X_OR_SM11X) ||                                \
+#if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90) || \
+    (defined ENABLE_CUTLASS_MOE_SM10X_OR_SM11X &&                   \
+     ENABLE_CUTLASS_MOE_SM10X_OR_SM11X) ||                          \
     (defined ENABLE_CUTLASS_MOE_SM120 && ENABLE_CUTLASS_MOE_SM120)
   get_cutlass_moe_mm_problem_sizes_from_expert_offsets_caller(
       expert_first_token_offset, problem_sizes1, problem_sizes2, n, k, swap_ab);
@@ -372,9 +372,9 @@ void get_cutlass_batched_moe_mm_data(
   // This function currently gets compiled only if we have a valid cutlass moe
   // mm to run it for.
   int32_t version_num = get_sm_version_num();
-#if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90) ||       \
-    (defined ENABLE_CUTLASS_MOE_SM10X_OR_SM11X &&                         \
-     ENABLE_CUTLASS_MOE_SM10X_OR_SM11X) ||                                \
+#if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90) || \
+    (defined ENABLE_CUTLASS_MOE_SM10X_OR_SM11X &&                   \
+     ENABLE_CUTLASS_MOE_SM10X_OR_SM11X) ||                          \
     (defined ENABLE_CUTLASS_MOE_SM120 && ENABLE_CUTLASS_MOE_SM120)
   get_cutlass_batched_moe_mm_data_caller(expert_offsets, problem_sizes1,
                                          problem_sizes2, expert_num_tokens,

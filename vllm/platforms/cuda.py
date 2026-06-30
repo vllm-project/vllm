@@ -8,12 +8,12 @@ from __future__ import annotations
 
 import os
 import platform
-import re
 from collections.abc import Callable
 from datetime import timedelta
 from functools import cache, lru_cache, wraps
 from typing import TYPE_CHECKING, NamedTuple, TypeVar
 
+import regex as re
 import torch
 from torch.distributed import PrefixStore, ProcessGroup
 from torch.distributed.distributed_c10d import is_nccl_available
@@ -50,7 +50,9 @@ _R = TypeVar("_R")
 
 pynvml = import_pynvml()
 
-_COMPILED_CUDA_ARCH_RE = re.compile(r"^(?P<major>\d+)\.(?P<minor>\d+)(?P<kind>[af])?$")
+_COMPILED_CUDA_ARCH_RE = re.compile(
+    r"^(?P<major>\d+)\.(?P<minor>\d+)(?P<kind>[af])?$"
+)
 
 # pytorch 2.5 uses cudnn sdpa by default, which will cause crash on some models
 # see https://github.com/huggingface/diffusers/issues/9704 for details

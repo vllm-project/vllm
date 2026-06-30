@@ -18,9 +18,7 @@ def test_cutlass_group_gemm_python_guard_allows_thor(monkeypatch):
     monkeypatch.setattr(
         torch.ops,
         "_C",
-        SimpleNamespace(
-            cutlass_group_gemm_supported=fake_cutlass_group_gemm_supported
-        ),
+        SimpleNamespace(cutlass_group_gemm_supported=fake_cutlass_group_gemm_supported),
     )
 
     # CUDA 12 reports Thor as SM101 and CUDA 13 reports it as SM110. Both

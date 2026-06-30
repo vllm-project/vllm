@@ -899,8 +899,9 @@ def cutlass_group_gemm_supported(cuda_device_capability: int) -> bool:
         return False
     try:
         return torch.ops._C.cutlass_group_gemm_supported(cuda_device_capability)
-    except AttributeError:
-        # Return False on non-CUDA platforms where it is not available
+    except (AttributeError, RuntimeError):
+        # Return False on non-CUDA platforms where it is not available or not
+        # implemented for the current build.
         return False
 
 
