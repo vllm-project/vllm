@@ -99,7 +99,7 @@ def test_gemma4_routing_kernel_triton(
         .values
     )
 
-    # Check that the top-k gating values returned for each token.
+    # Check that the top-k gating values returned for each token are a top-k.
     torch.testing.assert_close(topk_values, tri_gating_values, atol=1e-2, rtol=1e-2)
 
     # 2) Check for correct weight computation.
