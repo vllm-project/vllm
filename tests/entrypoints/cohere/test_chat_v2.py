@@ -13,11 +13,12 @@ Two layers of integration are covered:
 2. Cohere SDK (``pip install cohere``) — auto-skipped when the optional
    dependency isn't installed, verifies SDK-level interop.
 
-Like ``test_messages.py`` we use a small generic chat model
-(``Qwen/Qwen3-0.6B``); the Cohere v2 endpoint is model-agnostic and
-just performs the v2 ↔ OpenAI chat-completion translation, so the
-choice of model only matters for response shape (not for the
-translation logic itself, which is unit-tested elsewhere).
+We use a tiny generic chat model (``HuggingFaceTB/SmolLM2-135M-Instruct``,
+≈135M params) so the fixture stays runnable on CPU-only laptops. The
+Cohere v2 endpoint is model-agnostic and just performs the v2 ↔ OpenAI
+chat-completion translation, so the choice of model only matters for
+response *shape* — the translation logic itself is unit-tested
+elsewhere.
 """
 
 import json
@@ -28,30 +29,44 @@ import pytest_asyncio
 
 from tests.utils import RemoteOpenAIServer
 
-MODEL_NAME = "Qwen/Qwen3-0.6B"
+# Tiny chat-tuned model so the fixture is cheap to boot on CPU-only
+# hosts (Mac, CI runners without GPUs). The Cohere v2 translation is
+# completely independent of which underlying chat model is loaded.
+MODEL_NAME = "HuggingFaceTB/SmolLM2-135M-Instruct"
 SERVED_MODEL_NAME = "command-r-plus-08-2024"
 
 
 @pytest.fixture(scope="module")
 def server():
     args = [
+        # 1k tokens is plenty for the prompts these tests send; trimming
+        # it from the default keeps the KV-cache footprint tiny.
         "--max-model-len",
-        "2048",
+        "1024",
+        "--max-num-seqs",
+        "4",
+        "--dtype",
+        "bfloat16",
         "--enforce-eager",
-        "--enable-auto-tool-choice",
-        "--tool-call-parser",
-        "hermes",
         # Advertise a Cohere model name so Cohere SDK ``model=`` calls
         # round-trip without the ``model not found`` check.
         "--served-model-name",
         SERVED_MODEL_NAME,
         # Disable the reasoning-model path so the test doesn't require
-        # the conversation to surface a thinking block (Qwen3-0.6B
-        # doesn't emit Cohere-style reasoning tokens out of the box).
+        # the conversation to surface a thinking block (SmolLM2 doesn't
+        # emit Cohere-style reasoning tokens out of the box).
         "--no-cohere-is-reasoning-model",
     ]
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    # Cap the CPU KV-cache pool the vLLM CPU backend reserves at
+    # startup. The default (4 GB) trips Mac's RAM check on smaller
+    # machines; 1 GB is more than enough for max_model_len=1024 and
+    # max_num_seqs=4.
+    env_dict = {"VLLM_CPU_KVCACHE_SPACE": "1"}
+
+    with RemoteOpenAIServer(
+        MODEL_NAME, args, env_dict=env_dict
+    ) as remote_server:
         yield remote_server
 
 
@@ -141,15 +156,15 @@ async def test_cohere_v2_chat_streaming(httpx_client: httpx.AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_cohere_v2_chat_validation_error_returns_422(
+async def test_cohere_v2_chat_validation_error_returns_400(
     httpx_client: httpx.AsyncClient,
 ):
-    # Missing required ``model`` field → FastAPI/Pydantic returns 422.
+    # Missing required ``model`` field → FastAPI/Pydantic returns 400.
     resp = await httpx_client.post(
         "/cohere/v2/chat",
         json={"messages": []},
     )
-    assert resp.status_code == 422
+    assert resp.status_code == 400
 
 
 @pytest.mark.asyncio
