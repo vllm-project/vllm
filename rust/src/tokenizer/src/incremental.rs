@@ -32,6 +32,7 @@ pub(crate) struct DecodeStream<'a, T: Tokenizer + ?Sized> {
     ids: Vec<u32>,
     prefix: String,
     prefix_index: usize,
+    prefix_seeded: bool,
     cumulative_output: String,
     output_index: usize,
 }
@@ -50,6 +51,7 @@ impl<'a, T: Tokenizer + ?Sized> DecodeStream<'a, T> {
             ids: prompt_token_ids.to_vec(),
             prefix: String::new(),
             prefix_index: 0,
+            prefix_seeded: prompt_token_ids.is_empty(),
             cumulative_output: String::new(),
             output_index: 0,
         }
@@ -63,29 +65,48 @@ const SAFE_SUFFIX_MIN: usize = 4;
 const SAFE_SUFFIX_MAX: usize = 6;
 
 impl<T: Tokenizer + ?Sized> DecodeStream<'_, T> {
+    /// Return prompt-context ids that have a tokenizer-local raw token string.
+    ///
+    /// `DecodeStream` uses prompt ids only to seed left context before the
+    /// first generated token. Some prompt ids may come from a wider model
+    /// vocabulary than the local tokenizer can decode, so context seeding drops
+    /// ids that [`Tokenizer::id_to_token`] cannot resolve before calling strict
+    /// [`Tokenizer::decode`]. Generated token ids keep the normal strict decode
+    /// path.
+    fn decodable_context_ids(&self, ids: &[u32]) -> Vec<u32> {
+        ids.iter()
+            .copied()
+            .filter(|&id| self.tokenizer.id_to_token(id).is_some())
+            .collect()
+    }
+
     /// Seed `self.prefix` from the shortest trailing suffix whose decoded text
     /// has no U+FFFD — a clean decode means the suffix starts and ends at
     /// valid UTF-8/token boundaries, so priming from it is equivalent to
-    /// priming from the full prompt.
+    /// priming from the full prompt. Prompt-only ids that the tokenizer cannot
+    /// map back to token text are ignored for decode context; generated ids
+    /// still go through strict decode.
     fn seed_prefix(&mut self) -> Result<()> {
         let prompt_len = self.ids.len();
         if prompt_len > SAFE_SUFFIX_MIN {
             let max_try = SAFE_SUFFIX_MAX.min(prompt_len - 1);
             for suffix_len in SAFE_SUFFIX_MIN..=max_try {
                 let start = prompt_len - suffix_len;
-                let decoded =
-                    self.tokenizer.decode(&self.ids[start..], self.skip_special_tokens)?;
+                let candidate = self.decodable_context_ids(&self.ids[start..]);
+                let decoded = self.tokenizer.decode(&candidate, self.skip_special_tokens)?;
                 if !decoded.contains('\u{FFFD}') {
                     self.prefix = decoded;
-                    self.ids.drain(..start);
+                    self.ids = candidate;
                     self.prefix_index = self.ids.len();
                     return Ok(());
                 }
             }
         }
-        let decoded = self.tokenizer.decode(&self.ids, self.skip_special_tokens)?;
+        let candidate = self.decodable_context_ids(&self.ids);
+        let decoded = self.tokenizer.decode(&candidate, self.skip_special_tokens)?;
         if !decoded.ends_with('\u{FFFD}') {
             self.prefix = decoded;
+            self.ids = candidate;
             self.prefix_index = self.ids.len();
         }
         Ok(())
@@ -94,8 +115,9 @@ impl<T: Tokenizer + ?Sized> DecodeStream<'_, T> {
 
 impl<T: Tokenizer + ?Sized> IncrementalDecoder for DecodeStream<'_, T> {
     fn push_token(&mut self, token_id: u32) -> Result<usize> {
-        if self.prefix.is_empty() && !self.ids.is_empty() {
+        if !self.prefix_seeded && !self.ids.is_empty() {
             self.seed_prefix()?;
+            self.prefix_seeded = true;
         }
 
         self.ids.push(token_id);
@@ -131,6 +153,7 @@ impl<T: Tokenizer + ?Sized> IncrementalDecoder for DecodeStream<'_, T> {
             self.ids.clear();
             self.prefix.clear();
             self.prefix_index = 0;
+            self.prefix_seeded = true;
             // Ensure we split at a utf-8 char boundary.
             self.cumulative_output
                 .push_str(&string[string.floor_char_boundary(prefix_len)..]);
@@ -152,6 +175,7 @@ impl<T: Tokenizer + ?Sized> IncrementalDecoder for DecodeStream<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::TestTokenizer;
 
     /// Backend that treats each token ID as a raw byte, producing lossy UTF-8.
     #[derive(Debug)]
@@ -171,8 +195,11 @@ mod tests {
             unreachable!()
         }
 
-        fn id_to_token(&self, _id: u32) -> Option<String> {
-            unreachable!()
+        fn id_to_token(&self, id: u32) -> Option<String> {
+            u8::try_from(id).ok().map(|byte| {
+                let bytes = [byte];
+                String::from_utf8_lossy(&bytes).into_owned()
+            })
         }
     }
 
@@ -279,6 +306,47 @@ mod tests {
         let added = decoder.push_token(b'!' as u32).unwrap();
         assert_eq!(added, 1);
         assert_eq!(decoder.output(), "!");
+    }
+
+    #[test]
+    fn seed_prefix_filters_unknown_prompt_ids_from_suffix_context() {
+        let tokenizer = TestTokenizer::new();
+        let prompt = &[
+            b'a' as u32,
+            b'b' as u32,
+            b'c' as u32,
+            10_000,
+            b'H' as u32,
+            b'i' as u32,
+        ];
+        let mut decoder = tokenizer.create_decode_stream(prompt, false, 0);
+
+        assert_eq!(decoder.push_token(b'!' as u32).unwrap(), 1);
+        assert_eq!(decoder.output(), "!");
+    }
+
+    #[test]
+    fn seed_prefix_filters_unknown_prompt_ids_from_full_prompt_fallback() {
+        let tokenizer = TestTokenizer::new();
+        let prompt = &[10_000, b'H' as u32, b'i' as u32];
+        let mut decoder = tokenizer.create_decode_stream(prompt, false, 0);
+
+        assert_eq!(decoder.push_token(b'!' as u32).unwrap(), 1);
+        assert_eq!(decoder.output(), "!");
+    }
+
+    #[test]
+    fn generated_unknown_ids_still_return_decode_error() {
+        let tokenizer = TestTokenizer::new();
+        let prompt = &[10_000, b'H' as u32, b'i' as u32];
+        let mut decoder = tokenizer.create_decode_stream(prompt, false, 0);
+
+        let error = decoder.push_token(10_000).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("test tokenizer cannot decode unknown token id 10000")
+        );
     }
 
     #[test]
