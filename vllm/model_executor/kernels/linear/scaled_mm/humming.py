@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import humming.dtypes
 import torch
 
 from vllm.logger import init_logger
@@ -10,6 +9,7 @@ from vllm.model_executor.layers.quantization.utils.humming_utils import (
     prepare_humming_layer,
 )
 from vllm.platforms import current_platform
+from vllm.utils.humming import dtypes
 
 from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearKernel,
@@ -45,7 +45,7 @@ class HummingFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         name_map = {"weight": "weight", "weight_scale": "weight_scale"}
         scale_torch_dtype = self.config.weight_quant_key.scale.dtype
-        scale_dtype = humming.dtypes.DataType.from_torch_dtype(scale_torch_dtype)
+        scale_dtype = dtypes.DataType.from_torch_dtype(scale_torch_dtype)
 
         quant_config = {
             "quant_method": "humming",
@@ -80,7 +80,7 @@ class HummingFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        from humming.layer import HummingMethod
+        from vllm.utils.humming import HummingMethod
 
         flatten_inputs = x.view(-1, x.size(-1))
         output = HummingMethod.forward_layer(
@@ -141,7 +141,7 @@ class HummingInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        from humming.layer import HummingMethod
+        from vllm.utils.humming import HummingMethod
 
         flatten_inputs = x.view(-1, x.size(-1))
         output = HummingMethod.forward_layer(

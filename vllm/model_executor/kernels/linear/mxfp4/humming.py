@@ -52,7 +52,7 @@ class HummingMxFp4LinearKernel(MxFp4LinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        from humming.layer import HummingMethod
+        from vllm.utils.humming import HummingMethod
 
         flatten_inputs = x.view(-1, x.size(-1))
         output = HummingMethod.forward_layer(
