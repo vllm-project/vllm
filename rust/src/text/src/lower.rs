@@ -287,32 +287,6 @@ mod tests {
         TestTokenizer::new()
     }
 
-    struct FixedTokenizer {
-        token_ids: Vec<u32>,
-    }
-
-    impl Tokenizer for FixedTokenizer {
-        fn encode(
-            &self,
-            _text: &str,
-            _add_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<Vec<u32>> {
-            Ok(self.token_ids.clone())
-        }
-
-        fn decode(
-            &self,
-            _token_ids: &[u32],
-            _skip_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<String> {
-            Ok(String::new())
-        }
-
-        fn token_to_id(&self, _token: &str) -> Option<u32> {
-            None
-        }
-    }
-
     fn sample_request() -> TextRequest {
         TextRequest {
             prompt: Prompt::TokenIds(vec![1, 2, 3]),
@@ -927,9 +901,7 @@ mod tests {
 
     #[test]
     fn lower_sampling_params_rejects_out_of_vocab_bad_words() {
-        let tokenizer = FixedTokenizer {
-            token_ids: vec![1999, 2000],
-        };
+        let tokenizer = TestTokenizer::new().with_regular_token("blocked", 2000);
         let error = lower_sampling_params(
             SamplingParams {
                 bad_words: Some(vec!["blocked".to_string()]),

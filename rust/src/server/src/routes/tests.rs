@@ -40,7 +40,7 @@ use vllm_engine_core_client::{
 };
 use vllm_llm::Llm;
 use vllm_metrics::METRICS;
-use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
+use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, TextBackend};
 use vllm_tokenizer::test_utils::TestTokenizer;
 use zeromq::prelude::{SocketRecv, SocketSend};
@@ -419,6 +419,7 @@ struct FakeChatBackend {
 
 /// Synthetic BOS id used when `add_special_tokens` is true in tests.
 const FAKE_BOS_TOKEN_ID: u32 = 256;
+const UNKNOWN_DECODE_TOKEN_ID: u32 = 10_000;
 
 fn fake_chat_tokenizer() -> TestTokenizer {
     TestTokenizer::new()
@@ -574,70 +575,6 @@ fn qwen_multimodal_model_info() -> vllm_chat::multimodal::MultimodalModelInfo {
     .expect("qwen multimodal info is registered");
     let _ = fs::remove_file(config_path);
     info
-}
-
-#[derive(Clone, Debug)]
-struct FailingDecodeChatBackend;
-
-#[derive(Debug)]
-struct FailingDecodeTokenizer;
-
-impl Tokenizer for FailingDecodeTokenizer {
-    fn encode(
-        &self,
-        text: &str,
-        add_special_tokens: bool,
-    ) -> vllm_text::tokenizer::Result<Vec<u32>> {
-        fake_chat_tokenizer().encode(text, add_special_tokens)
-    }
-
-    fn decode(
-        &self,
-        token_ids: &[u32],
-        skip_special_tokens: bool,
-    ) -> vllm_text::tokenizer::Result<String> {
-        if token_ids.contains(&(b'i' as u32)) {
-            return Err(vllm_text::tokenizer::TokenizerError(
-                "forced decode failure for streaming test".to_string(),
-            ));
-        }
-
-        fake_chat_tokenizer().decode(token_ids, skip_special_tokens)
-    }
-
-    fn token_to_id(&self, token: &str) -> Option<u32> {
-        fake_chat_tokenizer().token_to_id(token)
-    }
-}
-
-impl TextBackend for FailingDecodeChatBackend {
-    fn tokenizer(&self) -> DynTokenizer {
-        Arc::new(FailingDecodeTokenizer)
-    }
-
-    fn model_id(&self) -> &str {
-        "test-model"
-    }
-}
-
-impl ChatBackend for FailingDecodeChatBackend {
-    fn chat_renderer(&self) -> DynChatRenderer {
-        Arc::new(self.clone())
-    }
-
-    fn new_chat_output_processor(
-        &self,
-        _request: &mut ChatRequest,
-        _options: NewChatOutputProcessorOptions<'_>,
-    ) -> vllm_chat::Result<DynChatOutputProcessor> {
-        Ok(Box::new(DefaultChatOutputProcessor::plain_text_only()))
-    }
-}
-
-impl ChatRenderer for FailingDecodeChatBackend {
-    fn render(&self, request: &ChatRequest) -> vllm_chat::Result<vllm_chat::RenderedPrompt> {
-        FakeChatBackend::new().render(request)
-    }
 }
 
 async fn test_models_with_engine_outputs_and_backend_inner(
@@ -2693,8 +2630,8 @@ async fn load_endpoint_resets_when_stream_response_is_dropped() {
 #[serial]
 async fn stream_error_is_returned_as_openai_error_sse() {
     let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
-        Arc::new(FailingDecodeChatBackend),
-        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+        vec![(vec![UNKNOWN_DECODE_TOKEN_ID], None)],
     )
     .await;
     let response = app
@@ -2727,7 +2664,9 @@ async fn stream_error_is_returned_as_openai_error_sse() {
     assert!(text.contains("\"role\":\"assistant\""), "{text}");
     assert!(text.contains("\"type\":\"server_error\""), "{text}");
     assert!(
-        text.contains("forced decode failure for streaming test"),
+        text.contains(&format!(
+            "test tokenizer cannot decode unknown token id {UNKNOWN_DECODE_TOKEN_ID}"
+        )),
         "{text}"
     );
     assert!(!text.contains("\"usage\":"), "{text}");
