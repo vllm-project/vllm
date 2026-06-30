@@ -1246,3 +1246,65 @@ async def test_system_prompt_structured_content(client: OpenAI, model_name: str)
     assert response is not None
     assert response.status == "completed"
     assert response.output_text is not None
+
+
+class TestUnsupportedContentTypes:
+    """Test validation of unsupported content types in Responses API Harmony path.
+
+    Regression test: Previously, unsupported content types like 'input_file'
+    were silently ignored in the Responses API Harmony path (used by GPT-OSS models),
+    causing confusion when users expected file processing. Now they properly
+    raise VLLMValidationError, matching the non-Harmony path behavior
+    (commit 4b95e9cec).
+    """
+
+    def test_input_file_raises_validation_error(self) -> None:
+        """Test that input_file content type is rejected in Responses API."""
+        from vllm.entrypoints.openai.responses.harmony import response_input_to_harmony
+        from vllm.exceptions import VLLMValidationError
+
+        response_msg = {
+            "role": "user",
+            "content": [{"type": "input_file", "file": {"file_data": "base64data"}}],
+        }
+
+        with pytest.raises(VLLMValidationError) as exc_info:
+            response_input_to_harmony(response_msg, prev_responses=[])
+
+        error = exc_info.value
+        assert "Unsupported chat content part type: 'input_file'" in str(error)
+        assert error.parameter == "type"
+        assert error.value == "input_file"
+
+    def test_file_content_type_raises_validation_error(self) -> None:
+        """Test that file content type is rejected in Responses API."""
+        from vllm.entrypoints.openai.responses.harmony import response_input_to_harmony
+        from vllm.exceptions import VLLMValidationError
+
+        response_msg = {
+            "role": "user",
+            "content": [{"type": "file", "file": {"file_data": "base64data"}}],
+        }
+
+        with pytest.raises(VLLMValidationError) as exc_info:
+            response_input_to_harmony(response_msg, prev_responses=[])
+
+        error = exc_info.value
+        assert "Unsupported chat content part type: 'file'" in str(error)
+        assert error.parameter == "type"
+
+    def test_supported_types_still_work(self) -> None:
+        """Test that supported content types are not affected."""
+        from vllm.entrypoints.openai.responses.harmony import response_input_to_harmony
+
+        response_msg = {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Hello"},
+                {"type": "input_text", "text": "World"},
+            ],
+        }
+
+        # Should not raise
+        result = response_input_to_harmony(response_msg, prev_responses=[])
+        assert result is not None

@@ -23,7 +23,9 @@ from openai_harmony import (
 )
 
 from vllm import envs
+from vllm.entrypoints.chat_utils import get_supported_content_part_types
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -423,7 +425,19 @@ def parse_chat_input_to_harmony_message(
     if isinstance(content, str):
         contents = [TextContent(text=content)]
     else:
-        # TODO: Support refusal.
+        # Validate content part types - match non-Harmony path validation
+        # Use shared helper to ensure consistency across all parsing paths
+        supported_types = get_supported_content_part_types()
+        for c in content:
+            if isinstance(c, dict):
+                part_type = c.get("type")
+                if part_type and part_type not in supported_types:
+                    raise VLLMValidationError(
+                        f"Unsupported chat content part type: {part_type!r}. "
+                        f"Supported types: {', '.join(sorted(supported_types))}.",
+                        parameter="type",
+                        value=part_type,
+                    )
         contents = [TextContent(text=c.get("text", "")) for c in content]
 
     # Only add assistant messages if they have content, as reasoning or tool calling

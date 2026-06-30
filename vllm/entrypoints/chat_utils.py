@@ -1564,6 +1564,21 @@ PART_TYPES_TO_SKIP_NONE_CONTENT = (
 )
 
 
+def get_supported_content_part_types() -> set[str]:
+    """Return the set of supported chat content part types.
+
+    This combines the types from MM_PARSER_MAP and PART_TYPES_TO_SKIP_NONE_CONTENT
+    to provide a single source of truth for validation across both Harmony and
+    non-Harmony parsing paths.
+
+    Returns:
+        Set of supported content part type strings.
+    """
+    # MM_PARSER_MAP.keys() already returns a dict_keys view which is set-like,
+    # so we can directly union it with PART_TYPES_TO_SKIP_NONE_CONTENT
+    return set(MM_PARSER_MAP.keys() | PART_TYPES_TO_SKIP_NONE_CONTENT)
+
+
 def _parse_chat_message_content_parts(
     role: str,
     parts: Iterable[ChatCompletionContentPartParam],
@@ -1711,7 +1726,7 @@ def _parse_chat_message_content_part(
             return {"type": "tool_reference", "name": cast(str, content)}
         return cast(str, content)
     else:
-        supported = sorted(MM_PARSER_MAP.keys() | set(PART_TYPES_TO_SKIP_NONE_CONTENT))
+        supported = sorted(get_supported_content_part_types())
         raise VLLMValidationError(
             f"Unsupported chat content part type: {part_type!r}. "
             f"Supported types: {', '.join(supported)}.",

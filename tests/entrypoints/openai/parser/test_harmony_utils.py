@@ -1065,3 +1065,95 @@ class TestResponseInputToHarmonyReasoningItem:
         msg = response_input_to_harmony(item, prev_responses=[])
 
         assert msg is None
+
+
+class TestUnsupportedContentTypes:
+    """Test validation of unsupported content types in Harmony path.
+
+    Regression test: Previously, unsupported content types like 'input_file'
+    were silently ignored in the Harmony path (used by GPT-OSS models),
+    causing confusion when users expected file processing. Now they properly
+    raise VLLMValidationError, matching the non-Harmony path behavior
+    (commit 4b95e9cec).
+    """
+
+    def test_input_file_raises_validation_error(self) -> None:
+        """Test that input_file content type is rejected with proper error."""
+        from vllm.exceptions import VLLMValidationError
+
+        chat_msg = {
+            "role": "user",
+            "content": [{"type": "input_file", "file": {"file_data": "base64data"}}],
+        }
+
+        with pytest.raises(VLLMValidationError) as exc_info:
+            parse_chat_input_to_harmony_message(chat_msg)
+
+        error = exc_info.value
+        assert "Unsupported chat content part type: 'input_file'" in str(error)
+        assert error.parameter == "type"
+        assert error.value == "input_file"
+
+    def test_file_content_type_raises_validation_error(self) -> None:
+        """Test that file content type is rejected (not supported in Harmony)."""
+        from vllm.exceptions import VLLMValidationError
+
+        chat_msg = {
+            "role": "user",
+            "content": [{"type": "file", "file": {"file_data": "base64data"}}],
+        }
+
+        with pytest.raises(VLLMValidationError) as exc_info:
+            parse_chat_input_to_harmony_message(chat_msg)
+
+        error = exc_info.value
+        assert "Unsupported chat content part type: 'file'" in str(error)
+        assert error.parameter == "type"
+
+    def test_supported_types_still_work(self) -> None:
+        """Test that supported content types are not affected by validation."""
+        chat_msg = {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Hello"},
+                {"type": "input_text", "text": "World"},
+            ],
+        }
+
+        # Should not raise
+        result = parse_chat_input_to_harmony_message(chat_msg)
+        assert len(result) == 1
+
+    def test_mixed_content_with_unsupported_type_raises_error(self) -> None:
+        """Test that mixed content with unsupported type raises error."""
+        from vllm.exceptions import VLLMValidationError
+
+        chat_msg = {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Hello"},
+                {"type": "input_file", "file": {"file_data": "data"}},
+            ],
+        }
+
+        with pytest.raises(VLLMValidationError) as exc_info:
+            parse_chat_input_to_harmony_message(chat_msg)
+
+        error = exc_info.value
+        assert "Unsupported chat content part type: 'input_file'" in str(error)
+
+    def test_plain_string_content_bypasses_validation(self) -> None:
+        """Test that plain string content (not a list) bypasses part validation.
+
+        When content is a plain string rather than a list of content parts,
+        the validation logic should not be triggered. This ensures backwards
+        compatibility for simple text-only messages.
+        """
+        chat_msg = {
+            "role": "user",
+            "content": "Hello, world!",
+        }
+
+        # Should not raise - validation only applies to list content
+        result = parse_chat_input_to_harmony_message(chat_msg)
+        assert len(result) == 1
