@@ -146,6 +146,7 @@ impl StructuredEventState {
         usage: vllm_llm::TokenUsage,
         finish_reason: FinishReason,
         kv_transfer_params: Option<serde_json::Value>,
+        ec_transfer_params: Option<serde_json::Value>,
     ) -> Result<Vec<ChatEvent>> {
         let mut events = Vec::new();
         self.close_open_text_block(&mut events);
@@ -155,6 +156,7 @@ impl StructuredEventState {
             usage,
             finish_reason,
             kv_transfer_params,
+            ec_transfer_params,
         });
         Ok(events)
     }
@@ -296,8 +298,9 @@ pub(crate) async fn structured_chat_event_stream(
                 usage,
                 finish_reason,
                 kv_transfer_params,
+                ec_transfer_params,
             } => {
-                for next in state.finish(usage, finish_reason, kv_transfer_params)? {
+                for next in state.finish(usage, finish_reason, kv_transfer_params, ec_transfer_params)? {
                     y.yield_ok(next).await;
                 }
             }
@@ -334,6 +337,7 @@ mod tests {
                 },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             }),
         ]);
 
@@ -388,6 +392,7 @@ mod tests {
                 },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             }),
         ]);
 
@@ -439,6 +444,7 @@ mod tests {
                 },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             }),
         ]);
 
@@ -490,6 +496,7 @@ mod tests {
                 },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             }),
         ]);
 
@@ -557,6 +564,7 @@ mod tests {
                 },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             }),
         ]);
 

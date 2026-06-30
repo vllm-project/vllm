@@ -482,6 +482,8 @@ pub struct EngineCoreOutput {
     #[serde(default)]
     pub kv_transfer_params: Option<serde_json::Value>,
     #[serde(default)]
+    pub ec_transfer_params: Option<serde_json::Value>,
+    #[serde(default)]
     pub trace_headers: Option<OpaqueValue>,
     /// Breakdown of the scheduled prefill computation, set on the first output
     /// of a newly scheduled prefill and elided for subsequent decode outputs.
