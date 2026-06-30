@@ -5968,10 +5968,6 @@ class GPUModelRunner(
             if self.use_aux_hidden_state_outputs and isinstance(outputs, tuple):
                 hidden_states, _ = outputs
             else:
-                # When aux hidden states are requested but the model returns a
-                # bare tensor (e.g. the configured EAGLE3 aux layer ids fall
-                # outside the model's layers, as happens when the number of
-                # layers is reduced for testing), fall back to the bare output.
                 hidden_states = outputs
 
             if self.speculative_config and (

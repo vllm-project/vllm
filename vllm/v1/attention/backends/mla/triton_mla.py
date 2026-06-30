@@ -48,14 +48,6 @@ def _compute_num_kv_splits(max_seq_len: int, sm_count: int) -> int:
 
 
 class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
-    # Triton MLA only has a single-token decode kernel (`query_len_support`
-    # stays SINGLE_ONLY and the decode workspace is sized for
-    # reorder_batch_threshold == 1), so it can only capture full CUDA graphs
-    # for query_len == 1 decodes. Declaring UNIFORM_BATCH here would tell the
-    # runner it can capture uniform spec-decode batches (query_len > 1) and
-    # bypass the spec-decode downgrade in resolve_cudagraph_mode_and_sizes,
-    # tripping the `max_query_len <= reorder_batch_threshold` assert during
-    # capture.
     _cudagraph_support: ClassVar[AttentionCGSupport] = (
         AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
     )

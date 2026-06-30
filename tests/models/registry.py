@@ -429,8 +429,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MistralForCausalLM": _HfExamplesInfo("mistralai/Mistral-7B-Instruct-v0.1"),
     "MistralLarge3ForCausalLM": _HfExamplesInfo(
         "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4",
-        # 675B model: even with the reduced-layer dummy config the profile run
-        # needs >200 GiB, OOMing on a single accelerator in CI.
         min_gpu_memory_gb=256,
     ),
     "MixtralForCausalLM": _HfExamplesInfo(
