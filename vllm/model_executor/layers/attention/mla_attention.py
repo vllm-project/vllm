@@ -819,20 +819,19 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
             # correct dcp attn_out with lse.
             if self.impl.dcp_world_size > 1:
-                lse_base_e = getattr(self.impl, "lse_base_is_e", True)
                 if self.dcp_a2a:
                     attn_out = dcp_a2a_lse_reduce(
                         attn_out,
                         lse,
                         get_dcp_group(),
-                        is_lse_base_on_e=lse_base_e,
+                        is_lse_base_on_e=self.impl.lse_base_on_e,
                     )
                 else:
                     attn_out = cp_lse_ag_out_rs(
                         attn_out,
                         lse,
                         get_dcp_group(),
-                        is_lse_base_on_e=lse_base_e,
+                        is_lse_base_on_e=self.impl.lse_base_on_e,
                     )
 
             # v_up projection
@@ -2067,10 +2066,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         self.cp_kv_cache_interleave_size: int = (
             get_current_vllm_config().parallel_config.cp_kv_cache_interleave_size
         )
-
-    @property
-    def lse_base_is_e(self) -> bool:
-        return True
 
     def _concat_k_nope_k_pe(
         self, k_nope: torch.Tensor, k_pe: torch.Tensor

@@ -6,7 +6,6 @@ from typing import ClassVar
 import torch
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
-from vllm import envs
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
@@ -30,6 +29,24 @@ from vllm.v1.attention.ops.dcp_split_q import dcp_split_q
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
+
+FLASHINFER_MLA_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
+FLASHINFER_MLA_LSE_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
+
+_fi_workspace: torch.Tensor | None = None
+
+
+def _get_workspace_buffer(return_lse: bool) -> torch.Tensor:
+    global _fi_workspace
+
+    buffer_size = (
+        FLASHINFER_MLA_LSE_WORKSPACE_BUFFER_SIZE
+        if return_lse
+        else FLASHINFER_MLA_WORKSPACE_BUFFER_SIZE
+    )
+    if _fi_workspace is None or _fi_workspace.numel() < buffer_size:
+        _fi_workspace = torch.zeros(buffer_size, dtype=torch.uint8, device="cuda")
+    return _fi_workspace
 
 
 class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
@@ -123,15 +140,15 @@ class FlashInferMLABackend(MLACommonBackend):
         return "HND"
 
 
-g_fi_workspace = torch.zeros(
-    envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,
-    dtype=torch.uint8,
-    device="cuda",
-)
-
-
 class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
     can_return_lse_for_decode: bool = True
+    # trtllm-gen MLA decode emits LSE in log2 (per flashinfer's own
+    # reference at flashinfer/trace/templates/attention.py:81:
+    # `logsumexp / log(2.0)`). Override the AttentionImplBase default
+    # so MLAAttention's DCP combine branches on the correct base
+    # (IS_BASE_E=False uses tl.exp2/tl.log2 natively, avoiding an FP
+    # multiply per decode step).
+    lse_base_on_e: bool = False
 
     def __init__(
         self,
@@ -177,13 +194,8 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 "FlashInferMLAImpl"
             )
 
-        self._workspace_buffer = g_fi_workspace
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
-
-    @property
-    def lse_base_is_e(self) -> bool:
-        return False
 
     def _split_q_for_dcp(
         self,
@@ -261,15 +273,12 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             if is_quantized_kv_cache(self.kv_cache_dtype):
                 self.bmm2_scale *= layer._k_scale_float
 
-        lse = torch.empty(
-            (q.shape[0] * q.shape[1], q.shape[2]),
-            dtype=torch.float32,
-            device=q.device,
-        )
-        o, lse = trtllm_batch_decode_with_kv_cache_mla(
+        return_lse = self.need_to_return_lse_for_decode
+        workspace_buffer = _get_workspace_buffer(return_lse)
+        kernel_out = trtllm_batch_decode_with_kv_cache_mla(
             query=q,
             kv_cache=kv_c_and_k_pe_cache.unsqueeze(1),
-            workspace_buffer=self._workspace_buffer,
+            workspace_buffer=workspace_buffer,
             qk_nope_head_dim=self.qk_nope_head_dim,
             kv_lora_rank=self.kv_lora_rank,
             qk_rope_head_dim=self.qk_rope_head_dim,
@@ -278,9 +287,13 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             max_seq_len=attn_metadata.max_seq_len,
             bmm1_scale=self.bmm1_scale,
             bmm2_scale=self.bmm2_scale,
-            lse=lse,
-            return_lse=True,
+            return_lse=return_lse,
         )
+        if return_lse:
+            o, lse = kernel_out
+        else:
+            o, lse = kernel_out, None
 
         o = o.view(-1, o.shape[-2], o.shape[-1])
+
         return o, lse
