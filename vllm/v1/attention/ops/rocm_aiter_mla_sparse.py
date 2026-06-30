@@ -42,6 +42,22 @@ def _indexer_cache_layout(block_size: int, head_dim: int = 128) -> str:
     return "NORMAL" if block_size <= 1 else "SHUFFLE"
 
 
+def _indexer_read_layout(cache: torch.Tensor, block_size: int, head_dim: int) -> str:
+    """Layout to READ an indexer cache, distinguishing two writers.
+
+    DeepSeek-V4's indexer cache is a *strided slice* of a combined per-block
+    record (indexer + main-MLA share blocks), written PLAIN (un-shuffled) with
+    per-token ``[head_dim fp8 | 4-byte f32 scale]`` separated as
+    ``[bs*head_dim fp8 | bs*4 scale]`` per block. It is detected by a
+    non-contiguous block stride (``stride(0) != block_size*(head_dim+4)``) and
+    must be read with the NORMAL (pos-major) offset. The V3.2/GLM cache is
+    contiguous and written by the in-tree SHUFFLE writer.
+    """
+    if cache.stride(0) != block_size * (head_dim + 4):
+        return "NORMAL"
+    return _indexer_cache_layout(block_size, head_dim)
+
+
 # Minimum amd-aiter version whose native gfx942/gfx950 paged-MQA-logits decode
 # (deepgemm_fp8_paged_mqa_logits) is validated correct and faster than the
 # in-tree Triton fallback. Below this — or when VLLM_ROCM_SPARSE_MLA_FORCE_TRITON
@@ -285,14 +301,18 @@ def cp_gather_indexer_k_quant_cache_triton(
     block_table_stride = block_table.stride(0)
     head_dim = k_fp8.shape[-1]
     num_blocks = k_cache.shape[0]
-    # we assume the kv cache already been split to 2 portion
-    k_cache = k_cache.view(num_blocks, -1)
+    # Detect the read layout from the ORIGINAL cache stride (before reshape).
+    layout = _indexer_read_layout(k_cache, block_size, head_dim)
+    # DeepSeek-V4's indexer cache is a strided slice of the combined per-block
+    # record; materialize it so the kernel reads a clean contiguous buffer.
+    if not k_cache.is_contiguous():
+        k_cache = k_cache.contiguous()
+    k_cache = k_cache.reshape(num_blocks, -1)
     fp8_dtype = current_platform.fp8_dtype()
     k_cache_value = k_cache[:, : block_size * head_dim].view(fp8_dtype)
     k_cache_scale = k_cache[:, block_size * head_dim :].view(torch.float32)
     grid = (num_tokens,)
     k_fp8_scale = k_fp8_scale.view(torch.float32)
-    layout = _indexer_cache_layout(block_size, head_dim)
     _cp_gather_indexer_quant_cache_kernel[grid](
         k_cache_value,
         k_cache_scale,
@@ -511,9 +531,9 @@ def _fp8_paged_mqa_logits_kernel(
         pos_part = (within_blk // BLOCK_TILE_SIZE) * (BLOCK_TILE_SIZE * D_actual) + (
             within_blk % BLOCK_TILE_SIZE
         ) * HEAD_TILE_SIZE
-        dim_part = (d_offs // HEAD_TILE_SIZE) * (
-            BLOCK_TILE_SIZE * HEAD_TILE_SIZE
-        ) + (d_offs % HEAD_TILE_SIZE)
+        dim_part = (d_offs // HEAD_TILE_SIZE) * (BLOCK_TILE_SIZE * HEAD_TILE_SIZE) + (
+            d_offs % HEAD_TILE_SIZE
+        )
         data_off = pos_part[:, None] + dim_part[None, :]
     else:
         data_off = within_blk[:, None] * D_actual + d_offs[None, :]
@@ -574,6 +594,12 @@ def fp8_paged_mqa_logits_triton(
     batch_size, next_n, H, D = q.shape
     N = kv_cache.shape[0]
     block_size = kv_cache.shape[1]
+    # Determine the read layout from the ORIGINAL stride, then materialize V4's
+    # strided combined-cache slice into a contiguous indexer buffer so the kernel
+    # pointer arithmetic stays within bounds.
+    layout = _indexer_read_layout(kv_cache, block_size, D)
+    if not kv_cache.is_contiguous():
+        kv_cache = kv_cache.contiguous()
 
     # Unpack kv_cache [N, block_size, 1, D+4] uint8 without copying. Within each
     # physical block the D*block_size fp8 bytes come first, followed by
@@ -599,7 +625,6 @@ def fp8_paged_mqa_logits_triton(
     BLOCK_D = triton.next_power_of_2(D)
     BLOCK_N = max(128, triton.next_power_of_2(block_size))
     grid = (triton.cdiv(max_model_len, BLOCK_N), batch_size, next_n)
-    layout = _indexer_cache_layout(block_size, D)
     # HEAD_TILE_SIZE is in fp8 elements (writer uses 16 bytes // element_size).
     head_tile_size = 16 // kv_fp8.element_size()
 
