@@ -1316,7 +1316,9 @@ def test_vllm_config_explicit_overrides():
         compilation_config=compilation_config,
     )
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
-    assert config.compilation_config.pass_config.enable_qk_norm_rope_fusion is True
+    assert config.compilation_config.pass_config.enable_qk_norm_rope_fusion is (
+        current_platform.is_cuda_alike() or current_platform.is_xpu()
+    )
     # Mode should still use default for O2
     assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
 

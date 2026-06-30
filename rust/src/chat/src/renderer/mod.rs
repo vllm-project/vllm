@@ -9,6 +9,7 @@ use crate::request::{ChatRequest, ReasoningEffort};
 
 pub mod deepseek_v32;
 pub mod deepseek_v4;
+pub mod harmony;
 pub mod hf;
 mod selection;
 #[cfg(test)]
@@ -16,6 +17,7 @@ mod test_utils;
 
 pub use deepseek_v4::DeepSeekV4ChatRenderer;
 pub use deepseek_v32::DeepSeekV32ChatRenderer;
+pub use harmony::HarmonyChatRenderer;
 pub use selection::RendererSelection;
 
 /// Rendered chat prompt submitted to the text backend.
