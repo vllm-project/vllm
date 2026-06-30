@@ -57,17 +57,19 @@ def _resolve_layer_attention(
 ) -> tuple[int | None, bool]:
     """Resolve ``(sliding_window, causal)`` for one DFlash draft layer.
 
-    Sliding window:
-    - Without ``layer_types``, every layer is full attention unless
-      ``dflash_config.use_swa`` is set, in which case every layer is SWA.
-    - With a ``layer_types`` carrying sliding entries, each layer follows its
-      own entry. An all-"full_attention" ``layer_types`` may be synthesized
-      when the checkpoint omits one, so ``use_swa`` still forces every layer to
-      SWA when ``layer_types`` has no sliding entries.
-
-    Causality: ``dflash_config.causal`` applies to all layers when set.
-    Otherwise full-attention layers are non-causal and SWA layers are causal;
-    uniform full/SWA models default to non-causal.
+    +----------------------+-------------------------+--------------------------------+
+    | Config               | ``layer_type``          | *``causal``                    |
+    +======================+=========================+================================+
+    | ``layer_types``      | SWA if ``use_swa``      | True if ``layer_types[i]=SWA`` |
+    |                      | else ``layer_types[i]`` | else False                     |
+    +----------------------+-------------------------+--------------------------------+
+    | ``layer_types=None`` | SWA                     | False                          |
+    | + ``use_swa=True``   |                         |                                |
+    +----------------------+-------------------------+--------------------------------+
+    | ``layer_types=None`` | Full                    | False                          |
+    | + ``use_swa=False``  |                         |                                |
+    +----------------------+-------------------------+--------------------------------+
+    * If ``dflash_config.causal`` is set, its value overrides ``causal`` for all layers.
 
     This is to support a varied ecosystem of checkpoints, including:
     - XiaomiMiMo/MiMo-V2.5-Pro-FP4-DFlash (sets "use_swa", assumes non-causal)
@@ -219,7 +221,7 @@ class DFlashQwen3Attention(nn.Module):
         with the context K/V from the target model's hidden states. This forward op
         computes attention for the query tokens only.
         See also: precompute_and_store_context_kv"""
-        qkv = F.linear(hidden_states, self.qkv_proj.weight, self.qkv_proj.bias)
+        qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         # Per-head RMSNorm
@@ -431,8 +433,11 @@ class DFlashQwen3Model(nn.Module):
         else:
             self._fused_kv_bias = None
 
-        # K-norm weights: list of [head_dim] tensors, one per layer.
-        self._k_norm_weights = [a.k_norm.weight.data for a in layers_attn]
+        # K-norm weights stacked into one contiguous [num_layers, head_dim]
+        # tensor so the per-layer K-norm runs as a single grouped kernel.
+        self._k_norm_weights = torch.stack(
+            [a.k_norm.weight.data for a in layers_attn], dim=0
+        ).contiguous()
 
         # RoPE parameters
         self._rope_head_size = attn0.rotary_emb.head_size
@@ -514,15 +519,15 @@ class DFlashQwen3Model(nn.Module):
         all_k = all_kv[0]  # [L, num_ctx, nkv, hd], contiguous
         all_v = all_kv[1]  # [L, num_ctx, nkv, hd], contiguous
 
-        # --- Per-layer RMSNorm K (3D: [num_ctx, nkv, hd] per layer) ---
+        # --- Grouped RMSNorm K across all layers ([L, num_ctx, nkv, hd]) ---
+        # The weight is selected per layer by the outermost (layer) index.
         all_k_normed = torch.empty_like(all_k)
-        for i in range(L):
-            ops.rms_norm(
-                all_k_normed[i],
-                all_k[i],
-                self._k_norm_weights[i],
-                self._rms_norm_eps,
-            )
+        ops.rms_norm(
+            all_k_normed,
+            all_k,
+            self._k_norm_weights,
+            self._rms_norm_eps,
+        )
 
         # --- Fused RoPE across all layers ---
         # View as [L * num_ctx, kv] so RoPE sees one big batch (no copy).

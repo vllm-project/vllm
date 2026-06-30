@@ -97,13 +97,22 @@ __device__ __forceinline__ uint32_t warp_inclusive_sum(uint32_t lane,
 }
 
 // Returns the sum of a value across all 32 threads in the warp, and every
-// thread gets the same result SM90+ PTX instruction that does a hardware
-// warp-wide reduction in a single instruction w.r.t. warp::reduce_sum(), which
-// uses a __shfl_xor_sync butterfly tree (5 shuffles for 32 lanes)
+// thread gets the same result. SM80+ uses redux.sync.add.u32, a single PTX
+// instruction for hardware warp-wide reduction. Older targets use the
+// __shfl_xor_sync butterfly tree, like warp::reduce_sum() (5 shuffles for 32
+// lanes).
 __device__ __forceinline__ uint32_t warp_reduce_sum_full(uint32_t v) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
   uint32_t r;
   asm("redux.sync.add.u32 %0, %1, 0xFFFFFFFF;" : "=r"(r) : "r"(v));
   return r;
+#else
+  #pragma unroll
+  for (uint32_t mask = kWarpSize >> 1; mask > 0; mask >>= 1) {
+    v += __shfl_xor_sync(0xFFFFFFFF, v, mask);
+  }
+  return v;
+#endif
 }
 
 // ============================================================================
@@ -412,7 +421,7 @@ __device__ void histogram_4096_topk(const float* __restrict__ scores,
   if (lane_id == kWarpSize - 1) smem->warp_sum[warp_id] = warp_inc;
   __syncthreads();
 
-  // Step 3: Inter-warp prefix via redux.sync
+  // Step 3: Inter-warp prefix across warp sums.
   const auto tmp = smem->warp_sum[lane_id];
   uint32_t prefix = warp_reduce_sum_full(
       lane_id < warp_id ? tmp : 0);  // sum of all prior warps
