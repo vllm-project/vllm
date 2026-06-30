@@ -94,7 +94,7 @@ class WeightsMapper:
                 "k_scale to v_scale"
             )
 
-        for renaming in self.orig_to_new_renamings:
+        for renaming in self.orig_to_new_renaming:
             key, _ = renaming.rename_source_key(key)
 
         for pattern, new_key in self.orig_to_new_regex.items():
