@@ -226,21 +226,20 @@ _ON_GFX1100 = "gfx1100" in _GCN_ARCH
 _ON_GFX1151 = "gfx1151" in _GCN_ARCH
 _ON_GFX12X = any(arch in _GCN_ARCH for arch in ["gfx12"])
 _ON_MI3XX = any(arch in _GCN_ARCH for arch in ["gfx942", "gfx950"])
-_ON_GFX9 = any(
-    arch in _GCN_ARCH for arch in ["gfx90a", "gfx942", "gfx950"]
-)
+_ON_GFX9 = any(arch in _GCN_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
 _ON_GFX90A = "gfx90a" in _GCN_ARCH
 _ON_GFX942 = "gfx942" in _GCN_ARCH
 _ON_GFX950 = "gfx950" in _GCN_ARCH
 _ON_GFX1250 = "gfx1250" in _GCN_ARCH
 
-_ON_MI3OR4 = any(arch in _GCN_ARCH for arch in ["gfx942", "gfx950", "gfx1250"])  # TODO GFX1250: Need a correct name for this
 _ON_CDNA = any(arch in _GCN_ARCH for arch in ["gfx9, gfx1250"])
 _ON_RDNA = any(
-    arch for arch in _GCN_ARCH
+    arch
+    for arch in _GCN_ARCH
     if (arch.startswith("gfx11") or arch.startswith("gfx12")) and arch != "gfx1250"
 )
-#TODO GFX1250: Use CDNA for MI3OR4
+# TODO GFX1250: Use CDNA for MI3OR4
+
 
 def _capability_from_gcn_arch(gcn_arch: str) -> tuple[int, int] | None:
     """
@@ -314,7 +313,7 @@ def _capability_from_gcn_arch(gcn_arch: str) -> tuple[int, int] | None:
 
 
 def on_gfx1x() -> bool:
-    return _ON_GFX1X # and not _ON_GFX1250 TODO GFX1250: should we skip this explicitly
+    return _ON_GFX1X  # and not _ON_GFX1250 TODO GFX1250: should we skip this explicitly
 
 
 def on_gfx11() -> bool:
@@ -330,7 +329,9 @@ def on_gfx1151() -> bool:
 
 
 def on_gfx12x() -> bool:
-    return _ON_GFX12X # and not _ON_GFX1250 TODO GFX1250: should we skip this explicitly
+    return (
+        _ON_GFX12X  # and not _ON_GFX1250 TODO GFX1250: should we skip this explicitly
+    )
 
 
 def on_gfx1250() -> bool:
@@ -339,10 +340,6 @@ def on_gfx1250() -> bool:
 
 def on_mi3xx() -> bool:
     return _ON_MI3XX
-
-
-def on_mi3or4() -> bool:
-    return _ON_MI3OR4
 
 
 def on_gfx9() -> bool:
@@ -388,7 +385,7 @@ if (
     envs.VLLM_ROCM_USE_AITER
     and envs.VLLM_ROCM_USE_AITER_LINEAR
     and envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM
-    and on_mi3or4()
+    and get_cdna_version() > 2
 ):
     os.environ["HIP_ONLINE_TUNING"] = "1"
 
@@ -407,7 +404,7 @@ def use_rocm_custom_paged_attention(
 ) -> bool:
     # custom paged attn always supported on V0. On V1, requires sliding window
     # disabled due to observed numerical discrepancy.
-    if _ON_GFX9 or _ON_GFX1250:
+    if on_cdna():
         return (
             (sliding_window == 0 or sliding_window == (-1, -1))
             and (qtype == torch.half or qtype == torch.bfloat16)
@@ -708,12 +705,12 @@ class RocmPlatform(Platform):
 
         from vllm._aiter_ops import rocm_aiter_ops
 
-        if rocm_aiter_ops.is_enabled() and (on_gfx9() or on_gfx1250()):
+        if rocm_aiter_ops.is_enabled() and on_cdna():
             logger.info_once("Using AITER Flash Attention backend for ViT model.")
             return AttentionBackendEnum.ROCM_AITER_FA
 
         if (
-            (on_gfx9() or on_gfx1250())
+            on_cdna()
             and find_spec("flash_attn") is not None
             and (dtype == torch.float16 or dtype == torch.bfloat16)
         ):
@@ -936,7 +933,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def supports_fp8(cls) -> bool:
-        return on_gfx9() or on_gfx12x() or on_gfx1250() # TODO GFX1250: We know this is redundant ATM
+        return on_cdna() or on_gfx12x()  # TODO GFX1250: We know this is redundant ATM
 
     @classmethod
     def is_fp8_fnuz(cls) -> bool:

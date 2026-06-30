@@ -758,9 +758,9 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
     ) -> bool:
         p = current_platform
         if p.is_rocm():
-            from vllm.platforms.rocm import on_gfx9, on_gfx1250
+            from vllm.platforms.rocm import get_cdna_version
 
-            _rocm_support_fp8 = on_gfx9() or on_gfx1250()
+            _rocm_support_fp8 = get_cdna_version() > 2
         else:
             _rocm_support_fp8 = False
 

@@ -28,16 +28,9 @@ def mock_vllm_config():
 
 
 @pytest.fixture
-def mock_on_gfx9():
-    """Mock gfx9 arch detection to return True."""
-    with patch("vllm.platforms.rocm.on_gfx9", return_value=True):
-        yield
-
-
-@pytest.fixture
-def mock_on_mi3or4():
-    """Mock mi3or4 arch detection to return True."""
-    with patch("vllm.platforms.rocm.on_mi3or4", return_value=True):
+def mock_get_cdna_version():
+    """Mock cdna version arch detection to return True."""
+    with patch("vllm.platforms.rocm.get_cdna_version", return_value=3):
         yield
 
 
@@ -111,8 +104,7 @@ def test_standard_attention_backend_selection(
     selected_backend,
     expected_backend_path,
     mock_vllm_config,
-    mock_on_gfx9,
-    mock_on_mi3or4,
+    mock_get_cdna_version,
     monkeypatch,
 ):
     """Test standard attention backend selection with various configurations."""

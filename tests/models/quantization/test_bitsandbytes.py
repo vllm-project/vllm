@@ -21,11 +21,11 @@ from ...utils import compare_two_settings, multi_gpu_test
 from ..utils import check_embeddings_close, check_logprobs_close
 
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import on_gfx9, on_gfx1250
+    from vllm.platforms.rocm import on_cdna
 
     pytestmark = pytest.mark.skipif(
-        on_gfx9() or on_gfx1250(),
-        reason="bitsandbytes not supported on gfx9 (warp size 64 limitation)",
+        on_cdna(),
+        reason="bitsandbytes not supported on CDNA (warp size 64 limitation)",
     )
 
 models_4bit_to_test = [

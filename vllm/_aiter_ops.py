@@ -53,7 +53,7 @@ IS_AITER_FOUND = is_aiter_found()
 def is_aiter_found_and_supported() -> bool:
     """Check if AITER library is available and platform supports it.
 
-    Checks: platform (ROCm), device arch (gfx9 or gfx1250), and library existence.
+    Checks: platform (ROCm), device arch is CDNA 3 or better, and library existence.
     Does NOT check environment variables - that's handled by rocm_aiter_ops.is_enabled().
 
     This function determines if aiter CAN be used, not if it SHOULD be used.
@@ -67,9 +67,9 @@ def is_aiter_found_and_supported() -> bool:
     VLLM_ROCM_USE_AITER=0, while preventing unwanted JIT warnings for auto-discovery.
     """
     if current_platform.is_rocm() and IS_AITER_FOUND:
-        from vllm.platforms.rocm import on_mi3or4
+        from vllm.platforms.rocm import get_cdna_version
 
-        return on_mi3or4()
+        return get_cdna_version() > 2
     return False
 
 
@@ -185,9 +185,7 @@ def _rocm_aiter_fused_moe_triton_gemm_a4w4(
     m, _ = topk_ids.shape
     num_experts = w1.shape[0]
 
-    logits = torch.full(
-        (m, num_experts), -1e9, device=device, dtype=torch.float32
-    )
+    logits = torch.full((m, num_experts), -1e9, device=device, dtype=torch.float32)
     tid = topk_ids.long().clamp(min=0, max=num_experts - 1)
     logits.scatter_(
         1,
@@ -1917,16 +1915,22 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_fp4bmm_enabled(cls) -> bool:
-        from vllm.platforms.rocm import on_gfx950, on_gfx1250
+        from vllm.platforms.rocm import get_cdna_version
 
-        return cls._AITER_ENABLED and cls._FP4BMM_ENABLED and on_gfx950() # TODO GFX1250: (on_gfx950() or on_gfx1250())
+        return (
+            cls._AITER_ENABLED and cls._FP4BMM_ENABLED and get_cdna_version() == 4
+        )  # TODO GFX1250: Swap to > 3
 
     @classmethod
     @if_aiter_supported
     def is_linear_hipbmm_enabled(cls) -> bool:
-        from vllm.platforms.rocm import on_mi3or4
+        from vllm.platforms.rocm import get_cdna_version
 
-        return cls.is_linear_enabled() and on_mi3or4() and cls._LINEAR_HIPBMM_ENABLED
+        return (
+            cls.is_linear_enabled()
+            and (get_cdna_version() > 2)
+            and cls._LINEAR_HIPBMM_ENABLED
+        )
 
     @classmethod
     @if_aiter_supported

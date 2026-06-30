@@ -40,9 +40,9 @@ def _get_attention_backend_params() -> list[str | None]:
 
         if current_platform.is_rocm():
             backends: list[str | None] = [None, "TRITON_ATTN"]
-            from vllm.platforms.rocm import _on_mi3or4
+            from vllm.platforms.rocm import get_cdna_version
 
-            if _on_mi3or4():
+            if get_cdna_version() > 2:
                 backends.append("ROCM_AITER_UNIFIED_ATTN")
             return backends
     except Exception:

@@ -37,13 +37,13 @@ def _get_rocm_attention_config(model_name):
 
     if "whisper" in model_name.lower():
         try:
-            from vllm.platforms.rocm import _on_mi3or4
+            from vllm.platforms.rocm import get_cdna_version
 
-            if _on_mi3or4():
+            if get_cdna_version() > 2:
                 return {"backend": "ROCM_AITER_UNIFIED_ATTN"}
         except ImportError:
             logger.warning(
-                "Could not import _on_mi3or4 from rocm platform, "
+                "Could not check cdna version from rocm platform, "
                 "falling back to TRITON_ATTN for Whisper."
             )
         return {"backend": "TRITON_ATTN"}
