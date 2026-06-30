@@ -32,6 +32,7 @@ from tests.parser.engine.replay_harness import (
 from tests.parser.engine.trace_builder import _BUILDERS, build_samples
 from vllm.parser.engine import registered_adapters as _adapters_mod
 from vllm.parser.engine.parser_engine import ParserEngine
+from vllm.parser.engine.parser_engine_config import ParserState
 
 # ── Parser discovery ─────────────────────────────────────────────────
 
@@ -80,7 +81,11 @@ def _discover_parsers() -> list[_ParserInfo]:
                 terminals=sorted(v for v in all_vals if len(v) > 1),
                 tool_end=tool_end,
                 think_end=cfg.terminals.get("THINK_END", ""),
-                tool_start=cfg.terminals.get("TOOL_START", ""),
+                tool_start=(
+                    cfg.terminals["TOOL_SECTION_START"]
+                    if (ParserState.CONTENT, "TOOL_SECTION_START") in cfg.transitions
+                    else cfg.terminals.get("TOOL_START", "")
+                ),
             )
         )
     if missing_builders:
