@@ -85,6 +85,48 @@ class MockConversationContext(ConversationContext):
         pass
 
 
+class ToolCallingConversationContext(MockConversationContext):
+    """Context that asks for multiple builtin tool calls."""
+
+    def __init__(self, requested_tool_calls: int):
+        super().__init__()
+        self.requested_tool_calls = requested_tool_calls
+        self.tool_call_count = 0
+
+    def need_builtin_tool_call(self) -> bool:
+        return self.tool_call_count < self.requested_tool_calls
+
+    async def call_tool(self):
+        self.tool_call_count += 1
+        return []
+
+
+class FakeServingForToolCalls:
+    def __init__(self):
+        self.model_config = MagicMock()
+        self.model_config.max_model_len = 100
+        self.engine_client = MagicMock()
+        self.engine_client.generate.side_effect = self._generate
+        self.default_sampling_params = None
+        self.override_max_tokens = None
+
+    def _log_inputs(self, *args, **kwargs):
+        pass
+
+    def _extract_prompt_len(self, engine_input):
+        return len(engine_input["prompt_token_ids"])
+
+    async def _generate(self, *args, **kwargs):
+        yield RequestOutput(
+            request_id="req",
+            prompt=None,
+            prompt_token_ids=[1],
+            prompt_logprobs=None,
+            outputs=[],
+            finished=True,
+        )
+
+
 def test_serialize_message_pydantic_model_returns_dict() -> None:
     msg = ResponseRawMessageAndToken(message="hello", tokens=[1, 2, 3])
 
@@ -202,6 +244,26 @@ def test_response_created_event_uses_public_json_schema_alias() -> None:
     assert event.response.text is not None
     assert event.response.text.format is not None
     assert event.response.text.format.model_dump(by_alias=True)["schema"] == schema
+
+
+@pytest.mark.asyncio
+async def test_generate_with_builtin_tools_honors_max_tool_calls() -> None:
+    serving = FakeServingForToolCalls()
+    context = ToolCallingConversationContext(requested_tool_calls=2)
+
+    generator = OpenAIServingResponses._generate_with_builtin_tools(
+        serving,
+        request_id="req",
+        engine_input=tokens_input([1]),
+        sampling_params=SamplingParams(max_tokens=16),
+        context=context,
+        max_tool_calls=1,
+    )
+    async for _ in generator:
+        pass
+
+    assert context.tool_call_count == 1
+    assert serving.engine_client.generate.call_count == 2
 
 
 class TestInitializeToolSessions:

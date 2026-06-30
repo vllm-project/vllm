@@ -529,6 +529,7 @@ class OpenAIServingResponses(OpenAIServing):
                 reasoning_parser_kwargs=reasoning_parser_kwargs
                 if self.parser and self.parser.reasoning_parser_cls is not None
                 else None,
+                max_tool_calls=request.max_tool_calls,
             )
             generators.append(generator)
 
@@ -674,11 +675,13 @@ class OpenAIServingResponses(OpenAIServing):
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
+        max_tool_calls: int | None = None,
     ):
         max_model_len = self.model_config.max_model_len
 
         orig_priority = priority
         sub_request = 0
+        tool_call_count = 0
         while True:
             # Ensure that each sub-request has a unique request id.
             sub_request_id = f"{request_id}_{sub_request}"
@@ -708,9 +711,12 @@ class OpenAIServingResponses(OpenAIServing):
             if not context.need_builtin_tool_call():
                 # The model did not ask for a tool call, so we're done.
                 break
+            if max_tool_calls is not None and tool_call_count >= max_tool_calls:
+                break
 
             # Call the tool and update the context with the result.
             tool_output = await context.call_tool()
+            tool_call_count += 1
             context.append_tool_output(tool_output)
 
             # TODO: uncomment this and enable tool output streaming
