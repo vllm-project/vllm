@@ -4,14 +4,14 @@
 Batch VLM inference with Ray Data and vLLM.
 
 Supports two datasets:
-  --dataset coco       Real-world captioning (lmms-lab/COCO-Caption2017, ~5 k val images)
+  --dataset coco       Real-world captioning (lmms-lab/COCO-Caption2017, ~5k val)
   --dataset random-mm  Synthetic multimodal data with configurable ISL/OSL
 
 The script is hardware-agnostic: runtime environment variables are selected
 automatically based on the detected GPU backend (ROCm or CUDA).
 
 Verified hardware:
-  NVIDIA: TBA
+  NVIDIA: B200
   AMD:    MI300X, MI325X, MI355X
 
 Example:
@@ -26,24 +26,25 @@ https://docs.ray.io/en/latest/data/working-with-llms.html
 Docker / Ray setup and compatibility
 
 The container may not include this file or Ray (ROCm OpenAI image or similar).
-Copy the script in (``docker cp .../batch_vlm_inference.py <container>:/tmp/``) or bind-mount
-your vLLM tree (e.g. ``-v /path/to/vllm:/workspace``) and run from there. Install once:
-``pip3 install "ray[data]>=2.44.1"``. Sanity check:
-``python3 -c "import ray; from ray.data.llm import build_llm_processor, vLLMEngineProcessorConfig; print(ray.__version__)"``.
+Copy the script in (``docker cp .../batch_vlm_inference.py <container>:/tmp/``)
+or bind-mount your vLLM tree (e.g. ``-v /path/to/vllm:/workspace``) and run from
+there. Install once: ``pip3 install "ray[data]>=2.44.1"``. Sanity check:
+``python3 -c "import ray; from ray.data.llm import build_llm_processor; \
+print(ray.__version__)"``.
 
 Ray Data LLM requires ``vllm.inputs.data``; use a vLLM revision that includes
 https://github.com/vllm-project/vllm/pull/46013 (or ``main`` after it merges).
 """
 
 import argparse
-import base64
 import functools
 from io import BytesIO
 from typing import Any
 
 import datasets
-import torch
+import pybase64 as base64
 import ray
+import torch
 from packaging.version import Version
 from PIL import Image
 from ray.data.llm import build_llm_processor, vLLMEngineProcessorConfig
@@ -61,13 +62,15 @@ def get_runtime_env_vars() -> dict[str, str]:
     """
     env: dict[str, str] = {"VLLM_WORKER_MULTIPROC_METHOD": "spawn"}
     if torch.version.hip:
-        env.update({
-            "HIP_FORCE_DEV_KERNARG": "1",
-            "VLLM_ROCM_USE_AITER": "1",
-            "VLLM_ROCM_USE_AITER_MHA": "1",
-            "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": "1",
-            "SAFETENSORS_FAST_GPU": "1",
-        })
+        env.update(
+            {
+                "HIP_FORCE_DEV_KERNARG": "1",
+                "VLLM_ROCM_USE_AITER": "1",
+                "VLLM_ROCM_USE_AITER_MHA": "1",
+                "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": "1",
+                "SAFETENSORS_FAST_GPU": "1",
+            }
+        )
     return env
 
 
@@ -89,7 +92,9 @@ def build_engine_config(args: argparse.Namespace) -> vLLMEngineProcessorConfig:
             "mode": 3,
             "cudagraph_mode": "FULL_AND_PIECEWISE",
             # Enable AITER-fused rms_norm and fp8 quantization kernels on ROCm.
-            **({"custom_ops": ["+rms_norm", "+quant_fp8"]} if torch.version.hip else {}),
+            **(
+                {"custom_ops": ["+rms_norm", "+quant_fp8"]} if torch.version.hip else {}
+            ),
         },
         limit_mm_per_prompt={"image": 1},
     )
@@ -137,24 +142,18 @@ def preprocess_coco(row: dict[str, Any], max_tokens: int = 256) -> dict[str, Any
     }
 
 
-def preprocess_random_mm(
-    row: dict[str, Any], max_tokens: int = 512
-) -> dict[str, Any]:
+def preprocess_random_mm(row: dict[str, Any], max_tokens: int = 512) -> dict[str, Any]:
     """Prepare a synthetic random-mm row for VLM inference.
 
     Decodes base64-encoded JPEG images from the RandomMultiModalDataset
     format into PIL Images that Ray Data can serialize efficiently.
     """
     images = [
-        Image.open(
-            BytesIO(base64.b64decode(item["image_url"]["url"].split(",", 1)[1]))
-        )
+        Image.open(BytesIO(base64.b64decode(item["image_url"]["url"].split(",", 1)[1])))
         for item in (row.get("multi_modal_data") or [])
         if item.get("type") == "image_url"
     ]
-    content: list[dict[str, Any]] = [
-        {"type": "image", "image": img} for img in images
-    ]
+    content: list[dict[str, Any]] = [{"type": "image", "image": img} for img in images]
     content.append({"type": "text", "text": row["prompt"]})
     return {
         "messages": [{"role": "user", "content": content}],
@@ -178,6 +177,7 @@ def load_random_mm_dataset(args: argparse.Namespace) -> ray.data.Dataset:
     throughput benefit at typical benchmark scales.
     """
     from transformers import AutoTokenizer
+
     from vllm.benchmarks.datasets import RandomMultiModalDataset
 
     print(
@@ -212,19 +212,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default="Qwen/Qwen3-VL-235B-A22B-Instruct-FP8")
     # Dataset
     parser.add_argument("--dataset", choices=["coco", "random-mm"], default="coco")
-    parser.add_argument("--n-samples", type=int, default=None,
-                        help="samples to process (default: 10 × batch-size)")
-    parser.add_argument("--isl", type=int, default=1024,
-                        help="[random-mm] input sequence length in text tokens")
-    parser.add_argument("--osl", type=int, default=512,
-                        help="max output tokens")
-    parser.add_argument("--image-size", type=int, default=512,
-                        help="[random-mm] synthetic image height and width in pixels")
+    parser.add_argument(
+        "--n-samples",
+        type=int,
+        default=None,
+        help="samples to process (default: 10 × batch-size)",
+    )
+    parser.add_argument(
+        "--isl",
+        type=int,
+        default=1024,
+        help="[random-mm] input sequence length in text tokens",
+    )
+    parser.add_argument("--osl", type=int, default=512, help="max output tokens")
+    parser.add_argument(
+        "--image-size",
+        type=int,
+        default=512,
+        help="[random-mm] synthetic image height and width in pixels",
+    )
     parser.add_argument("--seed", type=int, default=42, help="[random-mm] random seed")
     # Engine
     parser.add_argument("--tensor-parallel-size", type=int, default=8)
-    parser.add_argument("--enable-expert-parallel", action="store_true",
-                        help="enable for MoE models (e.g. Qwen3-VL-235B; not needed for 32B)")
+    parser.add_argument(
+        "--enable-expert-parallel",
+        action="store_true",
+        help="enable for MoE models (e.g. Qwen3-VL-235B; not needed for 32B)",
+    )
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.94)
     parser.add_argument("--max-model-len", type=int, default=32768)
     parser.add_argument("--max-num-seqs", type=int, default=10240)
@@ -241,10 +255,10 @@ def main() -> None:
 
     # Pass GPU count explicitly to ray.init — some ROCm environments (e.g. TheRock)
     # ship libamd_smi instead of librocm_smi64, causing Ray's auto-detection to
-    # return 0 GPUs. torch.cuda.device_count() works correctly on ROCm via HIP.
-    num_gpus = torch.cuda.device_count()
+    # return 0 GPUs. torch.accelerator works correctly on ROCm via HIP.
+    num_gpus = torch.accelerator.device_count()
     ray.init(num_gpus=num_gpus if num_gpus > 0 else None)
-    
+
     if args.n_samples is None:
         args.n_samples = 10 * args.batch_size
 
@@ -262,7 +276,7 @@ def main() -> None:
     results = processor(ds).take_all()
     print(f"Done — {len(results)} results.")
     if results:
-        print("Sample output:", results[0].get("generated_text", "")[:args.osl])
+        print("Sample output:", results[0].get("generated_text", "")[: args.osl])
 
 
 if __name__ == "__main__":
