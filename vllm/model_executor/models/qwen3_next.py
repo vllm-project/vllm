@@ -550,14 +550,13 @@ class Qwen3NextDecoderLayer(nn.Module):
                 )
 
         if self.use_attn_reduce_scatter_for_moe:
-            sp_remainder = (
-                hidden_states.shape[0] % get_tensor_model_parallel_world_size()
+            tp_world_size = get_tensor_model_parallel_world_size()
+            # small trick using minus, eg. -17 % 8 = 7
+            sp_pad = (-hidden_states.shape[0]) % tp_world_size
+            # pad if not divisible by world size
+            hidden_states = torch.nn.functional.pad(
+                hidden_states, (0, 0, 0, sp_pad)
             )
-            if sp_remainder:
-                sp_pad = get_tensor_model_parallel_world_size() - sp_remainder
-                hidden_states = torch.nn.functional.pad(
-                    hidden_states, (0, 0, 0, sp_pad)
-                )
             hidden_states = tensor_model_parallel_reduce_scatter(hidden_states, 0)
             if not input_is_sequence_parallel:
                 residual = sequence_parallel_chunk(residual)
