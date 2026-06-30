@@ -114,6 +114,13 @@ g_fi_workspace = torch.zeros(
 
 class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
     can_return_lse_for_decode: bool = True
+    # trtllm-gen MLA decode emits LSE in log2 (per flashinfer's own
+    # reference at flashinfer/trace/templates/attention.py:81:
+    # `logsumexp / log(2.0)`). Override the AttentionImplBase default
+    # so MLAAttention's DCP combine branches on the correct base
+    # (IS_BASE_E=False uses tl.exp2/tl.log2 natively, avoiding an FP
+    # multiply per decode step).
+    lse_base_on_e: bool = False
 
     def __init__(
         self,
