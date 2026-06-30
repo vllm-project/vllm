@@ -6385,7 +6385,7 @@ class GPUModelRunner(
         _ROPE_DICT.clear()
 
         reset_workspace_manager()
-        if current_platform.is_rocm():
+        if current_platform.is_rocm() or current_platform.is_xpu():
             gc.collect()
             torch.accelerator.empty_cache()
             torch.accelerator.synchronize()
