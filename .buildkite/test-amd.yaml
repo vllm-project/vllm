@@ -2828,6 +2828,7 @@ steps:
   - rocm-smi
   - python3 examples/basic/offline_inference/chat.py --attention-backend TRITON_ATTN
   - pytest -v -s tests/kernels/attention/test_attention_selector.py
+  - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
 
 - label: Kernels Attention Test %N # TBD
   timeout_in_minutes: 60

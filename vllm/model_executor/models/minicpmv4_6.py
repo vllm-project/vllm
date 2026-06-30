@@ -25,7 +25,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -619,6 +618,14 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
 
 
 class MiniCPMV4_6ViTWindowAttentionSelfAttn(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            "q_proj": ("qkv_proj", "q"),
+            "k_proj": ("qkv_proj", "k"),
+            "v_proj": ("qkv_proj", "v"),
+        }
+    )
+
     def __init__(
         self,
         config,
@@ -667,31 +674,8 @@ class MiniCPMV4_6ViTWindowAttentionSelfAttn(nn.Module):
         return out
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                mapped_name = name.replace(weight_name, param_name, 1)
-                if mapped_name not in params_dict:
-                    continue
-                param = params_dict[mapped_name]
-                param.weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                if name not in params_dict:
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class MiniCPMV4_6ViTWindowAttentionMerger(nn.Module):
