@@ -114,7 +114,6 @@ from vllm.utils.argparse_utils import (
 )
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_ip
-from vllm.utils.torch_utils import resolve_kv_cache_dtype_string
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.sample.logits_processor import LogitsProcessor
 from vllm.version import __version__ as VLLM_VERSION
@@ -1856,11 +1855,6 @@ class EngineArgs:
             # global layers in interleaved sliding window models.
             sliding_window = model_config.get_sliding_window()
 
-        # Resolve "auto" kv_cache_dtype to actual value from model config
-        resolved_cache_dtype = resolve_kv_cache_dtype_string(
-            self.kv_cache_dtype, model_config
-        )
-
         assert self.enable_prefix_caching is not None, (
             "enable_prefix_caching must be set by this point"
         )
@@ -1869,7 +1863,7 @@ class EngineArgs:
             block_size=self.block_size,  # type: ignore[arg-type]
             gpu_memory_utilization=self.gpu_memory_utilization,
             kv_cache_memory_bytes=self.kv_cache_memory_bytes,
-            cache_dtype=resolved_cache_dtype,  # type: ignore[arg-type]
+            cache_dtype=self.kv_cache_dtype,
             is_attention_free=model_config.is_attention_free,
             num_gpu_blocks_override=self.num_gpu_blocks_override,
             sliding_window=sliding_window,
@@ -1886,7 +1880,7 @@ class EngineArgs:
             kv_offloading_backend=self.kv_offloading_backend,
         )
 
-        if resolved_cache_dtype.startswith("turboquant_"):
+        if self.kv_cache_dtype.startswith("turboquant_"):
             from vllm.model_executor.layers.quantization.turboquant.config import (
                 TurboQuantConfig,
             )
@@ -2221,7 +2215,7 @@ class EngineArgs:
 
         # TurboQuant requires FlashAttention 2 — FA3 boundary layers assert
         # FlashAttentionImpl which fails with TurboQuantAttentionImpl.
-        if resolved_cache_dtype.startswith("turboquant_") and (
+        if self.kv_cache_dtype.startswith("turboquant_") and (
             attention_config.flash_attn_version is None
             or attention_config.flash_attn_version >= 3
         ):

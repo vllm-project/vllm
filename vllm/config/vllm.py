@@ -15,7 +15,7 @@ from datetime import datetime
 from enum import IntEnum
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, TypeVar, get_args
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast, get_args
 
 import torch
 from pydantic import ConfigDict, Field, model_validator
@@ -26,9 +26,10 @@ from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
+from vllm.utils.torch_utils import resolve_kv_cache_dtype_string
 
 from .attention import AttentionConfig
-from .cache import CacheConfig
+from .cache import CacheConfig, CacheDType
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig
 from .diffusion import DiffusionConfig
@@ -1909,6 +1910,13 @@ class VllmConfig:
     def try_verify_and_update_config(self):
         if self.model_config is None:
             return
+
+        self.cache_config.cache_dtype = cast(
+            CacheDType,
+            resolve_kv_cache_dtype_string(
+                self.cache_config.cache_dtype, self.model_config
+            ),
+        )
 
         # Avoid running try_verify_and_update_config multiple times
         if getattr(self.model_config, "config_updated", False):

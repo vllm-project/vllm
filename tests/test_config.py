@@ -15,6 +15,7 @@ import vllm.config.vllm as vllm_config_module
 import vllm.envs as envs
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
+    CacheConfig,
     CompilationConfig,
     KernelConfig,
     ModelConfig,
@@ -307,6 +308,33 @@ def test_async_scheduling_with_pipeline_parallelism_is_allowed():
         ),
     )
     assert cfg.scheduler_config.async_scheduling is True
+
+
+@pytest.mark.parametrize(
+    ("cache_dtype", "expected"),
+    [
+        ("auto", "nvfp4"),
+        ("bfloat16", "bfloat16"),
+    ],
+)
+def test_vllm_config_resolves_kv_cache_dtype(cache_dtype: str, expected: str):
+    cfg = VllmConfig(
+        cache_config=CacheConfig(cache_dtype=cache_dtype),
+    )
+    cfg.model_config = SimpleNamespace(
+        architecture=None,
+        model_arch_config=SimpleNamespace(
+            quantization_config={
+                "quant_method": "modelopt",
+                "kv_cache_quant_algo": "NVFP4",
+            },
+        ),
+        hf_config=SimpleNamespace(quantization_config=None),
+    )
+
+    cfg.try_verify_and_update_config()
+
+    assert cfg.cache_config.cache_dtype == expected
 
 
 @dataclass
