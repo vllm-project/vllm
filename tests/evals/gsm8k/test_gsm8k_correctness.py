@@ -9,15 +9,31 @@ pytest -s -v tests/evals/gsm8k/test_gsm8k_correctness.py \
     --config-list-file=configs/models-small.txt
 """
 
+import importlib.metadata
 import shlex
+from importlib.util import find_spec
 
 import pytest
+import torch
 import yaml
+from packaging import version
 
 from tests.utils import RemoteOpenAIServer
 from vllm.platforms import current_platform
 
 from .gsm8k_eval import evaluate_gsm8k
+
+# MXFP4 via quark requires amd-quark >= 0.12 on torch >= 2.11.
+# Earlier torch releases work with older quark versions. See
+# https://github.com/amd/Quark/issues/34
+# TODO: Remove once amd-quark>=0.12.0
+QUARK_MXFP4_TORCH_COMPATIBLE = find_spec("quark") is not None and (
+    version.parse(importlib.metadata.version("amd-quark")) >= version.parse("0.12.0")
+    if version.parse(torch.__version__.split("+")[0]) >= version.parse("2.11")
+    else True
+)
+
+DEFAULT_STARTUP_MAX_WAIT_SECONDS = 1200
 
 
 def run_gsm8k_eval(eval_config: dict, server_url: str) -> dict:
@@ -88,15 +104,18 @@ def test_gsm8k_correctness(config_filename):
             "Skipping DeepSeek-V3.2 and DeepSeek-R1 on ROCm platforms "
             "due to agent pool disk space issues and pod evictions."
         )
-    if current_platform.is_rocm() and (
-        "Qwen3.5-35B-A3B-MXFP4-AITER-TP2" in config_filename.name
-    ):
+    if current_platform.is_rocm() and ("Qwen3.5-35B-A3B-MXFP4" in config_filename.name):
         from vllm.platforms.rocm import on_gfx950
 
-        if not on_gfx950():
+        if not on_gfx950() and "AITER-TP2" in config_filename.name:
             pytest.skip(
                 "Skipping Qwen3.5-35B-A3B-MXFP4-AITER-TP2 on non-GFX950 platforms. "
                 "The quantization scheme is not supported on non-GFX950 platforms."
+            )
+        if not QUARK_MXFP4_TORCH_COMPATIBLE:
+            pytest.skip(
+                "Skipping Qwen3.5-35B-A3B-MXFP4: amd-quark >= 0.12 is required "
+                "on torch >= 2.11."
             )
     # Parse server arguments from config (use shlex to handle quoted strings)
     server_args_str = eval_config.get("server_args", "")
@@ -110,7 +129,11 @@ def test_gsm8k_correctness(config_filename):
         ]
     )
 
-    env_dict = eval_config.get("env", None)
+    startup_max_wait_seconds = eval_config.get(
+        "startup_max_wait_seconds", DEFAULT_STARTUP_MAX_WAIT_SECONDS
+    )
+    env_dict = dict(eval_config.get("env") or {})
+    env_dict["VLLM_ENGINE_READY_TIMEOUT_S"] = str(int(startup_max_wait_seconds))
 
     print(f"Starting GSM8K evaluation for model: {eval_config['model_name']}")
     print(f"Expected metric threshold: {eval_config['accuracy_threshold']}")
@@ -122,6 +145,7 @@ def test_gsm8k_correctness(config_filename):
             "rocm_request_timeout_seconds", request_timeout_seconds
         )
     print(f"Request timeout: {request_timeout_seconds}s")
+    print(f"Startup max wait: {startup_max_wait_seconds}s")
     print(f"Server args: {' '.join(server_args)}")
     print(f"Environment variables: {env_dict}")
 
@@ -130,7 +154,7 @@ def test_gsm8k_correctness(config_filename):
         eval_config["model_name"],
         server_args,
         env_dict=env_dict,
-        max_wait_seconds=eval_config.get("startup_max_wait_seconds", 600),
+        max_wait_seconds=startup_max_wait_seconds,
     ) as remote_server:
         server_url = remote_server.url_for("v1")
         print(f"Server started at: {server_url}")

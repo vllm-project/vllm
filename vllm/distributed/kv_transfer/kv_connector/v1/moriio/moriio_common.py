@@ -6,7 +6,7 @@ import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import msgspec
 import regex as re
@@ -41,6 +41,11 @@ Transfer = tuple[int, float]
 EngineId = str
 ReqId = str
 TransferId = str
+
+
+class MoRIIOTransferAck(NamedTuple):
+    transfer_id: TransferId
+    consumer_tp_size: int = 1
 
 
 @dataclass

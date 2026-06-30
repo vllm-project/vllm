@@ -337,5 +337,5 @@ def test_chunked_token_database_hash_block_size_smaller_than_block_size():
     assert out[1][0] == 16 and out[1][1] == 32
     # Each chunk's hash is its last (4th) fine hash, which already chains the
     # prior three.
-    assert out[0][2].chunk_hash == fine_hashes[3].hex()
-    assert out[1][2].chunk_hash == fine_hashes[7].hex()
+    assert out[0][2].hex() == fine_hashes[3].hex()
+    assert out[1][2].hex() == fine_hashes[7].hex()

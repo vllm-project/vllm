@@ -30,7 +30,6 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
-    get_tool_call_id_type,
 )
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.engine.protocol import (
@@ -92,7 +91,6 @@ from vllm.entrypoints.openai.responses.utils import (
     extract_function_tool_names,
     extract_tool_types,
 )
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import VLLMValidationError
@@ -103,6 +101,7 @@ from vllm.logprobs import SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import CompletionOutput
 from vllm.parser import Parser, ParserManager
+from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
@@ -155,7 +154,7 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         engine_client: EngineClient,
         models: OpenAIServingModels,
-        openai_serving_render: OpenAIServingRender,
+        online_renderer: OnlineRenderer,
         *,
         request_logger: RequestLogger | None,
         chat_template: str | None,
@@ -177,7 +176,7 @@ class OpenAIServingResponses(OpenAIServing):
             return_tokens_as_token_ids=return_tokens_as_token_ids,
         )
 
-        self.openai_serving_render = openai_serving_render
+        self.online_renderer = online_renderer
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
         self.chat_template_kwargs = default_chat_template_kwargs or {}
@@ -222,9 +221,6 @@ class OpenAIServingResponses(OpenAIServing):
                 "For gpt-oss, we ignore --enable-auto-tool-choice "
                 "and always enable tool use."
             )
-
-        self.tool_call_id_type = get_tool_call_id_type(self.model_config)
-
         self.enable_auto_tools = enable_auto_tools
         # HACK(woosuk): This is a hack. We should use a better store.
         # FIXME: If enable_store=True, this may cause a memory leak since we
@@ -272,6 +268,7 @@ class OpenAIServingResponses(OpenAIServing):
             tokenizer,
             request.tools,
             chat_template_kwargs=chat_template_kwargs,
+            model_config=self.model_config,
         )
 
     def _validate_generator_input(
@@ -493,7 +490,6 @@ class OpenAIServingResponses(OpenAIServing):
                         chat_template=self.chat_template,
                         chat_template_content_format=self.chat_template_content_format,
                         enable_auto_tools=self.enable_auto_tools,
-                        tool_call_id_type=self.tool_call_id_type,
                     )
                 else:
                     context = SimpleContext(
@@ -633,7 +629,7 @@ class OpenAIServingResponses(OpenAIServing):
             prev_response_output=prev_response.output if prev_response else None,
         )
         chat_template_kwargs = self._effective_chat_template_kwargs(request)
-        _, engine_inputs = await self.openai_serving_render.preprocess_chat(
+        _, engine_inputs = await self.online_renderer.preprocess_chat(
             request,
             messages,
             default_template=self.chat_template,
@@ -657,7 +653,7 @@ class OpenAIServingResponses(OpenAIServing):
             request_input=messages,
         )
         chat_template_kwargs = self._effective_chat_template_kwargs(request)
-        _, engine_inputs = await self.openai_serving_render.preprocess_chat(
+        _, engine_inputs = await self.online_renderer.preprocess_chat(
             request,
             new_messages,
             default_template=chat_template,
@@ -1067,6 +1063,7 @@ class OpenAIServingResponses(OpenAIServing):
                 final_output.text,
                 request,
                 enable_auto_tools=self.enable_auto_tools,
+                model_output_token_ids=final_output.token_ids,
             )
             if not request.include_reasoning:
                 reasoning = None
@@ -1076,7 +1073,6 @@ class OpenAIServingResponses(OpenAIServing):
                 content=content,
                 tool_calls=tool_calls,
                 logprobs=logprobs,
-                tool_call_id_type=self.tool_call_id_type,
             )
 
         # Fallback when no parser is configured
@@ -1194,30 +1190,6 @@ class OpenAIServingResponses(OpenAIServing):
             # instructions are ignored.
             prev_msgs = self.msg_store[prev_response.id]
 
-            # FIXME(woosuk): The slice-delete-reappend cycle below is
-            # currently a no-op --- it removes messages then puts them all
-            # back unfiltered. It may be intentionally deferred (see FIXME
-            # above) or redundant if the Harmony encoder already strips
-            # analysis messages at render time. If analysis messages need
-            # to be dropped here, add a channel != "analysis" filter when
-            # re-appending, similar to auto_drop_analysis_messages in
-            # harmony_utils.py.
-            if len(prev_msgs) > 0:
-                last_msg = prev_msgs[-1]
-                assert isinstance(last_msg, OpenAIHarmonyMessage)
-                if last_msg.channel == "final":
-                    prev_final_msg_idx = -1
-                    for i in range(len(prev_msgs) - 2, -1, -1):
-                        prev_msg_i = prev_msgs[i]
-                        assert isinstance(prev_msg_i, OpenAIHarmonyMessage)
-                        if prev_msg_i.channel == "final":
-                            prev_final_msg_idx = i
-                            break
-                    recent_turn_msgs = prev_msgs[prev_final_msg_idx + 1 :]
-                    del prev_msgs[prev_final_msg_idx + 1 :]
-                    for msg in recent_turn_msgs:
-                        assert isinstance(msg, OpenAIHarmonyMessage)
-                        prev_msgs.append(msg)
             messages.extend(prev_msgs)
         # Append the new input.
         # Responses API supports simple text inputs without chat format.

@@ -285,6 +285,125 @@ inline int32_t load_uint4_vnni(const uint8_t* __restrict__ B, int64_t k, int64_t
   return (n_group % 2 == 0) ? (packed & 0x0f) : ((packed >> 4) & 0x0f);
 }
 
+#if defined(CPU_CAPABILITY_RVV)
+template <int64_t N, int64_t ldb, int group>
+inline fixed_i8x8_t load_uint4_as_int8_rvv(const uint8_t* __restrict__ B, int64_t k) {
+  constexpr int64_t n_group_size = 8;
+  constexpr int64_t vnni_size = 4;
+  static_assert(N == 32);
+  static_assert(ldb == N / 2);
+  static_assert(group >= 0 && group < N / n_group_size);
+
+  // Unpack: gather 8 packed int4 values from the VNNI4 layout.
+  const int64_t ki = k % vnni_size;
+  const int64_t k_base = k - ki;
+  constexpr int64_t packed_group = group / 2;
+  const uint8_t* packed_ptr = B + k_base * ldb + packed_group * n_group_size * vnni_size + ki;
+
+  fixed_u8x8_t packed = RVVI(__riscv_vlse8_v_u8, LMUL_64)(packed_ptr, vnni_size, n_group_size);
+  if constexpr (group % 2 == 1) {
+    packed = RVVI(__riscv_vsrl_vx_u8, LMUL_64)(packed, 4, n_group_size);
+  }
+  fixed_u8x8_t nibbles = RVVI(__riscv_vand_vx_u8, LMUL_64)(packed, 0x0f, n_group_size);
+  return RVVI4(__riscv_vreinterpret_v_u8, LMUL_64, _i8, LMUL_64)(nibbles);
+}
+
+inline fixed_i32x8_t gemm_accum_uint8_int8_rvv(fixed_i32x8_t acc, uint8_t a, fixed_i8x8_t b) {
+  constexpr int64_t vl = 8;
+  fixed_i16x8_t b_i16 = RVVI(__riscv_vsext_vf2_i16, LMUL_128)(b, vl);
+  return RVVI(__riscv_vwmacc_vx_i32, LMUL_256)(acc, static_cast<int16_t>(a), b_i16, vl);
+}
+
+template <int64_t N, int64_t ldb, int group>
+inline fixed_i32x8_t gemm_accum_uint4_rvv(
+    fixed_i32x8_t acc,
+    const uint8_t* __restrict__ B,
+    const int8_t* __restrict__ qzeros_b,
+    uint8_t a,
+    int64_t k) {
+  constexpr int64_t n_group_size = 8;
+  fixed_i8x8_t b = load_uint4_as_int8_rvv<N, ldb, group>(B, k);
+  fixed_i8x8_t qzeros =
+      RVVI(__riscv_vle8_v_i8, LMUL_64)(qzeros_b + group * n_group_size, n_group_size);
+  b = RVVI(__riscv_vsub_vv_i8, LMUL_64)(b, qzeros, n_group_size);
+  return gemm_accum_uint8_int8_rvv(acc, a, b);
+}
+
+template <int group>
+inline void _dequant_and_store_rvv(
+    float* __restrict__ C,
+    fixed_i32x8_t acc,
+    const float* __restrict__ scales_a,
+    const int32_t* __restrict__ qzeros_a,
+    const float* __restrict__ scales_b,
+    const int32_t* __restrict__ compensation,
+    int64_t m,
+    int64_t ldc) {
+  constexpr int64_t n_group_size = 8;
+  constexpr int64_t n = group * n_group_size;
+  constexpr int64_t vl = n_group_size;
+
+  // Dequant compensation: remove activation zero-point contribution.
+  fixed_i32x8_t comp = RVVI(__riscv_vle32_v_i32, LMUL_256)(compensation + n, vl);
+  fixed_i32x8_t zp_comp = RVVI(__riscv_vmul_vx_i32, LMUL_256)(comp, qzeros_a[m], vl);
+  acc = RVVI(__riscv_vsub_vv_i32, LMUL_256)(acc, zp_comp, vl);
+
+  // Scale: convert int32 accumulators to fp32 and apply activation/weight scales.
+  fixed_fp32x8_t acc_f = RVVI(__riscv_vfcvt_f_x_v_f32, LMUL_256)(acc, vl);
+  acc_f = RVVI(__riscv_vfmul_vf_f32, LMUL_256)(acc_f, scales_a[m], vl);
+  fixed_fp32x8_t scale_b = RVVI(__riscv_vle32_v_f32, LMUL_256)(scales_b + n, vl);
+  acc_f = RVVI(__riscv_vfmul_vv_f32, LMUL_256)(acc_f, scale_b, vl);
+
+  // Store: accumulate into the float scratch buffer that already holds bias/zero.
+  float* c_ptr = C + m * ldc + n;
+  fixed_fp32x8_t c_old = RVVI(__riscv_vle32_v_f32, LMUL_256)(c_ptr, vl);
+  fixed_fp32x8_t c_new = RVVI(__riscv_vfadd_vv_f32, LMUL_256)(c_old, acc_f, vl);
+  RVVI(__riscv_vse32_v_f32, LMUL_256)(c_ptr, c_new, vl);
+}
+
+template <int64_t N, int64_t ldb>
+void _dequant_gemm_accum_rvv(
+    float* __restrict__ C,
+    const uint8_t* __restrict__ A,
+    const float* __restrict__ scales_a,
+    const int32_t* __restrict__ qzeros_a,
+    const uint8_t* __restrict__ B,
+    const float* __restrict__ scales_b,
+    const int8_t* __restrict__ qzeros_b,
+    const int32_t* __restrict__ compensation,
+    int64_t M,
+    int64_t K,
+    int64_t lda,
+    int64_t ldc) {
+  static_assert(N == 32);
+  static_assert(ldb == N / 2);
+  constexpr int64_t vl = 8;
+
+  // Accumulate one C row over the 32-column block.
+  for (int64_t m = 0; m < M; ++m) {
+    fixed_i32x8_t acc0 = RVVI(__riscv_vmv_v_x_i32, LMUL_256)(0, vl);
+    fixed_i32x8_t acc1 = RVVI(__riscv_vmv_v_x_i32, LMUL_256)(0, vl);
+    fixed_i32x8_t acc2 = RVVI(__riscv_vmv_v_x_i32, LMUL_256)(0, vl);
+    fixed_i32x8_t acc3 = RVVI(__riscv_vmv_v_x_i32, LMUL_256)(0, vl);
+    // A[m][k] @ B[k][0:32] -> acc[m][0:32]
+    for (int64_t k = 0; k < K; ++k) {
+      // GEMM K step: one scalar activation updates four 8-column RVV tiles.
+      const uint8_t a = A[m * lda + k];
+      acc0 = gemm_accum_uint4_rvv<N, ldb, 0>(acc0, B, qzeros_b, a, k);
+      acc1 = gemm_accum_uint4_rvv<N, ldb, 1>(acc1, B, qzeros_b, a, k);
+      acc2 = gemm_accum_uint4_rvv<N, ldb, 2>(acc2, B, qzeros_b, a, k);
+      acc3 = gemm_accum_uint4_rvv<N, ldb, 3>(acc3, B, qzeros_b, a, k);
+    }
+
+    // Dequant/scale/store each 8-column group back into C.
+    _dequant_and_store_rvv<0>(C, acc0, scales_a, qzeros_a, scales_b, compensation, m, ldc);
+    _dequant_and_store_rvv<1>(C, acc1, scales_a, qzeros_a, scales_b, compensation, m, ldc);
+    _dequant_and_store_rvv<2>(C, acc2, scales_a, qzeros_a, scales_b, compensation, m, ldc);
+    _dequant_and_store_rvv<3>(C, acc3, scales_a, qzeros_a, scales_b, compensation, m, ldc);
+  }
+}
+#endif
+
 template <int64_t N, int64_t ldb, bool sym_quant_act>
 void _dequant_gemm_accum(
     float* C,
@@ -335,6 +454,11 @@ void _dequant_gemm_accum(
     _mm_prefetch(A + K, _MM_HINT_T0);
     _dequant_and_store<true, N, sym_quant_act>(
         C, C_i32, scales_a, qzeros_a, scales_b, compensation, M, N /*ldi*/, ldc, 1 /*ldsa*/);
+  } else
+#elif defined(CPU_CAPABILITY_RVV)
+  if constexpr (!sym_quant_act && N == BLOCK_N && ldb == BLOCK_N / 2) {
+    _dequant_gemm_accum_rvv<N, ldb>(C, A, scales_a, qzeros_a, B, scales_b, qzeros_b, compensation, M, K, lda, ldc);
+    return;
   } else
 #endif
   {

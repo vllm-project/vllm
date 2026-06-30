@@ -471,6 +471,9 @@ class ModelCudaGraphManager(CudaGraphManager):
                 skip_attn=(desc.cg_mode == CUDAGraphMode.PIECEWISE),
             )
 
+            # Capture with dummy rows marked as padding.
+            input_buffers.is_padding.fill_(True)
+
             def forward_fn(cg_mode: CUDAGraphMode) -> None:
                 batch_descriptor = None
                 if cg_mode == CUDAGraphMode.PIECEWISE:
@@ -488,6 +491,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                     num_tokens_across_dp=num_tokens_across_dp,
                     slot_mapping=slot_mappings,
                     batch_descriptor=batch_descriptor,
+                    is_padding=input_buffers.is_padding[:num_tokens],
                 ):
                     if cg_mode == CUDAGraphMode.PIECEWISE:
                         # PIECEWISE graph (compiled PW or breakable, chosen inside
