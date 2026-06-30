@@ -68,6 +68,31 @@ def _make_test_kv_cache_config() -> KVCacheConfig:
     )
 
 
+def _make_unsplit_transfer_topo():
+    return SimpleNamespace(
+        split_k_and_v=False,
+        virtually_split_kv_in_blocks=False,
+        get_transfer_cache_regions=lambda cache, layer_spec: [cache],
+    )
+
+
+def _populate_worker_layer_metadata(worker: MooncakeConnectorWorker):
+    worker._layer_specs = {}
+    worker._layer_group_indices = {}
+    worker._layer_logical_group_indices = {}
+    for group_index, group in enumerate(worker.kv_cache_config.kv_cache_groups):
+        group_spec = group.kv_cache_spec
+        specs_by_layer = getattr(group_spec, "kv_cache_specs", {})
+        for layer_name in group.layer_names:
+            worker._layer_specs[layer_name] = specs_by_layer.get(
+                layer_name, group_spec
+            )
+            worker._layer_group_indices[layer_name] = group_index
+            worker._layer_logical_group_indices.setdefault(layer_name, []).append(
+                group_index
+            )
+
+
 class FakeMooncakeWrapper:
     """Mock Mooncake TransferEngine for unit testing environments."""
 
@@ -1380,7 +1405,7 @@ def test_register_kv_caches_skips_speculative_layers_outside_base_model():
         speculative_config=SimpleNamespace(method="mtp"),
     )
     worker.kv_cache_config = _make_test_kv_cache_config()
-    worker.transfer_topo = SimpleNamespace(split_k_and_v=False)
+    worker.transfer_topo = _make_unsplit_transfer_topo()
     worker.engine = MagicMock()
     worker.engine.batch_register_memory.return_value = 0
     worker.async_zmq_ctx = MagicMock()
@@ -1388,6 +1413,7 @@ def test_register_kv_caches_skips_speculative_layers_outside_base_model():
     worker.is_kv_producer = False
     worker.receiver_loop = MagicMock()
     worker.receiver_loop.is_running.return_value = False
+    _populate_worker_layer_metadata(worker)
 
     kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
         num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
@@ -1422,7 +1448,7 @@ def test_register_kv_caches_keeps_non_mtp_speculative_layers_outside_base_model(
         speculative_config=SimpleNamespace(method="eagle"),
     )
     worker.kv_cache_config = _make_test_kv_cache_config()
-    worker.transfer_topo = SimpleNamespace(split_k_and_v=False)
+    worker.transfer_topo = _make_unsplit_transfer_topo()
     worker.engine = MagicMock()
     worker.engine.batch_register_memory.return_value = 0
     worker.async_zmq_ctx = MagicMock()
@@ -1430,6 +1456,7 @@ def test_register_kv_caches_keeps_non_mtp_speculative_layers_outside_base_model(
     worker.is_kv_producer = False
     worker.receiver_loop = MagicMock()
     worker.receiver_loop.is_running.return_value = False
+    _populate_worker_layer_metadata(worker)
 
     kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
         num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
@@ -1490,10 +1517,7 @@ def test_register_kv_caches_preserves_dsv4_shared_region_group_aliases():
             ),
         ],
     )
-    worker.transfer_topo = SimpleNamespace(
-        split_k_and_v=False,
-        virtually_split_kv_in_blocks=False,
-    )
+    worker.transfer_topo = _make_unsplit_transfer_topo()
     worker.engine = MagicMock()
     worker.engine.batch_register_memory.return_value = 0
     worker.async_zmq_ctx = MagicMock()
@@ -1501,6 +1525,7 @@ def test_register_kv_caches_preserves_dsv4_shared_region_group_aliases():
     worker.is_kv_producer = False
     worker.receiver_loop = MagicMock()
     worker.receiver_loop.is_running.return_value = False
+    _populate_worker_layer_metadata(worker)
 
     shared_cache = torch.zeros((2, 16, 4, 16), dtype=torch.float16)
     kv_caches = {
