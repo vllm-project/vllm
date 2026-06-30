@@ -431,7 +431,15 @@ class BertModel(nn.Module, SupportsQuant):
         return other_weights, loaded_stacked_params
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        other_weights, loaded_stacked_params = self._load_weights(weights)
+        def weight_filter():
+            for name, weight in weights:
+                if name.startswith("model.encoder.layer."):
+                    name = name.replace("model.encoder.layer.", "encoder.layer.", 1)
+                elif name.startswith("model."):
+                    name = name.replace("model.", "", 1)
+                yield name, weight
+
+        other_weights, loaded_stacked_params = self._load_weights(weight_filter())
 
         loader = AutoWeightsLoader(self, skip_prefixes=["pooler."])
         loaded_params = loader.load_weights(other_weights)
