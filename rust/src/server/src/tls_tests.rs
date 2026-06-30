@@ -516,6 +516,26 @@ async fn plain_http_serves_when_tls_is_disabled() {
     shutdown.cancel();
 }
 
+#[tokio::test(start_paused = true)]
+async fn tls_handshake_timeout_drops_silent_client() {
+    // Silent client (no ClientHello) must be dropped at the handshake deadline.
+    let certs = TestCerts::generate();
+    let (addr, shutdown) = spawn_server(Some(server_tls(&certs, 0))).await;
+
+    let mut tcp = TcpStream::connect(&addr).await.expect("connect");
+    tokio::task::yield_now().await;
+    tokio::time::advance(tls::TLS_HANDSHAKE_TIMEOUT + Duration::from_millis(1)).await;
+    tokio::task::yield_now().await;
+
+    let mut buf = [0u8; 1];
+    let read = tokio::time::timeout(Duration::from_secs(1), tcp.read(&mut buf)).await;
+    assert!(
+        matches!(read, Ok(Ok(0)) | Ok(Err(_))),
+        "server must drop a stalled TLS handshake (expected close, got {read:?})"
+    );
+    shutdown.cancel();
+}
+
 #[tokio::test]
 async fn keep_alive_timeout_closes_idle_connection() {
     // Idle keep-alive connection must be closed at the deadline.

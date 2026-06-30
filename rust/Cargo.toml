@@ -104,6 +104,7 @@ tokio = { version = "1.47.1", features = [
     "net",
     "rt-multi-thread",
     "sync",
+    "test-util",
     "time",
 ] }
 tokio-openssl = "0.6"
