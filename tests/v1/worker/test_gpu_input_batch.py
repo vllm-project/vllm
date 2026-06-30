@@ -449,7 +449,7 @@ def test_placeholder_spec_token_ids_not_used_as_model_input():
         req_id="req",
         prompt_token_ids=[10, 11],
         mm_features=[],
-        sampling_params=None,
+        sampling_params=SamplingParams(),
         block_ids=([],),
         generator=None,
         num_computed_tokens=3,
@@ -458,10 +458,13 @@ def test_placeholder_spec_token_ids_not_used_as_model_input():
     input_batch.add_request(req)
 
     input_batch.token_ids_cpu[0, 2] = -1
-    input_batch.update_req_spec_token_ids(req, {"req": [-1, 13, -1]})
+    input_batch.update_req_spec_token_ids(
+        req,
+        {"req": [13, -1, -1]},
+    )
 
-    assert input_batch.spec_token_ids[0] == [-1, 13, -1]
-    assert input_batch.token_ids_cpu[0, 3:6].tolist() == [0, 13, 0]
+    assert input_batch.spec_token_ids[0] == [13, -1, -1]
+    assert input_batch.token_ids_cpu[0, 3:6].tolist() == [13, 0, 0]
 
 
 @pytest.mark.parametrize(
