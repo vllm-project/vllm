@@ -1481,39 +1481,6 @@ def run_minicpmv(questions: list[str], modality: str) -> ModelRequestData:
     return run_minicpmv_base(questions, modality, "openbmb/MiniCPM-V-2_6")
 
 
-def run_minimax_vl_01(questions: list[str], modality: str) -> ModelRequestData:
-    assert modality == "image"
-
-    model_name = "MiniMaxAI/MiniMax-VL-01"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        max_num_seqs=2,
-        limit_mm_per_prompt={modality: 1},
-        trust_remote_code=True,
-        tensor_parallel_size=8,
-    )
-
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    messages = [
-        [
-            {
-                "role": "user",
-                "content": [{"type": "image"}, {"type": "text", "text": question}],
-            }
-        ]
-        for question in questions
-    ]
-    prompts = tokenizer.apply_chat_template(
-        messages, add_generation_prompt=True, tokenize=False
-    )
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
-
-
 # Mistral-3 HF-format
 def run_mistral3(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -1931,27 +1898,6 @@ def run_pixtral_hf(questions: list[str], modality: str) -> ModelRequestData:
     )
 
     prompts = [f"<s>[INST]{question}\n[IMG][/INST]" for question in questions]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
-
-
-# Qwen-VL
-def run_qwen_vl(questions: list[str], modality: str) -> ModelRequestData:
-    assert modality == "image"
-
-    engine_args = EngineArgs(
-        model="Qwen/Qwen-VL",
-        trust_remote_code=True,
-        max_model_len=1024,
-        max_num_seqs=2,
-        hf_overrides={"architectures": ["QwenVLForConditionalGeneration"]},
-        limit_mm_per_prompt={modality: 1},
-    )
-
-    prompts = [f"{question}Picture 1: <img></img>\n" for question in questions]
 
     return ModelRequestData(
         engine_args=engine_args,
@@ -2506,7 +2452,6 @@ model_example_map = {
     "mantis": run_mantis,
     "minicpmo": run_minicpmo,
     "minicpmv": run_minicpmv,
-    "minimax_vl_01": run_minimax_vl_01,
     "mistral3": run_mistral3,
     "molmo": run_molmo,
     "molmo2": run_molmo2,
@@ -2522,7 +2467,6 @@ model_example_map = {
     "phi4_mm": run_phi4mm,
     "phi4_siglip": run_phi4siglip,
     "pixtral_hf": run_pixtral_hf,
-    "qwen_vl": run_qwen_vl,
     "qwen2_vl": run_qwen2_vl,
     "qwen2_5_vl": run_qwen2_5_vl,
     "qwen2_5_omni": run_qwen2_5_omni,
@@ -2554,13 +2498,18 @@ MODELS_NEED_VIDEO_METADATA = [
 
 
 MODELS_SUPPORT_VIT_CUDA_GRAPH = [
+    "llama4",
+    "qwen2_vl",
     "qwen2_5_vl",
     "qwen3_vl",
     "qwen3_vl_moe",
-    "qwen2_vl",
+    "kimi_vl",
     "qwen3_5",
     "qwen3_5_moe",
+    "internvl_chat",
     "stepvl",
+    "glm4_1v",
+    "deepseek_ocr",
 ]
 
 

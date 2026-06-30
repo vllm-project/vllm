@@ -2,6 +2,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use vllm_llm::TokenUsage;
 use vllm_text::{DecodedLogprobs, DecodedPromptLogprobs};
 
 use crate::FinishReason;
@@ -52,6 +53,25 @@ impl AssistantContentBlock {
             Self::ToolCall(call) => Some(call),
             _ => None,
         }
+    }
+
+    /// Return a copy of this block with leading and trailing whitespace trimmed from all text
+    /// fields and tool call arguments, or `None` if the resulting text would be empty.
+    pub fn trim(mut self) -> Option<Self> {
+        match &mut self {
+            Self::Text { text } | Self::Reasoning { text } => {
+                let trimmed_text = text.trim();
+                if trimmed_text.is_empty() {
+                    return None;
+                } else {
+                    *text = trimmed_text.to_string();
+                }
+            }
+            Self::ToolCall(call) => {
+                call.arguments = call.arguments.trim().to_string();
+            }
+        }
+        Some(self)
     }
 }
 
@@ -119,6 +139,13 @@ impl AssistantMessage {
     pub(crate) fn push_block(&mut self, block: AssistantContentBlock) {
         self.content.push(block);
     }
+
+    /// Return a copy of this message with leading and trailing whitespace trimmed from all text
+    /// fields and tool call arguments, and with any blocks that are empty after trimming removed.
+    pub fn trim(mut self) -> Self {
+        self.content = self.content.into_iter().filter_map(|block| block.trim()).collect();
+        self
+    }
 }
 
 /// Streamed chat event emitted by [`crate::ChatEventStream`].
@@ -171,11 +198,7 @@ pub enum ChatEvent {
     /// metadata.
     Done {
         message: AssistantMessage,
-        /// Number of prompt tokens actually sent to the engine after chat
-        /// template rendering and tokenization.
-        prompt_token_count: usize,
-        /// Number of output tokens generated.
-        output_token_count: usize,
+        usage: TokenUsage,
         finish_reason: FinishReason,
         /// Connector-specific KV transfer parameters for disaggregated serving.
         kv_transfer_params: Option<serde_json::Value>,

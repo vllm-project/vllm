@@ -2,15 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from enum import Enum
+from typing import TYPE_CHECKING
 
 import torch
-from torch.nn import Module
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )
@@ -18,13 +19,16 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.oracle.base import MoEKernelOracle
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    FlashinferMoeBackend,
+    align_moe_weights_for_fi,
     convert_moe_weights_to_flashinfer_trtllm_block_layout,
-    get_flashinfer_moe_backend,
     swap_w13_to_w31,
 )
 from vllm.platforms import current_platform
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 logger = init_logger(__name__)
 
@@ -68,10 +72,24 @@ def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBac
             UnquantizedMoeBackend.BATCHED_TRITON,
         ]
 
+        # On Hopper (SM90), the FlashInfer unquantized MoE kernels are slower
+        # than Triton, so prefer Triton by default.
+        if current_platform.is_device_capability_family(90):
+            _move_to_back(_AVAILABLE_BACKENDS, UnquantizedMoeBackend.FLASHINFER_TRTLLM)
+            _move_to_back(_AVAILABLE_BACKENDS, UnquantizedMoeBackend.FLASHINFER_CUTLASS)
+
         # HACK: Qwen3.5 has crash with FLASHINFER_CUTLASS BF16 if DEP.
         # Updating the oracle querying logic is out of the scope of this
         # PR. Need to fix the kernel or update structure in follow up.
         if moe_config.moe_parallel_config.dp_size > 1:
+            _move_to_back(_AVAILABLE_BACKENDS, UnquantizedMoeBackend.FLASHINFER_CUTLASS)
+
+        # HACK: unquantized FlashInfer aliases SWIGLUOAI to plain Swiglu
+        # (swiglu_alpha/limit only set on the MXFP4 branch). Route to
+        # Triton's swigluoai_and_mul until that's plumbed through. Same
+        # demotion pattern as the Qwen3.5/dp_size hack above.
+        if moe_config.activation == MoEActivation.SWIGLUOAI:
+            _move_to_back(_AVAILABLE_BACKENDS, UnquantizedMoeBackend.FLASHINFER_TRTLLM)
             _move_to_back(_AVAILABLE_BACKENDS, UnquantizedMoeBackend.FLASHINFER_CUTLASS)
 
     elif current_platform.is_xpu():
@@ -224,49 +242,6 @@ def select_unquantized_moe_backend(
 
         return _return_or_raise(requested_backend, moe_config, activation_format)
 
-    # Handle explicit FlashInfer FP16 configuration.
-    if envs.is_set("VLLM_USE_FLASHINFER_MOE_FP16"):
-        if not envs.VLLM_USE_FLASHINFER_MOE_FP16:
-            if UnquantizedMoeBackend.FLASHINFER_TRTLLM in AVAILABLE_BACKENDS:
-                AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.FLASHINFER_TRTLLM)
-            if UnquantizedMoeBackend.FLASHINFER_CUTLASS in AVAILABLE_BACKENDS:
-                AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.FLASHINFER_CUTLASS)
-
-        elif envs.is_set("VLLM_FLASHINFER_MOE_BACKEND"):
-            # If user is explicit about backend, validate it.
-            fi_backend = get_flashinfer_moe_backend()
-            if fi_backend == FlashinferMoeBackend.CUTLASS:
-                backend = UnquantizedMoeBackend.FLASHINFER_CUTLASS
-            elif fi_backend == FlashinferMoeBackend.TENSORRT_LLM:
-                backend = UnquantizedMoeBackend.FLASHINFER_TRTLLM
-            else:
-                raise ValueError(
-                    f"FlashInfer MOE backend {fi_backend} "
-                    "does not support unquantized MoE."
-                )
-            k_cls = backend_to_kernel_cls(backend)
-            return _return_or_raise(backend, moe_config, activation_format)
-        else:
-            # If the user is not explicit about the backend, try both.
-            for backend in [
-                UnquantizedMoeBackend.FLASHINFER_TRTLLM,
-                UnquantizedMoeBackend.FLASHINFER_CUTLASS,
-            ]:
-                k_cls = backend_to_kernel_cls(backend)
-                supported, reason = k_cls.is_supported_config(
-                    k_cls, moe_config, None, None, activation_format
-                )
-                if supported:
-                    logger.info_once(_make_log_backend(backend))
-                    return backend, k_cls
-                else:
-                    logger.debug_once(_make_log_unsupported(backend, reason))
-
-            raise NotImplementedError(
-                "Found VLLM_USE_FLASHINFER_MOE_FP16=1, but no "
-                "FlashInfer unquantized MoE backend supports the configuration."
-            )
-
     # Handle explicit AITER FP8 configuration.
     if envs.is_set("VLLM_ROCM_USE_AITER") or envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
         if not envs.VLLM_ROCM_USE_AITER or not envs.VLLM_ROCM_USE_AITER_MOE:
@@ -294,7 +269,7 @@ def select_unquantized_moe_backend(
 
 def convert_to_unquantized_kernel_format(
     unquantized_backend: UnquantizedMoeBackend,
-    layer: Module,
+    moe_config: FusedMoEConfig,
     w13_weight: torch.Tensor,
     w2_weight: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -302,21 +277,37 @@ def convert_to_unquantized_kernel_format(
         w13_weight, w2_weight = rocm_aiter_ops.shuffle_weights(w13_weight, w2_weight)
 
     elif unquantized_backend == UnquantizedMoeBackend.FLASHINFER_CUTLASS:
-        if layer.moe_config.is_act_and_mul:
+        if moe_config.is_act_and_mul:
             # Swap halves to arrange as [w3; w1] (kernel expectation)
             # Non-gated MoE: w13 is a single projection, no need to swap.
             w13_weight = swap_w13_to_w31(w13_weight)
 
     elif unquantized_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM:
-        # Swap halves to arrange as [w3; w1] (kernel expectation)
-        w13_weight = swap_w13_to_w31(w13_weight)
+        is_act_and_mul = moe_config.is_act_and_mul
+        if not is_act_and_mul:
+            # Kernel requires intermediate_size_per_partition % 128 == 0 (BlockMajorK
+            # weight layout uses block_k=128). Pad along the intermediate dim when
+            # the model + TP split don't satisfy the constraint.
+            w13_weight, w2_weight, padded_intermediate = align_moe_weights_for_fi(
+                w13_weight, w2_weight, is_act_and_mul, min_alignment=128
+            )
+            moe_config.intermediate_size_per_partition = padded_intermediate
+
         _cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
         w13_weight, w2_weight = convert_moe_weights_to_flashinfer_trtllm_block_layout(
             _cache_permute_indices,
             w13_weight,
             w2_weight,
+            is_gated_act_gemm=is_act_and_mul,
         )
 
+    if (
+        unquantized_backend == UnquantizedMoeBackend.TRITON
+        and current_platform.is_rocm()
+        and envs.VLLM_ROCM_MOE_PADDING
+    ):
+        # Skip .contiguous(): it would undo the ROCm MoE weight padding.
+        return w13_weight, w2_weight
     return w13_weight.contiguous(), w2_weight.contiguous()
 
 
@@ -359,7 +350,74 @@ def make_unquantized_moe_kernel(
     kernel = mk.FusedMoEKernel(
         prepare_finalize,
         experts,
-        inplace=(not moe_config.disable_inplace and not is_monolithic),
     )
 
     return kernel
+
+
+# ---------------------------------------------------------------------------
+# Class-based view (first PR of the #37753 series; see oracle/base.py).
+# Methods delegate to the module-level functions above so behaviour is
+# bit-identical with pre-class code.
+# ---------------------------------------------------------------------------
+
+
+class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
+    """Class-based view of the unquantized MoE kernel oracle.
+
+    Each method delegates to its module-level counterpart so that
+    instantiating and calling this class is bit-identical to calling
+    the standalone functions. Follow-up PRs may move logic from the
+    module-level functions into these methods.
+    """
+
+    def backend_enum_cls(self) -> type[UnquantizedMoeBackend]:
+        return UnquantizedMoeBackend
+
+    def get_priority_backends(
+        self, moe_config: FusedMoEConfig
+    ) -> list[UnquantizedMoeBackend]:
+        return _get_priority_backends(moe_config)
+
+    def backend_to_kernel_cls(
+        self, backend: UnquantizedMoeBackend
+    ) -> type[mk.FusedMoEExperts]:
+        return backend_to_kernel_cls(backend)
+
+    def map_backend(self, runner_backend: MoEBackend) -> UnquantizedMoeBackend:
+        return map_unquantized_backend(runner_backend)
+
+    def select_backend(
+        self,
+        moe_config: FusedMoEConfig,
+        weight_key: "QuantKey | None" = None,
+        activation_key: "QuantKey | None" = None,
+    ) -> tuple[UnquantizedMoeBackend, type[mk.FusedMoEExperts] | None]:
+        assert weight_key is None and activation_key is None, (
+            "Weights and activations will never be quantized for "
+            "UnquantizedMoEKernelOracle"
+        )
+        return select_unquantized_moe_backend(moe_config)
+
+    def convert_to_kernel_format(
+        self,
+        backend: UnquantizedMoeBackend,
+        moe_config: FusedMoEConfig,
+        w13_weight: torch.Tensor,
+        w2_weight: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return convert_to_unquantized_kernel_format(
+            backend, moe_config, w13_weight, w2_weight
+        )
+
+    def make_kernel(
+        self,
+        quant_config: FusedMoEQuantConfig,
+        moe_config: FusedMoEConfig,
+        backend: UnquantizedMoeBackend,
+        experts_cls: type[mk.FusedMoEExperts],
+        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    ) -> mk.FusedMoEKernel:
+        return make_unquantized_moe_kernel(
+            quant_config, moe_config, backend, experts_cls, routing_tables
+        )

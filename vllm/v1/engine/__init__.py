@@ -74,8 +74,15 @@ class EngineCoreReadyResponse:
 
     max_model_len: int
     num_gpu_blocks: int
+    block_size: int
     dp_stats_address: str | None
-    dtype: str | None = None
+    dtype: str
+    vllm_version: str
+    world_size: int
+    data_parallel_size: int
+    # KV cache capacity (None for encoder-only/attention-free models).
+    kv_cache_size_tokens: int | None = None
+    kv_cache_max_concurrency: float | None = None
 
 
 class EngineCoreRequest(
@@ -149,7 +156,7 @@ class EngineCoreEventType(enum.IntEnum):
 class EngineCoreEvent(msgspec.Struct):
     """A timestamped engine core event associated with a request.
 
-    The timestamp is a monotonic timestamps and is used for by the engine
+    The timestamp is a monotonic timestamp and is used by the engine
     frontend to calculate intervals between engine core events. These
     timestamps should not be compared with timestamps from other processes.
     """

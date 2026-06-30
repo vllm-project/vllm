@@ -16,10 +16,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler impor
 def _make_bare_scheduler() -> MooncakeStoreScheduler:
     scheduler = object.__new__(MooncakeStoreScheduler)
     scheduler.kv_role = "kv_both"
-    scheduler.original_block_size = 16
+    scheduler.lookup_async = False
     scheduler._block_size = 16
     scheduler.load_specs = {}
-    scheduler._preempted_req_ids = set()
     scheduler._unfinished_request_ids = {"req-0"}
     scheduler._unfinished_requests = {}
     scheduler._request_trackers = {}
@@ -35,11 +34,28 @@ def _make_scheduler_output(*, scheduled_spec_tokens: list[int] | None):
             req_ids=["req-0"],
             new_block_ids=[([2],)],
             num_computed_tokens=[44],
+            resumed_req_ids=set(),
         ),
         num_scheduled_tokens={"req-0": 4},
         scheduled_spec_decode_tokens=(
             {"req-0": scheduled_spec_tokens} if scheduled_spec_tokens else {}
         ),
+    )
+
+
+def _make_preemption_scheduler_output():
+    return SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids={"req-0"},
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=[],
+            new_block_ids=[],
+            num_computed_tokens=[],
+            resumed_req_ids=set(),
+        ),
+        num_scheduled_tokens={},
+        scheduled_spec_decode_tokens={},
     )
 
 
@@ -112,6 +128,48 @@ def test_cached_request_without_spec_decode_keeps_current_step_save_overlap():
     assert tracker.num_saved_tokens == 48
 
 
+def test_preemption_resets_tracker_before_request_finished():
+    scheduler = _make_bare_scheduler()
+    _add_unfinished_request(
+        scheduler,
+        token_ids=list(range(44)),
+        block_hashes=[b"h0", b"h1"],
+        prefill_end_tokens=48,
+    )
+
+    scheduler.build_connector_meta(_make_preemption_scheduler_output())
+
+    tracker = scheduler._request_trackers["req-0"]
+    assert tracker.token_len == 0
+    assert tracker.allocated_block_ids == ()
+    assert tracker.num_saved_tokens == 0
+    assert tracker.token_ids is None
+    assert tracker.prefill_end_tokens == 0
+    request = SimpleNamespace(request_id="req-0")
+    assert scheduler.request_finished(request, ([0, 1],)) == (False, None)
+
+
+def test_preemption_clears_stale_load_state():
+    scheduler = _make_bare_scheduler()
+    _make_pending_load_unfinished_request(
+        scheduler,
+        num_tokens=48,
+        block_hashes=[b"h0", b"h1", b"h2"],
+        block_ids=([10, 11, 12],),
+    )
+    scheduler.load_specs["req-0"] = LoadSpec(
+        vllm_cached_tokens=0,
+        kvpool_cached_tokens=48,
+        can_load=True,
+    )
+
+    meta = scheduler.build_connector_meta(_make_preemption_scheduler_output())
+
+    assert meta.requests == []
+    assert "req-0" not in scheduler.load_specs
+    assert "req-0" not in scheduler._unfinished_requests
+
+
 def _make_pending_load_unfinished_request(
     scheduler: MooncakeStoreScheduler,
     *,
@@ -138,6 +196,7 @@ def _make_pending_load_scheduler_output() -> SimpleNamespace:
             req_ids=[],
             new_block_ids=[],
             num_computed_tokens=[],
+            resumed_req_ids=set(),
         ),
         num_scheduled_tokens={},
         scheduled_spec_decode_tokens={},
@@ -196,14 +255,17 @@ def _make_resumed_unfinished_request(
 
 
 def _make_resumed_scheduler_output(*, num_scheduled_tokens: int) -> SimpleNamespace:
+    # A resumed-from-preemption step: the scheduler lists the request in
+    # resumed_req_ids and sends the FULL block table (replace semantics).
     return SimpleNamespace(
         finished_req_ids=set(),
         preempted_req_ids=set(),
         scheduled_new_reqs=[],
         scheduled_cached_reqs=SimpleNamespace(
             req_ids=["req-0"],
-            new_block_ids=[([2],)],
+            new_block_ids=[([0, 1, 2],)],
             num_computed_tokens=[0],
+            resumed_req_ids={"req-0"},
         ),
         num_scheduled_tokens={"req-0": num_scheduled_tokens},
         scheduled_spec_decode_tokens={},
@@ -216,7 +278,6 @@ def test_resumed_from_preemption_with_load_skips_save():
     # passes load_spec.can_load=True. Skip save in this step; subsequent
     # cached_reqs steps will save new tokens normally.
     scheduler = _make_bare_scheduler()
-    scheduler._preempted_req_ids = {"req-0"}
     _make_resumed_unfinished_request(
         scheduler,
         token_ids=list(range(48)),
@@ -246,7 +307,6 @@ def test_resumed_from_preemption_with_load_skips_save():
 def test_resumed_from_preemption_without_load_still_saves():
     # No load_spec → behavior is unchanged: save proceeds.
     scheduler = _make_bare_scheduler()
-    scheduler._preempted_req_ids = {"req-0"}
     _make_resumed_unfinished_request(
         scheduler,
         token_ids=list(range(48)),
@@ -265,6 +325,71 @@ def test_resumed_from_preemption_without_load_still_saves():
     assert req_meta.load_spec is None
     tracker = scheduler._request_trackers["req-0"]
     assert tracker.num_saved_tokens == 48
+
+
+def test_running_request_not_in_resumed_req_ids_appends_blocks():
+    """Regression: the replace-vs-append choice must follow the scheduler's
+    cached_reqs.resumed_req_ids, NOT connector-local preemption history.
+
+    A running request that is not resumed this step carries a *delta*
+    new_block_ids and must be APPENDED to the tracker's existing blocks.
+    Treating it as resumed would replace allocated_block_ids with just the
+    delta while token_len stays at the full computed length, so the store
+    path's block_ids[start // block_size] runs off the end (the
+    "list index out of range" / token_len >> len(block_ids) bug).
+    """
+    scheduler = _make_bare_scheduler()
+    _add_unfinished_request(
+        scheduler,
+        token_ids=list(range(48)),
+        block_hashes=[b"h0", b"h1", b"h2"],
+        prefill_end_tokens=48,
+    )
+
+    out = _make_scheduler_output(scheduled_spec_tokens=None)
+    assert "req-0" not in out.scheduled_cached_reqs.resumed_req_ids
+
+    meta = scheduler.build_connector_meta(out)
+
+    tracker = scheduler._request_trackers["req-0"]
+    # Delta [2] appended to existing [0, 1] (decode path), not replaced by [2].
+    assert tracker.allocated_block_ids == ([0, 1, 2],)
+    # token_len stays covered by the block table: no store-path under-count.
+    blocks_held = sum(len(g) for g in tracker.allocated_block_ids)
+    assert tracker.token_len // scheduler._block_size <= blocks_held
+    assert len(meta.requests) == 1
+    assert meta.requests[0].token_len_chunk == 48
+
+
+def test_resumed_request_in_resumed_req_ids_replaces_blocks():
+    """A request the scheduler marks resumed gets the FULL block table in
+    new_block_ids and must REPLACE the tracker's blocks (not append), even if
+    a stale tracker from before preemption is still present."""
+    scheduler = _make_bare_scheduler()
+    _make_resumed_unfinished_request(
+        scheduler,
+        token_ids=list(range(48)),
+        block_hashes=[b"h0", b"h1", b"h2"],
+        num_computed_tokens=0,
+    )
+    # Stale pre-preemption tracker that must be overwritten, not appended to.
+    scheduler._request_trackers["req-0"] = RequestTracker(
+        req_id="req-0",
+        token_len=99,
+        allocated_block_ids=([7, 8, 9],),
+        num_saved_tokens=0,
+    )
+
+    scheduler.build_connector_meta(
+        _make_resumed_scheduler_output(num_scheduled_tokens=48)
+    )
+
+    tracker = scheduler._request_trackers["req-0"]
+    # Replaced with the full table from new_block_ids, not appended to [7,8,9].
+    assert tracker.allocated_block_ids == ([0, 1, 2],)
+    assert tracker.token_len == 48
+    blocks_held = sum(len(g) for g in tracker.allocated_block_ids)
+    assert tracker.token_len // scheduler._block_size <= blocks_held
 
 
 # Focused tests for ReqMeta.from_request_tracker — the centralized guard that
@@ -349,7 +474,13 @@ class _StubLookupClient:
     def __init__(self, hit_tokens: int) -> None:
         self._hit_tokens = hit_tokens
 
-    def lookup(self, token_len: int, block_hashes: list[bytes]) -> int:
+    def lookup(
+        self,
+        req_id: str,
+        token_len: int,
+        block_hashes: list[bytes],
+        non_block: bool = False,
+    ) -> int:
         return self._hit_tokens
 
 

@@ -6,8 +6,8 @@
 
 use std::mem::take;
 
-pub use backend::{DynTextBackend, SamplingHints, TextBackend};
-pub use error::{Error, Result};
+pub use backend::{DynTextBackend, SamplingHints, SamplingLimits, TextBackend};
+pub use error::{Error, LogprobsError, Result, TokenIdsError};
 use futures::Stream;
 pub use lower::{
     PreparedTextRequest, lower_sampling_params, lower_text_request, resolve_max_tokens,
@@ -45,33 +45,33 @@ pub struct TextLlm {
     /// Tokenizer/model metadata backend responsible for prompt encode/decode
     /// and sampling hints.
     backend: DynTextBackend,
-    /// Context window size derived by the backend or from engine startup
-    /// handshake, with optional override from config.
-    max_model_len: Option<u32>,
+    /// Runtime context window size reported by the engine startup handshake.
+    max_model_len: u32,
+    /// Maximum number of top log probabilities accepted by this text facade.
+    max_logprobs: i32,
 }
 
 impl TextLlm {
     /// Create a new text-generation facade from a shared LLM client plus a text
     /// backend.
     pub fn new(llm: Llm, backend: DynTextBackend) -> Self {
-        // Prefer the engine-reported max_model_len because it reflects the
-        // post-profiling, auto-fitted KV cache limit rather than static
-        // frontend metadata.
+        // The engine-reported value reflects the post-profiling, auto-fitted
+        // KV cache limit used at runtime.
         let max_model_len = llm.engine_core_client().max_model_len();
 
         Self {
             llm,
             backend,
             max_model_len,
+            max_logprobs: SamplingLimits::DEFAULT_MAX_LOGPROBS,
         }
     }
 
-    /// Override the maximum model context length explicitly.
-    ///
-    /// This takes priority over both the engine-reported default and any
-    /// tokenizer/model metadata exposed by the backend.
-    pub fn with_max_model_len(mut self, max_model_len: u32) -> Self {
-        self.max_model_len = Some(max_model_len);
+    /// Override the maximum accepted logprobs count.
+    pub fn with_max_logprobs(mut self, max_logprobs: Option<i32>) -> Self {
+        if let Some(max_logprobs) = max_logprobs {
+            self.max_logprobs = max_logprobs;
+        }
         self
     }
 
@@ -89,6 +89,18 @@ impl TextLlm {
     /// Return the tokenizer used by this text backend.
     pub fn tokenizer(&self) -> DynTokenizer {
         self.backend.tokenizer()
+    }
+
+    /// Tokenizer vocabulary size (the number of tokens the tokenizer knows),
+    /// used to bound `allowed_token_ids` like the Python frontend `len(tokenizer)`.
+    pub fn tokenizer_vocab_size(&self) -> usize {
+        self.backend.tokenizer_vocab_size()
+    }
+
+    /// Model vocabulary size from the model config, used to bound generated
+    /// token IDs and logits-domain sampling controls.
+    pub fn model_vocab_size(&self) -> usize {
+        self.backend.model_vocab_size()
     }
 
     /// Tokenize if needed, lower to a generate request, and return the raw
@@ -128,17 +140,33 @@ impl TextLlm {
             Prompt::TokenIds(token_ids) => token_ids,
         };
 
-        let mut sampling_hints = self.backend.sampling_hints()?;
-        if let Some(max_model_len) = self.max_model_len {
-            sampling_hints.max_model_len = Some(max_model_len);
-        }
+        let sampling_hints = self.backend.sampling_hints()?;
+        let sampling_limits = SamplingLimits {
+            max_model_len: self.max_model_len,
+            max_logprobs: self.max_logprobs,
+            model_vocab_size: self.backend.model_vocab_size(),
+            tokenizer_vocab_size: self.backend.tokenizer_vocab_size(),
+        };
+
         let PreparedTextRequest {
             text_request,
             generate_request,
-        } = lower_text_request(request, prompt_token_ids, sampling_hints, &*tokenizer)?;
+        } = lower_text_request(
+            request,
+            prompt_token_ids,
+            sampling_hints,
+            sampling_limits,
+            &*tokenizer,
+        )?;
 
         let raw_stream = self.llm.generate(generate_request).await?;
         Ok((text_request, raw_stream))
+    }
+
+    /// Abort in-flight requests by their external (user-supplied) request ids.
+    pub async fn abort(&self, external_ids: &[String]) -> Result<()> {
+        self.llm.abort(external_ids).await?;
+        Ok(())
     }
 
     /// Shut down the underlying LLM client and its background tasks.
