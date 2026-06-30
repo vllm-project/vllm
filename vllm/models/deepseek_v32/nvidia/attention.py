@@ -467,10 +467,6 @@ class DeepseekV32Attention(MLAAttention):
             index_rope_interleave=self._index_rope_interleave,
         )
 
-        if attn_metadata is None:
-            output.zero_()
-            return
-
         if self.indexer is not None:
             sparse_attn_indexer(
                 q_c,
@@ -491,6 +487,10 @@ class DeepseekV32Attention(MLAAttention):
                 False,  # use_fp4_cache
                 True,  # skip_topk_buffer_clear (fused_norm_rope already did it)
             )
+
+        if attn_metadata is None:
+            output.zero_()
+            return
 
         num_actual = attn_metadata.num_actual_tokens  # type: ignore[attr-defined]
         kv_cache = self.kv_cache

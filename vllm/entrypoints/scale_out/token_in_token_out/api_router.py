@@ -11,13 +11,6 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
-from vllm.entrypoints.serve.disagg.protocol import (
-    GenerateRequest,
-    GenerateResponse,
-)
-from vllm.entrypoints.serve.disagg.serving import (
-    ServingTokens,
-)
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.entrypoints.serve.utils.api_utils import (
     load_aware_call,
@@ -25,6 +18,12 @@ from vllm.entrypoints.serve.utils.api_utils import (
     with_cancellation,
 )
 from vllm.logger import init_logger
+
+from .protocol import (
+    GenerateRequest,
+    GenerateResponse,
+)
+from .serving import ServingTokens
 
 logger = init_logger(__name__)
 
