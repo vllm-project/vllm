@@ -818,3 +818,46 @@ def test_non_causal_backend_correctness(
             causal=False,
             block_size=128,
         )
+
+
+@pytest.mark.parametrize(
+    "backend_enum",
+    [
+        AttentionBackendEnum.TRITON_ATTN,
+        AttentionBackendEnum.ROCm_ATTN,
+    ],
+)
+def test_cascade_metadata_build_no_unbound_local(
+    backend_enum: AttentionBackendEnum,
+):
+    """Regression: build() with cascade must not raise UnboundLocalError.
+
+    prefix_scheduler_metadata was previously only initialized in the
+    else (no-cascade) branch of build() in triton_attn.py and
+    rocm_attn.py, causing UnboundLocalError when use_cascade=True.
+    This test also verifies suffix_kv_lens stays on the input device
+    (no .cpu() round-trip) and has correct values.
+    """
+    builder_cls, _ = try_get_attention_backend(backend_enum)
+
+    batch_spec = BatchSpec(seq_lens=[64, 128], query_lens=[1, 1])
+    vllm_config = create_vllm_config()
+    kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
+    device = torch.device(current_platform.device_type)
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec, block_size=16, device=device
+    )
+
+    common_prefix_len = 16
+
+    builder = builder_cls(kv_cache_spec, ["layer_0"], vllm_config, device)
+    attn_metadata = builder.build(
+        common_prefix_len=common_prefix_len,
+        common_attn_metadata=common_attn_metadata,
+    )
+
+    assert attn_metadata.use_cascade is True
+    assert attn_metadata.suffix_kv_lens is not None
+    assert attn_metadata.suffix_kv_lens.device == device
+    expected = common_attn_metadata.seq_lens[:2] - common_prefix_len
+    torch.testing.assert_close(attn_metadata.suffix_kv_lens, expected)
