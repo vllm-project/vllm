@@ -1,11 +1,15 @@
 group: Models - Multimodal
-depends_on: 
+depends_on:
   - image-build-xpu
 steps:
 - label: "Multi-Modal Models (Standard) 1: qwen2"
   key: multi-modal-models-standard-1-qwen2
   timeout_in_minutes: 45
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -27,6 +31,10 @@ steps:
   key: multi-modal-models-standard-2-qwen3-gemma
   timeout_in_minutes: 45
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -47,6 +55,10 @@ steps:
   key: multi-modal-models-standard-3-llava-qwen2-vl
   timeout_in_minutes: 45
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 24+
   no_plugin: true
   working_dir: "."
   env:
@@ -68,6 +80,10 @@ steps:
   key: multi-modal-models-standard-4-other-whisper
   timeout_in_minutes: 45
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -88,6 +104,10 @@ steps:
   key: multi-modal-processor
   timeout_in_minutes: 45
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -105,7 +125,5 @@ steps:
       pip install open-clip-torch --no-deps &&
       cd tests &&
       pytest -v -s models/multimodal/processing/test_tensor_schema.py
-      --deselect "tests/models/multimodal/processing/test_tensor_schema.py::test_model_tensor_schema[mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4]"
-      --deselect "tests/models/multimodal/processing/test_tensor_schema.py::test_model_tensor_schema[Qwen/Qwen2.5-Omni-7B-AWQ]"
       --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB'
   parallelism: 4

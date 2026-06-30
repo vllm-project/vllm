@@ -30,9 +30,12 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.parser.engine.registered_adapters import (
     Gemma4Parser,
+    Glm47MoeParser,
+    KimiK2Parser,
     MinimaxM2Parser,
     NemotronV3Parser,
     Qwen3Parser,
+    SeedOssParser,
 )
 
 # ── Data structures ──────────────────────────────────────────────────
@@ -141,6 +144,12 @@ SCENARIOS: list[Scenario] = [
         description="Tool call immediately after tool response (agentic flow)",
         tool_calls=[_READ_TOOL],
         after_tool_response=True,
+    ),
+    Scenario(
+        id="empty-tool-block",
+        description="Empty tool block followed by content (edge case recovery)",
+        content="Content after empty tools.",
+        tool_calls=[],
     ),
 ]
 
@@ -343,8 +352,11 @@ def _qwen3_segments(scenario: Scenario) -> list[tuple[str, bool]]:
     segs: list[tuple[str, bool]] = []
     if scenario.reasoning is not None:
         segs.append((scenario.reasoning, False))
-    if scenario.content is not None or scenario.tool_calls:
+    if scenario.content is not None or scenario.tool_calls is not None:
         segs.append(("</think>", True))
+    if scenario.tool_calls is not None and not scenario.tool_calls:
+        segs.append(("<tool_call>", True))
+        segs.append(("</tool_call>", True))
     if scenario.content is not None:
         segs.append((scenario.content, False))
     if scenario.tool_calls:
@@ -436,8 +448,11 @@ def _minimax_m2_segments(scenario: Scenario) -> list[tuple[str, bool]]:
     segs: list[tuple[str, bool]] = []
     if scenario.reasoning is not None:
         segs.append((scenario.reasoning, False))
-    if scenario.content is not None or scenario.tool_calls:
+    if scenario.content is not None or scenario.tool_calls is not None:
         segs.append(("</think>", True))
+    if scenario.tool_calls is not None and not scenario.tool_calls:
+        segs.append(("<minimax:tool_call>", True))
+        segs.append(("</minimax:tool_call>", True))
     if scenario.content is not None:
         segs.append((scenario.content, False))
     if scenario.tool_calls:
@@ -533,6 +548,9 @@ def _gemma4_segments(scenario: Scenario) -> list[tuple[str, bool]]:
         segs.append((_GEMMA4_THOUGHT_PREFIX, False))
         segs.append((scenario.reasoning, False))
         segs.append(("<channel|>", True))
+    if scenario.tool_calls is not None and not scenario.tool_calls:
+        segs.append(("<|tool_call>", True))
+        segs.append(("<tool_call|>", True))
     if scenario.content is not None:
         segs.append((scenario.content, False))
     if scenario.tool_calls:
@@ -571,6 +589,225 @@ def _build_nemotron_v3(scenario: Scenario, validate: bool = True) -> Sample:
     )
 
 
+# ── Seed-OSS (Qwen3 XML grammar with Seed wrapper tokens) ────────────
+
+_SEED_OSS_VOCAB: dict[str, int] = {
+    "<seed:think>": 50,
+    "</seed:think>": 51,
+    "<seed:tool_call>": 60,
+    "</seed:tool_call>": 61,
+}
+
+
+def _seed_oss_tool_segments(tc: ToolCallSpec) -> list[tuple[str, bool]]:
+    parts = [f"\n<function={tc.name}>"]
+    for key, value in tc.arguments.items():
+        parts.append(f"\n<parameter={key}>{_qwen3_arg_value(value)}</parameter>")
+    parts.append("\n</function>\n")
+    return [
+        ("<seed:tool_call>", True),
+        ("".join(parts), False),
+        ("</seed:tool_call>", True),
+    ]
+
+
+def _seed_oss_segments(scenario: Scenario) -> list[tuple[str, bool]]:
+    segs: list[tuple[str, bool]] = []
+    if scenario.reasoning is not None:
+        segs.append((scenario.reasoning, False))
+    if scenario.content is not None or scenario.tool_calls is not None:
+        segs.append(("</seed:think>", True))
+    if scenario.tool_calls is not None and not scenario.tool_calls:
+        segs.append(("<seed:tool_call>", True))
+        segs.append(("</seed:tool_call>", True))
+    if scenario.content is not None:
+        segs.append((scenario.content, False))
+    if scenario.tool_calls:
+        for tc in scenario.tool_calls:
+            segs.extend(_seed_oss_tool_segments(tc))
+    return segs
+
+
+def _build_seed_oss(scenario: Scenario, validate: bool = True) -> Sample:
+    sample = _make_sample(
+        sample_id=f"seed_oss-{scenario.id}",
+        description=scenario.description,
+        vocab=_SEED_OSS_VOCAB,
+        segments=_seed_oss_segments(scenario),
+        expected_reasoning=scenario.reasoning if scenario.reasoning is not None else "",
+        expected_content=_qwen3_expected_content(scenario),
+        expected_tool_calls=_expected_tc(scenario),
+        tools=_expected_tools(scenario),
+    )
+    if validate:
+        _validate_sample(sample, SeedOssParser)
+    return sample
+
+
+# ── GLM-4.7 MoE (XML tool format, starts in REASONING) ──────────────
+
+_GLM47_MOE_VOCAB: dict[str, int] = {
+    "<think>": 50,
+    "</think>": 51,
+    "<tool_call>": 60,
+    "</tool_call>": 61,
+    "<arg_key>": 62,
+    "</arg_key>": 63,
+    "<arg_value>": 64,
+    "</arg_value>": 65,
+}
+
+
+def _glm47_moe_arg_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _glm47_moe_tool_segments(tc: ToolCallSpec) -> list[tuple[str, bool]]:
+    segs: list[tuple[str, bool]] = [
+        ("<tool_call>", True),
+        (tc.name, False),
+    ]
+    for key, value in tc.arguments.items():
+        segs.extend(
+            [
+                ("<arg_key>", True),
+                (key, False),
+                ("</arg_key>", True),
+                ("<arg_value>", True),
+                (_glm47_moe_arg_value(value), False),
+                ("</arg_value>", True),
+            ]
+        )
+    segs.append(("</tool_call>", True))
+    return segs
+
+
+def _glm47_moe_segments(scenario: Scenario) -> list[tuple[str, bool]]:
+    segs: list[tuple[str, bool]] = []
+    if scenario.reasoning is not None:
+        segs.append((scenario.reasoning, False))
+    if scenario.content is not None or scenario.tool_calls:
+        segs.append(("</think>", True))
+    if scenario.content is not None:
+        segs.append((scenario.content, False))
+    if scenario.tool_calls:
+        for tc in scenario.tool_calls:
+            segs.extend(_glm47_moe_tool_segments(tc))
+    return segs
+
+
+def _build_glm47_moe(scenario: Scenario, validate: bool = True) -> Sample:
+    sample = _make_sample(
+        sample_id=f"glm47_moe-{scenario.id}",
+        description=scenario.description,
+        vocab=_GLM47_MOE_VOCAB,
+        segments=_glm47_moe_segments(scenario),
+        expected_reasoning=scenario.reasoning if scenario.reasoning is not None else "",
+        expected_content=_qwen3_expected_content(scenario),
+        expected_tool_calls=_expected_tc(scenario),
+        tools=_expected_tools(scenario),
+    )
+    if validate:
+        _validate_sample(sample, Glm47MoeParser)
+    return sample
+
+
+# ── Kimi K2 (native tool-call section, starts in REASONING) ──────────
+
+_KIMI_K2_VOCAB: dict[str, int] = {
+    "<think>": 50,
+    "</think>": 51,
+    "<|tool_calls_section_begin|>": 60,
+    "<|tool_calls_section_end|>": 61,
+    "<|tool_call_begin|>": 62,
+    "<|tool_call_end|>": 63,
+    "<|tool_call_argument_begin|>": 64,
+}
+
+
+def _kimi_k2_tool_segments(
+    tool_calls: list[ToolCallSpec],
+) -> list[tuple[str, bool]]:
+    segs: list[tuple[str, bool]] = [("<|tool_calls_section_begin|>", True)]
+    for index, tc in enumerate(tool_calls):
+        args = json.dumps(tc.arguments, ensure_ascii=False, separators=(",", ":"))
+        segs.extend(
+            [
+                ("<|tool_call_begin|>", True),
+                (f"functions.{tc.name}:{index}\n", False),
+                ("<|tool_call_argument_begin|>", True),
+                (args, False),
+                ("<|tool_call_end|>", True),
+            ]
+        )
+    segs.append(("<|tool_calls_section_end|>", True))
+    return segs
+
+
+def _kimi_k2_segments(scenario: Scenario) -> list[tuple[str, bool]]:
+    segs: list[tuple[str, bool]] = []
+    if scenario.reasoning is not None:
+        segs.append(("<think>", True))
+        segs.append((scenario.reasoning, False))
+    if scenario.content is not None or scenario.tool_calls is not None:
+        segs.append(("</think>", True))
+    if scenario.content is not None:
+        segs.append((scenario.content, False))
+    if scenario.tool_calls is not None:
+        segs.extend(_kimi_k2_tool_segments(scenario.tool_calls))
+    return segs
+
+
+def _build_kimi_k2(
+    scenario: Scenario,
+    validate: bool = True,
+    thinking: bool = True,
+) -> Sample:
+    expected_reasoning = (
+        scenario.reasoning.rstrip()
+        if (thinking and scenario.reasoning is not None)
+        else None
+    )
+    if thinking and scenario.reasoning is None:
+        expected_reasoning = ""
+
+    sample = _make_sample(
+        sample_id=f"kimi_k2-{scenario.id}",
+        description=scenario.description,
+        vocab=_KIMI_K2_VOCAB,
+        segments=_kimi_k2_segments(scenario),
+        expected_reasoning=expected_reasoning,
+        expected_content=_qwen3_expected_content(scenario),
+        expected_tool_calls=_expected_tc(scenario),
+        tools=_expected_tools(scenario),
+        chat_template_kwargs=None if thinking else {"thinking": False},
+    )
+    if validate:
+        _validate_sample(
+            sample,
+            KimiK2Parser,
+            chat_template_kwargs=sample.chat_template_kwargs,
+        )
+    return sample
+
+
+_KIMI_K2_SCENARIOS = [
+    *SCENARIOS,
+    Scenario(
+        id="trailing-reasoning-whitespace",
+        description="Reasoning trailing whitespace is stripped",
+        reasoning="Reasoning with trailing whitespace. \n\t",
+        content="Done.",
+    ),
+]
+
+
 # ── Registry and public API ──────────────────────────────────────────
 
 _BUILDERS: dict[str, Any] = {
@@ -578,6 +815,9 @@ _BUILDERS: dict[str, Any] = {
     "gemma4": _build_gemma4,
     "minimax_m2": _build_minimax_m2,
     "nemotron_v3": _build_nemotron_v3,
+    "seed_oss": _build_seed_oss,
+    "glm47_moe": _build_glm47_moe,
+    "kimi_k2": _build_kimi_k2,
 }
 
 
@@ -585,7 +825,8 @@ _BUILDERS: dict[str, Any] = {
 def build_samples(model: str) -> tuple[Sample, ...]:
     """Build all scenario samples for a model, self-validated."""
     builder = _BUILDERS[model]
-    return tuple(builder(s) for s in SCENARIOS)
+    scenarios = _KIMI_K2_SCENARIOS if model == "kimi_k2" else SCENARIOS
+    return tuple(builder(s) for s in scenarios)
 
 
 def build_sample(model: str, scenario: Scenario) -> Sample:
