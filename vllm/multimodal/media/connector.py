@@ -22,6 +22,7 @@ from urllib3.util import Url, parse_url
 import vllm.envs as envs
 from vllm.connections import HTTPConnection, global_http_connection
 from vllm.logger import init_logger
+from vllm.multimodal.video import get_video_loader_backend_for_processor
 from vllm.utils.registry import ExtensionManager
 
 from .audio import AudioEmbeddingMediaIO, AudioMediaIO
@@ -104,7 +105,7 @@ class MediaConnector:
         self.connection = connection
 
         if allowed_local_media_path:
-            allowed_local_media_path_ = Path(allowed_local_media_path)
+            allowed_local_media_path_ = Path(allowed_local_media_path).resolve()
 
             if not allowed_local_media_path_.exists():
                 raise ValueError(
@@ -452,6 +453,7 @@ class MediaConnector:
         video_url: str,
         *,
         image_mode: str = "RGB",
+        video_processor: str | None = None,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         """
         Load video from an HTTP or base64 data URL.
@@ -459,7 +461,12 @@ class MediaConnector:
         image_io = ImageMediaIO(
             image_mode=image_mode, **self.media_io_kwargs.get("image", {})
         )
-        video_io = VideoMediaIO(image_io, **self.media_io_kwargs.get("video", {}))
+        video_io_kwargs = dict(self.media_io_kwargs.get("video", {}))
+        if "video_backend" not in video_io_kwargs and (
+            video_backend := get_video_loader_backend_for_processor(video_processor)
+        ):
+            video_io_kwargs["video_backend"] = video_backend
+        video_io = VideoMediaIO(image_io, **video_io_kwargs)
 
         return self.load_from_url(
             video_url,
@@ -472,6 +479,7 @@ class MediaConnector:
         video_url: str,
         *,
         image_mode: str = "RGB",
+        video_processor: str | None = None,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         """
         Asynchronously load video from an HTTP or base64 data URL.
@@ -481,7 +489,12 @@ class MediaConnector:
         image_io = ImageMediaIO(
             image_mode=image_mode, **self.media_io_kwargs.get("image", {})
         )
-        video_io = VideoMediaIO(image_io, **self.media_io_kwargs.get("video", {}))
+        video_io_kwargs = dict(self.media_io_kwargs.get("video", {}))
+        if "video_backend" not in video_io_kwargs and (
+            video_backend := get_video_loader_backend_for_processor(video_processor)
+        ):
+            video_io_kwargs["video_backend"] = video_backend
+        video_io = VideoMediaIO(image_io, **video_io_kwargs)
 
         return await self.load_from_url_async(
             video_url,

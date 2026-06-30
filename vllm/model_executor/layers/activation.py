@@ -158,20 +158,31 @@ class SiluAndMulWithClamp(CustomOp):
     Computes:
         gate = clamp(x[..., :d], max=swiglu_limit)
         up   = clamp(x[..., d:], min=-swiglu_limit, max=swiglu_limit)
-        out  = silu(gate) * up
-    where d = x.shape[-1] // 2.
+        out  = gate * sigmoid(alpha * gate) * (up + beta)
+    where d = x.shape[-1] // 2. The defaults alpha=1.0, beta=0.0 reduce this to
+    ``silu(gate) * up``; SwiGLU-OAI style models pass alpha (sigmoid scale) and
+    beta=1.0 (up bias).
 
     Shapes:
         x: (num_tokens, 2 * d) or (batch_size, seq_len, 2 * d)
         return: (num_tokens, d) or (batch_size, seq_len, d)
     """
 
-    def __init__(self, swiglu_limit: float, *, compile_native: bool = True):
+    def __init__(
+        self,
+        swiglu_limit: float,
+        alpha: float = 1.0,
+        beta: float = 0.0,
+        *,
+        compile_native: bool = True,
+    ):
         super().__init__(compile_native=compile_native)
         self.swiglu_limit = float(swiglu_limit)
-        if current_platform.is_rocm():
+        self.alpha = float(alpha)
+        self.beta = float(beta)
+        if current_platform.is_rocm() or current_platform.is_xpu():
             self._forward_method = self.forward_native
-        elif current_platform.is_cuda_alike() or current_platform.is_xpu():
+        elif current_platform.is_cuda_alike():
             self.op = torch.ops._C.silu_and_mul_with_clamp
         elif current_platform.is_cpu():
             self._forward_method = self.forward_native
@@ -180,17 +191,23 @@ class SiluAndMulWithClamp(CustomOp):
         d = x.shape[-1] // 2
         gate = torch.clamp(x[..., :d], max=self.swiglu_limit)
         up = torch.clamp(x[..., d:], min=-self.swiglu_limit, max=self.swiglu_limit)
-        return F.silu(gate) * up
+        return gate * torch.sigmoid(self.alpha * gate) * (up + self.beta)
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
         d = x.shape[-1] // 2
         output_shape = x.shape[:-1] + (d,)
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-        self.op(out, x, self.swiglu_limit)
+        self.op(out, x, self.swiglu_limit, self.alpha, self.beta)
         return out
 
     def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
-        return self.forward_cuda(x)
+        return self.forward_native(x)
+
+    def extra_repr(self) -> str:
+        return (
+            f"swiglu_limit={self.swiglu_limit!r}, "
+            f"alpha={self.alpha!r}, beta={self.beta!r}"
+        )
 
 
 # --8<-- [start:mul_and_silu]
@@ -761,10 +778,16 @@ _ACTIVATION_AND_MUL_REGISTRY: LazyDict[nn.Module] = LazyDict(
 )
 
 
-def get_act_and_mul_fn(act_fn_name: str) -> nn.Module:
+def get_act_and_mul_fn(act_fn_name: str, *, compile_native: bool = True) -> nn.Module:
     """Get an activation-and-mul (i.e. SiluAndMul) function by name."""
     act_fn_name = act_fn_name.lower()
-    if act_fn_name not in _ACTIVATION_AND_MUL_REGISTRY:
-        raise ValueError(f"Activation function {act_fn_name!r} is not supported.")
 
-    return _ACTIVATION_AND_MUL_REGISTRY[act_fn_name]
+    if not compile_native and act_fn_name in ("silu", "swish"):
+        return SiluAndMul(compile_native=False)
+
+    try:
+        return _ACTIVATION_AND_MUL_REGISTRY[act_fn_name]
+    except KeyError:
+        raise ValueError(
+            f"Activation function {act_fn_name!r} is not supported."
+        ) from None

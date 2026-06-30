@@ -83,7 +83,7 @@ def assert_executor(executor, tp_size, pp_size):
     assert executor._get_output_rank() == expected_output_rank
 
     if pp_size > 1:
-        assert executor.max_concurrent_batches == pp_size
+        assert executor.vllm_config.max_concurrent_batches == pp_size
 
     executor.check_health()
     assert not executor.is_failed

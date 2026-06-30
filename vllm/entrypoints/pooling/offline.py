@@ -1,34 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from tqdm.auto import tqdm
-from typing_extensions import TypeVar
 
-from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import ChatTemplateConfig
-from vllm.inputs import (
-    DataPrompt,
-    EngineInput,
-    PromptType,
-)
+from vllm.entrypoints.offline_utils import OfflineInferenceMixin
+from vllm.inputs import DataPrompt, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     ClassificationRequestOutput,
     EmbeddingRequestOutput,
     PoolingRequestOutput,
-    RequestOutput,
     ScoringRequestOutput,
 )
 from vllm.pooling_params import PoolingParams
-from vllm.renderers import BaseRenderer
-from vllm.sampling_params import SamplingParams
 from vllm.tasks import SCORE_TYPE_MAP, PoolingTask, SupportedTask
-from vllm.v1.engine.llm_engine import LLMEngine
 
 from .factories import init_pooling_io_processors
 from .scoring.io_processor import ScoringIOProcessor
@@ -37,20 +27,10 @@ from .typing import OfflineInputsContext, OfflineOutputsContext
 
 logger = init_logger(__name__)
 
-_P = TypeVar("_P", bound=SamplingParams | PoolingParams | None)
-_O = TypeVar(
-    "_O",
-    bound=RequestOutput | PoolingRequestOutput,
-    default=RequestOutput | PoolingRequestOutput,
-)
 
-
-class PoolingOfflineMixin(ABC):
+class PoolingOfflineMixin(OfflineInferenceMixin):
     """Offline inference for pooling models"""
 
-    renderer: BaseRenderer
-    llm_engine: "LLMEngine"
-    model_config: ModelConfig
     runner_type: str
     chat_template: str | None
     supported_tasks: tuple[SupportedTask, ...]
@@ -306,50 +286,6 @@ class PoolingOfflineMixin(ABC):
 
         return [ClassificationRequestOutput.from_base(item) for item in items]
 
-    def reward(
-        self,
-        prompts: PromptType | Sequence[PromptType],
-        /,
-        *,
-        pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
-        use_tqdm: bool | Callable[..., tqdm] = True,
-        lora_request: list[LoRARequest] | LoRARequest | None = None,
-        tokenization_kwargs: dict[str, Any] | None = None,
-    ) -> list[PoolingRequestOutput]:
-        """
-        Generate rewards for each prompt.
-
-        Args:
-            prompts: The prompts to the LLM. You may pass a sequence of prompts
-                for batch inference. See [PromptType][vllm.inputs.PromptType]
-                for more details about the format of each prompt.
-            pooling_params: The pooling parameters for pooling. If None, we
-                use the default pooling parameters.
-            use_tqdm: If `True`, shows a tqdm progress bar.
-                If a callable (e.g., `functools.partial(tqdm, leave=False)`),
-                it is used to create the progress bar.
-                If `False`, no progress bar is created.
-            lora_request: LoRA request to use for generation, if any.
-            tokenization_kwargs: Overrides for `tokenizer.encode`.
-
-        Returns:
-            A list of `PoolingRequestOutput` objects containing the
-            pooled hidden states in the same order as the input prompts.
-        """
-        logger.warning_once(
-            "`llm.reward` api is deprecated and will be removed in v0.23. "
-            'Please use `LLM.encode` with `pooling_task="classify"` or '
-            '`pooling_task="token_classify"` instead.'
-        )
-        return self.encode(
-            prompts,
-            use_tqdm=use_tqdm,
-            lora_request=lora_request,
-            pooling_params=pooling_params,
-            pooling_task="token_classify",
-            tokenization_kwargs=tokenization_kwargs,
-        )
-
     def score(
         self,
         data_1: ScoreInput | list[ScoreInput],
@@ -464,47 +400,3 @@ class PoolingOfflineMixin(ABC):
         )
 
         return [ScoringRequestOutput.from_base(item) for item in outputs]
-
-    @abstractmethod
-    def _params_to_seq(
-        self,
-        params: _P | Sequence[_P],
-        num_requests: int,
-    ) -> Sequence[_P]:
-        raise NotImplementedError
-
-    @abstractmethod
-    def _lora_request_to_seq(
-        self,
-        lora_request: LoRARequest | None | Sequence[LoRARequest | None],
-        num_requests: int,
-    ) -> Sequence[LoRARequest | None]:
-        raise NotImplementedError
-
-    @abstractmethod
-    def _priority_to_seq(
-        self,
-        priority: list[int] | None,
-        num_requests: int,
-    ) -> Sequence[int]:
-        raise NotImplementedError
-
-    @abstractmethod
-    def _render_and_add_requests(
-        self,
-        prompts: Iterable[EngineInput],
-        params: Sequence[SamplingParams | PoolingParams],
-        *,
-        lora_requests: Sequence[LoRARequest | None] | None = None,
-        priorities: Sequence[int] | None = None,
-    ) -> list[str]:
-        raise NotImplementedError
-
-    @abstractmethod
-    def _run_engine(
-        self,
-        output_type: type[_O] | tuple[type[_O], ...],
-        *,
-        use_tqdm: bool | Callable[..., tqdm] = True,
-    ) -> list[_O]:
-        raise NotImplementedError

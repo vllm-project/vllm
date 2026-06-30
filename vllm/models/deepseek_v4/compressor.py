@@ -13,13 +13,13 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
 from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
-    _fused_kv_compress_norm_rope_insert_indexer_attn,
-    _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn,
-    _fused_kv_compress_norm_rope_insert_sparse_attn,
+    compress_norm_rope_store_triton,
 )
 from vllm.models.deepseek_v4.common.ops.fused_indexer_q import MXFP4_BLOCK_SIZE
+from vllm.models.deepseek_v4.common.ops.save_partial_states import (
+    save_partial_states,
+)
 from vllm.platforms import current_platform
-from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -155,13 +155,17 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
             raise ValueError(f"Invalid compress ratio: {compress_ratio}")
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        # fp8_ds_mla is the UE8M0 paged layout and needs 576B alignment. Plain
+        # full-cache rows share state pages with contiguous KV pages, so padding
+        # would break page matching.
+        uses_fp8_ds_mla_layout = vllm_config.cache_config.cache_dtype == "fp8_ds_mla"
         return SlidingWindowMLASpec(  # only has one vector instead of K + V
             block_size=self.block_size,
             num_kv_heads=1,
             head_size=self.state_dim,
             dtype=self.dtype,
             sliding_window=self.sliding_window,
-            alignment=576,  # NOTE: FlashMLA requires 576B alignment
+            alignment=576 if uses_fp8_ds_mla_layout else None,
         )
 
     def forward(self): ...
@@ -171,6 +175,16 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
 
 
 class DeepseekCompressor(nn.Module):
+    """DeepSeek V4 KV/score compressor.
+
+    Owns the linear / norm / state-cache / ape state and the shared forward
+    prologue (kv/score split, save_partial_states launch). The
+    compress → norm → RoPE → store step is dispatched to a triton kernel
+    (``compress_norm_rope_store_triton``) by default, except for the NVIDIA
+    head_dim=128 indexer path which uses the cutedsl kernel
+    (``compress_norm_rope_store_cutedsl``) for better performance.
+    """
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -240,25 +254,18 @@ class DeepseekCompressor(nn.Module):
             assert not use_fp4_cache, (
                 "MXFP4 cache is only supported for indexer (head=128)"
             )
-            self._fused_kernel = _fused_kv_compress_norm_rope_insert_sparse_attn
             self._quant_block = 64
             self._token_stride = self.nope_head_dim + self.rope_head_dim * 2
             self._scale_dim = self.nope_head_dim // 64 + 1  # 7 real + 1 pad
-            self._num_warps = 4
         elif self.head_dim == 128:
             if use_fp4_cache:
-                self._fused_kernel = (
-                    _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn
-                )
                 self._quant_block = MXFP4_BLOCK_SIZE
                 self._token_stride = self.head_dim // 2
                 self._scale_dim = self.head_dim // MXFP4_BLOCK_SIZE
             else:
-                self._fused_kernel = _fused_kv_compress_norm_rope_insert_indexer_attn
                 self._quant_block = 128
                 self._token_stride = self.head_dim
                 self._scale_dim = 4  # single float32 scale
-            self._num_warps = 1
         else:
             raise ValueError(
                 f"Unsupported head_dim for fused quant+cache: {self.head_dim}"
@@ -296,32 +303,29 @@ class DeepseekCompressor(nn.Module):
         state_cache = self.state_cache.kv_cache
         # kv_state stored in first half, score_state stored in second half
         state_width = state_cache.shape[-1] // 2
-        pdl_kwargs = {} if current_platform.is_rocm() else {"launch_pdl": False}
+        pdl_kwargs = (
+            {}
+            if current_platform.is_rocm() or current_platform.is_xpu()
+            else {"launch_pdl": False}
+        )
 
         # Store the KV and score (with fused APE addition) in the state.
-        # NOTE: PDL is disabled — both this kernel and _fused_kernel below
-        # depend on preceding kernel outputs (kv/score from the cublas GEMM;
-        # state_cache from this kernel) but neither emits/waits on PDL grid
-        # dependency primitives, so launch_pdl=True caused a read-after-write
-        # race and non-deterministic output.
-        _save_partial_states_kernel[(num_actual,)](
-            kv,
-            kv.stride(0),
-            score,
-            score.stride(0),
-            self.ape,
-            self.ape.stride(0),
-            positions,
-            state_cache,
-            state_cache.stride(0),
-            state_cache.stride(1),
-            slot_mapping,
-            block_size,
-            HEAD_SIZE=kv.shape[-1],
-            TRITON_BLOCK_SIZE=triton.next_power_of_2(kv.shape[-1]),
-            STATE_WIDTH=state_width,
-            COMPRESS_RATIO=self.compress_ratio,
-            **pdl_kwargs,
+        # NOTE: PDL is disabled — both this kernel and the compress kernels
+        # below depend on preceding kernel outputs (kv/score from the cublas
+        # GEMM; state_cache from this kernel) but neither emits/waits on PDL
+        # grid dependency primitives, so launch_pdl=True caused a
+        # read-after-write race and non-deterministic output.
+        save_partial_states(
+            kv=kv,
+            score=score,
+            ape=self.ape,
+            positions=positions,
+            state_cache=state_cache,
+            slot_mapping=slot_mapping,
+            block_size=block_size,
+            state_width=state_width,
+            compress_ratio=self.compress_ratio,
+            pdl_kwargs=pdl_kwargs,
         )
 
         # Fused: compress → RMSNorm → RoPE → FP8 quant → KV cache write.
@@ -333,98 +337,63 @@ class DeepseekCompressor(nn.Module):
         # - position used: (positions // compress_ratio) * compress_ratio
         cos_sin_cache = rotary_emb.cos_sin_cache
         k_cache_metadata = cast(Any, attn_metadata[self.k_cache_prefix])
-        kv_cache = self._static_forward_context[self.k_cache_prefix].kv_cache
+        k_cache_layer = self._static_forward_context[self.k_cache_prefix]
+        kv_cache = k_cache_layer.kv_cache
 
-        self._fused_kernel[(num_actual,)](
-            # state cache
-            state_cache,
-            state_cache.stride(0),
-            state_cache.stride(1),
-            # metadata
-            token_to_req_indices,
-            positions,
-            slot_mapping,
-            block_table,
-            block_table.stride(0),
-            block_size,
-            # RMSNorm
-            self.norm.weight,
-            self.rms_norm_eps,
-            # RoPE
-            cos_sin_cache,
-            cos_sin_cache.stride(0),
-            # KV cache
-            kv_cache,
-            k_cache_metadata.slot_mapping,
-            kv_cache.shape[1],  # paged KV cache block size (tokens per block)
-            # constexprs
-            HEAD_SIZE=self.head_dim,
-            TRITON_BLOCK_SIZE=triton.next_power_of_2(self.head_dim),
-            STATE_WIDTH=state_width,
-            COMPRESS_RATIO=self.compress_ratio,
-            OVERLAP=self.overlap,
-            ROPE_HEAD_DIM=self.rope_head_dim,
-            FP8_MAX=448.0,
-            QUANT_BLOCK=self._quant_block,
-            TOKEN_STRIDE=self._token_stride,
-            SCALE_DIM=self._scale_dim,
-            KV_BLOCK_STRIDE=kv_cache.stride(0),
-            num_warps=self._num_warps,
-            **pdl_kwargs,
+        # Plain-row V4 reads a contiguous bf16 / per-tensor fp8 cache row; the
+        # fp8_ds_mla path uses the UE8M0 paged uint8 layout.
+        store_full_kv = self.head_dim == 512 and kv_cache.dtype != torch.uint8
+        store_full_fp8 = kv_cache.dtype == torch.float8_e4m3fn
+        fp8_scale = (
+            getattr(k_cache_layer, "_flashinfer_fp8_kv_scale", None)
+            if store_full_fp8
+            else None
         )
 
+        # cutedsl (head=512) accepts the full-cache flags; triton (indexer/AMD)
+        # does not, so the two callables have different signatures.
+        compress_norm_rope_store_fn: Any
+        if current_platform.is_cuda() and self.head_dim == 512:
+            from .nvidia.ops.sparse_attn_compress_cutedsl import (
+                compress_norm_rope_store_cutedsl,
+            )
 
-@triton.jit
-def _save_partial_states_kernel(
-    kv_ptr,
-    kv_stride,
-    score_ptr,
-    score_stride,
-    ape_ptr,
-    ape_stride,
-    positions_ptr,
-    state_cache_ptr,
-    state_cache_stride0,
-    state_cache_stride1,
-    slot_mapping_ptr,
-    block_size,
-    HEAD_SIZE: tl.constexpr,
-    TRITON_BLOCK_SIZE: tl.constexpr,
-    # state_cache last dim packs [kv_state, score_state], each STATE_WIDTH wide.
-    STATE_WIDTH: tl.constexpr,
-    COMPRESS_RATIO: tl.constexpr,
-):
-    token_idx = tl.program_id(0)
-    slot_id = tl.load(slot_mapping_ptr + token_idx)
+            # head=512 on CUDA always uses cutedsl, for both the fp8_ds_mla
+            # layout and the plain full-cache layout. The full-cache flags
+            # are consumed only here.
+            compress_norm_rope_store_fn = compress_norm_rope_store_cutedsl
+            extra_kwargs: dict[str, Any] = dict(
+                store_full_kv=store_full_kv,
+                store_full_fp8=store_full_fp8,
+                fp8_scale=fp8_scale,
+            )
+        else:
+            # Indexer path (head_dim == 128) or non-CUDA GPUs (AMD, XPU, etc.).
+            compress_norm_rope_store_fn = compress_norm_rope_store_triton
+            extra_kwargs = {}
 
-    # Skip padded / invalid tokens (slot_id == -1 is the PAD sentinel used
-    # by vLLM).  During CUDA graph replay the batch may contain padding
-    # tokens whose slot_mapping is -1; writing to kv_state[-1] would be an
-    # illegal memory access.
-    if slot_id < 0:
-        return
-
-    block_idx = slot_id // block_size
-    pos_in_block = slot_id % block_size
-    base_ptr = (
-        state_cache_ptr
-        + block_idx * state_cache_stride0
-        + pos_in_block * state_cache_stride1
-    )
-
-    block = tl.arange(0, TRITON_BLOCK_SIZE)
-    mask = block < HEAD_SIZE
-
-    kv = tl.load(kv_ptr + token_idx * kv_stride + block, mask=mask)
-    tl.store(base_ptr + block, kv, mask=mask)
-
-    # Fused: score += ape[position % compress_ratio]
-    position = tl.load(positions_ptr + token_idx)
-    ape_row = position % COMPRESS_RATIO
-    ape = tl.load(ape_ptr + ape_row * ape_stride + block, mask=mask)
-    score = tl.load(score_ptr + token_idx * score_stride + block, mask=mask)
-    tl.store(
-        base_ptr + STATE_WIDTH + block,
-        score + ape,
-        mask=mask,
-    )
+        compress_norm_rope_store_fn(
+            state_cache=state_cache,
+            num_actual=num_actual,
+            token_to_req_indices=token_to_req_indices,
+            positions=positions,
+            slot_mapping=slot_mapping,
+            block_table=block_table,
+            block_size=block_size,
+            state_width=state_width,
+            cos_sin_cache=cos_sin_cache,
+            kv_cache=kv_cache,
+            k_cache_metadata=k_cache_metadata,
+            pdl_kwargs=pdl_kwargs,
+            head_dim=self.head_dim,
+            rope_head_dim=self.rope_head_dim,
+            compress_ratio=self.compress_ratio,
+            overlap=self.overlap,
+            use_fp4_cache=self.use_fp4_cache,
+            rms_norm_weight=self.norm.weight,
+            rms_norm_eps=self.rms_norm_eps,
+            quant_block=self._quant_block,
+            token_stride=self._token_stride,
+            scale_dim=self._scale_dim,
+            **extra_kwargs,
+        )

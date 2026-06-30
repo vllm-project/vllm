@@ -14,7 +14,6 @@ import vllm_xpu_kernels._xpu_C  # noqa
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils.torch_utils import supports_xpu_graph
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum
@@ -56,7 +55,7 @@ class XPUPlatform(Platform):
         from vllm.v1.attention.backends.utils import set_kv_cache_layout
 
         set_kv_cache_layout("NHD")
-        logger.info(
+        logger.info_once(
             "Setting VLLM_KV_CACHE_LAYOUT to 'NHD' for XPU; "
             "only NHD layout is supported by XPU attention kernels."
         )
@@ -92,7 +91,7 @@ class XPUPlatform(Platform):
                 f"with use_mla: {attn_selector_config.use_mla}"
             )
 
-        logger.info("Using Flash Attention backend.")
+        logger.info_once("Using Flash Attention backend.")
         return AttentionBackendEnum.FLASH_ATTN.get_path()
 
     @classmethod
@@ -110,6 +109,13 @@ class XPUPlatform(Platform):
         dtype: torch.dtype,
         backend: "AttentionBackendEnum | None" = None,
     ) -> "AttentionBackendEnum":
+        if dtype == torch.float32:
+            logger.warning_once(
+                "Flash Attention on XPU does not support float32 dtype. "
+                "Falling back to Triton Attention backend for vit attention."
+            )
+            return AttentionBackendEnum.TRITON_ATTN
+
         if backend is not None:
             assert backend in cls.get_supported_vit_attn_backends(), (
                 f"Backend {backend} is not supported for vit attention. "
@@ -171,8 +177,6 @@ class XPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        parallel_config = vllm_config.parallel_config
-
         # lazy import to avoid circular import
         from vllm.config import CUDAGraphMode
 
@@ -183,38 +187,42 @@ class XPUPlatform(Platform):
         attention_config = vllm_config.attention_config
         if attention_config.backend is None:
             attention_config.backend = AttentionBackendEnum.FLASH_ATTN
+
+        # lazy import to avoid circular import
+        from vllm.utils.torch_utils import supports_xpu_graph
+
         if not supports_xpu_graph():
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            logger.warning(
+            logger.warning_once(
                 "XPU Graph is not supported in the current PyTorch version, "
                 "disabling cudagraph_mode."
             )
         elif not envs.VLLM_XPU_ENABLE_XPU_GRAPH:
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            logger.warning(
+            logger.warning_once(
                 "XPU Graph is disabled by environment variable, "
                 "please set VLLM_XPU_ENABLE_XPU_GRAPH=1 to enable it."
             )
 
         # Disable fusion passes not yet supported on XPU.
+        from vllm.config.compilation import CompilationMode
+
         pass_config = compilation_config.pass_config
         fusion_passes_to_disable = {
-            "enable_sp": "Sequence parallelism",
             "fuse_gemm_comms": "Async TP",
             "fuse_allreduce_rms": "AllReduce + RMSNorm fusion",
-            "fuse_norm_quant": "RMSNorm + quant fusion",
-            "fuse_act_quant": "Activation + quant fusion",
             "fuse_attn_quant": "Attention + quant fusion",
             "fuse_act_padding": "Activation + padding fusion",
             "fuse_rope_kvcache": "RoPE + KV cache fusion",
         }
-        for flag, feature_name in fusion_passes_to_disable.items():
-            if getattr(pass_config, flag):
-                logger.warning(
-                    "Feature %r is not yet supported on XPU and will be disabled.",
-                    feature_name,
-                )
-                setattr(pass_config, flag, False)
+        if compilation_config.mode != CompilationMode.NONE:
+            for flag, feature_name in fusion_passes_to_disable.items():
+                if getattr(pass_config, flag):
+                    logger.warning_once(
+                        "Feature %r is not yet supported on XPU and will be disabled.",
+                        feature_name,
+                    )
+                    setattr(pass_config, flag, False)
 
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
@@ -234,6 +242,16 @@ class XPUPlatform(Platform):
         # spawn is the only supported multiprocessing method on XPU
         if "VLLM_WORKER_MULTIPROC_METHOD" not in os.environ:
             os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
+        # XPU requires graceful shutdown to allow oneCCL/Level Zero resources
+        # to be properly released. Without this, subsequent server startups on
+        # the same devices may hang during CCL initialization.
+        if vllm_config.shutdown_timeout == 0:
+            vllm_config.shutdown_timeout = 5
+            logger.info(
+                "XPU platform: set server shutdown_timeout=%d.",
+                vllm_config.shutdown_timeout,
+            )
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
@@ -317,9 +335,8 @@ class XPUPlatform(Platform):
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
-        from vllm.utils.torch_utils import supports_xccl
-
-        if not supports_xccl():
+        if not torch.distributed.is_xccl_available():
+            # Supports xccl with PyTorch versions >= 2.8.0.dev for XPU platform
             logger.warning(
                 "xccl is not enabled in this torch build, communication"
                 " is not available."
@@ -374,8 +391,8 @@ class XPUPlatform(Platform):
         dst_block_indices: torch.Tensor,
     ) -> None:
         """Copy blocks from src_cache to dst_cache on XPU."""
-        _src_cache = src_cache[:, src_block_indices]
-        dst_cache[:, dst_block_indices] = _src_cache.to(dst_cache.device)
+        _src_cache = src_cache[src_block_indices]
+        dst_cache[dst_block_indices] = _src_cache.to(dst_cache.device)
 
     @classmethod
     def swap_out_blocks_to_host(
@@ -386,8 +403,8 @@ class XPUPlatform(Platform):
         dst_block_indices: torch.Tensor,
     ) -> None:
         """Copy blocks from XPU to host (CPU)."""
-        _src_cache = src_cache[:, src_block_indices]
-        dst_cache[:, dst_block_indices] = _src_cache.cpu()
+        _src_cache = src_cache[src_block_indices]
+        dst_cache[dst_block_indices] = _src_cache.cpu()
 
     @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:

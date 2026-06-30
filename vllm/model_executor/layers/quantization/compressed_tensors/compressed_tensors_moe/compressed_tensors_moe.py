@@ -7,8 +7,10 @@ from compressed_tensors import CompressionFormat
 from compressed_tensors.quantization import (
     ActivationOrdering,
     QuantizationStrategy,
+    QuantizationType,
 )
 
+from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEMethodBase,
@@ -94,22 +96,56 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 )
 
             # Prefer to use the MarlinMoE kernel when it is supported.
+            is_actorder = (
+                weight_quant.strategy == QuantizationStrategy.GROUP
+                and weight_quant.actorder
+                in (ActivationOrdering.GROUP, ActivationOrdering.DYNAMIC)
+            )
             if (
-                not check_moe_marlin_supports_layer(layer, group_size)
+                not check_moe_marlin_supports_layer(
+                    layer, group_size, allow_tile_padding=not is_actorder
+                )
                 or current_platform.is_rocm()
             ):
+                if is_actorder:
+                    raise ValueError(
+                        "WNA16MoE is not supported with actorder=group/dynamic."
+                    )
+
+                # Native ROCm HIP kernels (RDNA3, etc.)
+                if current_platform.is_rocm():
+                    from . import rocm_moe_rdna
+
+                    if rocm_moe_rdna.is_supported(weight_quant):
+                        return rocm_moe_rdna.make_method(
+                            weight_quant, input_quant, layer.moe_config
+                        )
+                    from vllm.platforms.rocm import on_gfx950
+
+                    vllm_config = get_current_vllm_config()
+                    is_lora_disabled = vllm_config.lora_config is None
+                    moe_backend = vllm_config.kernel_config.moe_backend
+                    if (
+                        weight_quant.strategy == QuantizationStrategy.GROUP
+                        and weight_quant.type == QuantizationType.INT
+                        and group_size == 32
+                        and weight_quant.num_bits == 4
+                        and is_lora_disabled
+                        and on_gfx950()
+                        and moe_backend == "flydsl"
+                    ):
+                        from .compressed_tensors_moe_w4a16_flydsl import (
+                            CompressedTensorsW4A16FlydslMoEMethod,
+                        )
+
+                        logger.info_once("Using CompressedTensorsW4A16FlydslMoEMethod")
+                        return CompressedTensorsW4A16FlydslMoEMethod(
+                            weight_quant, input_quant, layer.moe_config
+                        )
                 from .compressed_tensors_moe_wna16 import (
                     CompressedTensorsWNA16MoEMethod,
                 )
 
-                if (
-                    weight_quant.strategy == QuantizationStrategy.GROUP
-                    and weight_quant.actorder
-                    in (ActivationOrdering.GROUP, ActivationOrdering.DYNAMIC)
-                ):
-                    raise ValueError(
-                        "WNA16MoE is not supported with actorder=group/dynamic."
-                    )
                 logger.info_once("Using CompressedTensorsWNA16MoEMethod")
                 return CompressedTensorsWNA16MoEMethod(
                     weight_quant, input_quant, layer.moe_config

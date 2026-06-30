@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# Must be imported firstly
+import vllm.v1.worker.cpu.shm  # noqa # isort: skip
+
 import math
 import os
 import sys
@@ -101,8 +105,10 @@ class CPUWorker(Worker):
             )
 
     def init_device(self):
+        self.device = torch.device("cpu")
+
         # Check whether critical libraries are loaded
-        def check_preloaded_libs(name: str):
+        def check_preloaded_libs(name: str) -> bool:
             ld_preload_list = os.environ.get("LD_PRELOAD", "")
             if name not in ld_preload_list:
                 logger.warning(
@@ -113,11 +119,22 @@ class CPUWorker(Worker):
                     "to setup required pre-loaded libraries.",
                     name,
                 )
+                return False
+            return True
 
         if sys.platform.startswith("linux"):
             check_preloaded_libs("libtcmalloc")
             if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
-                check_preloaded_libs("libiomp")
+                iomp_loaded = check_preloaded_libs("libiomp")
+                if not iomp_loaded and self.vllm_config.speculative_config is not None:
+                    logger.warning(
+                        "Speculative decoding on CPU without Intel OpenMP in "
+                        "LD_PRELOAD will cause significant performance loss. "
+                        "Please follow the section `set LD_PRELOAD` in "
+                        "https://docs.vllm.ai/en/latest/getting_started/"
+                        "installation/cpu/ "
+                        "to setup libiomp5.",
+                    )
 
         def skip_set_num_threads(x: int):
             logger.warning(
@@ -141,9 +158,16 @@ class CPUWorker(Worker):
         set_random_seed(self.model_config.seed)
 
         # Construct the model runner
-        self.model_runner: CPUModelRunner = CPUModelRunner(
-            self.vllm_config, torch.device("cpu")
-        )
+        if self.use_v2_model_runner:
+            from vllm.v1.worker.cpu.model_runner import (
+                CPUModelRunner as CPUModelRunnerV2,
+            )
+
+            self.model_runner: CPUModelRunner = CPUModelRunnerV2(  # type: ignore
+                self.vllm_config, self.device
+            )
+        else:
+            self.model_runner = CPUModelRunner(self.vllm_config, torch.device("cpu"))
 
     def sleep(self, level: int = 1) -> None:
         logger.warning("sleep mode is not supported on CPU, ignore it.")

@@ -105,9 +105,9 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> "FusedMoEQuantConfig | None":
-        quant_config = make_int8_moe_quant_config(
+        return make_int8_moe_quant_config(
             w1_scale=layer.w13_scale,
             w2_scale=layer.w2_scale,
+            w1_bias=getattr(layer, "w13_bias", None),
+            w2_bias=getattr(layer, "w2_bias", None),
         )
-        self._maybe_inject_biases(quant_config, layer)
-        return quant_config

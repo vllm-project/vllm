@@ -42,10 +42,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Reference: https://github.com/astral-sh/uv/pull/1694
 ENV UV_HTTP_TIMEOUT=500
 
-# Upgrade to GCC 10 to avoid https://gcc.gnu.org/bugzilla/show_bug.cgi?id=92519
-# as it was causing spam when compiling the CUTLASS kernels
-RUN apt-get install -y gcc-10 g++-10
-RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 110 --slave /usr/bin/g++ g++ /usr/bin/g++-10
+# GCC >= 11.3 required for PyTorch C++20 headers (pytorch/pytorch#167929).
+RUN apt-get install -y gcc-11 g++-11
+RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 110 --slave /usr/bin/g++ g++ /usr/bin/g++-11
 RUN <<EOF
 gcc --version
 EOF
@@ -102,37 +101,32 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update -y \
     && apt-get install -y --no-install-recommends \
-        ca-certificates curl git build-essential \
-        protobuf-compiler libprotobuf-dev \
+        ca-certificates curl git build-essential unzip python3 python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
-# Install rustup; the toolchain itself is pinned by rust/rust-toolchain.toml.
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-    sh -s -- -y --profile minimal --default-toolchain none
-ENV PATH="/root/.cargo/bin:${PATH}"
+COPY tools/install_protoc.sh /tmp/install_protoc.sh
+RUN /tmp/install_protoc.sh && rm /tmp/install_protoc.sh
 
 WORKDIR /workspace
 
-COPY rust rust
+COPY requirements/build/rust.txt requirements/build/rust.txt
+RUN python3 -m pip install --no-cache-dir -r requirements/build/rust.txt
 
-# Fail loudly if the rust submodule was not initialized on the host before
-# `docker build`.
-RUN if [ ! -f rust/Cargo.toml ]; then \
-        echo "ERROR: rust/ submodule is not initialized."; \
-        echo "Run 'git submodule update --init --recursive' on the host before building."; \
-        exit 1; \
-    fi
+# Copy only the Rust build inputs; build_rust.sh publishes artifacts needed
+# by the wheel build stage.
+COPY rust rust
+COPY rust-toolchain.toml rust-toolchain.toml
+COPY tools/build_rust.py tools/build_rust.py
+COPY build_rust.sh build_rust.sh
 
 # Cap cargo parallelism to avoid exhausting the CI host's open-file limit
 # (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
 ENV CARGO_BUILD_JOBS=4
 
-RUN --mount=type=cache,target=/root/.cargo/registry \
-    --mount=type=cache,target=/root/.cargo/git \
-    --mount=type=cache,target=/workspace/rust/target \
-    cd rust \
-    && cargo build --release --bin vllm-rs --features native-tls-vendored \
-    && cp target/release/vllm-rs /workspace/vllm-rs
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,target=/root/.cargo/git,sharing=locked \
+    bash build_rust.sh
+
 #################### RUST BUILD IMAGE ####################
 
 #################### WHEEL BUILD IMAGE ####################
@@ -145,9 +139,10 @@ ENV UV_HTTP_TIMEOUT=500
 
 COPY . .
 
-# Drop the pre-built rust frontend binary into the source tree. setup.py
-# detects it and ships it as-is, skipping the local cargo build.
-COPY --from=rust-build /workspace/vllm-rs vllm/vllm-rs
+# Drop the pre-built Rust artifacts into the source tree. setup.py detects
+# them and ships them as-is, skipping the local Rust build.
+COPY --from=rust-build /workspace/vllm/vllm-rs vllm/vllm-rs
+COPY --from=rust-build /workspace/vllm/_rust_*.so vllm/
 
 RUN python3 use_existing_torch.py
 
@@ -262,13 +257,13 @@ RUN pip install setuptools==75.6.0 packaging==23.2 ninja==1.11.1.3 build==1.2.2.
 
 
 # build flashinfer for torch nightly from source around 10 mins
-# release version: v0.6.11.post2
+# release version: v0.6.13
 # todo(elainewy): cache flashinfer build result for faster build
 ENV CCACHE_DIR=/root/.cache/ccache
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/uv \
     echo "git clone flashinfer..." \
-    && git clone --depth 1 --branch v0.6.11.post2 --recursive https://github.com/flashinfer-ai/flashinfer.git \
+    && git clone --depth 1 --branch v0.6.13 --recursive https://github.com/flashinfer-ai/flashinfer.git \
     && cd flashinfer \
     && git submodule update --init --recursive \
     && echo "finish git clone flashinfer..." \

@@ -74,10 +74,12 @@ class IPCWeightTransferUpdateInfo(WeightTransferUpdateInfo):
     names: list[str]
     dtype_names: list[str]
     shapes: list[list[int]]
-    ipc_handles: list[dict[str, tuple]] | dict[str, tuple]
+    ipc_handles: list[dict[str, tuple]] | dict[str, tuple] | None = None
     """IPC handles mapping physical GPU UUID to rebuild_cuda_tensor args.
     For non-packed mode: list of per-parameter handle dicts.
     For packed mode: single handle dict for the packed buffer."""
+    ipc_handles_pickled: str | None = None
+    """Base64-encoded pickled IPC handles, used for HTTP transport."""
     tensor_sizes: list[int] | None = None
     """Per-parameter sizes in bytes within the packed buffer.
     Required when packed=True, unused otherwise."""
@@ -85,6 +87,29 @@ class IPCWeightTransferUpdateInfo(WeightTransferUpdateInfo):
     """Whether this update uses packed tensor format."""
 
     def __post_init__(self):
+        super().__post_init__()
+        if self.update_kind != "dense":
+            raise NotImplementedError("IPC weight transfer only supports dense updates")
+
+        if self.ipc_handles_pickled is not None:
+            if self.ipc_handles is not None:
+                raise ValueError(
+                    "Cannot specify both `ipc_handles` and `ipc_handles_pickled`"
+                )
+
+            if not envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
+                raise ValueError(
+                    "Refusing to deserialize `ipc_handles_pickled` without "
+                    "VLLM_ALLOW_INSECURE_SERIALIZATION=1"
+                )
+
+            self.ipc_handles = pickle.loads(base64.b64decode(self.ipc_handles_pickled))
+            self.ipc_handles_pickled = None
+
+        if self.ipc_handles is None:
+            raise ValueError(
+                "Either `ipc_handles` or `ipc_handles_pickled` must be provided"
+            )
         num_params = len(self.names)
         if len(self.dtype_names) != num_params:
             raise ValueError(
@@ -125,7 +150,10 @@ class IPCWeightTransferEngine(
     update_info_cls = IPCWeightTransferUpdateInfo
 
     def __init__(
-        self, config: WeightTransferConfig, parallel_config: ParallelConfig
+        self,
+        config: WeightTransferConfig,
+        parallel_config: ParallelConfig,
+        model: torch.nn.Module,
     ) -> None:
         """
         Initialize the IPC weight transfer engine.
@@ -133,8 +161,9 @@ class IPCWeightTransferEngine(
         Args:
             config: The configuration for the weight transfer engine
             parallel_config: The configuration for the parallel setup
+            model: The local model instance which will receive the weights
         """
-        super().__init__(config, parallel_config)
+        super().__init__(config, parallel_config, model)
 
     def parse_update_info(
         self, update_dict: dict[str, Any]
@@ -149,8 +178,9 @@ class IPCWeightTransferEngine(
         Requires ``VLLM_ALLOW_INSECURE_SERIALIZATION=1`` because the
         payload is deserialized via ``pickle.loads``.
         """
-        if "ipc_handles_pickled" in update_dict:
-            if "ipc_handles" in update_dict:
+        pickled = update_dict.pop("ipc_handles_pickled", None)
+        if pickled is not None:
+            if update_dict.get("ipc_handles") is not None:
                 raise ValueError(
                     "Cannot specify both `ipc_handles` and `ipc_handles_pickled`"
                 )
@@ -161,7 +191,6 @@ class IPCWeightTransferEngine(
                     "VLLM_ALLOW_INSECURE_SERIALIZATION=1"
                 )
 
-            pickled = update_dict.pop("ipc_handles_pickled")
             update_dict["ipc_handles"] = pickle.loads(base64.b64decode(pickled))
 
         return super().parse_update_info(update_dict)

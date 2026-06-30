@@ -110,7 +110,8 @@ class PoolingParams(
         if pooler_config is None:
             return
 
-        assert self.task is not None, "task must be set"
+        if self.task is None:
+            raise ValueError("task must be set before merging parameters")
         valid_parameters = self.valid_parameters[self.task]
 
         for k in valid_parameters:
@@ -181,6 +182,11 @@ class PoolingParams(
                         )
                 elif self.dimensions < 1:
                     raise ValueError("Dimensions must be greater than 0")
+                elif self.dimensions > model_config.embedding_size:
+                    raise ValueError(
+                        "Dimensions must be less than or equal to the model's "
+                        f"embedding size ({model_config.embedding_size})"
+                    )
 
         elif self.task in ["classify", "token_classify"]:
             if self.use_activation is None:
@@ -189,7 +195,8 @@ class PoolingParams(
             raise ValueError(f"Unknown pooling task: {self.task!r}")
 
     def _verify_valid_parameters(self):
-        assert self.task is not None, "task must be set"
+        if self.task is None:
+            raise ValueError("task must be set before verifying parameters")
         valid_parameters = self.valid_parameters[self.task]
         invalid_parameters = []
         for k in self.all_parameters:
@@ -221,6 +228,8 @@ class PoolingParams(
         )
 
     def __post_init__(self) -> None:
-        assert self.output_kind == RequestOutputKind.FINAL_ONLY, (
-            "For pooling output_kind has to be FINAL_ONLY"
-        )
+        if self.output_kind != RequestOutputKind.FINAL_ONLY:
+            raise ValueError(
+                "For pooling output_kind has to be FINAL_ONLY, "
+                f"got {self.output_kind!r}"
+            )

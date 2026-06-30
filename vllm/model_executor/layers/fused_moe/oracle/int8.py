@@ -22,12 +22,14 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8DynamicTokenSym,
     kInt8StaticChannelSym,
 )
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
 
 class Int8MoeBackend(Enum):
     TRITON = "TRITON"
+    CPU = "CPU"
 
 
 def _get_priority_backends(
@@ -36,7 +38,18 @@ def _get_priority_backends(
     """
     Get available backends in priority order based on platform and config.
     """
-    return [Int8MoeBackend.TRITON]
+    _AVAILABLE_BACKENDS = [
+        Int8MoeBackend.TRITON,
+        Int8MoeBackend.CPU,
+    ]
+
+    def _move_to_front(backends: list[Int8MoeBackend], backend: Int8MoeBackend) -> None:
+        backends.insert(0, backends.pop(backends.index(backend)))
+
+    if current_platform.is_cpu():
+        _move_to_front(_AVAILABLE_BACKENDS, Int8MoeBackend.CPU)
+
+    return _AVAILABLE_BACKENDS
 
 
 def backend_to_kernel_cls(
@@ -48,6 +61,13 @@ def backend_to_kernel_cls(
         )
 
         return [TritonExperts]
+
+    elif backend == Int8MoeBackend.CPU:
+        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+            CPUExpertsInt8,
+        )
+
+        return [CPUExpertsInt8]
 
     else:
         raise ValueError(f"Unknown Int8 MoE backend: {backend.value}")
@@ -147,6 +167,8 @@ def make_int8_moe_quant_config(
     w2_scale: torch.Tensor,
     a1_scale: torch.Tensor | None = None,
     a2_scale: torch.Tensor | None = None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
     per_act_token_quant: bool = False,
 ) -> FusedMoEQuantConfig:
     assert (a1_scale is None and a2_scale is None) or (
@@ -159,6 +181,8 @@ def make_int8_moe_quant_config(
             w2_scale=w2_scale,
             w1_zp=None,
             w2_zp=None,
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
         )
 
     return int8_w8a8_moe_quant_config(
@@ -166,8 +190,28 @@ def make_int8_moe_quant_config(
         w2_scale=w2_scale,
         a1_scale=a1_scale,
         a2_scale=a2_scale,
+        w1_bias=w1_bias,
+        w2_bias=w2_bias,
         per_act_token_quant=per_act_token_quant,
     )
+
+
+def convert_to_int8_moe_kernel_format(
+    int8_backend: Int8MoeBackend,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Convert INT8 MoE weights to backend-specific kernel format."""
+    if int8_backend == Int8MoeBackend.CPU:
+        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+            prepare_int8_moe_layer_for_cpu,
+        )
+
+        w13, w2 = prepare_int8_moe_layer_for_cpu(w13, w2)
+    elif int8_backend != Int8MoeBackend.TRITON:
+        raise ValueError(f"Unsupported Int8 MoE backend: {int8_backend.value}")
+
+    return w13, w2
 
 
 def make_int8_moe_kernel(
@@ -207,7 +251,6 @@ def make_int8_moe_kernel(
     kernel = mk.FusedMoEKernel(
         prepare_finalize,
         experts,
-        inplace=not moe_config.disable_inplace,
     )
 
     return kernel

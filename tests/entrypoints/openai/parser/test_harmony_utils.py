@@ -2,24 +2,78 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-from openai_harmony import Message, Role
+from openai.types.responses import FunctionTool
+from openai_harmony import DeveloperContent, Message, Role
 
 from tests.entrypoints.openai.utils import verify_harmony_messages
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
 from vllm.entrypoints.openai.parser.harmony_utils import (
     auto_drop_analysis_messages,
+    create_tool_definition,
     extract_function_from_recipient,
     get_encoding,
     get_system_message,
     has_custom_tools,
     is_function_recipient,
     parse_chat_input_to_harmony_message,
-    parse_chat_output,
     parse_output_into_messages,
 )
 from vllm.entrypoints.openai.responses.harmony import (
     response_input_to_harmony,
     response_previous_input_to_harmony,
 )
+
+_TOOL_PARAMETERS = {
+    "type": "object",
+    "properties": {"status": {"type": "string"}},
+    "required": ["status"],
+    "additionalProperties": False,
+}
+
+
+class TestCreateToolDefinition:
+    def test_chat_completion_omitted_description_defaults_to_empty_string(self):
+        tool = ChatCompletionToolsParam(
+            function={
+                "name": "report_status",
+                "parameters": _TOOL_PARAMETERS,
+            }
+        )
+
+        tool_definition = create_tool_definition(tool)
+
+        assert tool_definition.name == "report_status"
+        assert tool_definition.description == ""
+        assert tool_definition.parameters == _TOOL_PARAMETERS
+
+    def test_chat_completion_none_description_defaults_to_empty_string(self):
+        tool = ChatCompletionToolsParam(
+            function={
+                "name": "report_status",
+                "description": None,
+                "parameters": _TOOL_PARAMETERS,
+            }
+        )
+
+        tool_definition = create_tool_definition(tool)
+
+        assert tool_definition.name == "report_status"
+        assert tool_definition.description == ""
+        assert tool_definition.parameters == _TOOL_PARAMETERS
+
+    def test_response_tool_none_description_defaults_to_empty_string(self):
+        tool = FunctionTool(
+            name="report_status",
+            description=None,
+            parameters=_TOOL_PARAMETERS,
+            type="function",
+        )
+
+        tool_definition = create_tool_definition(tool)
+
+        assert tool_definition.name == "report_status"
+        assert tool_definition.description == ""
+        assert tool_definition.parameters == _TOOL_PARAMETERS
 
 
 class TestIsFunctionRecipient:
@@ -270,7 +324,8 @@ class TestCommonParseInputToHarmonyMessage:
         assert messages[0].recipient == "functions.get_current_time"
 
     def test_system_message(self, parse_function):
-        """Test parsing system message."""
+        """Test parsing system messages, which are parsed into developer messages
+        with DeveloperContent."""
         chat_msg = {
             "role": "system",
             "content": "You are a helpful assistant",
@@ -279,9 +334,9 @@ class TestCommonParseInputToHarmonyMessage:
         messages = parse_function(chat_msg)
 
         assert len(messages) == 1
-        # System messages are converted using Message.from_dict
-        # which should preserve the role
-        assert messages[0].author.role == Role.SYSTEM
+        assert messages[0].author.role == Role.DEVELOPER
+        assert isinstance(messages[0].content[0], DeveloperContent)
+        assert messages[0].content[0].instructions == "You are a helpful assistant"
 
     def test_developer_message(self, parse_function):
         """Test parsing developer message."""
@@ -294,6 +349,8 @@ class TestCommonParseInputToHarmonyMessage:
 
         assert len(messages) == 1
         assert messages[0].author.role == Role.DEVELOPER
+        assert isinstance(messages[0].content[0], DeveloperContent)
+        assert messages[0].content[0].instructions == "Use concise language"
 
     def test_user_message_with_string_content(self, parse_function):
         """Test parsing user message with string content."""
@@ -882,110 +939,6 @@ class TestAutoDropAnalysisMessages:
         cleaned_messages = auto_drop_analysis_messages(messages)
         # Should have dropped the analysis message
         assert cleaned_messages == messages[1:]
-
-
-class TestParseChatOutput:
-    def test_parse_chat_output_interrupted_first_message(self) -> None:
-        harmony_str = "<|channel|>final<|message|>I'm in the middle of answering"
-        token_ids = get_encoding().encode(harmony_str, allowed_special="all")
-        reasoning, final_content, _ = parse_chat_output(token_ids)
-        assert reasoning is None
-        assert final_content == "I'm in the middle of answering"
-
-    def test_parse_chat_output_interrupted_reasoning_first_message(self) -> None:
-        harmony_str = "<|channel|>analysis<|message|>I'm in the middle of thinking"
-        token_ids = get_encoding().encode(harmony_str, allowed_special="all")
-        reasoning, final_content, _ = parse_chat_output(token_ids)
-        assert reasoning == "I'm in the middle of thinking"
-        assert final_content is None
-
-    def test_parse_chat_output_complete_reasoning_interrupted_content(self) -> None:
-        harmony_str = (
-            "<|channel|>analysis<|message|>I'm thinking.<|end|>"
-            "<|start|>assistant<|channel|>final"
-            "<|message|>I'm in the middle of answering"
-        )
-        token_ids = get_encoding().encode(harmony_str, allowed_special="all")
-        reasoning, final_content, _ = parse_chat_output(token_ids)
-        assert reasoning == "I'm thinking."
-        assert final_content == "I'm in the middle of answering"
-
-    def test_parse_chat_output_complete_content(self) -> None:
-        harmony_str = "<|channel|>final<|message|>The answer is 4.<|end|>"
-        token_ids = get_encoding().encode(harmony_str, allowed_special="all")
-        reasoning, final_content, _ = parse_chat_output(token_ids)
-        assert reasoning is None
-        assert final_content == "The answer is 4."
-
-    def test_parse_chat_output_complete_commentary(self) -> None:
-        harmony_str = (
-            "<|channel|>commentary<|message|>I need to call some tools.<|end|>"
-        )
-        token_ids = get_encoding().encode(harmony_str, allowed_special="all")
-        reasoning, final_content, _ = parse_chat_output(token_ids)
-        assert reasoning is None
-        assert final_content == "I need to call some tools."
-
-    def test_parse_chat_output_complete_reasoning(self) -> None:
-        harmony_str = (
-            "<|channel|>analysis<|message|>I've thought hard about this.<|end|>"
-        )
-        token_ids = get_encoding().encode(harmony_str, allowed_special="all")
-        reasoning, final_content, _ = parse_chat_output(token_ids)
-        assert reasoning == "I've thought hard about this."
-        assert final_content is None
-
-    def test_parse_chat_output_complete_reasoning_and_content(self) -> None:
-        harmony_str = (
-            "<|channel|>analysis<|message|>I've thought hard about this.<|end|>"
-            "<|start|>assistant<|channel|>final<|message|>The answer is 4.<|end|>"
-        )
-        token_ids = get_encoding().encode(harmony_str, allowed_special="all")
-        reasoning, final_content, _ = parse_chat_output(token_ids)
-        assert reasoning == "I've thought hard about this."
-        assert final_content == "The answer is 4."
-
-    def test_parse_chat_output_commentary_with_recipient_excluded(self) -> None:
-        """Commentary with a recipient (tool call) should not appear in
-        final_content — those are handled separately by the tool parser.
-
-        The first message is a preamble (visible), the second is a tool
-        call (excluded). Only the preamble should appear in final_content.
-        """
-        harmony_str = (
-            "<|channel|>commentary"
-            "<|message|>Let me check the weather.<|end|>"
-            "<|start|>assistant to=functions.get_weather"
-            "<|channel|>commentary"
-            '<|message|>{"location": "SF"}<|end|>'
-        )
-        token_ids = get_encoding().encode(harmony_str, allowed_special="all")
-        reasoning, final_content, _ = parse_chat_output(token_ids)
-        assert reasoning is None
-        assert final_content == "Let me check the weather."
-
-    def test_parse_chat_output_interrupted_preamble(self) -> None:
-        """Partial/interrupted preamble (commentary without recipient) should
-        appear in final_content, not reasoning."""
-        harmony_str = "<|channel|>commentary<|message|>I'll search for that"
-        token_ids = get_encoding().encode(harmony_str, allowed_special="all")
-        reasoning, final_content, _ = parse_chat_output(token_ids)
-        assert reasoning is None
-        assert final_content == "I'll search for that"
-
-    def test_parse_chat_output_preamble_then_final(self) -> None:
-        """Preamble followed by a final message should both appear in
-        final_content, joined by newline."""
-        harmony_str = (
-            "<|channel|>commentary"
-            "<|message|>Let me look that up.<|end|>"
-            "<|start|>assistant<|channel|>final"
-            "<|message|>The answer is 42.<|end|>"
-        )
-        token_ids = get_encoding().encode(harmony_str, allowed_special="all")
-        reasoning, final_content, _ = parse_chat_output(token_ids)
-        assert reasoning is None
-        assert final_content == "Let me look that up.\nThe answer is 42."
 
 
 def test_has_custom_tools() -> None:
