@@ -93,11 +93,6 @@ class CpuPlatform(Platform):
         return meminfo.total_memory
 
     @classmethod
-    def mem_get_info(cls) -> tuple[int, int]:
-        meminfo = get_memory_node_info()
-        return meminfo.available_memory, meminfo.total_memory
-
-    @classmethod
     def set_device(cls, device: torch.device) -> None:
         """
         Set the device for the current platform.
