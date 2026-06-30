@@ -6527,6 +6527,7 @@ class GPUModelRunner(
                     mem_samples: list[int] = []
 
                     for i, desc in enumerate(profile_descs):
+                        torch.accelerator.empty_cache()
                         mem_before = torch.cuda.mem_get_info()[0]
                         self._warmup_and_capture(
                             desc,
@@ -6542,10 +6543,19 @@ class GPUModelRunner(
                         )
                         torch.accelerator.synchronize()
                         free_after = torch.cuda.mem_get_info()[0]
-                        mem_samples.append(mem_before - free_after)
+                        delta = mem_before - free_after
+                        if delta < 0:
+                            logger.warning(
+                                "CUDA graph capture measured a free-memory "
+                                "increase of %.2f MiB; clamping the sample "
+                                "to zero. This may indicate allocator "
+                                "fragmentation or lazy buffer cleanup.",
+                                -delta / (1 << 20),
+                            )
+                        mem_samples.append(max(delta, 0))
 
-                    first_capture = mem_samples[0]
                     # Use at least 1 MiB per graph for driver overhead
+                    first_capture = max(mem_samples[0], 1 << 20)
                     per_graph = max(
                         mem_samples[1] if len(mem_samples) > 1 else 0, 1 << 20
                     )

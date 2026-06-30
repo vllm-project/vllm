@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -10,9 +11,11 @@ import torch
 import torch.nn as nn
 
 import vllm.v1.worker.gpu_model_runner as gpu_model_runner_module
+import vllm.v1.worker.gpu_worker as gpu_worker_module
 from vllm.config import (
     AttentionConfig,
     CacheConfig,
+    CUDAGraphMode,
     ModelConfig,
     ParallelConfig,
     SchedulerConfig,
@@ -52,6 +55,7 @@ from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.v1.worker.gpu_worker import Worker
 from vllm.v1.worker.utils import select_common_block_size
 
 BLOCK_SIZE = 16
@@ -137,6 +141,136 @@ def model_runner():
 
 
 model_runner_2 = model_runner
+
+
+@pytest.mark.skip_global_cleanup
+def test_profile_cudagraph_memory_clamps_free_memory_increases(monkeypatch):
+    mib = 1 << 20
+    desc = SimpleNamespace(num_tokens=512)
+    runner = SimpleNamespace(
+        vllm_config=object(),
+        cudagraph_dispatcher=SimpleNamespace(
+            get_capture_descs=lambda: [(CUDAGraphMode.PIECEWISE, [desc, desc])],
+            cudagraph_keys={"piecewise": set()},
+            keys_initialized=True,
+        ),
+        max_model_len=1024,
+        max_num_tokens=512,
+        device="cuda",
+        lora_config=None,
+        _init_minimal_kv_cache_for_profiling=Mock(),
+        _create_encoder_cudagraph_manager=Mock(return_value=None),
+        _warmup_and_capture=Mock(),
+        _freeze_gc=Mock(return_value=nullcontext()),
+        maybe_remove_all_loras=Mock(),
+        _cleanup_profiling_kv_cache=Mock(),
+    )
+    mem_get_info_values = iter(
+        [
+            (100 * mib, 256 * mib),
+            (130 * mib, 256 * mib),
+            (130 * mib, 256 * mib),
+            (140 * mib, 256 * mib),
+        ]
+    )
+
+    monkeypatch.setattr(
+        gpu_model_runner_module,
+        "set_current_vllm_config",
+        lambda _: nullcontext(),
+    )
+    monkeypatch.setattr(
+        gpu_model_runner_module.current_platform,
+        "graph_pool_handle",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        gpu_model_runner_module, "graph_capture", lambda device: nullcontext()
+    )
+    monkeypatch.setattr(
+        gpu_model_runner_module, "set_cudagraph_capturing_enabled", lambda _: None
+    )
+    monkeypatch.setattr(gpu_model_runner_module.CUDAGraphWrapper, "_all_instances", [])
+    monkeypatch.setattr(
+        gpu_model_runner_module.BreakableCUDAGraphWrapper, "_all_instances", []
+    )
+    monkeypatch.setattr(
+        gpu_model_runner_module.CUDAGraphWrapper, "clear_all_graphs", lambda: None
+    )
+    monkeypatch.setattr(
+        gpu_model_runner_module.BreakableCUDAGraphWrapper,
+        "clear_all_graphs",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        gpu_model_runner_module.torch.accelerator, "synchronize", lambda: None
+    )
+    monkeypatch.setattr(
+        gpu_model_runner_module.torch.accelerator, "empty_cache", lambda: None
+    )
+    monkeypatch.setattr(
+        gpu_model_runner_module.torch.cuda,
+        "mem_get_info",
+        lambda: next(mem_get_info_values),
+    )
+
+    estimate = GPUModelRunner.profile_cudagraph_memory(runner)
+
+    assert estimate == 2 * mib
+    assert runner._warmup_and_capture.call_count == 2
+    runner._cleanup_profiling_kv_cache.assert_called_once()
+
+
+@pytest.mark.skip_global_cleanup
+def test_determine_available_memory_clamps_negative_cudagraph_estimate(monkeypatch):
+    profile_result = SimpleNamespace(
+        before_profile=SimpleNamespace(torch_peak=3),
+        after_profile=SimpleNamespace(free_memory=50),
+        non_torch_increase=7,
+        weights_memory=11,
+    )
+
+    @contextmanager
+    def memory_profiling(*args, **kwargs):
+        yield profile_result
+
+    monkeypatch.setattr(gpu_worker_module, "memory_profiling", memory_profiling)
+    monkeypatch.setattr(gpu_worker_module.current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        gpu_worker_module.envs, "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", True
+    )
+    monkeypatch.setattr(
+        gpu_worker_module.torch.accelerator,
+        "memory_stats",
+        lambda device: {"allocated_bytes.all.peak": 8},
+    )
+
+    worker = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            kv_cache_memory_bytes=None,
+            gpu_memory_utilization=0.8,
+        ),
+        model_runner=SimpleNamespace(
+            model_memory_usage=11,
+            profile_run=Mock(),
+            profile_cudagraph_memory=Mock(return_value=-30),
+        ),
+        device="cuda",
+        vllm_config=SimpleNamespace(
+            compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.PIECEWISE),
+        ),
+        init_snapshot=SimpleNamespace(
+            free_memory=80,
+            total_memory=100,
+        ),
+        requested_memory=100,
+    )
+
+    available_memory = Worker.determine_available_memory(worker)
+
+    assert available_memory == 77
+    assert worker.cudagraph_memory_estimate == 0
+    assert worker.available_kv_cache_memory_bytes == 77
 
 
 def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
