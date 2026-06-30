@@ -44,28 +44,21 @@ RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 MXFP4_BLOCK_SIZE = 32
 
 
-def _can_use_cutedsl_candidate_topk(gathered: torch.Tensor, k: int) -> bool:
-    return (
-        has_cutedsl()
-        and gathered.device.type == "cuda"
-        and gathered.dtype == torch.float32
-        and gathered.is_contiguous()
-        and k in (512, 1024, 2048)
-        and gathered.shape[0] >= 256
-    )
-
-
 def _can_use_cutedsl_dcp_merge(
     logits: torch.Tensor,
     topk_indices: torch.Tensor,
     k: int,
 ) -> bool:
+    # Single gate for the CuteDSL DCP merge: the Triton pack kernel + the CuteDSL
+    # stable-topk selector. The Triton pack itself has no shape/topk constraints
+    # (it tiles rows x topk via strides and masks empty shards), so the
+    # `k in (...)` / `rows >= 256` requirements come from the selector kernel,
+    # and `has_cutedsl()` covers both (the pack lives in a CuteDSL module).
     return (
         has_cutedsl()
         and logits.device.type == "cuda"
         and logits.dtype == torch.float32
         and topk_indices.dtype == torch.int32
-        and logits.shape[1] > 0
         and k in (512, 1024, 2048)
         and topk_indices.shape[0] >= 256
     )
@@ -169,6 +162,8 @@ def _merge_dcp_topk_global(
     if dcp_world_size <= 1:
         return
 
+    # Single CuteDSL path: Triton-pack each rank's (score, global_id) candidates
+    # on-device, all-gather, then the CuteDSL stable-topk selector.
     if _can_use_cutedsl_dcp_merge(logits, topk_indices, topk_tokens):
         try:
             from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
@@ -197,10 +192,12 @@ def _merge_dcp_topk_global(
             return
         except Exception as exc:
             logger.warning_once(
-                "Falling back from fused DCP candidate merge CuteDSL kernels: %s",
-                str(exc),
+                "Falling back from CuteDSL DCP candidate merge kernels: %s", str(exc)
             )
 
+    # PyTorch fallback: pack (score, global_id) so the candidate exchange is a
+    # single all-gather (token ids < max_model_len << 2**24, exact in fp32), then
+    # a deterministic fp64 stable top-k.
     valid = topk_indices >= 0
     score_indices = topk_indices.clamp_min(0).to(torch.long)
     if row_starts is not None:
@@ -219,32 +216,12 @@ def _merge_dcp_topk_global(
     global_indices = _local_dcp_indices_to_global(
         topk_indices, dcp_rank, dcp_world_size, cp_interleave
     )
-
-    # Pack (score, global_id) so the candidate exchange is a single all-gather.
-    # Token ids are < max_model_len (<< 2**24), exactly representable in fp32.
     packed = torch.stack(
         (local_scores.float(), global_indices.to(torch.float32)), dim=-1
     ).contiguous()
     gathered = get_dcp_group().all_gather(packed, dim=1)
-    if _can_use_cutedsl_candidate_topk(gathered, topk_tokens):
-        try:
-            from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
-                stable_topk_from_gathered_candidates_cutedsl,
-            )
-
-            stable_topk_from_gathered_candidates_cutedsl(
-                gathered, topk_tokens, out=topk_indices
-            )
-            return
-        except Exception as exc:
-            logger.warning_once(
-                "Falling back from DCP candidate top-k CuteDSL kernel: %s",
-                str(exc),
-            )
-
     candidate_scores = gathered[..., 0]
     candidate_ids = gathered[..., 1].to(torch.int32)
-
     topk_indices.copy_(
         _stable_topk_from_candidates(candidate_scores, candidate_ids, topk_tokens)
     )
