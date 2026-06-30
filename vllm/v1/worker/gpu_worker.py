@@ -4,6 +4,7 @@
 
 import gc
 import os
+import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import timedelta
@@ -170,7 +171,8 @@ class Worker(WorkerBase):
         self._pp_send_work: list[Handle] = []
 
     def sleep(self, level: int = 1) -> None:
-        free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
+        torch.accelerator.synchronize()
+        free_bytes_before_sleep = current_platform.mem_get_info()[0]
 
         # Save the buffers before level 2 sleep
         if level == 2:
@@ -181,8 +183,16 @@ class Worker(WorkerBase):
 
         allocator = get_mem_allocator_instance()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
-        free_bytes_after_sleep, total = torch.cuda.mem_get_info()
-        freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
+
+        torch.accelerator.synchronize()
+        deadline = time.monotonic() + (5.0 if current_platform.is_rocm() else 0)
+        while True:
+            free_bytes_after_sleep, total = current_platform.mem_get_info()
+            freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
+            if freed_bytes >= 0 or time.monotonic() >= deadline:
+                break
+            time.sleep(0.1)
+
         used_bytes = total - free_bytes_after_sleep
         assert freed_bytes >= 0, "Memory usage increased after sleeping."
         logger.info(
