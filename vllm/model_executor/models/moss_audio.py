@@ -709,15 +709,6 @@ class MossAudioEncoder(nn.Module):
 
 
 class GatedMLP(nn.Module):
-    # up_proj before gate_proj: the merged "gate_up_proj" name contains
-    # "up_proj", so the gate_proj rename must run last to avoid re-matching.
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_stacked={
-            "up_proj": ("gate_up_proj", 1),
-            "gate_proj": ("gate_up_proj", 0),
-        }
-    )
-
     def __init__(
         self,
         input_size: int,
@@ -749,10 +740,6 @@ class GatedMLP(nn.Module):
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 @support_torch_compile(
@@ -1459,7 +1446,11 @@ class MossAudioModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             "language_model.embed_tokens.": "language_model.model.embed_tokens.",
             "language_model.layers.": "language_model.model.layers.",
             "language_model.norm.": "language_model.model.norm.",
-        }
+        },
+        orig_to_new_stacked={
+            ".gate_proj": (".gate_up_proj", 0),
+            ".up_proj": (".gate_up_proj", 1),
+        },
     )
 
     def get_mm_mapping(self) -> MultiModelKeys:
