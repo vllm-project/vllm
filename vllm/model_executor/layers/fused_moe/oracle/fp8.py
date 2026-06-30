@@ -429,6 +429,10 @@ def _humming_fp8_weight_schema(
     if weight_scale.dtype in (torch.uint8, torch.float8_e8m0fnu):
         return {"quant_method": "modelopt", "quant_algo": "mxfp8"}
 
+    if hasattr(layer, "w13_weight_scale_inv"):
+        assert hasattr(layer, "weight_block_size")
+        return {"quant_method": "fp8", "weight_block_size": layer.weight_block_size}
+
     # fp8 (e4m3): recover the strategy from the scale layout (block from
     # weight_block_size, else channel vs tensor by per-expert scale count).
     config: dict[str, Any] = {
