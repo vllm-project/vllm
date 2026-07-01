@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import itertools
+import sys
+import threading
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -11,16 +15,23 @@ from transformers.video_utils import VideoMetadata
 
 from vllm.assets.base import get_vllm_public_assets
 from vllm.multimodal.video import (
+    PYNVVIDEOCODEC_DECODER_CACHE_SIZE,
+    PYNVVIDEOCODEC_MAX_RETAINED_DECODERS,
+    PYNVVIDEOCODEC_VIDEO_BACKEND,
     VIDEO_LOADER_REGISTRY,
     DynamicVideoBackend,
     GLM46VVideoBackend,
     Molmo2VideoBackend,
+    PyNvVideoCodecDecoderSlot,
+    PyNvVideoCodecVideoBackend,
+    Qwen2VLVideoBackend,
     Qwen3VLVideoBackend,
     VideoLoader,
     VideoSourceMetadata,
     VideoTargetMetadata,
     get_video_loader_backend_for_processor,
 )
+from vllm.platforms import current_platform
 from vllm.transformers_utils.processor import get_video_processor_cls_name_from_config
 
 from .utils import create_long_gop_video, create_video_from_image
@@ -64,17 +75,242 @@ def test_video_loader_type_doesnt_exist():
         VIDEO_LOADER_REGISTRY.load("non_existing_video_loader")
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_pynvvideocodec_backend_accounts_raw_decoded_frames(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    decoder_cache_sizes = []
+
+    class FakeMetadata:
+        width = 10
+        height = 20
+        average_fps = 5.0
+        duration = 2.0
+
+    class FakeDecoder:
+        def __init__(self, *args, **kwargs):
+            decoder_cache_sizes.append(kwargs["decoder_cache_size"])
+
+        def __len__(self):
+            return 10
+
+        def get_stream_metadata(self):
+            return FakeMetadata()
+
+    class FakeNvc:
+        class OutputColorType:
+            RGB = "rgb"
+
+        SimpleDecoder = FakeDecoder
+
+    class RecordingPool:
+        def __init__(self):
+            self.acquired: list[int] = []
+
+        @contextmanager
+        def acquire(self, size: int):
+            self.acquired.append(size)
+            yield
+
+    def fake_decode(cls, file_path: str, frame_idx: list[int], nvc):
+        return np.zeros((len(frame_idx), 20, 10, 3), dtype=np.uint8)
+
+    pool = RecordingPool()
+    monkeypatch.setitem(sys.modules, "PyNvVideoCodec", FakeNvc)
+    monkeypatch.setattr(
+        "vllm.multimodal.gpu_ipc_memory.get_mm_gpu_ipc_pool", lambda: pool
+    )
+    monkeypatch.setattr(
+        PyNvVideoCodecVideoBackend, "_decode_to_pinned_host", classmethod(fake_decode)
+    )
+
+    loader = VIDEO_LOADER_REGISTRY.load(PYNVVIDEOCODEC_VIDEO_BACKEND)
+    frames, metadata = loader.load_bytes(b"fake video", num_frames=4)
+
+    assert frames.shape == (4, 20, 10, 3)
+    assert pool.acquired == [4 * 20 * 10 * 3]
+    assert decoder_cache_sizes == [PYNVVIDEOCODEC_DECODER_CACHE_SIZE]
+    assert metadata["video_backend"] == PYNVVIDEOCODEC_VIDEO_BACKEND
+    assert metadata["frames_indices"] == [0, 3, 6, 9]
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_pynvvideocodec_codec_uses_dynamic_sampling_strategy(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    decoded_indices = []
+
+    class FakeMetadata:
+        width = 10
+        height = 20
+        average_fps = 5.0
+        duration = 2.0
+
+    class FakeDecoder:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __len__(self):
+            return 10
+
+        def get_stream_metadata(self):
+            return FakeMetadata()
+
+    class FakeNvc:
+        class OutputColorType:
+            RGB = "rgb"
+
+        SimpleDecoder = FakeDecoder
+
+    class RecordingPool:
+        def __init__(self):
+            self.acquired: list[int] = []
+
+        @contextmanager
+        def acquire(self, size: int):
+            self.acquired.append(size)
+            yield
+
+    def fake_decode(cls, file_path: str, frame_idx: list[int], nvc):
+        decoded_indices.append(frame_idx)
+        return np.zeros((len(frame_idx), 20, 10, 3), dtype=np.uint8)
+
+    pool = RecordingPool()
+    monkeypatch.setitem(sys.modules, "PyNvVideoCodec", FakeNvc)
+    monkeypatch.setattr(
+        "vllm.multimodal.gpu_ipc_memory.get_mm_gpu_ipc_pool", lambda: pool
+    )
+    monkeypatch.setattr(
+        DynamicVideoBackend, "_decode_to_pinned_host", classmethod(fake_decode)
+    )
+
+    loader = VIDEO_LOADER_REGISTRY.load("opencv_dynamic")
+    frames, metadata = loader.load_bytes(
+        b"fake video",
+        fps=2,
+        max_duration=1,
+        backend=PYNVVIDEOCODEC_VIDEO_BACKEND,
+    )
+
+    assert frames.shape == (2, 20, 10, 3)
+    assert decoded_indices == [[0, 9]]
+    assert pool.acquired == [2 * 20 * 10 * 3]
+    assert metadata["video_backend"] == f"{PYNVVIDEOCODEC_VIDEO_BACKEND}_dynamic"
+    assert metadata["frames_indices"] == [0, 9]
+
+
+def test_pynvvideocodec_decoder_slots_are_bounded(monkeypatch: pytest.MonkeyPatch):
+    class FakeSlot:
+        pass
+
+    create_count = 0
+    old_slots = PyNvVideoCodecVideoBackend._decoder_slots
+    old_active_slots = PyNvVideoCodecVideoBackend._active_decoder_slots
+    old_cond = PyNvVideoCodecVideoBackend._decoder_slot_cond
+    try:
+        PyNvVideoCodecVideoBackend._decoder_slots = []
+        PyNvVideoCodecVideoBackend._active_decoder_slots = 0
+        PyNvVideoCodecVideoBackend._decoder_slot_cond = threading.Condition()
+
+        def fake_create_slot(cls):
+            nonlocal create_count
+            create_count += 1
+            return FakeSlot()
+
+        monkeypatch.setattr(
+            PyNvVideoCodecVideoBackend,
+            "_create_decoder_slot",
+            classmethod(fake_create_slot),
+        )
+
+        borrowed = threading.Event()
+        seen_slots = []
+
+        with ExitStack() as stack:
+            retained_slots = [
+                stack.enter_context(PyNvVideoCodecVideoBackend._borrow_decoder_slot())
+                for _ in range(PYNVVIDEOCODEC_MAX_RETAINED_DECODERS)
+            ]
+
+            def borrow_extra_slot():
+                with PyNvVideoCodecVideoBackend._borrow_decoder_slot() as extra_slot:
+                    seen_slots.append(extra_slot)
+                    borrowed.set()
+
+            thread = threading.Thread(target=borrow_extra_slot)
+            thread.start()
+            assert not borrowed.wait(timeout=0.2)
+
+        assert borrowed.wait(timeout=2.0)
+        thread.join(timeout=2.0)
+        assert not thread.is_alive()
+
+        assert seen_slots[0] in retained_slots
+        assert create_count == PYNVVIDEOCODEC_MAX_RETAINED_DECODERS
+    finally:
+        PyNvVideoCodecVideoBackend._decoder_slots = old_slots
+        PyNvVideoCodecVideoBackend._active_decoder_slots = old_active_slots
+        PyNvVideoCodecVideoBackend._decoder_slot_cond = old_cond
+
+
+def test_pynvvideocodec_decoder_slot_retains_simple_decoder():
+    events: list[tuple[object, ...]] = []
+
+    class FakeStream:
+        cuda_stream = "cuda-stream"
+
+    class FakeDecoder:
+        def __init__(self, file_path: str, **kwargs):
+            events.append(
+                (
+                    "create",
+                    file_path,
+                    kwargs["gpu_id"],
+                    kwargs["cuda_stream"],
+                    kwargs["decoder_cache_size"],
+                )
+            )
+
+        def reconfigure_decoder(self, file_path: str):
+            events.append(("reconfigure", file_path))
+
+    class FakeNvc:
+        class OutputColorType:
+            RGB = "rgb"
+
+        SimpleDecoder = FakeDecoder
+
+    slot = PyNvVideoCodecDecoderSlot(FakeStream())
+
+    decoder = slot.get_decoder("first.mp4", FakeNvc, device_index=7)
+    assert slot.get_decoder("first.mp4", FakeNvc, device_index=7) is decoder
+    assert slot.get_decoder("second.mp4", FakeNvc, device_index=7) is decoder
+
+    assert events == [
+        (
+            "create",
+            "first.mp4",
+            7,
+            "cuda-stream",
+            PYNVVIDEOCODEC_DECODER_CACHE_SIZE,
+        ),
+        ("reconfigure", "second.mp4"),
+    ]
+    assert slot.source_path == "second.mp4"
+
+
 # ============================================================================
 # Video Processor → Video Loader Tests (via model repo)
 # ============================================================================
 
 
 @pytest.mark.parametrize(
-    "model_repo, expected_loader_cls",
+    "model_repo, expected_loader_cls, hf_sample_kwargs",
     [
         pytest.param(
             "allenai/Molmo2-4B",
             Molmo2VideoBackend,
+            None,
             marks=pytest.mark.skip(
                 reason="Video processor not aligned, investigate later.",
             ),
@@ -83,23 +319,44 @@ def test_video_loader_type_doesnt_exist():
         pytest.param(
             "zai-org/GLM-4.1V-9B-Thinking",
             DynamicVideoBackend,
+            None,
             id="glm4v",
         ),
         pytest.param(
             "zai-org/GLM-4.6V-Flash",
             GLM46VVideoBackend,
+            None,
             id="glm46v",
         ),
         pytest.param(
             "Qwen/Qwen3-VL-4B-Instruct",
             Qwen3VLVideoBackend,
+            None,
             id="qwen3vl",
+        ),
+        # Qwen2-VL/Qwen2.5-VL ship no ``video_processor_type`` in their
+        # preprocessor config, so resolution relies on the model_type ->
+        # video processor fallback in get_video_processor_cls_name_from_config.
+        # They also ship no default fps/num_frames, so the HF sampler needs an
+        # explicit target rate; pass fps=2 to match the loader default.
+        pytest.param(
+            "Qwen/Qwen2-VL-7B-Instruct",
+            Qwen2VLVideoBackend,
+            {"fps": 2},
+            id="qwen2vl",
+        ),
+        pytest.param(
+            "Qwen/Qwen2.5-VL-7B-Instruct",
+            Qwen2VLVideoBackend,
+            {"fps": 2},
+            id="qwen2_5_vl",
         ),
     ],
 )
 def test_video_processor_from_model_repo(
     model_repo: str,
     expected_loader_cls: type,
+    hf_sample_kwargs: dict[str, int | float] | None,
 ):
     """Test that a model repo resolves to the correct video loader backend.
 
@@ -143,7 +400,7 @@ def test_video_processor_from_model_repo(
             fps=vllm_meta["fps"],
             duration=vllm_meta["duration"],
         )
-        hf_indices = processor.sample_frames(hf_metadata)
+        hf_indices = processor.sample_frames(hf_metadata, **(hf_sample_kwargs or {}))
         vllm_indices = np.array(vllm_meta["frames_indices"])
         np.testing.assert_array_equal(
             hf_indices,

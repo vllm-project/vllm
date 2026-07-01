@@ -43,8 +43,8 @@ MODELS = [
     pytest.param(
         "Intel/Qwen2-0.5B-Instruct-int4-sym-AutoRound",
         marks=pytest.mark.skipif(
-            not current_platform.is_cuda(),
-            reason="AWQ AutoRound model only supports CUDA backend for now.",
+            not (current_platform.is_cuda() or current_platform.is_xpu()),
+            reason="AWQ AutoRound model only supports CUDA/XPU backend for now.",
         ),
         id="auto_round:auto_awq",
     ),
@@ -645,11 +645,11 @@ def test_resolve_awq_moe_uses_marlin_when_supported(monkeypatch) -> None:
         lambda *args, **kwargs: True,
     )
     monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.awq_marlin.verify_marlin_supported",
+        "vllm.model_executor.layers.quantization.auto_awq.verify_marlin_supported",
         lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.awq_marlin.AWQMarlinMoEMethod",
+        "vllm.model_executor.layers.quantization.auto_awq.AutoAWQMoEMethod",
         DummyMethod,
     )
 

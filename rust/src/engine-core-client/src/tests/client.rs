@@ -22,13 +22,14 @@ use crate::protocol::multimodal::{
     MmFeatureSpec, MmField, MmFieldElem, MmFlatField, MmKwargValue, MmSlice, PlaceholderRange,
     SliceSpec,
 };
+use crate::protocol::output::{
+    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, decode_engine_core_outputs,
+};
+use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
+use crate::protocol::sampling::EngineCoreSamplingParams;
 use crate::protocol::stats::SchedulerStats;
 use crate::protocol::tensor::WireTensor;
 use crate::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
-use crate::protocol::{
-    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest,
-    EngineCoreRequestType, EngineCoreSamplingParams, decode_engine_core_outputs,
-};
 use crate::test_utils::{
     IpcNamespace, setup_bootstrapped_mock_engine, setup_mock_engine_sockets,
     setup_mock_engine_with_init, spawn_mock_engine_task,
@@ -150,6 +151,7 @@ fn sample_request_with_id(request_id: &str) -> EngineCoreRequest {
             top_k: 8,
             max_tokens: 32,
             min_tokens: 1,
+            thinking_token_budget: Some(256),
             stop_token_ids: vec![151643],
             eos_token_id: Some(151645),
             all_stop_token_ids: BTreeSet::from([151643, 151645]),
@@ -1284,18 +1286,24 @@ async fn dropping_multiple_live_streams_aborts_all_in_a_burst() {
                 )
                 .await;
 
-                let abort =
-                    timeout(Duration::from_secs(1), recv_engine_message(dealer)).await.unwrap();
-                assert_eq!(abort[0].as_ref(), &[0x01]);
-                let ids: Vec<String> = rmp_serde::from_slice(&abort[1]).unwrap();
+                // Aborts may coalesce into one burst or split across several.
+                let mut aborted = BTreeSet::new();
+                while aborted.len() < 3 {
+                    let abort =
+                        timeout(Duration::from_secs(1), recv_engine_message(dealer)).await.unwrap();
+                    assert_eq!(abort[0].as_ref(), &[0x01]);
+                    let ids: Vec<String> = rmp_serde::from_slice(&abort[1]).unwrap();
+                    aborted.extend(ids);
+                }
                 assert_eq!(
-                    ids,
-                    vec![
+                    aborted,
+                    BTreeSet::from([
                         "req-1".to_string(),
                         "req-2".to_string(),
                         "req-3".to_string()
-                    ]
+                    ])
                 );
+                // No spurious extra aborts.
                 assert!(
                     timeout(Duration::from_millis(100), recv_engine_message(dealer)).await.is_err()
                 );
@@ -2502,6 +2510,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
             seed: None,
             max_tokens: 16,
             min_tokens: 0,
+            thinking_token_budget: None,
             logprobs: None,
             prompt_logprobs: None,
             min_p: 0.0,

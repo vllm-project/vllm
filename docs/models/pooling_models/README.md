@@ -143,7 +143,7 @@ enabling the corresponding APIs.
 
 The [classify][vllm.LLM.classify] method outputs a probability vector for each prompt.
 It is primarily designed for [classification models](classify.md).
-For more information about `LLM.embed`, see [this page](classify.md#offline-inference).
+For more information about `LLM.classify`, see [this page](classify.md#offline-inference).
 
 ### `LLM.embed`
 
@@ -302,7 +302,7 @@ Pooling models now support token-wise task.
 
 ### Score task
 
-`score` task have has been removed in v0.21, use `classify` instead. Only when a classification model outputs num_labels
+`score` task has been removed in v0.21, use `classify` instead. Only when a classification model outputs num_labels
 equal to 1 can it be used as a scoring model and have its scoring API enabled.
 
 ### Pooling multitask support

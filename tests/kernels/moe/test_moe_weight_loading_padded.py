@@ -325,3 +325,24 @@ class TestWeightLoadingWithPaddedHiddenSize:
                 shard_id="w2",
                 expert_id=0,
             )
+
+
+class TestPerTensorScaleCoercion:
+    """Regression test for shape-(1,) per-tensor scales (issue #43297).
+
+    llm-compressor NVFP4 emits per-tensor weight and input scales as
+    shape-(1,) tensors. `_to_scalar` collapses them to a 0-D scalar so the
+    scalar-slot assignments in the weight loader neither broadcast nor raise.
+    """
+
+    def test_collapses_to_scalar(self):
+        # shape-(1,) and 0-D both reduce to a 0-D scalar.
+        for loaded_weight in (torch.tensor([0.5]), torch.tensor(0.5)):
+            scalar = RoutedExperts._to_scalar(loaded_weight)
+            assert scalar.shape == ()
+            assert scalar.item() == pytest.approx(0.5)
+
+    def test_rejects_non_scalar(self):
+        # numel > 1 must fail loudly instead of silently picking an element.
+        with pytest.raises(RuntimeError):
+            RoutedExperts._to_scalar(torch.tensor([0.1, 0.2]))
