@@ -62,7 +62,7 @@ def _get_ray_assigned_device() -> torch.device:
 
 def _set_ray_assigned_device() -> torch.device:
     device = _get_ray_assigned_device()
-    torch.accelerator.set_device(device)
+    torch.accelerator.set_device_index(device)
     return device
 
 
