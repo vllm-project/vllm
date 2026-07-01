@@ -7,6 +7,13 @@ import torch
 from vllm.triton_utils import tl, triton
 
 
+def get_sparse_mla_reorder_batch_threshold(vllm_config) -> int:
+    num_q_heads = vllm_config.model_config.get_num_attention_heads(
+        vllm_config.parallel_config
+    )
+    return {16: 64, 128: 1024}.get(num_q_heads, 1024)
+
+
 # Kernel with prefill workspace support and valid count tracking
 @triton.jit
 def _convert_req_index_to_global_index_kernel(

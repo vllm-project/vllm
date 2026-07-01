@@ -27,6 +27,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
+    get_sparse_mla_reorder_batch_threshold,
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.attention.backends.utils import (
@@ -254,10 +255,12 @@ class FlashMLASparseMetadataBuilder(
         cache_config = vllm_config.cache_config
         parallel_config = vllm_config.parallel_config
 
-        # Classify single-token queries (plus num_speculative_tokens via
-        # supports_spec_as_decode=True) as decodes; longer queries go to
-        # prefill.
-        self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
+        # Route sparse MLA through MQA for short query chunks; larger chunks use
+        # dense MHA prefill. The cutoff depends on the local TP q-head count.
+        self._init_reorder_batch_threshold(
+            get_sparse_mla_reorder_batch_threshold(vllm_config),
+            supports_spec_as_decode=True,
+        )
 
         sm_count = num_compute_units(device.index)
 

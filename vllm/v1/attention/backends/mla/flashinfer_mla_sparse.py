@@ -29,6 +29,7 @@ from vllm.v1.attention.backend import (
     SparseMLAAttentionImpl,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
+    get_sparse_mla_reorder_batch_threshold,
     triton_convert_req_index_to_global_index,
     triton_filter_and_convert_dcp_index,
 )
@@ -288,7 +289,7 @@ class FlashInferMLASparseMetadataBuilder(
         self.topk_tokens = vllm_config.model_config.hf_config.index_topk
 
         self._init_reorder_batch_threshold(
-            1,
+            get_sparse_mla_reorder_batch_threshold(vllm_config),
             supports_spec_as_decode=True,
             supports_dcp_with_varlen=True,
         )

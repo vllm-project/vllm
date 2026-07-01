@@ -24,6 +24,9 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
+from vllm.v1.attention.backends.mla.sparse_utils import (
+    get_sparse_mla_reorder_batch_threshold,
+)
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     split_decodes_and_prefills,
@@ -273,6 +276,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         )
         self.use_fp4_indexer_cache = (
             self.vllm_config.attention_config.use_fp4_indexer_cache
+        )
+        self.reorder_batch_threshold = get_sparse_mla_reorder_batch_threshold(
+            self.vllm_config
         )
 
         assert (

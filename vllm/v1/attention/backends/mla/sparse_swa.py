@@ -17,6 +17,9 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
+from vllm.v1.attention.backends.mla.sparse_utils import (
+    get_sparse_mla_reorder_batch_threshold,
+)
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.flashmla import FlashMLASchedMeta, get_mla_metadata
 from vllm.v1.kv_cache_interface import (
@@ -289,7 +292,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
     - Chunked prefill (aligns with the indexer's chunking)
     """
 
-    # Base threshold: query_len <= 1 is decode
+    # Base threshold is set from the local sparse MLA q-head count.
     reorder_batch_threshold: int = 1
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
@@ -316,6 +319,9 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         # all backends agree on the decode/prefill split.
         spec_mult = (
             2 if (spec_config is not None and spec_config.parallel_drafting) else 1
+        )
+        self.reorder_batch_threshold = get_sparse_mla_reorder_batch_threshold(
+            self.vllm_config
         )
         self.decode_threshold = (
             self.reorder_batch_threshold + spec_mult * self.num_speculative_tokens
@@ -410,7 +416,8 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         # Split into decode and prefill portions using configurable threshold
         (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens) = (
             split_decodes_and_prefills(
-                common_attn_metadata, decode_threshold=self.decode_threshold
+                common_attn_metadata,
+                decode_threshold=self.decode_threshold,
             )
         )
 
