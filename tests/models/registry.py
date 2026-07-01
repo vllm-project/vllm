@@ -201,19 +201,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     # [Decoder-only]
     "AfmoeForCausalLM": _HfExamplesInfo("arcee-ai/Trinity-Nano-Preview"),
     "ApertusForCausalLM": _HfExamplesInfo("swiss-ai/Apertus-8B-Instruct-2509"),
-    "AquilaModel": _HfExamplesInfo("BAAI/AquilaChat-7B", trust_remote_code=True),
-    "AquilaForCausalLM": _HfExamplesInfo("BAAI/AquilaChat2-7B", trust_remote_code=True),
     "ArceeForCausalLM": _HfExamplesInfo("arcee-ai/AFM-4.5B-Base"),
     "ArcticForCausalLM": _HfExamplesInfo(
         "Snowflake/snowflake-arctic-instruct", trust_remote_code=True
     ),
     "AXK1ForCausalLM": _HfExamplesInfo("skt/A.X-K1", trust_remote_code=True),
-    "BaiChuanForCausalLM": _HfExamplesInfo(
-        "baichuan-inc/Baichuan-7B", trust_remote_code=True
-    ),
-    "BaichuanForCausalLM": _HfExamplesInfo(
-        "baichuan-inc/Baichuan2-7B-chat", trust_remote_code=True
-    ),
     "BailingMoeForCausalLM": _HfExamplesInfo(
         "inclusionAI/Ling-lite-1.5", trust_remote_code=True
     ),
@@ -327,10 +319,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "GraniteMoeSharedForCausalLM": _HfExamplesInfo(
         "ibm-research/moe-7b-1b-active-shared-experts"
     ),
-    "Grok1ModelForCausalLM": _HfExamplesInfo(
-        "hpcai-tech/grok-1", trust_remote_code=True
-    ),
-    "Grok1ForCausalLM": _HfExamplesInfo("xai-org/grok-2", trust_remote_code=True),
     "HrmTextForCausalLM": _HfExamplesInfo(
         "sapientinc/HRM-Text-1B",
         min_transformers_version="5.9.0",
@@ -420,15 +408,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
             "https://github.com/huggingface/transformers/issues/44561"
         },
         trust_remote_code=True,
-    ),
-    "MiniMaxForCausalLM": _HfExamplesInfo("MiniMaxAI/MiniMax-Text-01-hf"),
-    "MiniMaxText01ForCausalLM": _HfExamplesInfo(
-        "MiniMaxAI/MiniMax-Text-01",
-        trust_remote_code=True,
-        revision="a59aa9cbc53b9fb8742ca4e9e1531b9802b6fdc3",
-    ),
-    "MiniMaxM1ForCausalLM": _HfExamplesInfo(
-        "MiniMaxAI/MiniMax-M1-40k", trust_remote_code=True
     ),
     "MiniMaxM2ForCausalLM": _HfExamplesInfo(
         "MiniMaxAI/MiniMax-M2",
@@ -728,6 +707,10 @@ _TOKEN_CLASSIFICATION_EXAMPLE_MODELS = {
     "ModernBertForTokenClassification": _HfExamplesInfo(
         "disham993/electrical-ner-ModernBERT-base"
     ),
+    "OpenAIPrivacyFilterForTokenClassification": _HfExamplesInfo(
+        "openai/privacy-filter",
+        min_transformers_version="5.6.0.dev0",
+    ),
 }
 
 _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
@@ -845,6 +828,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "DeepseekOCR2ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-OCR-2",
+    ),
+    "UnlimitedOCRForCausalLM": _HfExamplesInfo(
+        "baidu/Unlimited-OCR",
     ),
     "DotsOCRForCausalLM": _HfExamplesInfo(
         "rednote-hilab/dots.ocr", trust_remote_code=True
@@ -1113,10 +1099,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "openbmb/MiniCPM-V-4_6",
         min_transformers_version="5.7.0",
     ),
-    "MiniMaxVL01ForConditionalGeneration": _HfExamplesInfo(
-        "MiniMaxAI/MiniMax-VL-01",
-        trust_remote_code=True,
-    ),
     "MiniMaxM3SparseForConditionalGeneration": _HfExamplesInfo(
         "MiniMaxAI/MiniMax-M3",
         trust_remote_code=True,
@@ -1138,6 +1120,15 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Moondream3ForCausalLM": _HfExamplesInfo(
         "moondream/moondream3-preview",
         tokenizer="moondream/starmie-v1",
+        trust_remote_code=True,
+    ),
+    "MossAudioModel": _HfExamplesInfo(
+        "OpenMOSS-Team/MOSS-Audio-4B-Instruct",
+        extras={
+            "4b-thinking": "OpenMOSS-Team/MOSS-Audio-4B-Thinking",
+            "8b-instruct": "OpenMOSS-Team/MOSS-Audio-8B-Instruct",
+            "8b-thinking": "OpenMOSS-Team/MOSS-Audio-8B-Thinking",
+        },
         trust_remote_code=True,
     ),
     "HfMoondream": _HfExamplesInfo(
@@ -1377,22 +1368,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "UltravoxModel": _HfExamplesInfo(
         "fixie-ai/ultravox-v0_5-llama-3_2-1b",
         trust_remote_code=True,
-    ),
-    "TarsierForConditionalGeneration": _HfExamplesInfo("omni-research/Tarsier-7b"),
-    "Tarsier2ForConditionalGeneration": _HfExamplesInfo(
-        "omni-research/Tarsier2-Recap-7b",
-        hf_overrides={
-            "architectures": ["Tarsier2ForConditionalGeneration"],
-            "model_type": "tarsier2",
-        },
-        max_transformers_version="5.3",
-        transformers_version_reason={
-            "vllm": (
-                "Qwen2VLConfig was split into Qwen2VLConfig + "
-                "Qwen2VLTextConfig in transformers v5, breaking "
-                "attribute access (num_attention_heads, hidden_size, etc.)"
-            )
-        },
     ),
     "VoxtralForConditionalGeneration": _HfExamplesInfo(
         "mistralai/Voxtral-Mini-3B-2507",

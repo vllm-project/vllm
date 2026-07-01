@@ -67,6 +67,10 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         kv_cache_config: KVCacheConfig,
     ):
         super().__init__(vllm_config, engine_id, kv_cache_config)
+        if self.is_bidirectional_kv_xfer_enabled:
+            raise NotImplementedError(
+                "Bidirectional KV transfer is not supported for NIXL push connector."
+            )
 
         # D-side: registration data to pass to D workers via metadata on
         # the next ``build_connector_meta`` call.
@@ -112,7 +116,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
 
         if params is not None and params.get("do_remote_prefill"):
             token_ids = request.prompt_token_ids or []
-            actual = self._mamba_prefill_token_count(len(token_ids))
+            actual = self._get_remote_prefill_token_count(len(token_ids))
             count = actual - num_computed_tokens
             if count > 0:
                 return count, True

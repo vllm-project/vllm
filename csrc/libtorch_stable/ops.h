@@ -288,10 +288,6 @@ void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
     int64_t cache_block_size);
 
 #ifndef USE_ROCM
-torch::stable::Tensor minimax_allreduce_rms(
-    torch::stable::Tensor const& input,
-    torch::stable::Tensor const& norm_weight, torch::stable::Tensor workspace,
-    int64_t const rank, int64_t const nranks, double const eps);
 std::tuple<torch::stable::Tensor, torch::stable::Tensor>
 minimax_allreduce_rms_qk(torch::stable::Tensor qkv,
                          torch::stable::Tensor const& norm_weight_q,
@@ -342,6 +338,14 @@ void persistent_topk(const torch::stable::Tensor& logits,
                      torch::stable::Tensor& output,
                      torch::stable::Tensor& workspace, int64_t k,
                      int64_t max_seq_len);
+
+#ifdef VLLM_ENABLE_COOPERATIVE_TOPK
+void cooperative_topk(const torch::stable::Tensor& logits,
+                      const torch::stable::Tensor& lengths,
+                      torch::stable::Tensor& output,
+                      torch::stable::Tensor& workspace, int64_t k,
+                      int64_t max_seq_len);
+#endif
 
 void selective_scan_fwd(
     const torch::stable::Tensor& u, const torch::stable::Tensor& delta,
