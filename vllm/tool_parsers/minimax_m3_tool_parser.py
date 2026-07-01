@@ -34,6 +34,46 @@ _NS_INVOKE_CLOSE = _NS + "</invoke>"
 _NS_OPEN_TAG_RE = re.compile(_NS_ESC + r"<([A-Za-z_][A-Za-z0-9_-]*)>")
 _NS_CLOSE_TAG_RE = re.compile(_NS_ESC + r"</([A-Za-z_][A-Za-z0-9_-]*)>")
 
+_ITEM_OPEN_RE = re.compile(r"<item\b[^>]*>")
+_ITEM_CLOSE = "</item>"
+
+
+def _extract_top_level_items(s: str) -> list[str] | None:
+    """Return the content of each top-level <item> element in *s*.
+
+    Handles nesting: <item><item>100</item><item>150</item></item> correctly
+    extracts the outer item's body (<item>100</item><item>150</item>).
+    Returns None if no <item> tags are found.
+    """
+    results = []
+    pos = 0
+    while pos < len(s):
+        m = _ITEM_OPEN_RE.search(s, pos)
+        if m is None:
+            break
+        depth = 1
+        inner_start = m.end()
+        scan = inner_start
+        while depth > 0 and scan < len(s):
+            next_open = _ITEM_OPEN_RE.search(s, scan)
+            next_close = s.find(_ITEM_CLOSE, scan)
+            if next_close == -1:
+                scan = len(s)
+                break
+            if next_open is not None and next_open.start() < next_close:
+                depth += 1
+                scan = next_open.end()
+            else:
+                depth -= 1
+                if depth == 0:
+                    results.append(s[inner_start:next_close])
+                    pos = next_close + len(_ITEM_CLOSE)
+                else:
+                    scan = next_close + len(_ITEM_CLOSE)
+        else:
+            pos = scan
+    return results if results else None
+
 
 def _coerce_param(value: str, schema: dict | None) -> Any:
     """Type-coerce a raw string parameter value using its JSON Schema type."""
@@ -59,7 +99,13 @@ def _coerce_param(value: str, schema: dict | None) -> Any:
         try:
             return json.loads(v)
         except (json.JSONDecodeError, ValueError):
-            return v
+            pass
+        if t == "array":
+            items = _extract_top_level_items(v)
+            if items is not None:
+                item_schema = schema.get("items")
+                return [_coerce_param(item.strip(), item_schema) for item in items]
+        return v
     return value
 
 
