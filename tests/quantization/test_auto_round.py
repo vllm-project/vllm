@@ -140,10 +140,97 @@ def test_inc_model_prefix_early_exit() -> None:
             },
         }
     )
+    layer = object.__new__(LinearBase)
 
     # get_quant_method checks model. prefix for unquantized early-exit
-    result = config.get_quant_method(DummyLayer(), "layers.1.mlp.gate_proj")
+    result = config.get_quant_method(layer, "layers.1.mlp.gate_proj")
     assert isinstance(result, UnquantizedLinearMethod)
+
+
+def test_inc_get_quant_method_unquantized_parallel_lm_head_returns_unquantized() -> (
+    None
+):
+    """ParallelLMHead with bits >= 16 returns UnquantizedLinearMethod via the
+    early-exit path (parallel_lm_head is explicitly handled alongside LinearBase).
+    """
+    config = make_config(extra_config={"lm_head": {"bits": 16}})
+    layer = object.__new__(ParallelLMHead)
+
+    method = config.get_quant_method(layer, "lm_head")
+
+    assert isinstance(method, UnquantizedLinearMethod)
+
+
+def test_inc_get_quant_method_unquantized_unknown_layer_returns_none() -> None:
+    """Regression test: non-Linear/non-MoE layers with bits >= 16 must return
+    None from the early-exit path instead of being misclassified as linear.
+    """
+    config = make_config(extra_config={"layer": {"bits": 16}})
+
+    method = config.get_quant_method(DummyLayer(), "layer")
+
+    assert method is None
+
+
+@pytest.mark.parametrize(
+    "layer_factory",
+    [
+        pytest.param(
+            lambda: object.__new__(LinearBase),
+            id="LinearBase",
+        ),
+        pytest.param(
+            lambda: object.__new__(ParallelLMHead),
+            id="ParallelLMHead",
+        ),
+    ],
+)
+def test_inc_get_quant_method_unquantized_layer_with_model_prefix(
+    layer_factory,
+) -> None:
+    """``model.``-prefixed extra_config entries trigger early exit for both
+    LinearBase and ParallelLMHead layers."""
+    config = make_config(extra_config={"model.layer": {"bits": 16}})
+    layer = layer_factory()
+
+    method = config.get_quant_method(layer, "layer")
+
+    assert isinstance(method, UnquantizedLinearMethod)
+
+
+def test_inc_get_quant_method_unquantized_routed_experts_with_model_prefix(
+    monkeypatch,
+) -> None:
+    """``model.``-prefixed extra_config entries trigger early exit for
+    RoutedExperts layers, returning UnquantizedFusedMoEMethod."""
+
+    class DummyUnquantizedFusedMoEMethod:
+        def __init__(self, moe_config) -> None:
+            self.moe_config = moe_config
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.inc.inc.UnquantizedFusedMoEMethod",
+        DummyUnquantizedFusedMoEMethod,
+    )
+
+    config = make_config(extra_config={"model.moe_layer": {"bits": 16}})
+    layer = object.__new__(RoutedExperts)
+    layer.moe_config = None
+
+    method = config.get_quant_method(layer, "moe_layer")
+
+    assert isinstance(method, DummyUnquantizedFusedMoEMethod)
+    assert method.moe_config is None
+
+
+def test_inc_get_quant_method_unknown_layer_with_model_prefix_returns_none() -> None:
+    """``model.``-prefixed extra_config entries return None for unhandled
+    layer types (non-Linear, non-MoE)."""
+    config = make_config(extra_config={"model.unknown": {"bits": 16}})
+
+    method = config.get_quant_method(DummyLayer(), "unknown")
+
+    assert method is None
 
 
 def test_inc_config_parser_regex_match() -> None:
