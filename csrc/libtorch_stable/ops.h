@@ -314,7 +314,7 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
     std::optional<torch::stable::Tensor> index_cache, int64_t block_size,
     std::optional<torch::stable::Tensor> q_out,
     std::optional<torch::stable::Tensor> index_q_out,
-    const std::string& kv_cache_dtype);
+    const std::string& kv_cache_dtype, bool skip_index_branch);
 
 // Sampler kernels (shared CUDA/ROCm)
 void apply_repetition_penalties_(
