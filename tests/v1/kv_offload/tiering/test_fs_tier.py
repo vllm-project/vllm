@@ -22,6 +22,7 @@ from vllm.v1.kv_offload.base import (
     LookupResult,
     OffloadKey,
     ReqContext,
+    ScheduleEndContext,
     make_offload_key,
 )
 from vllm.v1.kv_offload.tiering.base import JobMetadata
@@ -107,7 +108,7 @@ def lookup_and_wait(
     """Perform a full async lookup cycle and return resolved results."""
     for k in keys:
         tier.lookup(k, ctx)
-    tier.on_schedule_end()
+    tier.on_schedule_end(ScheduleEndContext(new_req_ids=[], preempted_req_ids=()))
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if not tier._lookup_manager._pending_results.empty():

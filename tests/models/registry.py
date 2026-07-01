@@ -1369,22 +1369,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "fixie-ai/ultravox-v0_5-llama-3_2-1b",
         trust_remote_code=True,
     ),
-    "TarsierForConditionalGeneration": _HfExamplesInfo("omni-research/Tarsier-7b"),
-    "Tarsier2ForConditionalGeneration": _HfExamplesInfo(
-        "omni-research/Tarsier2-Recap-7b",
-        hf_overrides={
-            "architectures": ["Tarsier2ForConditionalGeneration"],
-            "model_type": "tarsier2",
-        },
-        max_transformers_version="5.3",
-        transformers_version_reason={
-            "vllm": (
-                "Qwen2VLConfig was split into Qwen2VLConfig + "
-                "Qwen2VLTextConfig in transformers v5, breaking "
-                "attribute access (num_attention_heads, hidden_size, etc.)"
-            )
-        },
-    ),
     "VoxtralForConditionalGeneration": _HfExamplesInfo(
         "mistralai/Voxtral-Mini-3B-2507",
         tokenizer_mode="mistral",
@@ -1424,7 +1408,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     # [DFlash]
     "DFlashDraftModel": _HfExamplesInfo(
         "Qwen/Qwen3.5-4B",
-        speculative_model="z-lab/Qwen3.5-4B-DFlash",
+        speculative_model="z-lab/Qwen3-4B-DFlash-b16",
         use_original_num_layers=True,  # Need all layers since DFlash has >1 layer,
         max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
         max_num_seqs=32,
