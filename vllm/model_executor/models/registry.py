@@ -477,7 +477,6 @@ _MULTIMODAL_MODELS = {
         "llava_onevision",
         "LlavaOnevisionForConditionalGeneration",
     ),
-    "MantisForConditionalGeneration": ("llava", "MantisForConditionalGeneration"),
     "MiDashengLMModel": ("midashenglm", "MiDashengLMModel"),
     "MiMoV2OmniForCausalLM": ("mimo_v2_omni", "MiMoV2OmniForCausalLM"),
     "MiniMaxM3SparseForConditionalGeneration": (
@@ -733,6 +732,7 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "Grok1ForCausalLM": "0.24.0",
     "TarsierForConditionalGeneration": "0.24.0",
     "Tarsier2ForConditionalGeneration": "0.23.0",  # last version with Transformers v4
+    "MantisForConditionalGeneration": "0.24.0",
 }
 
 _OOT_SUPPORTED_MODELS = {
