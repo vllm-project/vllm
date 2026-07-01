@@ -812,17 +812,6 @@ class Llama4ForConditionalGeneration(
         )
         return self.language_model.get_eagle3_default_aux_hidden_state_layers()
 
-    def set_eplb_state(
-        self,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
-    ):
-        self.language_model.set_eplb_state(
-            expert_load_view, logical_to_physical_map, logical_replica_count
-        )
-        self.expert_weights = self.language_model.expert_weights
-
     def update_physical_experts_metadata(
         self, num_physical_experts: int, num_local_physical_experts: int
     ):
@@ -926,6 +915,7 @@ class Llama4ForConditionalGeneration(
         max_frames_per_batch: int,
         device: torch.device,
         dtype: torch.dtype,
+        path: str = "default",
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
@@ -954,6 +944,7 @@ class Llama4ForConditionalGeneration(
         mm_kwargs: dict[str, Any],
         max_batch_size: int,
         max_frames_per_batch: int,
+        path: str = "default",
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphReplayBuffers,
@@ -966,6 +957,7 @@ class Llama4ForConditionalGeneration(
     def encoder_cudagraph_forward(
         self,
         inputs: dict[str, torch.Tensor],
+        path: str = "default",
     ) -> torch.Tensor:
         return self.encode_image_chunks(
             inputs["pixel_values"],
@@ -975,6 +967,7 @@ class Llama4ForConditionalGeneration(
     def encoder_eager_forward(
         self,
         mm_kwargs: dict[str, Any],
+        path: str = "default",
     ) -> torch.Tensor:
         return self.encode_image_chunks(
             mm_kwargs["pixel_values"],

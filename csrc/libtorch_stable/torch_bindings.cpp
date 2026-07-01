@@ -34,6 +34,20 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   // TODO: Remove this once ROCm upgrade to torch 2.11.
   ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
 
+  // Note about marlin kernel 'workspace' arguments:
+  // Technically these should be mutable since they are modified by the kernel.
+  // But since they are set back to zero once the kernel is finished we can
+  // hand wave and say that they have no net effect.
+  //
+  // The reason to mark 'workspace' as immutable is so that they don't interfere
+  // with using ScalarType arguments in the ops. If they are marked as mutable,
+  // pytorch throws an assert in
+  // 'torch._higher_order_ops._register_effectful_op' that prevents these
+  // kernels from being torch.compile'd.
+  // See the following document for more info on custom types and ops that use
+  // custom types:
+  // https://docs.google.com/document/d/18fBMPuOJ0fY5ZQ6YyrHUppw9FA332CpNtgB6SOIgyuA
+
   // Machete (Dense) Optimized Mixed Precision GEMM for Hopper.
   ops.def(
       "machete_supported_schedules("
@@ -308,22 +322,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "awq_dequantize(Tensor _kernel, Tensor _scaling_factors, "
       "Tensor _zeros, SymInt split_k_iters, int thx, int thy) -> Tensor");
 
-  // Expert-specialization mxfp8 blockscaled grouped quantization (SM100+).
-  ops.def(
-      "mxfp8_experts_quant("
-      " Tensor input, Tensor problem_sizes, Tensor expert_offsets,"
-      " Tensor blockscale_offsets, Tensor! quant_output, Tensor! scale_factor)"
-      " -> ()");
-  // conditionally compiled so impl registration is in source file
-
-  // Expert-specialization mxfp8 blockscaled grouped GEMM (SM100+).
-  ops.def(
-      "cutlass_mxfp8_grouped_mm("
-      " Tensor a, Tensor b, Tensor sfa, Tensor sfb, Tensor! out,"
-      " Tensor problem_sizes, Tensor expert_offsets, Tensor blockscale_offsets)"
-      " -> ()");
-  // conditionally compiled so impl registration is in source file
-
   // DeepSeek V3 fused A GEMM (SM 9.0+, bf16 only, 1-16 tokens).
   // conditionally compiled so impl registration is in source file
   ops.def(
@@ -369,12 +367,13 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
 
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(
-      "rms_norm(Tensor! result, Tensor input, Tensor weight, float epsilon) -> "
+      "rms_norm(Tensor! result, Tensor input, Tensor? weight, float epsilon) "
+      "-> "
       "()");
 
   // In-place fused Add and RMS Normalization.
   ops.def(
-      "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor weight, "
+      "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor? weight, "
       "float epsilon) -> ()");
 
   // Layernorm-quant
@@ -451,10 +450,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
 
 #ifndef USE_ROCM
   ops.def(
-      "minimax_allreduce_rms("
-      "Tensor input, Tensor norm_weight, Tensor workspace, "
-      "int rank, int nranks, float eps) -> Tensor");
-  ops.def(
       "minimax_allreduce_rms_qk("
       "Tensor qkv, Tensor norm_weight_q, Tensor norm_weight_k, "
       "Tensor workspace, int q_size, int kv_size, int rank, int nranks, "
@@ -471,7 +466,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "int num_index_heads, "
       "Tensor? slot_mapping, Tensor? index_slot_mapping, "
       "Tensor!? kv_cache, Tensor!? index_cache, "
-      "int block_size, Tensor!? q_out, Tensor!? index_q_out) -> ()");
+      "int block_size, Tensor!? q_out, Tensor!? index_q_out, "
+      "str kv_cache_dtype) -> ()");
 
   // Apply repetition penalties to logits in-place.
   ops.def(
@@ -493,7 +489,18 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "persistent_topk(Tensor logits, Tensor lengths, Tensor! output, "
       "Tensor workspace, int k, int max_seq_len) -> ()");
 
+#ifdef VLLM_ENABLE_COOPERATIVE_TOPK
+  ops.def(
+      "cooperative_topk(Tensor logits, Tensor lengths, Tensor! output, "
+      "Tensor workspace, int k, int max_seq_len) -> ()");
+#endif
+
   // Activation ops
+  ops.def(
+      "persistent_masked_m_silu_mul_quant(Tensor input, Tensor counts, Tensor! "
+      "y_q, Tensor! y_s, bool use_ue8m0) -> ()");
+  ops.def("weak_ref_tensor(Tensor input) -> Tensor");
+
   // Activation function used in SwiGLU.
   ops.def("silu_and_mul(Tensor! result, Tensor input) -> ()");
 
@@ -505,6 +512,10 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def(
       "silu_and_mul_with_clamp(Tensor! result, Tensor input, float limit, "
       "float alpha=1.0, float beta=0.0) -> ()");
+
+  // SwiGLU activation with FP8 quantization.
+  ops.def(
+      "silu_and_mul_quant(Tensor! result, Tensor input, Tensor scale) -> ()");
 
   // Activation function used in GeGLU with `none` approximation.
   ops.def("gelu_and_mul(Tensor! out, Tensor input) -> ()");
@@ -690,7 +701,6 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
       "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert",
       TORCH_BOX(&fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert));
 #ifndef USE_ROCM
-  ops.impl("minimax_allreduce_rms", TORCH_BOX(&minimax_allreduce_rms));
   ops.impl("minimax_allreduce_rms_qk", TORCH_BOX(&minimax_allreduce_rms_qk));
 #endif
   ops.impl("fused_minimax_m3_qknorm_rope_kv_insert",
@@ -702,8 +712,15 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("top_k_per_row_prefill", TORCH_BOX(&top_k_per_row_prefill));
   ops.impl("top_k_per_row_decode", TORCH_BOX(&top_k_per_row_decode));
   ops.impl("persistent_topk", TORCH_BOX(&persistent_topk));
+#ifdef VLLM_ENABLE_COOPERATIVE_TOPK
+  ops.impl("cooperative_topk", TORCH_BOX(&cooperative_topk));
+#endif
 
   // Activation kernels (shared CUDA/ROCm)
+  ops.impl("persistent_masked_m_silu_mul_quant",
+           TORCH_BOX(&persistent_masked_m_silu_mul_quant));
+  ops.impl("weak_ref_tensor", TORCH_BOX(&weak_ref_tensor));
+  ops.impl("silu_and_mul_quant", TORCH_BOX(&silu_and_mul_quant));
   ops.impl("silu_and_mul", TORCH_BOX(&silu_and_mul));
   ops.impl("mul_and_silu", TORCH_BOX(&mul_and_silu));
   ops.impl("gelu_and_mul", TORCH_BOX(&gelu_and_mul));

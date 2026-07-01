@@ -77,9 +77,9 @@ class SchedulerConfig:
     this less than max_num_partial_prefills will allow shorter prompts to jump
     the queue in front of longer prompts in some cases, improving latency."""
 
-    long_prefill_token_threshold: int = 0
+    long_prefill_token_threshold: int = Field(default=0, ge=0)
     """For chunked prefill, a request is considered long if the prompt is
-    longer than this number of tokens."""
+    longer than this number of tokens. 0 disables the cap (default)."""
 
     enable_chunked_prefill: bool = True
     """If True, prefill requests can be chunked based
@@ -149,6 +149,11 @@ class SchedulerConfig:
     helps avoid frequent KV cache eviction and the resulting repeated preemption
     of requests when GPU memory is scarce. Must be in the range [0.0, 1.0); 0.0
     (the default) disables the watermark."""
+
+    prefill_schedule_interval: int = Field(default=1, ge=1)
+    """For data-parallel deployments, only admit new prefill requests
+    once every N engine steps, aligned across DP ranks, to better balance
+    per-step forward-pass times."""
 
     async_scheduling: bool | None = None
     """If set to False, disable async scheduling. Async scheduling helps to

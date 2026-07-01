@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING
 
 import regex as re
 
-from vllm.entrypoints.chat_utils import make_tool_call_id
+from vllm.entrypoints.chat_utils import get_tool_call_id_type, make_tool_call_id
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -30,6 +30,7 @@ from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
 from vllm.tool_parsers.utils import (
     coerce_to_schema_type,
     extract_types_from_schema,
+    find_tool_name,
     find_tool_properties,
 )
 
@@ -51,6 +52,7 @@ class ToolCallSlot:
         "_args_parts",
         "_args_joined",
         "name_sent",
+        "string_keys",
         "streamed_json",
     )
 
@@ -60,6 +62,7 @@ class ToolCallSlot:
         self._args_parts: list[str] = []
         self._args_joined: str | None = ""
         self.name_sent: bool = False
+        self.string_keys: set[str] | None = None
         self.streamed_json: str = ""
 
     @property
@@ -86,11 +89,18 @@ class ParserEngine(Parser):
         tools: list[Tool] | None = None,
         *,
         parser_engine_config: ParserEngineConfig,
+        model_config=None,
         **kwargs,
     ) -> None:
         self.model_tokenizer = tokenizer
         self._tools = tools
-        self._stream_state = StreamState()
+        self._stream_state = StreamState(
+            tool_call_id_type=(
+                get_tool_call_id_type(model_config)
+                if model_config is not None
+                else "random"
+            ),
+        )
         self._reasoning_parser = None
         self._tool_parser = None
         self.parser_engine_config = parser_engine_config
@@ -100,11 +110,13 @@ class ParserEngine(Parser):
 
         self._reasoning_ended: bool = False
         self._streaming_initialized: bool = False
+        self._prompt_streaming_prepared: bool = False
 
         self._tool_slots: list[ToolCallSlot] = []
         self._deferred_content: str = ""
         self._deferred_reasoning: str = ""
         self._content_has_nonws: bool = False
+        self._suppress_tool_calls: bool = False
 
         self._arg_converter = parser_engine_config.arg_converter
         self._arg_structural_chars = parser_engine_config.arg_structural_chars
@@ -164,9 +176,15 @@ class ParserEngine(Parser):
             self._streaming_initialized = True
             self._reset(initial_state=initial_state)
 
+    def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
+        """See :meth:`ReasoningParser.adjust_initial_state_from_prompt`."""
+        return
+
     def finish_streaming(self) -> DeltaMessage | None:
         events = self._engine.finish()
-        return self._events_to_delta(events) if events else None
+        if events or self._deferred_content:
+            return self._events_to_delta(events, finished=True)
+        return None
 
     def _reset(self, initial_state: ParserState | None = None) -> None:
         self._engine.reset(initial_state=initial_state)
@@ -175,12 +193,28 @@ class ParserEngine(Parser):
         self._deferred_content = ""
         self._deferred_reasoning = ""
         self._content_has_nonws = False
+        self._prompt_streaming_prepared = False
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
         request.skip_special_tokens = False
         return request
+
+    def _preprocess_feed(
+        self,
+        delta_text: str,
+        delta_token_ids: Sequence[int],
+    ) -> tuple[str, Sequence[int]]:
+        return delta_text, delta_token_ids
+
+    def _feed(
+        self,
+        delta_text: str,
+        delta_token_ids: Sequence[int],
+    ) -> list[SemanticEvent]:
+        delta_text, delta_token_ids = self._preprocess_feed(delta_text, delta_token_ids)
+        return self._engine.feed(delta_text, delta_token_ids)
 
     # ── Schema-aware type correction ─────────────────────────────────
 
@@ -240,17 +274,23 @@ class ParserEngine(Parser):
         return args, changed
 
     @staticmethod
-    def _safe_arg_prefix(json_str: str) -> str:
+    def _safe_arg_prefix(json_str: str, string_keys: set[str] | None = None) -> str:
         """Return the prefix of *json_str* up to the last top-level value.
 
         Middle values (followed by a comma) are stable across streaming
-        ticks and included.  The trailing value is excluded because type
-        coercion may change its serialised form between ticks, which
-        would violate the ``startswith(prev)`` prefix invariant.
+        ticks and included.  The trailing value is excluded for non-string
+        values because type coercion may change its serialised form between
+        ticks, which would violate the ``startswith(prev)`` prefix invariant.
+        String values for keys in ``string_keys`` are prefix-stable, so stream
+        their unterminated content instead of buffering long arguments until
+        the closing tag arrives.
         """
         last_colon = -1
+        last_key: str | None = None
+        pending_key: str | None = None
         in_string = False
         escape = False
+        string_start = -1
         depth = 0
         for i, c in enumerate(json_str):
             if escape:
@@ -261,21 +301,60 @@ class ParserEngine(Parser):
                     escape = True
                 elif c == '"':
                     in_string = False
+                    if depth == 1 and string_start >= 0:
+                        pending_key = json_str[string_start + 1 : i]
                 continue
             if c == '"':
                 in_string = True
+                string_start = i
             elif c in ("{", "["):
                 depth += 1
             elif c in ("}", "]"):
                 depth -= 1
             elif c == ":" and depth == 1:
                 last_colon = i
+                last_key = pending_key
+                pending_key = None
         if last_colon < 0:
             return ""
         end = last_colon + 1
         while end < len(json_str) and json_str[end] in (" ", "\t", "\n", "\r"):
             end += 1
-        return json_str[:end]
+        if end >= len(json_str) or json_str[end] != '"':
+            return json_str[:end]
+        if string_keys is not None and last_key not in string_keys:
+            return json_str[:end]
+
+        escape = False
+        for i in range(end + 1, len(json_str)):
+            c = json_str[i]
+            if escape:
+                escape = False
+                continue
+            if c == "\\":
+                escape = True
+                continue
+            if c == '"':
+                return json_str[:i]
+        return json_str
+
+    @staticmethod
+    def _streamable_string_keys(properties: dict) -> set[str] | None:
+        """Return keys whose trailing string values can safely stream.
+
+        ``None`` means there is no schema, so all string values keep their
+        JSON representation as strings.  With a schema, only fields that can
+        remain strings are safe to emit before the value is closed; fields
+        coerced to bool/number/null/object/array may serialize differently.
+        """
+        if not properties:
+            return None
+
+        streamable: set[str] = set()
+        for key, schema in properties.items():
+            if set(extract_types_from_schema(schema)) == {"string"}:
+                streamable.add(key)
+        return streamable
 
     def _fix_arg_types(self, args_json: str, func_name: str) -> str:
         """Correct parameter types using the tool schema.
@@ -304,17 +383,26 @@ class ParserEngine(Parser):
             return json.dumps(args, ensure_ascii=False)
         return args_json
 
+    def _is_valid_tool_name(self, name: str) -> bool:
+        if not self.parser_engine_config.validate_tool_names:
+            return True
+        if not self._tools:
+            return True
+        return find_tool_name(self._tools, name)
+
     # ── Private helpers ─────────────────────────────────────────────
 
     def _check_skip_tool_parsing(
         self,
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> None:
-        if not self.skip_tool_parsing:
+        tools = getattr(request, "tools", None)
+        if tools:
+            self._tools = tools
+        if not self.skip_tool_parsing and not self._suppress_tool_calls:
             tool_choice = getattr(request, "tool_choice", None)
-            tools = getattr(request, "tools", None)
             if tool_choice == "none" and tools:
-                self.skip_tool_parsing = True
+                self._suppress_tool_calls = True
 
     def _strip_content_whitespace(
         self,
@@ -339,8 +427,15 @@ class ParserEngine(Parser):
         *,
         finished: bool,
     ) -> DeltaMessage | None:
+        self._initialize_history_tool_call_cnt(request)
+        if not self._prompt_streaming_prepared and prompt_token_ids is not None:
+            # NOTE: call the hook BEFORE setting the flag, because the hook
+            # may invoke ``_reset`` (e.g. via ``initialize_streaming``) which
+            # clears ``_prompt_streaming_prepared``.
+            self.adjust_initial_state_from_prompt(prompt_token_ids)
+            self._prompt_streaming_prepared = True
         self._check_skip_tool_parsing(request)
-        events = self._engine.feed(delta_text, delta_token_ids)
+        events = self._feed(delta_text, delta_token_ids)
         if finished:
             events.extend(self._engine.finish())
         result = self._events_to_delta(events, finished=finished)
@@ -384,7 +479,7 @@ class ParserEngine(Parser):
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> tuple[str | None, str | None]:
         self._reset()
-        events = self._engine.feed(model_output, [])
+        events = self._feed(model_output, [])
         events.extend(self._engine.finish())
 
         reasoning_parts: list[str] = []
@@ -417,7 +512,7 @@ class ParserEngine(Parser):
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
         self.initialize_streaming()
-        events = self._engine.feed(delta_text, delta_token_ids)
+        events = self._feed(delta_text, delta_token_ids)
         return self._strip_trailing_reasoning(self._events_to_delta(events))
 
     # ── Non-streaming: extract_tool_calls ─────────────────────────────
@@ -452,6 +547,7 @@ class ParserEngine(Parser):
         output, this method starts the parser engine in ``CONTENT`` state
         so it can parse content that has already had reasoning stripped.
         """
+        self._check_skip_tool_parsing(request)
         _, parsed_content, tool_call_info = self._single_pass_parse(
             content,
             [],
@@ -477,7 +573,7 @@ class ParserEngine(Parser):
     ) -> DeltaMessage | None:
         self.initialize_streaming()
         self._check_skip_tool_parsing(request)
-        events = self._engine.feed(delta_text, delta_token_ids)
+        events = self._feed(delta_text, delta_token_ids)
         return self._strip_trailing_reasoning(self._events_to_delta(events))
 
     # ── Reasoning state queries ───────────────────────────────────────
@@ -503,6 +599,13 @@ class ParserEngine(Parser):
                 if input_ids[i] == end_id:
                     return input_ids[i + 1 :]
         return input_ids
+
+    def get_streaming_fallback_content(
+        self,
+        text: str,
+        request: ChatCompletionRequest | ResponsesRequest,
+    ) -> str | None:
+        return None
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
         start_id = self._reasoning_start_token_id
@@ -537,10 +640,10 @@ class ParserEngine(Parser):
         state that ``_build_extracted_result`` reads.
         """
         self._reset(initial_state=initial_state)
-        events = self._engine.feed(text, token_ids)
+        events = self._feed(text, token_ids)
         events.extend(self._engine.finish())
 
-        delta = self._events_to_delta(events)
+        delta = self._events_to_delta(events, finished=True)
         tool_call_info = self._build_extracted_result()
 
         reasoning = delta.reasoning if delta else None
@@ -564,6 +667,8 @@ class ParserEngine(Parser):
         enable_auto_tools: bool = False,
         model_output_token_ids: Sequence[int] = (),
     ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
+        self._initialize_history_tool_call_cnt(request)
+        self._check_skip_tool_parsing(request)
         reasoning, content, tool_call_info = self._single_pass_parse(
             model_output,
             model_output_token_ids,
@@ -597,6 +702,7 @@ class ParserEngine(Parser):
         reasoning_parts: list[str] = []
 
         seen_tool_event = False
+        suppress = self._suppress_tool_calls
         for event in events:
             match event.type:
                 case EventType.TEXT_CHUNK:
@@ -609,24 +715,28 @@ class ParserEngine(Parser):
                 case EventType.REASONING_END:
                     self._reasoning_ended = True
                 case EventType.TOOL_CALL_START:
-                    seen_tool_event = True
-                    self._ensure_slot(event.tool_index)
+                    if not suppress:
+                        seen_tool_event = True
+                        self._ensure_slot(event.tool_index)
                 case EventType.TOOL_NAME:
-                    seen_tool_event = True
-                    self._handle_tool_name(event)
+                    if not suppress:
+                        seen_tool_event = True
+                        self._handle_tool_name(event)
                 case EventType.ARG_VALUE_CHUNK:
-                    seen_tool_event = True
-                    self._handle_arg_chunk(event, tool_call_deltas)
+                    if not suppress:
+                        seen_tool_event = True
+                        self._handle_arg_chunk(event, tool_call_deltas)
                 case EventType.TOOL_CALL_END:
-                    seen_tool_event = True
-                    self._handle_tool_end(event, tool_call_deltas)
+                    if not suppress:
+                        seen_tool_event = True
+                        self._handle_tool_end(event, tool_call_deltas)
                 case EventType.REASONING_START:
                     pass  # no delta-level effect
 
         if len(tool_call_deltas) > 1:
             tool_call_deltas = self._coalesce_tool_call_deltas(tool_call_deltas)
 
-        if self._deferred_content and not seen_tool_event:
+        if self._deferred_content and (not seen_tool_event or not tool_call_deltas):
             content_parts.insert(0, self._deferred_content)
             self._deferred_content = ""
 
@@ -683,11 +793,14 @@ class ParserEngine(Parser):
         deltas: list[DeltaToolCall],
         name: str | None,
     ) -> None:
-        if not name:
+        if not name or not self._is_valid_tool_name(name):
             return
         slot = self._tool_slots[idx]
         slot.name = name
         slot.name_sent = True
+        slot.string_keys = self._streamable_string_keys(
+            find_tool_properties(self._tools, name)
+        )
         self._ensure_tool_id(slot, name)
         deltas.append(
             DeltaToolCall(
@@ -740,9 +853,12 @@ class ParserEngine(Parser):
 
         if not slot.name_sent:
             name = slot.name or self._try_extract_name(idx)
-            if name:
+            if name and self._is_valid_tool_name(name):
                 slot.name = name
                 slot.name_sent = True
+                slot.string_keys = self._streamable_string_keys(
+                    find_tool_properties(self._tools, name)
+                )
                 self._ensure_tool_id(slot, name)
                 deltas.append(
                     DeltaToolCall(
@@ -825,7 +941,7 @@ class ParserEngine(Parser):
             current_json = self._fix_arg_types(current_json, slot.name)
 
         prev = slot.streamed_json
-        safe_json = self._safe_arg_prefix(current_json)
+        safe_json = self._safe_arg_prefix(current_json, slot.string_keys)
 
         if not safe_json or safe_json == prev:
             return None
@@ -912,7 +1028,7 @@ class ParserEngine(Parser):
             else:
                 args_json = "{}"
 
-            if name:
+            if name and self._is_valid_tool_name(name):
                 self._ensure_tool_id(slot, name)
                 args_json = self._fix_arg_types(args_json, name)
                 tool_calls.append(

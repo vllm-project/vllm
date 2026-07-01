@@ -70,6 +70,7 @@ DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
         "Qwen3ForCausalLM",
         "DeepseekV2ForCausalLM",
         "Qwen2MoeForCausalLM",
+        "GraniteMoeForCausalLM",
         "LlamaForCausalLM",
         "MistralForCausalLM",
     }
@@ -128,13 +129,7 @@ def enable_act_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
-    """Enable if TP > 1, PP == 1, Hopper/Blackwell, and flashinfer installed.
-
-    Gated off for PP > 1: the fused op's GPU-side peer-signal spin-wait
-    assumes byte-identical kernel launches across TP peers, but concurrent
-    independent warmup of multiple TP subgroups lets ranks pick divergent
-    FlashInfer launch configs and deadlock.
-    """
+    """Enable if TP > 1 and Hopper/Blackwell and flashinfer installed."""
     from vllm.platforms import current_platform
     from vllm.utils.flashinfer import has_flashinfer
 
@@ -147,7 +142,6 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
 
     return (
         cfg.parallel_config.tensor_parallel_size > 1
-        and cfg.parallel_config.pipeline_parallel_size == 1
         and current_platform.is_cuda()
         and has_flashinfer()
         and (
@@ -561,9 +555,6 @@ class VllmConfig:
         if model_config.runner_type != "generate":
             return False
 
-        if model_config.is_quantized:
-            return False
-
         architectures = getattr(model_config, "architectures", [])
         return any(
             arch in DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES for arch in architectures
@@ -940,16 +931,28 @@ class VllmConfig:
                     model_type,
                 )
 
+        from vllm.platforms import current_platform
         from vllm.v1.executor.abstract import Executor
 
         executor_backend = self.parallel_config.distributed_executor_backend
         executor_class = Executor.get_class(self)
         executor_supports_async_sched = executor_class.supports_async_scheduling()
+        uses_rocm_deepep_ht_dbo = (
+            current_platform.is_rocm()
+            and self.parallel_config.enable_dbo
+            and self.parallel_config.all2all_backend == "deepep_high_throughput"
+        )
 
         if self.scheduler_config.async_scheduling:
             # Async scheduling explicitly enabled, hard fail any incompatibilities.
             # Currently, async scheduling only support eagle speculative
             # decoding.
+            if uses_rocm_deepep_ht_dbo:
+                raise ValueError(
+                    "Async scheduling is not compatible with ROCm DeepEP "
+                    "high-throughput DBO. Please use --no-async-scheduling or "
+                    "select a different all2all backend."
+                )
             if self.speculative_config is not None:
                 if (
                     self.speculative_config.method not in get_args(EagleModelTypes)
@@ -966,15 +969,6 @@ class VllmConfig:
                         "Async scheduling is not compatible with "
                         "disable_padded_drafter_batch=True."
                     )
-            if (
-                self.model_config is not None
-                and self.model_config.enable_prompt_embeds
-                and self.model_config.is_multimodal_model
-            ):
-                raise ValueError(
-                    "Async scheduling is not yet supported with prompt embeds "
-                    "for multimodal models."
-                )
             if not executor_supports_async_sched:
                 raise ValueError(
                     f"`{executor_backend}` does not support async scheduling yet."
@@ -1018,14 +1012,11 @@ class VllmConfig:
                     executor_backend,
                 )
                 self.scheduler_config.async_scheduling = False
-            elif (
-                self.model_config is not None
-                and self.model_config.enable_prompt_embeds
-                and self.model_config.is_multimodal_model
-            ):
+            elif uses_rocm_deepep_ht_dbo:
                 logger.warning_once(
-                    "Async scheduling is not yet supported with prompt embeds "
-                    "for multimodal models and will be disabled."
+                    "Async scheduling is disabled for ROCm DeepEP "
+                    "high-throughput DBO because that combination can corrupt "
+                    "DP+EP generation accuracy."
                 )
                 self.scheduler_config.async_scheduling = False
             else:
@@ -1071,8 +1062,6 @@ class VllmConfig:
                 "torch_shm is known to fail without "
                 "VLLM_WORKER_MULTIPROC_METHOD set to spawn"
             )
-
-        from vllm.platforms import current_platform
 
         if (
             self.model_config is not None
@@ -1457,12 +1446,14 @@ class VllmConfig:
             assert a2a_backend in [
                 "deepep_low_latency",
                 "deepep_high_throughput",
+                "nixl_ep",
             ], (
-                "Microbatching currently only supports the deepep_low_latency and "
-                f"deepep_high_throughput all2all backend. {a2a_backend} is not "
-                "supported. To fix use --all2all-backend=deepep_low_latency or "
-                "--all2all-backend=deepep_high_throughput and install the DeepEP"
-                " kernels."
+                "Microbatching currently only supports the deepep_low_latency, "
+                "deepep_high_throughput, and nixl_ep all2all backends. "
+                f"{a2a_backend} is not supported. To fix use "
+                "--all2all-backend=deepep_low_latency, "
+                "--all2all-backend=deepep_high_throughput, or "
+                "--all2all-backend=nixl_ep and install the matching kernels."
             )
 
             if not self.model_config.disable_cascade_attn:
@@ -2023,13 +2014,6 @@ class VllmConfig:
         model_config = self.model_config
         speculative_config = self.speculative_config
 
-        if (
-            model_config is not None
-            and model_config.has_inner_state
-            and self.cache_config.mamba_cache_mode == "align"
-        ):
-            unsupported.append("hybrid/mamba models with align cache mode")
-
         if self.parallel_config.prefill_context_parallel_size > 1:
             unsupported.append("prefill context parallelism")
 
@@ -2041,6 +2025,14 @@ class VllmConfig:
             and self.parallel_config.tensor_parallel_size > 1
         ):
             unsupported.append("sequence parallelism")
+
+        # V2 does not implement the external_launcher (torchrun) PP-output
+        # broadcast that V1 uses to keep all ranks in sync (broadcast_pp_output).
+        if (
+            self.parallel_config.distributed_executor_backend == "external_launcher"
+            and self.parallel_config.pipeline_parallel_size > 1
+        ):
+            unsupported.append("pipeline parallelism with external_launcher")
 
         if speculative_config is not None:
             # TODO: ngram / ngram_gpu are not supported by the v2 model runner yet
@@ -2169,10 +2161,6 @@ class VllmConfig:
                 "Chunked MM input is required because we need the flexibility "
                 "to schedule a multiple of block_size tokens even if they are "
                 "in the middle of a mm input"
-            )
-            # TODO: support align mamba cache mode for model runner v2
-            assert not envs.VLLM_USE_V2_MODEL_RUNNER, (
-                "Model Runner V2 has not yet supported mamba_cache_mode='align'. "
             )
 
     @model_validator(mode="after")

@@ -49,12 +49,16 @@ _REASONING_PARSERS_TO_REGISTER = {
         "Ernie45ReasoningParser",
     ),
     "gemma4": (
-        "gemma4_reasoning_parser",
-        "Gemma4ReasoningParser",
+        "gemma4_engine_reasoning_parser",
+        "Gemma4ParserReasoningAdapter",
     ),
     "glm45": (
-        "deepseek_v3_reasoning_parser",
-        "DeepSeekV3ReasoningWithThinkingParser",
+        "glm47_moe_reasoning_parser",
+        "Glm47MoeParserReasoningAdapter",
+    ),
+    "glm47": (
+        "glm47_moe_reasoning_parser",
+        "Glm47MoeParserReasoningAdapter",
     ),
     "openai_gptoss": (
         "gptoss_reasoning_parser",
@@ -101,8 +105,8 @@ _REASONING_PARSERS_TO_REGISTER = {
         "MistralReasoningParser",
     ),
     "nemotron_v3": (
-        "nemotron_v3_reasoning_parser",
-        "NemotronV3ReasoningParser",
+        "nemotron_v3_engine_reasoning_parser",
+        "NemotronV3ParserReasoningAdapter",
     ),
     "olmo3": (
         "olmo3_reasoning_parser",
@@ -113,8 +117,8 @@ _REASONING_PARSERS_TO_REGISTER = {
         "Qwen3ParserReasoningAdapter",
     ),
     "seed_oss": (
-        "seedoss_reasoning_parser",
-        "SeedOSSReasoningParser",
+        "seed_oss_engine_reasoning_parser",
+        "SeedOssParserReasoningAdapter",
     ),
     "step3": (
         "step3_reasoning_parser",
