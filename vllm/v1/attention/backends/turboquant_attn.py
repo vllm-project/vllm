@@ -18,6 +18,7 @@ Per-head per-position slot layout:
 
 import functools
 import math
+import os
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
@@ -26,6 +27,7 @@ import torch.nn.functional as F
 
 from vllm.config import get_current_vllm_config
 from vllm.config.cache import CacheDType
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.turboquant.centroids import (
     get_centroids,
 )
@@ -58,6 +60,8 @@ from vllm.v1.worker.workspace import (
     is_workspace_manager_initialized,
 )
 
+logger = init_logger(__name__)
+
 _HAS_FLASH_ATTN = is_flash_attn_varlen_func_available()
 if _HAS_FLASH_ATTN:
     from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
@@ -68,6 +72,50 @@ if _HAS_FLASH_ATTN:
 # kernel can read them efficiently. This avoids O(cached_len) dequant work
 # per continuation, eliminating the O(N²/chunk_size) collapse at long context.
 _CONTINUATION_DECODE_THRESHOLD = 128
+
+
+# --------------------------------------------------------------------------- #
+#  FlyDSL TurboQuant v4 decode (opt-in; AMD MI355X / gfx950).                  #
+#                                                                             #
+#  Enabled with VLLM_ROCM_TQ_FLYDSL_DECODE=1. When OFF (the default) NONE of the v4    #
+#  branches execute and the upstream TurboQuant v1 path runs byte-for-byte    #
+#  unchanged. When ON, the whole self-consistent SoA pipeline is used:        #
+#    * SoA Triton store (write)                                               #
+#    * FlyDSL v4 decode (GQA in {6, 8, 16}; gfx950) — GQA-6 = MiniMax sibling #
+#    * SoA-aware continuation/dequant for chunked prefill                     #
+#    * SoA Triton v3 fallback for ineligible layers / missing FlyDSL          #
+#  The FlyDSL framework is a separate runtime dependency; if unavailable the  #
+#  decode silently falls back to the SoA Triton v3 path.                      #
+# --------------------------------------------------------------------------- #
+_USE_TQ_V4 = os.environ.get("VLLM_ROCM_TQ_FLYDSL_DECODE", "0") == "1"
+if _USE_TQ_V4:
+    from vllm.v1.attention.ops.flydsl_turboquant_decode_v4 import (
+        flydsl_turboquant_decode_attention_v4,
+        is_flydsl_available as _flydsl_v4_available,
+        is_flydsl_gqa6_available as _flydsl_v4_gqa6_available,
+    )
+    if not _flydsl_v4_available():
+        logger.warning(
+            "VLLM_ROCM_TQ_FLYDSL_DECODE=1 but FlyDSL is unavailable; the decode path "
+            "will fall back to the SoA Triton v3 kernel."
+        )
+
+
+def _soa_imports():
+    """Lazy import of the HIP-free SoA Triton subset (store / dequant / v3).
+
+    Kept lazy so the default (v4-off) path never imports these modules.
+    """
+    from vllm.v1.attention.ops.turboquant_soa.triton_turboquant_store import (
+        triton_turboquant_store as soa_store,
+    )
+    from vllm.v1.attention.ops.turboquant_soa.triton_turboquant_decode import (
+        _tq_full_dequant_kv as soa_dequant,
+    )
+    from vllm.v1.attention.ops.turboquant_soa.triton_turboquant_unified_attention import (  # noqa: E501
+        triton_turboquant_decode_attention_v3 as soa_v3,
+    )
+    return soa_store, soa_dequant, soa_v3
 
 
 def _build_hadamard(d: int, device_str: str) -> torch.Tensor:
@@ -334,6 +382,18 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph
         )
 
+        # ---- FlyDSL v4 (opt-in) state. Inert unless VLLM_ROCM_TQ_FLYDSL_DECODE=1. ----
+        self.sliding_window = sliding_window
+        self.sinks = kwargs.get("sinks")
+        # Cache max_model_len now (config is available at __init__ but NOT
+        # during CUDA-graph capture when _ensure_on_device is re-entered).
+        self._max_model_len = vllm_config.model_config.max_model_len
+        # The SoA cache layout is integral to the FlyDSL v4 pipeline (the v4
+        # decode kernel and SoA-aware continuation both read it), so the SoA
+        # store is always on whenever v4 is enabled. There is no separate
+        # toggle: the single VLLM_ROCM_TQ_FLYDSL_DECODE flag drives the whole pipeline.
+        self._soa_store = _USE_TQ_V4
+
     def _flash_attn_varlen(
         self,
         q: torch.Tensor,
@@ -379,6 +439,46 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         quantizer is symmetric around zero (sign-flipping a coordinate
         maps it to the mirror centroid with identical distortion).
         """
+        if self._soa_store:
+            # CUDA-graph capture safety for the FlyDSL v4 decode path on ROCm.
+            # (1) Pre-allocate _arange_cache / _cu_2 BEFORE any capture; lazy
+            #     allocation during graph replay lands in the HIP graph memory
+            #     pool and yields stale addresses (GPU fault / garbage).
+            # (2) Pre-warm the WorkspaceManager to its max size before capture
+            #     so mid-capture growth cannot invalidate pointers baked into
+            #     already-captured batch sizes.
+            _max_len = self._max_model_len
+            _already_ok = (
+                hasattr(self, "_arange_cache")
+                and self._arange_cache.device.type == str(device).split(":")[0]
+                and self._arange_cache.shape[0] >= _max_len + 2
+            )
+            if not _already_ok:
+                self._arange_cache = torch.arange(
+                    0, _max_len + 2, device=device, dtype=torch.int32
+                )
+            if not hasattr(self, "_cu_2") or self._cu_2.device != torch.device(device):
+                self._cu_2 = torch.zeros(2, device=device, dtype=torch.int32)
+            if (
+                is_workspace_manager_initialized()
+                and not current_workspace_manager().is_locked()
+            ):
+                B_max = self._max_capture_batch_size()
+                D = self.head_size
+                Hq = self.num_heads
+                S = self.max_num_kv_splits
+                _pre_warm_bytes = (
+                    B_max * Hq * (S * (D + 1) + D) * 4  # fp32 mid_o + fp32 lse
+                    + B_max * Hq * D * 2  # query-dtype output (bf16 = 2 B)
+                    + 512  # alignment padding
+                )
+                try:
+                    current_workspace_manager().get_simultaneous(
+                        ((_pre_warm_bytes,), torch.uint8)
+                    )
+                except AssertionError:
+                    pass
+
         if not hasattr(layer, "_tq_cached"):
             D = self.head_size
 
@@ -398,6 +498,29 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             c_sorted, _ = layer._tq_centroids.sort()
             layer._tq_midpoints = (c_sorted[:-1] + c_sorted[1:]) / 2
             layer._tq_cached = True
+
+    def _max_capture_batch_size(self) -> int:
+        """Largest decode batch we might see at runtime (for workspace pre-warm).
+
+        Take max(cudagraph_capture_sizes, scheduler.max_num_seqs): a forward
+        pass exceeding the largest captured graph size falls back to eager,
+        but the workspace is locked and that eager path can still hit batch
+        sizes up to max_num_seqs. Falls back to 1024 if config is unavailable.
+        """
+        try:
+            cfg = get_current_vllm_config()
+            candidates: list[int] = []
+            sizes = cfg.compilation_config.cudagraph_capture_sizes
+            if sizes:
+                candidates.append(int(max(sizes)))
+            sched = getattr(cfg, "scheduler_config", None)
+            if sched is not None and getattr(sched, "max_num_seqs", None):
+                candidates.append(int(sched.max_num_seqs))
+            if candidates:
+                return max(candidates)
+        except Exception:  # noqa: BLE001
+            pass
+        return 1024
 
     def do_kv_cache_update(
         self,
@@ -582,6 +705,27 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         layer: Any,
     ):
         """Quantize + store via fused Triton kernel."""
+        if self._soa_store:
+            # SoA layout (data region + metadata region separated per block),
+            # required by the FlyDSL v4 decode kernel. Pure-Triton store; the
+            # cache tensor shape is identical to the default AoS store, only
+            # the within-block byte convention differs.
+            soa_store, _, _ = _soa_imports()
+            soa_store(
+                key=key,
+                value=value,
+                kv_cache=kv_cache,
+                slot_mapping=slot_mapping,
+                PiT=layer._tq_PiT,
+                midpoints=layer._tq_midpoints,
+                mse_bits=self.tq_config.key_mse_bits,
+                key_packed_size=self.tq_config.key_packed_size,
+                value_quant_bits=self.tq_config.effective_value_quant_bits,
+                key_fp8=self.tq_config.key_fp8,
+                centroids=layer._tq_centroids,
+                norm_correction=self.tq_config.norm_correction,
+            )
+            return
         triton_turboquant_store(
             key,
             value,
@@ -714,21 +858,53 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                     # Slice from pre-built arange (no kernel launch)
                     synth_seq_lens = _arange_cache[cached_len + 1 : seq_len + 1]
                     synth_bt = attn_metadata.block_table[i : i + 1].expand(q_len, -1)
-                    out = triton_turboquant_decode_attention(
-                        query=q_seq,
-                        kv_cache=kv_cache,
-                        block_table=synth_bt,
-                        seq_lens=synth_seq_lens,
-                        Pi=Pi,
-                        centroids=centroids,
-                        scale=self.scale,
-                        mse_bits=self.tq_config.key_mse_bits,
-                        key_packed_size=self.tq_config.key_packed_size,
-                        value_quant_bits=(self.tq_config.effective_value_quant_bits),
-                        key_fp8=self.tq_config.key_fp8,
-                        norm_correction=self.tq_config.norm_correction,
-                        PiT=PiT,
-                    )
+                    if self._soa_store:
+                        # The cache was written in SoA layout (always, for v4),
+                        # so it MUST be read with the SoA-aware v3 decode. The
+                        # default AoS decode mis-addresses k_norm/v_scale/v_zero
+                        # in a SoA cache -> garbage cached-prefix output ->
+                        # accuracy collapse on every multi-turn / prefix-cached
+                        # (APC) request. Continuation stays on v3 even when v4
+                        # is the main decode kernel (v4 is decode-batch only).
+                        out = self._dispatch_decode_v3(
+                            query=q_seq,
+                            kv_cache=kv_cache,
+                            block_table=synth_bt,
+                            seq_lens=synth_seq_lens,
+                            Pi=Pi,
+                            centroids=centroids,
+                            scale=self.scale,
+                            mse_bits=self.tq_config.key_mse_bits,
+                            key_packed_size=self.tq_config.key_packed_size,
+                            value_quant_bits=(
+                                self.tq_config.effective_value_quant_bits
+                            ),
+                            value_packed_size=self.tq_config.value_packed_size,
+                            max_seq_len=int(seq_len),
+                            key_fp8=self.tq_config.key_fp8,
+                            norm_correction=self.tq_config.norm_correction,
+                            PiT=PiT,
+                            sinks=self.sinks,
+                            sliding_window=self.sliding_window,
+                        )
+                    else:
+                        out = triton_turboquant_decode_attention(
+                            query=q_seq,
+                            kv_cache=kv_cache,
+                            block_table=synth_bt,
+                            seq_lens=synth_seq_lens,
+                            Pi=Pi,
+                            centroids=centroids,
+                            scale=self.scale,
+                            mse_bits=self.tq_config.key_mse_bits,
+                            key_packed_size=self.tq_config.key_packed_size,
+                            value_quant_bits=(
+                                self.tq_config.effective_value_quant_bits
+                            ),
+                            key_fp8=self.tq_config.key_fp8,
+                            norm_correction=self.tq_config.norm_correction,
+                            PiT=PiT,
+                        )
                 else:
                     # Large continuation: dequant cached K/V and use
                     # flash_attn for better throughput.
@@ -793,36 +969,84 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         v_cached = v_buf[:, :, :alloc_len, :]
 
         grid = (alloc_len, 1 * Hk)
-        _tq_full_dequant_kv[grid](
-            kv_cache,
-            block_table,
-            centroids,
-            k_cached,
-            v_cached,
-            k_cached.stride(0),
-            k_cached.stride(1),
-            k_cached.stride(2),
-            v_cached.stride(0),
-            v_cached.stride(1),
-            v_cached.stride(2),
-            kv_cache.stride(0),
-            kv_cache.stride(1),
-            kv_cache.stride(2),
-            block_table.stride(0),
-            HEAD_DIM=D,
-            BLOCK_SIZE=block_size,
-            NUM_KV_HEADS=Hk,
-            MSE_BYTES=mse_bytes,
-            KPS=self.tq_config.key_packed_size,
-            VQB=self.tq_config.effective_value_quant_bits,
-            VAL_DATA_BYTES=val_data_bytes,
-            MSE_BITS=self.tq_config.key_mse_bits,
-            KEY_FP8=1 if self.tq_config.key_fp8 else 0,
-            BLOCK_D=BLOCK_D,
-            NORM_CORRECTION=1 if self.tq_config.norm_correction else 0,
-            FP8_E4B15=_use_fp8_e4b15(device.index or 0),
-            num_warps=4,
-        )
+        if self._soa_store:
+            # SoA-aware dequant: read the data/metadata-separated SoA cache
+            # written by the SoA store. Constants must match the store side.
+            _, soa_dequant, _ = _soa_imports()
+            key_fp8 = self.tq_config.key_fp8
+            key_data_bytes = D if key_fp8 else mse_bytes
+            data_bytes_per_slot = key_data_bytes + val_data_bytes
+            meta_region_offset = block_size * Hk * data_bytes_per_slot
+            num_soa_fields = 2 if key_fp8 else 3
+            soa_k_norm = 0
+            soa_v_scale = 0 if key_fp8 else 1
+            soa_v_zero = 1 if key_fp8 else 2
+            kv_cache_u16 = kv_cache.view(torch.uint16)
+            soa_dequant[grid](
+                kv_cache,
+                kv_cache_u16,
+                block_table,
+                centroids,
+                k_cached,
+                v_cached,
+                k_cached.stride(0),
+                k_cached.stride(1),
+                k_cached.stride(2),
+                v_cached.stride(0),
+                v_cached.stride(1),
+                v_cached.stride(2),
+                kv_cache.stride(0),
+                block_table.stride(0),
+                HEAD_DIM=D,
+                BLOCK_SIZE=block_size,
+                NUM_KV_HEADS=Hk,
+                MSE_BYTES=mse_bytes,
+                VQB=self.tq_config.effective_value_quant_bits,
+                VAL_DATA_BYTES=val_data_bytes,
+                MSE_BITS=self.tq_config.key_mse_bits,
+                KEY_FP8=1 if key_fp8 else 0,
+                KEY_DATA_BYTES=key_data_bytes,
+                META_REGION_OFFSET=meta_region_offset,
+                NUM_SOA_FIELDS=num_soa_fields,
+                SOA_K_NORM=soa_k_norm,
+                SOA_V_SCALE=soa_v_scale,
+                SOA_V_ZERO=soa_v_zero,
+                BLOCK_D=BLOCK_D,
+                NORM_CORRECTION=1 if self.tq_config.norm_correction else 0,
+                FP8_E4B15=_use_fp8_e4b15(device.index or 0),
+                num_warps=4,
+            )
+        else:
+            _tq_full_dequant_kv[grid](
+                kv_cache,
+                block_table,
+                centroids,
+                k_cached,
+                v_cached,
+                k_cached.stride(0),
+                k_cached.stride(1),
+                k_cached.stride(2),
+                v_cached.stride(0),
+                v_cached.stride(1),
+                v_cached.stride(2),
+                kv_cache.stride(0),
+                kv_cache.stride(1),
+                kv_cache.stride(2),
+                block_table.stride(0),
+                HEAD_DIM=D,
+                BLOCK_SIZE=block_size,
+                NUM_KV_HEADS=Hk,
+                MSE_BYTES=mse_bytes,
+                KPS=self.tq_config.key_packed_size,
+                VQB=self.tq_config.effective_value_quant_bits,
+                VAL_DATA_BYTES=val_data_bytes,
+                MSE_BITS=self.tq_config.key_mse_bits,
+                KEY_FP8=1 if self.tq_config.key_fp8 else 0,
+                BLOCK_D=BLOCK_D,
+                NORM_CORRECTION=1 if self.tq_config.norm_correction else 0,
+                FP8_E4B15=_use_fp8_e4b15(device.index or 0),
+                num_warps=4,
+            )
 
         # Inverse-rotate MSE keys back to original space
         if not self.tq_config.key_fp8:
@@ -922,6 +1146,82 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 )
             )
 
+        if _USE_TQ_V4:
+            # FlyDSL v4 decode (MI355X/gfx950, MSE-key, HEAD_SIZE=128,
+            # GQA in {6, 8, 16}). GQA-6 routes to the MiniMax sibling kernel.
+            # Ineligible layers / missing FlyDSL fall back to SoA Triton v3.
+            _gqa = self.num_kv_groups
+            v4_gqa_ok = (_gqa in (8, 16)) or (
+                _gqa == 6 and _flydsl_v4_gqa6_available()
+            )
+            v4_eligible = (
+                not self.tq_config.key_fp8
+                and self.tq_config.key_mse_bits == 4
+                and self.tq_config.effective_value_quant_bits == 4
+                and self.head_size == 128
+                and v4_gqa_ok
+                and self.sinks is None
+                and not (self.sliding_window and self.sliding_window > 0)
+            )
+            if v4_eligible:
+                return flydsl_turboquant_decode_attention_v4(
+                    query=query,
+                    kv_cache=kv_cache,
+                    block_table=attn_metadata.block_table,
+                    seq_lens=attn_metadata.seq_lens,
+                    Pi=Pi,
+                    centroids=centroids,
+                    scale=self.scale,
+                    mse_bits=self.tq_config.key_mse_bits,
+                    key_packed_size=self.tq_config.key_packed_size,
+                    value_quant_bits=self.tq_config.effective_value_quant_bits,
+                    value_packed_size=self.tq_config.value_packed_size,
+                    max_seq_len=attn_metadata.max_seq_len,
+                    key_fp8=self.tq_config.key_fp8,
+                    norm_correction=self.tq_config.norm_correction,
+                    PiT=PiT,
+                    mid_o_buf=mid_o_buf,
+                    output_buf=output_buf,
+                    lse_buf=lse_buf,
+                    buf_holder=layer,
+                    max_num_kv_splits=self.max_num_kv_splits,
+                    sinks=self.sinks,
+                )
+            logger.warning_once(
+                "TurboQuant v4 ineligible (key_fp8=%s mse_bits=%s vqb=%s "
+                "head_size=%s num_kv_groups=%s sinks=%s) -> SoA Triton v3",
+                self.tq_config.key_fp8,
+                self.tq_config.key_mse_bits,
+                self.tq_config.effective_value_quant_bits,
+                self.head_size,
+                self.num_kv_groups,
+                self.sinks is not None,
+            )
+            return self._dispatch_decode_v3(
+                query=query,
+                kv_cache=kv_cache,
+                block_table=attn_metadata.block_table,
+                seq_lens=attn_metadata.seq_lens,
+                Pi=Pi,
+                centroids=centroids,
+                scale=self.scale,
+                mse_bits=self.tq_config.key_mse_bits,
+                key_packed_size=self.tq_config.key_packed_size,
+                value_quant_bits=self.tq_config.effective_value_quant_bits,
+                value_packed_size=self.tq_config.value_packed_size,
+                max_seq_len=attn_metadata.max_seq_len,
+                key_fp8=self.tq_config.key_fp8,
+                norm_correction=self.tq_config.norm_correction,
+                PiT=PiT,
+                mid_o_buf=mid_o_buf,
+                output_buf=output_buf,
+                lse_buf=lse_buf,
+                buf_holder=layer,
+                max_num_kv_splits=self.max_num_kv_splits,
+                sinks=self.sinks,
+                sliding_window=self.sliding_window,
+            )
+
         result = triton_turboquant_decode_attention(
             query=query,
             kv_cache=kv_cache,
@@ -943,3 +1243,23 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             max_num_kv_splits=self.max_num_kv_splits,
         )
         return result
+
+    def _dispatch_decode_v3(self, **kwargs):
+        """SoA-aware Triton v3 decode — fallback for v4-ineligible layers.
+
+        The SoA v3 launcher accepts a subset of the v4 kwargs; filter to the
+        params it accepts and raise if a *meaningful* (non-None) kwarg would
+        be silently dropped (so we never mask a real feature gap).
+        """
+        import inspect
+
+        _, _, soa_v3 = _soa_imports()
+        accepted = set(inspect.signature(soa_v3).parameters)
+        dropped = [
+            k for k, v in kwargs.items() if k not in accepted and v is not None
+        ]
+        if dropped:
+            raise NotImplementedError(
+                f"SoA v3 decode does not support kwargs {sorted(dropped)}"
+            )
+        return soa_v3(**{k: v for k, v in kwargs.items() if k in accepted})

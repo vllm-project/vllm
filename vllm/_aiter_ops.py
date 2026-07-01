@@ -182,6 +182,8 @@ def _rocm_aiter_fused_moe_impl(
     extra_kwargs: dict = {}
     if gate_mode and rocm_aiter_ops.fused_moe_supports_gate_mode():
         extra_kwargs["gate_mode"] = gate_mode
+    if rocm_aiter_ops.fused_moe_supports_swiglu_limit():
+        extra_kwargs["swiglu_limit"] = swiglu_limit
 
     return fused_moe(
         hidden_states,
@@ -204,7 +206,6 @@ def _rocm_aiter_fused_moe_impl(
         bias1=bias1,
         bias2=bias2,
         moe_sorting_dispatch_policy=moe_sorting_dispatch_policy,
-        swiglu_limit=swiglu_limit,
         **extra_kwargs,
     )
 
@@ -1831,6 +1832,23 @@ class rocm_aiter_ops:
         from aiter.fused_moe import fused_moe
 
         return "gate_mode" in inspect.signature(fused_moe).parameters
+
+    @classmethod
+    @if_aiter_supported
+    @functools.cache
+    def fused_moe_supports_swiglu_limit(cls) -> bool:
+        """Probe whether the installed aiter.fused_moe accepts `swiglu_limit`.
+
+        Added in a newer aiter alongside the SwiGLU clamp support. Builds with
+        older AITER must omit this argument, otherwise the call raises
+        ``TypeError: fused_moe() got an unexpected keyword argument
+        'swiglu_limit'``.
+        """
+        import inspect
+
+        from aiter.fused_moe import fused_moe
+
+        return "swiglu_limit" in inspect.signature(fused_moe).parameters
 
     @staticmethod
     @if_aiter_supported
