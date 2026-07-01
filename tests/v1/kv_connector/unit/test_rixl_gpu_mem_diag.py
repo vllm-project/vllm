@@ -29,8 +29,9 @@ def _gpu_snapshot(tag: str, prev_alloc: float = 0.0) -> dict:
     torch.accelerator.synchronize()
     alloc = torch.accelerator.memory_allocated()
     reserved = torch.accelerator.memory_reserved()
+    # mem_get_info is not available on torch.accelerator
     try:
-        drv_free, drv_total = torch.accelerator.get_memory_info()
+        drv_free, drv_total = torch.cuda.mem_get_info()
         drv_used = drv_total - drv_free
         drv_pct = drv_used / drv_total * 100
     except Exception:
