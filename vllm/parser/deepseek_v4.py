@@ -90,6 +90,37 @@ def _dsml_arg_converter(raw_args: str, partial: bool) -> str:
     return json.dumps(params, ensure_ascii=False)
 
 
+def _unwrap_wrapper_args(
+    args_json: str,
+    tools: list[Tool] | None,
+    func_name: str | None,
+) -> str:
+    if not tools or not func_name:
+        return args_json
+    try:
+        args = json.loads(args_json)
+    except (json.JSONDecodeError, ValueError):
+        return args_json
+    if not isinstance(args, dict):
+        return args_json
+    properties = find_tool_properties(tools, func_name)
+    if not properties:
+        return args_json
+    allowed = set(properties.keys())
+    for wrapper in ("arguments", "input"):
+        if set(args.keys()) != {wrapper} or wrapper in allowed:
+            continue
+        inner = args[wrapper]
+        if isinstance(inner, str):
+            try:
+                inner = json.loads(inner)
+            except json.JSONDecodeError:
+                return args_json
+        if isinstance(inner, dict) and set(inner.keys()).issubset(allowed):
+            return json.dumps(inner, ensure_ascii=False)
+    return args_json
+
+
 @functools.cache
 def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
     return ParserEngineConfig(
@@ -203,35 +234,4 @@ class DeepSeekV4Parser(ParserEngine):
         if not self._tools:
             return result
         func_name = next((s.name for s in self._tool_slots if s.args == raw_args), None)
-        return self._unwrap_wrapper_args(result, self._tools, func_name)
-
-    @staticmethod
-    def _unwrap_wrapper_args(
-        args_json: str,
-        tools: list[Tool] | None,
-        func_name: str | None,
-    ) -> str:
-        if not tools or not func_name:
-            return args_json
-        try:
-            args = json.loads(args_json)
-        except (json.JSONDecodeError, ValueError):
-            return args_json
-        if not isinstance(args, dict):
-            return args_json
-        properties = find_tool_properties(tools, func_name)
-        if not properties:
-            return args_json
-        allowed = set(properties.keys())
-        for wrapper in ("arguments", "input"):
-            if set(args.keys()) != {wrapper} or wrapper in allowed:
-                continue
-            inner = args[wrapper]
-            if isinstance(inner, str):
-                try:
-                    inner = json.loads(inner)
-                except json.JSONDecodeError:
-                    return args_json
-            if isinstance(inner, dict) and set(inner.keys()).issubset(allowed):
-                return json.dumps(inner, ensure_ascii=False)
-        return args_json
+        return _unwrap_wrapper_args(result, self._tools, func_name)

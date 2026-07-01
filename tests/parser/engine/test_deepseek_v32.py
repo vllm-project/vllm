@@ -18,12 +18,14 @@ from tests.parser.engine.streaming_helpers import (
     collect_tool_arguments,
     simulate_tool_streaming,
 )
-from vllm.parser.deepseek_v32 import (
-    DSML_FUNC_END,
-    DSML_FUNC_START,
+from vllm.parser.deepseek_v4 import (
     DSML_INVOKE_END,
     DSML_INVOKE_NAME_END,
     DSML_INVOKE_PREFIX,
+)
+from vllm.parser.deepseek_v32 import (
+    DSML_FUNC_END,
+    DSML_FUNC_START,
     DeepSeekV32Parser,
 )
 from vllm.parser.engine.parser_engine_config import ParserState
@@ -46,6 +48,23 @@ def _invoke(name: str, *params: str) -> str:
 def _func_calls(*invocations: str) -> str:
     body = "\n".join(invocations)
     return f"{DSML_FUNC_START}\n{body}\n{DSML_FUNC_END}"
+
+
+def _make_tool(name, properties):
+    from vllm.entrypoints.openai.chat_completion.protocol import (
+        ChatCompletionToolsParam,
+    )
+
+    return ChatCompletionToolsParam(
+        type="function",
+        function={
+            "name": name,
+            "parameters": {
+                "type": "object",
+                "properties": properties,
+            },
+        },
+    )
 
 
 @pytest.fixture
@@ -126,20 +145,7 @@ class TestNonStreaming:
         assert args["count"] == 42
 
     def test_wrapper_unwrapping(self, mock_tokenizer, mock_request):
-        from vllm.entrypoints.openai.chat_completion.protocol import (
-            ChatCompletionToolsParam,
-            FunctionDefinition,
-        )
-
-        tool = ChatCompletionToolsParam(
-            function=FunctionDefinition(
-                name="get_weather",
-                parameters={
-                    "type": "object",
-                    "properties": {"location": {"type": "string"}},
-                },
-            ),
-        )
+        tool = _make_tool("get_weather", {"location": {"type": "string"}})
         mock_request.tools = [tool]
         text = _func_calls(
             _invoke(
@@ -219,6 +225,34 @@ class TestStreaming:
         assert "Just some text" in content
         args = collect_tool_arguments(results)
         assert args == ""
+
+    def test_streaming_wrapper_unwrap_consistency(self, mock_tokenizer, mock_request):
+        tool = _make_tool("get_weather", {"location": {"type": "string"}})
+        mock_request.tools = [tool]
+        parser = DeepSeekV32Parser(mock_tokenizer, tools=[tool])
+
+        chunks = [
+            DSML_FUNC_START,
+            _invoke(
+                "get_weather",
+                _param("arguments", "false", '{"location": "NYC"}'),
+            ),
+            DSML_FUNC_END,
+        ]
+
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+        streamed_args = collect_tool_arguments(results)
+
+        final_delta, _ = results[-1]
+        finish_delta = parser.finish_streaming()
+        extracted = parser._build_extracted_result(final_delta, finish_delta)
+
+        assert extracted.tools_called is True
+        assert len(extracted.tool_calls) == 1
+        final_args = extracted.tool_calls[0].function.arguments
+        assert json.loads(final_args) == {"location": "NYC"}
+        assert '"arguments"' not in streamed_args
+        assert final_args.startswith(streamed_args)
 
     def test_missing_invoke_end(self, mock_tokenizer, mock_request):
         text = (

@@ -32,6 +32,7 @@ from vllm.parser.deepseek_v4 import (
     DSML_TOOL_START,
     DeepSeekV4Parser,
     _dsml_arg_converter,
+    _unwrap_wrapper_args,
     deepseek_v4_config,
 )
 from vllm.parser.engine.registered_adapters import (
@@ -423,7 +424,7 @@ class TestWrapperUnwrapping:
             },
         )
 
-        result = DeepSeekV4Parser._unwrap_wrapper_args(
+        result = _unwrap_wrapper_args(
             '{"arguments": {"location": "Beijing"}}',
             [tool],
             "get_weather",
@@ -446,7 +447,7 @@ class TestWrapperUnwrapping:
             },
         )
 
-        result = DeepSeekV4Parser._unwrap_wrapper_args(
+        result = _unwrap_wrapper_args(
             '{"input": {"location": "Beijing"}}',
             [tool],
             "get_weather",
@@ -469,7 +470,7 @@ class TestWrapperUnwrapping:
             },
         )
 
-        result = DeepSeekV4Parser._unwrap_wrapper_args(
+        result = _unwrap_wrapper_args(
             '{"arguments": "some value"}',
             [tool],
             "func",
@@ -477,7 +478,7 @@ class TestWrapperUnwrapping:
         assert json.loads(result) == {"arguments": "some value"}
 
     def test_no_unwrap_when_no_tools(self):
-        result = DeepSeekV4Parser._unwrap_wrapper_args(
+        result = _unwrap_wrapper_args(
             '{"arguments": {"location": "Beijing"}}',
             None,
             "get_weather",
@@ -500,7 +501,7 @@ class TestWrapperUnwrapping:
             },
         )
 
-        result = DeepSeekV4Parser._unwrap_wrapper_args(
+        result = _unwrap_wrapper_args(
             '{"arguments": "{\\"location\\": \\"Beijing\\"}"}',
             [tool],
             "get_weather",
