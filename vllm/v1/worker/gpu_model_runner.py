@@ -6170,7 +6170,7 @@ class GPUModelRunner(
         # TODO(shikamd123): Remove this workaround once the AITER fix for the
         # top_k_top_p / top_p sampling kernels lands and vLLM's minimum
         # supported AITER is bumped to include it.
-        #   AITER root-cause + fix: https://github.com/ROCm/aiter/pull/<N>
+        #   AITER root-cause + fix: https://github.com/ROCm/aiter/pull/3658
         #   vLLM-side context:      https://github.com/vllm-project/vllm/pull/45043
         #
         # Observed: on ROCm/MI300X (gfx942), the dummy sampler warm-up

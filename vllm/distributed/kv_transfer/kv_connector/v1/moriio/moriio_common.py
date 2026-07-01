@@ -283,12 +283,13 @@ class MoRIIOConfig:
         # For per-node port allocation we want the local dp_rank within
         # the node, not the global one. data_parallel_rank is global, so
         # fold it back to [0, data_parallel_size_local).
-        dp_rank = (
-            vllm_config.parallel_config.data_parallel_rank
-            % vllm_config.parallel_config.data_parallel_size_local
-        )
-        base_notify_port = int(extra_config["notify_port"])
         dp_size = vllm_config.parallel_config.data_parallel_size_local
+        assert dp_size and dp_size > 0, (
+            "data_parallel_size_local must be a positive integer for MoRIIO "
+            f"port allocation, got {dp_size!r}"
+        )
+        dp_rank = vllm_config.parallel_config.data_parallel_rank % dp_size
+        base_notify_port = int(extra_config["notify_port"])
         tp_size = get_tensor_model_parallel_world_size()
         port_offset = get_port_offset(dp_rank, tp_rank)
         backend = str(extra_config.get("backend", "rdma")).lower()

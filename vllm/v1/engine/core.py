@@ -32,7 +32,6 @@ from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.platforms import current_platform
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
@@ -90,7 +89,7 @@ from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 
-HANDSHAKE_TIMEOUT_MINS = envs.VLLM_ENGINE_HANDSHAKE_TIMEOUT_MINUTES
+HANDSHAKE_TIMEOUT_MINS = 5
 
 _R = TypeVar("_R")  # Return type for collective_rpc
 
@@ -1045,10 +1044,8 @@ class EngineCoreProc(EngineCore):
                 self.has_coordinator,
                 self.frontend_stats_publish_address,
             )
-            internal_dp_balancing = (
-                self.has_coordinator
-                and not vllm_config.parallel_config.data_parallel_external_lb
-            )
+            self.external_lb = vllm_config.parallel_config.data_parallel_external_lb
+            internal_dp_balancing = self.has_coordinator and not self.external_lb
             # Only publish request queue stats to coordinator for "internal"
             # and "hybrid" LB modes.
             self.publish_dp_lb_stats = internal_dp_balancing
@@ -1936,22 +1933,7 @@ class DPEngineCoreProc(EngineCoreProc):
         super().add_request(request, request_wave)
         if not self.has_coordinator:
             return
-        if current_platform.is_rocm():
-            # ROCm multi-pod: also wake on wave 0's first request (when
-            # request_wave == current_wave == 0) to prevent the all-to-all
-            # collective hang on cold start. This path is ROCm-only; the
-            # non-ROCm branch below stays bit-identical to upstream.
-            if request_wave > self.current_wave:
-                self.current_wave = request_wave
-            if (
-                not self.engines_running
-                and self.scheduler.pause_state == PauseState.UNPAUSED
-            ):
-                self.engines_running = True
-                self.output_queue.put_nowait(
-                    (-1, EngineCoreOutputs(start_wave=self.current_wave))
-                )
-        elif request_wave != self.current_wave:
+        if request_wave != self.current_wave:
             if request_wave > self.current_wave:
                 self.current_wave = request_wave
             elif (
@@ -1964,6 +1946,29 @@ class DPEngineCoreProc(EngineCoreProc):
                 self.output_queue.put_nowait(
                     (-1, EngineCoreOutputs(start_wave=self.current_wave))
                 )
+        elif (
+            self.external_lb
+            and not self.engines_running
+            and self.scheduler.pause_state == PauseState.UNPAUSED
+        ):
+            # External-LB DP: the external router addresses this engine
+            # directly, so the coordinator is not in the per-request path and
+            # does not drive the wake for the current wave's first request
+            # (request_wave == current_wave). Without this, a request that
+            # arrives while the wave is idle can stall until the next wave,
+            # deadlocking the DP all-to-all on cold start. Internal/hybrid LB
+            # is unaffected (coordinator drives the wake there), so this stays
+            # bit-identical to upstream for those modes.
+            logger.debug(
+                "External-LB wave wake: starting wave %d for directly-routed "
+                "request (engine %d).",
+                self.current_wave,
+                self.engine_index,
+            )
+            self.engines_running = True
+            self.output_queue.put_nowait(
+                (-1, EngineCoreOutputs(start_wave=self.current_wave))
+            )
 
     def resume_scheduler(self):
         if self.pending_pause or (self.engines_running and self.ignore_start_dp_wave):
