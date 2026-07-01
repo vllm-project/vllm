@@ -151,52 +151,55 @@ has been answered on the wire.
 
 #### `on_lookup(kv_request_id, block_hashes)`
 
-For each hash, call `cb.lookup(h, ctx)` and bucket:
+Build a `_LookupBlocks` for the LookupMsg with a `deadline` of
+`now + _LOOKUP_PENDING_TIMEOUT_S`, then for each hash call
+`cb.lookup(h, ctx)` and route:
 
 | `LookupResult` | Action |
 | --- | --- |
-| `HIT` | Add to the immediate-HIT list. |
-| `MISS` | Add to the immediate-MISS list. |
-| `HIT_PENDING` / `RETRY` | Park in `lookup.pending[h] = now`. |
+| `HIT` | Add to the newly-HIT list; record `resolved[h] = True`. |
+| `MISS` | Record `resolved[h] = False`. |
+| `HIT_PENDING` / `RETRY` | Add to `lookup.pending`. |
 
-Then, in one shot:
+Then:
 
 1. If any HITs: call `cb.create_store_job(hits, ctx)` once, then feed
    the returned JobMetadata into the existing
-   `ServerRole.add_stored_blocks(...)` path. This populates
-   `_outbound[kv_request_id].available[hash] = (job_id, block_id)`,
-   which the existing fetch-time match in `add_fetch_demand` already
-   consumes — no fetch-side changes needed.
-2. Send one `LookupRespMsg(kv_request_id, immediate_hashes, hits)`
-   (HITs first, then MISS es in their own order).
-3. If `lookup.pending` is empty (everything resolved on first sight),
-   call `cb.finish_request(ctx)` immediately and drop the entry.
-   Otherwise stash it in `_inbound_lookups`.
+   `ServerRole.add_stored_blocks(...)` path so the eventual FetchMsg
+   matches from `_outbound[kv_request_id].available`. HITs are pinned
+   **immediately** even though the wire response is deferred — waiting
+   would let the block evict before the client's FetchMsg lands.
+2. If `lookup.pending` is empty (everything resolved on first sight),
+   emit the aggregated `LookupRespMsg` now and fire
+   `cb.finish_request(ctx)` (see `_finalize_lookup`).
+3. Otherwise stash the entry in `_inbound_lookups` — the aggregate
+   response is deferred until either every pending hash settles or
+   `deadline` fires.
 
-Single-thread guarantee: `lookup → HIT → create_store_job` happens in
-one synchronous sequence, so no eviction can race in between.
-`create_store_job` is therefore N-in / N-out (parallel `keys` /
-`block_ids` of the same length as the input) — there is no
-partial-result branch.
+Exactly one `LookupRespMsg` goes out per inbound `LookupMsg`, carrying
+every hash in its original wire order. The single-thread guarantee
+(`lookup → HIT → create_store_job` in one synchronous sequence) means
+no eviction can race between HIT detection and the pin.
 
 #### `_resolve_pending_lookups` (driven from `collect_results`)
 
 Called every poll tick. For every parked lookup:
 
-- Re-call `cb.lookup` per remaining pending hash.
-    - `HIT` → move to the newly-HIT list, drop from `pending`.
-    - `MISS` → move to the newly-MISS list, drop from `pending`.
-    - Still `HIT_PENDING` / `RETRY` past `_LOOKUP_PENDING_TIMEOUT_S`
-    (5 s) → force-MISS, drop from `pending`. The consumer falls back
-    to local prefill rather than waiting on a stuck producer.
-    - Otherwise leave the entry to try again next tick.
+- Re-call `cb.lookup` per still-pending hash.
+    - `HIT` → move to the newly-HIT list, record `resolved[h] = True`,
+      drop from `pending`.
+    - `MISS` → record `resolved[h] = False`, drop from `pending`.
+    - Still `HIT_PENDING` / `RETRY` → leave for next tick.
+- If `now >= lookup.deadline` and `pending` is still non-empty, force
+  the stragglers to MISS (record `resolved[h] = False` for each and
+  clear `pending`). Guarantees the response goes out within the
+  deadline even against a stuck producer.
 - For the newly-HIT list: one `cb.create_store_job(...)` call per
   lookup, plumbed through `add_stored_blocks` as in `on_lookup`.
-- Send one follow-up `LookupRespMsg(kv_request_id, ...)` per lookup
-  with the freshly-resolved hashes (the wire protocol's
-  self-describing pairs make split responses safe).
-- Sweep any lookup whose `pending` is now empty: call
-  `cb.finish_request(ctx)` and drop.
+- Any lookup whose `pending` is now empty is finalized by
+  `_finalize_lookup`: emit the aggregated `LookupRespMsg` in wire
+  order using `resolved`, then fire `cb.finish_request(ctx)` and drop
+  the entry.
 
 #### Cleanup
 

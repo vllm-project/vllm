@@ -707,9 +707,11 @@ class TestServerLookupHandling:
         assert all(c[0] != "create_store_job" for c in cb.calls)
         assert cb.calls[-1][0] == "finish_request"
 
-    def test_mixed_hit_miss_pending_partial_response(self):
-        """HIT and MISS resolve immediately; HIT_PENDING / RETRY defer.
-        First LookupRespMsg carries only the immediate resolutions."""
+    def test_mixed_hit_miss_pending_defers_response_until_aggregate(self):
+        """HIT/MISS resolutions do not go out on first sight when any
+        hash is still HIT_PENDING / RETRY. The lookup parks until every
+        hash has settled (or the deadline fires), then one
+        LookupRespMsg carries all hashes in wire order."""
         cb = FakeCallbacks(
             stored={b"hA": 1},
             pending={b"hB"},
@@ -722,19 +724,22 @@ class TestServerLookupHandling:
         _send_lookup(conn, "req-1", [b"hA", b"hB", b"hC", b"hD"])
         session.poll()
 
-        resps = _lookup_resps(conn, sent_before)
-        assert len(resps) == 1
-        # immediate resolutions only — order: hits then misses
-        assert resps[0][LookupRespMsg.BLOCK_HASHES] == [b"hA", b"hC"]
-        assert resps[0][LookupRespMsg.HITS] == [True, False]
-        # batch is parked, finish_request not yet called
+        # No LookupRespMsg yet — hB and hD are still pending.
+        assert _lookup_resps(conn, sent_before) == []
+        # HIT is still pinned immediately so the eventual FetchMsg matches.
+        cs_calls = [c for c in cb.calls if c[0] == "create_store_job"]
+        assert len(cs_calls) == 1
+        assert cs_calls[0][1] == (b"hA",)
+        # Lookup is parked; finish_request not yet called.
         assert all(c[0] != "finish_request" for c in cb.calls)
         assert len(session._server._inbound_lookups) == 1
 
-    def test_pending_resolves_in_followup_creates_second_store_job(self):
-        """A HIT_PENDING hash that becomes HIT on a later poll fires a
-        follow-up LookupRespMsg with the resolution and a separate
-        create_store_job call for the newly-HIT key."""
+    def test_pending_resolves_then_aggregate_response_fires(self):
+        """A HIT_PENDING hash that becomes HIT on a later poll releases
+        the deferred aggregate response: one LookupRespMsg carrying
+        both hashes in wire order, and one create_store_job call per
+        HIT (the second HIT is pinned when it resolves, not when the
+        response goes out)."""
         cb = FakeCallbacks(stored={b"hA": 1}, pending={b"hB"})
         session, conn, _ = _make_session(tiering_callbacks=cb)
         _activate(session, conn)
@@ -742,6 +747,8 @@ class TestServerLookupHandling:
         sent_before = len(conn._sent)
         _send_lookup(conn, "req-1", [b"hA", b"hB"])
         session.poll()
+        # No response yet — hB still pending.
+        assert _lookup_resps(conn, sent_before) == []
 
         # Promote hB.
         cb.pending.discard(b"hB")
@@ -751,29 +758,23 @@ class TestServerLookupHandling:
         session.poll()
 
         resps = _lookup_resps(conn, sent_before)
-        assert len(resps) == 2
-        first_hashes = resps[0][LookupRespMsg.BLOCK_HASHES]
-        assert first_hashes == [b"hA"]
-        assert resps[0][LookupRespMsg.HITS] == [True]
-        assert resps[1][LookupRespMsg.BLOCK_HASHES] == [b"hB"]
-        assert resps[1][LookupRespMsg.HITS] == [True]
+        assert len(resps) == 1
+        assert resps[0][LookupRespMsg.BLOCK_HASHES] == [b"hA", b"hB"]
+        assert resps[0][LookupRespMsg.HITS] == [True, True]
 
         cs_calls = [c for c in cb.calls if c[0] == "create_store_job"]
         assert len(cs_calls) == 2
         assert cs_calls[0][1] == (b"hA",)
         assert cs_calls[1][1] == (b"hB",)
-        # finish_request fires once after the last resolve
+        # finish_request fires once after the aggregate resolve.
         assert sum(1 for c in cb.calls if c[0] == "finish_request") == 1
         assert b"hA" in session._server._outbound["req-1"].available
         assert b"hB" in session._server._outbound["req-1"].available
 
     def test_pending_timeout_replies_miss_no_store_job(self):
-        """A HIT_PENDING hash that stays pending past
-        ``_LOOKUP_PENDING_TIMEOUT_S`` is force-MISS and never pinned."""
-        from vllm.v1.kv_offload.tiering.p2p.session.server import (
-            _LOOKUP_PENDING_TIMEOUT_S,
-        )
-
+        """A HIT_PENDING hash that stays pending past the batch
+        ``deadline`` is force-MISS and never pinned; the deferred
+        aggregate response fires with hits=[False]."""
         cb = FakeCallbacks(pending={b"hA"})
         session, conn, _ = _make_session(tiering_callbacks=cb)
         _activate(session, conn)
@@ -781,12 +782,12 @@ class TestServerLookupHandling:
         sent_before = len(conn._sent)
         _send_lookup(conn, "req-1", [b"hA"])
         session.poll()
-        # Initial poll: nothing immediate, batch parked, no LookupRespMsg.
+        # Initial poll: nothing immediate, lookup parked, no LookupRespMsg.
         assert _lookup_resps(conn, sent_before) == []
 
-        # Forge timestamp to trigger the timeout branch.
+        # Forge the deadline into the past to trigger the timeout branch.
         lookup = next(iter(session._server._inbound_lookups.values()))
-        lookup.pending[b"hA"] = time.monotonic() - _LOOKUP_PENDING_TIMEOUT_S - 0.1
+        lookup.deadline = time.monotonic() - 0.1
 
         session.poll()
 

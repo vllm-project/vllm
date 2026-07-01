@@ -151,17 +151,30 @@ class _OutboundRequestState:
 class _LookupBlocks:
     """In-flight state for one inbound LookupMsg.
 
-    Tracks the synthetic ReqContext used for TieringCallbacks calls and
-    the still-unresolved hashes (HIT_PENDING / RETRY) so the resolver
-    sweep can re-poll and emit follow-up LookupRespMsgs as they settle.
-    Empty ``pending`` ⇒ all hashes have been answered to the peer; the
-    resolver sweep then calls ``finish_request(ctx)`` and drops the lookup.
+    Aggregates per-hash HIT/MISS resolutions and defers the single
+    outbound LookupRespMsg until every hash has been resolved or the
+    ``deadline`` fires (remaining ``pending`` hashes then force-MISS).
+    Exactly one LookupRespMsg is emitted per LookupMsg, carrying every
+    hash in the original wire order.
     """
 
     lookup_id: int
     kv_request_id: str
     ctx: ReqContext
-    pending: dict[OffloadKey, float] = field(default_factory=dict)
+    # Hashes from the inbound LookupMsg, preserved in wire order so
+    # the aggregated response goes back in the same order.
+    hashes: list[OffloadKey] = field(default_factory=list)
+    # Per-hash resolution: True = HIT, False = MISS. A hash is present
+    # here once definitively resolved; still-pending hashes are only
+    # in ``pending``.
+    resolved: dict[OffloadKey, bool] = field(default_factory=dict)
+    # Hashes still awaiting resolution (HIT_PENDING / RETRY from
+    # ``cb.lookup``); re-polled by ``_resolve_pending_lookups``.
+    pending: set[OffloadKey] = field(default_factory=set)
+    # Absolute deadline (``time.monotonic``). Once reached, remaining
+    # ``pending`` hashes are force-resolved to MISS so the consumer
+    # can fall back instead of waiting on a stuck producer.
+    deadline: float = 0.0
 
 
 class ServerRole:
@@ -296,15 +309,19 @@ class ServerRole:
     ) -> None:
         """Handle a LookupMsg from a symmetric-P2P consumer.
 
-        For each hash, query the TieringManager via ``cb.lookup``.
-        Immediate HIT/MISS resolutions are batched into one
-        ``LookupRespMsg`` and the HITs are pinned via ``cb.create_store_job``,
-        plumbed into the existing ``add_stored_blocks`` matching path so
-        the eventual FetchMsg finds them. HIT_PENDING and RETRY hashes
-        park in :class:`_LookupBlocks` for re-polling by
-        :meth:`_resolve_pending_lookups`. When every hash in the
-        lookup has settled, ``cb.finish_request`` is fired and the
-        lookup is dropped.
+        For each hash, query the TieringManager via ``cb.lookup`` and
+        pin any HITs immediately via ``cb.create_store_job`` (plumbed
+        into the existing ``add_stored_blocks`` matching path so the
+        eventual FetchMsg finds them). HIT_PENDING / RETRY hashes park
+        in :class:`_LookupBlocks` for re-polling by
+        :meth:`_resolve_pending_lookups`.
+
+        The outbound ``LookupRespMsg`` is deferred until every hash in
+        the LookupMsg has settled to HIT or MISS (or the batch-level
+        ``deadline`` fires, forcing any stragglers to MISS). One
+        LookupRespMsg goes out per LookupMsg — carrying every hash in
+        wire order — after which ``cb.finish_request`` fires and the
+        entry is dropped.
         """
         self._lookup_id_counter += 1
         lookup_id = self._lookup_id_counter
@@ -313,45 +330,37 @@ class ServerRole:
             lookup_id=lookup_id,
             kv_request_id=kv_request_id,
             ctx=ctx,
+            hashes=list(block_hashes),
+            deadline=time.monotonic() + _LOOKUP_PENDING_TIMEOUT_S,
         )
 
         hit_hashes: list[OffloadKey] = []
-        miss_hashes: list[OffloadKey] = []
-        now = time.monotonic()
-        for h in block_hashes:
+        for h in lookup.hashes:
+            if h in lookup.resolved or h in lookup.pending:
+                # Duplicate hash within the LookupMsg — its state has
+                # already been established on the first sighting.
+                continue
             result = self._cb.lookup(h, ctx)
             if result is LookupResult.HIT:
                 hit_hashes.append(h)
+                lookup.resolved[h] = True
             elif result is LookupResult.MISS:
-                miss_hashes.append(h)
+                lookup.resolved[h] = False
             else:
                 # HIT_PENDING / RETRY — defer until the next poll tick
                 # gives the underlying primary write or promotion time
                 # to settle.
-                lookup.pending[h] = now
+                lookup.pending.add(h)
 
         if hit_hashes:
             self._pin_and_register_hits(kv_request_id, hit_hashes, ctx)
 
-        resolved_hashes = hit_hashes + miss_hashes
-        if resolved_hashes:
-            resolved_hits = [True] * len(hit_hashes) + [False] * len(miss_hashes)
-            self._send(
-                {
-                    TYPE_KEY: LookupRespMsg.TYPE,
-                    LookupRespMsg.KV_REQUEST_ID: kv_request_id,
-                    LookupRespMsg.BLOCK_HASHES: resolved_hashes,
-                    LookupRespMsg.HITS: resolved_hits,
-                }
-            )
-
         if lookup.pending:
             self._inbound_lookups[lookup_id] = lookup
         else:
-            # Every hash resolved on first sight — close the synthetic
-            # request immediately so the TieringManager doesn't keep
-            # any per-request state around.
-            self._cb.finish_request(ctx)
+            # Every hash resolved on first sight — emit the aggregated
+            # response now and close the synthetic request.
+            self._finalize_lookup(lookup)
 
     def _pin_and_register_hits(
         self,
@@ -376,57 +385,69 @@ class ServerRole:
         )
 
     def _resolve_pending_lookups(self) -> None:
-        """Re-poll deferred LookupMsg hashes; emit follow-up responses.
+        """Re-poll deferred LookupMsg hashes; finalize when ready.
 
         Walks every parked :class:`_LookupBlocks` and re-calls
-        ``cb.lookup`` per remaining hash. HIT/MISS resolutions are
-        accumulated per lookup and sent as one follow-up LookupRespMsg;
-        HIT/HIT_PENDING/RETRY hashes that have been pending past
-        ``_LOOKUP_PENDING_TIMEOUT_S`` are forced to MISS so the consumer
+        ``cb.lookup`` per still-pending hash, moving HIT/MISS results
+        into ``resolved``. If ``deadline`` has passed, remaining
+        ``pending`` hashes are force-resolved to MISS so the consumer
         can fall back instead of waiting on a stuck producer. Newly-HIT
-        hashes are pinned via ``cb.create_store_job`` in one batch per
-        affected ``kv_request_id``. Batches whose ``pending`` empties
-        out fire ``finish_request`` and are dropped.
+        hashes are pinned via ``cb.create_store_job`` in one call per
+        affected ``kv_request_id``. Lookups whose ``pending`` empties
+        out get their aggregated LookupRespMsg sent by
+        :meth:`_finalize_lookup`.
         """
         if not self._inbound_lookups:
             return
-        deadline = time.monotonic() - _LOOKUP_PENDING_TIMEOUT_S
+        now = time.monotonic()
         finished_lookups: list[int] = []
         for lookup_id, lookup in self._inbound_lookups.items():
             new_hits: list[OffloadKey] = []
-            new_misses: list[OffloadKey] = []
-            for h, started_at in list(lookup.pending.items()):
+            for h in list(lookup.pending):
                 result = self._cb.lookup(h, lookup.ctx)
                 if result is LookupResult.HIT:
                     new_hits.append(h)
-                    del lookup.pending[h]
-                elif result is LookupResult.MISS or started_at <= deadline:
-                    new_misses.append(h)
-                    del lookup.pending[h]
-                # else still HIT_PENDING / RETRY within the deadline:
-                # leave the entry to try again next tick.
+                    lookup.resolved[h] = True
+                    lookup.pending.discard(h)
+                elif result is LookupResult.MISS:
+                    lookup.resolved[h] = False
+                    lookup.pending.discard(h)
+                # else still HIT_PENDING / RETRY: leave for next tick,
+                # unless the deadline forces MISS below.
+
+            if lookup.pending and now >= lookup.deadline:
+                for h in lookup.pending:
+                    lookup.resolved[h] = False
+                lookup.pending.clear()
 
             if new_hits:
                 self._pin_and_register_hits(lookup.kv_request_id, new_hits, lookup.ctx)
-
-            if new_hits or new_misses:
-                resolved_hashes = new_hits + new_misses
-                resolved_hits = [True] * len(new_hits) + [False] * len(new_misses)
-                self._send(
-                    {
-                        TYPE_KEY: LookupRespMsg.TYPE,
-                        LookupRespMsg.KV_REQUEST_ID: lookup.kv_request_id,
-                        LookupRespMsg.BLOCK_HASHES: resolved_hashes,
-                        LookupRespMsg.HITS: resolved_hits,
-                    }
-                )
 
             if not lookup.pending:
                 finished_lookups.append(lookup_id)
 
         for lookup_id in finished_lookups:
             lookup = self._inbound_lookups.pop(lookup_id)
-            self._cb.finish_request(lookup.ctx)
+            self._finalize_lookup(lookup)
+
+    def _finalize_lookup(self, lookup: _LookupBlocks) -> None:
+        """Emit the aggregated LookupRespMsg and close the synthetic request.
+
+        Called once per lookup when ``pending`` is empty — either every
+        hash resolved to HIT or MISS, or the deadline forced remaining
+        stragglers to MISS. Preserves the wire order of the inbound
+        LookupMsg so the client can zip hashes and hits positionally.
+        """
+        if lookup.hashes:
+            self._send(
+                {
+                    TYPE_KEY: LookupRespMsg.TYPE,
+                    LookupRespMsg.KV_REQUEST_ID: lookup.kv_request_id,
+                    LookupRespMsg.BLOCK_HASHES: list(lookup.hashes),
+                    LookupRespMsg.HITS: [lookup.resolved[h] for h in lookup.hashes],
+                }
+            )
+        self._cb.finish_request(lookup.ctx)
 
     def finish(self, kv_request_id: str) -> None:
         """Mark an outbound request finishing.
