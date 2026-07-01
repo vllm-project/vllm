@@ -238,6 +238,8 @@ def make_deepep_v2_a2a(
 
     from vllm.utils.nccl import query_nccl_gin_type
 
+    # Unfortunately we can't check GIN availability until the process
+    # group has a live ncclComm_t, so raise here to skip in parallel_launch.
     gin_type = query_nccl_gin_type(pg)
     if gin_type is None or gin_type == 0:
         raise GINNotAvailableError(f"NCCL GIN not available (ginType={gin_type})")

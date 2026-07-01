@@ -136,5 +136,4 @@ def query_nccl_gin_type(
         logger.warning("ncclCommQueryProperties returned error %d", result)
         return None
 
-    logger.info("NCCL GIN type: %d", props.ginType)
     return props.ginType
