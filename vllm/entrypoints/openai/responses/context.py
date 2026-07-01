@@ -349,6 +349,7 @@ class ParsableContext(ConversationContext):
                     reasoning=reasoning,
                     content=content,
                     tool_calls=tool_calls,
+                    tools=self.request.tools,
                 )
             )
         elif completion.text:
