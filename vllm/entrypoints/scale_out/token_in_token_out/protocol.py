@@ -224,9 +224,7 @@ class GenerateResponse(BaseModel):
     model: str | None = None
     created: int | None = None
     choices: list[GenerateResponseChoice]
-
     usage: UsageInfo | None = None
-
     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
 
     kv_transfer_params: dict[str, Any] | None = Field(
