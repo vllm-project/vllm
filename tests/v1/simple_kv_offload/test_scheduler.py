@@ -1917,8 +1917,7 @@ def test_in_flight_store_protected() -> None:
     for bhash in req_a.block_hashes[:2]:
         bhash_with_group = make_block_hash_with_group_id(bhash, 0)
         assert (
-            cpu_pool.cached_block_hash_to_block.get_one_block(bhash_with_group)
-            is None
+            cpu_pool.cached_block_hash_to_block.get_one_block(bhash_with_group) is None
         ), "req_a block should be evicted by req_c's get_new_blocks"
 
     # Attempt to store req_d (2 blocks) while req_c is in-flight.
@@ -1941,9 +1940,7 @@ def test_in_flight_store_protected() -> None:
     # The 4 usable CPU blocks are block_ids 1-4 (block 0 is null_block).
     for blk_id in range(1, 5):
         blk = cpu_pool.blocks[blk_id]
-        assert blk.ref_cnt == 1, (
-            f"CPU block {blk_id} should have ref_cnt=1 (in-flight)"
-        )
+        assert blk.ref_cnt == 1, f"CPU block {blk_id} should have ref_cnt=1 (in-flight)"
 
     # Now complete req_c's store.
     simulate_store_completion(sched, meta2.store_event)
@@ -2040,8 +2037,7 @@ def test_active_request_blocks_can_be_evicted() -> None:
     for bhash in req_a.block_hashes[:2]:
         bhash_with_group = make_block_hash_with_group_id(bhash, 0)
         assert (
-            cpu_pool.cached_block_hash_to_block.get_one_block(bhash_with_group)
-            is None
+            cpu_pool.cached_block_hash_to_block.get_one_block(bhash_with_group) is None
         ), "req_a block (active, not finished) should be evicted by req_c's store"
 
     # Verify: req_b's blocks survive (at MRU tail).
