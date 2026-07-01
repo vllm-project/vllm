@@ -323,7 +323,7 @@ An attacker who can reach the gRPC port can:
 
 1. **Run arbitrary inference** via the `Generate` and `GenerateStream` RPCs without any credentials
 2. **Consume GPU and compute resources** by submitting unbounded generation requests
-
+3. **Cause Denial of Service** by exploiting bugs in the gRPC interface that can crash vLLM.
 ### Recommendations
 
 - Only enable `--grpc-port` when you have a specific need for gRPC-based inference
