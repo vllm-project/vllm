@@ -108,6 +108,7 @@ def _trtllm_prefill_attn_kvfp8_dequant(
     src_stride_kv,
     src_stride_head,
     src_stride_block,
+    src_stride_head_size,
     DST_K_CACHE_STRIDE: tl.constexpr,
     DST_KV_CACHE_STRIDE: tl.constexpr,
     HEAD_STRIDE: tl.constexpr,
@@ -127,9 +128,9 @@ def _trtllm_prefill_attn_kvfp8_dequant(
     v_scale_val = tl.load(v_scale_ptr)
 
     mock_page_idx = batch_idx * block_table_stride + mock_block_table_idx + 1
-    elem_offsets = tl.arange(0, HEAD_STRIDE)
-    block_offsets = elem_offsets // HEAD_SIZE
-    head_offsets = elem_offsets % HEAD_SIZE
+    logical_offsets = tl.arange(0, HEAD_STRIDE)
+    block_offsets = logical_offsets // HEAD_SIZE
+    head_size_offsets = logical_offsets % HEAD_SIZE
 
     for h in range(NUM_KV_HEADS):
         h_off = tl.cast(h, tl.int64)
@@ -139,13 +140,13 @@ def _trtllm_prefill_attn_kvfp8_dequant(
             orig_page_num * src_stride_page
             + h_off * src_stride_head
             + block_offsets * src_stride_block
-            + head_offsets
+            + head_size_offsets * src_stride_head_size
         )
         fp8_k = tl.load(kv_cache_ptr + src_k)
         dequant_k = (fp8_k.to(tl.float32) * k_scale_val).to(dequant_dtype)
 
         # Write K to contiguous mock cache
-        dst_k = mock_page_idx * DST_KV_CACHE_STRIDE + h * HEAD_STRIDE + elem_offsets
+        dst_k = mock_page_idx * DST_KV_CACHE_STRIDE + h * HEAD_STRIDE + logical_offsets
         tl.store(mock_kv_cache_ptr + dst_k, dequant_k)
 
         # Read V from source (offset by src_stride_kv for the V half)
@@ -154,7 +155,7 @@ def _trtllm_prefill_attn_kvfp8_dequant(
             + src_stride_kv
             + h_off * src_stride_head
             + block_offsets * src_stride_block
-            + head_offsets
+            + head_size_offsets * src_stride_head_size
         )
         fp8_v = tl.load(kv_cache_ptr + src_v)
         dequant_v = (fp8_v.to(tl.float32) * v_scale_val).to(dequant_dtype)
@@ -164,7 +165,7 @@ def _trtllm_prefill_attn_kvfp8_dequant(
             mock_page_idx * DST_KV_CACHE_STRIDE
             + DST_K_CACHE_STRIDE
             + h * HEAD_STRIDE
-            + elem_offsets
+            + logical_offsets
         )
         tl.store(mock_kv_cache_ptr + dst_v, dequant_v)
 
@@ -181,16 +182,13 @@ def trtllm_prefill_attn_kvfp8_dequant(
     assert s[1] == 2
     assert dequant_dtype in (torch.bfloat16, torch.float16)
 
+    # Logical source layout is (B, 2, H, N, D). The tensor may be a
+    # non-contiguous view, so the Triton kernel indexes it with actual strides.
+    strides = kv_cache.stride()
     num_kv_heads, block_size, head_size = s[2], s[3], s[4]
     head_stride = block_size * head_size
     k_cache_stride = num_kv_heads * head_stride
     kv_cache_stride = k_cache_stride * s[1]
-
-    strides = kv_cache.stride()
-    assert strides[4] == 1, (
-        "For kv cache layouts, the head_size dimension must be contiguous, "
-        f"got strides {strides}"
-    )
 
     new_s = (batch_size * num_of_page_per_token + 1, s[1], s[2], s[3], s[4])
     # mock kv cache contains just the pages needed by this prefill
@@ -214,6 +212,7 @@ def trtllm_prefill_attn_kvfp8_dequant(
         strides[1],
         strides[2],
         strides[3],
+        strides[4],
         k_cache_stride,
         kv_cache_stride,
         head_stride,
@@ -403,7 +402,7 @@ class FlashInferBackend(AttentionBackend):
         include_num_layers_dimension: bool = False,
     ) -> tuple[int, ...]:
         # `stride_order` indicates the permutation that gets us from
-        # `get_kv_cache_shape` (logical (B, H, N, 2*C)) to the actual memory
+        # `get_kv_cache_shape` (logical (B, H, N, 2*hs)) to the actual memory
         # layout we want.
         cache_layout = get_kv_cache_layout()
         if cache_layout == "NHD" and include_num_layers_dimension:
@@ -1571,15 +1570,16 @@ class FlashInferImpl(AttentionImpl):
             assert attn_metadata.cascade_wrapper is not None
             stride_order = FlashInferBackend.get_kv_cache_stride_order()
             if self.is_kvcache_nvfp4:
-                k_cache, v_cache = kv_cache.split(self.num_kv_heads, dim=1)
-                kv_tuple = (
-                    canonicalize_singleton_dim_strides(k_cache.permute(*stride_order)),
-                    canonicalize_singleton_dim_strides(v_cache.permute(*stride_order)),
+                kv_cache_views = tuple(
+                    cache.permute(*stride_order)
+                    for cache in kv_cache.split(self.num_kv_heads, dim=1)
                 )
             else:
                 kv_perm = kv_cache.permute(*stride_order)
-                kv_perm = canonicalize_singleton_dim_strides(kv_perm)
-                kv_tuple = kv_perm.split(self.head_size, dim=-1)
+                kv_cache_views = kv_perm.split(self.head_size, dim=-1)
+            kv_tuple = tuple(
+                canonicalize_singleton_dim_strides(cache) for cache in kv_cache_views
+            )
             output.copy_(attn_metadata.cascade_wrapper.run(query, kv_tuple))
             return output
 
@@ -1968,7 +1968,9 @@ class FlashInferImpl(AttentionImpl):
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
             if self.is_kvcache_nvfp4:
-                # (B, 2*H, N, full_dim) -> ((B, N, H, full_dim), ...)
+                # (B, 2*H, N, full_dim) -> ((B, N, H, full_dim),
+                #                            (B, N, H, full_dim));
+                # K heads first, then V heads.
                 k_cache, v_cache = kv_cache.transpose(1, 2).split(
                     self.num_kv_heads, dim=-2
                 )

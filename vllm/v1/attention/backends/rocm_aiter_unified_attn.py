@@ -85,7 +85,7 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        # K and V are packed into the content dim: logical (B, H, N, 2*C).
+        # K and V are packed into the content dim: logical (B, H, N, 2*hs).
         return (num_blocks, num_kv_heads, block_size, 2 * head_size)
 
     @staticmethod

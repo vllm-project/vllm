@@ -104,7 +104,7 @@ class MiniMaxM3SparseBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        # K and V are packed into the content dim: logical (B, H, N, 2*C).
+        # K and V are packed into the content dim: logical (B, H, N, 2*hs).
         return (num_blocks, num_kv_heads, block_size, 2 * head_size)
 
     @staticmethod
@@ -112,7 +112,7 @@ class MiniMaxM3SparseBackend(AttentionBackend):
         include_num_layers_dimension: bool = False,
     ) -> tuple[int, ...]:
         # `stride_order` indicates the permutation that gets us from
-        # `get_kv_cache_shape` (logical (B, H, N, 2*C)) to the actual memory
+        # `get_kv_cache_shape` (logical (B, H, N, 2*hs)) to the actual memory
         # layout we want.
         if include_num_layers_dimension:
             raise NotImplementedError  # no cross-layer KV blocks in M3

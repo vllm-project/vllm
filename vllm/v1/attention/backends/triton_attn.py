@@ -303,7 +303,7 @@ class TritonAttentionBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        # K and V are packed into the content dim: logical (B, H, N, 2*C).
+        # K and V are packed into the content dim: logical (B, H, N, 2*hs).
         if kv_cache_uses_per_token_head_scales(cache_dtype_str):
             # Pad the head dim by sizeof(float32)/sizeof(cache_dtype) so the
             # per-(token, head) scale fits inline after the quantized data;
@@ -330,7 +330,7 @@ class TritonAttentionBackend(AttentionBackend):
         include_num_layers_dimension: bool = False,
     ) -> tuple[int, ...]:
         # `stride_order` indicates the permutation that gets us from
-        # `get_kv_cache_shape` (logical (B, H, N, 2*C)) to the actual memory
+        # `get_kv_cache_shape` (logical (B, H, N, 2*hs)) to the actual memory
         # layout we want.
         cache_layout = get_kv_cache_layout()
         if cache_layout == "NHD" and include_num_layers_dimension:
@@ -612,7 +612,7 @@ class TritonAttentionImpl(AttentionImpl):
                 layer,
             )
 
-        # KV cache arrives in logical (B, H, N, 2*C) order.
+        # KV cache arrives in logical (B, H, N, 2*hs) order.
         # Per-token-head quantized KV cache: handled by the core unified
         # kernel, which dequantizes per-(token, head) inline via constexpr
         # branches (INT8 / FP8) and dispatches to the packed INT4 kernel.

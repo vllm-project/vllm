@@ -130,7 +130,7 @@ class FlexAttentionBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        # K and V are packed into the content dim: logical (B, H, N, 2*C).
+        # K and V are packed into the content dim: logical (B, H, N, 2*hs).
         return (num_blocks, num_kv_heads, block_size, 2 * head_size)
 
     @staticmethod

@@ -495,6 +495,9 @@ def _test_backend_correctness(
             except (AttributeError, NotImplementedError):
                 stride_order = tuple(range(kv_cache.ndim))
             if stride_order != tuple(range(kv_cache.ndim)):
+                # Apply stride order like runtime does in
+                # _reshape_kv_cache (attn_utils.py:182-210): permute to physical
+                # layout, make contiguous, then permute to logical layout.
                 inv_order = [stride_order.index(i) for i in range(len(stride_order))]
                 kv_cache_for_backend = (
                     kv_cache.permute(*stride_order).contiguous().permute(*inv_order)

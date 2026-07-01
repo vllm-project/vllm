@@ -1745,10 +1745,6 @@ def _run_abort_timeout_test(llm: LLM, timeout: int):
                 reason="Attention backend FLASH_ATTN is not supported on ROCm",
             ),
         ),
-        pytest.param(
-            "ROCM_ATTN",
-            marks=pytest.mark.skip(reason="ROCM_ATTN does not support KV connectors"),
-        ),
         "TRITON_ATTN",
     ],
 )
