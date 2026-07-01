@@ -59,7 +59,6 @@ from vllm.model_executor.models.transformers.utils import (
     log_replacement,
     replace_conv_class,
     replace_linear_class,
-    replace_rms_norm_class,
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -434,7 +433,7 @@ class Base(
         - Attention QKV projections with a fused `QKVParallelLinear` + split
         - `nn.Linear` with vLLM's tensor parallel linear classes
         - `nn.Conv2d` / `nn.Conv3d` with vLLM's `Conv2d` / `Conv3d`
-        - `*RMSNorm` with vLLM's `RMSNorm`
+        - RMSNorm (detected from their dataflow) with vLLM's `RMSNorm`or `GemmaRMSNorm`
         """
         tp_plan = self.model.tp_plan
 
@@ -498,10 +497,6 @@ class Base(
                     )
                 elif isinstance(child_module, (nn.Conv2d, nn.Conv3d)):
                     new_module = replace_conv_class(child_module)
-                elif child_module.__class__.__name__.endswith("RMSNorm"):
-                    new_module = replace_rms_norm_class(
-                        child_module, self.text_config.hidden_size
-                    )
                 elif (fuser := fusers[child_module]) is not None:
                     register_fusion(fuser, qual_name)
                     new_module = fuser.fuse(
