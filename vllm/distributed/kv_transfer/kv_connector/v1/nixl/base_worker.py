@@ -404,6 +404,11 @@ class NixlBaseConnectorWorker:
         # Number of NIXL regions. Currently one region per cache
         # (so 1 per layer for MLA, otherwise 2 per layer)
         self.num_regions = 0
+        self.region_mem_types: list[str] = []
+        self._mixed_mem_types = False
+        self._desc_is_dram_by_block_size: dict[int, np.ndarray] = {}
+        self._desc_pos_by_block_size: dict[int, np.ndarray] = {}
+        self._dram_src_handles_by_block_size: dict[int, int] = {}
 
         # nixl_prepped_dlist_handle.
         self.src_xfer_handles_by_block_size: dict[int, int] = {}
@@ -982,6 +987,7 @@ class NixlBaseConnectorWorker:
         )
 
         caches_data = []
+        region_mem_types: list[str] = []
         # With hybrid allocator, layers can share a kv cache tensor
         seen_base_addresses = []
 
@@ -1091,10 +1097,17 @@ class NixlBaseConnectorWorker:
 
                 # Need to make sure the device ID is non-negative for NIXL,
                 # Torch uses -1 to indicate CPU tensors.
-                self.device_id = max(cache.get_device(), 0)
+                if cache.device.type == "cpu":
+                    mem_type = "DRAM"
+                    region_device_id = 0
+                else:
+                    mem_type = self.nixl_memory_type
+                    region_device_id = max(cache.get_device(), 0)
+                    self.device_id = region_device_id
                 caches_data.append(
-                    (base_addr, curr_tensor_size_bytes, self.device_id, "")
+                    (base_addr, curr_tensor_size_bytes, region_device_id, "")
                 )
+                region_mem_types.append(mem_type)
 
         logger.debug(
             "Different block lengths collected: %s", set(self.block_len_per_layer)
@@ -1107,6 +1120,7 @@ class NixlBaseConnectorWorker:
 
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
         self.num_regions = len(caches_data)
+        self.region_mem_types = region_mem_types
 
         if self.transfer_topo.virtually_split_kv_in_blocks:
             # NOTE (NickLucche) When FlashInfer is used, memory is registered
@@ -1127,11 +1141,32 @@ class NixlBaseConnectorWorker:
         # Total local FA descriptors (boundary between FA and mamba descs).
         self.num_descs = self.num_regions * self.num_blocks
 
-        descs = self.nixl_wrapper.get_reg_descs(caches_data, self.nixl_memory_type)
-        logger.debug("Registering descs: %s", caches_data)
-        self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
-        logger.debug("Done registering descs")
-        self._registered_descs.append(descs)
+        self._mixed_mem_types = len(set(region_mem_types)) > 1
+        if self._mixed_mem_types:
+            assert self.use_mla and not self._has_mamba, (
+                "Mixed-device KV registration is only supported for MLA "
+                "models without Mamba layers."
+            )
+            assert not self.transfer_topo.is_kv_layout_blocks_first, (
+                "Mixed-device KV registration does not support blocks-first "
+                "KV layouts."
+            )
+            assert not self.use_host_buffer
+            for mem_type in sorted(set(region_mem_types)):
+                typed = [
+                    cache
+                    for cache, cache_mem_type in zip(caches_data, region_mem_types)
+                    if cache_mem_type == mem_type
+                ]
+                descs = self.nixl_wrapper.get_reg_descs(typed, mem_type)
+                self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
+                self._registered_descs.append(descs)
+        else:
+            descs = self.nixl_wrapper.get_reg_descs(caches_data, self.nixl_memory_type)
+            logger.debug("Registering descs: %s", caches_data)
+            self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
+            logger.debug("Done registering descs")
+            self._registered_descs.append(descs)
 
         self.device_kv_caches = kv_caches
         self.dst_num_blocks[self.engine_id] = self.num_blocks
@@ -1401,6 +1436,52 @@ class NixlBaseConnectorWorker:
             logger.debug("Registering local Mamba descriptors (4 regions/layer)")
             blocks_data.extend(
                 self._build_mamba_local(local_base_addresses, block_size_ratio)
+            )
+
+        if self._mixed_mem_types:
+            assert self.region_mem_types
+            assert len(blocks_data) % len(self.region_mem_types) == 0
+            blocks_per_region = len(blocks_data) // len(self.region_mem_types)
+            desc_is_dram = np.array(
+                [
+                    mem_type == "DRAM"
+                    for mem_type in self.region_mem_types
+                    for _ in range(blocks_per_region)
+                ],
+                dtype=bool,
+            )
+            desc_pos = np.empty(len(desc_is_dram), dtype=np.int64)
+            dram_idx = np.where(desc_is_dram)[0]
+            vram_idx = np.where(~desc_is_dram)[0]
+            desc_pos[dram_idx] = np.arange(len(dram_idx), dtype=np.int64)
+            desc_pos[vram_idx] = np.arange(len(vram_idx), dtype=np.int64)
+            self._desc_is_dram_by_block_size[block_size] = desc_is_dram
+            self._desc_pos_by_block_size[block_size] = desc_pos
+
+            # _build_fa_local stamps every descriptor with self.device_id (the
+            # local GPU index). Host (DRAM) MLA regions are registered under CPU
+            # device_id 0, so their xfer descriptors must also use 0 — otherwise
+            # prep_xfer_dlist("DRAM", ...) raises NIXL_ERR_NOT_FOUND on every TP
+            # rank whose GPU index != 0 (i.e. all ranks but rank 0).
+            blocks_data = [
+                (addr, length, 0) if is_dram else (addr, length, dev)
+                for (addr, length, dev), is_dram in zip(
+                    blocks_data, desc_is_dram, strict=True
+                )
+            ]
+            dram_blocks = [blocks_data[i] for i in dram_idx]
+            vram_blocks = [blocks_data[i] for i in vram_idx]
+            if dram_blocks:
+                dram_descs = self.nixl_wrapper.get_xfer_descs(dram_blocks, "DRAM")
+                self._dram_src_handles_by_block_size[block_size] = (
+                    self.nixl_wrapper.prep_xfer_dlist(
+                        "NIXL_INIT_AGENT", dram_descs
+                    )
+                )
+            descs = self.nixl_wrapper.get_xfer_descs(vram_blocks, self.nixl_memory_type)
+            return (
+                self.nixl_wrapper.prep_xfer_dlist("NIXL_INIT_AGENT", descs),
+                blocks_data,
             )
 
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)

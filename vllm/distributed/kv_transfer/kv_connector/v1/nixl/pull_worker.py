@@ -300,6 +300,17 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         # Prepare transfer with Nixl.
         handle = None
         try:
+            if self._mixed_mem_types:
+                self._read_blocks_mixed(
+                    request_id=request_id,
+                    local_block_size_key=remote_info.remote_block_size,
+                    local_vram_handle=local_xfer_side_handle,
+                    remote_xfer_side_handle=remote_xfer_side_handle,
+                    local_block_descs_ids=local_block_descs_ids,
+                    remote_block_descs_ids=remote_block_descs_ids,
+                )
+                return
+
             handle = self.nixl_wrapper.make_prepped_xfer(
                 "READ",
                 local_xfer_side_handle,
@@ -325,6 +336,40 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                 remote_rank=remote_rank,
             )
             self._handle_failed_transfer(request_id, handle)
+
+    def _read_blocks_mixed(
+        self,
+        request_id: str,
+        local_block_size_key: int,
+        local_vram_handle: int,
+        remote_xfer_side_handle: int,
+        local_block_descs_ids: np.ndarray,
+        remote_block_descs_ids: np.ndarray,
+    ) -> None:
+        """Split a READ into DRAM and VRAM local descriptor lists."""
+        desc_is_dram = self._desc_is_dram_by_block_size[local_block_size_key]
+        desc_pos = self._desc_pos_by_block_size[local_block_size_key]
+        dram_handle = self._dram_src_handles_by_block_size[local_block_size_key]
+
+        local_ids = np.asarray(local_block_descs_ids)
+        remote_ids = np.asarray(remote_block_descs_ids)
+        is_dram = desc_is_dram[local_ids]
+
+        for type_mask, local_handle in (
+            (is_dram, dram_handle),
+            (~is_dram, local_vram_handle),
+        ):
+            if not type_mask.any():
+                continue
+            handle = self.nixl_wrapper.make_prepped_xfer(
+                "READ",
+                local_handle,
+                desc_pos[local_ids[type_mask]],
+                remote_xfer_side_handle,
+                remote_ids[type_mask],
+            )
+            self.nixl_wrapper.transfer(handle)
+            self._recving_transfers[request_id].append(handle)
 
     def _get_new_notifs(self) -> set[str]:
         """
