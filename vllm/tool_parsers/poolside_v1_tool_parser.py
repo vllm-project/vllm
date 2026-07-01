@@ -443,7 +443,11 @@ class PoolsideV1ToolParser(ToolParser):
 
         tool_calls = list(pending_deltas.values())
         if content is None and len(tool_calls) == 0:
-            if request.logprobs:
+            wants_logprobs = getattr(request, "logprobs", None) or (
+                isinstance(request, ResponsesRequest)
+                and request.is_include_output_logprobs()
+            )
+            if wants_logprobs:
                 return DeltaMessage(content="")
             return None
         return DeltaMessage(content=content, tool_calls=tool_calls)

@@ -42,6 +42,7 @@ from vllm.v1.kv_offload.base import (
     OffloadPolicy,
     ReqContext,
     RequestOffloadingContext,
+    ScheduleEndContext,
     make_offload_key,
 )
 from vllm.v1.outputs import KVConnectorOutput
@@ -1027,7 +1028,11 @@ class OffloadingConnectorScheduler:
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         self._update_req_states(scheduler_output)
-        self.manager.on_schedule_end()
+        schedule_end_context = ScheduleEndContext(
+            new_req_ids=[req.req_id for req in scheduler_output.scheduled_new_reqs],
+            preempted_req_ids=scheduler_output.preempted_req_ids or (),
+        )
+        self.manager.on_schedule_end(schedule_end_context)
 
         # Flush jobs for preempted requests.
         for req_id in scheduler_output.preempted_req_ids or ():
