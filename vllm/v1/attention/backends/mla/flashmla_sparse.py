@@ -592,8 +592,8 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
     # need_to_return_lse_for_decode is derived in AttentionImplBase.__new__ as
     # (dcp_world_size > 1 and can_return_lse_for_decode); without this the DCP
     # assert in mla_attention.py fails closed. FlashMLA kernels emit base-e
-    # (natural-log) LSE, so the inherited is_lse_base_on_e=True is correct --
-    # do NOT copy FlashInfer's is_lse_base_on_e=False (would corrupt the merge).
+    # (natural-log) LSE, so the inherited lse_base_on_e=True is correct --
+    # do NOT copy FlashInfer's lse_base_on_e=False (would corrupt the merge).
     can_return_lse_for_decode: bool = True
 
     @staticmethod
