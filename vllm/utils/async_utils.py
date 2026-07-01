@@ -10,7 +10,7 @@ import asyncio
 import contextlib
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Future, Task
 from collections.abc import AsyncGenerator, Awaitable, Callable
-from concurrent.futures import Executor, ThreadPoolExecutor
+from concurrent.futures import Executor
 from functools import partial
 from typing import TYPE_CHECKING, TypeVar
 
