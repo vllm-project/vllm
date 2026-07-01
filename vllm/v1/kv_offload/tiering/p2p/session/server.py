@@ -257,6 +257,24 @@ class ServerRole:
     ) -> None:
         """Handle a FetchMsg from the peer.
 
+        In p2p mode FetchMsg is the server-side "request finished"
+        signal for ``kv_request_id``. Three consequences flow from that:
+
+        - No further ``cb.create_store_job`` will fire for this id:
+          parked ``_inbound_lookups`` are popped here (via
+          ``_finish_inbound_lookups``) before the same poll tick's
+          ``collect_results`` calls ``_resolve_pending_lookups``, so
+          any HIT_PENDING / RETRY hash that would otherwise later
+          promote to HIT and pin a slot is dropped instead.
+        - All server-side lookup state for the id is cleaned up (the
+          ``_inbound_lookups`` entries themselves).
+        - ``cb.finish_request(lookup.ctx)`` fires so the TieringManager
+          can release per-lookup bookkeeping.
+
+        The client contract guarantees exactly one FetchMsg per
+        lookup-touched request — including an empty one when no
+        blocks end up being fetched.
+
         Raises ``ValueError`` on a duplicate fetch for the same
         ``kv_request_id``; the coordinator's dispatch loop turns that
         into a protocol-error disconnect.
@@ -277,6 +295,12 @@ class ServerRole:
         result = req.add_fetch_demand(block_hashes, block_indexes)
         if result.local_idxs:
             self._submit_transfer(kv_request_id, result)
+        # Close the peer's request as far as the server's lookup phase
+        # is concerned: pop parked lookups so no further
+        # ``cb.create_store_job`` fires for this id, and fire
+        # ``cb.finish_request`` on each. Done before the finalize path
+        # below so bookkeeping releases in-order.
+        self._finish_inbound_lookups(kv_request_id)
         # Prefiller-first mode: finish_request may have run before
         # fetch arrived. If so, finalize once we know what was
         # demanded — fully satisfied → success, else early-fail.
@@ -449,6 +473,33 @@ class ServerRole:
             )
         self._cb.finish_request(lookup.ctx)
 
+    def _finish_inbound_lookups(self, kv_request_id: str) -> None:
+        """Close the server-side lookup phase for ``kv_request_id``.
+
+        Pops every parked ``_LookupBlocks`` for this id (so
+        ``_resolve_pending_lookups`` cannot promote a HIT_PENDING /
+        RETRY hash into a fresh ``cb.create_store_job`` after this
+        point) and fires ``cb.finish_request(lookup.ctx)`` on each so
+        the TieringManager can release per-lookup bookkeeping. The
+        aggregated LookupRespMsg is skipped — the client already knows
+        the request is over (it just sent a terminal FetchMsg, or is
+        finishing locally).
+
+        Called on the two events that mean "no more lookup traffic for
+        ``kv_request_id`` is expected on this session": the terminal
+        FetchMsg from the peer (client contract: exactly one FetchMsg
+        per lookup-touched request, even if empty), and a local
+        ``finish``. Whichever fires second is a no-op.
+        """
+        finished_lookup_ids = [
+            lid
+            for lid, lu in self._inbound_lookups.items()
+            if lu.kv_request_id == kv_request_id
+        ]
+        for lid in finished_lookup_ids:
+            lookup = self._inbound_lookups.pop(lid)
+            self._cb.finish_request(lookup.ctx)
+
     def finish(self, kv_request_id: str) -> None:
         """Mark an outbound request finishing.
 
@@ -470,14 +521,7 @@ class ServerRole:
         If inflight transfers exist for this id, defer — the last
         completing transfer in collect_results will fire the message.
         """
-        finished_lookups = [
-            bid
-            for bid, b in self._inbound_lookups.items()
-            if b.kv_request_id == kv_request_id
-        ]
-        for bid in finished_lookups:
-            lookup = self._inbound_lookups.pop(bid)
-            self._cb.finish_request(lookup.ctx)
+        self._finish_inbound_lookups(kv_request_id)
 
         req = self._outbound.get(kv_request_id)
         if req is None:

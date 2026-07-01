@@ -614,6 +614,58 @@ class TestLookupFlow:
         assert ("req-1", b"hB") not in session._client._lookups
         assert ("req-2", b"hC") in session._client._lookups
 
+    def test_finish_after_flushed_lookup_sends_empty_fetch(self):
+        """LookupMsg flushed but no FetchMsg sent (all-miss case) →
+        finish_request emits an empty FetchMsg so the peer can drop its
+        lookup state and call cb.finish_request."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        session.register_lookup("req-1", b"hA")
+        session.flush_pending_lookups()
+        sent_before = len(conn._sent)
+
+        session.finish_request("req-1")
+
+        fetches = [m for m in conn._sent[sent_before:] if m[TYPE_KEY] == FetchMsg.TYPE]
+        assert len(fetches) == 1
+        assert fetches[0][FetchMsg.KV_REQUEST_ID] == "req-1"
+        assert fetches[0][FetchMsg.BLOCK_HASHES] == []
+        assert fetches[0][FetchMsg.BLOCK_INDEXES] == []
+
+    def test_finish_without_flushed_lookup_sends_no_fetch(self):
+        """No LookupMsg was ever sent → finish_request must not emit an
+        empty FetchMsg (the peer has no state to release)."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        # Register but never flush.
+        session.register_lookup("req-1", b"hA")
+        sent_before = len(conn._sent)
+
+        session.finish_request("req-1")
+
+        fetches = [m for m in conn._sent[sent_before:] if m[TYPE_KEY] == FetchMsg.TYPE]
+        assert fetches == []
+
+    def test_finish_after_real_fetch_sends_no_second_fetch(self):
+        """A real FetchMsg was already sent for the id → finish_request
+        must not emit a second (empty) FetchMsg."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        session.register_lookup("req-1", b"hA")
+        session.flush_pending_lookups()
+        session.request_blocks(
+            job_id=1, kv_request_id="req-1", keys=[b"hA"], block_ids=[7]
+        )
+        sent_before = len(conn._sent)
+
+        session.finish_request("req-1")
+
+        fetches = [m for m in conn._sent[sent_before:] if m[TYPE_KEY] == FetchMsg.TYPE]
+        assert fetches == []
+
     def test_server_default_callbacks_replies_all_misses(self):
         """Default ``_AllMissCallbacks`` ⇒ incoming LookupMsg yields one
         LookupRespMsg with the same hashes and ``hits=[False, ...]``."""
@@ -853,6 +905,40 @@ class TestServerLookupHandling:
         # req-1 batch dropped, finish_request fired exactly once
         remaining_kv_request_ids = {
             b.kv_request_id for b in session._server._inbound_lookups.values()
+        }
+        assert remaining_kv_request_ids == {"req-2"}
+        finish_calls = [c for c in cb.calls if c[0] == "finish_request"]
+        assert len(finish_calls) == 1
+        assert ":req-1:" in finish_calls[0][1]
+
+    def test_incoming_fetch_drops_pending_lookups_for_kv_request_id(self):
+        """A peer FetchMsg terminates the lookup phase for its id: parked
+        _inbound_lookups with matching kv_request_id are dropped and their
+        ``cb.finish_request`` fires; other kv_request_ids are untouched."""
+        cb = FakeCallbacks(pending={b"hA", b"hB"})
+        session, conn, _ = _make_session(tiering_callbacks=cb)
+        _activate(session, conn)
+
+        _send_lookup(conn, "req-1", [b"hA"])
+        session.poll()
+        _send_lookup(conn, "req-2", [b"hB"])
+        session.poll()
+        assert len(session._server._inbound_lookups) == 2
+
+        # Empty FetchMsg: peer signals "lookup phase done" without asking
+        # for any blocks (the all-miss case).
+        conn.enqueue(
+            {
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.KV_REQUEST_ID: "req-1",
+                FetchMsg.BLOCK_HASHES: [],
+                FetchMsg.BLOCK_INDEXES: [],
+            }
+        )
+        session.poll()
+
+        remaining_kv_request_ids = {
+            lu.kv_request_id for lu in session._server._inbound_lookups.values()
         }
         assert remaining_kv_request_ids == {"req-2"}
         finish_calls = [c for c in cb.calls if c[0] == "finish_request"]

@@ -26,6 +26,14 @@ Block Transfer Flow (happy path)
 
 1. Client sends FetchMsg with a kv_request_id and lists of
    block keys + remote indexes where it wants the data written.
+   In p2p mode FetchMsg is also the server-side "request finished"
+   signal for the id: no further ``cb.create_store_job`` will fire
+   (parked LookupMsg batches are popped, so pending-hash resolution
+   cannot promote a HIT after this point), all server-side lookup
+   state for the id is released, and ``cb.finish_request`` fires on
+   each dropped batch. The client emits exactly one FetchMsg per
+   lookup-touched request, including an empty one when no blocks
+   end up being fetched.
 2. Server matches requested blocks against locally stored blocks:
    - Blocks already available are transferred immediately via RDMA.
    - Blocks not yet available are recorded as "demanded" and
@@ -165,11 +173,21 @@ class DisconnectMsg:
 
 
 class FetchMsg:
-    """Client → Server: request blocks by key.
+    """Client → Server: request blocks by key and close the lookup phase.
+
+    In p2p mode FetchMsg is also the server-side "request finished"
+    signal for ``kv_request_id``: on receipt the server (a) fires no
+    further ``cb.create_store_job`` for this id — parked LookupMsg
+    batches are popped, so ``_resolve_pending_lookups`` cannot promote
+    a HIT_PENDING / RETRY hash into a fresh pin after this point — and
+    (b) calls ``cb.finish_request(batch.ctx)`` on each dropped batch
+    so the TieringManager can release per-batch bookkeeping. In the
+    all-miss case the client emits an empty FetchMsg (``BLOCK_HASHES``
+    and ``BLOCK_INDEXES`` both empty) purely to fire this signal.
 
     Fields:
         KV_REQUEST_ID: Identifies this block transfer request.
-        BLOCK_HASHES: List of block keys (OffloadKey bytes).
+        BLOCK_HASHES: List of block keys (OffloadKey bytes). May be empty.
         BLOCK_INDEXES: List of remote block indexes (same length as BLOCK_HASHES).
     """
 

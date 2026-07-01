@@ -93,6 +93,11 @@ class ClientRole:
         # cancelled and re-used (if that ever happens) is not falsely
         # flagged.
         self._flushed_req_ids: set[str] = set()
+        # Tracks kv_request_ids we have already emitted a FetchMsg for.
+        # cancel_lookups uses this to decide whether it must send a
+        # terminal empty FetchMsg to close the peer's lookup phase — see
+        # the ``cancel_lookups`` docstring for the full rationale.
+        self._fetch_sent_req_ids: set[str] = set()
 
     # ------------------------------------------------------------------
     # Public API
@@ -121,6 +126,7 @@ class ClientRole:
             kv_request_id=kv_request_id,
             submitted_at=time.monotonic(),
         )
+        self._fetch_sent_req_ids.add(kv_request_id)
         self._send(
             {
                 TYPE_KEY: FetchMsg.TYPE,
@@ -260,7 +266,36 @@ class ClientRole:
             state.result = hit
 
     def cancel_lookups(self, kv_request_id: str) -> None:
-        """Drop every pending lookup entry for this kv_request_id."""
+        """Drop lookup state and, if needed, close the peer's request.
+
+        Every FetchMsg the server receives in p2p mode is the
+        server-side "request finished" signal for its kv_request_id:
+        no further ``cb.create_store_job`` will fire, all server-side
+        lookup state for the id is released, and ``cb.finish_request``
+        fires on the TieringManager. In the happy path the FetchMsg
+        carrying blocks is that signal. But if the client's lookups
+        all missed (or timed out) no FetchMsg is ever sent, so on the
+        finish path we emit an empty FetchMsg purely to trigger those
+        semantics on the peer.
+
+        We only send the terminal FetchMsg when a LookupMsg was actually
+        flushed (``kv_request_id in _flushed_req_ids``): if the peer
+        never received a LookupMsg for this id, it has no state to
+        release.
+        """
+        if (
+            kv_request_id in self._flushed_req_ids
+            and kv_request_id not in self._fetch_sent_req_ids
+        ):
+            self._fetch_sent_req_ids.add(kv_request_id)
+            self._send(
+                {
+                    TYPE_KEY: FetchMsg.TYPE,
+                    FetchMsg.KV_REQUEST_ID: kv_request_id,
+                    FetchMsg.BLOCK_HASHES: [],
+                    FetchMsg.BLOCK_INDEXES: [],
+                }
+            )
         keys = [k for k in self._lookups if k[0] == kv_request_id]
         for k in keys:
             del self._lookups[k]
@@ -336,4 +371,5 @@ class ClientRole:
         self._lookups.clear()
         self._unsent_lookups_by_req.clear()
         self._flushed_req_ids.clear()
+        self._fetch_sent_req_ids.clear()
         return failed
