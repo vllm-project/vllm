@@ -496,7 +496,8 @@ class DeepseekV32Attention(MLAAttention):
                 self.topk_indices_buffer,
                 True,  # skip_k_cache_insert
                 False,  # use_fp4_cache
-                True,  # skip_topk_buffer_clear (fused_norm_rope already did it)
+                # fused_norm_rope already cleared the topk buffer this forward.
+                skip_topk_buffer_clear=True,
             )
 
         if attn_metadata is None:
