@@ -1280,9 +1280,10 @@ def _move_to_workspace(
     )
 
     # In async EPLB mode, post-rearrangement actions need to be performed
-    # per layer.
-    moe_layer = model_state.model.moe_layers[result.layer_idx]
-    moe_layer.quant_method.after_eplb_rearrangement(moe_layer)
+    # per layer. quant_method and the rearranged Parameters live on
+    # routed_experts, not the MoERunner.
+    routed_experts = model_state.model.moe_layers[result.layer_idx].routed_experts
+    routed_experts.quant_method.after_eplb_rearrangement(routed_experts)
 
     if result.layer_idx == model_state.model.num_moe_layers - 1:
         model_state.rebalanced = False
@@ -1300,4 +1301,6 @@ def _run_after_eplb_rearrangement_hooks(model: MixtureOfExperts) -> None:
     rearrangement won't touch on its own.
     """
     for moe_layer in model.moe_layers:
-        moe_layer.quant_method.after_eplb_rearrangement(moe_layer)
+        # quant_method and the rearranged Parameters live on routed_experts.
+        routed_experts = moe_layer.routed_experts
+        routed_experts.quant_method.after_eplb_rearrangement(routed_experts)

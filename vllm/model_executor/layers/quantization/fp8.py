@@ -807,10 +807,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         return True
 
     def after_eplb_rearrangement(self, layer: RoutedExperts) -> None:
-        # Only the FLASHINFER_CUTLASS per-tensor path precomputes g1_alphas /
-        # g2_alphas as fused (w_scale * a_scale) products. EPLB rearranges the
-        # registered w_scale Parameters in-place; refresh the fused products so
-        # the kernel doesn't read stale pre-rearrangement values.
+        # Refresh the fused (w_scale * a_scale) products EPLB just made
+        # stale by rearranging the registered w_scale Parameters in-place.
         if self.moe_quant_config is None or self.moe_quant_config.g1_alphas is None:
             return
         w1_scale = getattr(layer, f"w13_{self.weight_scale_name}")
