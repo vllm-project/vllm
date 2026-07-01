@@ -129,40 +129,13 @@ fn decode_position_logprobs<T: Tokenizer + ?Sized>(
 #[cfg(test)]
 mod tests {
     use vllm_llm::{Logprobs, PositionLogprobs, TokenLogprob};
+    use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::*;
 
-    #[derive(Debug)]
-    struct ByteTokenizer;
-
-    impl vllm_tokenizer::Tokenizer for ByteTokenizer {
-        fn encode(
-            &self,
-            _text: &str,
-            _add_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<Vec<u32>> {
-            unreachable!()
-        }
-
-        fn decode(
-            &self,
-            token_ids: &[u32],
-            _skip_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<String> {
-            Ok(String::from_utf8_lossy(
-                &token_ids.iter().map(|token_id| *token_id as u8).collect::<Vec<_>>(),
-            )
-            .into_owned())
-        }
-
-        fn token_to_id(&self, _token: &str) -> Option<u32> {
-            unreachable!()
-        }
-    }
-
     #[test]
     fn decode_logprobs_decodes_every_candidate_token() {
-        let tokenizer = ByteTokenizer;
+        let tokenizer = TestTokenizer::new();
         let logprobs = Logprobs {
             positions: vec![PositionLogprobs {
                 entries: vec![
@@ -205,7 +178,7 @@ mod tests {
 
     #[test]
     fn decode_prompt_logprobs_separates_first_prompt_token() {
-        let tokenizer = ByteTokenizer;
+        let tokenizer = TestTokenizer::new();
         let logprobs = Logprobs {
             positions: vec![PositionLogprobs {
                 entries: vec![TokenLogprob {

@@ -478,7 +478,6 @@ _MULTIMODAL_MODELS = {
         "llava_onevision",
         "LlavaOnevisionForConditionalGeneration",
     ),
-    "MantisForConditionalGeneration": ("llava", "MantisForConditionalGeneration"),
     "MiDashengLMModel": ("midashenglm", "MiDashengLMModel"),
     "MiMoV2OmniForCausalLM": ("mimo_v2_omni", "MiMoV2OmniForCausalLM"),
     "MiniMaxM3SparseForConditionalGeneration": (
@@ -572,11 +571,6 @@ _MULTIMODAL_MODELS = {
     "StepVLForConditionalGeneration": ("step_vl", "StepVLForConditionalGeneration"),
     "Step3VLForConditionalGeneration": ("step3_vl", "Step3VLForConditionalGeneration"),
     "Step3p7ForConditionalGeneration": ("step3p7", "Step3p7ForConditionalGeneration"),
-    "TarsierForConditionalGeneration": ("tarsier", "TarsierForConditionalGeneration"),
-    "Tarsier2ForConditionalGeneration": (
-        "qwen2_vl",
-        "Tarsier2ForConditionalGeneration",
-    ),
     "UltravoxModel": ("ultravox", "UltravoxModel"),
     "VoxtralForConditionalGeneration": ("voxtral", "VoxtralForConditionalGeneration"),
     "VoxtralRealtimeGeneration": ("voxtral_realtime", "VoxtralRealtimeGeneration"),
@@ -737,6 +731,9 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "AquilaForCausalLM": "0.24.0",
     "Grok1ModelForCausalLM": "0.24.0",
     "Grok1ForCausalLM": "0.24.0",
+    "TarsierForConditionalGeneration": "0.24.0",
+    "Tarsier2ForConditionalGeneration": "0.23.0",  # last version with Transformers v4
+    "MantisForConditionalGeneration": "0.24.0",
 }
 
 _OOT_SUPPORTED_MODELS = {
@@ -850,6 +847,25 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
         cls_name = f"{self.module_name}-{self.class_name}".replace(".", "-")
         return f"{cls_name}.json"
 
+    @staticmethod
+    def _get_modelinfo_module_hash(model_path: Path) -> str:
+        if model_path.name == "__init__.py":
+            # Package entry points often re-export classes implemented in
+            # submodules, so include the package contents in the cache key.
+            module_paths = sorted(model_path.parent.rglob("*.py"))
+            root_path = model_path.parent
+        else:
+            module_paths = [model_path]
+            root_path = model_path.parent
+
+        hasher = safe_hash(b"", usedforsecurity=False)
+        for path in module_paths:
+            hasher.update(path.relative_to(root_path).as_posix().encode("utf-8"))
+            hasher.update(b"\0")
+            hasher.update(path.read_bytes())
+            hasher.update(b"\0")
+        return hasher.hexdigest()
+
     def _load_modelinfo_from_cache(self, module_hash: str) -> _ModelInfo | None:
         try:
             try:
@@ -916,8 +932,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
         module_hash = None
 
         if model_path is not None and model_path.exists():
-            with open(model_path, "rb") as f:
-                module_hash = safe_hash(f.read(), usedforsecurity=False).hexdigest()
+            module_hash = self._get_modelinfo_module_hash(model_path)
 
             mi = self._load_modelinfo_from_cache(module_hash)
             if mi is not None:
