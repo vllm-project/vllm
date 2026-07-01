@@ -723,23 +723,6 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
             produce_plan=self._hisparse_index_sharing,
         )
 
-    def _hisparse_host_prefill_cache(
-        self,
-        kv_c_and_k_pe_cache: torch.Tensor,
-        block_table: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.hisparse_coordinator is not None:
-            self.hisparse_coordinator.wait_for_pending_backup()
-        num_b, max_blocks = block_table.shape
-        flat_ids = block_table.to(device="cpu", dtype=torch.long).clamp_(min=0)
-        staged = kv_c_and_k_pe_cache[flat_ids.flatten()].to(
-            device=block_table.device, non_blocking=True
-        )
-        new_bt = torch.arange(
-            num_b * max_blocks, dtype=torch.int32, device=block_table.device
-        ).view(num_b, max_blocks)
-        return staged, new_bt
-
     def do_kv_cache_update(
         self,
         kv_c_normed: torch.Tensor,
@@ -759,29 +742,12 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
                 k_scale,
             )
 
-        if not self._hisparse_decode_batch:
-            self.hisparse_coordinator.bind_source_cache(kv_cache)
-            if self.hisparse_coordinator.source_is_host:
-                self.hisparse_coordinator.write_rows_to_host(
-                    kv_c_normed,
-                    k_pe,
-                    kv_cache,
-                    slot_mapping,
-                    kv_cache_dtype,
-                    k_scale,
-                )
-                return
-            super().do_kv_cache_update(
-                kv_c_normed,
-                k_pe,
-                kv_cache,
-                slot_mapping,
-                kv_cache_dtype,
-                k_scale,
-            )
-            self.hisparse_coordinator.mirror_slots(kv_cache, slot_mapping)
-            return
-
+        # HiSparse is decode-only: on a PD decode instance KV arrives via NIXL
+        # into the host pool, so there is no local prefill to write/mirror to
+        # host. Write only the batch's newest rows into the hot buffer.
+        assert self._hisparse_decode_batch, (
+            "HiSparse is decode-only; unexpected prefill batch on a HiSparse instance."
+        )
         self.hisparse_coordinator.write_newest_rows(
             kv_c_normed,
             k_pe,
@@ -813,11 +779,6 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
             )
 
         block_table = attn_metadata.block_table
-        if kv_c_and_k_pe_cache.device.type == "cpu":
-            kv_c_and_k_pe_cache, block_table = self._hisparse_host_prefill_cache(
-                kv_c_and_k_pe_cache,
-                block_table,
-            )
 
         # Convert per-request indices to global slots (decode) or workspace
         # offsets (prefill).
@@ -938,17 +899,9 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
                 )
 
             assert fp8_metadata.prefill is not None
-            host_resident = (
-                use_hisparse and kv_c_and_k_pe_cache.device.type == "cpu"
-            )
             for chunk in fp8_metadata.prefill.chunks:
                 chunk_workspace = self.prefill_bf16_workspace[: chunk.chunk_tot_seqlen]
-                if host_resident:
-                    gather_cache, gather_bt = self._hisparse_host_prefill_cache(
-                        kv_c_and_k_pe_cache, chunk.block_table
-                    )
-                else:
-                    gather_cache, gather_bt = kv_c_and_k_pe_cache, chunk.block_table
+                gather_cache, gather_bt = kv_c_and_k_pe_cache, chunk.block_table
                 ops.cp_gather_and_upconvert_fp8_kv_cache(
                     gather_cache,
                     chunk_workspace,
@@ -1006,11 +959,6 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
             return _attn_out.squeeze(0)
 
         block_table = attn_metadata.block_table
-        if kv_c_and_k_pe_cache.device.type == "cpu":
-            kv_c_and_k_pe_cache, block_table = self._hisparse_host_prefill_cache(
-                kv_c_and_k_pe_cache,
-                block_table,
-            )
 
         # Convert per-request indices to global slots (decode) or workspace
         # offsets (prefill).

@@ -478,29 +478,11 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
                 k_scale,
             )
 
-        if not self._hisparse_decode_batch:
-            self.hisparse_coordinator.bind_source_cache(kv_cache)
-            if self.hisparse_coordinator.source_is_host:
-                self.hisparse_coordinator.write_rows_to_host(
-                    kv_c_normed,
-                    k_pe,
-                    kv_cache,
-                    slot_mapping,
-                    kv_cache_dtype,
-                    k_scale,
-                )
-                return
-            super().do_kv_cache_update(
-                kv_c_normed,
-                k_pe,
-                kv_cache,
-                slot_mapping,
-                kv_cache_dtype,
-                k_scale,
-            )
-            self.hisparse_coordinator.mirror_slots(kv_cache, slot_mapping)
-            return
-
+        # HiSparse is decode-only (KV arrives via NIXL into the host pool on a PD
+        # decode instance; no local prefill to write/mirror to host).
+        assert self._hisparse_decode_batch, (
+            "HiSparse is decode-only; unexpected prefill batch on a HiSparse instance."
+        )
         self.hisparse_coordinator.write_newest_rows(
             kv_c_normed,
             k_pe,
@@ -509,23 +491,6 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
             kv_cache_dtype,
             k_scale,
         )
-
-    def _hisparse_host_prefill_cache(
-        self,
-        kv_c_and_k_pe_cache: torch.Tensor,
-        block_table: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.hisparse_coordinator is not None:
-            self.hisparse_coordinator.wait_for_pending_backup()
-        num_b, max_blocks = block_table.shape
-        flat_ids = block_table.to(device="cpu", dtype=torch.long).clamp_(min=0)
-        staged = kv_c_and_k_pe_cache[flat_ids.flatten()].to(
-            device=block_table.device, non_blocking=True
-        )
-        new_bt = torch.arange(
-            num_b * max_blocks, dtype=torch.int32, device=block_table.device
-        ).view(num_b, max_blocks)
-        return staged, new_bt
 
     def forward_mqa(
         self,
@@ -557,11 +522,6 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
             )
         else:
             block_table = attn_metadata.block_table
-            if kv_c_and_k_pe_cache.device.type == "cpu":
-                kv_c_and_k_pe_cache, block_table = self._hisparse_host_prefill_cache(
-                    kv_c_and_k_pe_cache,
-                    block_table,
-                )
             topk_indices_physical, seq_lens = triton_convert_req_index_to_global_index(
                 attn_metadata.req_id_per_token[:num_actual_toks],
                 block_table,

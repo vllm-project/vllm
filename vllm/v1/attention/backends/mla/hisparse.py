@@ -680,58 +680,6 @@ class HiSparseCoordinator:
         # they cannot be served as hits.
         self._invalidate_hot_copies(global_slots)
 
-    def write_rows_to_host(
-        self,
-        kv_c_normed: torch.Tensor,
-        k_pe: torch.Tensor,
-        kv_cache: torch.Tensor,
-        slot_mapping: torch.Tensor,
-        kv_cache_dtype: str,
-        k_scale: torch.Tensor,
-    ) -> None:
-        """Write prefill/mixed-batch rows directly to a host-resident pool."""
-        from vllm import _custom_ops as ops
-
-        if kv_cache.numel() == 0:
-            return
-        self.bind_source_cache(kv_cache)
-        if not self._source_is_host:
-            raise RuntimeError("write_rows_to_host requires a host-resident KV pool.")
-        flat_slots = slot_mapping.flatten()[: kv_c_normed.shape[0]]
-        valid_mask = flat_slots >= 0
-        valid = flat_slots[valid_mask].to(device=self.device, dtype=torch.int64)
-        if valid.numel() == 0:
-            return
-        # CUDA graph padding can make kv_c_normed/k_pe longer than slot_mapping.
-        # Only rows represented by slot_mapping correspond to real KV writes.
-        real_kv_rows = kv_c_normed[: flat_slots.numel()]
-        real_pe_rows = k_pe[: flat_slots.numel()]
-
-        if kv_cache_dtype == "fp8_ds_mla":
-            kv_rows = real_kv_rows[valid_mask]
-            pe_rows = real_pe_rows[valid_mask]
-            rows = torch.empty(
-                (valid.numel(), self.row_width),
-                dtype=self.kv_dtype,
-                device=self.device,
-            )
-            ops.concat_and_cache_mla(
-                kv_rows,
-                pe_rows.squeeze(1),
-                rows.view(-1, 1, self.row_width),
-                torch.arange(valid.numel(), dtype=torch.int64, device=self.device),
-                kv_cache_dtype=kv_cache_dtype,
-                scale=k_scale,
-            )
-        else:
-            rows = torch.cat(
-                [real_kv_rows[valid_mask], real_pe_rows[valid_mask].squeeze(1)],
-                dim=-1,
-            ).contiguous()
-        src = torch.arange(valid.numel(), dtype=torch.int64, device=self.device)
-        self._backup_rows(rows, src, valid)
-        self._invalidate_hot_copies(valid)
-
     # ---------------------------------------------------------------- swap-in
 
     def swap_in(
@@ -1087,12 +1035,10 @@ def create_hisparse_coordinator(
     if config is None:
         return None
 
-    # HiSparse works on any deployment. PD-decode instances are the intended
-    # fast path (KV arrives via a consumer connector and the instance never
-    # prefills). Unified / non-PD instances are also supported: prefill gathers
-    # KV from the host pool (see _hisparse_host_prefill_cache) while decode uses
-    # the hot buffer. No kv_transfer_config requirement here; the non-PD prefill
-    # cost is surfaced as a warning in VllmConfig.__post_init__.
+    # HiSparse is decode-only: intended for PD decode instances, where KV
+    # arrives via a consumer connector (NIXL) into the host pool and the
+    # instance never prefills locally. The unified / non-PD prefill-from-host
+    # path has been removed (do_kv_cache_update asserts a decode batch).
     hf_config = vllm_config.model_config.hf_config
     if not hasattr(hf_config, "index_topk"):
         raise ValueError("HiSparse is only supported for DSA models with index_topk.")
