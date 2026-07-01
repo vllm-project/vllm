@@ -65,11 +65,42 @@ class SAECachePolicy(CachePolicy):
 
     @override
     def insert(self, key: OffloadKey, block: BlockStatus) -> None:
-        raise NotImplementedError
+        if self._last_event != "insert" or self._open_sid is None:
+            sid = self._sid_counter
+            self._sid_counter += 1
+            self._open_sid = sid
+            self._sid_to_keys[sid] = []
+            self._sid_stats[sid] = {
+                "hits": 0.0,
+                "last_touch": self._logical_timer,
+                "start_pos": 0,
+            }
+        sid = self._open_sid
+        self._sid_to_keys[sid].append(key)
+        self._key_to_sid[key] = sid
+        self._blocks[key] = block
+        seed = self._key_ghost.get(key, 0.0) / self._ghost_norm
+        self._sid_stats[sid]["hits"] += seed
+        self._last_event = "insert"
 
     @override
     def remove(self, key: OffloadKey) -> None:
-        raise NotImplementedError
+        block = self._blocks.pop(key, None)
+        if block is None:
+            self._last_event = "remove"
+            self._open_sid = None
+            return
+        sid = self._key_to_sid.pop(key, None)
+        if sid is not None:
+            seq = self._sid_to_keys.get(sid)
+            if seq is not None and key in seq:
+                seq.remove(key)
+            if not seq:
+                self._sid_to_keys.pop(sid, None)
+                self._sid_stats.pop(sid, None)
+        self._evictable_keys.pop(key, None)
+        self._open_sid = None
+        self._last_event = "remove"
 
     @override
     def touch(self, keys: Iterable[OffloadKey]) -> None:
