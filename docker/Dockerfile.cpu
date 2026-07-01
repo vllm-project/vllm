@@ -196,6 +196,9 @@ WORKDIR /vllm-workspace
 # cpu.txt is compiled at build time from cuda.in (seeded as cpu.in) so the torch
 # 2.13 CPU test-channel wheels resolve; upstream's pre-committed cpu.txt still
 # pins torch 2.11 and cannot carry the test-channel pins.
+# cpu.in starts with `-r ../common.txt`, so common.txt must be present at the
+# same relative location for `uv pip compile` to resolve the include.
+COPY requirements/common.txt requirements/common.txt
 COPY requirements/test/cuda.in requirements/test/cpu.in
 
 RUN \
