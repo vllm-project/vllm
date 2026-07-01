@@ -8,7 +8,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Any, NewType
+from typing import TYPE_CHECKING, Any, NamedTuple, NewType
 
 import numpy as np
 import torch
@@ -74,6 +74,15 @@ class OffloadPolicy(Enum):
 @dataclass
 class RequestOffloadingContext:
     policy: OffloadPolicy = OffloadPolicy.BLOCK_LEVEL
+
+
+class ScheduleEndContext(NamedTuple):
+    """Per-step scheduling info passed to on_schedule_end()."""
+
+    # Request IDs scheduled for the first time this step.
+    new_req_ids: Collection[str]
+    # Request IDs preempted this step.
+    preempted_req_ids: Collection[str]
 
 
 class LoadStoreSpec(ABC):
@@ -309,7 +318,7 @@ class OffloadingManager(ABC):
         """
         return ()
 
-    def on_schedule_end(self) -> None:
+    def on_schedule_end(self, context: ScheduleEndContext) -> None:
         """Called once at the end of each scheduler step.
 
         Managers may override this to flush deferred work accumulated

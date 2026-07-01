@@ -29,7 +29,41 @@ from vllm.distributed.weight_transfer.nccl_engine import (
     NCCLWeightTransferInitInfo,
     NCCLWeightTransferUpdateInfo,
 )
+from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
+
+
+def _weight_transfer_ray_env_vars() -> dict[str, str]:
+    if not current_platform.is_rocm():
+        return {}
+
+    return {
+        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+        "RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES": "1",
+        "RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES": "1",
+    }
+
+
+def _init_ray_for_weight_transfer() -> None:
+    if ray.is_initialized():
+        return
+    ray.init(
+        ignore_reinit_error=True,
+        runtime_env={"env_vars": _weight_transfer_ray_env_vars()},
+    )
+
+
+def _get_ray_assigned_device() -> torch.device:
+    gpu_ids = ray.get_gpu_ids()
+    if not gpu_ids:
+        return torch.device("cuda:0")
+    return torch.device(f"cuda:{int(gpu_ids[0])}")
+
+
+def _set_ray_assigned_device() -> torch.device:
+    device = _get_ray_assigned_device()
+    torch.accelerator.set_device(device)
+    return device
 
 
 def create_mock_parallel_config(
@@ -321,6 +355,8 @@ def trainer_broadcast_tensor(
     """Trainer task that broadcasts a tensor via NCCL."""
     import torch
 
+    device = _set_ray_assigned_device()
+
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
     from vllm.distributed.utils import StatelessProcessGroup
 
@@ -331,12 +367,11 @@ def trainer_broadcast_tensor(
         rank=0,
         world_size=world_size,
     )
-    # Ray sets CUDA_VISIBLE_DEVICES, so device 0 is the assigned GPU
-    comm = PyNcclCommunicator(pg, device=0)
+    comm = PyNcclCommunicator(pg, device=device.index)
 
     # Create and broadcast the tensor
     dtype = getattr(torch, tensor_dtype)
-    tensor_to_send = torch.ones(tensor_shape, dtype=dtype, device="cuda:0")
+    tensor_to_send = torch.ones(tensor_shape, dtype=dtype, device=device)
     comm.broadcast(tensor_to_send, src=0, stream=torch.cuda.current_stream())
     torch.accelerator.synchronize()
 
@@ -355,6 +390,8 @@ def inference_receive_tensor(
     from unittest.mock import MagicMock
 
     import torch
+
+    _set_ray_assigned_device()
 
     from vllm.config.parallel import ParallelConfig
     from vllm.config.weight_transfer import WeightTransferConfig
@@ -435,7 +472,7 @@ def test_nccl_weight_transfer_between_processes():
     This test verifies that the NCCLWeightTransferEngine can receive
     tensors broadcast by a trainer process via NCCL.
     """
-    ray.init(ignore_reinit_error=True)
+    _init_ray_for_weight_transfer()
 
     master_address = "127.0.0.1"
     master_port = get_open_port()
@@ -473,6 +510,8 @@ def trainer_broadcast_sparse_tensor(
     """Trainer task that broadcasts sparse patches via NCCL."""
     import torch
 
+    device = _set_ray_assigned_device()
+
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
     from vllm.distributed.utils import StatelessProcessGroup
     from vllm.distributed.weight_transfer.base import SparseWeightPatch
@@ -487,12 +526,12 @@ def trainer_broadcast_sparse_tensor(
         rank=0,
         world_size=world_size,
     )
-    comm = PyNcclCommunicator(pg, device=0)
+    comm = PyNcclCommunicator(pg, device=device.index)
 
     patch = SparseWeightPatch(
         name="test.weight",
-        indices=torch.tensor([1, 7, 25], dtype=torch.int32, device="cuda:0"),
-        values=torch.tensor([10.0, 20.0, 30.0], dtype=torch.float32, device="cuda:0"),
+        indices=torch.tensor([1, 7, 25], dtype=torch.int32, device=device),
+        values=torch.tensor([10.0, 20.0, 30.0], dtype=torch.float32, device=device),
     )
     NCCLWeightTransferEngine.trainer_send_sparse_weights(
         iter([patch]),
@@ -512,6 +551,8 @@ def inference_receive_sparse_tensor(
     from unittest.mock import MagicMock
 
     import torch
+
+    device = _set_ray_assigned_device()
 
     from vllm.config.parallel import ParallelConfig
     from vllm.config.weight_transfer import WeightTransferConfig
@@ -540,7 +581,7 @@ def inference_receive_sparse_tensor(
         )
     )
 
-    target = torch.zeros(30, dtype=torch.float32, device="cuda")
+    target = torch.zeros(30, dtype=torch.float32, device=device)
 
     def apply_sparse_patches(patches: list[SparseWeightPatch]):
         for patch in patches:
@@ -556,9 +597,9 @@ def inference_receive_sparse_tensor(
     engine.receive_sparse_weights(update_info, apply_sparse_patches)
     torch.accelerator.synchronize()
 
-    expected = torch.zeros(30, dtype=torch.float32, device="cuda")
+    expected = torch.zeros(30, dtype=torch.float32, device=device)
     expected[[1, 7, 25]] = torch.tensor(
-        [10.0, 20.0, 30.0], dtype=torch.float32, device="cuda"
+        [10.0, 20.0, 30.0], dtype=torch.float32, device=device
     )
     success = torch.equal(target, expected)
     engine.shutdown()
@@ -574,7 +615,7 @@ def inference_receive_sparse_tensor(
 )
 def test_nccl_sparse_weight_transfer_between_processes():
     """Test NCCL sparse weight transfer from trainer to inference process."""
-    ray.init(ignore_reinit_error=True)
+    _init_ray_for_weight_transfer()
 
     master_address = "127.0.0.1"
     master_port = get_open_port()
@@ -933,16 +974,18 @@ class TrainerActor:
     """Trainer actor that creates and holds CUDA IPC handles."""
 
     def __init__(self, tensor_shape: list[int], tensor_dtype: str):
+        device = _set_ray_assigned_device()
+
         # Create tensor on GPU and keep it alive
         dtype = getattr(torch, tensor_dtype)
-        self.tensor = torch.ones(tensor_shape, dtype=dtype, device="cuda:0")
+        self.tensor = torch.ones(tensor_shape, dtype=dtype, device=device)
         self.tensor.fill_(42.0)  # Fill with 42 to verify correct transfer
 
         # Create IPC handle (tensor must stay alive for IPC to work)
         # reduce_tensor returns (rebuild_func, args); we only send args
         # since the receiver imports rebuild_cuda_tensor directly.
         _, ipc_args = reduce_tensor(self.tensor)
-        gpu_uuid = get_physical_gpu_id(0)
+        gpu_uuid = get_physical_gpu_id(device.index)
 
         torch.accelerator.synchronize()
 
@@ -973,6 +1016,8 @@ def inference_receive_ipc_tensor(
     from unittest.mock import MagicMock
 
     import torch
+
+    _set_ray_assigned_device()
 
     from vllm.config.parallel import ParallelConfig
     from vllm.config.weight_transfer import WeightTransferConfig
@@ -1072,7 +1117,7 @@ def test_ipc_weight_transfer_between_processes(mode: str):
     from ray.util.placement_group import placement_group
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
-    ray.init(ignore_reinit_error=True)
+    _init_ray_for_weight_transfer()
 
     # Create a placement group to ensure both processes are on the same GPU
     # Use fractional GPUs so both tasks can share the same GPU bundle
