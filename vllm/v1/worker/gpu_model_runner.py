@@ -7231,20 +7231,31 @@ class GPUModelRunner(
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     state_tensors = []
                     storage_offset_bytes = 0
+                    if (
+                        isinstance(kv_cache_spec, SlidingWindowMomeSpec)
+                        and packing is not None
+                    ):
+                        base_offset_bytes, page_stride_bytes = packing
+                    else:
+                        base_offset_bytes = 0
+                        page_stride_bytes = kv_cache_spec.page_size_bytes
                     for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
                         dtype_size = get_dtype_size(dtype)
-                        num_element_per_page = (
-                            kv_cache_spec.page_size_bytes // dtype_size
-                        )
+                        assert base_offset_bytes % dtype_size == 0
+                        assert page_stride_bytes % dtype_size == 0
+                        assert storage_offset_bytes % dtype_size == 0
                         target_shape = (num_blocks, *shape)
                         stride = torch.empty(target_shape).stride()
-                        target_stride = (num_element_per_page, *stride[1:])
-                        assert storage_offset_bytes % dtype_size == 0
+                        target_stride = (
+                            page_stride_bytes // dtype_size,
+                            *stride[1:],
+                        )
                         tensor = torch.as_strided(
                             raw_tensor.view(dtype),
                             size=target_shape,
                             stride=target_stride,
-                            storage_offset=storage_offset_bytes // dtype_size,
+                            storage_offset=(base_offset_bytes + storage_offset_bytes)
+                            // dtype_size,
                         )
                         state_tensors.append(tensor)
                         storage_offset_bytes += stride[0] * dtype_size
