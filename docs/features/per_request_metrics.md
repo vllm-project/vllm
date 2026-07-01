@@ -20,7 +20,7 @@ that do not need them.
 
 !!! note
     At high concurrency, enabling per-request metrics computation may introduce
-    considerable CPU overhead. Benchmark your specific workload to evaluate the
+    non-negligible CPU overhead. Benchmark your specific workload to evaluate the
     impact before enabling in production.
 
 ## Response Format

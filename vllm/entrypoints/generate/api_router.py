@@ -4,8 +4,6 @@ from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 
-from vllm.logger import init_logger
-
 if TYPE_CHECKING:
     from argparse import Namespace
 
@@ -16,8 +14,6 @@ if TYPE_CHECKING:
     from vllm.tasks import SupportedTask
 else:
     RequestLogger = object
-
-logger = init_logger(__name__)
 
 
 def register_generate_api_routers(app: FastAPI):
@@ -78,20 +74,6 @@ async def init_generate_state(
         getattr(args, "fingerprint_mode", "full"),
         getattr(args, "fingerprint_value", None),
     )
-
-    # Per-request timing metrics are derived from the engine's RequestStateStats,
-    # which are only tracked when statistics logging is enabled. Warn (rather
-    # than fail) so the server still starts, but the operator knows the metrics
-    # will always be null until stat logging is re-enabled.
-    if args.enable_per_request_metrics and not getattr(
-        engine_client, "log_stats", True
-    ):
-        logger.warning(
-            "--enable-per-request-metrics is set but engine statistics logging "
-            "is disabled (e.g. --disable-log-stats). Per-request timing metrics "
-            "depend on engine statistics and will be null until stat logging is "
-            "enabled."
-        )
 
     if args.tool_server == "demo":
         tool_server: ToolServer | None = DemoToolServer()
