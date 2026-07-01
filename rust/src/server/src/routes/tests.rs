@@ -115,6 +115,7 @@ fn request_output_with_logprobs_and_kv(
     new_logprobs: Option<Logprobs>,
     new_prompt_logprobs_tensors: Option<Logprobs>,
     kv_transfer_params: Option<serde_json::Value>,
+    ec_transfer_params: Option<serde_json::Value>,
 ) -> EngineCoreOutput {
     EngineCoreOutput {
         request_id: request_id.to_string(),
@@ -126,6 +127,7 @@ fn request_output_with_logprobs_and_kv(
         stop_reason,
         events: None,
         kv_transfer_params,
+        ec_transfer_params,
         trace_headers: None,
         prefill_stats: None,
         routed_experts: None,
@@ -3731,6 +3733,7 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
                                 Some(sample_logprobs_for_token(44, 45)),
                                 None,
                                 Some(json!({"connector": "x"})),
+                                None,
                             ),
                         ],
                         scheduler_stats: None,
