@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -26,12 +25,16 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     is_function_recipient,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.logger import init_logger
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.reasoning.gptoss_reasoning_parser import GptOssReasoningParser
 from vllm.tool_parsers.gptoss_tool_parser import GptOssToolParser
 
 if TYPE_CHECKING:
     from openai_harmony import Message, StreamableParser
+
+
+logger = init_logger(__name__)
 
 
 class _SegmentType(Enum):
@@ -100,20 +103,26 @@ class HarmonyParser(DelegatingParser):
         if len(messages) <= self._num_processed_messages:
             return None
         msg = messages[self._num_processed_messages]
+        msg.recipient = self._normalize_recipient(msg.recipient)
         self._num_processed_messages += 1
         return msg
 
     def flush(self) -> Segment | None:
-        msg = None
-        with contextlib.suppress(HarmonyError):
+        try:
             self._harmony_parser.process_eos()
-            # TODO: Consider reraising
-
-        msg = self._poll_completed_message()
-
-        # Reset to the initial assistant-parser state for the next turn.
-        self._parser = None
-        self._num_processed_messages = 0
+            msg = self._poll_completed_message()
+        except HarmonyError:
+            logger.warning(
+                "Harmony parser ended in a non-terminal state; returning the "
+                "raw unparsed output. This usually indicates a malformed "
+                "assistant turn, e.g. a 'final' channel missing the "
+                "<|message|> delimiter."
+            )
+            raise
+        finally:
+            # Reset to the initial assistant-parser state for the next turn.
+            self._parser = None
+            self._num_processed_messages = 0
 
         if msg is None:
             return None
@@ -138,7 +147,10 @@ class HarmonyParser(DelegatingParser):
         Callers must decide whether to surface them.
         """
         result = self.process_chunk(model_output_token_ids)
-        flushed_segment = self.flush()
+        try:
+            flushed_segment = self.flush()
+        except HarmonyError:
+            return None, model_output, None
         if flushed_segment is not None:
             result.segments.append(flushed_segment)
 
@@ -192,10 +204,16 @@ class HarmonyParser(DelegatingParser):
         *,
         finished: bool,
     ) -> DeltaMessage | None:
-        prev_recipient = self._harmony_parser.current_recipient
+        prev_recipient = self._normalize_recipient(
+            self._harmony_parser.current_recipient
+        )
         result = self.process_chunk(delta_token_ids)
         if finished:
-            flushed_segment = self.flush()
+            try:
+                flushed_segment = self.flush()
+            except HarmonyError:
+                self._next_tool_call_index = 0
+                return DeltaMessage(content=delta_text)
             if flushed_segment is not None:
                 result.segments.append(flushed_segment)
         combined_content = ""
@@ -274,7 +292,9 @@ class HarmonyParser(DelegatingParser):
         for token_id in token_ids:
             self._harmony_parser.process(token_id)
             channel = self._harmony_parser.current_channel
-            recipient = self._harmony_parser.current_recipient
+            recipient = self._normalize_recipient(
+                self._harmony_parser.current_recipient
+            )
             delta = self._harmony_parser.last_content_delta or ""
             completed_message = self._poll_completed_message()
 
@@ -298,3 +318,14 @@ class HarmonyParser(DelegatingParser):
             segments=segments,
             reasoning_token_count=reasoning_token_count,
         )
+
+    @staticmethod
+    def _normalize_recipient(recipient: str | None) -> str | None:
+        """Remove constrained formats misparsed into recipients by older Harmony."""
+        if recipient is None:
+            return None
+
+        constrain_index = recipient.find("<|constrain|>")
+        if constrain_index == -1:
+            return recipient
+        return recipient[:constrain_index].rstrip() or None
