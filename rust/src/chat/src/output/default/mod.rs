@@ -189,46 +189,19 @@ impl ChatOutputProcessor for DefaultChatOutputProcessor {
 mod tests {
     use std::sync::Arc;
 
-    use vllm_tokenizer::Tokenizer;
+    use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::DefaultChatOutputProcessor;
     use crate::Error;
     use crate::parser::ParserSelection;
     use crate::request::ChatRequest;
 
-    struct FakeTokenizer;
-
-    impl Tokenizer for FakeTokenizer {
-        fn encode(
-            &self,
-            text: &str,
-            _add_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<Vec<u32>> {
-            Ok(text.chars().map(u32::from).collect())
-        }
-
-        fn decode(
-            &self,
-            token_ids: &[u32],
-            _skip_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<String> {
-            Ok(token_ids
-                .iter()
-                .map(|token_id| char::from_u32(*token_id).unwrap_or('\u{FFFD}'))
-                .collect())
-        }
-
-        fn token_to_id(&self, token: &str) -> Option<u32> {
-            match token {
-                "<|channel>" => Some(1),
-                "<channel|>" => Some(2),
-                _ => None,
-            }
-        }
-    }
-
-    fn tokenizer() -> Arc<FakeTokenizer> {
-        Arc::new(FakeTokenizer)
+    fn tokenizer() -> Arc<TestTokenizer> {
+        Arc::new(
+            TestTokenizer::new()
+                .with_regular_token("<|channel>", 256)
+                .with_regular_token("<channel|>", 257),
+        )
     }
 
     #[test]

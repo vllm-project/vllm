@@ -100,6 +100,7 @@ class HarmonyParser(DelegatingParser):
         if len(messages) <= self._num_processed_messages:
             return None
         msg = messages[self._num_processed_messages]
+        msg.recipient = self._normalize_recipient(msg.recipient)
         self._num_processed_messages += 1
         return msg
 
@@ -192,7 +193,9 @@ class HarmonyParser(DelegatingParser):
         *,
         finished: bool,
     ) -> DeltaMessage | None:
-        prev_recipient = self._harmony_parser.current_recipient
+        prev_recipient = self._normalize_recipient(
+            self._harmony_parser.current_recipient
+        )
         result = self.process_chunk(delta_token_ids)
         if finished:
             flushed_segment = self.flush()
@@ -274,7 +277,9 @@ class HarmonyParser(DelegatingParser):
         for token_id in token_ids:
             self._harmony_parser.process(token_id)
             channel = self._harmony_parser.current_channel
-            recipient = self._harmony_parser.current_recipient
+            recipient = self._normalize_recipient(
+                self._harmony_parser.current_recipient
+            )
             delta = self._harmony_parser.last_content_delta or ""
             completed_message = self._poll_completed_message()
 
@@ -298,3 +303,14 @@ class HarmonyParser(DelegatingParser):
             segments=segments,
             reasoning_token_count=reasoning_token_count,
         )
+
+    @staticmethod
+    def _normalize_recipient(recipient: str | None) -> str | None:
+        """Remove constrained formats misparsed into recipients by older Harmony."""
+        if recipient is None:
+            return None
+
+        constrain_index = recipient.find("<|constrain|>")
+        if constrain_index == -1:
+            return recipient
+        return recipient[:constrain_index].rstrip() or None
