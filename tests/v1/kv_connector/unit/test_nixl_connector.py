@@ -1747,10 +1747,7 @@ def _run_abort_timeout_test(llm: LLM, timeout: int):
         ),
         pytest.param(
             "ROCM_ATTN",
-            marks=pytest.mark.skipif(
-                not current_platform.is_rocm(),
-                reason="Attention backend ROCM_ATTN is only supported on ROCm",
-            ),
+            marks=pytest.mark.skip(reason="ROCM_ATTN does not support KV connectors"),
         ),
         "TRITON_ATTN",
     ],

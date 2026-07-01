@@ -10,7 +10,12 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
 
-from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
+from vllm.config import (
+    VllmConfig,
+    get_current_vllm_config,
+    get_layers_from_vllm_config,
+    set_current_vllm_config,
+)
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -344,14 +349,15 @@ def get_current_attn_backends(
     )
     from vllm.v1.attention.selector import get_attn_backend
 
-    return [
-        get_attn_backend(
-            head_size=vllm_config.model_config.get_head_size(),
-            dtype=vllm_config.model_config.dtype,
-            kv_cache_dtype=vllm_config.cache_config.cache_dtype,
-            use_mla=vllm_config.model_config.use_mla,
-        )
-    ]
+    with set_current_vllm_config(vllm_config):
+        return [
+            get_attn_backend(
+                head_size=vllm_config.model_config.get_head_size(),
+                dtype=vllm_config.model_config.dtype,
+                kv_cache_dtype=vllm_config.cache_config.cache_dtype,
+                use_mla=vllm_config.model_config.use_mla,
+            )
+        ]
 
 
 def get_current_attn_backend(
