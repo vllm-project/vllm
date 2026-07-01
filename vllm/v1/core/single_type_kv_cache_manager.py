@@ -1253,7 +1253,8 @@ class MambaManager(SingleTypeKVCacheManager):
                     # num_tokens_main_model exceeds total_computed_tokens.)
                     if (
                         request_id not in self.num_cached_block
-                        and total_computed_tokens > len(new_computed_blocks) * self.block_size
+                        and total_computed_tokens
+                        > len(new_computed_blocks) * self.block_size
                         and num_tokens_main_model > total_computed_tokens
                     ):
                         num_new_blocks += 1
