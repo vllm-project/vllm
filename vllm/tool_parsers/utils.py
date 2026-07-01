@@ -350,8 +350,8 @@ def _get_tool_schema_defs(
 def _get_json_schema_from_tools(
     tools: list[Tool],
 ) -> dict:
-    fn_tool_schemas = []
-    fn_tools = []
+    fn_tool_schemas: list[dict[str, Any]] = []
+    fn_tools: list[Tool] = []
     for tool in tools:
         if isinstance(tool, (FunctionTool, NamespaceTool)):
             fn_tool_schemas.extend(
@@ -389,30 +389,30 @@ def get_json_schema_from_tools(
         tool_choice, ToolChoiceFunction
     ):
         tool_name = tool_choice.name
-        tool_map = {}
+        responses_tool_map: dict[str, dict[str, Any] | None] = {}
         for tool in tools:
             if not isinstance(tool, (FunctionTool, NamespaceTool)):
                 continue
             for name, params in iter_response_function_tool_info(tool):
-                tool_map[name] = params
+                responses_tool_map[name] = params
                 if "__" in name:
-                    tool_map.setdefault(name.rsplit("__", 1)[1], params)
-        if tool_name not in tool_map:
+                    responses_tool_map.setdefault(name.rsplit("__", 1)[1], params)
+        if tool_name not in responses_tool_map:
             raise ValueError(f"Tool '{tool_name}' has not been passed in `tools`.")
-        return tool_map[tool_name]
+        return responses_tool_map[tool_name]
     # tool_choice: Forced Function (ChatCompletion)
     if (not isinstance(tool_choice, str)) and isinstance(
         tool_choice, ChatCompletionNamedToolChoiceParam
     ):
         tool_name = tool_choice.function.name
-        tool_map = {
+        chat_tool_map: dict[str, ChatCompletionToolsParam] = {
             tool.function.name: tool
             for tool in tools
             if isinstance(tool, ChatCompletionToolsParam)
         }
-        if tool_name not in tool_map:
+        if tool_name not in chat_tool_map:
             raise ValueError(f"Tool '{tool_name}' has not been passed in `tools`.")
-        return tool_map[tool_name].function.parameters
+        return chat_tool_map[tool_name].function.parameters
     # tool_choice: "required"
     if tool_choice == "required":
         return _get_json_schema_from_tools(tools)
