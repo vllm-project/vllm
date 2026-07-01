@@ -511,6 +511,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.impl: MiniMaxM3SparseImpl = select_main_impl_cls(  # type: ignore[assignment]
             topk_blocks=sparse_cfg["sparse_topk_blocks"],
             kv_cache_dtype=self.kv_cache_dtype,
+            num_kv_heads=self.num_kv_heads,
         )(
             self.num_heads,
             self.head_dim,
