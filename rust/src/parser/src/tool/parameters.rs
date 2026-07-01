@@ -166,7 +166,13 @@ impl JsonParamType {
 
         // Typically, these types are already handled by checking the "type" field, but
         // we can also infer them from their characteristic fields if "type" is missing.
-        if schema.contains_key("enum") {
+        if let Some(values) = schema.get("enum").and_then(Value::as_array) {
+            // Enum values are treated as strings, except that a `null` member
+            // makes the parameter nullable (mirrors Python's enum type
+            // inference), so a literal "null" coerces to JSON null.
+            if values.iter().any(Value::is_null) {
+                return Some(Self::one_of(vec![Self::String, Self::Null]));
+            }
             return Some(Self::String);
         }
         if schema.contains_key("items") {
@@ -277,9 +283,12 @@ impl JsonParamType {
 
 /// Convert one parameter input to a normalized JSON value.
 fn convert_with_optional_schema(param_type: Option<&JsonParamType>, input: &ParamInput) -> Value {
-    // For literal `null`, always convert to JSON null value.
+    // Coerce the literal text `null` to JSON null, except for `string`-typed
+    // params, where it must stay the string "null": a model emitting the literal
+    // text "null" for a string field means the string, not a missing value.
     if let ParamInput::Text(value) = input
         && value.eq_ignore_ascii_case("null")
+        && param_type != Some(&JsonParamType::String)
     {
         return Value::Null;
     }
@@ -685,21 +694,43 @@ mod tests {
     }
 
     #[test]
-    fn convert_params_preserves_null_for_known_param() {
-        let schemas = ToolSchemas::from_tools(&[test_tool(
-            "convert",
-            json!({
-                "type": "object",
-                "properties": {
-                    "value": { "type": "string" }
-                }
-            }),
-        )]);
+    fn string_param_preserves_literal_null_text() {
+        // A `string`-typed param whose value is the literal text "null"/"NULL"
+        // must stay a string (the original case is preserved), rather than being
+        // coerced to JSON null. Non-string types keep coercing "null" to null.
+        let params = ToolSchema::from_schema(&json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" },
+                "count": { "type": "integer" },
+                "anything": {}
+            }
+        }));
 
-        let converted = schemas
-            .convert_params_with_schema("convert", vec![("value".to_string(), "NULL".to_string())]);
+        assert_eq!(params.convert("name", text("null")), json!("null"));
+        assert_eq!(params.convert("name", text("NULL")), json!("NULL"));
+        // Non-string and schema-less params are unchanged: "null" -> null.
+        assert_eq!(params.convert("count", text("null")), json!(null));
+        assert_eq!(params.convert("anything", text("null")), json!(null));
+    }
 
-        assert_eq!(converted.get("value"), Some(&json!(null)));
+    #[test]
+    fn nullable_enum_param_coerces_literal_null() {
+        // An enum that includes `null` admits a null value, so a literal "null"
+        // must coerce to JSON null (matching Python's `extract_types_from_schema`,
+        // which infers `null` from the enum values), while a non-null enum keeps
+        // "null" as a string.
+        let params = ToolSchema::from_schema(&json!({
+            "type": "object",
+            "properties": {
+                "mode": { "enum": [null, "auto"] },
+                "color": { "enum": ["red", "green"] }
+            }
+        }));
+
+        assert_eq!(params.convert("mode", text("null")), json!(null));
+        assert_eq!(params.convert("mode", text("auto")), json!("auto"));
+        assert_eq!(params.convert("color", text("null")), json!("null"));
     }
 
     #[test]
@@ -841,7 +872,7 @@ mod tests {
                 "user_id": 42,
                 "urgent": true,
                 "note": "Please leave at front desk.",
-                "nil": null,
+                "nil": "NULL",
                 "shipping": {
                     "city": "Singapore",
                     "zip": 18956
