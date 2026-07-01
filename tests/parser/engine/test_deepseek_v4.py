@@ -7,6 +7,13 @@ import json
 import pytest
 
 from tests.parser.engine.conftest import make_mock_tokenizer
+from tests.parser.engine.replay_harness import (
+    DUMMY_TOOLS,
+    MockTokenizer,
+    _test_request,
+    collect_output,
+    replay_streaming,
+)
 from tests.parser.engine.streaming_helpers import (
     collect_content,
     collect_function_name,
@@ -14,6 +21,7 @@ from tests.parser.engine.streaming_helpers import (
     simulate_reasoning_streaming,
     simulate_tool_streaming,
 )
+from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.deepseek_v4 import (
     DSML_INVOKE_END,
     DSML_INVOKE_NAME_END,
@@ -25,6 +33,10 @@ from vllm.parser.deepseek_v4 import (
     DeepSeekV4Parser,
     _dsml_arg_converter,
     deepseek_v4_config,
+)
+from vllm.parser.engine.registered_adapters import (
+    DeepSeekV4ParserReasoningAdapter,
+    DeepSeekV4ParserToolAdapter,
 )
 
 _THINK_START_ID = 50
@@ -656,3 +668,209 @@ class TestParallelUnwrapping:
         assert len(result.tool_calls) == 1
         args = json.loads(result.tool_calls[0].function.arguments)
         assert args == {"location": "Beijing"}
+
+
+# ── DelegatingParser: large delta with </think> + tool calls ─────────
+
+_DSV4_FULL_VOCAB = {
+    DSML_THINK_START: 128821,
+    DSML_THINK_END: 128822,
+    DSML_TOOL_START: 128823,
+    DSML_TOOL_END: 128824,
+}
+
+
+class _DeepSeekV4Delegating(DelegatingParser):
+    reasoning_parser_cls = DeepSeekV4ParserReasoningAdapter
+    tool_parser_cls = DeepSeekV4ParserToolAdapter
+
+
+def _dsv4_tokens(
+    reasoning: str,
+    tool_name: str,
+    params: list[tuple[str, str, str]],
+) -> list[tuple[int, str]]:
+    """Build a token sequence: reasoning + </think> + DSML tool block."""
+    tokens: list[tuple[int, str]] = []
+    tid = 100
+
+    for word in reasoning.split(" "):
+        prefix = " " if tokens else ""
+        tokens.append((tid, prefix + word))
+        tid += 1
+
+    tokens.append((_DSV4_FULL_VOCAB[DSML_THINK_END], DSML_THINK_END))
+
+    tokens.append((tid, "\n\n"))
+    tid += 1
+
+    tokens.append((_DSV4_FULL_VOCAB[DSML_TOOL_START], DSML_TOOL_START))
+
+    tokens.append((tid, "\n"))
+    tid += 1
+
+    invoke_prefix_text = f"{DSML_INVOKE_PREFIX}{tool_name}{DSML_INVOKE_NAME_END}"
+    tokens.append((tid, invoke_prefix_text))
+    tid += 1
+
+    tokens.append((tid, "\n"))
+    tid += 1
+
+    for name, is_str, value in params:
+        param_text = _param(name, is_str, value)
+        tokens.append((tid, param_text))
+        tid += 1
+        tokens.append((tid, "\n"))
+        tid += 1
+
+    tokens.append((tid, DSML_INVOKE_END))
+    tid += 1
+
+    tokens.append((tid, "\n"))
+    tid += 1
+
+    tokens.append((_DSV4_FULL_VOCAB[DSML_TOOL_END], DSML_TOOL_END))
+
+    return tokens
+
+
+class TestDelegatingParserLargeDelta:
+    """Regression: tool calls lost when </think> + DSML arrive in same delta.
+
+    The DelegatingParser used by the serving layer splits reasoning and
+    tool parsing across two separate engine instances.  When </think> and
+    the entire DSML tool block arrive in a single large streaming delta,
+    the content transfer from reasoning adapter to tool adapter must
+    preserve the tool call text.
+    """
+
+    @pytest.fixture
+    def dsv4_tokens(self):
+        return _dsv4_tokens(
+            reasoning="The user wants the current weather in Berlin.",
+            tool_name="get_weather",
+            params=[
+                ("location", "true", "Berlin"),
+                ("units", "true", "celsius"),
+            ],
+        )
+
+    @pytest.fixture
+    def dsv4_tokenizer(self, dsv4_tokens):
+        return MockTokenizer(
+            vocab=dict(_DSV4_FULL_VOCAB),
+            tokens=dsv4_tokens,
+        )
+
+    @pytest.mark.parametrize(
+        "chunk_size",
+        [1, 2, 3, 5, None],
+        ids=lambda c: f"chunk={c}",
+    )
+    def test_tool_calls_extracted_at_all_chunk_sizes(
+        self, dsv4_tokenizer, dsv4_tokens, chunk_size
+    ):
+        parser = _DeepSeekV4Delegating(
+            dsv4_tokenizer,
+            chat_template_kwargs={"thinking": True},
+        )
+        deltas = replay_streaming(
+            parser,
+            dsv4_tokens,
+            chunk_size=chunk_size,
+            finished_on_last=True,
+            tools=DUMMY_TOOLS,
+        )
+        output = collect_output(deltas)
+
+        assert "The user wants" in output.reasoning
+        assert len(output.tool_calls) == 1, (
+            f"Expected 1 tool call but got {len(output.tool_calls)}; "
+            f"reasoning={output.reasoning!r}, content={output.content!r}"
+        )
+        assert output.tool_calls[0]["name"] == "get_weather"
+        args = json.loads(output.tool_calls[0]["arguments"])
+        assert args == {"location": "Berlin", "units": "celsius"}
+
+    def test_eos_drop_token_does_not_swallow_tool_calls(self):
+        """Tool calls must survive when an EOS DROP token's ID is in
+        delta_token_ids but its text is absent from delta_text.
+
+        At large stream_interval the EOS token ID arrives in the same
+        delta as </think> + tool calls but the detokenizer strips the
+        EOS text.  The scanner's _rebuild_from_anchors defers all text
+        after </think> when it can't find the EOS anchor text.  The
+        reasoning adapter's finish_streaming must flush deferred text
+        as content (with skip_tool_parsing), not as tool calls.
+        """
+        eos_text = "<｜end▁of▁sentence｜>"
+        eos_id = 128801
+        vocab = {
+            DSML_THINK_START: 128821,
+            DSML_THINK_END: 128822,
+            eos_text: eos_id,
+        }
+
+        reasoning = "The user wants weather."
+        tool_block = (
+            "\n\n"
+            + DSML_TOOL_START
+            + "\n"
+            + DSML_INVOKE_PREFIX
+            + "get_weather"
+            + DSML_INVOKE_NAME_END
+            + "\n"
+            + _param("location", "true", "Berlin")
+            + "\n"
+            + DSML_INVOKE_END
+            + "\n"
+            + DSML_TOOL_END
+        )
+        # delta_text does NOT include EOS text (detokenizer strips it)
+        full_text = reasoning + DSML_THINK_END + tool_block
+        # Build token list: word-split reasoning, then special tokens,
+        # then word-split tool block content, then EOS.
+        # EOS ID is present but its text is NOT in delta_text.
+        tokens: list[tuple[int, str]] = []
+        tid = 100
+        for word in reasoning.split(" "):
+            pfx = " " if tokens else ""
+            tokens.append((tid, pfx + word))
+            tid += 1
+        tokens.append((128822, DSML_THINK_END))
+        for ch in tool_block:
+            tokens.append((tid, ch))
+            tid += 1
+        tokens.append((eos_id, eos_text))
+
+        all_ids = [t[0] for t in tokens]
+        tokenizer = MockTokenizer(vocab=vocab, tokens=tokens)
+        request = _test_request(tools=DUMMY_TOOLS)
+
+        # All-in-one delta: EOS ID in token_ids but text NOT in
+        # delta_text (detokenizer strips EOS).  This is the scenario
+        # at large stream_interval.
+        parser = _DeepSeekV4Delegating(
+            tokenizer,
+            chat_template_kwargs={"thinking": True},
+        )
+        deltas = [
+            parser.parse_delta(
+                full_text,
+                all_ids,
+                request,
+                prompt_token_ids=[],
+                finished=True,
+            )
+        ]
+
+        output = collect_output(deltas)
+
+        assert "The user wants" in output.reasoning
+        assert len(output.tool_calls) == 1, (
+            f"Expected 1 tool call but got {len(output.tool_calls)}; "
+            f"reasoning={output.reasoning!r}, content={output.content!r}"
+        )
+        assert output.tool_calls[0]["name"] == "get_weather"
+        args = json.loads(output.tool_calls[0]["arguments"])
+        assert args == {"location": "Berlin"}
