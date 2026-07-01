@@ -119,8 +119,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
   m.def(
       "grouped_topk(Tensor scores, int n_group, int "
       "topk_group, int topk, bool renormalize, float "
-      "routed_scaling_factor, Tensor bias, int scoring_func) -> (Tensor, "
-      "Tensor)");
+      "routed_scaling_factor, Tensor bias, int scoring_func, int "
+      "group_scoring_func) -> (Tensor, Tensor)");
 
   // DeepSeek V3 optimized router GEMM for SM90+
   m.def("dsv3_router_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
