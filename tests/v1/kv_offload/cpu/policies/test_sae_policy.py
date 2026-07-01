@@ -267,3 +267,25 @@ def test_evict_admission_gate_allows_when_new_session_score_above_worst():
     result = policy.evict(1, {key(2)})
     assert result is not None
     assert len(result) == 1
+
+
+def test_cpu_offloading_manager_accepts_sae_policy_and_kwargs():
+    from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
+
+    mgr = CPUOffloadingManager(
+        num_blocks=4,
+        cache_policy="sae",
+        policy_kwargs={"decay_interval": 42, "decay_factor": 0.5},
+    )
+    assert isinstance(mgr._policy, SAECachePolicy)
+    assert mgr._policy._decay_interval == 42
+    assert mgr._policy._decay_factor == 0.5
+
+
+def test_cpu_offloading_manager_defaults_still_work_for_lru():
+    from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
+    from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
+
+    mgr = CPUOffloadingManager(num_blocks=4, cache_policy="lru")
+    assert mgr._policy is not None
+    assert isinstance(mgr._policy, LRUCachePolicy)
