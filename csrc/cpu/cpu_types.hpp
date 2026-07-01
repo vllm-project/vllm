@@ -8,7 +8,6 @@
   #include "cpu_types_x86.hpp"
 #elif defined(__powerpc__) 
 // ppc implementation
-#pragma message("power pc triggered \n\n\n")
   #include "cpu_types_vsx.hpp"
 #elif defined(__s390x__)
   // s390 implementation

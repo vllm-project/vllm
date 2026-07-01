@@ -80,7 +80,12 @@ inline int64_t get_available_l2_size() {
   }();
   return size;
 #else
-  return at::cpu::get_cpu_capability("L2_CACHE_SIZE");
+  static int64_t size = []() {
+    auto caps = at::cpu::get_cpu_capabilities();
+    const uint32_t l2_cache_size = caps.at("l2_cache_size").toInt();
+    return l2_cache_size >> 1;
+  }();
+  return size;
 #endif
 }
 
