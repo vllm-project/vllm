@@ -127,7 +127,7 @@ def FusedMoE(
     num_redundant_experts: int = 0,
     has_bias: bool = False,
     is_sequence_parallel: bool = False,
-    ckpt_names: tuple[str, str, str] = ("gate_proj", "down_proj", "up_proj"),
+    expert_mapping: list[tuple[str, str, int, str]] | None = None,
     n_shared_experts: int | None = None,
     router_logits_dtype: torch.dtype | None = None,
     gate: torch.nn.Module | None = None,
@@ -356,9 +356,7 @@ def FusedMoE(
         moe_config,
         quant_config,
         expert_map_manager=expert_map_manager,
-        ckpt_gate_proj_name=ckpt_names[0],
-        ckpt_down_proj_name=ckpt_names[1],
-        ckpt_up_proj_name=ckpt_names[2],
+        expert_mapping=expert_mapping,
         # Extra params that are needed by quant_methods, pass along for now
         # Prefer getting these from other sources, e.g. moe_config or
         # router object
