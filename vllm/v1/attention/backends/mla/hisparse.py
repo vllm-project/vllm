@@ -231,6 +231,43 @@ def _has_hisparse_ops() -> bool:
     return "num_real_reqs" in schema
 
 
+class _GroupPlan:
+    """Group-shared swap-in plan for GLM-5.2 index sharing.
+
+    A "full" layer's swap_in(produce_plan=True) writes the resolved plan here;
+    its "shared" layers replay it via apply_plan without re-resolving LRU. One
+    set per (device, max_rows, top_k), shared across all coordinators -- mirrors
+    the model-global topk_indices_buffer (layers run sequentially: full writes,
+    its shared layers read, the next full overwrites). Static shapes so the
+    replay is CUDA-graph-capture safe.
+    """
+
+    __slots__ = ("global_indices", "hot_indices", "miss_mask")
+
+    def __init__(self, device: torch.device, max_rows: int, top_k: int) -> None:
+        self.global_indices = torch.full(
+            (max_rows, top_k), -1, dtype=torch.int32, device=device
+        )
+        self.hot_indices = torch.full(
+            (max_rows, top_k), -1, dtype=torch.int32, device=device
+        )
+        self.miss_mask = torch.zeros(
+            (max_rows, top_k), dtype=torch.int32, device=device
+        )
+
+
+_GROUP_PLANS: dict[tuple[str, int, int], _GroupPlan] = {}
+
+
+def _get_group_plan(device: torch.device, max_rows: int, top_k: int) -> _GroupPlan:
+    key = (str(device), max_rows, top_k)
+    plan = _GROUP_PLANS.get(key)
+    if plan is None:
+        plan = _GroupPlan(device, max_rows, top_k)
+        _GROUP_PLANS[key] = plan
+    return plan
+
+
 class HiSparseCoordinator:
     """Per-layer decode-time hot buffer for sparse MLA KV rows.
 
@@ -289,6 +326,9 @@ class HiSparseCoordinator:
         )
 
         self.num_real_reqs = get_num_real_reqs_tensor(self.device)
+
+        # Group-shared plan buffers for index-sharing plan-once (see _GroupPlan).
+        self._plan = _get_group_plan(self.device, max_num_reqs, config.top_k)
 
         self._source_cache: torch.Tensor | None = None
         self._source_is_host = False
@@ -668,6 +708,7 @@ class HiSparseCoordinator:
         block_size: int,
         slot_mapping: torch.Tensor | None,
         return_valid_counts: bool = False,
+        produce_plan: bool = False,
     ) -> (
         tuple[torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
@@ -677,6 +718,11 @@ class HiSparseCoordinator:
         Returns ``(hot_cache_paged, hot_indices)`` (plus ``valid_counts`` when
         requested). ``hot_cache_paged`` has the same paged layout as a regular
         MLA KV cache; ``hot_indices`` are global token ids within it.
+
+        When ``produce_plan`` (an index-sharing "full" layer), the resolved plan
+        (global ids, hot slots, miss mask) is also written to the group-shared
+        buffers so the group's "shared" layers can replay it via ``apply_plan``
+        without re-resolving the LRU.
         """
         num_tokens = topk_indices.shape[0]
         top_k = topk_indices.shape[1]
@@ -721,6 +767,16 @@ class HiSparseCoordinator:
             # handling can read it.
             self.wait_for_pending_backup()
 
+        # For a plan producer, resolve into the group-shared buffers so the
+        # group's shared layers can replay the identical plan.
+        if produce_plan:
+            self._plan.global_indices[:num_tokens].copy_(global_indices)
+            hot_indices = self._plan.hot_indices[:num_tokens]
+            miss_mask = self._plan.miss_mask[:num_tokens]
+        else:
+            hot_indices = torch.full_like(global_indices, -1)
+            miss_mask = None
+
         if self._kernel_path():
             # Padded rows are skipped by the kernel (num_real_reqs) and must
             # come out as -1 so the attention kernel masks them.
@@ -730,7 +786,6 @@ class HiSparseCoordinator:
             kernel_source = (
                 self.hot_cache if self._source_is_host else self._source_cache
             )
-            hot_indices = torch.full_like(global_indices, -1)
             torch.ops._C_cache_ops.hisparse_swap_in(
                 kernel_source,
                 self._host_cache,
@@ -743,9 +798,12 @@ class HiSparseCoordinator:
                 self.lru_slots,
                 self.num_real_reqs,
                 self.region_stride,
+                miss_mask,
             )
         else:
-            hot_indices = self._swap_in_fallback(global_indices, newest_global)
+            self._swap_in_fallback(
+                global_indices, newest_global, hot_indices, miss_mask
+            )
 
         if valid_counts is None:
             return self.hot_cache_paged(block_size), hot_indices
@@ -755,13 +813,22 @@ class HiSparseCoordinator:
         self,
         global_indices: torch.Tensor,
         newest_global: torch.Tensor | None,
-    ) -> torch.Tensor:
-        """Slow reference implementation of the swap-in kernel semantics."""
+        hot_indices: torch.Tensor,
+        miss_mask: torch.Tensor | None = None,
+    ) -> None:
+        """Slow reference implementation of the swap-in kernel semantics.
+
+        Writes resolved slots into ``hot_indices`` in place; when ``miss_mask``
+        is given, sets it to 1 at columns resolved as a miss (matching the
+        kernel's plan output for the group-shared replay path).
+        """
         assert self._source_cache is not None
         assert self._host_cache is not None and self._host_cache_valid is not None
         num_tokens, _ = global_indices.shape
         buf = self.config.device_buffer_size
-        hot_indices = torch.full_like(global_indices, -1)
+        hot_indices.fill_(-1)
+        if miss_mask is not None:
+            miss_mask.fill_(0)
 
         global_cpu = global_indices.cpu().tolist()
         newest_cpu = (
@@ -805,6 +872,8 @@ class HiSparseCoordinator:
                 slot = evictables[m]
                 miss_slots.append(slot)
                 hot_indices[row, col] = base + slot
+                if miss_mask is not None:
+                    miss_mask[row, col] = 1
                 dgi_cpu[row][slot] = g
                 miss_src.append(g)
                 miss_dst.append(base + slot)
@@ -837,6 +906,74 @@ class HiSparseCoordinator:
                     0, gpu_src
                 )
             self.hot_cache.index_copy_(0, dst, rows)
+
+    # ---------------------------------------------------------- plan replay
+
+    def apply_plan(
+        self,
+        *,
+        kv_cache: torch.Tensor,
+        block_size: int,
+        num_tokens: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Replay the group's plan for an index-sharing "shared" layer.
+
+        A "full" layer resolved the plan via ``swap_in(produce_plan=True)``;
+        this gathers only THIS layer's own missed rows into the identical
+        planned hot slots, with no LRU resolution. Fixed shape -> capture-safe.
+        """
+        self.bind_source_cache(kv_cache)
+        n = num_tokens
+        global_indices = self._plan.global_indices[:n]
+        hot_indices = self._plan.hot_indices[:n]
+        miss_mask = self._plan.miss_mask[:n]
+        if self._kernel_path():
+            kernel_source = (
+                self.hot_cache if self._source_is_host else self._source_cache
+            )
+            torch.ops._C_cache_ops.hisparse_gather_plan(
+                kernel_source,
+                self._host_cache,
+                self._host_cache_valid,
+                self.hot_cache,
+                global_indices,
+                hot_indices,
+                miss_mask,
+                self.num_real_reqs,
+            )
+        else:
+            self._apply_plan_fallback(global_indices, hot_indices, miss_mask)
+        return self.hot_cache_paged(block_size), hot_indices
+
+    def _apply_plan_fallback(
+        self,
+        global_indices: torch.Tensor,
+        hot_indices: torch.Tensor,
+        miss_mask: torch.Tensor,
+    ) -> None:
+        """Python reference for hisparse_gather_plan (miss-column gather)."""
+        assert self._source_cache is not None
+        assert self._host_cache is not None and self._host_cache_valid is not None
+        mask = (miss_mask != 0) & (global_indices >= 0) & (hot_indices >= 0)
+        src = global_indices[mask]
+        dst = hot_indices[mask].to(torch.long)
+        if src.numel() == 0:
+            return
+        src_cpu = src.cpu().to(torch.long)
+        host_valid = self._host_cache_valid[src_cpu]
+        rows = torch.empty(
+            (src.numel(), self.row_width), dtype=self.kv_dtype, device=self.device
+        )
+        if torch.any(host_valid):
+            rows[host_valid.to(self.device)] = self._host_cache[
+                src_cpu[host_valid]
+            ].to(self.device)
+        if not torch.all(host_valid):
+            gpu_src = src_cpu[~host_valid].to(self.device)
+            rows[(~host_valid).to(self.device)] = self._source_cache.index_select(
+                0, gpu_src
+            )
+        self.hot_cache.index_copy_(0, dst, rows)
 
         return hot_indices
 

@@ -86,6 +86,7 @@ __global__ void hisparse_swap_in_kernel(
     const int32_t* __restrict__ global_indices,   // [num_rows, top_k]
     const int32_t* __restrict__ newest_global,    // [num_rows] or nullptr
     int32_t* __restrict__ hot_indices,            // [num_rows, top_k]
+    int32_t* __restrict__ miss_mask,              // [num_rows, top_k] or nullptr
     int32_t* __restrict__ device_global_indices,  // [max_rows, hot_size]
     int16_t* __restrict__ lru_slots,              // [max_rows, hot_size]
     const int32_t* __restrict__ num_real_reqs,    // [1] or nullptr
@@ -114,6 +115,9 @@ __global__ void hisparse_swap_in_kernel(
 
   const int32_t* row_topk = global_indices + static_cast<int64_t>(row) * top_k;
   int32_t* row_out = hot_indices + static_cast<int64_t>(row) * top_k;
+  int32_t* row_miss =
+      (miss_mask != nullptr) ? miss_mask + static_cast<int64_t>(row) * top_k
+                             : nullptr;
   int32_t* row_dgi =
       device_global_indices + static_cast<int64_t>(row) * hot_size;
   int16_t* row_lru = lru_slots + static_cast<int64_t>(row) * hot_size;
@@ -142,6 +146,7 @@ __global__ void hisparse_swap_in_kernel(
   // Phase 1: resolve invalid / newest entries, hash the rest.
   for (int i = tid; i < top_k; i += BLOCK_SIZE) {
     const int32_t g = row_topk[i];
+    if (row_miss != nullptr) row_miss[i] = 0;
     if (g < 0) {
       row_out[i] = -1;
       s_topk[i] = kTokenDone;
@@ -290,6 +295,7 @@ __global__ void hisparse_swap_in_kernel(
       // entries are skipped), so writes never overrun pending reads.
       s_topk[m] = g;
       row_out[i] = static_cast<int32_t>(hot_base) + evict_slot;
+      if (row_miss != nullptr) row_miss[i] = 1;
       row_dgi[evict_slot] = g;
     }
   }
@@ -327,6 +333,54 @@ __global__ void hisparse_swap_in_kernel(
     }
     if (src != nullptr) {
       copy_row_warp(lane_id, src, dst, row_bytes);
+    }
+  }
+}
+
+// Shared-layer plan replay. Given a plan (hot_indices + miss_mask) already
+// computed by the group's "full" layer via hisparse_swap_in, gather THIS
+// layer's own missed KV rows into the planned hot slots. No LRU resolution:
+// index-sharing shared layers see identical global_indices/hot_indices, so the
+// slot assignment is identical -- only the per-layer bytes differ. Fixed shape
+// (num_rows x top_k), so it is CUDA-graph-capture safe.
+template <int BLOCK_SIZE>
+__global__ void hisparse_gather_plan_kernel(
+    const char* __restrict__ source_cache,        // [source_rows, row_bytes]
+    const char* __restrict__ host_cache,          // [host_rows, row_bytes]
+    const bool* __restrict__ host_cache_valid,    // [host_rows]
+    char* __restrict__ hot_cache,                 // [hot_rows, row_bytes]
+    const int32_t* __restrict__ global_indices,   // [num_rows, top_k]
+    const int32_t* __restrict__ hot_indices,      // [num_rows, top_k] abs hot rows
+    const int32_t* __restrict__ miss_mask,        // [num_rows, top_k]
+    const int32_t* __restrict__ num_real_reqs,    // [1] or nullptr
+    const int64_t source_rows, const int64_t host_rows,
+    const int64_t row_bytes, const int32_t top_k) {
+  constexpr int NUM_WARPS = BLOCK_SIZE / kWarpSize;
+  const int row = blockIdx.x;
+  if (num_real_reqs != nullptr && row >= num_real_reqs[0]) {
+    return;
+  }
+  const int warp_id = threadIdx.x / kWarpSize;
+  const int lane_id = threadIdx.x % kWarpSize;
+  const int64_t base = static_cast<int64_t>(row) * top_k;
+  for (int col = warp_id; col < top_k; col += NUM_WARPS) {
+    if (miss_mask[base + col] == 0) {
+      continue;
+    }
+    const int32_t g = global_indices[base + col];
+    const int32_t dst = hot_indices[base + col];
+    if (g < 0 || dst < 0) {
+      continue;
+    }
+    const char* src = nullptr;
+    if (g < host_rows && host_cache_valid[g]) {
+      src = host_cache + static_cast<int64_t>(g) * row_bytes;
+    } else if (g < source_rows) {
+      src = source_cache + static_cast<int64_t>(g) * row_bytes;
+    }
+    if (src != nullptr) {
+      copy_row_warp(lane_id, src,
+                    hot_cache + static_cast<int64_t>(dst) * row_bytes, row_bytes);
     }
   }
 }
@@ -381,7 +435,8 @@ void hisparse_swap_in(torch::stable::Tensor const& source_cache,
                       torch::stable::Tensor& device_global_indices,
                       torch::stable::Tensor& lru_slots,
                       std::optional<torch::stable::Tensor> const& num_real_reqs,
-                      int64_t region_stride) {
+                      int64_t region_stride,
+                      std::optional<torch::stable::Tensor> const& miss_mask) {
   STD_TORCH_CHECK(source_cache.is_cuda(), "source_cache must be on CUDA");
   STD_TORCH_CHECK(host_cache.device().is_cpu(),
               "host_cache must be CPU memory");
@@ -455,6 +510,20 @@ void hisparse_swap_in(torch::stable::Tensor const& source_cache,
     num_real_ptr = num_real.const_data_ptr<int32_t>();
   }
 
+  // Optional plan output: 1 at columns resolved as a miss (loaded from
+  // host/source this call), 0 elsewhere. Lets index-sharing "shared" layers
+  // replay the same gather via hisparse_gather_plan without re-resolving LRU.
+  int32_t* miss_mask_ptr = nullptr;
+  if (miss_mask.has_value()) {
+    auto const& mm = miss_mask.value();
+    STD_TORCH_CHECK(mm.is_cuda() && mm.scalar_type() == torch::headeronly::ScalarType::Int &&
+                    mm.dim() == 2 && mm.is_contiguous() &&
+                    mm.size(0) == global_indices.size(0) &&
+                    mm.size(1) == global_indices.size(1),
+                "miss_mask must be a contiguous int32 CUDA tensor matching global_indices");
+    miss_mask_ptr = mm.mutable_data_ptr<int32_t>();
+  }
+
   if (num_rows == 0 || top_k == 0) {
     return;
   }
@@ -479,10 +548,80 @@ void hisparse_swap_in(torch::stable::Tensor const& source_cache,
       host_cache_valid.const_data_ptr<bool>(),
       static_cast<char*>(hot_cache_2d.mutable_data_ptr()),
       global_indices.const_data_ptr<int32_t>(), newest_ptr,
-      hot_indices.mutable_data_ptr<int32_t>(),
+      hot_indices.mutable_data_ptr<int32_t>(), miss_mask_ptr,
       device_global_indices.mutable_data_ptr<int32_t>(),
       lru_slots.mutable_data_ptr<int16_t>(), num_real_ptr, source_rows, host_rows,
       row_bytes, top_k, hot_size, hash_size, region_stride);
+}
+
+void hisparse_gather_plan(torch::stable::Tensor const& source_cache,
+                          torch::stable::Tensor const& host_cache,
+                          torch::stable::Tensor const& host_cache_valid,
+                          torch::stable::Tensor& hot_cache,
+                          torch::stable::Tensor const& global_indices,
+                          torch::stable::Tensor const& hot_indices,
+                          torch::stable::Tensor const& miss_mask,
+                          std::optional<torch::stable::Tensor> const& num_real_reqs) {
+  STD_TORCH_CHECK(source_cache.is_cuda(), "source_cache must be on CUDA");
+  STD_TORCH_CHECK(host_cache.device().is_cpu(), "host_cache must be CPU memory");
+  STD_TORCH_CHECK(host_cache_valid.device().is_cpu(),
+              "host_cache_valid must be CPU memory");
+  STD_TORCH_CHECK(hot_cache.is_cuda(), "hot_cache must be on CUDA");
+  STD_TORCH_CHECK(global_indices.is_cuda() && hot_indices.is_cuda() &&
+                  miss_mask.is_cuda(),
+              "plan tensors must be on CUDA");
+  STD_TORCH_CHECK(global_indices.scalar_type() == torch::headeronly::ScalarType::Int &&
+                  hot_indices.scalar_type() == torch::headeronly::ScalarType::Int &&
+                  miss_mask.scalar_type() == torch::headeronly::ScalarType::Int,
+              "plan tensors must be int32");
+  STD_TORCH_CHECK(global_indices.dim() == 2 && global_indices.is_contiguous(),
+              "global_indices must be contiguous 2D");
+  STD_TORCH_CHECK(hot_indices.size(0) == global_indices.size(0) &&
+                  hot_indices.size(1) == global_indices.size(1) &&
+                  miss_mask.size(0) == global_indices.size(0) &&
+                  miss_mask.size(1) == global_indices.size(1) &&
+                  hot_indices.is_contiguous() && miss_mask.is_contiguous(),
+              "hot_indices/miss_mask must match contiguous 2D global_indices");
+  STD_TORCH_CHECK(host_cache_valid.scalar_type() == torch::headeronly::ScalarType::Bool,
+              "host_cache_valid must be bool");
+
+  const int64_t row_bytes = hot_cache.size(-1) * hot_cache.element_size();
+  STD_TORCH_CHECK(row_bytes % 16 == 0, "KV row must be 16-byte aligned");
+  auto hot_cache_2d = torch::stable::reshape(hot_cache, {-1, hot_cache.size(-1)});
+  auto source_2d = torch::stable::reshape(source_cache, {-1, source_cache.size(-1)});
+  const int64_t source_rows = check_2d_rows(source_2d, "source_cache", row_bytes);
+  const int64_t host_rows = check_2d_rows(host_cache, "host_cache", row_bytes);
+  STD_TORCH_CHECK(host_cache_valid.numel() >= host_rows,
+              "host_cache_valid has too few rows");
+
+  const auto num_rows = static_cast<int32_t>(global_indices.size(0));
+  const auto top_k = static_cast<int32_t>(global_indices.size(1));
+
+  const int32_t* num_real_ptr = nullptr;
+  if (num_real_reqs.has_value()) {
+    auto const& num_real = num_real_reqs.value();
+    STD_TORCH_CHECK(num_real.is_cuda() && num_real.scalar_type() == torch::headeronly::ScalarType::Int &&
+                    num_real.numel() >= 1,
+                "num_real_reqs must be int32 on CUDA");
+    num_real_ptr = num_real.const_data_ptr<int32_t>();
+  }
+
+  if (num_rows == 0 || top_k == 0) {
+    return;
+  }
+
+  constexpr int kBlockSize = 256;
+  const torch::stable::accelerator::DeviceGuard device_guard(hot_cache.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream();
+  hisparse_gather_plan_kernel<kBlockSize><<<num_rows, kBlockSize, 0, stream>>>(
+      static_cast<const char*>(source_2d.const_data_ptr()),
+      static_cast<const char*>(host_cache.const_data_ptr()),
+      host_cache_valid.const_data_ptr<bool>(),
+      static_cast<char*>(hot_cache_2d.mutable_data_ptr()),
+      global_indices.const_data_ptr<int32_t>(),
+      hot_indices.const_data_ptr<int32_t>(),
+      miss_mask.const_data_ptr<int32_t>(), num_real_ptr, source_rows, host_rows,
+      row_bytes, top_k);
 }
 
 void hisparse_backup(torch::stable::Tensor const& src_cache,

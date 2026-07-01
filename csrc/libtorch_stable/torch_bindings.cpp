@@ -846,7 +846,18 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                 Tensor! device_global_indices,"
       "                 Tensor! lru_slots,"
       "                 Tensor? num_real_reqs,"
-      "                 int region_stride) -> ()");
+      "                 int region_stride,"
+      "                 Tensor(a!)? miss_mask=None) -> ()");
+
+  ops.def(
+      "hisparse_gather_plan(Tensor source_cache,"
+      "                     Tensor host_cache,"
+      "                     Tensor host_cache_valid,"
+      "                     Tensor! hot_cache,"
+      "                     Tensor global_indices,"
+      "                     Tensor hot_indices,"
+      "                     Tensor miss_mask,"
+      "                     Tensor? num_real_reqs) -> ()");
 
   ops.def(
       "hisparse_backup(Tensor src_cache,"
@@ -954,6 +965,7 @@ STABLE_TORCH_LIBRARY_IMPL(_C_cache_ops, CUDA, ops) {
   ops.impl("reshape_and_cache_flash", TORCH_BOX(&reshape_and_cache_flash));
   ops.impl("concat_and_cache_mla", TORCH_BOX(&concat_and_cache_mla));
   ops.impl("hisparse_swap_in", TORCH_BOX(&hisparse_swap_in));
+  ops.impl("hisparse_gather_plan", TORCH_BOX(&hisparse_gather_plan));
   ops.impl("hisparse_backup", TORCH_BOX(&hisparse_backup));
   ops.impl("concat_and_cache_mla_rope_fused",
            TORCH_BOX(&concat_and_cache_mla_rope_fused));

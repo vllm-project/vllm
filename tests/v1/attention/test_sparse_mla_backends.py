@@ -1288,6 +1288,79 @@ def test_hisparse_kernel_matches_fallback():
         torch.testing.assert_close(gathered[data_mask], expected[data_mask])
 
 
+def test_hisparse_plan_once_matches_independent():
+    """GLM-5.2 index sharing: a "shared" layer that replays the "full" layer's
+    plan via apply_plan must produce the same hot buffer as if it had run
+    swap_in independently. Covers the new hisparse_gather_plan kernel + the
+    miss_mask plan output, on both the kernel and Python-reference paths.
+    """
+    from vllm.v1.attention.backends.mla import hisparse as _hs
+
+    device = torch.device(DEVICE_TYPE)
+    torch.manual_seed(0)
+    block_size = 64
+    row_width = 64
+    num_blocks = 64
+    top_k = 128
+    buf = 256
+    num_reqs = 4
+
+    kv_cache = torch.randn(
+        (num_blocks, block_size, row_width), dtype=torch.float32, device=device
+    )
+
+    def make(use_cuda: bool) -> HiSparseCoordinator:
+        c = _make_hisparse_coordinator(
+            top_k=top_k, device_buffer_size=buf, max_num_reqs=num_reqs,
+            row_width=row_width,
+        )
+        c._use_cuda_ops = use_cuda
+        _mirror_block_slots(c, kv_cache, list(range(num_blocks)), block_size)
+        return c
+
+    blocks_per_req = num_blocks // num_reqs
+    block_table = torch.arange(
+        num_blocks, dtype=torch.int32, device=device
+    ).view(num_reqs, blocks_per_req)
+    req_ids = torch.arange(num_reqs, dtype=torch.int32, device=device)
+    seq_len = blocks_per_req * block_size
+    slot_mapping = block_table[:, -1].to(torch.int64) * block_size + (block_size - 1)
+
+    def run(use_cuda: bool) -> None:
+        # Distinct plan buffers per path so the two runs never clobber.
+        _hs._GROUP_PLANS.clear()
+        producer, shared, indep = make(use_cuda), make(use_cuda), make(use_cuda)
+        if use_cuda and not producer._kernel_path():
+            pytest.skip("pinned host memory unavailable")
+        for step in range(8):
+            topk = torch.stack([
+                torch.randperm(seq_len, device=device)[:top_k].to(torch.int32)
+                for _ in range(num_reqs)
+            ])
+            topk[:, -1] = -1  # padding column
+            kw = dict(
+                kv_cache=kv_cache, req_id_per_token=req_ids,
+                block_table=block_table, block_size=block_size,
+                slot_mapping=slot_mapping,
+            )
+            # full layer produces the plan; independent layer resolves alone.
+            _, idx_full = producer.swap_in(topk_indices=topk.clone(), produce_plan=True, **kw)
+            _, idx_indep = indep.swap_in(topk_indices=topk.clone(), **kw)
+            # shared layer replays the plan (no LRU resolution of its own).
+            _, idx_shared = shared.apply_plan(
+                kv_cache=kv_cache, block_size=block_size, num_tokens=num_reqs
+            )
+            if use_cuda:
+                torch.cuda.synchronize()
+            # Same plan, and the replayed hot buffer == the independent one.
+            torch.testing.assert_close(idx_shared, idx_full, rtol=0, atol=0)
+            torch.testing.assert_close(idx_indep, idx_full, rtol=0, atol=0)
+            torch.testing.assert_close(shared.hot_cache, indep.hot_cache)
+
+    run(True)
+    run(False)
+
+
 @pytest.mark.skipif(
     not _has_hisparse_ops(),
     reason="HiSparse host-resident mode requires compiled CUDA ops",
