@@ -224,18 +224,6 @@ steps:
     - pytest -v -s tests/v1/distributed/test_dbo.py
     - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py
     - pytest -v -s tests/distributed/test_packed_tensor.py
-  mirror:
-    amd:
-      device: mi300_2
-      timeout_in_minutes: 180
-      depends_on:
-      - image-build-amd
-      commands:
-      - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_async_new_apis.py
-      - VLLM_LOGGING_LEVEL=DEBUG python3 examples/features/data_parallel/data_parallel_offline.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048
-      - pytest -v -s tests/v1/distributed/test_dbo.py
-      - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py
-      - pytest -v -s tests/distributed/test_packed_tensor.py
 
 - label: Distributed Tests (2xB200)
   key: distributed-tests-2xb200
@@ -245,7 +233,7 @@ steps:
   num_devices: 2
   commands:
     - pytest -v -s tests/distributed/test_context_parallel.py
-    - pytest -v -s tests/distributed/test_nccl_symm_mem_allreduce.py
+    - pytest -v -s tests/distributed/test_nccl_symm_mem.py
     - pytest -v -s tests/v1/distributed/test_dbo.py
     - pytest -v -s tests/distributed/test_mnnvl_alltoall.py
 
