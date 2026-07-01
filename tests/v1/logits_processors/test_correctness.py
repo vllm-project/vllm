@@ -145,6 +145,7 @@ def _generate_fake_sampling_metadata(
         vllm_config.scheduler_config.max_num_seqs,
         num_spec,
         device,
+        is_pin_memory=False,
     )
     fake_sampling_metadata = SamplingMetadata(
         temperature=torch.full((batch_size,), 0.0),
@@ -879,6 +880,7 @@ def test_maybe_create_thinking_budget_holder_without_reasoning():
             cfg.scheduler_config.max_num_seqs,
             0,
             torch.device("cpu"),
+            is_pin_memory=False,
         )
         is None
     )
