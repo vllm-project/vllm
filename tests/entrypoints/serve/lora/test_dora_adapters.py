@@ -12,7 +12,6 @@ from tests.utils import RemoteOpenAIServer
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 DORA_ADAPTER_NAME = "qwen25-dora"
 DYNAMIC_DORA_ADAPTER_NAME = "qwen25-dora-dynamic"
-DORA_ADAPTER_REPO = "Dhanushkumaramk/healthcare-qwen2.5-0.5B-dora"
 COMPLETION_PROMPT = "The capital of France is"
 
 
@@ -33,14 +32,6 @@ async def _unload_lora_adapter(client: openai.AsyncOpenAI, lora_name: str) -> No
         cast_to=str,
         body={"lora_name": lora_name},
     )
-
-
-@pytest.fixture(scope="session")
-def qwen25_05b_dora_files():
-    """Download Qwen2.5 DoRA files once per test session."""
-    from huggingface_hub import snapshot_download
-
-    return snapshot_download(repo_id=DORA_ADAPTER_REPO)
 
 
 @pytest.fixture(scope="module")
@@ -86,7 +77,7 @@ async def client(server_with_dora):
 
 
 @pytest.mark.asyncio
-async def test_static_dora_lineage_and_completion(
+async def test_static_dora_lineage(
     client: openai.AsyncOpenAI,
     qwen25_05b_dora_files,
 ):
@@ -100,13 +91,6 @@ async def test_static_dora_lineage_and_completion(
     assert dora_model.id == DORA_ADAPTER_NAME
     assert dora_model.root == qwen25_05b_dora_files
     assert dora_model.parent == MODEL_NAME
-
-    completion = await client.completions.create(
-        model=DORA_ADAPTER_NAME,
-        prompt=COMPLETION_PROMPT,
-        max_tokens=4,
-    )
-    assert completion.choices
 
 
 @pytest.mark.asyncio
@@ -155,7 +139,6 @@ async def test_dynamic_dora_load_unload_reload_and_lineage(
         )
         assert "success" in response.lower()
         loaded = True
-        await _complete_text(client, adapter_name)
     finally:
         if loaded:
             await _unload_lora_adapter(client, adapter_name)

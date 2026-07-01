@@ -28,14 +28,12 @@ MOCK_PACKED_MAPPING = {
 }
 
 
-def _make_peft_helper(use_dora: bool) -> PEFTHelper:
-    return PEFTHelper.from_dict(
-        {
-            "r": 2,
-            "lora_alpha": 4,
-            "target_modules": ["linear"],
-            "use_dora": use_dora,
-        }
+def _linear_peft_helper(*, use_dora: bool) -> PEFTHelper:
+    return PEFTHelper(
+        r=2,
+        lora_alpha=4,
+        target_modules=["linear"],
+        use_dora=use_dora,
     )
 
 
@@ -185,7 +183,7 @@ def test_load_dora_tensors(disable_lora_pin_memory):
     lora_model = LoRAModel.from_lora_tensors(
         1,
         tensors,
-        _make_peft_helper(use_dora=True),
+        _linear_peft_helper(use_dora=True),
         device="cpu",
     )
 
@@ -245,7 +243,7 @@ def test_load_lora_tensors_rejects_unconfigured_dora_magnitude(
         LoRAModel.from_lora_tensors(
             1,
             tensors,
-            _make_peft_helper(use_dora=False),
+            _linear_peft_helper(use_dora=False),
             device="cpu",
         )
 
@@ -261,6 +259,6 @@ def test_load_dora_tensors_rejects_missing_magnitude(disable_lora_pin_memory):
         LoRAModel.from_lora_tensors(
             1,
             tensors,
-            _make_peft_helper(use_dora=True),
+            _linear_peft_helper(use_dora=True),
             device="cpu",
         )

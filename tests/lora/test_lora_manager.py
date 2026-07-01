@@ -75,35 +75,27 @@ def test_from_lora_tensors(qwen3_lora_files, device):
 
 
 def create_lora(
-    lora_id: int, model: nn.Module, sub_modules: list[str], device: torch.device
+    lora_id: int,
+    model: nn.Module,
+    sub_modules: list[str],
+    device: torch.device,
+    *,
+    use_dora: bool = False,
 ) -> LoRAModel:
     loras: dict[str, LoRALayerWeights] = {}
     for name in sub_modules:
         w = model.get_submodule(name).weight
-        loras[name] = LoRALayerWeights(
-            name,
-            8,
-            16,
-            torch.rand([8, w.shape[1]], device=device),
-            torch.rand([w.shape[0], 8], device=device),
+        lora_magnitude_vector = (
+            torch.ones(w.shape[0], device=device) if use_dora else None
         )
-    return LoRAModel(lora_id, 8, loras)
-
-
-def create_dora(
-    lora_id: int, model: nn.Module, sub_modules: list[str], device: torch.device
-) -> LoRAModel:
-    loras: dict[str, LoRALayerWeights] = {}
-    for name in sub_modules:
-        w = model.get_submodule(name).weight
         loras[name] = LoRALayerWeights(
             name,
             8,
             16,
             torch.rand([8, w.shape[1]], device=device),
             torch.rand([w.shape[0], 8], device=device),
-            lora_magnitude_vector=torch.ones(w.shape[0], device=device),
-            use_dora=True,
+            lora_magnitude_vector=lora_magnitude_vector,
+            use_dora=use_dora,
         )
     return LoRAModel(lora_id, 8, loras)
 
@@ -454,7 +446,7 @@ def test_lora_model_manager_deactivate_resets_dora_slot(
     default_vllm_config, dist_init, dummy_model, device
 ):
     model = dummy_model
-    model_lora = create_dora(1, model, ["dense1"], device=device)
+    model_lora = create_lora(1, model, ["dense1"], device=device, use_dora=True)
     manager = LoRAModelManager(
         model,
         2,
@@ -488,7 +480,9 @@ def test_lora_model_manager_activation_failure_resets_dora_slot(
     default_vllm_config, dist_init, dummy_model, device
 ):
     model = dummy_model
-    model_lora = create_dora(1, model, ["dense1", "lm_head"], device=device)
+    model_lora = create_lora(
+        1, model, ["dense1", "lm_head"], device=device, use_dora=True
+    )
     manager = LoRAModelManager(
         model,
         2,

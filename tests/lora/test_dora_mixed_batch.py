@@ -3,7 +3,6 @@
 
 import pytest
 
-from tests.lora.utils import convert_dora_checkpoint_to_lora
 from vllm import LLM, SamplingParams
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
@@ -11,12 +10,6 @@ from vllm.platforms import current_platform
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 DORA_ADAPTER_NAME = "qwen25-dora"
 LORA_ADAPTER_NAME = "qwen25-lora-from-dora"
-
-
-@pytest.fixture(scope="module")
-def qwen25_05b_lora_files(tmp_path_factory, qwen25_05b_dora_files):
-    lora_dir = tmp_path_factory.mktemp("qwen25_05b_lora_from_dora")
-    return convert_dora_checkpoint_to_lora(qwen25_05b_dora_files, lora_dir)
 
 
 @pytest.mark.skipif(
