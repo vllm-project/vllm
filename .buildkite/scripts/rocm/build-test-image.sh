@@ -48,7 +48,7 @@ main() {
     if [[ "${ROCM_CI_ARTIFACT_ONLY:-0}" == "1" && "${base_refreshed}" != "1" ]]; then
         echo "ROCM_CI_ARTIFACT_ONLY=1; building ROCm wheel artifact only"
         IMAGE_TAG="" bash .buildkite/scripts/ci-bake-rocm.sh test-rocm-ci-with-artifacts
-        return 0
+        return
     fi
 
     bash .buildkite/scripts/ci-bake-rocm.sh test-rocm-ci-with-wheel

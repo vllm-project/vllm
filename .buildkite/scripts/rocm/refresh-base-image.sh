@@ -11,7 +11,6 @@ DOCKERFILE="${ROCM_BASE_DOCKERFILE:-docker/Dockerfile.rocm_base}"
 BASE_REPO="${ROCM_BASE_IMAGE_REPO:-rocm/vllm-dev}"
 CI_IMAGE_REPO="${ROCM_CI_IMAGE_REPO:-rocm/vllm-ci}"
 BUILDER_NAME="${ROCM_BASE_BUILDER_NAME:-vllm-rocm-base-builder}"
-DEFAULT_ROCM_ARCH="gfx90a;gfx942;gfx950"
 
 metadata_set() {
     local key="$1"
@@ -117,19 +116,16 @@ setup_builder() {
 }
 
 compute_base_content_hash() {
-    local pytorch_rocm_arch="$1"
-    local use_sccache="$2"
+    local use_sccache="$1"
 
     {
         printf 'dockerfile:%s\n' "${DOCKERFILE}"
         sha256sum "${DOCKERFILE}"
-        printf 'arg:PYTORCH_ROCM_ARCH=%s\n' "${pytorch_rocm_arch}"
         printf 'arg:USE_SCCACHE=%s\n' "${use_sccache}"
     } | sha256sum | cut -d' ' -f1
 }
 
 build_base_image() {
-    local pytorch_rocm_arch="${PYTORCH_ROCM_ARCH:-${DEFAULT_ROCM_ARCH}}"
     local use_sccache="${ROCM_BASE_USE_SCCACHE:-${USE_SCCACHE:-0}}"
     local base_hash=""
     local short_hash=""
@@ -160,7 +156,7 @@ build_base_image() {
         exit 1
     fi
 
-    base_hash=$(compute_base_content_hash "${pytorch_rocm_arch}" "${use_sccache}")
+    base_hash=$(compute_base_content_hash "${use_sccache}")
     short_hash="${base_hash:0:16}"
     build_date="${ROCM_BASE_TAG_DATE:-$(date -u +%Y%m%d)}"
     base_image_arg="$(extract_arg_default BASE_IMAGE)"
@@ -209,7 +205,6 @@ build_base_image() {
     echo "Descriptive tag: ${descriptive_tag}"
     echo "Stable tag: ${stable_tag} ($(should_push_stable_tag && echo enabled || echo disabled))"
     echo "Dependency summary: ${dependency_summary}"
-    echo "PYTORCH_ROCM_ARCH: ${pytorch_rocm_arch}"
     echo "USE_SCCACHE: ${use_sccache}"
 
     docker buildx build \
@@ -217,7 +212,6 @@ build_base_image() {
         --pull \
         --progress plain \
         --file "${DOCKERFILE}" \
-        --build-arg "PYTORCH_ROCM_ARCH=${pytorch_rocm_arch}" \
         --build-arg "USE_SCCACHE=${use_sccache}" \
         "${sccache_args[@]}" \
         --label "org.opencontainers.image.source=https://github.com/vllm-project/vllm" \
