@@ -43,6 +43,8 @@ VLLM_RUNNER_BASE_KWARGS = {
 
 
 def run_test(vllm_runner, audio_assets, lora_request, expected_suffix, **kwargs):
+    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
     inputs = [([AUDIO_PROMPT], [audio_assets[0].audio_and_sample_rate[0]])]
 
     # Apply any additional kwargs as overrides to the base kwargs
@@ -135,6 +137,9 @@ def test_default_mm_lora_fails_with_overridden_lora_request(
 
 @create_new_process_for_each_test()
 def test_default_mm_lora_does_not_expand_string_reqs(vllm_runner):
+    # See run_test: force spawn to avoid the forked-child CUDA re-init crash.
+    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
     class MockEngineException(Exception):
         pass
 
