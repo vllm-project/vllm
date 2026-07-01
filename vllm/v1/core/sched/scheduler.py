@@ -1592,6 +1592,7 @@ class Scheduler(SchedulerInterface):
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
+        debug_log_full = model_runner_output.debug_log_full
 
         # Every GPU write enqueued by this and earlier steps has completed, so it is
         # safe to return deferred-free blocks to the pool.
@@ -1838,6 +1839,11 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        debug_log_full=(
+                            debug_log_full.get(req_id, False)
+                            if debug_log_full is not None
+                            else False
+                        ),
                     )
                 )
             else:

@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from vllm.lora.request import LoRARequest
+from vllm.logger import logger
 from vllm.outputs import (
     STREAM_FINISHED,
     CompletionOutput,
@@ -581,6 +582,80 @@ class OutputProcessor:
             # Queue the streaming update otherwise.
             req_state.input_chunk_queue.append(update)
 
+    def _log_anomaly_full_details_if_enabled(
+        self,
+        req_state: RequestState,
+        engine_core_output: EngineCoreOutput,
+        new_token_ids: list[int],
+        finish_reason: FinishReason | None,
+    ) -> None:
+        full_debug = bool(getattr(engine_core_output, "debug_log_full", False))
+        if not full_debug:
+            return
+
+        logger.info("[Anomaly] req_id=%s finished=%s new_token_ids=%s",
+            req_state.external_req_id,
+            finish_reason is not None,
+            new_token_ids if new_token_ids else [])
+
+        input_text = req_state.prompt or ""
+        logger.info(
+            "[Anomaly] req_id=%s input_text=%r",
+            req_state.external_req_id,
+            input_text,
+        )
+
+        input_token_ids = req_state.prompt_token_ids or []
+        decoded_prompt_from_token_ids = ""
+        if self.tokenizer is not None and input_token_ids:
+            try:
+                decoded_prompt_from_token_ids = self.tokenizer.decode(
+                    input_token_ids,
+                    skip_special_tokens=False,
+                )
+            except TypeError:
+                decoded_prompt_from_token_ids = self.tokenizer.decode(
+                    input_token_ids
+                )
+            except Exception as e:
+                logger.warning(
+                    "[Anomaly] req_id=%s decode_prompt_failed error=%s",
+                    req_state.external_req_id,
+                    e,
+                )
+        if input_text != decoded_prompt_from_token_ids:
+            logger.info(
+                "[Anomaly] req_id=%s input_text != decoded_prompt_from_token_ids=%r",
+                req_state.external_req_id,
+                decoded_prompt_from_token_ids,
+            )
+        logger.info(
+            "[Anomaly] req_id=%s input_token_ids=%s",
+            req_state.external_req_id,
+            input_token_ids,
+        )
+
+        detokenizer = req_state.detokenizer
+        if detokenizer is None:
+            return
+
+        output_text = detokenizer.get_next_output_text(
+            finished=finish_reason is not None,
+            delta=False,
+        )
+        logger.info(
+            "[Anomaly] req_id=%s output_text=%r",
+            req_state.external_req_id,
+            output_text if output_text else "",
+        )
+
+        output_token_ids = detokenizer.output_token_ids
+        logger.info(
+            "[Anomaly] req_id=%s output_token_ids=%s",
+            req_state.external_req_id,
+            output_token_ids if output_token_ids else [],
+        )
+
     def process_outputs(
         self,
         engine_core_outputs: list[EngineCoreOutput],
@@ -655,6 +730,13 @@ class OutputProcessor:
                 # 3) Compute sample and prompt logprobs for request,
                 # if required.
                 req_state.logprobs_processor.update_from_output(engine_core_output)
+
+            self._log_anomaly_full_details_if_enabled(
+                req_state,
+                engine_core_output,
+                new_token_ids,
+                finish_reason,
+            )
 
             # 4) Create and handle RequestOutput objects.
             if request_output := req_state.make_request_output(
