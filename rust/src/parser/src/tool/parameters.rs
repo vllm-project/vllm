@@ -361,8 +361,14 @@ fn try_convert_elements_value(
                 .map(|element| convert_with_optional_schema(items.as_deref(), &element.value))
                 .collect(),
         )),
-        JsonParamType::OneOf(types) => one_of_by_precedence(types)
-            .into_iter()
+        // Structured element trees have no Python counterpart: Python's fixed
+        // precedence applies only to raw *string* coercion
+        // (`coerce_to_schema_type` takes a `str`), not to these nested inputs.
+        // Keep schema declaration order here so an array-or-object union selects
+        // the member the schema declares first, rather than always matching the
+        // unconditionally-succeeding `Object` branch.
+        JsonParamType::OneOf(types) => types
+            .iter()
             .find_map(|param_type| try_convert_elements_value(param_type, elements)),
 
         // Primitive types can't be converted from structured input.
@@ -872,6 +878,50 @@ mod tests {
         assert_eq!(params.convert("mode", text("null")), json!(null));
         assert_eq!(params.convert("mode", text("auto")), json!("auto"));
         assert_eq!(params.convert("color", text("null")), json!("null"));
+    }
+
+    #[test]
+    fn structured_union_input_keeps_declaration_order() {
+        // Fixed coercion precedence is a raw-*string* concern (Python's
+        // `coerce_to_schema_type` takes a `str`); it must NOT reorder structured
+        // element trees. For an `array`-or-`object` union whose `array` member is
+        // declared first, structured (nested-XML) input must select the array,
+        // not the unconditionally-succeeding object branch that precedence
+        // ordering (object=4 < array=5) would otherwise pick first.
+        let array_first = ToolSchema::from_schema(&json!({
+            "type": "object",
+            "properties": {
+                "value": {
+                    "anyOf": [
+                        { "type": "array", "items": { "type": "integer" } },
+                        { "type": "object" }
+                    ]
+                }
+            }
+        }));
+        let input = elements(vec![elem("a", text("1")), elem("b", text("2"))]);
+        assert_eq!(array_first.convert("value", input), json!([1, 2]));
+
+        // Object declared first keeps object shape.
+        let object_first = ToolSchema::from_schema(&json!({
+            "type": "object",
+            "properties": {
+                "value": {
+                    "anyOf": [
+                        { "type": "object" },
+                        { "type": "array", "items": { "type": "integer" } }
+                    ]
+                }
+            }
+        }));
+        // The `object` member is untyped (no `properties`), so its children are
+        // coerced without a schema and stay strings — the point here is the
+        // object *shape* is selected, not the array.
+        let input = elements(vec![elem("a", text("1")), elem("b", text("2"))]);
+        assert_eq!(
+            object_first.convert("value", input),
+            json!({ "a": "1", "b": "2" })
+        );
     }
 
     #[test]
