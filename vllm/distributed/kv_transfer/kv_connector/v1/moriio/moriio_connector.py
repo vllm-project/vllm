@@ -1927,30 +1927,25 @@ class MoRIIOConnectorWorker:
     def _pick_host_for_dp_rank_tp(
         self, meta: ReqMeta, dp_rank: int, tp_rank: int
     ) -> str:
-        """Resolve the prefill host owning remote rank (dp_rank, tp_rank).
+        """TP-aware counterpart of _pick_host_for_dp_rank for the flexible
+        TP-replicated read path (prefill TP + MLA, remote_dp_size == 1).
 
-        TP-aware counterpart of _pick_host_for_dp_rank, for the TP-replicated
-        read path (prefill TP + MLA). There the TP index varies per decode
-        worker (flexible reads spread across prefill tp0..N-1), so the host is
-        resolved from the GLOBAL rank = dp_rank * remote_tp_size + tp_rank, not
-        from the dp rank alone. This is the same rank ordering get_port_offset
-        uses, so host and port resolution agree on one layout.
-
-        Single-node prefill (remote_hosts unset or length 1 — the mirror's
-        actual deployment, one TP8 node): every rank is on meta.remote_host.
-        Multi-node prefill (e.g. TP16 across 2 nodes): map the global rank onto
-        the ordered remote_hosts list (rank 0's host first).
+        The source TP index varies per read (flexible reads spread across
+        prefill tp0..N-1), so resolve the host for the CHOSEN tp_rank rather
+        than the local self.tp_rank. Routing through the shared
+        _pick_remote_rank_host keeps host selection on the SAME node layout the
+        DP path and get_port_offset use — one host/port convention. In the
+        flexible regime (remote_dp_size == 1) this maps the chosen tp_rank onto
+        remote_hosts, matching get_port_offset's rank ordering.
         """
-        if meta.remote_hosts and len(meta.remote_hosts) > 1:
-            n_hosts = len(meta.remote_hosts)
-            remote_tp_size = max(1, int(meta.tp_size))
-            total_ranks = max(1, int(meta.remote_dp_size)) * remote_tp_size
-            ranks_per_node = max(1, total_ranks // n_hosts)
-            global_rank = int(dp_rank) * remote_tp_size + int(tp_rank)
-            node_idx = global_rank // ranks_per_node
-            if 0 <= node_idx < n_hosts:
-                return meta.remote_hosts[node_idx]
-        return meta.remote_host
+        return _pick_remote_rank_host(
+            meta.remote_host,
+            meta.remote_hosts,
+            int(meta.tp_size),
+            int(tp_rank),
+            int(meta.remote_dp_size),
+            dp_rank,
+        )
 
     def _background_moriio_handshake(
         self, req_id: ReqId, remote_engine_id: EngineId, meta: ReqMeta
