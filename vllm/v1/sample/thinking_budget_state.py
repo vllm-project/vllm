@@ -266,6 +266,7 @@ class ThinkingBudgetStateHolder:
             and state["start_thinking"] >= 0
             and state["end_thinking"] >= 0
             and state["end_thinking"] > state["start_thinking"]
+            and not state.get("continue_thinking", False)
         ):
             state["in_think"] = False
             state["think_count"] = 0
@@ -298,10 +299,18 @@ class ThinkingBudgetStateHolder:
         predicted_countdown = current_step_countdown - len(state["spec_token_ids"]) - 1
         # We only proceed further if we have counted down the thinking budget
         # to 0 or less and when we are in the "in think" mode.
+        # Exception: when continue_thinking=True and a natural </think> is
+        # detected (end_thinking != -1), fall through to handle the exit —
+        # even if the budget hasn't expired yet. For continue_thinking=False,
+        # the early natural-end detection block above already handles it.
+        natural_end_with_continue = (
+            state.get("continue_thinking", False) and state["end_thinking"] != -1
+        )
         if (
             not state.get("in_end", False)
             and predicted_countdown >= 0
             and state["start_thinking"] > -1
+            and not natural_end_with_continue
         ):
             state["check_count_down"] = current_step_countdown
             state["prev_output_length"] = len(state.get("output_tok_ids", []))

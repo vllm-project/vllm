@@ -1253,12 +1253,20 @@ def test_thinking_budget_long_thinking_section_end_marker_found_at_correct_index
         out.append(tok)
         h.update_state([out], None, None)
         assert h._state[0]["end_thinking"] == -1  # not present yet
-    expected_end_idx = len(out)  # marker appended next
     out.extend(end)
     h.update_state([out], None, None)
 
-    assert h._state[0]["start_thinking"] == 0
-    assert h._state[0]["end_thinking"] == expected_end_idx
+    # After a natural exit, start_thinking and end_thinking are reset to -1
+    # (state machine prepared for next block). Verify the exit happened at the
+    # correct position by checking scan_offset (set to len(output) after exit).
+    assert not h._state[0]["in_think"], "Should have exited think mode after </think>"
+    assert h._state[0]["start_thinking"] == -1, (
+        "start_thinking should be reset after natural exit"
+    )
+    assert h._state[0]["scan_offset"] == len(out), (
+        f"scan_offset should point past the end marker; "
+        f"expected {len(out)}, got {h._state[0]['scan_offset']}"
+    )
 
 
 # --- Thinking budget re-entry tests (issue #43708) ---
