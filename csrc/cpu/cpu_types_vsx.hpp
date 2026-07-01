@@ -1094,4 +1094,3 @@ struct INT8Vec64 {
 };
 }  // namespace vec_op
 #endif
-

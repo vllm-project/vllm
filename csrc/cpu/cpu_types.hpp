@@ -1,13 +1,11 @@
 #ifndef CPU_TYPES_HPP
 #define CPU_TYPES_HPP
 
-
-
 #if defined(__x86_64__)
   // x86 implementation
   #include "cpu_types_x86.hpp"
-#elif defined(__powerpc__) 
-// ppc implementation
+#elif defined(__powerpc__)
+  // ppc implementation
   #include "cpu_types_vsx.hpp"
 #elif defined(__s390x__)
   // s390 implementation

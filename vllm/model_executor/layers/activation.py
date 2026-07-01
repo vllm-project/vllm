@@ -153,7 +153,7 @@ class SiluAndMul(CustomOp):
         return self.forward_cuda(x)
 
     def forward_cpu(self, x: torch.Tensor) -> torch.Tensor:
-        if current_platform.get_cpu_architecture() == CpuArchEnum.POWER:
+        if current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC:
             return self.forward_cuda(x)
         return self.forward_native(x)
 
@@ -424,16 +424,11 @@ class GeluAndMul(CustomOp):
         self.op(out, x)
         return out
 
-    def forward_cpu(self, x: torch.Tensor) -> torch.Tensor:
-        if self.op:
-            return self.forward_cuda(x)
-        return self.native(x)
-
     def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
         return self.forward_cuda(x)
 
     def forward_cpu(self, x: torch.Tensor) -> torch.Tensor:
-        if current_platform.get_cpu_architecture() == CpuArchEnum.POWER:
+        if current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC:
             return self.forward_cuda(x)
         return self.forward_native(x)
 
@@ -539,7 +534,7 @@ class NewGELU(CustomOp):
         return self.forward_cuda(x)
 
     def forward_cpu(self, x: torch.Tensor) -> torch.Tensor:
-        if current_platform.get_cpu_architecture() == CpuArchEnum.POWER:
+        if current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC:
             return self.forward_cuda(x)
         return self.forward_native(x)
 
@@ -571,9 +566,10 @@ class FastGELU(CustomOp):
         return self.forward_cuda(x)
 
     def forward_cpu(self, x: torch.Tensor) -> torch.Tensor:
-        if current_platform.get_cpu_architecture() == CpuArchEnum.POWER:
+        if current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC:
             return self.forward_cuda(x)
         return self.forward_native(x)
+
 
 # --8<-- [start:quick_gelu]
 @CustomOp.register("quick_gelu")
@@ -603,7 +599,7 @@ class QuickGELU(CustomOp):
         return self.forward_cuda(x)
 
     def forward_cpu(self, x: torch.Tensor) -> torch.Tensor:
-        if current_platform.get_cpu_architecture() == CpuArchEnum.POWER:
+        if current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC:
             return self.forward_cuda(x)
         return self.forward_native(x)
 
