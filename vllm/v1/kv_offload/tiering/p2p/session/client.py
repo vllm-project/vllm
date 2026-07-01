@@ -43,22 +43,6 @@ class _InboundRequestState:
     aborted_at: float | None = None
 
 
-@dataclass
-class _LookupState:
-    """Client-role state for a single (kv_request_id, block_hash) probe.
-
-    submitted_at: when the manager first registered the lookup.
-    sent_at: when the LookupMsg carrying this hash was emitted, or
-        None while still in the local batch awaiting flush.
-    result: True/False once a LookupRespMsg resolved this hash, or
-        None while still in-flight.
-    """
-
-    submitted_at: float
-    sent_at: float | None = None
-    result: bool | None = None
-
-
 class LoadResult(NamedTuple):
     """Result from a session poll, client side."""
 
@@ -81,11 +65,15 @@ class ClientRole:
         self._inbound: dict[str, _InboundRequestState] = {}
         self._completed_loads: list[LoadResult] = []
         # Symmetric-P2P lookup state, keyed by (kv_request_id, block_hash).
-        self._lookups: dict[tuple[str, bytes], _LookupState] = {}
-        # Fast index of unsent entries, kept in sync with _lookups:
-        # (req_id, h) is in _unsent_lookups_by_req[req_id] iff
-        # _lookups[(req_id, h)].sent_at is None. Populated in
-        # register_lookup, drained in flush_pending_lookups.
+        # Value is the probe outcome: None while in-flight (registered/sent
+        # but unresolved), True/False once a LookupRespMsg lands. There is no
+        # timeout — on_request_finished (finish_request → cancel_lookups) is
+        # guaranteed after the request's lookup() calls and clears every
+        # entry, so an unanswered probe simply stays None until then.
+        self._lookups: dict[tuple[str, bytes], bool | None] = {}
+        # Fast index of entries registered but not yet flushed onto the wire:
+        # (req_id, h) is in _unsent_lookups_by_req[req_id] from register_lookup
+        # until the next flush_pending_lookups, which drains and clears it.
         self._unsent_lookups_by_req: dict[str, list[bytes]] = {}
         # Tracks kv_request_ids we have already emitted a LookupMsg for,
         # to enforce the at-most-one-LookupMsg-per-request invariant.
@@ -206,13 +194,13 @@ class ClientRole:
           returns the bool result.
         """
         key = (kv_request_id, block_hash)
-        state = self._lookups.get(key)
-        if state is not None and state.result is not None:
-            del self._lookups[key]
-            return state.result
-        if state is None:
-            self._lookups[key] = _LookupState(submitted_at=time.monotonic())
-            self._unsent_lookups_by_req.setdefault(kv_request_id, []).append(block_hash)
+        if key in self._lookups:
+            result = self._lookups[key]
+            if result is not None:
+                del self._lookups[key]
+            return result
+        self._lookups[key] = None
+        self._unsent_lookups_by_req.setdefault(kv_request_id, []).append(block_hash)
         return None
 
     def flush_pending_lookups(self) -> None:
@@ -224,7 +212,6 @@ class ClientRole:
         """
         if not self._unsent_lookups_by_req:
             return
-        now = time.monotonic()
         for req_id, hashes in self._unsent_lookups_by_req.items():
             # At most one LookupMsg per kv_request_id per session:
             # all block lookups for a request are registered in a
@@ -243,8 +230,6 @@ class ClientRole:
                     LookupMsg.BLOCK_HASHES: list(hashes),
                 }
             )
-            for h in hashes:
-                self._lookups[(req_id, h)].sent_at = now
         self._unsent_lookups_by_req.clear()
 
     def on_lookup_resp(
@@ -255,15 +240,14 @@ class ClientRole:
     ) -> None:
         """Apply per-pair hit/miss results from a peer.
 
-        Pairs that don't match a known entry (already cancelled, timed
-        out, or never asked) are silently dropped — the producer is
-        free to split or coalesce responses.
+        Pairs that don't match a known entry (already cancelled or
+        never asked) are silently dropped — the producer is free to
+        split or coalesce responses.
         """
         for h, hit in zip(block_hashes, hits):
-            state = self._lookups.get((kv_request_id, h))
-            if state is None:
-                continue
-            state.result = hit
+            key = (kv_request_id, h)
+            if key in self._lookups:
+                self._lookups[key] = hit
 
     def cancel_lookups(self, kv_request_id: str) -> None:
         """Drop lookup state and, if needed, close the peer's request.
@@ -274,9 +258,9 @@ class ClientRole:
         lookup state for the id is released, and ``cb.finish_request``
         fires on the TieringManager. In the happy path the FetchMsg
         carrying blocks is that signal. But if the client's lookups
-        all missed (or timed out) no FetchMsg is ever sent, so on the
-        finish path we emit an empty FetchMsg purely to trigger those
-        semantics on the peer.
+        all missed no FetchMsg is ever sent, so on the finish path we
+        emit an empty FetchMsg purely to trigger those semantics on
+        the peer.
 
         We only send the terminal FetchMsg when a LookupMsg was actually
         flushed (``kv_request_id in _flushed_req_ids``): if the peer
@@ -303,14 +287,14 @@ class ClientRole:
         self._flushed_req_ids.discard(kv_request_id)
 
     def collect_results(self) -> list[LoadResult]:
-        """Walk timeouts and drain completed loads.
+        """Walk load timeouts and drain completed loads.
 
         Active requests past ``_LOAD_TIMEOUT_S`` get an AbortFetchMsg
         sent and enter the aborting phase. Aborting requests past
         ``_ABORT_ACK_TIMEOUT_S`` are surfaced as failed loads.
-        Lookup entries past ``_LOAD_TIMEOUT_S`` since send are
-        resolved as misses (False) so the caller falls back to local
-        prefill.
+
+        Lookups have no timeout: an unanswered probe stays None (RETRY)
+        until finish_request clears it — see ``_lookups``.
         """
         now = time.monotonic()
         to_remove: list[str] = []
@@ -346,18 +330,6 @@ class ClientRole:
                     )
         for req_id in to_remove:
             self._inbound.pop(req_id)
-
-        # Lookup timeout sweep: entries that were sent more than
-        # _LOAD_TIMEOUT_S ago without a response resolve to miss so
-        # the next register_lookup() returns False and the caller
-        # falls back to local prefill.
-        for state in self._lookups.values():
-            if (
-                state.result is None
-                and state.sent_at is not None
-                and now - state.sent_at >= _LOAD_TIMEOUT_S
-            ):
-                state.result = False
 
         results = self._completed_loads
         self._completed_loads = []
