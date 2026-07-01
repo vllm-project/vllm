@@ -31,7 +31,7 @@ import time
 import uuid
 import warnings
 from collections.abc import AsyncGenerator, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
@@ -79,6 +79,80 @@ def _allow_local_benchmark_fallback(args: argparse.Namespace) -> bool:
         "yes",
         "on",
     }
+
+
+async def _align_prompts_to_server_tokenizer(
+    base_url: str,
+    model_id: str,
+    input_requests: list[SampleRequest],
+    ssl_context: ssl.SSLContext | bool | None = None,
+) -> list[SampleRequest]:
+    """Re-align prompts if local/server tokenizers disagree."""
+    if not input_requests or not isinstance(input_requests[0].prompt, str):
+        return input_requests
+
+    tok_url = f"{base_url}/tokenize"
+    detok_url = f"{base_url}/detokenize"
+    connector = aiohttp.TCPConnector(ssl=ssl_context)
+
+    async with aiohttp.ClientSession(connector=connector) as session:
+        sem = asyncio.Semaphore(64)
+
+        async def _tokenize(prompt: str) -> list[int]:
+            async with (
+                sem,
+                session.post(
+                    tok_url,
+                    json={
+                        "model": model_id,
+                        "prompt": prompt,
+                        "add_special_tokens": False,
+                    },
+                ) as r,
+            ):
+                r.raise_for_status()
+                return (await r.json())["tokens"]
+
+        async def _detokenize(tokens: list[int]) -> str:
+            async with (
+                sem,
+                session.post(
+                    detok_url, json={"model": model_id, "tokens": tokens}
+                ) as r,
+            ):
+                r.raise_for_status()
+                return (await r.json())["prompt"]
+
+        try:
+            first_tokens = await _tokenize(input_requests[0].prompt)
+        except Exception:
+            print("WARNING: /tokenize unavailable, skipping alignment.")
+            return input_requests
+
+        expected = input_requests[0].prompt_len
+        if len(first_tokens) == expected:
+            return input_requests
+
+        print(
+            f"WARNING: tokenizer mismatch "
+            f"(server={len(first_tokens)}, expected={expected}), "
+            f"re-aligning prompts."
+        )
+
+        async def _fix_one(req: SampleRequest) -> SampleRequest:
+            tokens = await _tokenize(req.prompt)
+            if len(tokens) <= req.prompt_len:
+                return req
+            corrected = await _detokenize(tokens[: req.prompt_len])
+            return replace(req, prompt=corrected, prompt_len=req.prompt_len)
+
+        results = await asyncio.gather(
+            *[_fix_one(r) for r in input_requests], return_exceptions=True
+        )
+        return [
+            res if not isinstance(res, BaseException) else orig
+            for orig, res in zip(input_requests, results)
+        ]
 
 
 async def get_first_model_from_server(
@@ -1949,6 +2023,15 @@ def add_cli_args(parser: argparse.ArgumentParser):
     )
 
     parser.add_argument(
+        "--chat-template-kwargs",
+        type=json.loads,
+        default=None,
+        help="A JSON string of kwargs forwarded to the tokenizer's "
+        "apply_chat_template when a dataset renders prompts client-side "
+        "(e.g. custom / speed_bench). "
+        "Example: '{\"thinking\": true}' to enable reasoning models.",
+    )
+    parser.add_argument(
         "--extra-body",
         help="A JSON string representing extra body parameters to include "
         "in each request."
@@ -2138,6 +2221,12 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
 
     # Load the dataset.
     input_requests = get_samples(args, tokenizer)
+
+    if args.dataset_name in ("random", "prefix_repetition"):
+        input_requests = await _align_prompts_to_server_tokenizer(
+            base_url, model_id, input_requests, ssl_context
+        )
+
     goodput_config_dict = check_goodput_args(args)
 
     backend = args.backend

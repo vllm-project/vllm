@@ -102,6 +102,8 @@ if TYPE_CHECKING:
     VLLM_FORCE_AOT_LOAD: bool = False
     VLLM_USE_MEGA_AOT_ARTIFACT: bool = False
     VLLM_USE_TRITON_AWQ: bool = False
+    VLLM_FASTSAFETENSORS_QUEUE_SIZE: int = 0
+    VLLM_TRITON_FORCE_FIRST_CONFIG: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
@@ -248,7 +250,7 @@ if TYPE_CHECKING:
     VLLM_DEBUG_WORKSPACE: bool = False
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
-    VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 4096
+    VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
@@ -923,9 +925,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TEST_FORCE_LOAD_FORMAT": lambda: os.getenv(
         "VLLM_TEST_FORCE_LOAD_FORMAT", "dummy"
     ),
-    # Time in ms for the zmq client to wait for a response from the backend
-    # server for simple data operations
-    "VLLM_RPC_TIMEOUT": lambda: int(os.getenv("VLLM_RPC_TIMEOUT", "10000")),
+    # Queue size for fastsafetensors ParallelLoader pipelined weight
+    # loading. Peak load-time VRAM is roughly
+    # model_weights + (1 + queue_size) * shard_size.
+    # Default 0 preserves the non-pipelined memory footprint so this
+    # change does not shrink the loadable-model envelope. Set to 1
+    # (or higher) to overlap producing the next shard's device buffer
+    # with the consumer copying the current shard into model params,
+    # at the cost of `queue_size` extra shard-sized buffers resident
+    # at peak during loading.
+    "VLLM_FASTSAFETENSORS_QUEUE_SIZE": lambda: int(
+        os.getenv("VLLM_FASTSAFETENSORS_QUEUE_SIZE", "0")
+    ),
     # Timeout in seconds for keeping HTTP connections alive in API server
     "VLLM_HTTP_TIMEOUT_KEEP_ALIVE": lambda: int(
         os.environ.get("VLLM_HTTP_TIMEOUT_KEEP_ALIVE", "5")
@@ -951,6 +962,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # If set, vLLM will use Triton implementations of AWQ.
     "VLLM_USE_TRITON_AWQ": lambda: bool(int(os.getenv("VLLM_USE_TRITON_AWQ", "0"))),
+    # If set, monkey-patch triton.runtime.autotuner.Autotuner.run to skip
+    # benchmarking and select the first valid config (walking past invalid
+    # ones). Used to eliminate autotuning variability when measuring kernel
+    # performance and applied before running any kernel.
+    "VLLM_TRITON_FORCE_FIRST_CONFIG": lambda: (
+        os.environ.get("VLLM_TRITON_FORCE_FIRST_CONFIG", "0").strip().lower()
+        in ("1", "true")
+    ),
     # If set, allow loading or unloading lora adapters in runtime,
     "VLLM_ALLOW_RUNTIME_LORA_UPDATING": lambda: (
         os.environ.get("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "0").strip().lower()
@@ -1684,10 +1703,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # tokens the FP8 main GEMM has idle SMs to share with the bf16 aux GEMMs
     # and overlap is a 5-45% win; above it the FP8 GEMM saturates the device
     # and the cross-stream sync becomes pure overhead. Set to 0 to disable
-    # the multi-stream path entirely. Empirical crossover on B300 (148 SMs)
-    # is ~4096; B200 (132 SMs) is expected ~3072.
+    # the multi-stream path entirely. See #PR 41526 for the empirical result
+    # for the default value of 1024 tokens.
     "VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD": lambda: int(
-        os.getenv("VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD", "4096")
+        os.getenv("VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD", "1024")
     ),
     # Format for saving torch.compile cache artifacts
     # - "binary": saves as binary file

@@ -234,6 +234,37 @@ def log_current_affinity_state(label: str) -> None:
     _log_numactl_show(label)
 
 
+def _probe_numactl_args(numactl_args: str) -> bool:
+    """Whether ``numactl <args> true`` succeeds in this (parent) environment."""
+    try:
+        result = subprocess.run(
+            ["numactl", *numactl_args.split(), "true"],
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def _resolve_numactl_args(numactl_args: str) -> str:
+    """Drop ``--membind`` if the container rejects it, keeping CPU binding."""
+    cpu_only = " ".join(
+        t for t in numactl_args.split() if not t.startswith("--membind=")
+    )
+    for candidate in (numactl_args, cpu_only, ""):
+        if _probe_numactl_args(candidate):
+            if candidate != numactl_args:
+                logger.warning(
+                    "numactl args %r rejected; falling back to %r. Add "
+                    "--cap-add SYS_NICE for full NUMA binding.",
+                    numactl_args,
+                    candidate or "no binding",
+                )
+            return candidate
+    return ""
+
+
 @contextmanager
 def configure_subprocess(
     vllm_config: "VllmConfig",
@@ -250,6 +281,11 @@ def configure_subprocess(
         return
 
     executable, debug_str = _get_numactl_executable()
+    numactl_args = _resolve_numactl_args(numactl_args)
+    if not numactl_args:
+        # No NUMA binding possible here; launch without the wrapper.
+        yield
+        return
     python_executable = os.fsdecode(multiprocessing.spawn.get_executable())
     with (
         _set_numa_wrapper_env(numactl_args, python_executable),

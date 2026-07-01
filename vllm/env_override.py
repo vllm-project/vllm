@@ -249,6 +249,13 @@ os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 # in the environment.
 os.environ.setdefault("TRITON_CACHE_AUTOTUNING", "1")
 
+# When unset, TileLang routes JIT temp dirs through a world-shared
+# /tmp/tvm-debug-mode-tempdirs/ whose ownership is pinned to whichever
+# user compiled first, breaking every other user on a shared host.
+# Opt into per-process tempdirs unless the user explicitly chose the
+# debug layout (see https://github.com/vllm-project/vllm/issues/41410).
+os.environ.setdefault("TILELANG_CLEANUP_TEMP_FILES", "1")
+
 # ===================================================
 # torch 2.9 Inductor PythonWrapperCodegen monkeypatch
 # ===================================================
@@ -888,3 +895,116 @@ def _patch_cpp_indirect_assert_if_needed():
 
 
 _patch_cpp_indirect_assert_if_needed()
+
+# ============================================================
+# Inductor FALLBACK_ALLOW_LIST fast-path for vllm::*/vllm_aiter::* ops
+# ============================================================
+# When Inductor encounters a custom op without a registered lowering or
+# decomposition (e.g. vllm::all_reduce, vllm_aiter::fused_add_rms_norm) it
+# correctly creates an implicit fallback that calls into the eager Python
+# impl. However, unless `base_name` (e.g. "vllm::all_reduce") is in
+# torch._inductor.lowering.FALLBACK_ALLOW_LIST, GraphLowering.call_function
+# (torch/_inductor/graph.py:~1283) takes the slow path that emits
+#   log.info("Creating implicit fallback for:\n%s",
+#            error.operator_str(target, args, kwargs))
+# `operator_str` eagerly recurses through __str__ on every input TensorBox;
+# for deep MoE/TP graphs (e.g. Kimi-K2.6 at TP=8) the IR provenance tree
+# behind a TP all-reduce input or a residual-fed RMSNorm input is hundreds
+# of layers deep, and stringifying it consumes many minutes of CPU per call,
+# effectively hanging compilation.
+#
+# Patching FALLBACK_ALLOW_LIST membership to also match any "vllm::*" or
+# "vllm_aiter::*" base_name routes our custom ops through the fast path
+# `make_fallback(target, warn=False, override_decomp=True)` instead. This
+# preserves all downstream behaviour (allreduce_rms_fusion still pattern-
+# matches them, partitioning still works, fallback semantics identical) but
+# skips the expensive log formatting on the FIRST encounter of each op.
+#
+# We wrap the OrderedSet in a thin proxy that:
+#   - Returns True from __contains__ for any vllm::*/vllm_aiter::* op
+#   - Otherwise delegates to the underlying set (preserving membership of
+#     the standard entries like "torchvision::roi_align", "aten::index_add")
+#   - Forwards add()/__iter__()/__len__()/etc. so other Inductor code paths
+#     that mutate or iterate the set keep working.
+
+_VLLM_FALLBACK_NAMESPACE_PREFIXES = ("vllm::", "vllm_aiter::")
+
+
+class _VllmFallbackAllowList:
+    """Membership proxy that auto-allows vllm::*/vllm_aiter::* base_names."""
+
+    _vllm_patched = True
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def __contains__(self, item):
+        if isinstance(item, str) and item.startswith(_VLLM_FALLBACK_NAMESPACE_PREFIXES):
+            return True
+        return item in self._inner
+
+    def add(self, item):
+        self._inner.add(item)
+
+    def discard(self, item):
+        self._inner.discard(item)
+
+    def __iter__(self):
+        return iter(self._inner)
+
+    def __len__(self):
+        return len(self._inner)
+
+    def __repr__(self):
+        return f"_VllmFallbackAllowList({self._inner!r})"
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def _patch_inductor_fallback_allow_list() -> None:
+    """Wrap torch._inductor.lowering.FALLBACK_ALLOW_LIST so any custom op in
+    the ``vllm::`` or ``vllm_aiter::`` namespaces is treated as a member.
+
+    Idempotent: a sentinel attribute on the proxy prevents re-wrapping.
+    """
+    try:
+        from torch._inductor import lowering as _lowering
+    except ImportError:
+        return
+
+    base = getattr(_lowering, "FALLBACK_ALLOW_LIST", None)
+    if base is None or getattr(base, "_vllm_patched", False):
+        return
+
+    _lowering.FALLBACK_ALLOW_LIST = _VllmFallbackAllowList(base)
+
+    # torch/_inductor/graph.py imports the symbol at module load time:
+    #   from torch._inductor.lowering import FALLBACK_ALLOW_LIST
+    # so we also need to overwrite the local binding in the graph module if
+    # it has already been imported.
+    try:
+        from torch._inductor import graph as _graph
+
+        if hasattr(_graph, "FALLBACK_ALLOW_LIST"):
+            _graph.FALLBACK_ALLOW_LIST = _lowering.FALLBACK_ALLOW_LIST
+    except ImportError:
+        pass
+
+
+_patch_inductor_fallback_allow_list()
+
+# ============================================================
+# Triton Autotuner determinism
+# ============================================================
+# Replace the Autotuner.run so it always pick the first running configuration.
+# Useful to eliminate autotune variability leading to non determinism.
+if os.environ.get("VLLM_TRITON_FORCE_FIRST_CONFIG", "0").strip().lower() in (
+    "1",
+    "true",
+):
+    from vllm.triton_utils.force_first_config import (
+        install as _install_force_first_config,
+    )
+
+    _install_force_first_config()

@@ -153,7 +153,6 @@ TEXT_GENERATION_MODELS = {
     "microsoft/Phi-3.5-MoE-instruct": PPTestSettings.detailed(
         multi_node_only=True, load_format="dummy"
     ),
-    "Qwen/Qwen-7B-Chat": PPTestSettings.fast(),
     "Qwen/Qwen2.5-0.5B-Instruct": PPTestSettings.fast(),
     "Qwen/Qwen1.5-MoE-A2.7B-Chat": PPTestSettings.fast(),
     "stabilityai/stablelm-3b-4e1t": PPTestSettings.fast(),
@@ -349,7 +348,14 @@ def _compare_tp(
         "mp",
     ]
 
-    compare_two_settings(model_id, pp_args, tp_args, pp_env, tp_env, method=method)
+    compare_two_settings(
+        model_id,
+        pp_args,
+        tp_args,
+        pp_env,
+        tp_env,
+        method=method,
+    )
 
 
 @pytest.mark.parametrize(

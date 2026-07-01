@@ -81,4 +81,10 @@ def test_async_tp_pass_correctness(
         "mp",
     ]
 
-    compare_two_settings(model_id, async_tp_args, tp_args, method="generate")
+    compare_two_settings(
+        model_id,
+        async_tp_args,
+        tp_args,
+        method="generate",
+        force_v1_runner=True,
+    )

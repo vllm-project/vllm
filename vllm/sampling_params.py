@@ -4,6 +4,7 @@
 
 import copy
 import json as json_mod
+import math
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
@@ -459,14 +460,31 @@ class SamplingParams(
             raise ValueError(
                 f"frequency_penalty must be in [-2, 2], got {self.frequency_penalty}."
             )
+        if not math.isfinite(self.repetition_penalty):
+            raise ValueError(
+                "repetition_penalty must be a finite number, "
+                f"got {self.repetition_penalty}."
+            )
         if self.repetition_penalty <= 0.0:
             raise ValueError(
                 "repetition_penalty must be greater than zero, got "
                 f"{self.repetition_penalty}."
             )
+        if not math.isfinite(self.temperature):
+            raise VLLMValidationError(
+                f"temperature must be a finite number, got {self.temperature}.",
+                parameter="temperature",
+                value=self.temperature,
+            )
         if self.temperature < 0.0:
             raise VLLMValidationError(
                 f"temperature must be non-negative, got {self.temperature}.",
+                parameter="temperature",
+                value=self.temperature,
+            )
+        if self.temperature > 2.0:
+            raise VLLMValidationError(
+                f"temperature must be in [0, 2], got {self.temperature}.",
                 parameter="temperature",
                 value=self.temperature,
             )
