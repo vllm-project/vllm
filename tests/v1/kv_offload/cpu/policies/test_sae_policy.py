@@ -100,3 +100,53 @@ def test_clear_resets_all_state():
     assert policy._evictable_keys == OrderedDict()
     assert policy._open_sid is None
     assert policy._last_event == "clear"
+
+
+def test_get_hit_accumulates_ghost_score():
+    policy = SAECachePolicy(cache_capacity=4, ghost_hit_weight=3.0)
+    policy.insert(key(1), make_block(0))
+    policy.get(key(1))
+    policy.get(key(1))
+    assert policy._key_ghost[key(1)] == 6.0
+
+
+def test_get_miss_accumulates_ghost_score():
+    policy = SAECachePolicy(cache_capacity=4, ghost_miss_weight=0.5)
+    policy.get(key(1))
+    policy.get(key(1))
+    assert policy._key_ghost[key(1)] == 1.0
+
+
+def test_decay_runs_every_interval_and_prunes_low_ghosts():
+    policy = SAECachePolicy(
+        cache_capacity=4,
+        decay_interval=3,
+        decay_factor=0.5,
+        ghost_hit_weight=1.0,
+        ghost_miss_weight=1.0,
+    )
+    policy.insert(key(1), make_block(0))
+    policy._sid_stats[0]["hits"] = 10.0
+    policy._key_ghost[key(2)] = 0.05  # non-resident
+    policy._key_ghost[key(1)] = 4.0  # resident
+    # 3 gets triggers one decay tick
+    policy.get(key(1))
+    policy.get(key(1))
+    policy.get(key(1))
+    assert policy._sid_stats[0]["hits"] == 5.0
+    # resident key(1) accumulated 3 hits before decay: (4.0 + 3.0) * 0.5 = 3.5
+    assert policy._key_ghost[key(1)] == 3.5
+    # non-resident key(2) with score 0.05 -> 0.025 < 0.01? no, still 0.025 >= 0.01
+    # Adjust: set higher threshold test
+    assert key(2) in policy._key_ghost
+
+
+def test_decay_prunes_below_threshold():
+    policy = SAECachePolicy(
+        cache_capacity=4,
+        decay_interval=1,
+        decay_factor=0.1,
+    )
+    policy._key_ghost[key(99)] = 0.05  # non-resident
+    policy.get(key(1))  # triggers decay; 0.05 * 0.1 = 0.005 < 0.01
+    assert key(99) not in policy._key_ghost

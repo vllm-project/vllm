@@ -61,7 +61,30 @@ class SAECachePolicy(CachePolicy):
 
     @override
     def get(self, key: OffloadKey) -> BlockStatus | None:
-        return self._blocks.get(key)
+        block = self._blocks.get(key)
+        if block is not None:
+            self._key_ghost[key] = (
+                self._key_ghost.get(key, 0.0) + self._ghost_hit_weight
+            )
+        else:
+            self._key_ghost[key] = (
+                self._key_ghost.get(key, 0.0) + self._ghost_miss_weight
+            )
+        self._lookup_count += 1
+        if self._lookup_count % self._decay_interval == 0:
+            self._run_decay()
+        self._last_event = "get"
+        return block
+
+    def _run_decay(self) -> None:
+        for stats in self._sid_stats.values():
+            stats["hits"] = stats["hits"] * self._decay_factor
+        for k in list(self._key_ghost):
+            new_score = self._key_ghost[k] * self._decay_factor
+            if k not in self._blocks and new_score < 0.01:
+                del self._key_ghost[k]
+            else:
+                self._key_ghost[k] = new_score
 
     @override
     def insert(self, key: OffloadKey, block: BlockStatus) -> None:
