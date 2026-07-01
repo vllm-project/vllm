@@ -193,6 +193,17 @@ class SchedulerInterface(ABC):
         not yet returned in SchedulerOutputs."""
         return self.has_unfinished_requests() or self.has_finished_requests()
 
+    def has_structured_output_in_flight(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> bool:
+        """Returns True if any structured-output request scheduled in
+        `scheduler_output` still has a previously scheduled token in flight,
+        i.e. its grammar FSM has not yet caught up. Used under pipeline
+        parallelism to decide whether in-flight batches must be drained before
+        computing the next grammar bitmask. Defaults to False for schedulers
+        that do not track in-flight output tokens."""
+        return False
+
     @property
     @abstractmethod
     def pause_state(self) -> PauseState:

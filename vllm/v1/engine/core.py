@@ -634,7 +634,7 @@ class EngineCore:
             # token), but with pp_size > 1 the previous token can be several
             # batches deep, so the FSM would still be stale and the bitmask
             # wrong. Drain the queue until those requests are caught up (#45014).
-            while batch_queue and self._deferred_structured_pending(
+            while batch_queue and self.scheduler.has_structured_output_in_flight(
                 deferred_scheduler_output
             ):
                 d_future, d_scheduler_output, d_exec_fut = batch_queue.pop()
@@ -670,20 +670,6 @@ class EngineCore:
             batch_queue.appendleft((future, deferred_scheduler_output, exec_future))
 
         return engine_core_outputs, model_executed
-
-    def _deferred_structured_pending(self, scheduler_output) -> bool:
-        """True if a structured request in the deferred batch still has a
-        previous token in flight (its grammar FSM is not yet caught up)."""
-        requests = self.scheduler.requests
-        for req_id in scheduler_output.num_scheduled_tokens:
-            req = requests.get(req_id)
-            if (
-                req is not None
-                and req.use_structured_output
-                and req.num_output_placeholders > 1
-            ):
-                return True
-        return False
 
     def _process_aborts_queue(self):
         if not self.aborts_queue.empty():
