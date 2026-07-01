@@ -1442,7 +1442,9 @@ class MooncakeStoreWorker:
         exists_set = {gh for gh, c in present_count.items() if c >= expected_per_key}
 
         _masks, hit_length = self.coord.find_longest_cache_hit(
-            block_hashes, token_len, ExternalCachedBlockPool(exists_set)
+            block_hashes,
+            token_len,
+            ExternalCachedBlockPool(exists_set, hash_block_size=self.hash_block_size),
         )
         return hit_length
 
