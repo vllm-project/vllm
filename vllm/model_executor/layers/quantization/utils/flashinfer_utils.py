@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from enum import Enum
 from typing import TYPE_CHECKING
 
 import torch
@@ -13,12 +12,6 @@ if TYPE_CHECKING:
     from flashinfer.fused_moe.core import ActivationType
 
 logger = init_logger(__name__)
-
-
-class FlashinferMoeBackend(Enum):
-    TENSORRT_LLM = "TensorRT-LLM"
-    CUTLASS = "CUTLASS"
-    CUTEDSL = "CUTEDSL"
 
 
 def activation_to_flashinfer_int(activation: MoEActivation) -> int:
@@ -93,16 +86,6 @@ def rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(
     gemm2_weights.data = torch.stack(gemm2_weights_fp8_shuffled).view(
         torch.float8_e4m3fn
     )
-
-
-def is_flashinfer_supporting_global_sf(backend: FlashinferMoeBackend | None) -> bool:
-    # TODO(shuw@nvidia): Update when new backends are added.
-    backends_supporting_global_sf = (
-        FlashinferMoeBackend.CUTLASS,
-        FlashinferMoeBackend.TENSORRT_LLM,
-        FlashinferMoeBackend.CUTEDSL,
-    )
-    return backend in backends_supporting_global_sf
 
 
 def convert_moe_weights_to_flashinfer_trtllm_block_layout(
