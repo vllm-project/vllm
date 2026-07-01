@@ -244,6 +244,13 @@ class ServerRole:
     ) -> None:
         """Handle a FetchMsg from the peer.
 
+        FetchMsg also terminates the peer's lookup phase for
+        ``kv_request_id``: any parked ``_lookup_batches`` are dropped
+        and their ``cb.finish_request`` fires so the TieringManager can
+        release per-batch bookkeeping. The client contract guarantees
+        exactly one FetchMsg per lookup-touched request — including an
+        empty one when no blocks end up being fetched.
+
         Raises ``ValueError`` on a duplicate fetch for the same
         ``kv_request_id``; the coordinator's dispatch loop turns that
         into a protocol-error disconnect.
@@ -264,6 +271,10 @@ class ServerRole:
         result = req.add_fetch_demand(block_hashes, block_indexes)
         if result.local_idxs:
             self._submit_transfer(kv_request_id, result)
+        # Close the lookup phase for this kv_request_id before any
+        # finalize path runs so the TieringManager releases per-batch
+        # bookkeeping in-order.
+        self._finish_lookup_batches(kv_request_id)
         # Prefiller-first mode: finish_request may have run before
         # fetch arrived. If so, finalize once we know what was
         # demanded — fully satisfied → success, else early-fail.
@@ -428,6 +439,24 @@ class ServerRole:
             batch = self._lookup_batches.pop(batch_id)
             self._cb.finish_request(batch.ctx)
 
+    def _finish_lookup_batches(self, kv_request_id: str) -> None:
+        """Drop parked LookupMsg batches for this id, firing finish_request.
+
+        Called on the two events that mean "no more lookup traffic for
+        ``kv_request_id`` is expected on this session": the terminal
+        FetchMsg from the peer (client contract: exactly one FetchMsg
+        per lookup-touched request, even if empty), and a local
+        ``finish`` — the last one to fire is a no-op.
+        """
+        finished_batch_ids = [
+            bid
+            for bid, b in self._lookup_batches.items()
+            if b.kv_request_id == kv_request_id
+        ]
+        for bid in finished_batch_ids:
+            batch = self._lookup_batches.pop(bid)
+            self._cb.finish_request(batch.ctx)
+
     def finish(self, kv_request_id: str) -> None:
         """Mark an outbound request finishing.
 
@@ -449,14 +478,7 @@ class ServerRole:
         If inflight transfers exist for this id, defer — the last
         completing transfer in collect_results will fire the message.
         """
-        finished_batches = [
-            bid
-            for bid, b in self._lookup_batches.items()
-            if b.kv_request_id == kv_request_id
-        ]
-        for bid in finished_batches:
-            batch = self._lookup_batches.pop(bid)
-            self._cb.finish_request(batch.ctx)
+        self._finish_lookup_batches(kv_request_id)
 
         req = self._outbound.get(kv_request_id)
         if req is None:

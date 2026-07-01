@@ -26,6 +26,10 @@ Block Transfer Flow (happy path)
 
 1. Client sends FetchMsg with a kv_request_id and lists of
    block keys + remote indexes where it wants the data written.
+   FetchMsg also terminates the lookup phase for the id — the server
+   drops any parked LookupMsg batches and calls ``cb.finish_request``.
+   The client emits exactly one FetchMsg per lookup-touched request,
+   including an empty one when no blocks end up being fetched.
 2. Server matches requested blocks against locally stored blocks:
    - Blocks already available are transferred immediately via RDMA.
    - Blocks not yet available are recorded as "demanded" and
@@ -165,11 +169,17 @@ class DisconnectMsg:
 
 
 class FetchMsg:
-    """Client → Server: request blocks by key.
+    """Client → Server: request blocks by key and close the lookup phase.
+
+    Also serves as the client's terminal "lookup phase done" signal for
+    ``kv_request_id``: the server drops any parked LookupMsg batches
+    for this id and calls ``cb.finish_request`` on receipt. In the
+    all-miss case the client emits an empty FetchMsg (``BLOCK_HASHES``
+    and ``BLOCK_INDEXES`` both empty) purely to fire this signal.
 
     Fields:
         KV_REQUEST_ID: Identifies this block transfer request.
-        BLOCK_HASHES: List of block keys (OffloadKey bytes).
+        BLOCK_HASHES: List of block keys (OffloadKey bytes). May be empty.
         BLOCK_INDEXES: List of remote block indexes (same length as BLOCK_HASHES).
     """
 
