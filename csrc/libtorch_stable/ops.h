@@ -288,10 +288,6 @@ void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
     int64_t cache_block_size);
 
 #ifndef USE_ROCM
-torch::stable::Tensor minimax_allreduce_rms(
-    torch::stable::Tensor const& input,
-    torch::stable::Tensor const& norm_weight, torch::stable::Tensor workspace,
-    int64_t const rank, int64_t const nranks, double const eps);
 std::tuple<torch::stable::Tensor, torch::stable::Tensor>
 minimax_allreduce_rms_qk(torch::stable::Tensor qkv,
                          torch::stable::Tensor const& norm_weight_q,

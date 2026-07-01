@@ -12,6 +12,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.model_executor.warmup.deepseek_v4_mhc_warmup import (
     deepseek_v4_mhc_warmup,
@@ -124,6 +125,9 @@ def kernel_warmup(worker: "Worker"):
             force_attention=True,
             create_mixed_batch=True,
         )
+
+    if worker.vllm_config.kernel_config.enable_cutedsl_warmup:
+        cutedsl_warmup()
 
 
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:

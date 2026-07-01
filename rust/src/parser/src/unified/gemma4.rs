@@ -515,7 +515,7 @@ mod tests {
 
     use serde_json::{Value, json};
     use thiserror_ext::AsReport;
-    use vllm_tokenizer::Tokenizer;
+    use vllm_tokenizer::test_utils::TestTokenizer;
     use winnow::combinator::{eof, terminated};
     use winnow::error::ErrMode;
     use winnow::prelude::*;
@@ -527,66 +527,15 @@ mod tests {
     use crate::tool::Tool;
     use crate::unified::{UnifiedParserEvent, parsing_failed};
 
-    struct FakeTokenizer;
+    const CHANNEL_START_ID: u32 = 256;
+    const CHANNEL_END_ID: u32 = 257;
+    const TURN_BOUNDARY_ID: u32 = 258;
 
-    impl Tokenizer for FakeTokenizer {
-        fn encode(
-            &self,
-            text: &str,
-            _add_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<Vec<u32>> {
-            Ok(text.chars().map(u32::from).collect())
-        }
-
-        fn decode(
-            &self,
-            token_ids: &[u32],
-            _skip_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<String> {
-            Ok(token_ids
-                .iter()
-                .map(|token_id| char::from_u32(*token_id).unwrap_or('\u{FFFD}'))
-                .collect())
-        }
-
-        fn token_to_id(&self, token: &str) -> Option<u32> {
-            match token {
-                CHANNEL_START => Some(100),
-                CHANNEL_END => Some(101),
-                _ => None,
-            }
-        }
-
-        fn is_special_id(&self, token_id: u32) -> bool {
-            matches!(token_id, 100..=105)
-        }
-    }
-
-    struct MissingTokenTokenizer;
-
-    impl Tokenizer for MissingTokenTokenizer {
-        fn encode(
-            &self,
-            text: &str,
-            _add_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<Vec<u32>> {
-            Ok(text.chars().map(u32::from).collect())
-        }
-
-        fn decode(
-            &self,
-            token_ids: &[u32],
-            _skip_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<String> {
-            Ok(token_ids
-                .iter()
-                .map(|token_id| char::from_u32(*token_id).unwrap_or('\u{FFFD}'))
-                .collect())
-        }
-
-        fn token_to_id(&self, _token: &str) -> Option<u32> {
-            None
-        }
+    fn tokenizer() -> TestTokenizer {
+        TestTokenizer::new()
+            .with_special_token(CHANNEL_START, CHANNEL_START_ID)
+            .with_special_token(CHANNEL_END, CHANNEL_END_ID)
+            .with_special_token("<turn-boundary>", TURN_BOUNDARY_ID)
     }
 
     trait UnifiedParserTestExt {
@@ -716,12 +665,12 @@ mod tests {
     }
 
     fn test_parser() -> Gemma4UnifiedParser {
-        Gemma4UnifiedParser::new(&test_tools(), Arc::new(FakeTokenizer)).unwrap()
+        Gemma4UnifiedParser::new(&test_tools(), Arc::new(tokenizer())).unwrap()
     }
 
     #[test]
     fn gemma4_create_requires_channel_start_token() {
-        let error = match Gemma4UnifiedParser::new(&test_tools(), Arc::new(MissingTokenTokenizer)) {
+        let error = match Gemma4UnifiedParser::new(&test_tools(), Arc::new(TestTokenizer::new())) {
             Ok(_) => panic!("expected missing token error"),
             Err(error) => error,
         };
@@ -1046,7 +995,7 @@ mod tests {
     #[test]
     fn gemma4_initialize_open_channel_prompt_starts_in_reasoning() {
         let mut parser = test_parser();
-        parser.initialize(&[100, 3000, 3001]).unwrap();
+        parser.initialize(&[CHANNEL_START_ID, 3000, 3001]).unwrap();
 
         let output = parser.parse_complete("reason<channel|>answer").unwrap();
 
@@ -1057,7 +1006,7 @@ mod tests {
     #[test]
     fn gemma4_initialize_turn_prompt_starts_in_text() {
         let mut parser = test_parser();
-        parser.initialize(&[104, 3000, 3001]).unwrap();
+        parser.initialize(&[TURN_BOUNDARY_ID, 3000, 3001]).unwrap();
 
         let output = parser.parse_complete("<|channel>thought\nreason<channel|>answer").unwrap();
 
@@ -1068,7 +1017,7 @@ mod tests {
     #[test]
     fn gemma4_initialize_special_token_caps_boundary_scan() {
         let mut parser = test_parser();
-        parser.initialize(&[100, 3000, 104, 3001]).unwrap();
+        parser.initialize(&[CHANNEL_START_ID, 3000, TURN_BOUNDARY_ID, 3001]).unwrap();
 
         let output = parser.parse_complete("answer").unwrap();
 
@@ -1079,7 +1028,7 @@ mod tests {
     #[test]
     fn gemma4_initialize_closed_channel_prompt_starts_in_text() {
         let mut parser = test_parser();
-        parser.initialize(&[100, 3000, 3001, 101]).unwrap();
+        parser.initialize(&[CHANNEL_START_ID, 3000, 3001, CHANNEL_END_ID]).unwrap();
 
         let output = parser.parse_complete("answer").unwrap();
 
