@@ -99,10 +99,23 @@ class Ovis2_5Processor(ProcessorMixin):
             "https://huggingface.co/AIDC-AI/Ovis2.6-30B-A3B/blob/main/tokenizer_config.json"
         )
 
+        # Transformers v4 auto-injected the `additional_special_tokens` declared
+        # in tokenizer_config.json into the tokenizer vocab; v5 no longer does,
+        # so these Ovis tokens may be missing from `get_vocab()`. They are
+        # always appended right after the base vocab in declaration order (this
+        # is how the model's embedding was built), so resolve any missing token
+        # deterministically instead of mutating the tokenizer (which is a no-op
+        # under vLLM's cached/thread-pooled tokenizer wrapper).
+        next_token_id = max(vocab.values()) + 1
         for key, token_name in required_tokens.items():
-            if token_name not in vocab:
-                raise ValueError(f"Can not find {token_name}, {suggestion}")
-            extra_special_tokens[key] = vocab[token_name]
+            if token_name in vocab:
+                extra_special_tokens[key] = vocab[token_name]
+            else:
+                extra_special_tokens[key] = next_token_id
+                next_token_id += 1
+
+        if not extra_special_tokens:
+            raise ValueError(f"Can not resolve Ovis special tokens, {suggestion}")
 
         return extra_special_tokens
 
