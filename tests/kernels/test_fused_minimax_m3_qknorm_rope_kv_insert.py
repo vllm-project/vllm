@@ -280,7 +280,117 @@ def test_sparse_full(num_tokens, block_size, kv_cache_dtype):
     )
 
 
-# ── Test 3: fp8 (e4m3) index outputs ─────────────────────────────────────────
+@pytest.mark.parametrize("num_tokens", [1, 64, 513])
+@pytest.mark.parametrize("block_size", [16, 64])
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+def test_sparse_skip_index_branch(num_tokens, block_size, kv_cache_dtype):
+    torch.manual_seed(2)
+    device, dtype, eps = "cuda", torch.bfloat16, 1e-6
+    base, max_pos = 5_000_000.0, 4096
+    num_heads, num_kv_heads, num_idx_heads = 16, 4, 4
+
+    q_w = torch.randn(HEAD_DIM, dtype=dtype, device=device) * 0.1
+    k_w = torch.randn(HEAD_DIM, dtype=dtype, device=device) * 0.1
+    cos_sin = make_cos_sin_cache(max_pos, ROTARY_DIM, base, dtype, device)
+    positions = torch.randint(
+        0, max_pos, (num_tokens,), dtype=torch.int64, device=device
+    )
+
+    qsz, kvsz = num_heads * HEAD_DIM, num_kv_heads * HEAD_DIM
+    iqsz, iksz = num_idx_heads * HEAD_DIM, HEAD_DIM
+    qkv = torch.randn(
+        num_tokens, qsz + 2 * kvsz + iqsz + iksz, dtype=dtype, device=device
+    )
+    qkv_orig = qkv.clone()
+    splits = [qsz, kvsz, kvsz, iqsz, iksz]
+
+    num_blocks = (num_tokens + block_size - 1) // block_size + 1
+    kv_cache_storage_dtype = torch.uint8 if kv_cache_dtype == "fp8" else dtype
+    kv_cache = torch.zeros(
+        num_blocks,
+        2,
+        block_size,
+        num_kv_heads,
+        HEAD_DIM,
+        dtype=kv_cache_storage_dtype,
+        device=device,
+    )
+    index_cache = torch.randn(
+        num_blocks, block_size, HEAD_DIM, dtype=dtype, device=device
+    )
+    index_cache_orig = index_cache.clone()
+    slot_mapping = torch.randperm(
+        num_blocks * block_size, dtype=torch.int64, device=device
+    )[:num_tokens]
+    q_out = torch.empty(num_tokens, qsz, dtype=dtype, device=device)
+
+    ops.fused_minimax_m3_qknorm_rope_kv_insert(
+        qkv,
+        q_w,
+        k_w,
+        cos_sin,
+        positions,
+        num_heads,
+        num_kv_heads,
+        ROTARY_DIM,
+        eps,
+        num_index_heads=num_idx_heads,
+        slot_mapping=slot_mapping,
+        kv_cache=kv_cache,
+        index_cache=index_cache,
+        block_size=block_size,
+        q_out=q_out,
+        kv_cache_dtype=kv_cache_dtype,
+        skip_index_branch=True,
+    )
+
+    _, k_out, v_out, index_q_out, index_k_out = qkv.split(splits, dim=-1)
+    q_in, k_in, v_in, index_q_in, index_k_in = qkv_orig.split(splits, dim=-1)
+    q_ref = norm_rope_ref(
+        q_in.view(num_tokens, num_heads, HEAD_DIM), q_w, positions, cos_sin, eps
+    ).view(num_tokens, qsz)
+    k_ref = norm_rope_ref(
+        k_in.view(num_tokens, num_kv_heads, HEAD_DIM),
+        k_w,
+        positions,
+        cos_sin,
+        eps,
+    ).view(num_tokens, kvsz)
+
+    torch.testing.assert_close(q_out, q_ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(k_out, k_ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(v_out, v_in, rtol=0, atol=0)
+    torch.testing.assert_close(index_q_out, index_q_in, rtol=0, atol=0)
+    torch.testing.assert_close(index_k_out, index_k_in, rtol=0, atol=0)
+    torch.testing.assert_close(index_cache, index_cache_orig, rtol=0, atol=0)
+
+    if kv_cache_dtype == "fp8":
+        expected_kv_cache = torch.zeros_like(kv_cache)
+        scale = torch.ones((), device=device)
+        ops.reshape_and_cache_flash(
+            k_out.view(num_tokens, num_kv_heads, HEAD_DIM),
+            v_out.view(num_tokens, num_kv_heads, HEAD_DIM),
+            expected_kv_cache[:, 0],
+            expected_kv_cache[:, 1],
+            slot_mapping,
+            kv_cache_dtype,
+            scale,
+            scale,
+        )
+        torch.testing.assert_close(kv_cache, expected_kv_cache, rtol=0, atol=0)
+    else:
+        k_ref_h = k_ref.view(num_tokens, num_kv_heads, HEAD_DIM)
+        v_ref_h = v_in.view(num_tokens, num_kv_heads, HEAD_DIM)
+        for t in range(num_tokens):
+            s = slot_mapping[t].item()
+            b, pos = s // block_size, s % block_size
+            torch.testing.assert_close(
+                kv_cache[b, 0, pos], k_ref_h[t], rtol=1e-2, atol=1e-2
+            )
+            torch.testing.assert_close(kv_cache[b, 1, pos], v_ref_h[t], rtol=0, atol=0)
+
+
+# ── Test 4: fp8 (e4m3) index outputs ─────────────────────────────────────────
 # The fp8 score path stores index_q and the index-K cache as e4m3 while q/k/v +
 # q_out stay bf16. Asserts: (1) q/k/v/q_out are bit-identical to the bf16 run
 # (the index dtype must not perturb the main branch), and (2) the e4m3 index
