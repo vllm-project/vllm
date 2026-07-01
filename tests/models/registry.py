@@ -468,7 +468,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "bharatgenai/Param2-17B-A2.4B-Thinking",
         trust_remote_code=True,
     ),
-    "PersimmonForCausalLM": _HfExamplesInfo("adept/persimmon-8b-chat"),
     "PhiForCausalLM": _HfExamplesInfo("microsoft/phi-2"),
     "Phi3ForCausalLM": _HfExamplesInfo("microsoft/Phi-3-mini-4k-instruct"),
     "PhiMoEForCausalLM": _HfExamplesInfo(
@@ -879,7 +878,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "FunAudioChatForConditionalGeneration": _HfExamplesInfo(
         "funaudiochat", is_available_online=False
     ),
-    "FuyuForCausalLM": _HfExamplesInfo("adept/fuyu-8b"),
     "Gemma3ForConditionalGeneration": _HfExamplesInfo("google/gemma-3-4b-it"),
     "DiffusionGemmaForBlockDiffusion": _HfExamplesInfo(
         "google/diffusiongemma-26B-A4B-it",

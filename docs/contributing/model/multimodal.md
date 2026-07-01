@@ -604,7 +604,7 @@ return a schema of the tensors outputted by the HF processor that are related to
         ```
 
     !!! note
-        Our [actual code](../../../vllm/model_executor/models/fuyu.py) has special handling
+        Our [actual code](https://github.com/vllm-project/vllm/blob/v0.23.0/vllm/model_executor/models/fuyu.py) has special handling
         for text-only inputs to prevent unnecessary warnings from HF processor.
 
     !!! note
@@ -873,7 +873,7 @@ Examples:
 Examples:
 
 - Chameleon (appends `sep_token`): [vllm/model_executor/models/chameleon.py](../../../vllm/model_executor/models/chameleon.py)
-- Fuyu (appends `boa_token`): [vllm/model_executor/models/fuyu.py](../../../vllm/model_executor/models/fuyu.py)
+- Fuyu (appends `boa_token`): [vllm/model_executor/models/fuyu.py](https://github.com/vllm-project/vllm/blob/v0.23.0/vllm/model_executor/models/fuyu.py)
 - Molmo (applies chat template which is not defined elsewhere): [vllm/model_executor/models/molmo.py](../../../vllm/model_executor/models/molmo.py)
 
 ### Custom HF processor

@@ -140,7 +140,6 @@ TEXT_GENERATION_MODELS = {
     "allenai/OLMoE-1B-7B-0924-Instruct": PPTestSettings.fast(),
     "facebook/opt-iml-max-1.3b": PPTestSettings.fast(),
     "OrionStarAI/Orion-14B-Chat": PPTestSettings.fast(),
-    "adept/persimmon-8b-chat": PPTestSettings.fast(),
     "microsoft/phi-2": PPTestSettings.fast(),
     "microsoft/Phi-3-small-8k-instruct": PPTestSettings.fast(),
     "microsoft/Phi-3.5-MoE-instruct": PPTestSettings.detailed(
@@ -169,7 +168,6 @@ MULTIMODAL_MODELS = {
     # [Decoder-only]
     "Salesforce/blip2-opt-6.7b": PPTestSettings.fast(),
     "facebook/chameleon-7b": PPTestSettings.fast(),
-    "adept/fuyu-8b": PPTestSettings.fast(),
     "zai-org/glm-4v-9b": PPTestSettings.fast(),
     "OpenGVLab/InternVL3-1B": PPTestSettings.fast(),
     "llava-hf/llava-1.5-7b-hf": PPTestSettings.fast(),
