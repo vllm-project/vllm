@@ -393,6 +393,24 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             calculate_kv_scales = False
         self.quant_config = quant_config
 
+        # Skip quantization for specified layers
+        if cache_config is not None and cache_config.kv_cache_dtype_skip_layers:
+            from vllm.model_executor.models.utils import extract_layer_index
+
+            skip = False
+            # Check layer index
+            layer_idx = extract_layer_index(prefix)
+            if str(layer_idx) in cache_config.kv_cache_dtype_skip_layers:
+                skip = True
+            if skip:
+                kv_cache_dtype = "auto"
+                calculate_kv_scales = False
+            logger.debug(
+                "Layer %s: kv_cache_dtype=%s",
+                prefix,
+                kv_cache_dtype,
+            )
+
         dtype = torch.get_default_dtype()
         if attn_backend is not None:
             assert attn_backend.is_mla(), (
@@ -1006,7 +1024,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             num_kv_heads=1,
             head_size=self.head_size,
             dtype=kv_cache_dtype,
-            cache_dtype_str=vllm_config.cache_config.cache_dtype,
+            cache_dtype_str=self.kv_cache_dtype,
         )
 
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
