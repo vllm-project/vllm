@@ -111,6 +111,9 @@ class MultiModalConfig:
     """Additional args passed to process media inputs, keyed by modalities.
     For example, to set num_frames for video, set
     `--media-io-kwargs '{"video": {"num_frames": 40} }'`"""
+    max_video_size_mb: int | None = None
+    """Maximum allowed video file size in MiB before decoding.
+    Set to 0 to disable the check."""
     mm_processor_kwargs: dict[str, object] | None = None
     """Arguments to be forwarded to the model's processor for multi-modal data,
     e.g., image processor. Overrides for the multi-modal processor obtained
