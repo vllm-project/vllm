@@ -6,6 +6,7 @@ import json
 import math
 import os
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 
@@ -118,6 +119,30 @@ def write_to_json(filename: str, records: list) -> None:
             cls=InfEncoder,
             default=lambda o: f"<{type(o).__name__} is not JSON serializable>",
         )
+
+
+def append_jsonl_record(filename: str | Path, record: dict[str, Any]) -> None:
+    """Append one benchmark record to a JSONL file."""
+    path = Path(filename)
+    if path.parent != Path("."):
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+    needs_leading_newline = False
+    if path.exists() and path.stat().st_size > 0:
+        with path.open("rb") as f:
+            f.seek(-1, os.SEEK_END)
+            needs_leading_newline = f.read(1) != b"\n"
+
+    with path.open("a", encoding="utf-8") as f:
+        if needs_leading_newline:
+            f.write("\n")
+        json.dump(
+            record,
+            f,
+            cls=InfEncoder,
+            default=lambda o: f"<{type(o).__name__} is not JSON serializable>",
+        )
+        f.write("\n")
 
 
 @contextmanager
