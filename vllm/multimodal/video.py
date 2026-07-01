@@ -205,6 +205,13 @@ PYNVVIDEOCODEC_MAX_RETAINED_DECODERS = 1
 # PyNvVideoCodec 2.0.4 on H100.
 PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES = int(1.8 * 1024 * MiB_bytes)
 
+# Video backends that allocate GPU VRAM (decoder surfaces, CUDA context)
+# and therefore require startup-time memory reservation via
+# _reserve_mm_ipc_gpu_memory. Request-level media_io_kwargs must not be
+# allowed to select these backends unless the static config already
+# reserved the corresponding budget.
+GPU_VIDEO_BACKENDS: frozenset[str] = frozenset({PYNVVIDEOCODEC_VIDEO_BACKEND})
+
 
 class PyNvVideoCodecDecoderSlot:
     """A retained PyNv decoder slot and its CUDA stream.
