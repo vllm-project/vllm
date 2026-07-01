@@ -55,7 +55,6 @@ from vllm.models.deepseek_v4.hw_agnostic.attention.sparse_mla import (
     DeepseekV4HWAgnosticMetadata,
 )
 from vllm.models.deepseek_v4.hw_agnostic.attention.sparse_swa import DeepseekV4SWACache
-from vllm.model_executor.hw_agnostic._custom_op_lib import vllm_hw_agnostic_lib
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -91,8 +90,7 @@ LAYER_NAME = "deepseek_v4_multi_head_latent_attention"
 
 # KV-cache writeback is done explicitly inside ``attention_impl`` and the
 # ``dsv4_sparse_attn_indexer`` op; the hw_agnostic backends are spec carriers
-# only and compute is dispatched via
-# ``torch.ops.vllm_hw_agnostic.deepseek_v4_attention``.
+# only and compute is dispatched via ``torch.ops.vllm.deepseek_v4_attention``.
 @PluggableLayer.register(LAYER_NAME)
 class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
     def __init__(
@@ -233,7 +231,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         )
 
         # Wrapped in a custom op for the torch.compile boundary.
-        torch.ops.vllm_hw_agnostic.deepseek_v4_attention(
+        torch.ops.vllm.deepseek_v4_attention(
             hidden_states,
             positions,
             o_padded,
@@ -407,7 +405,6 @@ direct_register_custom_op(
     op_func=deepseek_v4_attention,
     mutates_args=["out"],
     fake_impl=deepseek_v4_attention_fake,
-    target_lib=vllm_hw_agnostic_lib,
 )
 
 
