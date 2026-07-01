@@ -6,6 +6,7 @@ Identical to the NVIDIA backbone (nvidia/model.py) except DeepseekV32DecoderLaye
 instantiates DeepseekV32ROCMAiterMLAAttention instead of DeepseekV32Attention.
 Weight loading, MoE routing, and pipeline-parallel logic are unchanged.
 """
+
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
@@ -39,9 +40,9 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory,
     make_layers,
 )
+from vllm.models.deepseek_v32.common.fused_ops import fused_allreduce_rms_norm
 from vllm.sequence import IntermediateTensors
 
-from vllm.models.deepseek_v32.common.fused_ops import fused_allreduce_rms_norm
 from .rocm import DeepseekV32ROCMAiterMLAAttention
 
 
