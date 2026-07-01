@@ -1197,6 +1197,10 @@ def test_hybrid_mamba_align_partial_hash_hit():
     assert len(mamba_new_block_ids) == 1
     assert mamba_new_block_ids[0] != partial_mamba_block[0].block_id
     assert manager.get_blocks("1").get_block_ids()[1][1] == mamba_new_block_ids[0]
+    assert partial_mamba_block[0].block_hash is not None
+    assert get_block_hash(partial_mamba_block[0].block_hash) == partial_mamba_hash
+    assert get_group_id(partial_mamba_block[0].block_hash) == 1
+    assert partial_mamba_block[0].block_hash_num_tokens == 6
     assert (
         KVCacheBlockCopy(
             src_block_id=partial_mamba_block[0].block_id,
@@ -1263,6 +1267,13 @@ def test_hybrid_mamba_partial_tail_owner_uses_cow_on_continue():
     assert len(mamba_new_block_ids) == 1
     assert mamba_new_block_ids[0] != partial_mamba_block_id
     assert manager.get_blocks("0").get_block_ids()[1][1] == mamba_new_block_ids[0]
+    assert partial_mamba_block[0].block_hash is not None
+    assert get_block_hash(partial_mamba_block[0].block_hash) == partial_mamba_hash
+    assert get_group_id(partial_mamba_block[0].block_hash) == 1
+    assert partial_mamba_block[0].block_hash_num_tokens == 6
+    cow_mamba_block = manager.get_blocks("0").blocks[1][1]
+    assert cow_mamba_block.block_hash is None
+    assert cow_mamba_block.block_hash_num_tokens is None
     assert (
         KVCacheBlockCopy(
             src_block_id=partial_mamba_block_id,
@@ -1404,6 +1415,10 @@ def test_hybrid_full_attention_partial_hash_hit_uses_cow():
     full_new_block_ids = new_blocks.get_block_ids()[0]
     assert len(full_new_block_ids) == 1
     assert full_new_block_ids[0] != partial_full_block[0].block_id
+    assert partial_full_block[0].block_hash is not None
+    assert get_block_hash(partial_full_block[0].block_hash) == partial_full_hash
+    assert get_group_id(partial_full_block[0].block_hash) == 0
+    assert partial_full_block[0].block_hash_num_tokens == 6
     assert (
         KVCacheBlockCopy(
             src_block_id=partial_full_block[0].block_id,
@@ -1414,6 +1429,89 @@ def test_hybrid_full_attention_partial_hash_hit_uses_cow():
     assert partial_full_block[0].ref_cnt == 1
     manager.new_step_starts()
     assert partial_full_block[0].ref_cnt == 0
+
+
+def test_hybrid_partial_hit_cow_target_starts_uncached():
+    hash_block_size = 2
+    block_size = 2 * hash_block_size
+    kv_cache_config = KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+
+    req0 = make_request("0", [0, 0, 1, 1, 2, 2], hash_block_size, sha256)
+    computed_blocks, num_computed = manager.get_computed_blocks(req0)
+    assert num_computed == 0
+    assert manager.allocate_slots(req0, 6, num_computed, computed_blocks) is not None
+    manager.free(req0)
+    manager.new_step_starts()
+
+    partial_hash = req0.block_hashes[6 // hash_block_size - 1]
+    partial_full_block = manager.block_pool.get_cached_block(
+        partial_hash, kv_cache_group_ids=[0]
+    )
+    partial_mamba_block = manager.block_pool.get_cached_block(
+        partial_hash, kv_cache_group_ids=[1]
+    )
+    assert partial_full_block is not None
+    assert partial_mamba_block is not None
+
+    req1 = make_request("1", [0, 0, 1, 1, 2, 2, 3, 3], hash_block_size, sha256)
+    computed_blocks, num_computed = manager.get_computed_blocks(req1)
+    assert num_computed == 6
+
+    new_blocks = manager.allocate_slots(
+        req1,
+        2,
+        num_computed,
+        computed_blocks,
+        delay_cache_blocks=True,
+    )
+    assert new_blocks is not None
+
+    full_cow_block = manager.get_blocks("1").blocks[0][1]
+    mamba_cow_block = manager.get_blocks("1").blocks[1][1]
+    assert full_cow_block.block_id != partial_full_block[0].block_id
+    assert mamba_cow_block.block_id != partial_mamba_block[0].block_id
+    assert full_cow_block.block_hash is None
+    assert full_cow_block.block_hash_num_tokens is None
+    assert mamba_cow_block.block_hash is None
+    assert mamba_cow_block.block_hash_num_tokens is None
+
+    assert partial_full_block[0].block_hash is not None
+    assert get_block_hash(partial_full_block[0].block_hash) == partial_hash
+    assert get_group_id(partial_full_block[0].block_hash) == 0
+    assert partial_full_block[0].block_hash_num_tokens == 6
+    assert partial_mamba_block[0].block_hash is not None
+    assert get_block_hash(partial_mamba_block[0].block_hash) == partial_hash
+    assert get_group_id(partial_mamba_block[0].block_hash) == 1
+    assert partial_mamba_block[0].block_hash_num_tokens == 6
 
 
 def test_hybrid_partial_hash_truncates_full_attention_hit_length():
