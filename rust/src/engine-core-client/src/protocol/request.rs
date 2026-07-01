@@ -135,3 +135,41 @@ impl EngineCoreRequest {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use rmpv::Value;
+
+    use crate::protocol::{EngineCoreSamplingParams, decode_value, encode_msgpack};
+
+    use super::*;
+
+    #[test]
+    fn engine_core_request_serializes_as_full_array() {
+        let request = EngineCoreRequest {
+            request_id: "req-1".to_string(),
+            prompt_token_ids: Some(vec![1, 2, 3]),
+            sampling_params: Some(EngineCoreSamplingParams {
+                max_tokens: 8,
+                ..EngineCoreSamplingParams::for_test()
+            }),
+            arrival_time: 1234.5,
+            client_index: 7,
+            ..EngineCoreRequest::default()
+        };
+
+        let encoded = encode_msgpack(&request).unwrap();
+        let value = decode_value(&encoded).unwrap();
+        let array = match value {
+            Value::Array(array) => array,
+            other => panic!("expected array, got {other:?}"),
+        };
+
+        assert_eq!(array.len(), 20);
+        assert_eq!(array[0], Value::from("req-1"));
+        assert_eq!(array[2], Value::Nil);
+        assert_eq!(array[4], Value::Nil);
+        assert_eq!(array[10], Value::Nil);
+        assert_eq!(array[11], Value::from(7));
+    }
+}

@@ -60,3 +60,22 @@ pub struct StructuredOutputsParams {
     )]
     pub backend: StructuredOutputBackend,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn structured_outputs_backend_ignores_deserialized_value() {
+        let params: StructuredOutputsParams = serde_json::from_value(serde_json::json!({
+            "json_object": true,
+            "_backend": "xgrammar",
+        }))
+        .unwrap();
+
+        assert_eq!(params.backend, StructuredOutputBackend::Guidance);
+
+        let value = serde_json::to_value(params).unwrap();
+        assert_eq!(value["_backend"], "guidance");
+    }
+}

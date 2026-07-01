@@ -235,7 +235,43 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::protocol::EngineCoreOutput;
+    use crate::protocol::{EngineCoreOutput, decode_msgpack, encode_msgpack};
+
+    #[test]
+    fn engine_core_outputs_roundtrip_finished_fields() {
+        let outputs = EngineCoreOutputs {
+            outputs: vec![EngineCoreOutput {
+                request_id: "req-1".to_string(),
+                new_token_ids: vec![42],
+                new_logprobs: None,
+                new_prompt_logprobs_tensors: None,
+                pooling_output: None,
+                finish_reason: Some(EngineCoreFinishReason::Length),
+                stop_reason: Some(StopReason::Text("stop".to_string())),
+                events: None,
+                kv_transfer_params: None,
+                trace_headers: None,
+                prefill_stats: None,
+                routed_experts: None,
+                num_nans_in_logits: 0,
+            }],
+            finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
+            ..Default::default()
+        };
+
+        let encoded = encode_msgpack(&outputs).unwrap();
+        let decoded: EngineCoreOutputs = decode_msgpack(&encoded).unwrap();
+
+        assert_eq!(decoded.outputs.len(), 1);
+        assert_eq!(
+            decoded.outputs[0].finish_reason,
+            Some(EngineCoreFinishReason::Length)
+        );
+        assert_eq!(
+            decoded.finished_requests,
+            Some(BTreeSet::from(["req-1".to_string()]))
+        );
+    }
 
     #[test]
     fn engine_core_outputs_classify_request_batch() {

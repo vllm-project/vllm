@@ -147,3 +147,64 @@ impl EngineCoreSamplingParams {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use rmpv::Value;
+
+    use crate::protocol::{EngineCoreRequest, decode_msgpack};
+
+    /// A real `sampling_params` is a sparse `omit_defaults` map; absent fields
+    /// must fall back to defaults. `python_compat` can't catch this since Rust
+    /// encodes full maps (see `engine_core_request_serializes_as_full_array`).
+    #[test]
+    fn decodes_sampling_params_with_omitted_defaults() {
+        let sampling_params = Value::Map(vec![
+            (
+                Value::from("stop_token_ids"),
+                Value::Array(vec![Value::from(151643u32)]),
+            ),
+            (Value::from("skip_reading_prefix_cache"), Value::from(false)),
+        ]);
+        let request = Value::Array(vec![
+            Value::from("req-omit-defaults"),
+            Value::Array(vec![
+                Value::from(1u32),
+                Value::from(2u32),
+                Value::from(3u32),
+            ]),
+            Value::Nil,
+            sampling_params,
+            Value::Nil,
+            Value::from(1.0f64),
+        ]);
+
+        let mut bytes = Vec::new();
+        rmpv::encode::write_value(&mut bytes, &request).unwrap();
+
+        let decoded: EngineCoreRequest = decode_msgpack(&bytes)
+            .expect("a real omit_defaults request must decode (regression: missing field)");
+
+        assert_eq!(decoded.request_id, "req-omit-defaults");
+        let sampling = decoded.sampling_params.expect("sampling params present");
+
+        assert_eq!(sampling.stop_token_ids, vec![151643]);
+        assert_eq!(sampling.skip_reading_prefix_cache, Some(false));
+
+        // Omitted fields -> Python defaults.
+        assert_eq!(sampling.temperature, 1.0);
+        assert_eq!(sampling.top_p, 1.0);
+        assert_eq!(sampling.top_k, 0);
+        assert_eq!(sampling.seed, None);
+        assert_eq!(sampling.max_tokens, 16);
+        assert_eq!(sampling.min_tokens, 0);
+        assert_eq!(sampling.min_p, 0.0);
+        assert_eq!(sampling.frequency_penalty, 0.0);
+        assert_eq!(sampling.presence_penalty, 0.0);
+        assert_eq!(sampling.repetition_penalty, 1.0);
+        assert_eq!(sampling.logprobs, None);
+        assert_eq!(sampling.prompt_logprobs, None);
+        assert_eq!(sampling.eos_token_id, None);
+        assert!(sampling.all_stop_token_ids.is_empty());
+    }
+}
