@@ -96,15 +96,18 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 )
 
             # Prefer to use the MarlinMoE kernel when it is supported.
+            is_actorder = (
+                weight_quant.strategy == QuantizationStrategy.GROUP
+                and weight_quant.actorder
+                in (ActivationOrdering.GROUP, ActivationOrdering.DYNAMIC)
+            )
             if (
-                not check_moe_marlin_supports_layer(layer, group_size)
+                not check_moe_marlin_supports_layer(
+                    layer, group_size, allow_tile_padding=not is_actorder
+                )
                 or current_platform.is_rocm()
             ):
-                if (
-                    weight_quant.strategy == QuantizationStrategy.GROUP
-                    and weight_quant.actorder
-                    in (ActivationOrdering.GROUP, ActivationOrdering.DYNAMIC)
-                ):
+                if is_actorder:
                     raise ValueError(
                         "WNA16MoE is not supported with actorder=group/dynamic."
                     )

@@ -4,12 +4,11 @@ import contextlib
 
 import pytest
 import pytest_asyncio
-from mistral_common.audio import Audio
-from mistral_common.protocol.instruct.chunk import RawAudio
 from mistral_common.protocol.transcription.request import (
     StreamingMode,
     TranscriptionRequest,
 )
+from mistral_common.tokens.tokenizers.audio import Audio
 from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 from mistral_common.tokens.tokenizers.tekken import SpecialTokenPolicy
 
@@ -101,7 +100,7 @@ def test_voxtral_realtime_forward(audio_assets, tokenizer, engine):
     def from_file(file_path: str):
         audio = Audio.from_file(file_path, strict=False)
         req = TranscriptionRequest(
-            audio=RawAudio.from_audio(audio),
+            audio=audio.to_base64(audio.format),
             streaming=StreamingMode.OFFLINE,
             language=None,
         )
@@ -156,7 +155,7 @@ async def test_voxtral_realtime_generator(audio_assets, tokenizer, async_engine)
 
         req = TranscriptionRequest(
             streaming=StreamingMode.OFFLINE,
-            audio=RawAudio.from_audio(audio),
+            audio=audio.to_base64(audio.format),
             language=None,
         )
         audio_enc = tokenizer.encode_transcription(req)

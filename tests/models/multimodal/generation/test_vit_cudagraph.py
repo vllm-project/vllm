@@ -29,6 +29,7 @@ class VitCudagraphTestConfig:
     vllm_runner_kwargs: dict = field(default_factory=dict)
     compilation_config_overrides: dict = field(default_factory=dict)
     marks: list = field(default_factory=list)
+    skip: bool = False
 
 
 def params_with_marks(
@@ -47,6 +48,13 @@ def internvl_chat_template(content: str) -> str:
     return f"<|im_start|>user\n{content}<|im_end|>\n<|im_start|>assistant\n"
 
 
+def kimi_vl_chat_template(content: str) -> str:
+    return (
+        f"<|im_user|>user<|im_middle|>{content}<|im_end|>"
+        "<|im_assistant|>assistant<|im_middle|>"
+    )
+
+
 def step3_vl_chat_template(content: str) -> str:
     return (
         "<｜begin▁of▁sentence｜> You are a helpful assistant.<|BOT|>user\n "
@@ -54,7 +62,21 @@ def step3_vl_chat_template(content: str) -> str:
     )
 
 
+def gemma3_chat_template(content: str) -> str:
+    return f"<bos><start_of_turn>user\n{content}<end_of_turn>\n<start_of_turn>model\n"
+
+
 MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
+    "gemma3": VitCudagraphTestConfig(
+        model="google/gemma-3-4b-it",
+        modalities=["image"],
+        image_prompt=gemma3_chat_template("<start_of_image>What is in this image?"),
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [512],
+        },
+        dtype="bfloat16",
+        max_model_len=4096,
+    ),
     "llama4": VitCudagraphTestConfig(
         model="meta-llama/Llama-4-Scout-17B-16E-Instruct",
         modalities=["image"],
@@ -75,15 +97,16 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         },
         marks=[pytest.mark.core_model],
     ),
-    "internvl": VitCudagraphTestConfig(
-        model="OpenGVLab/InternVL3-1B",
-        num_video_frames=8,
-        image_prompt=internvl_chat_template("<image>\nWhat is in this image?"),
-        video_prompt=internvl_chat_template(
-            "<video>\nDescribe this video in one sentence."
+    "qwen2_vl": VitCudagraphTestConfig(
+        model="Qwen/Qwen2-VL-2B-Instruct",
+        image_prompt=qwen_vl_chat_template(
+            "<|vision_start|><|image_pad|><|vision_end|>What is in this image?"
+        ),
+        video_prompt=qwen_vl_chat_template(
+            "<|vision_start|><|video_pad|><|vision_end|>"
+            "Describe this video in one sentence."
         ),
         needs_video_metadata=False,
-        vllm_runner_kwargs={"trust_remote_code": True},
         marks=[pytest.mark.core_model],
     ),
     "qwen2_5_vl": VitCudagraphTestConfig(
@@ -96,6 +119,34 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
             "Describe this video in one sentence."
         ),
         needs_video_metadata=False,
+        marks=[pytest.mark.core_model],
+    ),
+    "kimi_vl": VitCudagraphTestConfig(
+        model="moonshotai/Kimi-VL-A3B-Instruct",
+        modalities=["image"],
+        image_prompt=kimi_vl_chat_template(
+            "<|media_start|>image<|media_content|><|media_pad|><|media_end|>"
+            "What is in this image?"
+        ),
+        needs_video_metadata=False,
+        # Single bucket sized to cover the test images' output tokens.
+        # The default auto-inferred range fans out into multiple power-of-2
+        # buckets, each holding a full ViT capture pool.
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [1024],
+        },
+        # Shrink to 1 text + 1 vision layer with random weights so the
+        # test runs on any CI GPU (incl. L4) and skips the multi-GiB
+        # weight download. The test only validates that encoder CG
+        # capture/replay functions correctly, not output quality.
+        vllm_runner_kwargs={
+            "trust_remote_code": True,
+            "load_format": "dummy",
+            "hf_overrides": partial(
+                dummy_hf_overrides,
+                model_arch="KimiVLForConditionalGeneration",
+            ),
+        },
         marks=[pytest.mark.core_model],
     ),
     "qwen3_vl": VitCudagraphTestConfig(
@@ -122,16 +173,15 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         needs_video_metadata=True,
         marks=[pytest.mark.core_model],
     ),
-    "qwen2_vl": VitCudagraphTestConfig(
-        model="Qwen/Qwen2-VL-2B-Instruct",
-        image_prompt=qwen_vl_chat_template(
-            "<|vision_start|><|image_pad|><|vision_end|>What is in this image?"
-        ),
-        video_prompt=qwen_vl_chat_template(
-            "<|vision_start|><|video_pad|><|vision_end|>"
-            "Describe this video in one sentence."
+    "internvl": VitCudagraphTestConfig(
+        model="OpenGVLab/InternVL3-1B",
+        num_video_frames=8,
+        image_prompt=internvl_chat_template("<image>\nWhat is in this image?"),
+        video_prompt=internvl_chat_template(
+            "<video>\nDescribe this video in one sentence."
         ),
         needs_video_metadata=False,
+        vllm_runner_kwargs={"trust_remote_code": True},
         marks=[pytest.mark.core_model],
     ),
     "step3_vl": VitCudagraphTestConfig(
@@ -179,6 +229,25 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
             ),
         },
     ),
+    "deepseek_ocr": VitCudagraphTestConfig(
+        model="deepseek-ai/DeepSeek-OCR",
+        modalities=["image"],
+        image_prompt="<image>\nWhat is in this image?",
+        marks=[pytest.mark.core_model],
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [272],
+            "mode": 0,
+            "cudagraph_mode": 2,
+        },
+        vllm_runner_kwargs={
+            "load_format": "dummy",
+            "hf_overrides": partial(
+                dummy_hf_overrides,
+                model_arch="DeepseekOCRForCausalLM",
+            ),
+        },
+        skip=True,  # TODO: Re-enable this once OOM issues are resolved on CI.
+    ),
 }
 
 
@@ -200,6 +269,9 @@ def get_compilation_config(config: VitCudagraphTestConfig):
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 def test_vit_cudagraph_image(model_id, vllm_runner, image_assets):
     config = MODEL_CONFIGS[model_id]
+
+    if config.skip:
+        pytest.skip(f"{model_id} is marked to be skipped.")
 
     if "image" not in config.modalities:
         pytest.skip(f"{model_id} does not support the image modality.")
@@ -241,6 +313,9 @@ def test_vit_cudagraph_image(model_id, vllm_runner, image_assets):
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 def test_vit_cudagraph_video(model_id, vllm_runner, video_assets):
     config = MODEL_CONFIGS[model_id]
+
+    if config.skip:
+        pytest.skip(f"{model_id} is marked to be skipped.")
 
     if "video" not in config.modalities:
         pytest.skip(f"{model_id} does not support the video modality")

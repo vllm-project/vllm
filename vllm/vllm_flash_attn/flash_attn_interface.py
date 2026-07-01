@@ -200,6 +200,8 @@ def flash_attn_varlen_func(
     k_descale=None,
     v_descale=None,
     num_splits: int = 0,
+    # FA4 Only
+    output_scale=None,
     # Version selector
     fa_version: int = DEFAULT_FA_VERSION,
     s_aux=None,
@@ -271,6 +273,11 @@ def flash_attn_varlen_func(
     )
     assert block_table is None or seqused_k is not None, (
         "seqused_k must be provided if block_table is provided"
+    )
+
+    assert output_scale is None or fa_version == 4, (
+        f"Fused FP8 output (output_scale) is only supported by FA4, "
+        f"got fa_version={fa_version}"
     )
 
     if softmax_scale is None:
@@ -403,10 +410,71 @@ def flash_attn_varlen_func(
             learnable_sink=s_aux,
             mask_mod=mask_mod,
             aux_tensors=aux_tensors,
+            output_scale=output_scale,
         )
     else:
         raise ValueError(f"Unsupported FA version: {fa_version}")
     return (out, softmax_lse) if return_softmax_lse else out
+
+
+def compile_flash_attn_varlen_func_from_specs(
+    *,
+    q_shape: tuple[int, ...],
+    k_shape: tuple[int, ...],
+    v_shape: tuple[int, ...],
+    q_dtype: torch.dtype,
+    v_stride: tuple[int, ...] | None = None,
+    cu_seqlens_q_shape: tuple[int, ...] | None = None,
+    cu_seqlens_k_shape: tuple[int, ...] | None = None,
+    max_seqlen_q: int | None = None,
+    max_seqlen_k: int | None = None,
+    dropout_p: float = 0.0,
+    softmax_scale=None,
+    causal=False,
+    window_size: list[int] | None = None,
+    deterministic=False,
+    return_softmax_lse=False,
+    num_splits: int = 0,
+    fa_version: int = DEFAULT_FA_VERSION,
+) -> None:
+    if fa_version != 4:
+        raise ValueError(
+            f"Compile-only FlashAttention is only supported for FA4, got FA{fa_version}"
+        )
+    if dropout_p != 0.0:
+        raise NotImplementedError("FA4 compile-only wrapper does not support dropout")
+    del deterministic
+
+    from vllm.vllm_flash_attn.cute.interface import (
+        compile_flash_attn_varlen_func_from_specs as _fa4_compile_flash_attn_varlen_func_from_specs,
+    )
+
+    real_window_size: tuple[int, int]
+    if window_size is None:
+        real_window_size = (-1, -1)
+    else:
+        assert len(window_size) == 2
+        real_window_size = (window_size[0], window_size[1])
+
+    if softmax_scale is None:
+        softmax_scale = q_shape[-1] ** (-0.5)
+
+    return _fa4_compile_flash_attn_varlen_func_from_specs(
+        q_shape=q_shape,
+        k_shape=k_shape,
+        v_shape=v_shape,
+        q_dtype=q_dtype,
+        v_stride=v_stride,
+        cu_seqlens_q_shape=cu_seqlens_q_shape,
+        cu_seqlens_k_shape=cu_seqlens_k_shape,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        softmax_scale=softmax_scale,
+        causal=causal,
+        window_size=real_window_size,
+        num_splits=num_splits,
+        return_lse=return_softmax_lse,
+    )
 
 
 def sparse_attn_func(

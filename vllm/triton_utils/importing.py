@@ -7,6 +7,7 @@ from importlib.metadata import version
 from importlib.util import find_spec
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
@@ -27,10 +28,16 @@ if HAS_TRITON:
         ]
 
         # Check if we're in a distributed environment where CUDA_VISIBLE_DEVICES
-        # might be temporarily empty (e.g., Ray sets it to "" during actor init)
-        cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+        # or HIP_VISIBLE_DEVICES might be temporarily empty (e.g., Ray sets it to ""
+        # during actor init)
+        visible_devices_env = (
+            "HIP_VISIBLE_DEVICES"
+            if current_platform.is_rocm()
+            else "CUDA_VISIBLE_DEVICES"
+        )
+        visible_devices = os.environ.get(visible_devices_env)
         is_distributed_env = (
-            cuda_visible_devices is not None and len(cuda_visible_devices.strip()) == 0
+            visible_devices is not None and len(visible_devices.strip()) == 0
         )
 
         # Apply lenient driver check for distributed environments

@@ -302,33 +302,6 @@ class PyNcclCommunicator:
         if stream is None:
             stream = current_stream()
 
-        # Batch-invariant deterministic path.
-        #
-        # The default implementation below issues one ncclReduce per chunk with
-        # a different `root` per chunk (so a token is reduced to `root == its
-        # rank`). Different roots use different NCCL reduction trees, so the
-        # cross-rank floating-point summation order changes with how tokens are
-        # routed into the buffer -> ULP-level nondeterminism. This breaks
-        # batch-invariance (the same request must produce bit-identical results
-        # regardless of which rank it lands on).
-        #
-        # `world_size > 2` is required because at world_size == 2 the cross-rank
-        # sum is a single `a + b`, which is commutative and therefore already
-        # bit-identical regardless of root.
-        #
-        # Instead we reduce the *entire* buffer with a single ncclReduce to a
-        # fixed root (0) so every element is summed with the same reduction
-        # tree, then scatter each rank's own chunk back from root. The scatter
-        # is pure data movement (no arithmetic), so determinism is preserved.
-        # We scatter (not broadcast) because each rank only needs its own
-        # `sizes[rank]` rows. This is effectively a deterministic reduce-scatter,
-        # at the cost of relying on NCCL using a single tree for one ncclReduce.
-        if envs.VLLM_BATCH_INVARIANT and self.world_size > 2:
-            reduced = torch.empty_like(input_tensor)
-            self.reduce(reduced, input_tensor, root=0, op=op, stream=stream)
-            self.scatter(output_tensor, reduced, sizes, root=0, stream=stream)
-            return
-
         split_offset = 0
         self.nccl.ncclGroupStart()
         for root, split_size in enumerate(sizes):

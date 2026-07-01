@@ -92,14 +92,22 @@ def convert_mapping(
     embedding_indices = index_mapping_indices.copy()
     lora_indices = index_mapping_indices.copy()
 
+    # Build a reverse lookup (LoRA id -> index) once instead of repeatedly
+    # calling list.index(), which is an O(num_loras) linear scan performed for
+    # every prompt token and every batch token on each step.
+    lora_id_to_index = {
+        lora_id: index
+        for index, lora_id in enumerate(lora_index_to_id)
+        if lora_id is not None
+    }
+
     prompt_mapping: list[int] = [
-        lora_index_to_id.index(x) if x > 0 else -1 for x in mapping.prompt_mapping
+        lora_id_to_index[x] if x > 0 else -1 for x in mapping.prompt_mapping
     ]
     lora_idx = None
     for i in range(len(index_mapping_indices)):
-        # TODO index can be slow. optimize
         lora_idx = (
-            lora_index_to_id.index(index_mapping_indices[i])
+            lora_id_to_index[index_mapping_indices[i]]
             if index_mapping_indices[i] > 0
             else -1
         )

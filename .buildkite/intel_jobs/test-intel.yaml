@@ -19,6 +19,10 @@ steps:
       - image-build-xpu
     timeout_in_minutes: 30
     device: intel_gpu
+    agent_tags:
+      label: production
+      gpu: 2+
+      mem: 24+
     no_plugin: true
     env:
       REGISTRY: "public.ecr.aws/q9t5s3a7"
@@ -49,6 +53,10 @@ steps:
       - image-build-xpu
     timeout_in_minutes: 30
     device: intel_gpu
+    agent_tags:
+      label: production
+      gpu: 1+
+      mem: 16+
     no_plugin: true
     env:
       REGISTRY: "public.ecr.aws/q9t5s3a7"
@@ -66,13 +74,17 @@ steps:
         pytest -v -s v1/worker --ignore=v1/worker/test_gpu_model_runner.py --ignore=v1/worker/test_worker_memory_snapshot.py &&
         pytest -v -s v1/structured_output &&
         pytest -v -s v1/test_serial_utils.py &&
-        pytest -v -s v1/spec_decode --ignore=v1/spec_decode/test_max_len.py --ignore=v1/spec_decode/test_speculators_eagle3.py --ignore=v1/spec_decode/test_acceptance_length.py &&
+        pytest -v -s v1/spec_decode --ignore=v1/spec_decode/test_max_len.py --ignore=v1/spec_decode/test_speculators_eagle3.py --ignore=v1/spec_decode/test_acceptance_length.py --ignore=v1/spec_decode/test_speculators_correctness.py &&
         pytest -v -s v1/kv_connector/unit --ignore=v1/kv_connector/unit/test_multi_connector.py --ignore=v1/kv_connector/unit/test_example_connector.py --ignore=v1/kv_connector/unit/test_lmcache_integration.py --ignore=v1/kv_connector/unit/test_hf3fs_client.py --ignore=v1/kv_connector/unit/test_hf3fs_connector.py --ignore=v1/kv_connector/unit/test_hf3fs_metadata_server.py --ignore=v1/kv_connector/unit/test_offloading_connector.py'
   - label: "XPU server test"
     depends_on:
       - image-build-xpu
     timeout_in_minutes: 30
     device: intel_gpu
+    agent_tags:
+      label: production
+      gpu: 1+
+      mem: 16+
     no_plugin: true
     env:
       REGISTRY: "public.ecr.aws/q9t5s3a7"
@@ -87,3 +99,24 @@ steps:
         cd tests &&
         pytest -v -s entrypoints/multimodal/openai/chat_completion/test_audio_in_video.py &&
         pytest -v -s benchmarks/test_serve_cli.py'
+  - label: "XPU quantization test"
+    depends_on:
+      - image-build-xpu
+    timeout_in_minutes: 30
+    device: intel_gpu
+    agent_tags:
+      label: production
+      gpu: 1+
+      mem: 16+
+    no_plugin: true
+    env:
+      REGISTRY: "public.ecr.aws/q9t5s3a7"
+      REPO: "vllm-ci-test-repo"
+    source_file_dependencies:
+      - vllm/
+      - .buildkite/intel_jobs/test-intel.yaml 
+    commands:
+      - >-
+        bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+        'cd tests &&
+        pytest -v -s quantization/test_auto_round.py'

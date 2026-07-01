@@ -25,6 +25,7 @@ from vllm.model_executor.layers.fused_moe import (
     UnquantizedFusedMoEMethod,
 )
 from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
+    WNA16MoEBackend,
     convert_to_wna16_moe_kernel_format,
     make_wna16_moe_kernel,
     select_wna16_moe_backend,
@@ -242,7 +243,9 @@ class AutoGPTQConfig(QuantizationConfig):
         if isinstance(layer, RoutedExperts):
             from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 
-            if not check_moe_marlin_supports_layer(layer, self.group_size):
+            if not check_moe_marlin_supports_layer(
+                layer, self.group_size, allow_tile_padding=not self.desc_act
+            ):
                 logger.warning_once(
                     f"Layer '{prefix}' is not supported by GPTQMoeMarlin. "
                     "Falling back to Moe WNA16 kernels."
@@ -753,13 +756,18 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             gptq_marlin_moe_quant_config,
         )
 
+        # CPU fused_experts_cpu requires zero points even for symmetric quant
+        use_zp = (
+            not self.quant_config.is_sym
+            or self.wna16_moe_backend == WNA16MoEBackend.CPU
+        )
         return gptq_marlin_moe_quant_config(
             w1_scale=layer.w13_scales,
             w2_scale=layer.w2_scales,
             weight_bits=self.quant_config.weight_bits,
             group_size=self.quant_config.group_size,
-            w1_zp=getattr(layer, "w13_qzeros", None),
-            w2_zp=getattr(layer, "w2_qzeros", None),
+            w1_zp=getattr(layer, "w13_qzeros", None) if use_zp else None,
+            w2_zp=getattr(layer, "w2_qzeros", None) if use_zp else None,
             w1_bias=getattr(layer, "w13_bias", None),
             w2_bias=getattr(layer, "w2_bias", None),
         )

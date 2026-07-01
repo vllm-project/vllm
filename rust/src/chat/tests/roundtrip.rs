@@ -1,8 +1,8 @@
-//! Text-level roundtrip tests for the real chat-template and output-processor pairing.
+//! Roundtrip tests for the real chat-template and output-processor pairing.
 //!
 //! The invariant under test is that a structured assistant message rendered as history can be
 //! parsed from the generated assistant completion and then rendered back to the exact same
-//! assistant-completion text.
+//! assistant completion.
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -18,6 +18,10 @@ use vllm_chat::{
     RendererSelection, load_model_backends,
 };
 use vllm_text::{DecodedTextEvent, Finished, Prompt};
+use vllm_tokenizer::Tokenizer;
+
+const TEXT_COMPLETION_CHUNK_CHARS: usize = 7;
+const TOKEN_COMPLETION_CHUNK_TOKENS: usize = 1;
 
 /// One model/parser configuration used to run the fixed roundtrip fixtures.
 #[derive(Clone)]
@@ -37,6 +41,8 @@ struct RoundtripCase {
     /// JSON formatting expected after this model's template has materialized
     /// tool-call arguments.
     json_fmt: JsonFmt,
+    /// Whether the template renders tool-call argument object keys in sorted order.
+    sort_json_keys: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -81,6 +87,7 @@ impl RoundtripCase {
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: spaced_json_fmt(),
+            sort_json_keys: false,
         }
     }
 
@@ -93,6 +100,7 @@ impl RoundtripCase {
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
         }
     }
 
@@ -105,6 +113,7 @@ impl RoundtripCase {
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
         }
     }
 
@@ -117,6 +126,7 @@ impl RoundtripCase {
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Toggleable { default: false },
             json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
         }
     }
 
@@ -129,6 +139,20 @@ impl RoundtripCase {
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
+        }
+    }
+
+    /// Gemma4 channel reasoning with custom function-call arguments.
+    fn gemma4() -> Self {
+        Self {
+            model_id: "google/gemma-4-E4B-it",
+            assistant_stop_suffix: "<|tool_response>",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Always { value: true },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: true,
         }
     }
 
@@ -142,6 +166,7 @@ impl RoundtripCase {
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Toggleable { default: true },
             json_fmt: spaced_json_fmt(),
+            sort_json_keys: false,
         }
     }
 
@@ -154,6 +179,7 @@ impl RoundtripCase {
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
         }
     }
 
@@ -166,16 +192,31 @@ impl RoundtripCase {
             reasoning_parser: ParserSelection::Auto,
             thinking_behavior: ThinkingBehavior::Always { value: true },
             json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
+        }
+    }
+
+    /// GPT-OSS Harmony token-id renderer and native Harmony output processor.
+    fn gpt_oss() -> Self {
+        Self {
+            model_id: "openai/gpt-oss-20b",
+            assistant_stop_suffix: "", // not applicable for token-id cases
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Always { value: true },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
         }
     }
 }
 
 macro_rules! roundtrip_tests {
-    ($($case:ident => [$($fixture:ident),* $(,)?]),+ $(,)?) => {
+    ($($case:ident => [$($(#[$fixture_attr:meta])* $fixture:ident),* $(,)?]),+ $(,)?) => {
         paste::paste! {
             $(
                 $(
                     #[tokio::test]
+                    $(#[$fixture_attr])*
                     #[file_serial([<hf_ $case>])]
                     async fn [<roundtrip_ $case _ $fixture>]() -> Result<()> {
                         [<run_roundtrip_ $fixture>](RoundtripCase::$case()).await
@@ -194,9 +235,9 @@ roundtrip_tests! {
     glm47 => [reasoning_and_content, tool_call_mix],
     seed_oss => [reasoning_and_content],
     step3p5 => [reasoning_and_content],
-
-    // Note: Kimi K2.5 strips the reasoning content in history.
-    kimi_k25 => [tool_call_mix],
+    gemma4 => [tool_call_mix], // Gemma4 strips reasoning in history if there's no tool call
+    kimi_k25 => [tool_call_mix], // Kimi K2.5 strips reasoning in history
+    gpt_oss => [tool_call_mix], // Harmony strips reasoning in history if there's no tool call
 }
 
 /// Run the fixed reasoning+content fixture for one model/parser case.
@@ -347,12 +388,36 @@ fn spaced_json_fmt() -> JsonFmt {
 /// Pass in a raw JSON string instead of a structured value to ensure the exact precision and
 /// formatting of numbers are preserved.
 fn expected_arguments(case: &RoundtripCase, raw_json: &str) -> Result<String> {
-    let value: serde_json::Value =
+    let mut value: serde_json::Value =
         serde_json::from_str(raw_json).context("invalid expected tool-call arguments")?;
+    if case.sort_json_keys {
+        sort_json_value(&mut value);
+    }
 
     case.json_fmt
         .format_to_string(&value)
         .context("failed to format expected tool-call arguments")
+}
+
+/// Sort JSON object keys recursively to match templates that render mappings with `dictsort`.
+fn sort_json_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for value in map.values_mut() {
+                sort_json_value(value);
+            }
+
+            let mut entries = std::mem::take(map).into_iter().collect::<Vec<_>>();
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            map.extend(entries);
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                sort_json_value(value);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Load the real model chat/text backend for one roundtrip case.
@@ -374,10 +439,10 @@ struct RoundtripResult {
     parsed_message: AssistantMessage,
     /// Assistant-completion suffix cut from rendering the expected assistant as
     /// history.
-    closed_completion: String,
+    closed_completion: Prompt,
     /// Assistant-completion suffix cut after rendering the parsed assistant
     /// back as history.
-    rerendered_closed_completion: String,
+    rerendered_closed_completion: Prompt,
 }
 
 /// Render, parse, and rerender one assistant turn through the production
@@ -389,27 +454,22 @@ async fn run_roundtrip(
     assistant: AssistantMessage,
 ) -> Result<RoundtripResult> {
     let renderer = backends.chat_backend.chat_renderer();
-    let (prompt, closed_completion_text) =
-        render_closed_completion(renderer.as_ref(), request, &assistant)?;
-    let completion_body = closed_completion_text
-        .strip_suffix(case.assistant_stop_suffix)
-        .with_context(|| {
-            format!(
-                "closed assistant completion did not end with {:?}: {:?}",
-                case.assistant_stop_suffix, closed_completion_text
-            )
-        })?;
+    let rendered = render_closed_completion(renderer.as_ref(), request, &assistant)?;
 
-    let parsed_message =
-        parse_completion(case, backends, request, &prompt, completion_body).await?;
-    let (_, rerendered_closed_completion) =
-        render_closed_completion(renderer.as_ref(), request, &parsed_message)?;
+    let parsed_message = parse_completion(case, backends, request, &rendered).await?;
+    let rerendered = render_closed_completion(renderer.as_ref(), request, &parsed_message)?;
 
     Ok(RoundtripResult {
         parsed_message,
-        closed_completion: closed_completion_text,
-        rerendered_closed_completion,
+        closed_completion: rendered.completion,
+        rerendered_closed_completion: rerendered.completion,
     })
+}
+
+/// Rendered prompt/completion artifacts at the renderer boundary.
+struct RenderedTurn {
+    prompt: Prompt,
+    completion: Prompt,
 }
 
 /// Render `history` as a production prompt and `history + assistant` as closed
@@ -418,31 +478,35 @@ fn render_closed_completion(
     renderer: &dyn vllm_chat::ChatRenderer,
     base_request: &ChatRequest,
     assistant: &AssistantMessage,
-) -> Result<(String, String)> {
+) -> Result<RenderedTurn> {
     let mut prompt_request = base_request.clone();
     prompt_request.chat_options.generation_prompt_mode = GenerationPromptMode::StartNewAssistant;
-    let prompt = render_text(renderer, &prompt_request).context("failed to render prompt")?;
+    let prompt = renderer.render(&prompt_request).context("failed to render prompt")?.prompt;
 
     let mut full_request = base_request.clone();
     full_request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
     full_request.messages.push(ChatMessage::from(assistant.clone()));
-    let full = render_text(renderer, &full_request).context("failed to render full prompt")?;
+    let full = renderer.render(&full_request).context("failed to render full prompt")?.prompt;
 
-    ensure!(
-        full.starts_with(&prompt),
-        "full prompt must extend production prompt\nprompt: {prompt:?}\nfull: {full:?}"
-    );
-    let completion = full[prompt.len()..].to_string();
+    let completion = match (&prompt, full) {
+        (Prompt::Text(prompt), Prompt::Text(full)) => {
+            ensure!(
+                full.starts_with(prompt),
+                "full prompt must extend production prompt\nprompt: {prompt:?}\nfull: {full:?}"
+            );
+            Prompt::Text(full[prompt.len()..].to_string())
+        }
+        (Prompt::TokenIds(prompt), Prompt::TokenIds(full)) => {
+            ensure!(
+                full.starts_with(prompt),
+                "full prompt must extend production prompt\nprompt: {prompt:?}\nfull: {full:?}"
+            );
+            Prompt::TokenIds(full[prompt.len()..].to_vec())
+        }
+        (prompt, full) => bail!("prompt kind changed between renders: {prompt:?} vs {full:?}"),
+    };
 
-    Ok((prompt, completion))
-}
-
-/// Render one chat request and require a text prompt.
-fn render_text(renderer: &dyn vllm_chat::ChatRenderer, request: &ChatRequest) -> Result<String> {
-    match renderer.render(request)?.prompt {
-        Prompt::Text(text) => Ok(text),
-        other => bail!("roundtrip tests expect text prompts, got {other:?}"),
-    }
+    Ok(RenderedTurn { prompt, completion })
 }
 
 /// Feed one rendered assistant completion body into the real output processor
@@ -451,13 +515,15 @@ async fn parse_completion(
     case: &RoundtripCase,
     backends: &vllm_chat::LoadedModelBackends,
     base_request: &ChatRequest,
-    prompt: &str,
-    completion_body: &str,
+    rendered: &RenderedTurn,
 ) -> Result<AssistantMessage> {
     let tokenizer = backends.text_backend.tokenizer();
-    let prompt_token_ids = tokenizer
-        .encode(prompt, base_request.add_special_tokens)
-        .context("failed to encode rendered prompt")?;
+    let prompt_token_ids = match &rendered.prompt {
+        Prompt::Text(prompt) => tokenizer
+            .encode(prompt, base_request.add_special_tokens)
+            .context("failed to encode rendered prompt")?,
+        Prompt::TokenIds(token_ids) => token_ids.clone(),
+    };
 
     let mut request = base_request.clone();
     let processor = backends.chat_backend.new_chat_output_processor(
@@ -468,7 +534,12 @@ async fn parse_completion(
         },
     )?;
 
-    let decoded = decoded_completion_stream(prompt_token_ids, completion_body);
+    let decoded = decoded_completion_stream(
+        tokenizer.as_ref(),
+        prompt_token_ids,
+        &rendered.completion,
+        case.assistant_stop_suffix,
+    )?;
     let mut events = processor.process(decoded)?;
 
     while let Some(event) = events.next().await {
@@ -491,16 +562,46 @@ async fn parse_completion(
 /// split into small chunks to exercise streaming parser state across marker
 /// and JSON boundaries.
 fn decoded_completion_stream(
+    tokenizer: &dyn Tokenizer,
     prompt_token_ids: Vec<u32>,
-    completion_body: &str,
-) -> Pin<Box<dyn Stream<Item = vllm_chat::Result<DecodedTextEvent>> + Send>> {
-    let prompt_token_count = prompt_token_ids.len();
+    completion: &Prompt,
+    assistant_stop_suffix: &str,
+) -> Result<Pin<Box<dyn Stream<Item = vllm_chat::Result<DecodedTextEvent>> + Send>>> {
     let mut events = vec![DecodedTextEvent::Start {
-        prompt_token_ids: Arc::from(prompt_token_ids.into_boxed_slice()),
+        prompt_token_ids: Arc::from(prompt_token_ids.clone().into_boxed_slice()),
         prompt_logprobs: None,
     }];
 
-    let chunks = split_by_chars(completion_body, 7);
+    let chunks = match completion {
+        Prompt::Text(text) => {
+            let body = text.strip_suffix(assistant_stop_suffix).with_context(|| {
+                format!(
+                    "closed assistant completion did not end with {:?}: {:?}",
+                    assistant_stop_suffix, text
+                )
+            })?;
+            split_by_chars(body, TEXT_COMPLETION_CHUNK_CHARS)
+                .into_iter()
+                .map(|delta| DecodedCompletionChunk {
+                    delta,
+                    token_ids: Vec::new(), // unused for text-level roundtrip cases
+                })
+                .collect()
+        }
+        Prompt::TokenIds(token_ids) => {
+            ensure!(
+                assistant_stop_suffix.is_empty(),
+                "token-id roundtrip cases do not support text stop suffixes"
+            );
+            incremental_decode_chunks(
+                tokenizer,
+                &prompt_token_ids,
+                token_ids,
+                TOKEN_COMPLETION_CHUNK_TOKENS,
+            )?
+        }
+    };
+
     if chunks.is_empty() {
         events.push({
             DecodedTextEvent::TextDelta {
@@ -508,11 +609,7 @@ fn decoded_completion_stream(
                 token_ids: Vec::new(),
                 logprobs: None,
                 finished: Some(Finished {
-                    usage: vllm_llm::TokenUsage {
-                        prompt_token_count: 0,
-                        output_token_count: 0,
-                        cached_token_count: 0,
-                    },
+                    usage: Default::default(),
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                 }),
@@ -522,24 +619,26 @@ fn decoded_completion_stream(
         let last_index = chunks.len() - 1;
         for (index, chunk) in chunks.into_iter().enumerate() {
             let finished = (index == last_index).then(|| Finished {
-                usage: vllm_llm::TokenUsage {
-                    prompt_token_count,
-                    output_token_count: completion_body.chars().count(),
-                    cached_token_count: 0,
-                },
+                usage: Default::default(),
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             });
             events.push(DecodedTextEvent::TextDelta {
-                delta: chunk,
-                token_ids: Vec::new(),
+                delta: chunk.delta,
+                token_ids: chunk.token_ids,
                 logprobs: None,
                 finished,
             });
         }
     }
 
-    stream::iter(events).map(Ok).boxed()
+    Ok(stream::iter(events).map(Ok).boxed())
+}
+
+/// One decoded completion chunk fed into the output processor.
+struct DecodedCompletionChunk {
+    delta: String,
+    token_ids: Vec<u32>,
 }
 
 /// Split text into chunks containing at most `chunk_chars` Unicode scalar
@@ -563,6 +662,49 @@ fn split_by_chars(text: &str, chunk_chars: usize) -> Vec<String> {
     }
 
     chunks
+}
+
+/// Split token ids into chunks containing at most `chunk_size` ids.
+fn split_by_count(token_ids: &[u32], chunk_size: usize) -> Vec<Vec<u32>> {
+    token_ids.chunks(chunk_size).map(<[u32]>::to_vec).collect()
+}
+
+/// Decode token ids incrementally using the production tokenizer stream.
+fn incremental_decode_chunks(
+    tokenizer: &dyn Tokenizer,
+    prompt_token_ids: &[u32],
+    token_ids: &[u32],
+    chunk_size: usize,
+) -> Result<Vec<DecodedCompletionChunk>> {
+    let mut decoder = tokenizer.create_decode_stream(prompt_token_ids, false, 0);
+    let mut chunks = Vec::new();
+    for chunk_token_ids in split_by_count(token_ids, chunk_size) {
+        let mut delta = String::new();
+        for token_id in chunk_token_ids.iter().copied() {
+            decoder.push_token(token_id)?;
+            while let Some(chunk) = decoder.next_chunk() {
+                delta.push_str(&chunk);
+            }
+        }
+        chunks.push(DecodedCompletionChunk {
+            delta,
+            token_ids: chunk_token_ids,
+        });
+    }
+
+    let (last_chunk, _) = decoder.flush(None)?;
+    if let Some(last_chunk) = last_chunk {
+        if let Some(delta) = chunks.last_mut() {
+            delta.delta.push_str(&last_chunk);
+        } else {
+            chunks.push(DecodedCompletionChunk {
+                delta: last_chunk,
+                token_ids: Vec::new(),
+            });
+        }
+    }
+
+    Ok(chunks)
 }
 
 /// Build a chat request fixture with parser-enabling tool-choice semantics.

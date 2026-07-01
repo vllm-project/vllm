@@ -224,7 +224,7 @@ class RustToolParser(ToolParser):
                 "Error parsing %s tool call output.", self.rust_parser_name
             )
             return None
-        return output.coalesce_calls(), tool_call_ids
+        return output.coalesce(), tool_call_ids
 
     def extract_tool_calls(
         self,

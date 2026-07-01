@@ -804,35 +804,6 @@ void minimax_reduce_rms_op(MiniMaxReduceRMSParams const& params) {
 }  // namespace tensorrt_llm
 }  // namespace vllm
 
-torch::stable::Tensor minimax_allreduce_rms(
-    torch::stable::Tensor const& input,
-    torch::stable::Tensor const& norm_weight, torch::stable::Tensor workspace,
-    int64_t const rank, int64_t const nranks, double const eps) {
-  const torch::stable::accelerator::DeviceGuard device_guard(
-      input.get_device_index());
-  auto allreduce_params = vllm::tensorrt_llm::MiniMaxReduceRMSParams();
-
-  allreduce_params.nranks = static_cast<int>(nranks);
-  allreduce_params.rank = static_cast<int>(rank);
-  allreduce_params.dtype = input.scalar_type();
-  allreduce_params.size_q = static_cast<int>(input.numel());
-  allreduce_params.hidden_dim = static_cast<int>(input.size(-1));
-  allreduce_params.stride_q = allreduce_params.hidden_dim;
-  allreduce_params.workspace =
-      reinterpret_cast<void**>(workspace.mutable_data_ptr());
-  allreduce_params.allreduce_in = const_cast<void*>(input.const_data_ptr());
-  allreduce_params.rms_gamma = const_cast<void*>(norm_weight.const_data_ptr());
-  allreduce_params.rms_eps = static_cast<float>(eps);
-  allreduce_params.stream = get_current_cuda_stream(input.get_device_index());
-
-  torch::stable::Tensor rms_norm_out = torch::stable::empty_like(input);
-  allreduce_params.rms_norm_out = rms_norm_out.mutable_data_ptr();
-
-  vllm::tensorrt_llm::minimax_reduce_rms_op(allreduce_params);
-
-  return rms_norm_out;
-}
-
 std::tuple<torch::stable::Tensor, torch::stable::Tensor>
 minimax_allreduce_rms_qk(torch::stable::Tensor qkv,
                          torch::stable::Tensor const& norm_weight_q,

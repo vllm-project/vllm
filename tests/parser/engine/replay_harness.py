@@ -33,6 +33,7 @@ class Sample:
     expected_tool_calls: list[dict] | None
     tools: list[dict] | None = None
     chat_template_kwargs: dict | None = None
+    prompt_token_ids: list[int] | None = None
 
 
 @dataclass
@@ -61,6 +62,7 @@ class MockTokenizer:
         "eos_token_id",
         "bos_token_id",
         "pad_token_id",
+        "_all_special_tokens",
     )
 
     def __init__(
@@ -72,6 +74,7 @@ class MockTokenizer:
         self._token_ids = [tid for tid, _ in tokens]
         self._token_decode_map = {tid: text for tid, text in tokens}
         self._special_ids = set(vocab.values())
+        self._all_special_tokens = list(vocab.keys())
         self.eos_token_id = None
         self.bos_token_id = None
         self.pad_token_id = None
@@ -81,6 +84,14 @@ class MockTokenizer:
 
     def get_vocab(self) -> dict[str, int]:
         return self._vocab
+
+    @property
+    def all_special_tokens(self) -> list[str]:
+        return self._all_special_tokens
+
+    @property
+    def all_special_ids(self) -> list[int]:
+        return [self._vocab[t] for t in self._all_special_tokens if t in self._vocab]
 
     def encode(self, text: str, **kwargs) -> list[int]:
         return self._token_ids
@@ -93,6 +104,9 @@ class MockTokenizer:
             text = self._token_decode_map.get(tid, f"?{tid}?")
             parts.append(text)
         return "".join(parts)
+
+
+CHUNK_SIZES = [1, 2, 3, 5, 11, 23, None]
 
 
 def make_mock_tokenizer(sample: Sample) -> MockTokenizer:
@@ -113,6 +127,37 @@ def _test_request(
     )
 
 
+DUMMY_TOOLS = [
+    {
+        "type": "function",
+        "function": {"name": "stub", "parameters": {"type": "object"}},
+    },
+]
+
+
+def parse_non_streaming(
+    parser,
+    sample: Sample,
+    request: ChatCompletionRequest,
+) -> ParseOutput:
+    """Run ``parser.parse()`` and return a :class:`ParseOutput`."""
+    full_text = "".join(text for _, text in sample.tokens)
+    reasoning, content, tool_calls = parser.parse(
+        full_text,
+        request,
+        enable_auto_tools=True,
+    )
+    tc_list: list[dict] = []
+    if tool_calls:
+        for tc in tool_calls:
+            tc_list.append({"name": tc.name, "arguments": tc.arguments})
+    return ParseOutput(
+        reasoning=reasoning or "",
+        content=content or "",
+        tool_calls=tc_list,
+    )
+
+
 def replay_streaming(
     parser,
     tokens: list[tuple[int, str]],
@@ -120,6 +165,7 @@ def replay_streaming(
     holdback_chars: int = 0,
     finished_on_last: bool = False,
     tools: list[dict] | None = None,
+    prompt_token_ids: list[int] | None = None,
 ) -> list[DeltaMessage | None]:
     """Feed tokens through ``parser.parse_delta()`` at a given chunk size.
 
@@ -146,6 +192,7 @@ def replay_streaming(
     all_texts = [text for _, text in tokens]
 
     request = _test_request(tools=tools)
+    first_prompt_ids = prompt_token_ids if prompt_token_ids is not None else []
 
     if holdback_chars <= 0:
         chunks = list(range(0, len(tokens), chunk_size))
@@ -159,7 +206,7 @@ def replay_streaming(
                 delta_text,
                 batch_ids,
                 request,
-                prompt_token_ids=[] if start == 0 else None,
+                prompt_token_ids=first_prompt_ids if start == 0 else None,
                 finished=finished_on_last and is_last,
             )
             results.append(result)
@@ -192,7 +239,7 @@ def replay_streaming(
             delta_text,
             batch_ids,
             request,
-            prompt_token_ids=[] if is_first else None,
+            prompt_token_ids=first_prompt_ids if is_first else None,
             finished=finished_on_last and is_last_chunk,
         )
         results.append(result)
@@ -205,7 +252,7 @@ def replay_streaming(
             delta_text,
             batch_ids,
             request,
-            prompt_token_ids=[] if is_first else None,
+            prompt_token_ids=first_prompt_ids if is_first else None,
             finished=finished_on_last,
         )
         results.append(result)
@@ -218,6 +265,7 @@ def replay_with_text_holdback(
     tokens: list[tuple[int, str]],
     text_delay: int = 1,
     tools: list[dict] | None = None,
+    prompt_token_ids: list[int] | None = None,
 ) -> list[DeltaMessage | None]:
     """Replay token-by-token with text arriving *text_delay* steps late.
 
@@ -235,6 +283,7 @@ def replay_with_text_holdback(
     """
     results: list[DeltaMessage | None] = []
     request = _test_request(tools=tools)
+    first_prompt_ids = prompt_token_ids if prompt_token_ids is not None else []
 
     n = len(tokens)
     held_texts: list[str] = []
@@ -256,7 +305,7 @@ def replay_with_text_holdback(
             delta_text,
             [token_id],
             request,
-            prompt_token_ids=[] if i == 0 else None,
+            prompt_token_ids=first_prompt_ids if i == 0 else None,
             finished=is_last,
         )
         results.append(result)
