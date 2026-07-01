@@ -184,6 +184,7 @@ class BlockPool:
         # Cache for block lookup
         self.cached_block_hash_to_block: BlockHashToBlockMap = BlockHashToBlockMap()
         self.cached_block_hashes_by_block: dict[int, set[BlockHashWithGroupId]] = {}
+        self._had_recent_eviction = False
 
         # To represent a placeholder block with block_id=0.
         # The ref_cnt of null_block is not maintained, needs special care to
@@ -548,7 +549,7 @@ class BlockPool:
             num_blocks: The number of blocks to allocate.
 
         Returns:
-            A list of new block.
+            List of newly allocated blocks.
         """
         if num_blocks > self.get_num_free_blocks():
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
@@ -569,6 +570,7 @@ class BlockPool:
                 block.ref_cnt += 1
                 if self.metrics_collector:
                     self.metrics_collector.on_block_allocated(block)
+
         return ret
 
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
@@ -591,8 +593,23 @@ class BlockPool:
             # The block doesn't have hash, eviction is not needed
             return False
 
+        self._had_recent_eviction = True
         self._emit_block_removed_events(evicted_hashes)
         return True
+
+    def consume_eviction_signal(self) -> bool:
+        """Read and reset the eviction flag atomically.
+
+        Used by SimpleCPUOffloadScheduler to detect whether LRU eviction
+        freed any cached blocks since the last call, triggering a re-scan
+        of previously stored blocks.
+
+        Returns:
+            True if a cached block was evicted since the last call.
+        """
+        val = self._had_recent_eviction
+        self._had_recent_eviction = False
+        return val
 
     def touch(self, blocks: Sequence[KVCacheBlock]) -> None:
         """Touch a block increases its reference count by 1, and may remove

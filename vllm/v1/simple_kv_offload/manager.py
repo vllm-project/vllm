@@ -536,6 +536,26 @@ class SimpleCPUOffloadScheduler:
 
         return gpu_ids, cpu_ids, []
 
+    @staticmethod
+    def _should_skip_block(
+        gpu_block: "KVCacheBlock",
+        in_flight: set[int],
+        cpu_block_pool: "BlockPool",
+    ) -> bool:
+        """Return True if block should be skipped (no store needed)."""
+        if gpu_block.is_null:
+            return True
+        if gpu_block.block_hash is None:
+            return True
+        if gpu_block.block_id in in_flight:
+            return True
+        return (
+            cpu_block_pool.cached_block_hash_to_block.get_one_block(
+                gpu_block.block_hash
+            )
+            is not None
+        )
+
     def _prepare_eager_store_specs(
         self, scheduler_output: SchedulerOutput
     ) -> tuple[list[int], list[int], list[str]]:
@@ -564,6 +584,10 @@ class SimpleCPUOffloadScheduler:
         # Dedup against blocks already scheduled.
         in_flight = self._in_flight_store_gpu_blocks
 
+        # Consume the eviction signal once — snapshot applies to all requests
+        # in this step. Phase 1a re-scans only if eviction actually happened.
+        had_recent_eviction = cpu_block_pool.consume_eviction_signal()
+
         for req_id, new_block_id_groups, preempted in yield_req_data(scheduler_output):
             state = self._reqs_to_store.get(req_id)
             if state is None or state.finished:
@@ -579,8 +603,6 @@ class SimpleCPUOffloadScheduler:
                         state.block_ids[g].extend(new_block_id_groups[g])
 
             num_new_tokens = scheduler_output.num_scheduled_tokens.get(req_id, 0)
-            if num_new_tokens == 0:
-                continue
 
             block_ids_by_group = state.block_ids
             if not block_ids_by_group:
@@ -589,6 +611,8 @@ class SimpleCPUOffloadScheduler:
             # --- Phase 1: Scan blocks, classify as cached vs to-store ---
             gpu_block_ids: list[int] = []
             block_hashes_to_store: list[bytes] = []
+            # advanced_per_group tracks absolute cursor position:
+            # init = already_stored_g, Phase 1a doesn't modify, Phase 1b adds delta.
             advanced_per_group: list[int] = [0] * num_groups
             out_of_space = False
             # Confirmed tokens: KV data written and visible to all streams.
@@ -598,9 +622,10 @@ class SimpleCPUOffloadScheduler:
             aligned_tokens = confirmed_tokens // self.block_size * self.block_size
 
             for g in range(num_groups):
-                # FIXME (yifan): handle CPU cache eviction, where
-                # num_stored_blocks can be stale and omit evicted blocks in
-                # the middle of the request.
+                # NOTE: Phase 1a re-scans previously stored blocks whose CPU
+                # cache entries may have been removed when get_new_blocks()
+                # re-allocated the CPU blocks. CPU and GPU ref_cnts are
+                # independent — see test_active_request_blocks_can_be_evicted.
                 already_stored_g = state.num_stored_blocks[g]
                 group_gpu_ids = block_ids_by_group[g]
 
@@ -608,43 +633,56 @@ class SimpleCPUOffloadScheduler:
                     kv_cache_groups[g].kv_cache_spec.block_size * self.cp_world_size
                 )
                 ready_blocks_g = aligned_tokens // g_block_size
-                scannable = group_gpu_ids[already_stored_g:ready_blocks_g]
 
-                for gpu_block_id in scannable:
-                    gpu_block = gpu_block_pool.blocks[gpu_block_id]
-                    if gpu_block.is_null:
-                        advanced_per_group[g] += 1
-                        continue
+                # Phase 1a: Re-scan stored blocks (0..already_stored_g) if
+                # eviction was detected, re-storing any that lost their cache
+                # entries. Runs regardless of num_new_tokens.
+                if already_stored_g > 0 and had_recent_eviction:
+                    for i in range(min(already_stored_g, len(group_gpu_ids))):
+                        gpu_block_id = group_gpu_ids[i]
+                        gpu_block = gpu_block_pool.blocks[gpu_block_id]
+                        if self._should_skip_block(
+                            gpu_block, in_flight, cpu_block_pool
+                        ):
+                            continue
 
-                    bhash_with_group = gpu_block.block_hash
-                    if bhash_with_group is None:
-                        # Masked-out SWA position the coordinator chose not to
-                        # hash; it can never serve a prefix-cache hit, so skip.
-                        advanced_per_group[g] += 1
-                        continue
+                        if num_free <= 0:
+                            out_of_space = True
+                            break
+                        num_free -= 1
 
-                    # Skip if already scheduled for store or already cached in CPU.
-                    if (
-                        gpu_block_id in in_flight
-                        or cpu_block_pool.cached_block_hash_to_block.get_one_block(
-                            bhash_with_group
-                        )
-                        is not None
-                    ):
-                        advanced_per_group[g] += 1
-                        continue
+                        assert gpu_block.block_hash is not None
+                        gpu_block_ids.append(gpu_block_id)
+                        block_hashes_to_store.append(gpu_block.block_hash)
 
-                    if num_free <= 0:
-                        out_of_space = True
+                    if out_of_space:
                         break
-                    num_free -= 1
 
-                    gpu_block_ids.append(gpu_block_id)
-                    block_hashes_to_store.append(bhash_with_group)
-                    advanced_per_group[g] += 1
+                # Phase 1b: Scan newly ready blocks (already_stored_g..ready_blocks_g).
+                # Only execute when there are new tokens to store.
+                if num_new_tokens > 0:
+                    scannable = group_gpu_ids[already_stored_g:ready_blocks_g]
 
-                if out_of_space:
-                    break
+                    for gpu_block_id in scannable:
+                        gpu_block = gpu_block_pool.blocks[gpu_block_id]
+                        if self._should_skip_block(
+                            gpu_block, in_flight, cpu_block_pool
+                        ):
+                            advanced_per_group[g] += 1
+                            continue
+
+                        if num_free <= 0:
+                            out_of_space = True
+                            break
+                        num_free -= 1
+
+                        assert gpu_block.block_hash is not None
+                        gpu_block_ids.append(gpu_block_id)
+                        block_hashes_to_store.append(gpu_block.block_hash)
+                        advanced_per_group[g] += 1
+
+                    if out_of_space:
+                        break
 
             # --- Phase 2: Batch allocate CPU blocks and stamp hashes ---
             n_to_alloc = len(gpu_block_ids)
@@ -674,9 +712,9 @@ class SimpleCPUOffloadScheduler:
                     num_groups,
                 )
 
-            # Advance per-group cursors (includes cached hits + newly stored)
+            # Advance per-group cursors (absolute position).
             for g in range(num_groups):
-                state.num_stored_blocks[g] += advanced_per_group[g]
+                state.num_stored_blocks[g] = advanced_per_group[g]
 
         return merged_gpu_block_ids, merged_cpu_block_ids, req_ids
 
