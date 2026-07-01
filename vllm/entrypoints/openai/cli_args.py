@@ -403,6 +403,19 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     if args.enable_log_outputs and not args.enable_log_requests:
         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
 
+    # Per-request timing metrics are derived from the engine's RequestStateStats,
+    # which are only tracked when statistics logging is enabled. Warn (rather than
+    # fail) so the server still starts, but the operator knows the metrics will be
+    # null until stat logging is re-enabled.
+    if getattr(args, "enable_per_request_metrics", False) and getattr(
+        args, "disable_log_stats", False
+    ):
+        logger.warning(
+            "--enable-per-request-metrics is set but engine statistics logging "
+            "is disabled (--disable-log-stats). Per-request timing metrics depend "
+            "on engine statistics and will be null until stat logging is enabled."
+        )
+
     if args.data_parallel_multi_port_external_lb:
         from vllm.entrypoints.openai.dp_supervisor import (
             validate_multi_port_external_lb_args,
