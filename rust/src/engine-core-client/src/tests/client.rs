@@ -150,6 +150,7 @@ fn sample_request_with_id(request_id: &str) -> EngineCoreRequest {
             top_k: 8,
             max_tokens: 32,
             min_tokens: 1,
+            thinking_token_budget: Some(256),
             stop_token_ids: vec![151643],
             eos_token_id: Some(151645),
             all_stop_token_ids: BTreeSet::from([151643, 151645]),
@@ -303,6 +304,7 @@ fn bootstrapped_test_config(
         transport_mode: TransportMode::Bootstrapped {
             input_address,
             output_address,
+            engine_start_index: 0,
             engine_count,
             ready_timeout,
         },
@@ -310,6 +312,34 @@ fn bootstrapped_test_config(
         model_name: "test-model".to_string(),
         client_index,
     }
+}
+
+fn bootstrapped_test_config_with_start_index(
+    input_address: String,
+    output_address: String,
+    engine_start_index: u32,
+    engine_count: usize,
+    ready_timeout: Duration,
+    client_index: u32,
+    coordinator_mode: Option<CoordinatorMode>,
+) -> EngineCoreClientConfig {
+    let mut config = bootstrapped_test_config(
+        input_address,
+        output_address,
+        engine_count,
+        ready_timeout,
+        client_index,
+        coordinator_mode,
+    );
+    let TransportMode::Bootstrapped {
+        engine_start_index: start,
+        ..
+    } = &mut config.transport_mode
+    else {
+        unreachable!("bootstrapped_test_config returns bootstrapped transport")
+    };
+    *start = engine_start_index;
+    config
 }
 
 async fn recv_xpub_message(xpub: &mut XPubSocket) -> Vec<bytes::Bytes> {
@@ -1255,18 +1285,24 @@ async fn dropping_multiple_live_streams_aborts_all_in_a_burst() {
                 )
                 .await;
 
-                let abort =
-                    timeout(Duration::from_secs(1), recv_engine_message(dealer)).await.unwrap();
-                assert_eq!(abort[0].as_ref(), &[0x01]);
-                let ids: Vec<String> = rmp_serde::from_slice(&abort[1]).unwrap();
+                // Aborts may coalesce into one burst or split across several.
+                let mut aborted = BTreeSet::new();
+                while aborted.len() < 3 {
+                    let abort =
+                        timeout(Duration::from_secs(1), recv_engine_message(dealer)).await.unwrap();
+                    assert_eq!(abort[0].as_ref(), &[0x01]);
+                    let ids: Vec<String> = rmp_serde::from_slice(&abort[1]).unwrap();
+                    aborted.extend(ids);
+                }
                 assert_eq!(
-                    ids,
-                    vec![
+                    aborted,
+                    BTreeSet::from([
                         "req-1".to_string(),
                         "req-2".to_string(),
                         "req-3".to_string()
-                    ]
+                    ])
                 );
+                // No spurious extra aborts.
                 assert!(
                     timeout(Duration::from_millis(100), recv_engine_message(dealer)).await.is_err()
                 );
@@ -2473,6 +2509,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
             seed: None,
             max_tokens: 16,
             min_tokens: 0,
+            thinking_token_budget: None,
             logprobs: None,
             prompt_logprobs: None,
             min_p: 0.0,
@@ -2687,6 +2724,90 @@ async fn bootstrapped_connects_with_contiguous_engine_ids() {
     assert_eq!(engine_ids, vec![vec![0x00, 0x00], vec![0x01, 0x00]]);
 
     client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bootstrapped_connects_with_nonzero_engine_start_index() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let input_address = ipc.input_endpoint();
+    let output_address = ipc.output_endpoint();
+
+    let client_task = tokio::spawn({
+        let input_address = input_address.clone();
+        let output_address = output_address.clone();
+        async move {
+            EngineCoreClient::connect(bootstrapped_test_config_with_start_index(
+                input_address,
+                output_address,
+                3,
+                1,
+                Duration::from_secs(2),
+                0,
+                None,
+            ))
+            .await
+            .unwrap()
+        }
+    });
+
+    let (_dealer, _push) =
+        setup_bootstrapped_mock_engine(input_address, output_address, &[0x03, 0x00]).await;
+    let client = client_task.await.unwrap();
+
+    assert_eq!(client.engine_count(), 1);
+    let engine_ids =
+        client.engine_identities().into_iter().map(|id| id.to_vec()).collect::<Vec<_>>();
+    assert_eq!(engine_ids, vec![vec![0x03, 0x00]]);
+
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bootstrapped_rejects_unexpected_engine_id_for_start_index() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let input_address = ipc.input_endpoint();
+    let output_address = ipc.output_endpoint();
+
+    let client_task = tokio::spawn({
+        let input_address = input_address.clone();
+        let output_address = output_address.clone();
+        async move {
+            EngineCoreClient::connect(bootstrapped_test_config_with_start_index(
+                input_address,
+                output_address,
+                3,
+                1,
+                Duration::from_secs(2),
+                0,
+                None,
+            ))
+            .await
+        }
+    });
+
+    let _ = crate::mock_engine::connect_to_bootstrapped_frontend(
+        input_address,
+        output_address,
+        &[0x00, 0x00],
+        crate::mock_engine::MockEngineConfig {
+            local: true,
+            headless: true,
+            ..Default::default()
+        },
+    )
+    .await;
+    let error = match client_task.await.unwrap() {
+        Ok(_) => panic!("bootstrapped connect should reject unexpected engine id"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("received input registration for unexpected engine id")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
