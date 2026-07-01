@@ -420,14 +420,17 @@ class TritonW4A16LinearKernel(MPLinearKernel):
         K = c.partition_weight_shape[0]
         group_size = c.group_size if c.group_size != -1 else K
 
-        # For symmetric types (uint4b8), use the scalar bias; no zeros tensor
+        # For symmetric types (uint4b8), use the scalar bias; no zeros tensor.
+        # Some checkpoint loaders still register qzeros parameters for GPTQ
+        # layers, but they are not part of the symmetric kernel contract.
         zp_bias = c.weight_type.bias if c.weight_type.has_bias() else 0
+        qzeros = None if c.weight_type.has_bias() else w_zp
 
         output = triton_w4a16_gemm(
             a=x_2d,
             b_q=w_q,
             scales=w_s,
-            qzeros=w_zp,
+            qzeros=qzeros,
             group_size=group_size,
             zp_bias=zp_bias,
         )

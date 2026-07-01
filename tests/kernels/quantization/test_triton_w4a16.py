@@ -302,3 +302,53 @@ def test_triton_w4a16_process_weights_after_loading_repacks_layout():
     torch.testing.assert_close(layer.weight_packed, expected_w_kn8)
     torch.testing.assert_close(layer.weight_scale, expected_scales_gn)
     torch.testing.assert_close(layer.weight_zero_point, expected_zeros_gn8)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
+def test_triton_w4a16_symmetric_apply_ignores_qzeros(monkeypatch):
+    from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
+        MPLinearLayerConfig,
+    )
+    from vllm.scalar_type import scalar_types
+
+    K, N, G = 256, 256, 32
+    config = MPLinearLayerConfig(
+        full_weight_shape=(K, N),
+        partition_weight_shape=(K, N),
+        weight_type=scalar_types.uint4b8,
+        act_type=torch.float16,
+        group_size=G,
+        zero_points=False,
+        has_g_idx=False,
+    )
+    kernel = TritonW4A16LinearKernel(
+        config,
+        w_q_param_name="qweight",
+        w_s_param_name="scales",
+        w_zp_param_name="qzeros",
+        w_gidx_param_name=None,
+    )
+
+    class DummyLayer(torch.nn.Module):
+        pass
+
+    layer = DummyLayer()
+    layer.qweight = torch.empty((K, N // 8), device=device, dtype=torch.int32)
+    layer.scales = torch.empty((K // G, N), device=device, dtype=torch.float16)
+    layer.qzeros = torch.empty((1, 1), device=device, dtype=torch.int32)
+
+    captured = {}
+
+    def fake_gemm(*, a, b_q, scales, qzeros, group_size, zp_bias):
+        captured["qzeros"] = qzeros
+        captured["zp_bias"] = zp_bias
+        return torch.empty((a.shape[0], N), device=a.device, dtype=a.dtype)
+
+    monkeypatch.setattr(triton_w4a16_module, "triton_w4a16_gemm", fake_gemm)
+
+    x = torch.empty((2, K), device=device, dtype=torch.float16)
+    output = kernel.apply_weights(layer, x)
+
+    assert output.shape == (2, N)
+    assert captured["qzeros"] is None
+    assert captured["zp_bias"] == scalar_types.uint4b8.bias
