@@ -82,6 +82,11 @@ class ClientRole:
         self._completed_loads: list[LoadResult] = []
         # Symmetric-P2P lookup state, keyed by (kv_request_id, block_hash).
         self._lookups: dict[tuple[str, bytes], _LookupState] = {}
+        # Fast index of unsent entries, kept in sync with _lookups:
+        # (req_id, h) is in _unsent_lookups_by_req[req_id] iff
+        # _lookups[(req_id, h)].sent_at is None. Populated in
+        # register_lookup, drained in flush_pending_lookups.
+        self._unsent_lookups_by_req: dict[str, list[bytes]] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -195,6 +200,7 @@ class ClientRole:
             return state.result
         if state is None:
             self._lookups[key] = _LookupState(submitted_at=time.monotonic())
+            self._unsent_lookups_by_req.setdefault(kv_request_id, []).append(block_hash)
         return None
 
     def flush_pending_lookups(self) -> None:
@@ -204,14 +210,10 @@ class ClientRole:
         ``on_schedule_end()``. Send-gating is handled by the injected
         ``_send`` callback (queues until ConnectAckMsg if needed).
         """
-        by_request: dict[str, list[bytes]] = {}
-        for (req_id, block_hash), state in self._lookups.items():
-            if state.sent_at is None:
-                by_request.setdefault(req_id, []).append(block_hash)
-        if not by_request:
+        if not self._unsent_lookups_by_req:
             return
         now = time.monotonic()
-        for req_id, hashes in by_request.items():
+        for req_id, hashes in self._unsent_lookups_by_req.items():
             self._send(
                 {
                     TYPE_KEY: LookupMsg.TYPE,
@@ -221,6 +223,7 @@ class ClientRole:
             )
             for h in hashes:
                 self._lookups[(req_id, h)].sent_at = now
+        self._unsent_lookups_by_req.clear()
 
     def on_lookup_resp(
         self,
@@ -245,6 +248,7 @@ class ClientRole:
         keys = [k for k in self._lookups if k[0] == kv_request_id]
         for k in keys:
             del self._lookups[k]
+        self._unsent_lookups_by_req.pop(kv_request_id, None)
 
     def collect_results(self) -> list[LoadResult]:
         """Walk timeouts and drain completed loads.
@@ -313,4 +317,5 @@ class ClientRole:
         self._inbound.clear()
         self._completed_loads.clear()
         self._lookups.clear()
+        self._unsent_lookups_by_req.clear()
         return failed
