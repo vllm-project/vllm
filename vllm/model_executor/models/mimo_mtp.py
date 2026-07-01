@@ -56,7 +56,6 @@ class MiMoMultiTokenPredictorLayer(nn.Module):
         self.mtp_block = Qwen2DecoderLayer(
             vllm_config=vllm_config,
             prefix=prefix,
-            config=config,
         )
         self.final_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 

@@ -40,7 +40,7 @@ class Qwen3Eagle3DecoderLayer(Qwen3DecoderLayer):
         config: Qwen3Config | None = None,
         layer_idx: int = 0,
     ) -> None:
-        super().__init__(vllm_config, prefix=prefix, config=config)
+        super().__init__(vllm_config, prefix=prefix)
 
         config = config or vllm_config.model_config.hf_config
         quant_config = self.get_quant_config(vllm_config)
