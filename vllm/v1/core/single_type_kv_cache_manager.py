@@ -1676,13 +1676,17 @@ class MambaManager(SingleTypeKVCacheManager):
         if source_block.is_null:
             return None
 
-        return self.block_pool.cache_partial_block(
+        partial_hash = self.block_pool.cache_partial_block(
             request=request,
             block=source_block,
             num_tokens=num_tokens,
             kv_cache_group_id=self.kv_cache_group_id,
             block_size=self.block_size,
         )
+        if partial_hash is not None:
+            self._partial_hit_reqs[request.request_id] = (block_idx, source_block)
+            self.num_cached_block[request.request_id] = block_idx
+        return partial_hash
 
     def take_kv_cache_block_copies(self) -> list[KVCacheBlockCopy]:
         copies = self._kv_cache_block_copies
