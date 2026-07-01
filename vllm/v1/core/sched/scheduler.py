@@ -1588,28 +1588,46 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
-            # Skip a stale frame still pending discard (async_tokens_to_discard
-            # > 0): its pre-reset rejection count would underflow the counters.
+            # Account any materialized or rejected output slots for this
+            # speculative step. Skip a stale frame still pending discard
+            # (async_tokens_to_discard > 0): its pre-reset rejection count
+            # would underflow the counters.
             if (
                 scheduled_spec_token_ids
-                and (generated_token_ids or self.num_sampled_tokens_per_step == 0)
                 and request.async_tokens_to_discard == 0
             ):
                 num_draft_tokens = len(scheduled_spec_token_ids)
                 num_sampled = self.num_sampled_tokens_per_step
-                num_accepted = max(len(generated_token_ids) - num_sampled, 0)
-                num_rejected = num_draft_tokens - num_accepted
+                num_materialized = len(generated_token_ids)
+                num_accepted = max(num_materialized - num_sampled, 0)
+                num_accepted = min(num_accepted, num_draft_tokens)
+                num_scheduled_output_slots = num_sampled + num_draft_tokens
+                num_scheduled_output_slots = min(
+                    num_scheduled_output_slots,
+                    num_scheduled_tokens.get(req_id, num_scheduled_output_slots),
+                )
+                num_unmaterialized = max(
+                    num_scheduled_output_slots - num_materialized, 0
+                )
                 # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled
                 # tokens and rejections. If some tokens are rejected,
                 # num_computed_tokens is decreased by the number of rejected
                 # tokens.
                 if request.num_computed_tokens > 0:
-                    request.num_computed_tokens -= num_rejected
+                    request.num_computed_tokens -= min(
+                        num_unmaterialized, request.num_computed_tokens
+                    )
                 # If async scheduling, num_output_placeholders also includes
-                # the scheduled spec tokens count and so is similarly adjusted.
+                # the scheduled sampled/spec token slots and so is similarly
+                # adjusted. When generated_token_ids is empty,
+                # _update_request_with_output() does not drain the sampled
+                # slot, so it is included in num_unmaterialized.
                 if request.num_output_placeholders > 0:
-                    request.num_output_placeholders -= num_rejected
+                    request.num_output_placeholders -= min(
+                        num_unmaterialized,
+                        request.num_output_placeholders,
+                    )
                 spec_decoding_stats = self.make_spec_decoding_stats(
                     spec_decoding_stats,
                     num_draft_tokens=num_draft_tokens,

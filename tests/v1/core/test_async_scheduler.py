@@ -369,3 +369,57 @@ def test_no_placeholder_underflow_on_discarded_spec_frame():
     assert req.num_computed_tokens == computed_before
     assert req.async_tokens_to_discard == num_spec - 1
     assert req.status == RequestStatus.RUNNING
+
+
+@pytest.mark.parametrize(
+    "generated_token_ids",
+    [
+        [],
+        [123],
+        [123, 124, 125],
+    ],
+)
+def test_spec_output_row_refunds_unmaterialized_scheduled_slots(
+    generated_token_ids: list[int],
+):
+    num_spec = 5
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        num_speculative_tokens=num_spec,
+        speculative_method="ngram_gpu",
+    )
+    req = create_requests(num_requests=1, max_tokens=20)[0]
+    scheduler.requests[req.request_id] = req
+    scheduler.running.append(req)
+    req.status = RequestStatus.RUNNING
+
+    scheduled_slots = 1 + num_spec
+    req.num_computed_tokens = req.num_tokens + scheduled_slots
+    req.num_output_placeholders = scheduled_slots
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={req.request_id: scheduled_slots},
+        total_num_scheduled_tokens=scheduled_slots,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={req.request_id: [10] * num_spec},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[req.request_id],
+        req_id_to_index={req.request_id: 0},
+        sampled_token_ids=[generated_token_ids],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    assert req.num_computed_tokens == req.num_tokens
+    assert req.num_output_placeholders == 0
+    assert list(req.output_token_ids) == generated_token_ids
+    assert req.status == RequestStatus.RUNNING
