@@ -543,6 +543,58 @@ class TestAiterAsmIsAvailable:
             assert not aiter_asm_cls.is_available()
 
 
+class TestAsmPrefillBackendActiveGate:
+    """`_asm_prefill_backend_active` gates the in-impl FP8 PS path.
+
+    The AITER MLA builder/impl keep their exact main-branch FP8 PS behavior
+    until the AITER ASM prefill backend is the active prefill backend (which
+    only happens once aiter is upgraded past ROCm/aiter#3606). When it is
+    active, the in-impl path is dead and must be disabled to avoid its
+    multi-TB workspace reservation OOM at startup.
+    """
+
+    def _gate_fn(self):
+        try:
+            from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
+                _asm_prefill_backend_active,
+            )
+        except ImportError:
+            pytest.skip("rocm_aiter_mla not importable")
+        return _asm_prefill_backend_active
+
+    def test_active_when_asm_is_selected(self, aiter_asm_cls):
+        gate = self._gate_fn()
+        vllm_config = _make_vllm_config()
+        with patch(
+            "vllm.v1.attention.backends.mla.prefill.selector.get_mla_prefill_backend",
+            return_value=aiter_asm_cls,
+        ):
+            assert gate(vllm_config) is True
+
+    def test_inactive_when_other_backend_selected(self):
+        gate = self._gate_fn()
+        try:
+            fa_cls = MLAPrefillBackendEnum.FLASH_ATTN.get_class()
+        except ImportError:
+            pytest.skip("FLASH_ATTN backend not importable")
+        vllm_config = _make_vllm_config()
+        with patch(
+            "vllm.v1.attention.backends.mla.prefill.selector.get_mla_prefill_backend",
+            return_value=fa_cls,
+        ):
+            assert gate(vllm_config) is False
+
+    def test_inactive_when_selection_raises(self):
+        gate = self._gate_fn()
+        vllm_config = _make_vllm_config()
+        with patch(
+            "vllm.v1.attention.backends.mla.prefill.selector.get_mla_prefill_backend",
+            side_effect=ValueError("no valid backend"),
+        ):
+            # Any resolution failure must fall back to main-branch behavior.
+            assert gate(vllm_config) is False
+
+
 class TestAiterAsmSelectorPriority:
     """On gfx950, AITER_ASM should win over FLASH_ATTN when FP8 KV is on."""
 
