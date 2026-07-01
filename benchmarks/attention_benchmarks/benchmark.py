@@ -596,6 +596,23 @@ def main():
         default="profile",
         help="Output file name for ncu profile (default: 'profile').",
     )
+    parser.add_argument(
+        "--torch-profile",
+        action="store_true",
+        default=False,
+        help="Collect a PyTorch profiler Chrome trace for each benchmark run.",
+    )
+    parser.add_argument(
+        "--torch-profile-dir",
+        default=None,
+        help="Directory for PyTorch profiler traces.",
+    )
+    parser.add_argument(
+        "--torch-profile-iters",
+        type=int,
+        default=3,
+        help="Number of forward passes to record per PyTorch profiler trace.",
+    )
 
     # Parameter sweep (use YAML config for advanced sweeps)
     parser.add_argument(
@@ -708,6 +725,12 @@ def main():
             args.cuda_graphs = yaml_config["cuda_graphs"]
         if "ncu_profile" in yaml_config:
             args.ncu_profile = yaml_config["ncu_profile"]
+        if "torch_profile" in yaml_config:
+            args.torch_profile = yaml_config["torch_profile"]
+        if "torch_profile_dir" in yaml_config:
+            args.torch_profile_dir = yaml_config["torch_profile_dir"]
+        if "torch_profile_iters" in yaml_config:
+            args.torch_profile_iters = yaml_config["torch_profile_iters"]
         args.sparse_mla_topk_pattern = yaml_config.get(
             "sparse_mla_topk_pattern", "random"
         )
@@ -1137,6 +1160,9 @@ def main():
                             profile_memory=args.profile_memory,
                             use_cuda_graphs=args.cuda_graphs,
                             ncu_profile=args.ncu_profile,
+                            torch_profile=args.torch_profile,
+                            torch_profile_dir=args.torch_profile_dir,
+                            torch_profile_iters=args.torch_profile_iters,
                             warmup_ms=args.warmup_ms,
                             kv_lora_rank=getattr(args, "kv_lora_rank", None),
                             qk_nope_head_dim=getattr(args, "qk_nope_head_dim", None),

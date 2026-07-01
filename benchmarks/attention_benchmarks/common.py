@@ -93,42 +93,6 @@ except ImportError:
     AttentionLayerBase = object  # Fallback
 
 
-class MockKVBProj:
-    """Mock KV projection layer for MLA prefill mode.
-
-    Mimics ColumnParallelLinear behavior for kv_b_proj in MLA backends.
-    Projects kv_c_normed to [qk_nope_head_dim + v_head_dim] per head.
-    """
-
-    def __init__(self, num_heads: int, qk_nope_head_dim: int, v_head_dim: int):
-        self.num_heads = num_heads
-        self.qk_nope_head_dim = qk_nope_head_dim
-        self.v_head_dim = v_head_dim
-        self.out_dim = qk_nope_head_dim + v_head_dim
-        self.weight = torch.empty(0, dtype=torch.bfloat16)
-
-    def __call__(self, x: torch.Tensor) -> tuple[torch.Tensor]:
-        """
-        Project kv_c_normed to output space.
-
-        Args:
-            x: Input tensor [num_tokens, kv_lora_rank]
-
-        Returns:
-            Tuple containing output tensor
-                [num_tokens, num_heads, qk_nope_head_dim + v_head_dim]
-        """
-        num_tokens = x.shape[0]
-        result = torch.randn(
-            num_tokens,
-            self.num_heads,
-            self.out_dim,
-            device=x.device,
-            dtype=x.dtype,
-        )
-        return (result,)  # Return as tuple to match ColumnParallelLinear API
-
-
 class MockIndexer:
     """Mock Indexer for sparse MLA backends.
 
@@ -313,6 +277,9 @@ class BenchmarkConfig:
     profile_memory: bool = False
     use_cuda_graphs: bool = True
     ncu_profile: bool = False
+    torch_profile: bool = False
+    torch_profile_dir: str | None = None
+    torch_profile_iters: int = 3
     warmup_ms: int | None = None
 
     # "auto" or "fp8"

@@ -9,6 +9,8 @@ needing full VllmConfig integration.
 """
 
 import statistics
+import tempfile
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -17,7 +19,6 @@ from common import (
     BenchmarkResult,
     MockHfConfig,
     MockIndexer,
-    MockKVBProj,
     MockLayer,
     run_do_bench,
     run_ncu_profile,
@@ -33,7 +34,58 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
+
+
+def _safe_profile_name(value: str) -> str:
+    return "".join(c if c.isalnum() or c in "._-" else "_" for c in value)
+
+
+def _create_kv_b_proj(
+    mla_dims: dict,
+    device: torch.device,
+):
+    kv_b_proj = ColumnParallelLinear(
+        mla_dims["kv_lora_rank"],
+        mla_dims["num_q_heads"]
+        * (mla_dims["qk_nope_head_dim"] + mla_dims["v_head_dim"]),
+        bias=False,
+        params_dtype=torch.bfloat16,
+        quant_config=None,
+        prefix="benchmark.kv_b_proj",
+    ).to(device)
+    with torch.no_grad():
+        kv_b_proj.weight.copy_(torch.randn_like(kv_b_proj.weight))
+    return kv_b_proj
+
+
+def _ensure_single_rank_model_parallel() -> None:
+    import torch.distributed as dist
+
+    from vllm.distributed import (
+        ensure_model_parallel_initialized,
+        init_distributed_environment,
+        model_parallel_is_initialized,
+    )
+
+    if not dist.is_available():
+        return
+    if not dist.is_initialized():
+        with tempfile.NamedTemporaryFile(
+            prefix="vllm_bench_dist_", delete=False
+        ) as init_file:
+            distributed_init_method = f"file://{init_file.name}"
+        init_distributed_environment(
+            world_size=1,
+            rank=0,
+            distributed_init_method=distributed_init_method,
+            local_rank=0,
+            backend="nccl",
+        )
+    if not model_parallel_is_initialized():
+        ensure_model_parallel_initialized(1, 1)
+
 
 # ============================================================================
 # VllmConfig Creation
@@ -555,12 +607,7 @@ def _create_backend_impl(
     # Calculate scale
     scale = 1.0 / np.sqrt(mla_dims["qk_nope_head_dim"] + mla_dims["qk_rope_head_dim"])
 
-    # Create mock kv_b_proj layer for prefill mode
-    mock_kv_b_proj = MockKVBProj(
-        num_heads=mla_dims["num_q_heads"],
-        qk_nope_head_dim=mla_dims["qk_nope_head_dim"],
-        v_head_dim=mla_dims["v_head_dim"],
-    )
+    kv_b_proj = _create_kv_b_proj(mla_dims, device)
 
     # Create indexer for sparse backends
     indexer = None
@@ -591,7 +638,7 @@ def _create_backend_impl(
         "qk_rope_head_dim": mla_dims["qk_rope_head_dim"],
         "qk_head_dim": mla_dims["qk_nope_head_dim"] + mla_dims["qk_rope_head_dim"],
         "v_head_dim": mla_dims["v_head_dim"],
-        "kv_b_proj": mock_kv_b_proj,
+        "kv_b_proj": kv_b_proj,
     }
 
     # Add indexer for sparse backends
@@ -925,6 +972,48 @@ def _run_single_benchmark(
             throughput_tokens_per_sec=0.0,
         )
 
+    if config.torch_profile:
+        profile_dir = Path(
+            config.torch_profile_dir or "benchmark_outputs/torch_profiles"
+        )
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        trace_name = _safe_profile_name(f"{config.backend}_{config.batch_spec}")
+        trace_path = profile_dir / f"{trace_name}.json"
+        iters = max(config.torch_profile_iters, 1)
+
+        forward_fn()
+        torch.accelerator.synchronize()
+        with torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=False,
+        ) as prof:
+            for _ in range(iters):
+                forward_fn()
+                torch.accelerator.synchronize()
+                prof.step()
+        prof.export_chrome_trace(str(trace_path))
+        print(f"Saved PyTorch profiler trace to {trace_path}")
+        print(
+            prof.key_averages().table(
+                sort_by="cuda_time_total",
+                row_limit=25,
+            )
+        )
+        return BenchmarkResult(
+            config=config,
+            mean_time=0.0,
+            median_time=0.0,
+            std_time=0.0,
+            min_time=0.0,
+            max_time=0.0,
+            throughput_tokens_per_sec=0.0,
+        )
+
     all_ms = run_do_bench(benchmark_fn, config.use_cuda_graphs, config.warmup_ms)
 
     # Convert ms to seconds per layer
@@ -1043,6 +1132,8 @@ def _run_mla_benchmark_batched(
         init_workspace_manager(device)
 
     with set_current_vllm_config(vllm_config):
+        _ensure_single_rank_model_parallel()
+
         # Create backend impl, layer, builder, and indexer (reused across benchmarks)
         impl, layer, builder_instance, indexer = _create_backend_impl(
             backend_cfg,
