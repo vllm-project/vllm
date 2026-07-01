@@ -269,20 +269,30 @@ class DeepseekV32Attention(MLAAttention):
         # Runtime toggle for index_share_for_mtp_iteration: MTP draft step 0
         # computes the top-k, steps 1+ set this True to reuse it.
         self.skip_topk = False
-        # Single fused fp8 path: Triton fused norm/rope/cache + fused-q write a
-        # single fp8 MQA query and the contiguous [kv_c; k_pe] MLA cache layout.
-        # This requires an fp8 KV cache and a sparse MLA backend that accepts a
-        # quantized query (FlashInfer sparse on SM100).
-        assert (
-            is_quantized_kv_cache(self.kv_cache_dtype)
-            and self.impl.supports_quant_query_input
-        ), (
-            "deepseek_v32 (nvidia) requires an fp8 KV cache served by the "
-            "FlashInfer sparse MLA backend (which accepts a quantized query). "
-            "Launch with --kv-cache-dtype fp8."
+        # Fused fp8 paths: Triton fused norm/rope/cache + fused-q. Two layouts,
+        # picked by the sparse MLA backend's query support:
+        #   * supports_quant_query_input (FlashInfer sparse, SM100): per-tensor
+        #     fp8 cache + a single packed fp8 MQA query.
+        #   * not supported (FlashMLA sparse, SM90/SM100): fp8_ds_mla cache
+        #     (per-128 block-scaled fp8 NoPE + unquantized bf16 RoPE) + a bf16
+        #     (ql_nope, q_pe) query tuple. FA3 cannot mix a bf16 query with an
+        #     fp8 KV cache, so FlashMLA (which dequantizes internally) is used.
+        #     FlashMLA sparse runs on both Hopper and Blackwell, so this is the
+        #     only DSA path on SM90 and an opt-in alternative on SM100.
+        assert is_quantized_kv_cache(self.kv_cache_dtype), (
+            "deepseek_v32 (nvidia) requires an fp8 KV cache served by a sparse "
+            "MLA backend. Launch with --kv-cache-dtype fp8 (FlashInfer sparse) "
+            "or --kv-cache-dtype fp8_ds_mla (FlashMLA sparse)."
         )
+        self._fp8_query = self.impl.supports_quant_query_input
+        if not self._fp8_query:
+            assert self.kv_cache_dtype == "fp8_ds_mla", (
+                "deepseek_v32 (nvidia) on a bf16-query sparse MLA backend "
+                "(FlashMLA sparse) requires the fp8_ds_mla KV cache layout. "
+                "Launch with --kv-cache-dtype fp8_ds_mla."
+            )
         # The paged KV cache is stored as uint8 and viewed as fp8 for the decode
-        # (per-tensor fp8; never the fp8_ds_mla layout on this path).
+        # (per-tensor fp8). The fp8_ds_mla layout is consumed as raw bytes.
         self._fp8_kv_needs_view = self.kv_cache_dtype != "fp8_ds_mla"
         # GLM-5.2 uses interleaved indexer RoPE; DeepSeek-V3.2 uses NeoX.
         self._index_rope_interleave = getattr(config, "indexer_rope_interleave", False)
@@ -465,6 +475,7 @@ class DeepseekV32Attention(MLAAttention):
             indexer_n_head_scale,
             has_indexer=has_indexer,
             index_rope_interleave=self._index_rope_interleave,
+            quantize_mqa=self._fp8_query,
         )
 
         if self.indexer is not None:
@@ -485,7 +496,8 @@ class DeepseekV32Attention(MLAAttention):
                 self.topk_indices_buffer,
                 True,  # skip_k_cache_insert
                 False,  # use_fp4_cache
-                True,  # skip_topk_buffer_clear (fused_norm_rope already did it)
+                # fused_norm_rope already cleared the topk buffer this forward.
+                skip_topk_buffer_clear=True,
             )
 
         if attn_metadata is None:
@@ -496,8 +508,17 @@ class DeepseekV32Attention(MLAAttention):
         kv_cache = self.kv_cache
         if self._fp8_kv_needs_view:
             kv_cache = kv_cache.view(torch.float8_e4m3fn)
+        if self._fp8_query:
+            # FlashInfer sparse: single packed fp8 query.
+            mqa_q_arg: torch.Tensor | tuple[torch.Tensor, torch.Tensor] = mqa_q[
+                :num_actual
+            ]
+        else:
+            # FlashMLA sparse: bf16 (ql_nope, q_pe) tuple. mqa_q is the RoPE'd
+            # q_pe; ql_nope is consumed directly.
+            mqa_q_arg = (ql_nope[:num_actual], mqa_q[:num_actual])
         attn_out, _ = self.impl.forward_mqa(  # type: ignore[attr-defined]
-            mqa_q[:num_actual], kv_cache, attn_metadata, self
+            mqa_q_arg, kv_cache, attn_metadata, self
         )
         x = attn_out.view(
             num_actual, self.num_local_heads, self.kv_lora_rank
