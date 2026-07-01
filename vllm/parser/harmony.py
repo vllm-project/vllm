@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -26,12 +25,16 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     is_function_recipient,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.logger import init_logger
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.reasoning.gptoss_reasoning_parser import GptOssReasoningParser
 from vllm.tool_parsers.gptoss_tool_parser import GptOssToolParser
 
 if TYPE_CHECKING:
     from openai_harmony import Message, StreamableParser
+
+
+logger = init_logger(__name__)
 
 
 class _SegmentType(Enum):
@@ -105,16 +108,21 @@ class HarmonyParser(DelegatingParser):
         return msg
 
     def flush(self) -> Segment | None:
-        msg = None
-        with contextlib.suppress(HarmonyError):
+        try:
             self._harmony_parser.process_eos()
-            # TODO: Consider reraising
-
-        msg = self._poll_completed_message()
-
-        # Reset to the initial assistant-parser state for the next turn.
-        self._parser = None
-        self._num_processed_messages = 0
+            msg = self._poll_completed_message()
+        except HarmonyError:
+            logger.warning(
+                "Harmony parser ended in a non-terminal state; returning the "
+                "raw unparsed output. This usually indicates a malformed "
+                "assistant turn, e.g. a 'final' channel missing the "
+                "<|message|> delimiter."
+            )
+            raise
+        finally:
+            # Reset to the initial assistant-parser state for the next turn.
+            self._parser = None
+            self._num_processed_messages = 0
 
         if msg is None:
             return None
@@ -139,7 +147,10 @@ class HarmonyParser(DelegatingParser):
         Callers must decide whether to surface them.
         """
         result = self.process_chunk(model_output_token_ids)
-        flushed_segment = self.flush()
+        try:
+            flushed_segment = self.flush()
+        except HarmonyError:
+            return None, model_output, None
         if flushed_segment is not None:
             result.segments.append(flushed_segment)
 
@@ -198,7 +209,11 @@ class HarmonyParser(DelegatingParser):
         )
         result = self.process_chunk(delta_token_ids)
         if finished:
-            flushed_segment = self.flush()
+            try:
+                flushed_segment = self.flush()
+            except HarmonyError:
+                self._next_tool_call_index = 0
+                return DeltaMessage(content=delta_text)
             if flushed_segment is not None:
                 result.segments.append(flushed_segment)
         combined_content = ""
