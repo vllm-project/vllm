@@ -125,6 +125,10 @@ def query_nccl_gin_type(
 
     props = ncclCommProperties()
     ctypes.memset(ctypes.addressof(props), 0, ctypes.sizeof(props))
+    # NCCL validates these fields (mirrors NCCL_COMM_PROPERTIES_INITIALIZER)
+    props.size = ctypes.sizeof(props)
+    props.magic = 0xCAFEBEEF
+    props.version = nccl.ncclGetRawVersion()
 
     try:
         result = query_fn(ctypes.c_void_p(comm_ptr), ctypes.byref(props))
