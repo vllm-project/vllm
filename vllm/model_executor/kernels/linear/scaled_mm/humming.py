@@ -58,6 +58,9 @@ class HummingFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         scale_group_shape = self.config.weight_quant_key.scale.group_shape
         if scale_group_shape.is_per_tensor():
             quant_config["weight_scale_type"] = "tensor"
+            if not hasattr(layer, "global_scale") and hasattr(layer, "weight_scale"):
+                del name_map["weight_scale"]
+                name_map["global_scale"] = "weight_scale"
         elif scale_group_shape.is_per_channel():
             quant_config["weight_scale_type"] = "channel"
         elif scale_group_shape.is_per_group():
