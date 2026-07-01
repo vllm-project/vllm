@@ -17,6 +17,7 @@
 """Transformers modeling backend mixin for multi-modal models."""
 
 from collections.abc import Mapping
+from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
 import torch
@@ -61,10 +62,7 @@ _MODALITY_TO_TOKEN_TYPE_ID = {"image": 1, "video": 2, "audio": 3}
 
 class MultiModalProcessingInfo(BaseProcessingInfo):
     def _is_audio_model(self) -> bool:
-        processor = self.get_hf_processor()
-        return hasattr(processor, "feature_extractor") or hasattr(
-            processor, "audio_processor"
-        )
+        return hasattr(self.get_hf_processor(), "feature_extractor")
 
     def _is_image_model(self) -> bool:
         return hasattr(self.get_hf_processor(), "image_processor")
@@ -88,8 +86,7 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         raise ValueError("Cannot find audio_token_id on processor or model config")
 
     def _get_audio_sampling_rate(self) -> float:
-        processor = self.get_hf_processor()
-        sub = getattr_iter(processor, ("audio_processor", "feature_extractor"))
+        sub = getattr(self.get_hf_processor(), "feature_extractor", None)
         if sub is not None and hasattr(sub, "sampling_rate"):
             return sub.sampling_rate
         return 16000.0
@@ -108,7 +105,13 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
             limits["audio"] = None
         if self._is_image_model():
             limits["image"] = None
-        return limits if limits else {"image": None}
+        if not limits:
+            raise ValueError(
+                f"Unable to detect a supported modality on "
+                f"{type(self.get_hf_processor()).__name__}. "
+                "Checked `_is_audio_model` and `_is_image_model`."
+            )
+        return limits
 
     def get_mm_max_tokens_per_item(self, seq_len, mm_counts):
         result = {}
@@ -116,29 +119,25 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
             result["audio"] = self.get_max_audio_tokens()
         if self._is_image_model():
             result["image"] = self.get_max_image_tokens()
-        return result if result else {"image": self.get_max_image_tokens()}
+        if not result:
+            raise ValueError(
+                f"Unable to detect a supported modality on "
+                f"{type(self.get_hf_processor()).__name__}. "
+                "Checked `_is_audio_model` and `_is_image_model`."
+            )
+        return result
 
     def get_max_audio_tokens(self) -> int:
         config = self.get_hf_config()
         audio_config_names = ("audio_config", "encoder_config")
         names = ("max_source_positions", "max_position_embeddings", "max_pos_emb")
-        audio_config = getattr_iter(config, audio_config_names)
-        if audio_config is not None:
-            val = getattr_iter(audio_config, names)
-            if val is not None:
-                return int(val)
-            raise ValueError(
-                f"Unable to get max input length from {type(audio_config).__name__}. "
-                f"The following attribute names were checked: {names}."
-            )
-        val = getattr_iter(config, names)
+        audio_config = getattr_iter(config, audio_config_names, default=config)
+        val = getattr_iter(audio_config, names)
         if val is not None:
             return int(val)
         raise ValueError(
-            f"Unable to get audio config from {type(config).__name__}. "
-            f"The following audio config names were checked: {audio_config_names}; "
-            f"and {type(config).__name__} does not expose any of {names} at the "
-            f"top level either."
+            f"Unable to get max input length from {type(audio_config).__name__}. "
+            f"The following attribute names were checked: {names}."
         )
 
     def get_max_image_tokens(self) -> int:
@@ -158,20 +157,19 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
 
 class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        if self.info._is_audio_model():
-            num_audios = mm_counts.get("audio", 0)
+        text = ""
+        if self.info._is_audio_model() and (num_audios := mm_counts.get("audio", 0)):
             processor = self.info.get_hf_processor()
             audio_token = getattr(processor, "audio_token", "")
-            return audio_token * num_audios
-
-        num_images = mm_counts.get("image", 0)
-
-        processor = self.info.get_hf_processor()
-        if "gemma3" in processor.__class__.__name__.lower():
-            image_token = processor.boi_token
-        else:
-            image_token = getattr(processor, "image_token", "")
-        return image_token * num_images
+            text += audio_token * num_audios
+        if self.info._is_image_model() and (num_images := mm_counts.get("image", 0)):
+            processor = self.info.get_hf_processor()
+            if "gemma3" in processor.__class__.__name__.lower():
+                image_token = processor.boi_token
+            else:
+                image_token = getattr(processor, "image_token", "")
+            text += image_token * num_images
+        return text
 
     def get_dummy_mm_data(
         self,
@@ -179,38 +177,29 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, "BaseDummyOptions"],
     ) -> MultiModalDataDict:
-        if self.info._is_audio_model():
-            num_audios = mm_counts.get("audio", 0)
-            audio_overrides = mm_options.get("audio")
+        data: MultiModalDataDict = {}
+        if self.info._is_audio_model() and (num_audios := mm_counts.get("audio", 0)):
             sampling_rate = self.info._get_audio_sampling_rate()
             processor = self.info.get_hf_processor()
-            sub = getattr_iter(processor, ("audio_processor", "feature_extractor"))
+            sub = getattr(processor, "feature_extractor", None)
             chunk_length = getattr(sub, "chunk_length", None) if sub else None
             if chunk_length is None:
                 chunk_length = 30
             audio_len = int(chunk_length * sampling_rate)
-            return {
-                "audio": self._get_dummy_audios(
-                    length=audio_len,
-                    num_audios=num_audios,
-                    overrides=audio_overrides,
-                ),
-            }
-
-        num_images = mm_counts.get("image", 0)
-
-        target_width, target_height = self.info.get_max_image_size()
-
-        image_overrides = mm_options.get("image")
-
-        return {
-            "image": self._get_dummy_images(
+            data["audio"] = self._get_dummy_audios(
+                length=audio_len,
+                num_audios=num_audios,
+                overrides=mm_options.get("audio"),
+            )
+        if self.info._is_image_model() and (num_images := mm_counts.get("image", 0)):
+            target_width, target_height = self.info.get_max_image_size()
+            data["image"] = self._get_dummy_images(
                 width=target_width,
                 height=target_height,
                 num_images=num_images,
-                overrides=image_overrides,
-            ),
-        }
+                overrides=mm_options.get("image"),
+            )
+        return data
 
 
 class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
@@ -594,14 +583,14 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         kwargs.pop("token_type_ids", None)
         kwargs.pop("mm_token_type_ids", None)
 
-        if current_platform.is_rocm():
-            with torch.nn.attention.sdpa_kernel(
+        context = (
+            torch.nn.attention.sdpa_kernel(
                 backends=[torch.nn.attention.SDPBackend.MATH]
-            ):
-                audio_output = self.model.get_audio_features(
-                    input_features, return_dict=True, **kwargs
-                )
-        else:
+            )
+            if current_platform.is_rocm()
+            else nullcontext()
+        )
+        with context:
             audio_output = self.model.get_audio_features(
                 input_features, return_dict=True, **kwargs
             )
@@ -636,13 +625,14 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
                 "`mem_efficient_sdp` backends. See issue: "
                 "https://github.com/vllm-project/vllm/issues/30167"
             )
-            with torch.nn.attention.sdpa_kernel(
+        context = (
+            torch.nn.attention.sdpa_kernel(
                 backends=[torch.nn.attention.SDPBackend.MATH]
-            ):
-                vision_embeddings = self.model.get_image_features(
-                    pixel_values, **kwargs
-                )
-        else:
+            )
+            if current_platform.is_rocm()
+            else nullcontext()
+        )
+        with context:
             vision_embeddings = self.model.get_image_features(pixel_values, **kwargs)
 
         # Transformers `v5`, `self.get_image_features` returns a tuple
