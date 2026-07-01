@@ -150,6 +150,22 @@ class Worker(WorkerBase):
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
 
+        # Whether CUDA graphs were released in the most recent sleep() and
+        # therefore need to be re-captured once the model is fully awake again.
+        self._cudagraphs_released: bool = False
+
+        # Whether the model weights / KV cache are currently offloaded or
+        # unmapped by a sleep(). Re-capturing CUDA graphs runs a forward pass
+        # through the weights AND uses the KV cache, so recapture MUST be
+        # deferred until a wake_up() has restored BOTH -- otherwise (e.g. the
+        # RLHF sleep() -> wake_up(["kv_cache"]) partial-wake sequence, which
+        # leaves the weights unmapped) the capture forward pass would read
+        # unmapped memory and fault with CUDA_ERROR_ILLEGAL_ADDRESS. These are
+        # tracked independently because weights and kv_cache can be woken in
+        # either order across separate wake_up() calls.
+        self._weights_suspended: bool = False
+        self._kv_cache_suspended: bool = False
+
         # Weight transfer engine is created in `load_model` once the model
         # is available, since the engine needs a reference to the model.
         self.weight_transfer_engine: WeightTransferEngine | None = None
@@ -181,6 +197,22 @@ class Worker(WorkerBase):
                 name: buffer.cpu().clone() for name, buffer in model.named_buffers()
             }
 
+        # Drop captured CUDA graphs before the cumem unmap. With graph capture
+        # pools resident, per-allocation VMM unmap/remap ops slow to ~6-9s for a
+        # 32B model (vs ~2s without graphs); releasing graphs first restores the
+        # fast unmap path. Re-captured lazily on wake_up(). No-op when
+        # cudagraph_mode is NONE.
+        self._cudagraphs_released = self.model_runner.release_cudagraphs()
+
+        # The cumem unmap below drops the weights and KV cache from GPU virtual
+        # memory (weights are offloaded to CPU on level-1 sleep, discarded on
+        # level-2; the KV cache is always discarded). Mark both suspended so a
+        # subsequent partial wake does NOT trigger a CUDA graph recapture (which
+        # would run a forward pass through unmapped weights). Recapture is
+        # deferred until BOTH are restored.
+        self._weights_suspended = True
+        self._kv_cache_suspended = True
+
         allocator = get_mem_allocator_instance()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
 
@@ -205,6 +237,17 @@ class Worker(WorkerBase):
         allocator = get_mem_allocator_instance()
         allocator.wake_up(tags)
 
+        # Track whether this wake has restored the weights / KV cache to GPU
+        # memory. A wake with no tags restores everything; an explicit tag list
+        # restores only the named segments. This must happen BEFORE the
+        # recapture gate below, since recapture needs both mapped. The flags are
+        # sticky across wake_up() calls so weights and kv_cache may be woken in
+        # either order (e.g. weights-only then kv_cache-only, or vice versa).
+        if tags is None or "weights" in tags:
+            self._weights_suspended = False
+        if tags is None or "kv_cache" in tags:
+            self._kv_cache_suspended = False
+
         # Restore the buffers after level 2 sleep
         if len(self._sleep_saved_buffers):
             model = self.model_runner.model
@@ -215,6 +258,24 @@ class Worker(WorkerBase):
 
         if tags is None or "kv_cache" in tags:
             self.model_runner.post_kv_cache_wake_up()
+
+        # Re-capture CUDA graphs that were released in sleep(), now that the
+        # model is fully awake. Recapture runs a forward pass through the
+        # weights AND uses the KV cache, so BOTH must be mapped before it can
+        # run. We gate on the sticky suspension flags rather than this wake's
+        # tags so that the deferred recapture fires on whichever wake completes
+        # the pair -- handling the RLHF partial-wake pattern (kv_cache woken
+        # first, weights later) as well as the weights-first ordering. Until
+        # both are awake `_cudagraphs_released` stays True so a later wake still
+        # triggers it. No-op when cudagraph_mode is NONE (release_cudagraphs()
+        # returned False, so _cudagraphs_released is False).
+        if (
+            self._cudagraphs_released
+            and not self._weights_suspended
+            and not self._kv_cache_suspended
+        ):
+            self.model_runner.recapture_cudagraphs()
+            self._cudagraphs_released = False
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if (

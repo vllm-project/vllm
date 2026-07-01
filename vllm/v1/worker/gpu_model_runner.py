@@ -6696,6 +6696,62 @@ class GPUModelRunner(
         )
         return cuda_graph_size
 
+    def release_cudagraphs(self) -> bool:
+        """Drop all captured CUDA graphs so their capture-pool memory is freed
+        before a cumem ``sleep()`` unmaps the virtual-address space.
+
+        With CUDA-graph capture pools resident, per-allocation cumem VMM
+        unmap/remap operations slow dramatically (field-measured ~6-9s for a
+        32B model vs ~2s without graphs), because every block the graph pool
+        touches forces an individual VMM op. Releasing the graphs first lets
+        the unmap take the fast path; ``recapture_cudagraphs()`` rebuilds them
+        after wake.
+
+        Returns ``True`` if there were graphs to release (i.e. the caller
+        should re-capture on wake), ``False`` otherwise (no-op when
+        ``cudagraph_mode`` is ``NONE``).
+        """
+        if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
+            return False
+
+        # Ensure no captured graph is mid-replay before we drop references.
+        torch.accelerator.synchronize()
+
+        CUDAGraphWrapper.clear_all_graphs()
+        BreakableCUDAGraphWrapper.clear_all_graphs()
+        if self.encoder_cudagraph_manager is not None:
+            self.encoder_cudagraph_manager = None
+
+        # Force the dropped torch.cuda.CUDAGraph objects to finalize now so the
+        # backing capture pool is actually returned to the driver before the
+        # cumem unmap walks the address space. All three calls are required and
+        # ordered: gc.collect() runs the CUDAGraph finalizers that release the
+        # underlying graph exec + capture pool (clearing references alone is not
+        # enough -- the C++ objects free only on __del__); synchronize() then
+        # waits for any in-flight stream work referencing those pools to drain
+        # so the free is safe; and empty_cache() returns the now-unused caching
+        # allocator blocks (including the capture pool) to the driver, which is
+        # what lets the subsequent cumem unmap take the fast path instead of
+        # walking per-block VMM ops. Dropping any one leaves the pool resident
+        # and reintroduces the slow ~6-9s unmap.
+        gc.collect()
+        torch.accelerator.synchronize()
+        torch.accelerator.empty_cache()
+        logger.info("Released CUDA graphs ahead of sleep.")
+        return True
+
+    def recapture_cudagraphs(self) -> None:
+        """Re-capture CUDA graphs after a cumem ``wake_up()`` has remapped the
+        weights and KV cache. Counterpart to :meth:`release_cudagraphs`.
+
+        No-op when ``cudagraph_mode`` is ``NONE``. Safe to call even if no
+        graphs were previously captured -- ``capture_model`` simply rebuilds
+        the dispatch set.
+        """
+        if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
+            return
+        self.capture_model()
+
     def _warmup_and_capture(
         self,
         desc: BatchDescriptor,
