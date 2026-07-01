@@ -1,10 +1,148 @@
 use std::collections::BTreeSet;
 
 use enum_as_inner::EnumAsInner;
+use serde::{Deserialize, Serialize};
+use serde_default::DefaultFromSerde;
+use serde_repr::{Deserialize_repr, Serialize_repr};
+use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 
 use super::utility::UtilityOutput;
-use super::{EngineCoreOutput, EngineCoreOutputs};
-use crate::protocol::stats::SchedulerStats;
+use crate::protocol::OpaqueValue;
+use crate::protocol::logprobs::MaybeWireLogprobs;
+use crate::protocol::stats::{PrefillStats, SchedulerStats};
+
+/// The stop reason associated with a finished output.
+///
+/// Python models this as the union-typed `stop_reason: int | str | None`
+/// field on `EngineCoreOutput`; the Rust client narrows it into a tagged enum.
+///
+/// Original Python field:
+/// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/v1/engine/__init__.py#L155>
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum StopReason {
+    TokenId(u32),
+    Text(String),
+}
+
+/// Reason a request finished: stop, length, abort, error, or repetition.
+///
+/// This mirrors the Python enum and uses integer encoding for compact wire
+/// representation.
+///
+/// Original Python definition:
+/// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/v1/engine/__init__.py#L41-L63>
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(u8)]
+pub enum EngineCoreFinishReason {
+    /// A stop string was emitted.
+    Stop = 0,
+    /// `max_tokens` or `max_model_len` was reached.
+    Length = 1,
+    /// The request was aborted by the client.
+    Abort = 2,
+    /// A retryable request-level internal error occurred.
+    Error = 3,
+    /// A repetitive token pattern was detected.
+    Repetition = 4,
+}
+
+/// Event types emitted by engine-core for one request.
+///
+/// Original Python definition:
+/// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/v1/engine/__init__.py#L113-L118>
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
+#[repr(u8)]
+pub enum EngineCoreEventType {
+    Queued = 1,
+    Scheduled = 2,
+    Preempted = 3,
+}
+
+/// A timestamped engine-core event associated with one request.
+///
+/// Original Python definition:
+/// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/v1/engine/__init__.py#L121-L130>
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EngineCoreEvent {
+    pub r#type: EngineCoreEventType,
+    pub timestamp: f64,
+}
+
+/// Engine-core output for a single request.
+///
+/// Original Python definition:
+/// <https://github.com/vllm-project/vllm/blob/d3af8c18317c0dc008d42e4367fbb9045cfb7bf6/vllm/v1/engine/__init__.py#L154-L184>
+#[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple, DefaultFromSerde)]
+pub struct EngineCoreOutput {
+    pub request_id: String,
+    pub new_token_ids: Vec<u32>,
+    /// Decoded sample logprobs for the newly generated positions in this
+    /// output.
+    #[serde(default)]
+    pub new_logprobs: Option<MaybeWireLogprobs>,
+    /// Decoded prompt logprobs for the scored prompt positions emitted in this
+    /// output.
+    #[serde(default)]
+    pub new_prompt_logprobs_tensors: Option<MaybeWireLogprobs>,
+    #[serde(default)]
+    pub pooling_output: Option<OpaqueValue>,
+    #[serde(default)]
+    pub finish_reason: Option<EngineCoreFinishReason>,
+    #[serde(default)]
+    pub stop_reason: Option<StopReason>,
+    #[serde(default)]
+    pub events: Option<Vec<EngineCoreEvent>>,
+    #[serde(default)]
+    pub kv_transfer_params: Option<serde_json::Value>,
+    #[serde(default)]
+    pub trace_headers: Option<OpaqueValue>,
+    /// Breakdown of the scheduled prefill computation, set on the first output
+    /// of a newly scheduled prefill and elided for subsequent decode outputs.
+    #[serde(default)]
+    pub prefill_stats: Option<PrefillStats>,
+    #[serde(default)]
+    pub routed_experts: Option<OpaqueValue>,
+    /// Number of NaNs seen in logits. Values above zero indicate corruption.
+    #[serde(default)]
+    pub num_nans_in_logits: u32,
+}
+
+impl EngineCoreOutput {
+    /// Returns whether this output is terminal for the request.
+    pub fn finished(&self) -> bool {
+        self.finish_reason.is_some()
+    }
+}
+
+/// Batch of engine-core outputs returned to a frontend client.
+///
+/// Original Python definition:
+/// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/v1/engine/__init__.py#L186-L214>
+#[derive(Debug, Clone, PartialEq, Serialize_tuple, Deserialize_tuple, DefaultFromSerde)]
+pub struct EngineCoreOutputs {
+    #[serde(default)]
+    pub engine_index: u32,
+    /// Outputs grouped for this client in the current engine tick.
+    #[serde(default)]
+    pub outputs: Vec<EngineCoreOutput>,
+    #[serde(default)]
+    pub scheduler_stats: Option<Box<SchedulerStats>>,
+    #[serde(default)]
+    pub timestamp: f64,
+    #[serde(default)]
+    pub utility_output: Option<UtilityOutput>,
+    #[serde(default)]
+    pub finished_requests: Option<BTreeSet<String>>,
+    /// In DP mode, signals that the current wave finished and engines are
+    /// paused.
+    #[serde(default)]
+    pub wave_complete: Option<u32>,
+    /// In DP mode, signals that a request arrived for an old wave and the next
+    /// wave needs to start in other engines.
+    #[serde(default)]
+    pub start_wave: Option<u32>,
+}
 
 /// Data-parallel control notifications multiplexed through `EngineCoreOutputs`.
 #[derive(Debug, Clone, PartialEq, Eq)]
