@@ -11,6 +11,8 @@ when the target itself is shrunk — which is what kept spec-decode archs like
 ("TODO: revert once figuring out OOM in CI").
 """
 
+import functools
+
 import pytest
 from transformers import PretrainedConfig
 
@@ -81,3 +83,24 @@ def test_arch_mapping_applies_before_callable_override():
     )
     composed(mimo)
     assert seen_architectures == ["MiMoMTPModel"]
+
+
+def _module_level_shrink(hf_config: PretrainedConfig) -> PretrainedConfig:
+    hf_config.num_hidden_layers = 1
+    return hf_config
+
+
+@pytest.mark.cpu_test
+def test_composed_override_is_picklable():
+    """The draft ``ModelConfig`` is sent to spawned engine-core processes, so
+    the composed override must be picklable. A nested local closure is not
+    (it raised ``Can't get local object`` on DFlashDraftModel); a
+    ``functools.partial`` over a module-referenceable static method is.
+    Guard against regressing to a closure."""
+    composed = SpeculativeConfig.compose_draft_hf_overrides(_module_level_shrink)
+
+    assert isinstance(composed, functools.partial)
+    assert composed.func is SpeculativeConfig._apply_composed_hf_override
+
+    out = composed(_make_hf_config())
+    assert out.num_hidden_layers == 1

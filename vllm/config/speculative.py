@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+import functools
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
@@ -565,6 +566,14 @@ class SpeculativeConfig:
         return hf_config
 
     @staticmethod
+    def _apply_composed_hf_override(
+        target_hf_overrides: Callable[[PretrainedConfig], PretrainedConfig],
+        hf_config: PretrainedConfig,
+    ) -> PretrainedConfig:
+        hf_config = SpeculativeConfig.hf_config_override(hf_config)
+        return target_hf_overrides(hf_config)
+
+    @staticmethod
     def compose_draft_hf_overrides(
         target_hf_overrides: HfOverrides | None,
     ) -> Callable[[PretrainedConfig], PretrainedConfig]:
@@ -576,15 +585,19 @@ class SpeculativeConfig:
         target is instantiated at full size even when the target is shrunk.
         Dict overrides are target-specific key patches and are not applied
         to the draft.
+
+        The composed override must stay picklable: the draft ``ModelConfig``
+        is sent to spawned engine-core processes, so a local closure would
+        fail with ``Can't get local object`` during pickling. Bind the
+        target via ``functools.partial`` over a module-referenceable static
+        method instead.
         """
         if not callable(target_hf_overrides):
             return SpeculativeConfig.hf_config_override
 
-        def composed(hf_config: PretrainedConfig) -> PretrainedConfig:
-            hf_config = SpeculativeConfig.hf_config_override(hf_config)
-            return target_hf_overrides(hf_config)
-
-        return composed
+        return functools.partial(
+            SpeculativeConfig._apply_composed_hf_override, target_hf_overrides
+        )
 
     def __post_init__(self):
         # Note: "method" is a new parameter that helps to extend the
