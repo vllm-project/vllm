@@ -202,6 +202,10 @@ class Scheduler(SchedulerInterface):
         self.finished_recving_kv_req_ids: set[str] = set()
         self.failed_recving_kv_req_ids: set[str] = set()
 
+        # Grammar compilation failures to finish as per-request errors in
+        # update_from_output.
+        self.grammar_compile_error_reqs: set[str] = set()
+
         # Encoder-related.
         # Calculate encoder cache size if applicable
         supports_mm_inputs = mm_registry.supports_multimodal_inputs(
@@ -1733,7 +1737,7 @@ class Scheduler(SchedulerInterface):
                 struct_output_request = request.structured_output_request
                 assert struct_output_request is not None
                 grammar = struct_output_request.grammar
-                assert grammar is not None
+                assert grammar is not None and not isinstance(grammar, Exception)
                 # new_token_ids can be a mixed block of reasoning content, then
                 # the reasoning end marker, then the start of the grammar content.
                 # Trim the reasoning content so the grammar only sees grammar content.
@@ -1863,10 +1867,22 @@ class Scheduler(SchedulerInterface):
             # This is a rare case and unlikely to impact performance.
             self.waiting.remove_requests(stopped_preempted_reqs)
 
+        error_req_ids = set(self.grammar_compile_error_reqs)
+        self.grammar_compile_error_reqs.clear()
         if failed_kv_load_req_ids and not self.recompute_kv_load_failures:
-            requests = [self.requests[req_id] for req_id in failed_kv_load_req_ids]
-            self.finish_requests(failed_kv_load_req_ids, RequestStatus.FINISHED_ERROR)
-            for request in requests:
+            error_req_ids.update(failed_kv_load_req_ids)
+
+        error_reqs = [
+            self.requests[req_id]
+            for req_id in error_req_ids
+            if req_id in self.requests and not self.requests[req_id].is_finished()
+        ]
+        if error_reqs:
+            self.finish_requests(
+                [request.request_id for request in error_reqs],
+                RequestStatus.FINISHED_ERROR,
+            )
+            for request in error_reqs:
                 outputs[request.client_index].append(
                     EngineCoreOutput(
                         request_id=request.request_id,
@@ -2096,8 +2112,10 @@ class Scheduler(SchedulerInterface):
             # Filter out spec tokens which do not adhere to the grammar.
             if self.structured_output_manager.should_advance(request):
                 metadata = request.structured_output_request
-                assert metadata is not None and metadata.grammar is not None
-                spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)
+                assert metadata is not None
+                grammar = metadata.grammar
+                assert grammar is not None and not isinstance(grammar, Exception)
+                spec_token_ids = grammar.validate_tokens(spec_token_ids)
             # Pad to original number of spec tokens.
             num_invalid_tokens = orig_num_spec_tokens - len(spec_token_ids)
             if num_invalid_tokens:
@@ -2597,7 +2615,11 @@ class Scheduler(SchedulerInterface):
 
         if request.status == RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR:
             structured_output_req = request.structured_output_request
-            if not (structured_output_req and structured_output_req.grammar):
+            grammar = structured_output_req.grammar if structured_output_req else None
+            if isinstance(grammar, Exception):
+                self.grammar_compile_error_reqs.add(request.request_id)
+                return False
+            if grammar is None:
                 return False
             request.status = RequestStatus.WAITING
             return True

@@ -3,8 +3,7 @@
 import dataclasses
 import functools
 import json
-from concurrent.futures import Future
-from concurrent.futures._base import TimeoutError
+from concurrent.futures import Future, wait
 from typing import TYPE_CHECKING, Any, cast
 
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
@@ -21,7 +20,9 @@ if TYPE_CHECKING:
 @dataclasses.dataclass
 class StructuredOutputRequest:
     params: StructuredOutputsParams
-    _grammar: Future[StructuredOutputGrammar] | StructuredOutputGrammar | None = None
+    _grammar: (
+        Future[StructuredOutputGrammar] | StructuredOutputGrammar | Exception | None
+    ) = None
     reasoning_ended: bool | None = None
     # Absolute index into the request's all_token_ids of the last reasoning
     # token (the reasoning-end marker). Tokens at or before this index are
@@ -47,11 +48,16 @@ class StructuredOutputRequest:
 
     def _check_grammar_completion(self) -> bool:
         if isinstance(self._grammar, Future):
-            try:
-                # We will check whether the future is ready within 100 us
-                self._grammar = self._grammar.result(timeout=0.0001)
-            except TimeoutError:
+            grammar_future = self._grammar
+            # Wait up to 100 us without conflating a polling timeout with an
+            # exception raised by the grammar compiler.
+            wait((grammar_future,), timeout=0.0001)
+            if not grammar_future.done():
                 return False
+            try:
+                self._grammar = grammar_future.result()
+            except Exception as e:
+                self._grammar = e
         return True
 
     @property
@@ -59,10 +65,12 @@ class StructuredOutputRequest:
         return self._check_grammar_completion()
 
     @property
-    def grammar(self) -> StructuredOutputGrammar | None:
+    def grammar(self) -> StructuredOutputGrammar | Exception | None:
         completed = self._check_grammar_completion()
         return (
-            cast(StructuredOutputGrammar | None, self._grammar) if completed else None
+            cast(StructuredOutputGrammar | Exception | None, self._grammar)
+            if completed
+            else None
         )
 
     @grammar.setter
