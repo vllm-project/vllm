@@ -690,7 +690,9 @@ def parse_compute_capability(node: ast.ClassDef) -> str:
         major_list.sort()
         if len(major_list) == 1:
             return f"{major_list[0]}.x"
-        return f"{major_list[0]}.x-{major_list[-1]}.x"
+        if major_list == list(range(major_list[0], major_list[-1] + 1)):
+            return f"{major_list[0]}.x-{major_list[-1]}.x"
+        return ", ".join(f"{major}.x" for major in major_list)
 
     if min_cap:
         if max_cap:
@@ -1668,7 +1670,8 @@ def generate_mla_section(
                 "`--attention-backend=<BACKEND>` (e.g., `FLASHMLA_SPARSE_DSV4`,",
                 "`FLASHINFER_MLA_SPARSE_DSV4`). They share the V4 sparse-index",
                 "pipeline (compressor + SWA + indexer, 256-token blocks, head 512);",
-                "default on NVIDIA is `FLASHMLA_SPARSE_DSV4`.",
+                "default on NVIDIA is `FLASHINFER_MLA_SPARSE_DSV4` on SM12x and",
+                "`FLASHMLA_SPARSE_DSV4` on other supported CUDA architectures.",
                 "",
             ]
         )

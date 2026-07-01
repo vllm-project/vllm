@@ -25,6 +25,7 @@ EXPECTED_VALUES = {
     "ibm-granite/granite-4.0-h-tiny": 0.77,
     "Qwen/Qwen3.5-0.8B": 0.33,
     "google/gemma-4-E2B-it": 0.485,
+    "ai21labs/AI21-Jamba2-3B": 0.74,
 }
 
 SIMPLE_PROMPT = (

@@ -154,6 +154,16 @@ class UBatchWrapper:
     @staticmethod
     def _create_sm_control_context(vllm_config: VllmConfig):
         comm_sms: int = envs.VLLM_DBO_COMM_SMS
+        rocm_deepep_ht_dbo = (
+            current_platform.is_rocm()
+            and vllm_config.parallel_config.enable_dbo
+            and vllm_config.parallel_config.all2all_backend == "deepep_high_throughput"
+        )
+        if rocm_deepep_ht_dbo:
+            # On ROCm, reserving CUs for DeepEP HT communication under DBO
+            # corrupts DP+EP generation accuracy. Keep the backend active, but
+            # leave all CUs visible to the compute and communication kernels.
+            comm_sms = 0
 
         set_comm_sms = lambda sms: None
         if vllm_config.parallel_config.enable_expert_parallel:

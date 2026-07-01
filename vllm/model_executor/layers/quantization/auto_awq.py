@@ -339,7 +339,9 @@ class AutoAWQConfig(QuantizationConfig):
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
 
-            if not check_moe_marlin_supports_layer(layer, self.group_size):
+            if not check_moe_marlin_supports_layer(
+                layer, self.group_size, allow_tile_padding=True
+            ):
                 logger.warning_once(
                     f"Layer '{prefix}' is not supported by AutoAWQMoEMarlin. "
                     "Falling back to Moe WNA16 kernels."

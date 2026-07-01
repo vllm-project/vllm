@@ -5,6 +5,8 @@
 Run `pytest tests/kernels/quantization/test_marlin_tile_padding.py`.
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -14,6 +16,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     apply_gptq_marlin_linear,
     marlin_make_empty_g_idx,
     marlin_make_workspace_new,
+    marlin_moe_padded_intermediate,
     marlin_pad_qweight,
     marlin_pad_scales,
     marlin_padded_nk,
@@ -113,6 +116,74 @@ def test_marlin_pad_helpers_shapes():
     channelwise = torch.ones(1, size_n)
     padded = marlin_pad_scales(channelwise, size_n, size_k, padded_n, padded_k, -1)
     assert padded.shape == (1, padded_n)
+
+
+# Rank-local MoE intermediate sizes. group<=0 / 32 with a non-multiple-of-64
+# size is where tile padding triggers; 64/128 are already tile-aligned.
+MOE_INTERMEDIATE_SIZES = [64, 96, 100, 176, 192, 256, 2816]
+
+
+@pytest.mark.parametrize("intermediate", MOE_INTERMEDIATE_SIZES)
+@pytest.mark.parametrize("group_size", [-1, 32, 64, 128])
+def test_marlin_moe_padded_intermediate(intermediate, group_size):
+    # The MoE gate only admits shapes where the group does not straddle the
+    # boundary, i.e. group divides the intermediate size.
+    if group_size > 0 and intermediate % group_size != 0:
+        pytest.skip("group straddles the boundary; rejected by the MoE gate")
+
+    padded = marlin_moe_padded_intermediate(intermediate, group_size)
+    assert padded >= intermediate
+    # Valid MoE thread tile: gate-up n = 2*intermediate % 128, down k % 64.
+    assert (2 * padded) % 128 == 0
+    assert padded % 64 == 0
+    if group_size > 0:
+        assert padded % group_size == 0
+
+    # Minimal: no smaller valid intermediate exists.
+    for cand in range(intermediate, padded):
+        if (
+            (2 * cand) % 128 == 0
+            and cand % 64 == 0
+            and (group_size <= 0 or cand % group_size == 0)
+        ):
+            pytest.fail(f"{cand} beats {padded}")
+
+    # Already-tile-aligned sizes pass through unchanged (zero hot-path cost).
+    if intermediate % 64 == 0:
+        assert padded == intermediate
+
+
+def test_marlin_moe_pad_helpers_shapes():
+    from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
+        _pad_rows,
+        _pad_w13_bias,
+        _pad_w13_shard_cols,
+    )
+
+    E, rows, N, padded_N = 2, 8, 96, 128
+
+    # w13 stores the two gate/up shards along the last dim; padding each shard
+    # must preserve the loaded values and zero the padded columns.
+    w13 = torch.arange(E * rows * 2 * N).reshape(E, rows, 2 * N).float()
+    padded = _pad_w13_shard_cols(w13, N, padded_N)
+    assert padded.shape == (E, rows, 2 * padded_N)
+    shards = padded.view(E, rows, 2, padded_N)
+    orig = w13.view(E, rows, 2, N)
+    assert torch.equal(shards[..., :N], orig)
+    assert shards[..., N:].abs().sum() == 0
+
+    # w2 stores the intermediate dim in the rows.
+    w2 = torch.ones(E, N // 32, 16)
+    padded = _pad_rows(w2, padded_N // 32)
+    assert padded.shape == (E, padded_N // 32, 16)
+    assert padded[:, N // 32 :, :].abs().sum() == 0
+
+    bias = torch.arange(E * 2 * N).reshape(E, 2 * N).float()
+    padded = _pad_w13_bias(bias, N, padded_N)
+    assert padded.shape == (E, 2 * padded_N)
+    bias_shards = padded.view(E, 2, padded_N)
+    assert torch.equal(bias_shards[..., :N], bias.view(E, 2, N))
+    assert bias_shards[..., N:].abs().sum() == 0
 
 
 def _gpu_marlin_unsupported() -> bool:
@@ -468,3 +539,325 @@ def test_check_marlin_supports_layer_allow_tile_padding():
     # A group straddling the TP shard cannot be fixed by padding
     layer = _FakeLinear(4608, 4672, input_size=18688)
     assert not check_marlin_supports_layer(layer, 128, allow_tile_padding=True)
+
+
+@pytest.mark.skipif(
+    _gpu_marlin_unsupported(),
+    reason="Marlin is not supported on this GPU type.",
+)
+@pytest.mark.parametrize("group_size", [-1, 32])
+@pytest.mark.parametrize("shape", [(96, 256, 8), (160, 512, 4)])
+def test_gptq_marlin_moe_padded_round_trip(shape, group_size):
+    """Pad a tile-misaligned MoE intermediate the way the WNA16 Marlin MoE prep
+    does, run the real repack + fused_marlin_moe, and check against the
+    dequantized reference. Symmetric int4's quantized zero decodes to -8, so the
+    padded region only stays out of the output via the zero-padded scales.
+    """
+    from tests.kernels.utils import torch_experts
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.fused_moe import fused_topk
+    from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
+        fused_marlin_moe,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
+        _pad_rows,
+        _pad_w13_shard_cols,
+    )
+    from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+        marlin_moe_padded_intermediate,
+        marlin_moe_permute_scales,
+    )
+
+    n, k, e = shape
+    topk, m = 2, 33
+    padded_n = marlin_moe_padded_intermediate(n, group_size)
+    assert padded_n != n, "test should exercise padding"
+
+    dtype = torch.float16
+    device = torch.device("cuda")
+    quant_type = scalar_types.uint4b8
+    bits = quant_type.size_bits
+    pack = 32 // bits
+
+    a = torch.randn((m, k), device=device, dtype=dtype) / 10
+    w1 = torch.randn((e, 2 * n, k), device=device, dtype=dtype) / k**0.5
+    w2 = torch.randn((e, k, n), device=device, dtype=dtype) / n**0.5
+
+    def quant(w, size_k, size_n):
+        # w is (size_n, size_k); gptq expects (size_k, size_n).
+        ref, q_w, s, _, _ = gptq_quantize_weights(
+            w.T, quant_type, group_size, act_order=False
+        )
+        return ref, gptq_pack(q_w, bits, size_k, size_n), s
+
+    w13_qw, w13_s, w13_ref = [], [], []
+    w2_qw, w2_s, w2_ref = [], [], []
+    for i in range(e):
+        ref, qw, s = quant(w1[i], k, 2 * n)
+        w13_ref.append(ref.T)  # (2n, k)
+        w13_qw.append(qw)
+        w13_s.append(s)
+        ref, qw, s = quant(w2[i], n, k)
+        w2_ref.append(ref.T)  # (k, n)
+        w2_qw.append(qw)
+        w2_s.append(s)
+
+    w13_qweight = torch.stack(w13_qw)
+    w2_qweight = torch.stack(w2_qw)
+    w13_scales = torch.stack(w13_s)
+    w2_scales = torch.stack(w2_s)
+    w1_ref = torch.stack(w13_ref)  # (e, 2n, k)
+    w2_ref = torch.stack(w2_ref)  # (e, k, n)
+
+    # Pad the intermediate via the production helpers.
+    w13_qweight = _pad_w13_shard_cols(w13_qweight, n, padded_n)
+    w2_qweight = _pad_rows(w2_qweight, padded_n // pack)
+    w13_scales = _pad_w13_shard_cols(w13_scales, n, padded_n)
+    if group_size > 0:
+        w2_scales = _pad_rows(w2_scales, padded_n // group_size)
+
+    sort_idx = torch.empty((e, 0), dtype=torch.int32, device=device)
+    marlin_w13 = ops.gptq_marlin_moe_repack(
+        w13_qweight, sort_idx, w13_qweight.shape[1] * pack, w13_qweight.shape[2], bits
+    )
+    marlin_w2 = ops.gptq_marlin_moe_repack(
+        w2_qweight, sort_idx, w2_qweight.shape[1] * pack, w2_qweight.shape[2], bits
+    )
+    group_or_pack = group_size if group_size != -1 else pack
+    marlin_w13_s = marlin_moe_permute_scales(
+        s=w13_scales, size_k=n, size_n=w13_scales.shape[2], group_size=group_size
+    )
+    marlin_w2_s = marlin_moe_permute_scales(
+        s=w2_scales,
+        size_k=w2_scales.shape[1] * group_or_pack,
+        size_n=w2_scales.shape[2],
+        group_size=group_size,
+    )
+
+    score = torch.randn((m, e), device=device, dtype=dtype)
+    topk_weights, topk_ids, _ = fused_topk(a, score, topk, False)
+
+    marlin_out = fused_marlin_moe(
+        a,
+        marlin_w13,
+        marlin_w2,
+        None,
+        None,
+        marlin_w13_s,
+        marlin_w2_s,
+        topk_weights,
+        topk_ids,
+        quant_type_id=quant_type.id,
+        global_num_experts=e,
+        is_k_full=True,
+    )
+    with set_current_vllm_config(VllmConfig()):
+        ref = torch_experts(
+            a,
+            w1_ref,
+            w2_ref,
+            topk_weight=topk_weights,
+            topk_ids=topk_ids,
+            global_num_experts=e,
+        )
+
+    torch.testing.assert_close(marlin_out, ref, atol=5e-2, rtol=0)
+
+
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="MoE Marlin is not selected on ROCm.",
+)
+def test_check_moe_marlin_supports_layer_padding():
+    from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+        check_moe_marlin_supports_layer,
+    )
+
+    def make_layer(hidden, intermediate):
+        layer = SimpleNamespace()
+        layer.hidden_size = hidden
+        layer.apply_router_weight_on_input = False
+        layer.moe_config = SimpleNamespace(
+            intermediate_size_per_partition_unpadded=intermediate
+        )
+        return layer
+
+    # group=32 with intermediate % 64 != 0: rejected strictly, accepted w/ padding
+    layer = make_layer(4096, 96)
+    assert not check_moe_marlin_supports_layer(layer, 32)
+    assert check_moe_marlin_supports_layer(layer, 32, allow_tile_padding=True)
+    # channelwise misaligned intermediate is paddable
+    assert check_moe_marlin_supports_layer(layer, -1, allow_tile_padding=True)
+
+    # A group straddling the boundary cannot be fixed by padding
+    layer = make_layer(4096, 176)
+    assert not check_moe_marlin_supports_layer(layer, 128, allow_tile_padding=True)
+
+    # hidden_size is the MoE I/O extent and is never padded
+    layer = make_layer(4090, 128)
+    assert not check_moe_marlin_supports_layer(layer, 64, allow_tile_padding=True)
+
+
+@pytest.mark.skipif(
+    _gpu_marlin_unsupported() or not is_fp8_marlin_supported(),
+    reason="FP8 Marlin is not supported on this GPU type.",
+)
+@pytest.mark.parametrize("quant", ["channel", "tensor"])
+@pytest.mark.parametrize("shape", [(96, 256, 8), (160, 512, 4)])
+def test_fp8_marlin_moe_padded_round_trip(shape, quant):
+    """FP8 weight-only MoE: pad a tile-misaligned intermediate and check the
+    real prepare + fused_marlin_moe against the dequantized reference."""
+    from tests.kernels.utils import torch_experts
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.fused_moe import fused_topk
+    from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
+        fused_marlin_moe,
+    )
+    from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+        marlin_moe_intermediate_size,
+        marlin_moe_padded_intermediate,
+    )
+    from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
+        prepare_fp8_moe_layer_for_marlin,
+    )
+
+    n, k, e = shape
+    topk, m = 2, 33
+    fp8 = torch.float8_e4m3fn
+    dtype = torch.bfloat16
+    device = torch.device("cuda")
+    padded_n = marlin_moe_padded_intermediate(n, -1)
+    assert padded_n != n
+
+    def q(w):  # (out, in) -> fp8 weight, scale, dequant reference
+        dim = None if quant == "tensor" else 1
+        s = (w.abs().amax(dim, keepdim=dim is not None) / 448.0).clamp(min=1e-8)
+        wq = (w / s).clamp(-448, 448).to(fp8)
+        ref = wq.to(dtype) * s.to(dtype)
+        s = s.reshape(1) if quant == "tensor" else s.squeeze(1)
+        return wq, s, ref
+
+    a = torch.randn((m, k), device=device, dtype=dtype) / 10
+    w1 = torch.randn((e, 2 * n, k), device=device, dtype=dtype) / k**0.5
+    w2 = torch.randn((e, k, n), device=device, dtype=dtype) / n**0.5
+    w13_q, w13_s, w1_ref = zip(*(q(w1[i]) for i in range(e)))
+    w2_q, w2_s, w2_ref = zip(*(q(w2[i]) for i in range(e)))
+
+    w13_weight, w2_weight = torch.stack(w13_q), torch.stack(w2_q)
+    layer = SimpleNamespace(
+        num_experts=e,
+        hidden_size=k,
+        intermediate_size_per_partition=n,
+        orig_dtype=dtype,
+        w13_weight=w13_weight,
+    )
+    pw13, pw2, ps13, ps2 = prepare_fp8_moe_layer_for_marlin(
+        layer, w13_weight, w2_weight, torch.stack(w13_s), torch.stack(w2_s)
+    )
+    assert marlin_moe_intermediate_size(pw13, pw2) == padded_n
+
+    score = torch.randn((m, e), device=device, dtype=dtype)
+    topk_weights, topk_ids, _ = fused_topk(a, score, topk, False)
+    out = fused_marlin_moe(
+        a,
+        pw13,
+        pw2,
+        None,
+        None,
+        ps13,
+        ps2,
+        topk_weights,
+        topk_ids,
+        quant_type_id=scalar_types.float8_e4m3fn.id,
+        global_num_experts=e,
+        is_k_full=True,
+        workspace=layer.workspace,
+    )
+    with set_current_vllm_config(VllmConfig()):
+        ref = torch_experts(
+            a,
+            torch.stack(w1_ref),
+            torch.stack(w2_ref),
+            topk_weight=topk_weights,
+            topk_ids=topk_ids,
+            global_num_experts=e,
+        )
+    torch.testing.assert_close(out, ref, atol=8e-2, rtol=0)
+
+
+@pytest.mark.skipif(
+    _gpu_marlin_unsupported() or not is_fp8_marlin_supported(),
+    reason="FP8 Marlin is not supported on this GPU type.",
+)
+@pytest.mark.parametrize("shape", [(96, 256, 8), (160, 512, 4)])
+def test_mxfp8_marlin_moe_padded_round_trip(shape):
+    """MXFP8 weight-only MoE round-trip at a tile-misaligned intermediate, with
+    unit e8m0 scales so the reference is the exact fp8 dequant."""
+    from tests.kernels.utils import torch_experts
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.fused_moe import fused_topk
+    from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
+        fused_marlin_moe,
+    )
+    from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+        marlin_moe_intermediate_size,
+        marlin_moe_padded_intermediate,
+    )
+    from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
+        prepare_mxfp8_moe_layer_for_marlin,
+    )
+
+    n, k, e = shape
+    topk, m, gs, e8m0_one = 2, 33, 32, 127
+    fp8 = torch.float8_e4m3fn
+    dtype = torch.bfloat16
+    device = torch.device("cuda")
+    padded_n = marlin_moe_padded_intermediate(n, gs)
+    assert padded_n != n
+
+    a = torch.randn((m, k), device=device, dtype=dtype) / 10
+    w13_weight = torch.randn((e, 2 * n, k), device=device, dtype=dtype) / k**0.5
+    w2_weight = torch.randn((e, k, n), device=device, dtype=dtype) / n**0.5
+    w13_weight = w13_weight.clamp(-448, 448).to(fp8)
+    w2_weight = w2_weight.clamp(-448, 448).to(fp8)
+    w13_scale = torch.full(
+        (e, 2 * n, k // gs), e8m0_one, dtype=torch.uint8, device=device
+    )
+    w2_scale = torch.full((e, k, n // gs), e8m0_one, dtype=torch.uint8, device=device)
+
+    layer = SimpleNamespace(
+        num_experts=e, hidden_size=k, intermediate_size_per_partition=n
+    )
+    with set_current_vllm_config(VllmConfig()):
+        pw13, pw2, ps13, ps2 = prepare_mxfp8_moe_layer_for_marlin(
+            layer, w13_weight, w2_weight, w13_scale, w2_scale
+        )
+    assert marlin_moe_intermediate_size(pw13, pw2) == padded_n
+
+    score = torch.randn((m, e), device=device, dtype=dtype)
+    topk_weights, topk_ids, _ = fused_topk(a, score, topk, False)
+    out = fused_marlin_moe(
+        a,
+        pw13,
+        pw2,
+        None,
+        None,
+        ps13,
+        ps2,
+        topk_weights,
+        topk_ids,
+        quant_type_id=scalar_types.float8_e4m3fn.id,
+        global_num_experts=e,
+        is_k_full=True,
+        workspace=layer.workspace,
+    )
+    with set_current_vllm_config(VllmConfig()):
+        ref = torch_experts(
+            a,
+            w13_weight.to(dtype),
+            w2_weight.to(dtype),
+            topk_weight=topk_weights,
+            topk_ids=topk_ids,
+            global_num_experts=e,
+        )
+    torch.testing.assert_close(out, ref, atol=8e-2, rtol=0)

@@ -425,7 +425,7 @@ def _run_eagle_correctness(
             if "deepseek" in model_setup[1].lower():
                 m.setenv("VLLM_ROCM_USE_AITER", "1")
                 m.delenv("VLLM_MLA_DISABLE", raising=False)
-                attention_config = {"backend": "TRITON_MLA"}
+                attention_config = {"backend": "ROCM_AITER_MLA"}
             else:
                 m.setenv("VLLM_ROCM_USE_AITER", "1")
 
@@ -715,6 +715,47 @@ def test_eagle_correctness_heavy(
         enable_chunked_prefill,
         model_impl,
         attn_backend,
+    )
+
+
+@large_gpu_mark(min_gb=24)
+def test_medusa_acceptance_rate(
+    sampling_config: SamplingParams,
+):
+    """Verify a trained Medusa checkpoint achieves nonzero acceptance rate.
+
+    Uses the canonical FasterDecoding vicuna-7b checkpoint to confirm the
+    speculation path actually accepts tokens — unlike test_medusa_correctness,
+    which uses a random head and only validates output correctness.
+    """
+    target_model = "lmsys/vicuna-7b-v1.3"
+    medusa_model = "FasterDecoding/medusa-vicuna-7b-v1.3"
+    prompts = _build_gsm8k_prompts(num_questions=10, num_shots=1)[0]
+
+    spec_llm = LLM(
+        model=target_model,
+        speculative_config={
+            "method": "medusa",
+            "model": medusa_model,
+            "num_speculative_tokens": 3,
+        },
+        max_model_len=1024,
+        enforce_eager=True,
+        disable_log_stats=False,
+    )
+    spec_llm.generate(prompts, sampling_config)
+    metrics = spec_llm.get_metrics()
+    acceptance_rate = compute_acceptance_rate(metrics)
+    del spec_llm
+    torch.accelerator.empty_cache()
+    cleanup_dist_env_and_memory()
+
+    min_acceptance_rate = 0.198
+    print(f"Medusa acceptance rate: {acceptance_rate:.4f} (min {min_acceptance_rate})")
+
+    # Regression guard at 90% of the measured baseline.
+    assert acceptance_rate >= min_acceptance_rate, (
+        f"Medusa acceptance rate {acceptance_rate:.4f} below min {min_acceptance_rate}"
     )
 
 
@@ -1365,6 +1406,67 @@ def test_dflash_acceptance_rates(
             f"DFlash acceptance_len for {dataset_name} is below expected threshold:"
             f"{mean_acceptance_length:.2f} < {expected_len:.2f}"
         )
+
+    del spec_llm
+    torch.accelerator.empty_cache()
+    cleanup_dist_env_and_memory()
+
+
+@pytest.fixture
+def dspark_config():
+    target_model = "Qwen/Qwen3-4B-FP8"
+    draft_model = "deepseek-ai/dspark_qwen3_4b_block7"
+
+    return dict(
+        model=target_model,
+        trust_remote_code=True,
+        speculative_config={
+            "method": "dspark",
+            "model": draft_model,
+            "num_speculative_tokens": 7,
+            "attention_backend": "FLASH_ATTN",
+            "draft_sample_method": "probabilistic",
+        },
+        max_model_len=4096,
+        disable_log_stats=False,
+    )
+
+
+@single_gpu_only
+@large_gpu_mark(min_gb=24)
+def test_dspark_correctness_and_acceptance_rate(dspark_config):
+    """
+    E2E test for DSpark speculative decoding: acceptance rate/length
+    regression coverage plus GSM8K correctness, at temperature=1.0 to
+    exercise the probabilistic draft-sampling/rejection-sampling path
+    (not just greedy).
+
+    Uses Qwen/Qwen3-4B-FP8 as target with the dspark_qwen3_4b_block7 draft
+    model. Reference: measured over 12 runs of the full GSM8K set at
+    temperature=1.0 (prefix caching disabled to avoid cross-run reuse):
+      accuracy:        min=0.782 max=0.814 mean=0.801
+      acceptance_rate: min=0.418 max=0.434 mean=0.428
+      acceptance_len:  min=3.928 max=4.037 mean=3.994
+    Thresholds set conservatively to 10% to avoid flaking due to unlucky sampling
+    """
+    spec_llm = LLM(**dspark_config)
+
+    results = evaluate_gsm8k_offline(spec_llm, temperature=1.0)
+    gsm8k_accuracy = results["accuracy"]
+
+    metrics = spec_llm.get_metrics()
+    acceptance_rate = compute_acceptance_rate(metrics)
+    acceptance_len = compute_acceptance_len(metrics)
+
+    print(
+        f"DSpark acceptance_rate={acceptance_rate:.2f}, "
+        f"acceptance_len={acceptance_len:.2f}, "
+        f"gsm8k_accuracy={gsm8k_accuracy:.3f}"
+    )
+
+    assert acceptance_rate >= 0.428 * 0.9
+    assert acceptance_len >= 3.994 * 0.9
+    assert gsm8k_accuracy >= 0.801 * 0.9
 
     del spec_llm
     torch.accelerator.empty_cache()
