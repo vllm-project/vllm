@@ -782,12 +782,17 @@ class MiniMaxM3DecoderLayer(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.block_sparse_moe",
             )
+            # Defer the FFN cross-rank all-reduce; it is fused into the next
+            # layer's input_layernorm (or the model's final norm) via
+            # fused_allreduce_gemma_rms_norm, matching the post-attention path.
+            self.block_sparse_moe.experts.moe_config.skip_final_all_reduce = True
         else:
             self.mlp = MiniMaxM3MLP(
                 config=config,
                 intermediate_size=config.dense_intermediate_size,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
+                reduce_results=False,
             )
 
         # config.use_gemma_norm is True for M3 -> Gemma-style RMSNorm.
@@ -809,7 +814,11 @@ class MiniMaxM3DecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+            # Fuse the previous layer's deferred FFN all-reduce into this
+            # input_layernorm (all-reduce + add residual + GemmaRMSNorm).
+            hidden_states, residual = fused_allreduce_gemma_rms_norm(
+                hidden_states, residual, self.input_layernorm
+            )
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
@@ -916,7 +925,10 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 {"hidden_states": hidden_states, "residual": residual}
             )
 
-        hidden_states, _ = self.norm(hidden_states, residual)
+        # The last layer's FFN all-reduce is deferred; fuse it into the final norm.
+        hidden_states, _ = fused_allreduce_gemma_rms_norm(
+            hidden_states, residual, self.norm
+        )
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
