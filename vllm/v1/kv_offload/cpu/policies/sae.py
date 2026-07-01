@@ -140,11 +140,65 @@ class SAECachePolicy(CachePolicy):
         self._open_sid = None
         self._last_event = "touch"
 
+    def _score(self, sid: int) -> float:
+        stats = self._sid_stats[sid]
+        pos_bonus = 30000.0 / (1.0 + stats["start_pos"] / 8.0)
+        freq_bonus = stats["hits"] * 1500.0
+        return stats["last_touch"] + freq_bonus + pos_bonus
+
+    def _admission_gate_allows(self, protected: set[OffloadKey]) -> bool:
+        if not self._sid_stats:
+            return True
+        ghost_sum = sum(self._key_ghost.get(k, 0.0) for k in protected)
+        new_hits = ghost_sum / self._ghost_norm
+        new_score = self._logical_timer + new_hits * 1500.0 + 30000.0
+        worst_sid = min(self._sid_stats.keys(), key=self._score)
+        return new_score >= self._score(worst_sid)
+
     @override
     def evict(
         self, n: int, protected: set[OffloadKey]
     ) -> list[tuple[OffloadKey, BlockStatus]] | None:
-        raise NotImplementedError
+        self._open_sid = None
+        self._last_event = "evict"
+        if n == 0:
+            return []
+        if not self._admission_gate_allows(protected):
+            return None
+
+        candidates: list[tuple[OffloadKey, BlockStatus]] = []
+        sorted_sids = sorted(self._sid_stats.keys(), key=self._score)
+        for sid in sorted_sids:
+            if len(candidates) == n:
+                break
+            seq = self._sid_to_keys.get(sid, [])
+            for k in reversed(seq):
+                if len(candidates) == n:
+                    break
+                if k in protected:
+                    continue
+                if k not in self._evictable_keys:
+                    continue
+                block = self._blocks.get(k)
+                if block is None or block.ref_cnt != 0:
+                    continue
+                candidates.append((k, block))
+
+        if len(candidates) < n:
+            return None
+
+        for k, _ in candidates:
+            if k in self._key_to_sid:
+                sid = self._key_to_sid.pop(k)
+                sid_seq = self._sid_to_keys.get(sid, [])
+                if k in sid_seq:
+                    sid_seq.remove(k)
+                if not sid_seq:
+                    self._sid_to_keys.pop(sid, None)
+                    self._sid_stats.pop(sid, None)
+            self._blocks.pop(k, None)
+            self._evictable_keys.pop(k, None)
+        return candidates
 
     @override
     def clear(self) -> None:
