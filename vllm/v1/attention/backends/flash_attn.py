@@ -892,7 +892,16 @@ class FlashAttentionImpl(AttentionImpl):
                     and self.vllm_flash_attn_version == 4
                 ):
                     max_ranges = mm_prefix_ranges.shape[1]
-                    mm_mask_mod = _make_mm_prefix_mask_mod(max_ranges)
+                    # Convert window_size[0] to the Triton convention
+                    # (1 + window_size[0]).  Global-attention layers
+                    # store (-1, -1) → sw_left stays None.
+                    sw_left = (
+                        1 + sliding_window_size[0]
+                        if sliding_window_size is not None
+                        and sliding_window_size[0] >= 0
+                        else None
+                    )
+                    mm_mask_mod = _make_mm_prefix_mask_mod(max_ranges, sw_left)
                     mm_aux = [mm_prefix_ranges]
 
                 # R-SWA: use CuTE-DSL mask_mod on FA4 for exact token-level
@@ -1189,13 +1198,17 @@ class FlashAttentionImpl(AttentionImpl):
         return output
 
 
-def _make_mm_prefix_mask_mod(max_ranges: int):
-    """Build a CuTE-DSL mask_mod implementing (causal OR mm_prefix).
+def _make_mm_prefix_mask_mod(max_ranges: int, sliding_window_left: int | None = None):
+    """Build a CuTE-DSL mask_mod implementing
+    ``(causal AND sliding_window) OR mm_prefix``.
 
-    Returns a @cute.jit callable that evaluates:
-      keep = (kv_idx <= q_idx) OR
-             (q_idx in [r_start,r_end] AND kv_idx in [r_start,r_end])
-    for each mm_prefix range stored in aux_tensors[0].
+    The FA4 kernel passes *local* ``q_idx`` (0-based within the current
+    prefill chunk) while ``kv_idx`` is absolute (0-based over the full
+    KV cache).  We recover the absolute Q position via
+    ``q_abs = q_idx + seqlen_k - seqlen_q`` (the context-length offset)
+    so that causal, sliding-window, and mm_prefix range comparisons all
+    use consistent absolute positions.  This matches the Triton
+    reference path (``compute_kv_seq_mask``).
     """
     import cutlass
     import cutlass.cute as cute
@@ -1205,26 +1218,56 @@ def _make_mm_prefix_mask_mod(max_ranges: int):
         scalar_to_ssa,
     )
 
-    @cute.jit
-    def mm_prefix_mask_mod(
-        batch_idx: cute.TensorSSA,
-        head_idx: cute.TensorSSA,
-        q_idx: cute.TensorSSA,
-        kv_idx: cute.TensorSSA,
-        seqlen_info,
-        aux_tensors,
-    ):
-        keep = kv_idx <= q_idx
-        ranges = aux_tensors[0]
-        b = batch_idx[0]
-        for i in cutlass.range_constexpr(max_ranges):  # type: ignore[attr-defined]
-            r_start = scalar_to_ssa(ranges[b, i, 0], Int32)
-            r_end = scalar_to_ssa(ranges[b, i, 1], Int32)
-            valid = r_start < r_end
-            q_in = (q_idx >= r_start) & (q_idx <= r_end) & valid
-            k_in = (kv_idx >= r_start) & (kv_idx <= r_end) & valid
-            keep = keep | (q_in & k_in)
-        return keep
+    if sliding_window_left is not None:
+
+        @cute.jit
+        def mm_prefix_mask_mod(
+            batch_idx: cute.TensorSSA,
+            head_idx: cute.TensorSSA,
+            q_idx: cute.TensorSSA,
+            kv_idx: cute.TensorSSA,
+            seqlen_info,
+            aux_tensors,
+        ):
+            ctx_off = scalar_to_ssa(seqlen_info.seqlen_k - seqlen_info.seqlen_q, Int32)
+            q_abs = q_idx + ctx_off
+            sw = scalar_to_ssa(Int32(sliding_window_left), Int32)
+            keep = (kv_idx <= q_abs) & ((q_abs - kv_idx) < sw)
+            ranges = aux_tensors[0]
+            b = batch_idx[0]
+            for i in cutlass.range_constexpr(max_ranges):  # type: ignore[attr-defined]
+                r_start = scalar_to_ssa(ranges[b, i, 0], Int32)
+                r_end = scalar_to_ssa(ranges[b, i, 1], Int32)
+                valid = r_start < r_end
+                q_in = (q_abs >= r_start) & (q_abs <= r_end) & valid
+                k_in = (kv_idx >= r_start) & (kv_idx <= r_end) & valid
+                keep = keep | (q_in & k_in)
+            return keep
+
+    else:
+
+        @cute.jit
+        def mm_prefix_mask_mod(
+            batch_idx: cute.TensorSSA,
+            head_idx: cute.TensorSSA,
+            q_idx: cute.TensorSSA,
+            kv_idx: cute.TensorSSA,
+            seqlen_info,
+            aux_tensors,
+        ):
+            ctx_off = scalar_to_ssa(seqlen_info.seqlen_k - seqlen_info.seqlen_q, Int32)
+            q_abs = q_idx + ctx_off
+            keep = kv_idx <= q_abs
+            ranges = aux_tensors[0]
+            b = batch_idx[0]
+            for i in cutlass.range_constexpr(max_ranges):  # type: ignore[attr-defined]
+                r_start = scalar_to_ssa(ranges[b, i, 0], Int32)
+                r_end = scalar_to_ssa(ranges[b, i, 1], Int32)
+                valid = r_start < r_end
+                q_in = (q_abs >= r_start) & (q_abs <= r_end) & valid
+                k_in = (kv_idx >= r_start) & (kv_idx <= r_end) & valid
+                keep = keep | (q_in & k_in)
+            return keep
 
     mm_prefix_mask_mod.use_fast_sampling = True
     return mm_prefix_mask_mod
