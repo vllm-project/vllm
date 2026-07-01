@@ -24,7 +24,10 @@ set (ENABLE_NUMA TRUE)
 # Check the compile flags
 #
 if(MACOSX_FOUND)
+    # Apple clang needs -Xpreprocessor to enable OpenMP. No runtime link is
+    # needed: _C is a dynamic_lookup bundle and resolves libomp from torch.
     list(APPEND CXX_COMPILE_FLAGS
+        "-Xpreprocessor" "-fopenmp"
         "-DVLLM_CPU_EXTENSION")
 else()
     list(APPEND CXX_COMPILE_FLAGS
@@ -424,6 +427,7 @@ if (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND)
     set(VLLM_EXT_SRC
         "csrc/cpu/shm.cpp"
         "csrc/cpu/activation_lut_bf16.cpp"
+        "csrc/cpu/cpu_tanhf_neon.hpp"
         "csrc/cpu/cpu_fused_moe.cpp"
         ${VLLM_EXT_SRC})
 endif()
