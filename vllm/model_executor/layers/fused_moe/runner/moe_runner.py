@@ -292,6 +292,11 @@ class MoERunner(MoERunnerInterface):
         # For smuggling this layer into the fused moe custom op
         register_layer_for_moe_forward_op(get_current_vllm_config(), self)
 
+    def load_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[str]:
+        return self.routed_experts.load_weights(weights)
+
     def _select_forward(self) -> Callable:
         if current_platform.is_tpu() or current_platform.is_cpu():
             # TODO: Once the OOM issue for the TPU backend is resolved, we
@@ -423,6 +428,7 @@ class MoERunner(MoERunnerInterface):
         if (
             shared_output is not None
             and not self.moe_config.is_sequence_parallel
+            and not self.moe_config.skip_final_all_reduce
             and self._fused_output_is_reduced
         ):
             shared_output = tensor_model_parallel_all_reduce(shared_output)
@@ -445,6 +451,7 @@ class MoERunner(MoERunnerInterface):
         # - The MK already reduced the fused output itself.
         if (
             not self.moe_config.is_sequence_parallel
+            and not self.moe_config.skip_final_all_reduce
             and (self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1)
             and not self._fused_output_is_reduced
         ):
