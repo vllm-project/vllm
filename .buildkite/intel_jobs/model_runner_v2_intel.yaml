@@ -8,7 +8,7 @@ steps:
   agent_tags:
     label: debug_b50
     gpu: 2+
-    mem: 24+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -37,7 +37,7 @@ steps:
   agent_tags:
     label: debug_b50
     gpu: 1+
-    mem: 16+
+    mem: 24+
   no_plugin: true
   working_dir: "."
   env:
