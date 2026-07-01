@@ -1,13 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for the Transformers backend's fx-based fusers (GLU, QKV, RMSNorm).
-
-These exercise the structural detection and surgical subgraph rewrite in
-`vllm.model_executor.models.transformers.fuser` without needing a distributed
-environment; the real `MergedColumnParallelLinear` / `QKVParallelLinear` /
-`...AndMul` integration is covered end-to-end by `test_fusion`, `test_models`
-and `test_quantization` in `tests/models/test_transformers.py`.
-"""
+"""Unit tests for the Transformers backend's fx fusers (MoE, GLU, QKV, RMSNorm)."""
 
 import inspect
 import types
@@ -26,6 +19,7 @@ from vllm.model_executor.models.transformers.fuser import (
     RMSNormFuser,
     get_fuser,
 )
+from vllm.model_executor.models.transformers.fusers.moe import MoEFuser
 
 
 class SiluAndMulStub(nn.Module):
@@ -546,3 +540,261 @@ def test_rms_norm_builds_vllm_class(cls, expected, zero_centered, default_vllm_c
     types_by_name = {"RMSNorm": VLLMRMSNorm, "GemmaRMSNorm": VLLMGemmaRMSNorm}
     assert type(built) is types_by_name[expected]
     assert built.variance_epsilon == fuser.eps
+
+
+class TopKRouter(nn.Module):
+    """HF v5 top-k router: `linear -> softmax -> topk (-> renorm)`."""
+
+    def __init__(self, num_experts=8, hidden=16, top_k=2, sigmoid=False):
+        super().__init__()
+        self.top_k = top_k
+        self.sigmoid = sigmoid
+        self.weight = nn.Parameter(torch.zeros(num_experts, hidden))
+
+    def forward(self, hidden_states):
+        logits = F.linear(hidden_states, self.weight)
+        scores = torch.sigmoid(logits) if self.sigmoid else F.softmax(logits, dim=-1)
+        value, index = torch.topk(scores, self.top_k, dim=-1)
+        value = value / value.sum(dim=-1, keepdim=True)
+        return logits, value, index
+
+
+class CorrectionRouter(nn.Module):
+    """Grouped/noaux router whose score-correction bias is a buffer (as in
+    DeepSeek-V3).
+
+    It is `weight`-only in its parameters, so it is declined via the correction
+    bias read structurally from the graph, not by the parameter check."""
+
+    def __init__(self, num_experts=8, hidden=16):
+        super().__init__()
+        self.weight = nn.Parameter(torch.zeros(num_experts, hidden))
+        self.register_buffer("e_score_correction_bias", torch.zeros(num_experts))
+
+    def forward(self, hidden_states):
+        logits = F.linear(hidden_states, self.weight)
+        scores = torch.sigmoid(logits) + self.e_score_correction_bias
+        _, index = torch.topk(scores, 2, dim=-1)
+        return logits, scores, index
+
+
+class BiasedRouter(TopKRouter):
+    """A valid top-k router but not `weight`-only (an extra `bias` parameter).
+
+    `build_gate` rebuilds the router as a bias-free `ReplicatedLinear`, so a
+    router carrying any other parameter cannot be reproduced faithfully."""
+
+    def __init__(self):
+        super().__init__()
+        self.bias = nn.Parameter(torch.zeros(8))
+
+    def forward(self, hidden_states):
+        logits = F.linear(hidden_states, self.weight) + self.bias
+        scores = F.softmax(logits, dim=-1)
+        value, index = torch.topk(scores, self.top_k, dim=-1)
+        return logits, value, index
+
+
+class MoEExperts(nn.Module):
+    """Packed experts (3D weights); only its name (`experts`) matters here."""
+
+    def __init__(self, num_experts=8, hidden=16, inter=32):
+        super().__init__()
+        self.gate_up_proj = nn.Parameter(torch.zeros(num_experts, 2 * inter, hidden))
+        self.down_proj = nn.Parameter(torch.zeros(num_experts, hidden, inter))
+
+    def forward(self, hidden_states, index, weights):
+        return hidden_states
+
+
+class MoEBlock(nn.Module):
+    """A single-tensor-returning MoE block (Qwen3-style)."""
+
+    def __init__(self, router_cls=TopKRouter):
+        super().__init__()
+        self.experts = MoEExperts()
+        self.gate = router_cls()
+
+    def forward(self, hidden_states):
+        x = hidden_states.reshape(-1, hidden_states.shape[-1])
+        _, weights, index = self.gate(x)
+        return self.experts(x, index, weights).reshape(hidden_states.shape)
+
+
+class MoEBlockShared(MoEBlock):
+    """A block with a shared expert and its sigmoid gate (Qwen2-style)."""
+
+    def __init__(self):
+        super().__init__()
+        self.shared_expert = GLUMLP()
+        self.shared_expert_gate = nn.Linear(16, 1, bias=False)
+
+    def forward(self, hidden_states):
+        x = hidden_states.reshape(-1, hidden_states.shape[-1])
+        _, weights, index = self.gate(x)
+        out = self.experts(x, index, weights)
+        out = out + torch.sigmoid(self.shared_expert_gate(x)) * self.shared_expert(x)
+        return out.reshape(hidden_states.shape)
+
+
+class MoEBlockSharedNoGate(MoEBlock):
+    """A block with an ungated shared expert -> native, shared passed through."""
+
+    def __init__(self):
+        super().__init__()
+        self.shared_expert = GLUMLP()
+
+    def forward(self, hidden_states):
+        x = hidden_states.reshape(-1, hidden_states.shape[-1])
+        _, weights, index = self.gate(x)
+        out = self.experts(x, index, weights) + self.shared_expert(x)
+        return out.reshape(hidden_states.shape)
+
+
+class MoEBlockTuple(MoEBlock):
+    """A tuple-returning block (gpt-oss-style) -> must decline."""
+
+    def forward(self, hidden_states):
+        x = hidden_states.reshape(-1, hidden_states.shape[-1])
+        _, weights, index = self.gate(x)
+        return self.experts(x, index, weights), index
+
+
+class PlainMLP(nn.Module):
+    """A non-GLU FFN: `down(act(up(x)))`, no gating multiply."""
+
+    def __init__(self, hidden: int = 16, inter: int = 32):
+        super().__init__()
+        self.up_proj = nn.Linear(hidden, inter, bias=False)
+        self.down_proj = nn.Linear(inter, hidden, bias=False)
+        self.act_fn = nn.SiLU()
+
+    def forward(self, x):
+        return self.down_proj(self.act_fn(self.up_proj(x)))
+
+
+class MoEBlockSharedNonGLU(MoEBlock):
+    """A block whose shared expert is a non-GLU MLP -> detected by dataflow.
+
+    It is added to the experts' output, so it is recognised as the shared
+    expert even though it is not a GLU (no gate/up merge is needed).
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.shared_expert = PlainMLP()
+
+    def forward(self, hidden_states):
+        x = hidden_states.reshape(-1, hidden_states.shape[-1])
+        _, weights, index = self.gate(x)
+        out = self.experts(x, index, weights) + self.shared_expert(x)
+        return out.reshape(hidden_states.shape)
+
+
+class MoEBlockUnaccounted(MoEBlock):
+    """A block with a weight-bearing child outside the experts + shared-expert
+    dataflow (here a pre-router transform) -> must decline, since the rewritten
+    forward would drop it."""
+
+    def __init__(self):
+        super().__init__()
+        self.extra = nn.Linear(16, 16, bias=False)
+
+    def forward(self, hidden_states):
+        x = self.extra(hidden_states.reshape(-1, hidden_states.shape[-1]))
+        _, weights, index = self.gate(x)
+        return self.experts(x, index, weights).reshape(hidden_states.shape)
+
+
+class BufferScale(nn.Module):
+    """A stateful child carrying only a buffer (no parameters)."""
+
+    def __init__(self, hidden: int = 16):
+        super().__init__()
+        self.register_buffer("scale", torch.ones(hidden))
+
+    def forward(self, x):
+        return x * self.scale
+
+
+class MoEBlockUnaccountedBuffer(MoEBlock):
+    """Like `MoEBlockUnaccounted`, but the dropped child holds only a buffer, so
+    the fail-closed check must inspect buffers as well as parameters."""
+
+    def __init__(self):
+        super().__init__()
+        self.extra = BufferScale()
+
+    def forward(self, hidden_states):
+        x = self.extra(hidden_states.reshape(-1, hidden_states.shape[-1]))
+        _, weights, index = self.gate(x)
+        return self.experts(x, index, weights).reshape(hidden_states.shape)
+
+
+@pytest.mark.parametrize("sigmoid", [False, True])
+def test_moe_fuser_detects_router(sigmoid):
+    with torch.device("meta"):
+        block = MoEBlock(lambda: TopKRouter(sigmoid=sigmoid))
+    fuser = MoEFuser.match(block)
+    assert isinstance(fuser, MoEFuser)
+    assert fuser.gate_name == "gate"
+    assert fuser.scoring_func == ("sigmoid" if sigmoid else "softmax")
+    assert fuser.shared_name is None and fuser.shared_gate_name is None
+
+
+def test_moe_fuser_detects_shared_experts():
+    with torch.device("meta"):
+        block = MoEBlockShared()
+    fuser = MoEFuser.match(block)
+    assert isinstance(fuser, MoEFuser)
+    assert fuser.shared_name == "shared_expert"
+    assert fuser.shared_gate_name == "shared_expert_gate"
+    # The shared expert's gate/up projections are merged, scoped to its qualname.
+    assert fuser.orig_to_new_stacked("model.layers.0.mlp") == {
+        "model.layers.0.mlp.shared_expert.gate_proj": (
+            "model.layers.0.mlp.shared_expert.gate_up_proj",
+            0,
+        ),
+        "model.layers.0.mlp.shared_expert.up_proj": (
+            "model.layers.0.mlp.shared_expert.gate_up_proj",
+            1,
+        ),
+    }
+
+
+def test_moe_fuser_shared_without_gate():
+    with torch.device("meta"):
+        block = MoEBlockSharedNoGate()
+    fuser = MoEFuser.match(block)
+    assert isinstance(fuser, MoEFuser)
+    assert fuser.shared_name == "shared_expert"
+    assert fuser.shared_gate_name is None
+
+
+def test_moe_fuser_detects_non_glu_shared_expert():
+    with torch.device("meta"):
+        block = MoEBlockSharedNonGLU()
+    fuser = MoEFuser.match(block)
+    assert isinstance(fuser, MoEFuser)
+    # Recognised by dataflow (added to the experts' output), though not a GLU.
+    assert fuser.shared_name == "shared_expert"
+    assert fuser.shared_gate_name is None
+    # A non-GLU shared expert needs no gate/up merge; it loads by identity.
+    assert fuser.shared_glu is None
+    assert fuser.orig_to_new_stacked("model.layers.0.mlp") == {}
+
+
+@pytest.mark.parametrize(
+    "block_cls",
+    [
+        lambda: MoEBlock(CorrectionRouter),  # score-correction buffer (grouped)
+        lambda: MoEBlock(BiasedRouter),  # router not weight-only (extra param)
+        MoEBlockTuple,  # tuple-returning block (e.g. gpt-oss)
+        MoEBlockUnaccounted,  # weight-bearing child outside the fused dataflow
+        MoEBlockUnaccountedBuffer,  # buffer-only child outside the fused dataflow
+    ],
+)
+def test_moe_fuser_declines_unsupported(block_cls):
+    with torch.device("meta"):
+        block = block_cls()
+    assert MoEFuser.match(block) is None

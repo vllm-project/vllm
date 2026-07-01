@@ -124,7 +124,12 @@ class GLUFuser(StackedFuser):
         if gate.in_features == up.in_features and (gate.bias is None) == (
             up.bias is None
         ):
-            return cls(act_node.target, gate_node.target, up_node.target)
+            return cls(
+                source_cls=type(module).__name__,
+                act_name=act_node.target,
+                gate_name=gate_node.target,
+                up_name=up_node.target,
+            )
         return None
 
     def update_forward(self, module: nn.Module) -> None:

@@ -78,7 +78,12 @@ class QKVFuser(StackedFuser):
         if (qkv_nodes := cls._get_qkv_nodes(graph, module)) is None:
             return None
         q, k, v = qkv_nodes
-        return cls(q_name=q.target, k_name=k.target, v_name=v.target)
+        return cls(
+            source_cls=type(module).__name__,
+            q_name=q.target,
+            k_name=k.target,
+            v_name=v.target,
+        )
 
     def update_forward(self, module: nn.Module) -> None:
         """Replace `q(x), k(x), v(x)` with `qkv(x).split(sizes, -1)` in source."""

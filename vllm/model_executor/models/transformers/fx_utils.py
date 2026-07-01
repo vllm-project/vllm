@@ -14,7 +14,9 @@ import operator
 import textwrap
 from collections.abc import Callable
 
+import torch
 from torch import fx, nn
+from torch.nn import functional as F
 
 from vllm.logger import init_logger
 
@@ -204,6 +206,11 @@ def replace_expr(module: ast.AST, old: ast.expr, new: ast.expr) -> None:
     _Replacer().visit(module)
 
 
+def find_node(graph: fx.Graph, predicate: Callable[[fx.Node], bool]) -> fx.Node | None:
+    """The first node in `graph` matching `predicate`, or `None`."""
+    return next((n for n in graph.nodes if predicate(n)), None)
+
+
 def is_linear(node: fx.Node, module: nn.Module) -> bool:
     """Is node `nn.Linear.__call__()`."""
     return node.op == "call_module" and isinstance(
@@ -226,6 +233,7 @@ def peel(node: object) -> object:
 
 
 def is_fn(node: object, target: Callable) -> bool:
+    """Is node `<target>()`."""
     return (
         isinstance(node, fx.Node)
         and node.op == "call_function"
@@ -234,6 +242,16 @@ def is_fn(node: object, target: Callable) -> bool:
 
 
 def is_method(node: object, name: str) -> bool:
+    """Is node `.<name>()`."""
     return (
         isinstance(node, fx.Node) and node.op == "call_method" and node.target == name
     )
+
+
+def is_op(node: object, name: str) -> bool:
+    """
+    Is node `torch.<name>()`, `F.<name>()`, `operator.<name>()`, or `Tensor.<name>()`.
+    """
+    return any(
+        is_fn(node, getattr(module, name, None)) for module in (torch, F, operator)
+    ) or (hasattr(torch.Tensor, name) and is_method(node, name))

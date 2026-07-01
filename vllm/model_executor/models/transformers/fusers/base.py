@@ -26,10 +26,9 @@ class BaseFuser(ABC):
     module to install in its place.
     """
 
-    @property
     @abstractmethod
-    def info(self) -> str:
-        """A human-readable description of the fusion, for logging."""
+    def info(self, name: str) -> str:
+        """A human-readable description of the fusion at `name`, for logging."""
 
     @classmethod
     @abstractmethod
@@ -78,13 +77,18 @@ class StackedFuser(BaseFuser):
     merged_cls: ClassVar[str]
     """Name of the vLLM class the merged projection becomes (for logging)."""
 
+    source_cls: str
+    """Class of the HF module the fused projections belonged to (for logging)."""
+
     fused_forward: Callable = field(init=False, repr=False)
     """The compiled rewritten forward, set by `update_forward`."""
 
-    @property
-    def info(self) -> str:
-        sources = " + ".join(name for name, _ in self.shards)
-        return f"Fused {sources} -> {self.merged_name} ({self.merged_cls})"
+    def info(self, name: str) -> str:
+        sources = " + ".join(shard for shard, _ in self.shards)
+        return (
+            f"Fused: {sources} ({name}: {self.source_cls}) -> "
+            f"{self.merged_name} ({self.merged_cls})"
+        )
 
     @property
     @abstractmethod
