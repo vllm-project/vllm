@@ -62,7 +62,11 @@ _MODALITY_TO_TOKEN_TYPE_ID = {"image": 1, "video": 2, "audio": 3}
 
 class MultiModalProcessingInfo(BaseProcessingInfo):
     def _is_audio_model(self) -> bool:
-        return hasattr(self.get_hf_processor(), "feature_extractor")
+        # TODO: drop feature_extractor branch once huggingface/transformers#44394 lands.
+        processor = self.get_hf_processor()
+        return hasattr(processor, "feature_extractor") or hasattr(
+            processor, "audio_processor"
+        )
 
     def _is_image_model(self) -> bool:
         return hasattr(self.get_hf_processor(), "image_processor")
@@ -86,7 +90,8 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
         raise ValueError("Cannot find audio_token_id on processor or model config")
 
     def _get_audio_sampling_rate(self) -> float:
-        sub = getattr(self.get_hf_processor(), "feature_extractor", None)
+        processor = self.get_hf_processor()
+        sub = getattr_iter(processor, ("audio_processor", "feature_extractor"))
         if sub is not None and hasattr(sub, "sampling_rate"):
             return sub.sampling_rate
         return 16000.0
@@ -181,7 +186,7 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
         if self.info._is_audio_model() and (num_audios := mm_counts.get("audio", 0)):
             sampling_rate = self.info._get_audio_sampling_rate()
             processor = self.info.get_hf_processor()
-            sub = getattr(processor, "feature_extractor", None)
+            sub = getattr_iter(processor, ("audio_processor", "feature_extractor"))
             chunk_length = getattr(sub, "chunk_length", None) if sub else None
             if chunk_length is None:
                 chunk_length = 30
