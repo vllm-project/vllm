@@ -168,7 +168,6 @@ def _mxfp8_grouped_gemm_kernel(
     )
 
 
-# ----------------------------------------------------------------------------
 def _grouped_gemm_mxfp8(
     a_q: torch.Tensor,  # [M, K] fp8 e4m3
     a_scale: torch.Tensor,  # [M, K//32] uint8 (E8M0)

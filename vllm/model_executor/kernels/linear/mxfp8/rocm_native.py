@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Native MXFP8 dense linear for AMD CDNA4 (gfx950) via Triton ``tl.dot_scaled``.
+"""Native MXFP8 linear GEMM for AMD CDNA4 (gfx950) via Triton ``tl.dot_scaled``.
 
-Reuses the shared fused activation quant (``mxfp8_e4m3_quantize``) and adds a
-graph-tuned, M-bucketed ``dot_scaled`` GEMM (``_select_cfg``) — the GEMM tile
-selection is the speedup vs the upstream 2-bucket launcher. Math is unchanged vs
-the upstream kernel (fp32 accumulate, tol 6e-2).
+Consumes the FP8 E4M3 weights + E8M0 block scales directly (no dequant-to-BF16);
+activations are MXFP8-quantized per token. Uses the CDNA4 hardware microscaling
+matrix cores. Falls back (via the kernel selector) to the BF16
+``EmulationMxfp8LinearKernel`` on archs without native MX or for shapes with
+``K % 128 != 0``.
 """
 
 import torch
@@ -86,12 +87,8 @@ def _mxfp8_dot_scaled_linear(
 ) -> torch.Tensor:
     M, K = x.shape
     N = w.shape[0]
-    out = torch.empty((M, N), dtype=x.dtype, device=x.device)
-    # Shared fused activation quant (already the upstream ROCm path), then a
-    # graph-tuned, M-bucketed dot_scaled GEMM. Tiles are pipelined (num_stages>=2,
-    # larger BLOCK_K) and shape-adaptive: large-K prefill uses BLOCK_K=256; short-K
-    # (K=768) widens N. The tile selection (_select_cfg) is the speedup here.
     x_q, x_scale = mxfp8_e4m3_quantize(x)
+    out = torch.empty((M, N), dtype=x.dtype, device=x.device)
     BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages = _select_cfg(M, N, K)
     grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
     _mxfp8_linear_kernel[grid](
@@ -125,10 +122,13 @@ def _mxfp8_dot_scaled_linear(
 def _select_cfg(M, N, K):
     """(BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages) — graph-tuned on gfx950.
 
-    Occupancy- and shape-aware: keyed on the LOCAL (M, N, K), so it adapts to the
-    TP-sharded shapes (e.g. MiniMax-M3 TP=4 vs TP=8, where local N and K differ).
-    BLOCK_K must divide K (the K-loop is unmasked), so every BLOCK_K below is guarded
-    to be K-divisible (served K: 384/768/1024/2048/6144).
+    The M-bucketed, shape-adaptive tile selection here is the speedup over the
+    upstream 2-bucket launcher. Tiles are pipelined (num_stages>=2, larger BLOCK_K)
+    and occupancy- and shape-aware: keyed on the LOCAL (M, N, K), so it adapts to the
+    TP-sharded shapes (e.g. MiniMax-M3 TP=4 vs TP=8, where local N and K differ) —
+    large-K prefill uses BLOCK_K=256; short-K (K=768) widens N. BLOCK_K must divide K
+    (the K-loop is unmasked), so every BLOCK_K below is guarded to be K-divisible
+    (served K: 384/768/1024/2048/6144).
     """
     if M <= 64:
         # decode (M in {1,32,64}): tiny-M GEMV is weight-BW + GPU-OCCUPANCY bound. The
