@@ -111,6 +111,16 @@ class SingleTypeKVCacheManager(ABC):
     def _get_num_evictable_blocks(cls, blocks: Sequence[KVCacheBlock]):
         return sum(blk.ref_cnt == 0 and not blk.is_null for blk in blocks)
 
+    def _has_partial_local_hit(
+        self,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        num_local_computed_tokens: int,
+    ) -> bool:
+        return (
+            len(new_computed_blocks) > 0
+            and num_local_computed_tokens % self.block_size != 0
+        )
+
     def get_num_blocks_to_allocate(
         self,
         request_id: str,
@@ -712,10 +722,10 @@ class FullAttentionManager(SingleTypeKVCacheManager):
                 for computed in computed_blocks:
                     computed.pop()
                 hit_length = len(computed_blocks[0]) * block_size
-            while block_size != alignment_tokens and hit_length % alignment_tokens != 0:
-                for computed in computed_blocks:
-                    computed.pop()
-                hit_length = len(computed_blocks[0]) * block_size
+            # Fine-grained hits land on a hash-block boundary (== alignment_tokens)
+            # by construction, and the eagle pop drops to a full-block boundary, so
+            # the result is always alignment-aligned; no extra trim needed here
+            # (unlike the coarse branch below, which handles alignment > block_size).
             return computed_blocks, hit_length
 
         max_num_blocks = max_length // block_size
@@ -765,10 +775,8 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             num_tokens_main_model,
             apply_admission_cap=apply_admission_cap,
         )
-        if (
-            request_id not in self.num_cached_block
-            and len(new_computed_blocks) > 0
-            and num_local_computed_tokens % self.block_size != 0
+        if request_id not in self.num_cached_block and self._has_partial_local_hit(
+            new_computed_blocks, num_local_computed_tokens
         ):
             num_blocks += 1
         return num_blocks
@@ -786,18 +794,9 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             num_local_computed_tokens,
             num_external_computed_tokens,
         )
-        hit_length = num_local_computed_tokens
-        if (
-            len(new_computed_blocks) > 0
-            and hit_length > 0
-            and hit_length % self.block_size != 0
-        ):
-            block_idx = hit_length // self.block_size
-            source_block = new_computed_blocks[-1]
-            self._partial_hit_reqs[request_id] = (
-                block_idx,
-                source_block,
-            )
+        if self._has_partial_local_hit(new_computed_blocks, num_local_computed_tokens):
+            block_idx = num_local_computed_tokens // self.block_size
+            self._partial_hit_reqs[request_id] = (block_idx, new_computed_blocks[-1])
             self.num_cached_block[request_id] = block_idx
 
     def allocate_new_blocks(
@@ -1434,12 +1433,11 @@ class MambaManager(SingleTypeKVCacheManager):
                 - len(new_computed_blocks)
                 - len(self.req_to_blocks[request_id])
             )
-            has_partial_local_hit = (
-                len(new_computed_blocks) > 0
-                and num_local_computed_tokens % self.block_size != 0
-            )
             has_partial_hit = (
-                has_partial_local_hit or request_id in self._partial_hit_reqs
+                self._has_partial_local_hit(
+                    new_computed_blocks, num_local_computed_tokens
+                )
+                or request_id in self._partial_hit_reqs
             )
             if has_partial_hit:
                 num_new_blocks = max(num_new_blocks, 0) + 1
@@ -1643,10 +1641,8 @@ class MambaManager(SingleTypeKVCacheManager):
             num_local_computed_tokens,
             num_external_computed_tokens,
         )
-        if (
-            self.mamba_cache_mode == "align"
-            and len(new_computed_blocks) > 0
-            and num_local_computed_tokens % self.block_size != 0
+        if self.mamba_cache_mode == "align" and self._has_partial_local_hit(
+            new_computed_blocks, num_local_computed_tokens
         ):
             block_idx = num_local_computed_tokens // self.block_size
             self._partial_hit_reqs[request_id] = (block_idx, new_computed_blocks[-1])
