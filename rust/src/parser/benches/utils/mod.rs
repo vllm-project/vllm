@@ -5,13 +5,12 @@
 
 mod adapter;
 
+pub(super) use adapter::UnifiedToolParserAdapter;
 use futures::FutureExt as _;
 use openai_protocol::common::{Function as OpenAiFunction, Tool as OpenAiTool};
 use tool_parser::traits::ToolParser as ExternalToolParser;
 use vllm_parser::tool::test_utils::collect_stream;
 use vllm_parser::tool::{Tool, ToolParser};
-
-pub(super) use adapter::UnifiedToolParserAdapter;
 
 pub(super) fn openai_tools(tools: &[Tool]) -> Vec<OpenAiTool> {
     tools
