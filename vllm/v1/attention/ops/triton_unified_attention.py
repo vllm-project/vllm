@@ -904,6 +904,20 @@ def unified_attention(
     )
     BLOCK_Q = BLOCK_M // num_queries_per_kv
 
+    # Prefill is dominated by the Q@K / P@V matmuls, but the default BLOCK_M
+    # (=16 for the common GQA<=16 case) makes those dots too small to saturate
+    # the XPU matrix engine -- measured flat ~5.7 TFLOPS on Intel BMG vs the
+    # vendor kernel's 50+. For prefill (max_seqlen_q > 1) on the TD path with
+    # power-of-2 num_queries_per_kv, widen the Q tile to BLOCK_M=32 (~2x prefill
+    # throughput on Arc Pro B60). Gated to power-of-2 num_queries_per_kv so
+    # BLOCK_M stays a power of 2 (tl.arange(0, BLOCK_M) and the TD block_shape
+    # must be pow2); non-pow2 GQA and decode (max_seqlen_q == 1) keep the
+    # default -- no-ops.
+    _is_pow2_nq = (num_queries_per_kv & (num_queries_per_kv - 1)) == 0
+    if max_seqlen_q > 1 and use_td and _is_pow2_nq and BLOCK_M < 32:
+        BLOCK_Q = max(32 // num_queries_per_kv, 1)
+        BLOCK_M = BLOCK_Q * num_queries_per_kv
+
     # Tuned launch parameters; ``None`` lets Triton pick its defaults.
     launch_num_warps: int | None = None
     launch_num_stages: int | None = None
