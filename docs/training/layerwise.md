@@ -58,7 +58,7 @@ class Fp8PerTensorOnlineLinearMethod(LinearMethodBase):
 
 ### High Level Weight Transfer API
 
-The layerwise reloading system is integrated with the post-training weight transfer system. To use layerwise reloading in conjunction to the weight transfer system, follow the examples found [here](../../examples/rl/). Layerwise reloading is controlled by the `WeightTransferUpdateInfo.is_checkpoint_format` flag and is set to `True` by default.
+The layerwise reloading system is integrated with the post-training weight transfer system. To use layerwise reloading in conjunction to the weight transfer system, follow the examples found [here](../../examples/rl/). Checkpoint-format weight transfer engines (e.g. the NCCL and IPC backends) run layerwise reloading automatically inside their `start_weight_update`/`finish_weight_update` lifecycle.
 
 ### Mid Level `reload_weights` API
 
