@@ -33,6 +33,11 @@ def _patch_linear(monkeypatch):
     monkeypatch.setattr(warmup, "LinearBase", torch.nn.Module)
     monkeypatch.setattr(warmup, "Fp8LinearMethod", _FakeFp8LinearMethod)
     monkeypatch.setattr(warmup, "Mxfp8OnlineLinearMethod", _FakeMxfp8OnlineLinearMethod)
+    # The selector reads the DeepGEMM block alignment before any other check;
+    # stub it so the tests do not require the deep_gemm package.
+    monkeypatch.setattr(
+        warmup, "get_mk_alignment_for_contiguous_layout", lambda: (128, 128)
+    )
 
 
 def test_dense_selector_skips_when_auto_disabled(monkeypatch):
@@ -49,9 +54,6 @@ def test_dense_selector_skips_when_auto_disabled(monkeypatch):
 
 def test_dense_selector_runs_when_enabled(monkeypatch):
     _patch_linear(monkeypatch)
-    monkeypatch.setattr(
-        warmup, "get_mk_alignment_for_contiguous_layout", lambda: (128, 128)
-    )
     monkeypatch.setattr(
         warmup,
         "_extract_data_from_linear_base_module",
