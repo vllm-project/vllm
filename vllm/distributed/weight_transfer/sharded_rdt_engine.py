@@ -877,6 +877,12 @@ class ShardedRDTWeightTransferEngine(
             n = prod(shape) or 1
             targets.append(self._dest_arenas[dt][off : off + n].reshape(shape))
 
+        # Stamp pull-start so the NIXL patch can cleave this pull into
+        # produce_wait (blocked on the producer: serve + Ray dispatch + meta
+        # cuda.sync) vs recv_wall (the actual RDMA read). Without this the split
+        # stays dead and only the coarse pull/transfer numbers are available.
+        from vllm.distributed.weight_transfer import _nixl_profile
+        _nixl_profile.mark_pull_start()
         ref = self._produce_method.remote(keys)  # type: ignore[union-attr]
         set_target_for_ref(ref, targets)
         ray.get(ref)  # NIXL reads each slice directly into its arena view
@@ -1136,8 +1142,16 @@ class ShardedRDTWeightTransferEngine(
         results = self._pull_into_registered(keys)
         pull_seconds = time.perf_counter() - _t_pull
         _nixl_delta = _nixl_profile.delta(_nixl_before, _nixl_profile.snapshot())
+        # Bytes this worker actually pulled (for true per-worker BW / straggler
+        # diagnosis: slow worker + more bytes = imbalance; slow + equal bytes =
+        # transport straggler).
+        pull_bytes = sum(prod(self._src_shapes[k]) * self._src_dtypes[k].itemsize
+                         for k in keys)
+
+        from vllm.distributed.weight_transfer._nixl_profile import PhaseTimer
 
         _t_proc = time.perf_counter()
+        ph = PhaseTimer()  # per-phase split of process (materialize/scatter/quant/kernel)
         for g in groups:
             layer = g.layer
             info = LAYERWISE_INFO.get(layer)
@@ -1147,12 +1161,14 @@ class ShardedRDTWeightTransferEngine(
                     "for reload this sync (start_weight_update must run before "
                     "update_weights)."
                 )
-            materialize_layer(layer, info)  # cheap empty HF params
-            for c in g.copies:
-                param = getattr(layer, c.param_name)
-                dst = param.as_strided(c.shape, c.stride, c.offset)
-                with torch._C.DisableTorchFunctionSubclass():
-                    dst.copy_(results[c.src])
+            with ph.phase("materialize_seconds"):
+                materialize_layer(layer, info)  # cheap empty HF params
+            with ph.phase("scatter_seconds"):
+                for c in g.copies:
+                    param = getattr(layer, c.param_name)
+                    dst = param.as_strided(c.shape, c.stride, c.offset)
+                    with torch._C.DisableTorchFunctionSubclass():
+                        dst.copy_(results[c.src])
             # Quantization / repack, exactly as _layerwise_process: run it iff
             # the layer has a QuantizeMethodBase quant method (a no-op for
             # unquantized layers, real work for quantized ones).
@@ -1160,15 +1176,19 @@ class ShardedRDTWeightTransferEngine(
             if isinstance(quant_method, QuantizeMethodBase):
                 if hasattr(layer, "_already_called_process_weights_after_loading"):
                     delattr(layer, "_already_called_process_weights_after_loading")
-                quant_method.process_weights_after_loading(layer)
+                with ph.phase("quant_seconds"):
+                    quant_method.process_weights_after_loading(layer)
             # Copy into persistent kernel storage (preserves cudagraph refs).
             if info.kernel_tensors is not None:
-                _copy_and_restore_kernel_tensors(layer, info)
+                with ph.phase("kernel_copy_seconds"):
+                    _copy_and_restore_kernel_tensors(layer, info)
             # Reset so finalize_layerwise_reload skips this (already-loaded) layer.
             info.reset()
         # The receive arena is reused by the NEXT _replay's NIXL read, which is
         # not ordered against this stream's scatter copies that READ from it.
-        # Sync so those reads finish before the arena can be overwritten.
+        # Sync so those reads finish before the arena can be overwritten. (The
+        # per-phase syncs above already drained the stream; this is a cheap
+        # backstop and covers the no-baked-group path.)
         torch.cuda.synchronize()
         process_seconds = time.perf_counter() - _t_proc
         self._log_timing(
@@ -1178,6 +1198,8 @@ class ShardedRDTWeightTransferEngine(
             1,
             process_seconds,
             _nixl_delta,
+            dict(ph.t),
+            pull_bytes,
         )
 
     # Hardcoded profiling sink: vLLM workers run in an EngineCore subprocess
@@ -1194,14 +1216,22 @@ class ShardedRDTWeightTransferEngine(
         pull_calls: int,
         process_seconds: float,
         nixl_delta: dict | None = None,
+        phase_split: dict | None = None,
+        pull_bytes: int = 0,
     ) -> None:
         """Log a one-line timing summary for one ``receive_weights`` call.
 
         ``mode`` is ``replay`` or ``unbaked``. ``pull_seconds`` is the full
         ``ray.get`` round trip; ``nixl_delta`` (when present) splits that into the
-        consumer-side registration / transfer / deregistration measured by the
-        NIXL patch. ``process_seconds`` is the scatter/materialize/quantize/
-        kernel-copy work after the pull.
+        consumer-side registration / transfer / deregistration AND the
+        produce_wait / recv_wall cleave measured by the NIXL patch.
+        ``process_seconds`` is the scatter/materialize/quantize/kernel-copy work
+        after the pull; ``phase_split`` (when present) breaks it into its
+        per-phase ``*_seconds`` (from the engine's PhaseTimer). ``pull_bytes`` is
+        the bytes THIS worker pulled this call, logged as ``bytes`` so the driver
+        can compute true per-worker bandwidth (bytes/transfer) and distinguish an
+        EP-imbalance straggler (more bytes) from a transport straggler (equal
+        bytes, lower GB/s).
         """
         nixl_delta = nixl_delta or {}
         logger.info(
@@ -1230,7 +1260,9 @@ class ShardedRDTWeightTransferEngine(
             "total": total_seconds,
             "pull": pull_seconds,
             "process": process_seconds,
+            "bytes": pull_bytes,
             **nixl_delta,
+            **(phase_split or {}),
         }
         with open(ShardedRDTWeightTransferEngine._CONSUMER_TIMING_FILE, "a") as f:
             f.write(json.dumps(record) + "\n")

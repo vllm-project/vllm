@@ -47,6 +47,10 @@ from vllm.distributed.weight_transfer.sharded_rdt_engine import (
 from vllm.utils.network_utils import get_open_port
 from vllm.v1.executor import Executor
 
+# Local module (ships with the example via runtime_env working_dir): the
+# two-level critical-path profiler. See rdt_profile.py for the design.
+from rdt_profile import CriticalPathProfiler, make_consumer_file_tasks
+
 MODEL_NAME = "moonshotai/Kimi-K2-Instruct"
 TRAINER_ACTOR_NAME = "sharded_rdt_kimi_trainer"
 RAY_NAMESPACE = "sharded_rdt_kimi_example"
@@ -127,14 +131,25 @@ class KimiTrainWorker:
         self._cache_cond = threading.Condition()
         self._gather_error: BaseException | None = None
 
-        # Producer-side serve arenas, ONE PER DTYPE: clone each produced slice into
-        # a persistent, NIXL-pre-registered arena (registered once) and serve VIEWS,
-        # instead of cloning into fresh buffers (which re-registers ~148k buffers per
-        # iter). Reused across produce calls -- safe because the driver serializes
-        # update_weights (transfer K drains before produce K+1 overwrites). Holds
-        # only one group's SERVED slices (~a couple GB), so memory is bounded.
         from ray.experimental import register_nixl_memory
         self._register_nixl_memory = register_nixl_memory
+
+        # A2: gather DIRECTLY into a persistent, NIXL-registered GATHER BUFFER and
+        # serve names as views into it -- no serve arena, no per-slice copy, and
+        # (via the cached serve plan below) no per-spec op-chain replay on the warm
+        # path. DOUBLE-BUFFERED (slot = group_idx % 2) so gather(N+1) lands in the
+        # other slot while the consumer still RDMA-reads slot N -- preserving the
+        # gather/transfer overlap that hides the all-gather. Per-dtype, high-water
+        # reused, (re)registered on grow. Memory ~= today's transient 2-group peak.
+        self._NSLOTS = 2
+        self._gbuf: list[dict[torch.dtype, torch.Tensor]] = [
+            {} for _ in range(self._NSLOTS)]
+        # Per-group cached serve plan (key = group's sorted name set): the list of
+        # served views (gbuf views auto-refresh as gather rewrites gbuf in place) +
+        # the per-phys data_ptrs it is valid against (cheap O(#phys) revalidation).
+        self._serve_plan: dict[tuple, dict] = {}
+        # Fallback arena (per dtype) for the rare materialize specs (chains that
+        # copy / are not pure views of gbuf -- 0% on Kimi). Registered, reused.
         self._serve_arenas: dict[torch.dtype, torch.Tensor] = {}
 
         # profiling counters
@@ -288,12 +303,17 @@ class KimiTrainWorker:
             self._produce_method_seconds = 0.0
 
     # ---- gather / serve / free ----
-    def gather_layer(self, names):
-        """Gather a layer group: full_tensor() each unique PHYSICAL tensor (stacks +
-        individuals -- ~20/layer instead of ~2300 individual experts), then expose
-        each requested individual name as a view (stack_full[expert_idx], or the
-        individual full tensor). Bounded: the driver frees each group after its
-        update_weights drains.
+    def gather_layer(self, names, slot):
+        """Gather a layer group DIRECTLY into the persistent, NIXL-registered gather
+        buffer for `slot` (= group_idx % 2), then expose each requested name as a
+        VIEW into gbuf (stack[expert_idx] or the individual full tensor).
+
+        Uses all_gather_into_tensor on a uint8 bytecast (dtype-agnostic, fp8-safe)
+        + a [:D] strip of the padded shards -- byte-exact vs full_tensor() (verified
+        in ~/gather_check.py). Serving views straight from gbuf removes the serve
+        arena and the per-slice copy. ~20 all-gathers/layer (stacks + individuals).
+        Bounded: high-water-reused per slot; the driver frees the group (cache refs)
+        after its update_weights drains, and the OTHER slot absorbs the next group.
         """
         try:
             phys_keys: list[str] = []
@@ -303,12 +323,39 @@ class KimiTrainWorker:
                 if pk not in seen:
                     seen.add(pk)
                     phys_keys.append(pk)
-            full_phys = {pk: self._phys[pk].full_tensor() for pk in phys_keys}
+            # byte layout of this group's phys tensors within the slot's per-dtype
+            # gbuf (16-byte aligned offsets so the uint8->dtype view is legal).
+            ALIGN = 16
+            plan: list[tuple] = []   # (pk, dtype, off, glen, full_shape, sp, local)
+            totals: dict[torch.dtype, int] = {}
+            for pk in phys_keys:
+                ph = self._phys[pk]
+                full_shape = tuple(ph.shape)
+                local = ph.to_local()                  # (sp,)+rest, contiguous
+                dtype = local.dtype
+                glen = self.world_size * local.numel() * local.element_size()
+                off = totals.get(dtype, 0)
+                plan.append((pk, dtype, off, glen, full_shape, local.shape[0], local))
+                totals[dtype] = off + ((glen + ALIGN - 1) & ~(ALIGN - 1))
+            for dtype, total in totals.items():
+                b = self._gbuf[slot].get(dtype)
+                if b is None or b.numel() < total:
+                    b = torch.empty(total, dtype=torch.uint8, device="cuda:0")
+                    self._register_nixl_memory(b)     # registered once per (slot,dtype)
+                    self._gbuf[slot][dtype] = b
+            gathered: dict[str, torch.Tensor] = {}
+            for (pk, dtype, off, glen, full_shape, sp, local) in plan:
+                region = self._gbuf[slot][dtype][off:off + glen]   # uint8, contiguous
+                dist.all_gather_into_tensor(
+                    region, local.reshape(-1).view(torch.uint8).contiguous())
+                rest = full_shape[1:]
+                full_padded = region.view(dtype).view((self.world_size * sp,) + rest)
+                gathered[pk] = full_padded[:full_shape[0]]         # logical, gbuf view
             with self._cache_cond:
-                self._cache_phys.update(full_phys)
+                self._cache_phys.update(gathered)
                 for n in names:
                     pk, idx = self._name_to_src[n]
-                    self._cache[n] = full_phys[pk] if idx is None else full_phys[pk][idx]
+                    self._cache[n] = gathered[pk] if idx is None else gathered[pk][idx]
                 self._cache_cond.notify_all()
         except BaseException as e:
             with self._cache_cond:
@@ -319,6 +366,43 @@ class KimiTrainWorker:
     @ray.method(tensor_transport="nixl")
     def rdt_warmup(self):
         return torch.zeros(1, device="cuda:0")
+
+    def _build_serve_plan(self, specs):
+        """Cold path (once per group): replay each op-chain, classify pure-view
+        (served DIRECTLY as a gbuf view) vs materialize (copied into the fallback
+        arena), and cache the served list + the per-phys gbuf data_ptrs the plan is
+        valid against. Purely storage-based -- generalizes to any pure-view chain."""
+        served: list = [None] * len(specs)
+        ptrs: dict[str, int] = {}
+        fb_specs: list = []
+        nbytes = 0
+        for i, (name, chain) in enumerate(specs):
+            t = self._cache[name]
+            for op, args, kw in chain:
+                if op not in _ALLOWED_OPS:
+                    raise ValueError(f"{name!r}: disallowed op {op!r}")
+                t = getattr(t, op)(*args, **dict(kw))
+            nbytes += t.element_size() * t.numel()
+            phys = self._cache_phys[self._name_to_src[name][0]]
+            if t.untyped_storage().data_ptr() == phys.untyped_storage().data_ptr():
+                served[i] = t                                   # pure view into gbuf
+                ptrs[self._name_to_src[name][0]] = phys.data_ptr()
+            else:
+                fb_specs.append((i, name, chain, t.dtype, t.numel()))   # materialize
+        # lay fallback specs into the registered fallback arena (offsets cached)
+        fb: list = []
+        fb_totals: dict[torch.dtype, int] = {}
+        for (i, name, chain, dt, n) in fb_specs:
+            off = fb_totals.get(dt, 0)
+            fb.append((i, name, chain, dt, off, n))
+            fb_totals[dt] = off + ((n + 7) & ~7)
+        for dt, total in fb_totals.items():
+            a = self._serve_arenas.get(dt)
+            if a is None or a.numel() < total:
+                a = torch.empty(total, dtype=dt, device="cuda:0")
+                self._register_nixl_memory(a)
+                self._serve_arenas[dt] = a
+        return {"served": served, "ptrs": ptrs, "fb": fb, "nbytes": nbytes}
 
     @ray.method(tensor_transport="nixl")
     def rdt_produce_weights_batched(self, specs):
@@ -334,49 +418,36 @@ class KimiTrainWorker:
         wait_s = time.perf_counter() - _t_w0
 
         _t_s0 = time.perf_counter()
-        # Replay op-chains -> the produced slice views (into the gather cache).
-        sliced: list[torch.Tensor] = []
-        for name, chain in specs:
+        # Warm path: reuse the cached serve plan. served[i] are gbuf views, which
+        # auto-refresh because gather rewrote gbuf IN PLACE this sync. Revalidate
+        # cheaply (O(#phys), not O(#specs)) via the gbuf data_ptrs -- a high-water
+        # realloc / changed specs forces a rebuild. NO per-spec op-chain replay.
+        gk = tuple(needed)
+        plan = self._serve_plan.get(gk)
+        if not (plan is not None and len(plan["served"]) == len(specs)
+                and all(self._cache_phys[pk].data_ptr() == ptr
+                        for pk, ptr in plan["ptrs"].items())):
+            plan = self._build_serve_plan(specs)
+            self._serve_plan[gk] = plan
+        served = plan["served"]
+        # refresh materialize-fallback specs (0% on Kimi): re-copy from the freshly
+        # gathered source into the registered fallback arena.
+        for (i, name, chain, dt, off, n) in plan["fb"]:
             t = self._cache[name]
             for op, args, kw in chain:
-                if op not in _ALLOWED_OPS:
-                    raise ValueError(f"{name!r}: disallowed op {op!r}")
                 t = getattr(t, op)(*args, **dict(kw))
-            sliced.append(t)
-        # Lay each slice into the persistent per-dtype serve arena and clone in;
-        # serve the arena VIEW (registration reused -> no per-pull register).
-        layout: list[tuple[torch.dtype, int]] = []
-        totals: dict[torch.dtype, int] = {}
-        for t in sliced:
-            dt = t.dtype
-            off = totals.get(dt, 0)
-            layout.append((dt, off))
-            n = t.numel()
-            totals[dt] = off + ((n + 7) & ~7)
-        for dt, total in totals.items():
-            a = self._serve_arenas.get(dt)
-            if a is None or a.numel() < total:
-                a = torch.empty(total, dtype=dt, device="cuda:0")
-                self._register_nixl_memory(a)  # one-time; pinned for process life
-                self._serve_arenas[dt] = a
-        out: list[torch.Tensor] = []
-        nbytes = 0
-        for t, (dt, off) in zip(sliced, layout):
-            n = t.numel()
             view = self._serve_arenas[dt][off:off + n].reshape(t.shape)
             view.copy_(t)
-            out.append(view)
-            nbytes += view.element_size() * n
-        torch.accelerator.synchronize()
+            served[i] = view
         slice_s = time.perf_counter() - _t_s0
         with self._timing_lock:
             self._produce_calls += 1
             self._produce_specs += len(specs)
             self._produce_wait_seconds += wait_s
             self._produce_slice_seconds += slice_s
-            self._produce_bytes += nbytes
+            self._produce_bytes += plan["nbytes"]
             self._produce_method_seconds += time.perf_counter() - _t_m0
-        return out
+        return served
 
     def free_group(self, names):
         with self._cache_cond:
@@ -427,6 +498,15 @@ async def main():
     pg_node_id = next(iter(placement_group_table(trainer_pg)["bundles_to_node_id"].values()))
     fsdp_master_addr = next(n["NodeManagerAddress"] for n in ray.nodes()
                             if n["NodeID"] == pg_node_id)
+
+    # The 8 inference (consumer) workers land on the OTHER GPU node and write
+    # their per-pull timing to that node's local /tmp. With no shared FS and the
+    # driver possibly on the trainer node, collect that file via Ray tasks pinned
+    # to the inference node (falls back to the trainer node in a single-node run).
+    inference_ip = next((n["NodeManagerAddress"] for n in ray.nodes()
+                         if n["Alive"] and n["Resources"].get("GPU", 0) > 0
+                         and n["NodeManagerAddress"] != fsdp_master_addr),
+                        fsdp_master_addr)
 
     @ray.remote(num_cpus=0, scheduling_strategy=PlacementGroupSchedulingStrategy(
         placement_group=trainer_pg))
@@ -481,8 +561,8 @@ async def main():
           f"(max {max(len(g) for g in layer_groups)} params/group).", flush=True)
 
     consumer_file = "/tmp/rdt_profile/consumer.jsonl"
-    os.makedirs(os.path.dirname(consumer_file), exist_ok=True)
-    open(consumer_file, "w").close()
+    read_consumer, truncate_consumer = make_consumer_file_tasks(
+        inference_ip, consumer_file)
 
     print("[sync] init_weight_transfer_engine (bake)...", flush=True)
     _t0 = time.perf_counter()
@@ -497,69 +577,57 @@ async def main():
     await engine.pause_generation(mode="abort")
 
     for sync_iter in range(SYNC_ITERS):
+        # Clean this iter's per-process counters: producer (on trainer actors),
+        # consumer NIXL (on trainer actors), and the consumer jsonl (on the
+        # inference node). After truncate, the file holds exactly this iter.
+        truncate_consumer()
         ray.get([w.reset_produce_timing.remote() for w in workers])
         ray.get([w.reset_nixl_timing.remote() for w in workers])
-        await engine.start_weight_update(is_checkpoint_format=True)
+
+        cp = CriticalPathProfiler(sync_iter)
+        cp.begin()
+        with cp.timed("start_weight_update"):
+            await engine.start_weight_update(is_checkpoint_format=True)
         print(f"[sync] iter {sync_iter}: gather + update_weights...", flush=True)
-        _s0 = time.perf_counter()
-        allgather_s = 0.0
         prev_task = None
         prev_names = None
-        for group_names in layer_groups:
+        for gidx, group_names in enumerate(layer_groups):
             gi = ShardedRDTWeightTransferUpdateInfo(names=group_names)
-            gfuts = [w.gather_layer.remote(group_names) for w in workers]
+            slot = gidx % 2  # double-buffer: gather(N+1) lands in the other slot
+            # Dispatch this group's gather NOW (non-blocking) so it overlaps the
+            # previous group's update_weights, which we await next.
+            gfuts = [w.gather_layer.remote(group_names, slot) for w in workers]
             if prev_task is not None:
-                await prev_task
-                ray.get([w.free_group.remote(prev_names) for w in workers])
-            _tg = time.perf_counter()
-            ray.get(gfuts)
-            allgather_s += time.perf_counter() - _tg
+                with cp.timed("update_weights"):
+                    await prev_task
+                with cp.timed("free_group"):
+                    ray.get([w.free_group.remote(prev_names) for w in workers])
+            # For gidx==0 this is the pipeline fill (nothing overlapped it); for
+            # gidx>0 it is only the residual gather tail not hidden by the await.
+            with cp.timed("gather_fill" if gidx == 0 else "gather_tail"):
+                ray.get(gfuts)
             prev_task = asyncio.create_task(engine.update_weights(
                 WeightTransferUpdateRequest(update_info=asdict(gi))))
             prev_names = group_names
         if prev_task is not None:
-            await prev_task
-            ray.get([w.free_group.remote(prev_names) for w in workers])
-        await engine.finish_weight_update()
-        secs = time.perf_counter() - _s0
+            with cp.timed("update_weights"):
+                await prev_task
+            with cp.timed("free_group"):
+                ray.get([w.free_group.remote(prev_names) for w in workers])
+        with cp.timed("finish_weight_update"):
+            await engine.finish_weight_update()
+        cp.finish()
+
+        # Level-2 attribution inputs (per-process durations, gathered after the
+        # iter): producer execution timing + consumer NIXL counters from the
+        # trainer actors, and the consumer jsonl from the inference node.
         pt = ray.get([w.get_produce_timing.remote() for w in workers])
         nt = ray.get([w.get_nixl_timing.remote() for w in workers])
         gib = sum(p["bytes"] for p in pt) / (1024**3)
-        print(f"[profile] iter {sync_iter}: total={secs:.2f}s  bytes={gib:.2f}GiB  "
-              f"calls={sum(p['calls'] for p in pt)}", flush=True)
-        print(f"[profile]   allgather(overlap'd tail)={allgather_s:.2f}s  "
-              f"producer slice+clone(max)={max(p['slice_seconds'] for p in pt):.2f}s  "
-              f"producer method(max)={max(p['method_seconds'] for p in pt):.2f}s", flush=True)
-        print(f"[profile]   producer NIXL register(max)={max(n['register_seconds'] for n in nt):.2f}s "
-              f"({sum(n['register_calls'] for n in nt)} regs)  "
-              f"extract(max)={max(n['extract_seconds'] for n in nt):.2f}s", flush=True)
-
-    # consumer-side breakdown (warm iters), read from the engine's jsonl
-    try:
-        from collections import defaultdict
-        recs = defaultdict(list)
-        base = []
-        with open(consumer_file) as f:
-            for line in f:
-                r = json.loads(line)
-                (base if r.get("mode") == "baseline" else recs[r["pid"]]).append(r)
-        n_groups = len(layer_groups)
-        agg = dict.fromkeys(("pull", "transfer_seconds", "register_seconds",
-                             "deregister_seconds", "descs_seconds", "process"), 0.0)
-        nreg = cnt = 0
-        for pid, rows in recs.items():
-            warm = rows[n_groups:] if len(rows) > n_groups else rows
-            for r in warm:
-                for k in agg:
-                    agg[k] += r.get(k, 0.0)
-                nreg += r.get("register_calls", 0); cnt += 1
-        if cnt:
-            print(f"[profile] CONSUMER warm (sum over {cnt} pulls, all workers): "
-                  f"pull={agg['pull']:.1f}s transfer={agg['transfer_seconds']:.1f}s "
-                  f"register={agg['register_seconds']:.1f}s ({nreg} regs) "
-                  f"descs={agg['descs_seconds']:.1f}s process={agg['process']:.1f}s", flush=True)
-    except Exception as e:
-        print(f"[profile] consumer read failed: {e!r}", flush=True)
+        print(cp.report(consumer_jsonl=read_consumer(), producer_timings=pt,
+                        producer_nixl=nt, n_groups=len(layer_groups)), flush=True)
+        print(f"[profile]   bytes moved (all producers)={gib:.2f}GiB  "
+              f"produce calls={sum(p['calls'] for p in pt)}", flush=True)
 
     await engine.resume_generation()
     print("[generate] AFTER sync (real weights):", flush=True)

@@ -26,6 +26,35 @@ not part of the final commit.
 
 import threading
 import time
+from collections import defaultdict
+from contextlib import contextmanager
+
+
+class PhaseTimer:
+    """Accumulate wall time per named phase of the consumer's ``_replay`` process
+    loop, syncing CUDA at each phase exit so async GPU work is charged to the
+    phase that launched it (otherwise every phase reads ~0 and the trailing
+    cuda.synchronize eats all the time).
+
+    Benchmark scaffolding: the per-phase syncs serialize phases that would
+    otherwise overlap, so the split SUMS to ``process`` but slightly inflates it
+    vs the un-instrumented path (the doc measured this overhead as negligible).
+    """
+
+    def __init__(self) -> None:
+        self.t: dict = defaultdict(float)
+
+    @contextmanager
+    def phase(self, name: str):
+        import torch
+
+        t0 = time.perf_counter()
+        try:
+            yield
+        finally:
+            torch.cuda.synchronize()
+            self.t[name] += time.perf_counter() - t0
+
 
 # ---- per-process NIXL timing accumulators ----
 _lock = threading.Lock()
@@ -47,7 +76,31 @@ _FIELDS = (
     # per-RPC cuda.synchronize() the producer pays.
     "extract_seconds",
     "extract_calls",
+    # Consumer-side remote-agent (re)binding — the suspected control-plane cost.
+    # Currently UNtimed by Ray, so it lands in the "control-plane residual"
+    # (pull - transfer - register - descs). Time it to split that residual.
+    "add_remote_agent_seconds",
+    "add_remote_agent_calls",
+    "remove_remote_agent_seconds",  # >0 ⇒ producer version churned this pull
+    "remove_remote_agent_calls",
+    "check_calls",  # check_xfer_state invocations; ~(check_calls-1) poll sleeps/pull
+    # DIRECT consumer-side split of pull (no cross-process inference):
+    # produce_wait = time from pull-start (just before produce.remote) to the
+    # NIXL read starting (recv_multiple_tensors entry) = producer execution
+    # (slice+clone) + metadata transport + Ray dispatch, all blocked-on.
+    # recv_wall = the NIXL read itself (transfer + descs + add). pull ≈ produce_wait + recv_wall.
+    "produce_wait_seconds",
+    "produce_wait_calls",
+    "recv_wall_seconds",
 )
+
+# Set by the engine just before it calls produce.remote(); read at recv entry.
+# Pulls are serialized per consumer, so a plain holder (no thread-local) is safe.
+_pull_t0 = [0.0]
+
+
+def mark_pull_start() -> None:
+    _pull_t0[0] = time.perf_counter()
 
 
 def _zero() -> dict:
@@ -93,6 +146,8 @@ def _wrap_agent(agent) -> None:
     orig_get_descs = agent.get_xfer_descs
     orig_ser = agent.get_serialized_descs
     orig_deser = agent.deserialize_descs
+    orig_add_remote = getattr(agent, "add_remote_agent", None)
+    orig_rem_remote = getattr(agent, "remove_remote_agent", None)
 
     def register_memory(*a, **k):
         t0 = time.perf_counter()
@@ -147,11 +202,29 @@ def _wrap_agent(agent) -> None:
         return state
 
     def check_xfer_state(*a, **k):
+        with _lock:
+            _stats["check_calls"] += 1
         state = orig_check(*a, **k)
         if state == "DONE" and getattr(_local, "t0", None) is not None:
             _add("transfer_seconds", time.perf_counter() - _local.t0, "transfer_calls")
             _local.t0 = None
         return state
+
+    def add_remote_agent(*a, **k):
+        t0 = time.perf_counter()
+        try:
+            return orig_add_remote(*a, **k)
+        finally:
+            _add("add_remote_agent_seconds",
+                 time.perf_counter() - t0, "add_remote_agent_calls")
+
+    def remove_remote_agent(*a, **k):
+        t0 = time.perf_counter()
+        try:
+            return orig_rem_remote(*a, **k)
+        finally:
+            _add("remove_remote_agent_seconds",
+                 time.perf_counter() - t0, "remove_remote_agent_calls")
 
     agent.register_memory = register_memory
     agent.deregister_memory = deregister_memory
@@ -161,6 +234,10 @@ def _wrap_agent(agent) -> None:
     agent.deserialize_descs = deserialize_descs
     agent.transfer = transfer
     agent.check_xfer_state = check_xfer_state
+    if orig_add_remote is not None:
+        agent.add_remote_agent = add_remote_agent
+    if orig_rem_remote is not None:
+        agent.remove_remote_agent = remove_remote_agent
     agent._rdt_timed = True
 
 
@@ -205,6 +282,23 @@ def install_nixl_timing() -> bool:
     NixlTensorTransport.extract_tensor_transport_metadata = (
         extract_tensor_transport_metadata
     )
+
+    # Consumer-side: split pull into produce_wait (blocked on producer execution +
+    # metadata + dispatch) vs recv_wall (the NIXL read). recv_multiple_tensors is
+    # invoked by Ray during the engine's ray.get, after produce returns.
+    orig_recv = NixlTensorTransport.recv_multiple_tensors
+
+    def recv_multiple_tensors(self, *a, **k):
+        t_start = time.perf_counter()
+        if _pull_t0[0]:
+            _add("produce_wait_seconds", t_start - _pull_t0[0], "produce_wait_calls")
+            _pull_t0[0] = 0.0
+        try:
+            return orig_recv(self, *a, **k)
+        finally:
+            _add("recv_wall_seconds", time.perf_counter() - t_start)
+
+    NixlTensorTransport.recv_multiple_tensors = recv_multiple_tensors
 
     _patched = True
     return True
