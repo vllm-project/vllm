@@ -66,6 +66,7 @@ from .interfaces import (
     MultiModalEmbeddings,
     SupportsEagle3,
     SupportsLoRA,
+    SupportsMRoPE,
     SupportsPP,
     _require_is_multimodal,
 )
@@ -271,6 +272,8 @@ class Qwen3_5Model(Qwen3NextModel):
 class Qwen3_5ForCausalLMBase(
     nn.Module,
     HasInnerState,
+    IsHybrid,
+    SupportsMRoPE,
     SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
@@ -362,6 +365,18 @@ class Qwen3_5ForCausalLMBase(
             skip_prefixes=["mtp."],
         )
         return loader.load_weights(weights)
+
+    def get_mrope_input_positions(
+        self,
+        input_tokens: list[int],
+        mm_features: list,
+    ) -> tuple[torch.Tensor, int]:
+        # Text-only Qwen3.5 uses the same token position for all M-RoPE axes.
+        seq_len = len(input_tokens)
+        positions = torch.arange(seq_len, dtype=torch.long).unsqueeze(0).expand(
+            3, seq_len
+        )
+        return positions, 1
 
 
 class Qwen3_5ForCausalLM(Qwen3_5ForCausalLMBase):
