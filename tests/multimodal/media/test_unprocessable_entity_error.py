@@ -76,7 +76,8 @@ class TestWrapMediaFetchError:
         wrapped = wrap_error(url, exc)
         assert isinstance(wrapped, VLLMUnprocessableEntityError)
 
-    def test_aiohttp_dns_error_converted(self, wrap_error):
+    def test_aiohttp_dns_error_preserved(self, wrap_error):
+        """DNS errors are transient and should remain as-is for retry."""
         url = "https://nonexistent.example/image.jpg"
         exc = aiohttp.ClientConnectorDNSError(
             connection_key=MagicMock(),
@@ -84,14 +85,17 @@ class TestWrapMediaFetchError:
         )
 
         wrapped = wrap_error(url, exc)
-        assert isinstance(wrapped, VLLMUnprocessableEntityError)
+        assert not isinstance(wrapped, VLLMUnprocessableEntityError)
+        assert isinstance(wrapped, aiohttp.ClientConnectorDNSError)
 
-    def test_aiohttp_connection_error_converted(self, wrap_error):
+    def test_aiohttp_connection_error_preserved(self, wrap_error):
+        """Connection errors are transient and should remain as-is for retry."""
         url = "https://example.com/image.jpg"
         exc = aiohttp.ClientConnectionError("Connection refused")
 
         wrapped = wrap_error(url, exc)
-        assert isinstance(wrapped, VLLMUnprocessableEntityError)
+        assert not isinstance(wrapped, VLLMUnprocessableEntityError)
+        assert isinstance(wrapped, aiohttp.ClientConnectionError)
 
     def test_requests_404_converted(self, wrap_error):
         url = "https://example.com/missing.jpg"
@@ -102,12 +106,14 @@ class TestWrapMediaFetchError:
         wrapped = wrap_error(url, exc)
         assert isinstance(wrapped, VLLMUnprocessableEntityError)
 
-    def test_requests_connection_error_converted(self, wrap_error):
+    def test_requests_connection_error_preserved(self, wrap_error):
+        """Connection errors are transient and should remain as-is for retry."""
         url = "https://example.com/image.jpg"
         exc = requests.exceptions.ConnectionError("Connection refused")
 
         wrapped = wrap_error(url, exc)
-        assert isinstance(wrapped, VLLMUnprocessableEntityError)
+        assert not isinstance(wrapped, VLLMUnprocessableEntityError)
+        assert isinstance(wrapped, requests.exceptions.ConnectionError)
 
     def test_aiohttp_500_preserved(self, wrap_error):
         """5xx errors should remain as server errors."""
@@ -146,19 +152,72 @@ class TestWrapMediaFetchError:
         wrapped = wrap_error(url, exc)
         assert isinstance(wrapped, requests.exceptions.HTTPError)
 
+    def test_aiohttp_408_preserved(self, wrap_error):
+        """408 (timeout) is transient and should remain as-is for retry."""
+        url = "https://example.com/image.jpg"
+        exc = aiohttp.ClientResponseError(
+            request_info=MagicMock(),
+            history=(),
+            status=408,
+            message="Request Timeout",
+        )
+
+        wrapped = wrap_error(url, exc)
+        assert not isinstance(wrapped, VLLMUnprocessableEntityError)
+        assert isinstance(wrapped, aiohttp.ClientResponseError)
+        assert wrapped.status == 408
+
+    def test_aiohttp_429_preserved(self, wrap_error):
+        """429 (rate limit) is transient and should remain as-is for retry."""
+        url = "https://example.com/image.jpg"
+        exc = aiohttp.ClientResponseError(
+            request_info=MagicMock(),
+            history=(),
+            status=429,
+            message="Too Many Requests",
+        )
+
+        wrapped = wrap_error(url, exc)
+        assert not isinstance(wrapped, VLLMUnprocessableEntityError)
+        assert isinstance(wrapped, aiohttp.ClientResponseError)
+        assert wrapped.status == 429
+
+    def test_requests_429_preserved(self, wrap_error):
+        """429 (rate limit) is transient and should remain as-is for retry."""
+        url = "https://example.com/image.jpg"
+        mock_response = MagicMock()
+        mock_response.status_code = 429
+        exc = requests.exceptions.HTTPError(response=mock_response)
+
+        wrapped = wrap_error(url, exc)
+        assert not isinstance(wrapped, VLLMUnprocessableEntityError)
+        assert isinstance(wrapped, requests.exceptions.HTTPError)
+
     def test_value_error_converted(self, wrap_error):
         url = "https://example.com/image.jpg"
         exc = ValueError("Invalid URL")
 
         wrapped = wrap_error(url, exc)
         assert isinstance(wrapped, VLLMUnprocessableEntityError)
+        assert wrapped.parameter == "image_url"
 
-    def test_timeout_converted(self, wrap_error):
+    def test_aiohttp_server_disconnected_preserved(self, wrap_error):
+        """ServerDisconnectedError is transient and should remain as-is for retry."""
+        url = "https://example.com/image.jpg"
+        exc = aiohttp.ServerDisconnectedError("Server disconnected")
+
+        wrapped = wrap_error(url, exc)
+        assert not isinstance(wrapped, VLLMUnprocessableEntityError)
+        assert isinstance(wrapped, aiohttp.ServerDisconnectedError)
+
+    def test_timeout_preserved(self, wrap_error):
+        """Timeouts are transient and should remain as-is for retry."""
         url = "https://example.com/image.jpg"
         exc = TimeoutError("Connection timed out")
 
         wrapped = wrap_error(url, exc)
-        assert isinstance(wrapped, VLLMUnprocessableEntityError)
+        assert not isinstance(wrapped, VLLMUnprocessableEntityError)
+        assert isinstance(wrapped, TimeoutError)
 
     def test_generic_exception_preserved(self, wrap_error):
         url = "https://example.com/image.jpg"
@@ -192,6 +251,7 @@ class TestMediaConnectorErrorHandling:
 
     @pytest.mark.asyncio
     async def test_fetch_image_async_dns_error(self):
+        """DNS errors are transient and should remain as-is for retry."""
         connector = MediaConnector()
 
         with patch.object(
@@ -202,12 +262,12 @@ class TestMediaConnectorErrorHandling:
                 os_error=MagicMock(),
             )
 
-            with pytest.raises(VLLMUnprocessableEntityError) as exc_info:
+            with pytest.raises(aiohttp.ClientConnectorDNSError) as exc_info:
                 await connector.fetch_image_async(
                     "https://nonexistent.example/image.jpg"
                 )
 
-            assert exc_info.value.parameter == "image_url"
+            assert isinstance(exc_info.value, aiohttp.ClientConnectorDNSError)
 
     @pytest.mark.asyncio
     async def test_fetch_image_async_500_preserved(self):
@@ -248,6 +308,7 @@ class TestMediaConnectorErrorHandling:
             assert exc_info.value.parameter == "image_url"
 
     def test_fetch_image_connection_error(self):
+        """Connection errors are transient and should remain as-is for retry."""
         connector = MediaConnector()
 
         with patch.object(
@@ -255,10 +316,10 @@ class TestMediaConnectorErrorHandling:
         ) as mock_get:
             mock_get.side_effect = aiohttp.ClientConnectionError("Connection refused")
 
-            with pytest.raises(VLLMUnprocessableEntityError) as exc_info:
+            with pytest.raises(aiohttp.ClientConnectionError) as exc_info:
                 connector.fetch_image("https://example.com/image.jpg")
 
-            assert exc_info.value.parameter == "image_url"
+            assert isinstance(exc_info.value, aiohttp.ClientConnectionError)
 
 
 class TestErrorResponse:
@@ -306,8 +367,8 @@ class TestIntegration:
         assert response.error.code == 422
         assert response.error.type == "UnprocessableEntityError"
 
-    def test_dns_to_http_422(self):
-        """Verify DNS error results in HTTP 422 response."""
+    def test_dns_remains_retryable(self):
+        """Verify DNS error remains as-is for retry (not converted to 422)."""
         from vllm.multimodal.media.connector import _wrap_media_fetch_error
 
         url = "https://nonexistent.example/image.jpg"
@@ -319,8 +380,8 @@ class TestIntegration:
         wrapped = _wrap_media_fetch_error(url, exc)
         response = create_error_response(wrapped)
 
-        assert response.error.code == 422
-        assert response.error.type == "UnprocessableEntityError"
+        assert response.error.code == 500
+        assert response.error.type == "InternalServerError"
 
     def test_500_remains_500(self):
         """Verify 500 error remains HTTP 500."""

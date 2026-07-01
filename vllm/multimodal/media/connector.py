@@ -54,59 +54,68 @@ def _wrap_media_fetch_error(
 ) -> VLLMUnprocessableEntityError | Exception:
     """Convert media fetch exceptions to VLLMUnprocessableEntityError.
 
-    This handles various HTTP/client errors that indicate the media resource
-    is unavailable (404, 403, DNS failures, connection errors, etc.) and
-    converts them to a 422 Unprocessable Entity error instead of 500.
+    This handles HTTP errors that indicate the media resource is invalid
+    (4xx responses except 408/429, malformed URLs) and converts them to a
+    422 Unprocessable Entity error instead of 500.
+
+    Transient errors (5xx, 408, 429, DNS failures, connection errors,
+    timeouts) are returned as-is to allow retry logic to handle them
+    appropriately.
 
     Returns:
-        VLLMUnprocessableEntityError for client-side errors (4xx, DNS, etc.)
-        Original exception for server-side errors (5xx) or other exceptions
+        VLLMUnprocessableEntityError for permanent client errors (4xx except
+            408/429, invalid URL)
+        Original exception for transient errors (5xx, 408, 429, network blips)
+            or other exceptions
     """
     import aiohttp
     import requests
 
-    # List of exception types that indicate unprocessable content
-    # (client-side issues with the URL/resource, not server errors)
-    unprocessable_types = (
-        # aiohttp client errors (4xx, DNS, connection)
-        aiohttp.ClientResponseError,  # Includes 404, 403, etc.
-        aiohttp.ClientConnectorError,  # Connection refused, etc.
-        aiohttp.ClientConnectorDNSError,  # DNS resolution failed
-        aiohttp.ClientConnectionError,  # Base class for connection errors
-        aiohttp.ServerDisconnectedError,  # Server disconnected
-        # requests errors
-        requests.exceptions.HTTPError,  # HTTP errors (includes 4xx)
-        requests.exceptions.ConnectionError,  # Connection errors
-        requests.exceptions.InvalidURL,  # Invalid URL
-        # Standard library errors
-        ValueError,  # Invalid URL, etc.
-        TimeoutError,  # Connection timeout
-    )
-
-    if isinstance(exc, unprocessable_types):
-        # Check if it's a 5xx error - those should remain server errors
-        if isinstance(exc, aiohttp.ClientResponseError) and exc.status >= 500:
-            # 5xx errors are server-side, keep as-is
+    if isinstance(exc, aiohttp.ClientResponseError):
+        # 408 (timeout) and 429 (rate limit) are transient/retryable
+        if exc.status in (408, 429):
             return exc
-        if (
-            isinstance(exc, requests.exceptions.HTTPError)
-            and exc.response is not None
-            and exc.response.status_code >= 500
-        ):
-            # 5xx errors are server-side, keep as-is
-            return exc
+        # 4xx responses indicate invalid/unavailable resources
+        if exc.status < 500:
+            return VLLMUnprocessableEntityError(
+                f"Failed to fetch media from URL: HTTP {exc.status} error",
+                parameter="image_url",
+                value=url,
+            )
+        # 5xx responses are transient server errors
+        return exc
 
-        # Convert to VLLMUnprocessableEntityError
-        error_msg = str(exc)
-        # Sanitize the error message to remove sensitive information
-        # but keep it informative
+    if isinstance(exc, requests.exceptions.HTTPError):
+        if exc.response is not None:
+            status_code = exc.response.status_code
+            # 408 (timeout) and 429 (rate limit) are transient/retryable
+            if status_code in (408, 429):
+                return exc
+            # 4xx responses indicate invalid/unavailable resources
+            if status_code < 500:
+                return VLLMUnprocessableEntityError(
+                    f"Failed to fetch media from URL: HTTP {status_code} error",
+                    parameter="image_url",
+                    value=url,
+                )
+        # 5xx responses or unknown status are transient
+        return exc
+
+    if isinstance(exc, requests.exceptions.InvalidURL):
         return VLLMUnprocessableEntityError(
-            f"Failed to fetch media from URL: {error_msg}",
+            "Failed to fetch media from URL: Invalid URL format",
             parameter="image_url",
             value=url,
         )
 
-    # For other exceptions, return as-is (will be handled as server errors)
+    if isinstance(exc, ValueError):
+        return VLLMUnprocessableEntityError(
+            "Failed to fetch media from URL: Invalid URL",
+            parameter="image_url",
+            value=url,
+        )
+
+    # Transient errors (DNS, connection, timeout, etc.) remain as-is for retry
     return exc
 
 
