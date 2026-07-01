@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
-from collections.abc import Mapping
-from typing import Any, Literal
+from collections.abc import Iterable, Mapping
+from typing import Any, Literal, cast
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -13,10 +13,15 @@ from vllm.inputs import (
     SingletonInput,
     split_enc_dec_input,
 )
+from vllm.inputs.engine import MM_CACHE_TXN_FIELD
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.multimodal.cache import (
+    MultiModalProcessorCacheTransaction,
+    collect_mm_processor_cache_transactions,
+)
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.multimodal.utils import argsort_mm_positions
@@ -239,6 +244,55 @@ class InputProcessor:
         else:
             request.request_id = f"{request.external_req_id}-{random_uuid():.8}"
 
+    @staticmethod
+    def _pop_mm_cache_txns(
+        processed_inputs: EngineInput,
+    ) -> list[MultiModalProcessorCacheTransaction]:
+        txns: list[MultiModalProcessorCacheTransaction] = []
+
+        def pop_txn(prompt_input: SingletonInput) -> None:
+            if prompt_input["type"] != "multimodal":
+                return
+            txn = cast(dict[str, Any], prompt_input).pop(MM_CACHE_TXN_FIELD, None)
+            if txn is not None:
+                txns.append(cast(MultiModalProcessorCacheTransaction, txn))
+
+        if processed_inputs["type"] == "enc_dec":
+            pop_txn(processed_inputs["encoder_prompt"])
+            pop_txn(processed_inputs["decoder_prompt"])
+        else:
+            pop_txn(processed_inputs)
+
+        return txns
+
+    @staticmethod
+    def _commit_mm_cache_txns(
+        txns: list[MultiModalProcessorCacheTransaction],
+    ) -> None:
+        for txn in txns:
+            txn.commit()
+
+    @staticmethod
+    def _rollback_mm_cache_txns(
+        txns: list[MultiModalProcessorCacheTransaction],
+    ) -> None:
+        for txn in txns:
+            txn.rollback()
+
+    @staticmethod
+    def _dedupe_mm_cache_txns(
+        txns: Iterable[MultiModalProcessorCacheTransaction],
+    ) -> list[MultiModalProcessorCacheTransaction]:
+        deduped: list[MultiModalProcessorCacheTransaction] = []
+        seen_ids = set[int]()
+        for txn in txns:
+            txn_id = id(txn)
+            if txn_id in seen_ids:
+                continue
+            seen_ids.add(txn_id)
+            deduped.append(txn)
+        return deduped
+
     def process_inputs(
         self,
         request_id: str,
@@ -266,6 +320,8 @@ class InputProcessor:
                 f"is out of range [0, {num_ranks})."
             )
 
+        mm_cache_txns: list[MultiModalProcessorCacheTransaction] = []
+
         if isinstance(prompt, dict) and "type" in prompt:
             if tokenization_kwargs:
                 logger.warning_once(
@@ -288,105 +344,119 @@ class InputProcessor:
             if arrival_time is None:
                 arrival_time = time.time()
 
-            processed_inputs = self.input_preprocessor.preprocess(
-                prompt,
-                tokenization_kwargs=tokenization_kwargs,
-            )
+            try:
+                with collect_mm_processor_cache_transactions() as mm_cache_txns:
+                    processed_inputs = self.input_preprocessor.preprocess(
+                        prompt,
+                        tokenization_kwargs=tokenization_kwargs,
+                    )
+            except Exception:
+                self._rollback_mm_cache_txns(mm_cache_txns)
+                raise
 
+        mm_cache_txns = self._dedupe_mm_cache_txns(
+            [*mm_cache_txns, *self._pop_mm_cache_txns(processed_inputs)]
+        )
         try:
             current_platform.validate_request(processed_inputs, params)
             encoder_inputs, decoder_inputs = split_enc_dec_input(processed_inputs)
             self._validate_model_inputs(encoder_inputs, decoder_inputs)
+
+            # Mypy can be conservative for TypedDict unions; normalize access.
+            if decoder_inputs["type"] == "embeds":
+                prompt_embeds = decoder_inputs["prompt_embeds"]
+                prompt_token_ids = decoder_inputs.get("prompt_token_ids")
+                prompt_is_token_ids = decoder_inputs.get("is_token_ids")
+            else:
+                prompt_token_ids = decoder_inputs["prompt_token_ids"]
+                prompt_embeds = None
+                prompt_is_token_ids = None
+
+            sampling_params = None
+            pooling_params = None
+            if isinstance(params, SamplingParams):
+                # TODO: can we avoid cloning here in multiproc case?
+                sampling_params = params.clone()
+                # If unset max tokens, then generate up to the max_model_len.
+                if sampling_params.max_tokens is None:
+                    seq_len = length_from_prompt_token_ids_or_embeds(
+                        prompt_token_ids, prompt_embeds
+                    )
+                    sampling_params.max_tokens = (
+                        self.model_config.max_model_len - seq_len
+                    )
+
+                sampling_params.update_from_generation_config(
+                    self.generation_config_fields,
+                    self.renderer.get_eos_token_id(),
+                )
+                if self.tokenizer is not None:
+                    sampling_params.update_from_tokenizer(self.tokenizer)
+            else:
+                pooling_params = params.clone()
+
+            # Multimodal related.
+            mm_features: list[MultiModalFeatureSpec] | None = None
+
+            if decoder_inputs["type"] == "multimodal":
+                decoder_mm_inputs = decoder_inputs["mm_kwargs"]
+                decoder_mm_positions = decoder_inputs["mm_placeholders"]
+                decoder_mm_hashes = decoder_inputs["mm_hashes"]
+
+                if not all(
+                    isinstance(leaf, str)
+                    for leaf in json_iter_leaves(decoder_mm_hashes)
+                ):
+                    raise ValueError(
+                        f"mm_hashes must contain only strings, got: "
+                        f"{decoder_mm_hashes}. This is likely due to an "
+                        "incorrect custom implementation of "
+                        "MultiModalProcessor.apply method."
+                    )
+
+                # Merge and flatten multimodal placeholders, hashes and inputs
+                # from dictionaries to lists, and sort them by each item's
+                # position in the input sequence.
+                sorted_mm_idxs = argsort_mm_positions(decoder_mm_positions)
+
+                mm_features = []
+                for modality, idx in sorted_mm_idxs:
+                    base_mm_hash = decoder_mm_hashes[modality][idx]
+                    mm_features.append(
+                        MultiModalFeatureSpec(
+                            data=decoder_mm_inputs[modality][idx],
+                            modality=modality,
+                            identifier=self._get_mm_identifier(
+                                base_mm_hash,
+                                lora_request,
+                            ),
+                            mm_position=decoder_mm_positions[modality][idx],
+                            mm_hash=base_mm_hash,
+                        )
+                    )
+
+            request = EngineCoreRequest(
+                request_id=request_id,
+                prompt_token_ids=prompt_token_ids,
+                prompt_embeds=prompt_embeds,
+                prompt_is_token_ids=prompt_is_token_ids,
+                mm_features=mm_features,
+                sampling_params=sampling_params,
+                pooling_params=pooling_params,
+                arrival_time=arrival_time,
+                lora_request=lora_request,
+                cache_salt=decoder_inputs.get("cache_salt"),
+                priority=priority,
+                data_parallel_rank=data_parallel_rank,
+                trace_headers=trace_headers,
+                resumable=resumable,
+            )
         except Exception:
-            if self.renderer.mm_processor_cache is not None:
-                self.renderer.clear_mm_cache()
+            self._rollback_mm_cache_txns(mm_cache_txns)
             raise
 
-        # Mypy can be conservative for TypedDict unions; normalize access.
-        if decoder_inputs["type"] == "embeds":
-            prompt_embeds = decoder_inputs["prompt_embeds"]
-            prompt_token_ids = decoder_inputs.get("prompt_token_ids")
-            prompt_is_token_ids = decoder_inputs.get("is_token_ids")
-        else:
-            prompt_token_ids = decoder_inputs["prompt_token_ids"]
-            prompt_embeds = None
-            prompt_is_token_ids = None
-
-        sampling_params = None
-        pooling_params = None
-        if isinstance(params, SamplingParams):
-            # TODO: can we avoid cloning here in multiproc case?
-            sampling_params = params.clone()
-            # If unset max tokens, then generate up to the max_model_len.
-            if sampling_params.max_tokens is None:
-                seq_len = length_from_prompt_token_ids_or_embeds(
-                    prompt_token_ids, prompt_embeds
-                )
-                sampling_params.max_tokens = self.model_config.max_model_len - seq_len
-
-            sampling_params.update_from_generation_config(
-                self.generation_config_fields,
-                self.renderer.get_eos_token_id(),
-            )
-            if self.tokenizer is not None:
-                sampling_params.update_from_tokenizer(self.tokenizer)
-        else:
-            pooling_params = params.clone()
-
-        # Multimodal related.
-        mm_features: list[MultiModalFeatureSpec] | None = None
-
-        if decoder_inputs["type"] == "multimodal":
-            decoder_mm_inputs = decoder_inputs["mm_kwargs"]
-            decoder_mm_positions = decoder_inputs["mm_placeholders"]
-            decoder_mm_hashes = decoder_inputs["mm_hashes"]
-
-            if not all(
-                isinstance(leaf, str) for leaf in json_iter_leaves(decoder_mm_hashes)
-            ):
-                raise ValueError(
-                    f"mm_hashes must contain only strings, got: {decoder_mm_hashes}. "
-                    "This is likely due to an incorrect custom implementation of "
-                    "MultiModalProcessor.apply method."
-                )
-
-            # Merge and flatten multimodal placeholders, hashes and inputs
-            # from dictionaries to lists, and sort them by each item's position
-            # in the input sequence.
-            sorted_mm_idxs = argsort_mm_positions(decoder_mm_positions)
-
-            mm_features = []
-            for modality, idx in sorted_mm_idxs:
-                base_mm_hash = decoder_mm_hashes[modality][idx]
-                mm_features.append(
-                    MultiModalFeatureSpec(
-                        data=decoder_mm_inputs[modality][idx],
-                        modality=modality,
-                        identifier=self._get_mm_identifier(
-                            base_mm_hash,
-                            lora_request,
-                        ),
-                        mm_position=decoder_mm_positions[modality][idx],
-                        mm_hash=base_mm_hash,
-                    )
-                )
-
-        return EngineCoreRequest(
-            request_id=request_id,
-            prompt_token_ids=prompt_token_ids,
-            prompt_embeds=prompt_embeds,
-            prompt_is_token_ids=prompt_is_token_ids,
-            mm_features=mm_features,
-            sampling_params=sampling_params,
-            pooling_params=pooling_params,
-            arrival_time=arrival_time,
-            lora_request=lora_request,
-            cache_salt=decoder_inputs.get("cache_salt"),
-            priority=priority,
-            data_parallel_rank=data_parallel_rank,
-            trace_headers=trace_headers,
-            resumable=resumable,
-        )
+        self._commit_mm_cache_txns(mm_cache_txns)
+        return request
 
     def _validate_prompt_len(
         self,
