@@ -200,9 +200,7 @@ def test_gsm8k_offloading_correctness(cfg: OffloadingModelConfig):
                 f"latency={results['latency']:.1f}s"
             )
 
-            assert results["accuracy"] >= (
-                cfg.accuracy_threshold - cfg.tolerance
-            ), (
+            assert results["accuracy"] >= (cfg.accuracy_threshold - cfg.tolerance), (
                 f"GSM8K run {run_idx}/2 accuracy "
                 f"{results['accuracy']:.4f} below "
                 f"{cfg.accuracy_threshold - cfg.tolerance:.4f}"
