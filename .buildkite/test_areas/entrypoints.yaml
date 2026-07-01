@@ -29,6 +29,8 @@ steps:
   mirror:
     amd:
       device: mi325_1
+      # TODO(akaratza): Test after Torch >= 2.12 bump
+      soft_fail: true
       depends_on:
       - image-build-amd
 

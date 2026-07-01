@@ -292,6 +292,76 @@ def test_fused_norm_rope_no_indexer(num_tokens: int):
     assert (topk == 7).all(), "topk buffer should be untouched on shared layer"
 
 
+@pytest.mark.parametrize("num_tokens", [1, 4, 17, 512])
+def test_fused_norm_rope_ds_mla(num_tokens: int):
+    """fp8_ds_mla MLA cache layout (FlashMLA sparse, bf16-query path; SM90/SM100).
+
+    Per-token 656-byte entry: 512 fp8 NoPE (4 per-128 tiles, dynamic float32
+    scale) | 4 float32 scales | 64 bf16 (unquantized) RoPE.
+    """
+    torch.manual_seed(5)
+    dev = "cuda"
+    max_pos = 8192
+    pos = torch.arange(num_tokens, device=dev, dtype=torch.int64) % max_pos
+
+    q_c = torch.randn(num_tokens, Q_LORA, device=dev, dtype=torch.bfloat16)
+    kv_c = torch.randn(num_tokens, KV_LORA, device=dev, dtype=torch.bfloat16)
+    k_pe = torch.randn(num_tokens, ROPE_DIM, device=dev, dtype=torch.bfloat16)
+    qw = torch.randn(Q_LORA, device=dev, dtype=torch.bfloat16)
+    kvw = torch.randn(KV_LORA, device=dev, dtype=torch.bfloat16)
+    mla_cos_sin = make_cos_sin(max_pos, ROPE_DIM, dev)
+
+    bs = max_pos
+    mla_cache = torch.zeros(1, bs, 656, device=dev, dtype=torch.uint8)
+    slot = torch.arange(num_tokens, device=dev, dtype=torch.int64)
+    topk = torch.full((num_tokens, 2048), 7, device=dev, dtype=torch.int32)
+
+    q_out = K.fused_norm_rope(
+        pos,
+        q_c,
+        qw,
+        EPS,
+        kv_c,
+        kvw,
+        EPS,
+        k_pe,
+        mla_cos_sin,
+        None,
+        None,
+        None,
+        EPS,
+        None,
+        topk,
+        slot_mapping=slot,
+        indexer_k_cache=None,
+        mla_kv_cache=mla_cache,
+        mla_kv_cache_dtype="fp8_ds_mla",
+        mla_k_scale=None,
+        has_indexer=False,
+        index_rope_interleave=False,
+    )
+
+    assert_bf16(q_out, rms_norm(q_c, qw), "q_c rmsnorm (ds_mla)")
+
+    kv_ref = rms_norm(kv_c, kvw)  # [N, 512] fp32
+    kpe_ref = rope(k_pe.float(), pos, mla_cos_sin, interleave=True)  # [N, 64]
+    tiles = kv_ref.view(num_tokens, 4, 128)
+    ref_scale = torch.clamp(tiles.abs().amax(dim=-1) / FP8_MAX, min=1.1754944e-38)
+    ref_nope = (tiles / ref_scale[..., None]).reshape(num_tokens, KV_LORA).to(FP8)
+
+    cache = mla_cache[0, :num_tokens]  # [N, 656] uint8
+    nope = cache[:, :KV_LORA].view(FP8)
+    scales = cache.view(torch.float32)[:, KV_LORA // 4 : KV_LORA // 4 + 4]
+    rope_off = KV_LORA // 2 + 8
+    rope_vals = cache.view(torch.bfloat16)[:, rope_off : rope_off + ROPE_DIM]
+
+    torch.testing.assert_close(scales, ref_scale, rtol=1e-2, atol=1e-6)
+    assert_fp8(nope, ref_nope, "ds_mla NoPE fp8")
+    assert_bf16(rope_vals, kpe_ref, "ds_mla RoPE bf16")
+    # No indexer on this call: top-k buffer must be untouched.
+    assert (topk == 7).all(), "topk buffer should be untouched (no indexer)"
+
+
 # ── fused_q ──────────────────────────────────────────────────────────────────
 
 
@@ -398,6 +468,75 @@ def test_fused_q_no_indexer(num_tokens: int):
         interleave=True,
     )
     assert_fp8(mqa[:, :, KV_LORA:], (qpe_ref / s).to(FP8), "mqa q_pe")
+
+
+@pytest.mark.parametrize("num_tokens", [1, 17, 512])
+@pytest.mark.parametrize("has_indexer", [True, False])
+def test_fused_q_bf16_query(num_tokens: int, has_indexer: bool):
+    """bf16-query path (FlashMLA sparse, SM90/SM100): only the RoPE'd q_pe is
+    produced (bf16, unquantized); ql_nope is consumed directly by the caller."""
+    torch.manual_seed(6)
+    dev = "cuda"
+    max_pos = 8192
+    pos = torch.arange(num_tokens, device=dev, dtype=torch.int64) % max_pos
+
+    q_pe = torch.randn(
+        num_tokens, NUM_HEADS, ROPE_DIM, device=dev, dtype=torch.bfloat16
+    )
+    ql_nope = torch.randn(
+        num_tokens, NUM_HEADS, KV_LORA, device=dev, dtype=torch.bfloat16
+    )
+    q_scale = torch.tensor([0.37], device=dev, dtype=torch.float32)
+    q_cos_sin = make_cos_sin(max_pos, ROPE_DIM, dev)
+
+    index_q = index_w = idx_cos_sin = None
+    if has_indexer:
+        index_q = torch.randn(
+            num_tokens, INDEX_HEADS, INDEX_HEAD_DIM, device=dev, dtype=torch.bfloat16
+        )
+        index_w = torch.randn(num_tokens, INDEX_HEADS, device=dev, dtype=torch.float32)
+        idx_cos_sin = make_cos_sin(max_pos, ROPE_DIM, dev)
+
+    iq_fp8, iw_out, q_pe_out = K.fused_q(
+        pos,
+        q_pe,
+        q_cos_sin,
+        index_q,
+        idx_cos_sin,
+        ql_nope,
+        q_scale,
+        index_w,
+        INDEX_HEAD_DIM**-0.5,
+        INDEX_HEADS**-0.5,
+        has_indexer=has_indexer,
+        index_rope_interleave=False,
+        quantize_mqa=False,
+    )
+
+    # MQA query: only the RoPE'd q_pe, bf16, unquantized.
+    assert q_pe_out.dtype == torch.bfloat16
+    assert q_pe_out.shape == (num_tokens, NUM_HEADS, ROPE_DIM)
+    qpe_ref = rope(
+        q_pe.float(),
+        pos.unsqueeze(-1).expand(num_tokens, NUM_HEADS),
+        q_cos_sin,
+        interleave=True,
+    )
+    assert_bf16(q_pe_out, qpe_ref, "bf16 q_pe RoPE")
+
+    # Indexer-Q is unchanged on this path (still UE8M0 fp8 + folded weights).
+    if has_indexer:
+        assert index_q is not None
+        iq_ref = rope(
+            index_q.float(),
+            pos.unsqueeze(-1).expand(num_tokens, INDEX_HEADS),
+            idx_cos_sin,
+            interleave=False,
+        )
+        q_ref, scale_ref = ue8m0_quant(iq_ref)
+        assert_fp8(iq_fp8, q_ref, "indexer-Q fp8 (bf16-query path)")
+        iw_ref = index_w * scale_ref * (INDEX_HEAD_DIM**-0.5) * (INDEX_HEADS**-0.5)
+        torch.testing.assert_close(iw_out, iw_ref, rtol=1e-3, atol=1e-3)
 
 
 # ── fused_eh_norm (MTP) ──────────────────────────────────────────────────────

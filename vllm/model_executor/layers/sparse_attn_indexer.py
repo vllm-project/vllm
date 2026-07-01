@@ -7,6 +7,8 @@ import torch
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.config import get_current_vllm_config
+from vllm.distributed import get_dcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
@@ -22,6 +24,7 @@ from vllm.utils.deep_gemm import (
     fp8_fp4_paged_mqa_topk_indices,
     has_deep_gemm,
 )
+from vllm.utils.import_utils import has_cutedsl
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
@@ -94,6 +97,85 @@ def _sparse_indexer_requires_deep_gemm(use_fp4_cache: bool = False) -> bool:
         # the generic DeepGEMM missing-dependency error.
         return use_fp4_cache
     return True
+
+
+def _assert_cutedsl_dcp_merge_supported(
+    logits: torch.Tensor,
+    topk_indices: torch.Tensor,
+    k: int,
+) -> None:
+    # The DCP merge only supports the CuteDSL path (Triton pack kernel + CuteDSL
+    # stable-topk selector); there is no PyTorch fallback. The first cut targets
+    # Blackwell/Hopper with index_topk in (512, 1024, 2048) (the selector's radix
+    # sizing); the Triton pack itself has no shape/topk constraints.
+    if not has_cutedsl():
+        raise RuntimeError(
+            "DCP sparse-indexer merge requires CuteDSL; install it or disable DCP."
+        )
+    if logits.device.type != "cuda":
+        raise RuntimeError("DCP sparse-indexer merge requires CUDA tensors.")
+    if logits.dtype != torch.float32 or topk_indices.dtype != torch.int32:
+        raise RuntimeError(
+            "DCP sparse-indexer merge requires fp32 logits and int32 indices."
+        )
+    if k not in (512, 1024, 2048):
+        raise RuntimeError(
+            f"DCP sparse-indexer merge requires index_topk in (512, 1024, 2048); "
+            f"got {k}."
+        )
+
+
+def _merge_dcp_topk_global(
+    logits: torch.Tensor,
+    topk_indices: torch.Tensor,
+    topk_tokens: int,
+    dcp_rank: int,
+    dcp_world_size: int,
+    cp_interleave: int,
+    row_starts: torch.Tensor | None = None,
+) -> None:
+    """Merge each DCP rank's local top-K into the global top-K.
+
+    ``topk_indices`` are this rank's local top-K positions into its 1/N KV
+    shard. A token in the global top-K must also be in its owning rank's local
+    top-K (at most ``topk_tokens - 1`` tokens rank globally above it, hence at
+    most that many on its own rank), so exchanging only the per-rank local
+    candidates is exact -- equivalent to all-gathering the full logit matrix,
+    but it ships ``dcp_world_size * topk_tokens`` candidates instead of the whole
+    score row. Overwrites ``topk_indices`` with global token ids (``-1`` for
+    padding); the attention backend localizes them back to physical slots per
+    rank.
+    """
+    if dcp_world_size <= 1:
+        return
+
+    # CuteDSL-only path (no PyTorch fallback): Triton-pack each rank's
+    # (score, global_id) candidates on-device, all-gather, then the CuteDSL
+    # stable-topk selector.
+    _assert_cutedsl_dcp_merge_supported(logits, topk_indices, topk_tokens)
+    from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
+        pack_dcp_topk_candidates_cutedsl,
+        stable_topk_from_gathered_candidates_cutedsl,
+    )
+
+    packed = torch.empty(
+        (*topk_indices.shape, 2),
+        dtype=torch.float32,
+        device=topk_indices.device,
+    )
+    pack_dcp_topk_candidates_cutedsl(
+        logits,
+        topk_indices,
+        packed,
+        dcp_rank,
+        dcp_world_size,
+        cp_interleave,
+        row_starts,
+    )
+    gathered = get_dcp_group().all_gather(packed, dim=1)
+    stable_topk_from_gathered_candidates_cutedsl(
+        gathered, topk_tokens, out=topk_indices
+    )
 
 
 @triton.jit
@@ -282,6 +364,9 @@ def sparse_attn_indexer(
     topk_indices_buffer: torch.Tensor,
     skip_k_cache_insert: bool,
     use_fp4_cache: bool = False,
+    dcp_rank: int = 0,
+    dcp_world_size: int = 1,
+    cp_kv_cache_interleave_size: int = 1,
     skip_topk_buffer_clear: bool = False,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
@@ -383,16 +468,18 @@ def sparse_attn_indexer(
             scales_spec,
         )
         for chunk in prefill_metadata.chunks:
-            k_quant = k_quant_full[: chunk.total_seq_lens]
-            k_scale = k_scale_full[: chunk.total_seq_lens]
-
-            if not chunk.skip_kv_gather:
+            cu_seqlen_ks = chunk.cu_seqlen_ks
+            cu_seqlen_ke = chunk.cu_seqlen_ke
+            assert chunk.local_cu_seq_lens is not None
+            k_quant = k_quant_full[: chunk.max_local_total_seq_lens]
+            k_scale = k_scale_full[: chunk.max_local_total_seq_lens]
+            if not chunk.skip_kv_gather and chunk.local_total_seq_lens > 0:
                 ops.cp_gather_indexer_k_quant_cache(
                     kv_cache,
                     k_quant,
                     k_scale,
                     chunk.block_table,
-                    chunk.cu_seq_lens,
+                    chunk.local_cu_seq_lens,
                 )
 
             q_slice = q_quant[chunk.token_start : chunk.token_end]
@@ -401,6 +488,10 @@ def sparse_attn_indexer(
                 if q_scale is not None
                 else None
             )
+            topk_indices = topk_indices_buffer[
+                chunk.token_start : chunk.token_end, :topk_tokens
+            ]
+
             # DeepGEMM scalar-type tags (zero-copy): MXFP4 values → int8
             # (kPackedFP4), scales → int32 squeezed to 1-D kv_sf / 2-D q_sf.
             if use_fp4_cache:
@@ -411,50 +502,71 @@ def sparse_attn_indexer(
                 q_slice_cast = q_slice
                 k_quant_cast = k_quant
                 k_scale_cast = k_scale.view(torch.float32).squeeze(-1)
-            topk_indices = topk_indices_buffer[
-                chunk.token_start : chunk.token_end, :topk_tokens
-            ]
-            if not current_platform.is_xpu() and fp8_fp4_mqa_topk_indices(
-                (q_slice_cast, q_scale_slice),
-                (k_quant_cast, k_scale_cast),
-                weights[chunk.token_start : chunk.token_end],
-                chunk.cu_seqlen_ks,
-                chunk.cu_seqlen_ke,
-                topk_indices,
-            ):
-                continue
 
-            if current_platform.is_xpu():
-                if q_scale_slice is not None:
-                    raise RuntimeError("XPU fp8_mqa_logits does not support FP4 Q")
-                logits = torch.ops.vllm.xpu_fp8_mqa_logits(
-                    q_slice_cast,
-                    k_quant_cast,
-                    k_scale_cast,
-                    weights[chunk.token_start : chunk.token_end],
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
-                )
-            else:
-                logits = fp8_fp4_mqa_logits(
+            # OURS fused DeepGEMM fast-path: writes topk directly and skips the
+            # separate logits + top_k_per_row_prefill. Not available on XPU, and
+            # bypassed for empty local shards / when a DCP merge is required (the
+            # merge needs the dense logit row, which the fused kernel does not
+            # materialize).
+            if (
+                dcp_world_size <= 1
+                and chunk.local_total_seq_lens > 0
+                and not current_platform.is_xpu()
+                and fp8_fp4_mqa_topk_indices(
                     (q_slice_cast, q_scale_slice),
                     (k_quant_cast, k_scale_cast),
                     weights[chunk.token_start : chunk.token_end],
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
-                    clean_logits=False,
+                    cu_seqlen_ks,
+                    cu_seqlen_ke,
+                    topk_indices,
                 )
-            num_rows = logits.shape[0]
+            ):
+                continue
 
-            ops.top_k_per_row_prefill(
+            if chunk.local_total_seq_lens == 0:
+                logits = q_slice.new_empty((q_slice.shape[0], 0), dtype=torch.float32)
+                topk_indices.fill_(-1)
+            else:
+                if current_platform.is_xpu():
+                    if q_scale_slice is not None:
+                        raise RuntimeError("XPU fp8_mqa_logits does not support FP4 Q")
+                    logits = torch.ops.vllm.xpu_fp8_mqa_logits(
+                        q_slice_cast,
+                        k_quant_cast,
+                        k_scale_cast,
+                        weights[chunk.token_start : chunk.token_end],
+                        cu_seqlen_ks,
+                        cu_seqlen_ke,
+                    )
+                else:
+                    logits = fp8_fp4_mqa_logits(
+                        (q_slice_cast, q_scale_slice),
+                        (k_quant_cast, k_scale_cast),
+                        weights[chunk.token_start : chunk.token_end],
+                        cu_seqlen_ks,
+                        cu_seqlen_ke,
+                        clean_logits=False,
+                    )
+                num_rows = logits.shape[0]
+                ops.top_k_per_row_prefill(
+                    logits,
+                    cu_seqlen_ks,
+                    cu_seqlen_ke,
+                    topk_indices,
+                    num_rows,
+                    logits.stride(0),
+                    logits.stride(1),
+                    topk_tokens,
+                )
+
+            _merge_dcp_topk_global(
                 logits,
-                chunk.cu_seqlen_ks,
-                chunk.cu_seqlen_ke,
                 topk_indices,
-                num_rows,
-                logits.stride(0),
-                logits.stride(1),
                 topk_tokens,
+                dcp_rank,
+                dcp_world_size,
+                cp_kv_cache_interleave_size,
+                row_starts=chunk.cu_seqlen_ks,
             )
 
     if has_decode:
@@ -633,6 +745,16 @@ def sparse_attn_indexer(
                     topk_tokens,
                 )
 
+        if decode_metadata.global_seq_lens is not None:
+            _merge_dcp_topk_global(
+                logits,
+                topk_indices,
+                topk_tokens,
+                dcp_rank,
+                dcp_world_size,
+                cp_kv_cache_interleave_size,
+            )
+
         if decode_metadata.requires_padding:
             # if padded, we need to unpack
             # the topk indices removing padded tokens
@@ -664,6 +786,9 @@ def sparse_attn_indexer_fake(
     topk_indices_buffer: torch.Tensor | None,
     skip_k_cache_insert: bool,
     use_fp4_cache: bool = False,
+    dcp_rank: int = 0,
+    dcp_world_size: int = 1,
+    cp_kv_cache_interleave_size: int = 1,
     skip_topk_buffer_clear: bool = False,
 ) -> torch.Tensor:
     return topk_indices_buffer
@@ -715,6 +840,13 @@ class SparseAttnIndexer(CustomOp):
         self.topk_indices_buffer = topk_indices_buffer
         self.skip_k_cache_insert = skip_k_cache_insert
         self.use_fp4_cache = use_fp4_cache
+        # DCP scalars are constant for the run; resolve them here (config is set
+        # during model construction) and pass them into the custom op, rather
+        # than threading them through per-step metadata.
+        parallel_config = get_current_vllm_config().parallel_config
+        self.dcp_world_size = parallel_config.decode_context_parallel_size
+        self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
+        self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
         if _sparse_indexer_requires_deep_gemm(use_fp4_cache) and not has_deep_gemm():
             raise RuntimeError(
                 "Sparse Attention Indexer CUDA op requires DeepGEMM support in "
@@ -768,6 +900,9 @@ class SparseAttnIndexer(CustomOp):
             self.topk_indices_buffer,
             self.skip_k_cache_insert,
             self.use_fp4_cache,
+            self.dcp_rank,
+            self.dcp_world_size,
+            self.cp_kv_cache_interleave_size,
         )
 
     def forward_xpu(
