@@ -43,8 +43,7 @@ class AsyncScheduler(Scheduler):
             # We will update the actual spec token ids in the worker process.
             request.spec_token_ids = self._spec_token_placeholders
 
-            # Structured outputs need this decode spacing on V1 too (see #45014).
-            if self.use_v2_model_runner or request.use_structured_output:
+            if self.use_v2_model_runner:
                 # Set the next step index in which this request is eligible to be
                 # scheduled for decode (for PP microbatching).
                 request.next_decode_eligible_step = self.current_step + self.pp_size
