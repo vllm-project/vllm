@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{Level, debug, trace};
 use vllm_engine_core_client::AbortCause;
 use vllm_engine_core_client::protocol::StopReason;
-use vllm_llm::{FinishReason, GenerateOutput};
+use vllm_llm::{FinishReason, GenerateOutput, TokenUsage};
 use vllm_tokenizer::{DynTokenizer, IncrementalDecoder};
 
 use super::logprobs::{
@@ -40,8 +40,7 @@ impl Default for TextDecodeOptions {
 /// Terminal metadata carried on the final [`DecodedTextEvent`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct Finished {
-    pub prompt_token_count: usize,
-    pub output_token_count: usize,
+    pub usage: TokenUsage,
     pub finish_reason: FinishReason,
     /// Connector-specific KV transfer parameters for disaggregated serving.
     pub kv_transfer_params: Option<serde_json::Value>,
@@ -98,12 +97,14 @@ pub async fn decoded_text_event_stream(
 ) -> crate::Result<()> {
     let mut decoder: Option<Box<dyn IncrementalDecoder>> = None;
     let mut prompt_token_count = 0_usize;
+    let mut cached_token_count = 0_usize;
     let mut token_ids = Vec::new();
     let mut output_token_count: usize = 0;
     let mut logprobs: Option<DecodedLogprobs> = None;
 
     while let Some(next) = raw_stream.next().await {
         let output = next?;
+        cached_token_count = cached_token_count.max(output.cached_token_count);
 
         // If it's the first output, init states and yield `Start` event.
         if decoder.is_none() {
@@ -267,8 +268,11 @@ pub async fn decoded_text_event_stream(
                 token_ids,
                 logprobs,
                 finished: Some(Finished {
-                    prompt_token_count,
-                    output_token_count,
+                    usage: TokenUsage {
+                        prompt_token_count,
+                        output_token_count,
+                        cached_token_count,
+                    },
                     finish_reason: reason,
                     kv_transfer_params,
                 }),
@@ -305,7 +309,7 @@ fn matches_stop_string(stops: &[String], output: &str, new_bytes: usize) -> Opti
         .find_map(|(ss_idx, (ss, len, start_off))| {
             output[start_off..]
                 .windows(len)
-                .rposition(|w| w == ss)
+                .position(|w| w == ss)
                 .map(|pos| (ss_idx, start_off + pos))
         })
 }
@@ -556,6 +560,13 @@ mod tests {
         // "say wor" where last 3 bytes "wor" were added at once
         let result = matches_stop_string(&stops, "say wor", 3);
         assert_eq!(result, Some((0, 4)));
+    }
+
+    #[test]
+    fn stop_string_matches_leftmost_with_multiple_new_bytes() {
+        let stops = vec!["\n".to_string()];
+        let result = matches_stop_string(&stops, "Answer\n\n", 2);
+        assert_eq!(result, Some((0, 6)));
     }
 
     #[test]

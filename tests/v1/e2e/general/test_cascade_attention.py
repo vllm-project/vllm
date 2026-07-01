@@ -4,8 +4,15 @@
 import pytest
 
 from vllm import LLM, SamplingParams
+from vllm.platforms import current_platform
 
 from ....utils import create_new_process_for_each_test
+
+if current_platform.is_rocm():
+    pytest.skip(
+        "Cascade attention backends FLASH_ATTN and FLASHINFER are notsupported on ROCm",
+        allow_module_level=True,
+    )
 
 
 @create_new_process_for_each_test()

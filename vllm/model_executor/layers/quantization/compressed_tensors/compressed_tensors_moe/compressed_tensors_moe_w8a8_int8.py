@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
 import torch
 from compressed_tensors.quantization import (
     QuantizationArgs,
@@ -20,6 +19,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.oracle.int8 import (
+    convert_to_int8_moe_kernel_format,
     make_int8_moe_kernel,
     make_int8_moe_quant_config,
     select_int8_moe_backend,
@@ -31,7 +31,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8DynamicTokenSym,
     kInt8StaticChannelSym,
 )
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 
 logger = init_logger(__name__)
 
@@ -142,6 +142,14 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
         layer.w2_input_scale = None
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
+        w13, w2 = convert_to_int8_moe_kernel_format(
+            int8_backend=self.int8_backend,
+            w13=layer.w13_weight,
+            w2=layer.w2_weight,
+        )
+        replace_parameter(layer, "w13_weight", w13)
+        replace_parameter(layer, "w2_weight", w2)
+
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.experts_cls is not None
         self.moe_kernel = make_int8_moe_kernel(
@@ -192,4 +200,28 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
+        )
+
+    def apply_monolithic(
+        self,
+        layer: RoutedExperts,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        assert self.is_monolithic
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply_monolithic(
+            x,
+            layer.w13_weight,
+            layer.w2_weight,
+            router_logits,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            num_expert_group=layer.num_expert_group,
+            topk_group=layer.topk_group,
+            e_score_correction_bias=layer.e_score_correction_bias,
+            routed_scaling_factor=layer.routed_scaling_factor,
         )

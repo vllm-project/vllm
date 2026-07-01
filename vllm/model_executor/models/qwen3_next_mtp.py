@@ -64,13 +64,22 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
             config.hidden_size,
         )
 
+        # Workaround: mtp.fc is stored as BF16 in NVFP4 checkpoints but is
+        # missing from the checkpoint quant exclude list (its `ignore` glob
+        # does not cover `mtp.fc`). Force unquantized to match the weights,
+        # mirroring the Qwen3.5 MTP handling (PR #38832).
+        fc_quant = (
+            None
+            if (quant_config and quant_config.get_name() == "modelopt_fp4")
+            else quant_config
+        )
         self.fc = ColumnParallelLinear(
             self.config.hidden_size * 2,
             self.config.hidden_size,
             gather_output=True,
             bias=False,
             return_bias=False,
-            quant_config=quant_config,
+            quant_config=fc_quant,
             prefix=f"{prefix}.fc",
         )
 
@@ -242,7 +251,7 @@ class Qwen3NextMTP(nn.Module, QwenNextMixtureOfExperts):
             "k_proj",
             "v_proj",
         ],
-        "gate_up_proj": ["up_proj", "down_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

@@ -87,6 +87,9 @@ class ChatParams:
     mm_processor_kwargs: dict[str, Any] | None = None
     """The kwargs to pass to the multi-modal processor."""
 
+    return_assistant_tokens_mask: bool = False
+    """Request a per-token assistant mask from apply_chat_template."""
+
     def with_defaults(
         self,
         default_chat_template_kwargs: dict[str, Any] | None = None,
@@ -115,6 +118,7 @@ class ChatParams:
                 default_mm_processor_kwargs,
                 self.mm_processor_kwargs,
             ),
+            return_assistant_tokens_mask=self.return_assistant_tokens_mask,
         )
 
     def get_apply_chat_template_kwargs(self) -> dict[str, Any]:
@@ -166,6 +170,11 @@ class TokenizeParams:
 
     add_special_tokens: bool = True
     """Whether to add special tokens."""
+
+    return_token_offsets: bool = False
+    """If true, request char-level (start, end) offsets per token. Honored
+    only for Fast (Rust-backed) tokenizers with text input and no multimodal
+    data; otherwise silently ignored."""
 
     needs_detokenization: bool = False
     """

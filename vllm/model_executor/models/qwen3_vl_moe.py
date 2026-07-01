@@ -187,8 +187,18 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
             "base_layer." if any(".base_layer." in name for name in params_dict) else ""
         )
         fused_expert_params_mapping = [
-            (f"experts.{base_layer}w13_weight", "experts.gate_up_proj", 0, "w1"),
-            (f"experts.{base_layer}w2_weight", "experts.down_proj", 0, "w2"),
+            (
+                f"experts.routed_experts.{base_layer}w13_weight",
+                "experts.gate_up_proj",
+                0,
+                "w1",
+            ),
+            (
+                f"experts.routed_experts.{base_layer}w2_weight",
+                "experts.down_proj",
+                0,
+                "w2",
+            ),
         ]
         num_experts = self.config.num_experts
         for name, loaded_weight in weights:
@@ -363,8 +373,6 @@ class Qwen3VLMoeMixtureOfExperts(MixtureOfExperts):
                 moe.experts.update_expert_map()
 
     def set_moe_parameters(self):
-        self.expert_weights = []
-
         self.moe_layers = []
         example_moe = None
         for layer in self.language_model.model.layers:

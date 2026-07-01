@@ -97,6 +97,11 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
                 f"attention backend '{attn_backend.backend.name}'"
             )
 
+        if backend_name == "rocm_attn" and model_name == "openai/gpt-oss-20b":
+            pytest.skip(
+                "ROCM_ATTN does not support attention sinks (required by gpt-oss-20b)"
+            )
+
         if attn_backend.backend.name == "FLASHINFER":
             from vllm.utils.flashinfer import supports_trtllm_attention
 

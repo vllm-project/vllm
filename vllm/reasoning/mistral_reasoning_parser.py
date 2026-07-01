@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING
 
-from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 from vllm.tokenizers.mistral import MistralTokenizer
@@ -13,8 +12,6 @@ from vllm.tokenizers.mistral import MistralTokenizer
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-
-logger = init_logger(__name__)
 
 
 class MistralReasoningParser(BaseThinkingReasoningParser):
@@ -75,6 +72,15 @@ class MistralReasoningParser(BaseThinkingReasoningParser):
             elif id == self.end_token_id:
                 has_eot_token = True
         return False
+
+    def is_reasoning_end_streaming(
+        self, input_ids: Sequence[int], delta_ids: Iterable[int]
+    ) -> bool:
+        if self.end_token_id in delta_ids:
+            return True
+        # Grammar's think? is optional — if [THINK] was never generated,
+        # reasoning was skipped entirely.
+        return self.start_token_id not in input_ids
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """

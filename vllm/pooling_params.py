@@ -182,6 +182,11 @@ class PoolingParams(
                         )
                 elif self.dimensions < 1:
                     raise ValueError("Dimensions must be greater than 0")
+                elif self.dimensions > model_config.embedding_size:
+                    raise ValueError(
+                        "Dimensions must be less than or equal to the model's "
+                        f"embedding size ({model_config.embedding_size})"
+                    )
 
         elif self.task in ["classify", "token_classify"]:
             if self.use_activation is None:

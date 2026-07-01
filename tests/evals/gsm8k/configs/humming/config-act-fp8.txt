@@ -1,0 +1,2 @@
+gpt-oss-20b-humming-act-fp8.yaml
+Qwen3-30B-A3B-MXFP4A16-humming-act-fp8.yaml

@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
+    SparseWeightPatch,
     WeightTransferEngine,
     WeightTransferInitInfo,
     WeightTransferUpdateInfo,
@@ -81,6 +82,7 @@ class NCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
 
     def __post_init__(self):
         """Validate that all lists have the same length."""
+        super().__post_init__()
         num_params = len(self.names)
         if len(self.dtype_names) != num_params:
             raise ValueError(
@@ -91,6 +93,13 @@ class NCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
             raise ValueError(
                 f"`shapes` should be of the same size as `names`: "
                 f"got {len(self.shapes)} and {len(self.names)}"
+            )
+        if self.update_kind == "dense":
+            return
+
+        if self.packed:
+            raise ValueError(
+                "`update_kind='sparse_flat'` cannot be combined with `packed=True`"
             )
 
 
@@ -178,6 +187,11 @@ class NCCLWeightTransferEngine(
                 "NCCL weight transfer not initialized. "
                 "Call init_transfer_engine() first."
             )
+        if update_info.update_kind != "dense":
+            raise ValueError(
+                "Sparse updates must use `receive_sparse_weights`, not "
+                "`receive_weights`"
+            )
 
         if update_info.packed:
             # Build iterator of (name, (shape, dtype)) from update_info
@@ -208,6 +222,42 @@ class NCCLWeightTransferEngine(
                 )
                 load_weights([(name, weight)])
                 del weight
+
+    def receive_sparse_weights(
+        self,
+        update_info: NCCLWeightTransferUpdateInfo,
+        apply_patches: Callable[[list[SparseWeightPatch]], None],
+    ) -> None:
+        """Receive sparse flat-index patches from trainer via NCCL."""
+        if self.model_update_group is None:
+            raise RuntimeError(
+                "NCCL weight transfer not initialized. "
+                "Call init_transfer_engine() first."
+            )
+        if update_info.update_kind != "sparse_flat":
+            raise ValueError("Sparse receive path requires `update_kind='sparse_flat'`")
+        assert update_info.num_updates_list is not None
+
+        for name, dtype_name, num_updates in zip(
+            update_info.names,
+            update_info.dtype_names,
+            update_info.num_updates_list,
+        ):
+            dtype = getattr(torch, dtype_name)
+            device = torch.accelerator.current_device_index()
+            indices = torch.empty(num_updates, dtype=torch.int32, device=device)
+            values = torch.empty(num_updates, dtype=dtype, device=device)
+            self.model_update_group.broadcast(
+                indices, src=0, stream=torch.cuda.current_stream()
+            )
+            self.model_update_group.broadcast(
+                values, src=0, stream=torch.cuda.current_stream()
+            )
+            apply_patches(
+                [SparseWeightPatch(name=name, indices=indices, values=values)]
+            )
+            del indices
+            del values
 
     def shutdown(self) -> None:
         if self.model_update_group is not None:
@@ -271,6 +321,27 @@ class NCCLWeightTransferEngine(
                     src=args.src,
                     stream=args.stream or torch.cuda.current_stream(),
                 )
+
+    @staticmethod
+    def trainer_send_sparse_weights(
+        iterator: Iterator[SparseWeightPatch],
+        trainer_args: dict[str, Any] | NCCLTrainerSendWeightsArgs,
+    ) -> None:
+        """Broadcast sparse flat-index patches from trainer to vLLM workers."""
+        if isinstance(trainer_args, dict):
+            args = NCCLTrainerSendWeightsArgs(**trainer_args)
+        else:
+            args = trainer_args
+
+        if args.packed:
+            raise ValueError(
+                "Sparse NCCL updates cannot be combined with `packed=True`"
+            )
+
+        stream = args.stream or torch.cuda.current_stream()
+        for patch in iterator:
+            args.group.broadcast(patch.indices, src=args.src, stream=stream)
+            args.group.broadcast(patch.values, src=args.src, stream=stream)
 
     @staticmethod
     def trainer_init(

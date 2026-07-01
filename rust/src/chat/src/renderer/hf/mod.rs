@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::Value as JsonValue;
 use thiserror_ext::AsReport as _;
 use tracing::{info, trace, warn};
 use vllm_text::Prompt;
@@ -13,7 +13,8 @@ use self::format::{
     ChatTemplateContentFormat, ChatTemplateContentFormatOption as ContentFormatOption,
 };
 use self::template::{CompiledChatTemplate, TemplateContext};
-use super::{ChatRenderer, RenderedPrompt};
+use self::value::{TemplateValue, to_template_value};
+use super::{ChatRenderer, RenderedPrompt, effective_template_kwargs};
 use crate::error::Result;
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
 use crate::{
@@ -24,6 +25,7 @@ mod error;
 mod format;
 mod template;
 mod tojson;
+mod value;
 
 pub use template::{load_chat_template, resolve_chat_template};
 
@@ -38,7 +40,7 @@ pub struct MultimodalRenderInfo {
 /// state.
 pub struct HfChatRenderer {
     default_template: Option<CompiledChatTemplate>,
-    default_template_kwargs: HashMap<String, Value>,
+    default_template_kwargs: HashMap<String, JsonValue>,
     content_format: ContentFormatOption,
     special_tokens: Option<HfSpecialTokens>,
     multimodal: Option<MultimodalRenderInfo>,
@@ -48,7 +50,7 @@ impl HfChatRenderer {
     /// Create a renderer from the given template string.
     pub fn new(
         template: Option<String>,
-        default_template_kwargs: HashMap<String, Value>,
+        default_template_kwargs: HashMap<String, JsonValue>,
         content_format: ContentFormatOption,
     ) -> Result<Self> {
         Ok(Self {
@@ -167,8 +169,8 @@ impl HfChatRenderer {
             "applying chat template"
         );
 
-        let mut merged_template_kwargs = self.default_template_kwargs.clone();
-        merged_template_kwargs.extend(request.chat_options.template_kwargs.clone());
+        let effective_template_kwargs =
+            effective_template_kwargs(&self.default_template_kwargs, request);
         let prompt = effective_template
             .apply(TemplateContext {
                 messages: &messages,
@@ -176,9 +178,8 @@ impl HfChatRenderer {
                 continue_final_message: request.chat_options.continue_final_message(),
                 tools: tools.as_deref(),
                 documents: request.documents.as_deref(),
-                template_kwargs: Some(&merged_template_kwargs),
+                template_kwargs: Some(&effective_template_kwargs),
                 special_tokens: self.special_tokens.as_ref(),
-                reasoning_effort: request.chat_options.reasoning_effort,
             })
             .map_err(|error| Error::ChatTemplate(error.to_report_string()))?;
 
@@ -189,6 +190,7 @@ impl HfChatRenderer {
 
         Ok(RenderedPrompt {
             prompt: Prompt::Text(prompt),
+            effective_template_kwargs,
         })
     }
 }
@@ -245,7 +247,7 @@ struct TemplateToolCall {
 #[derive(Debug, Serialize)]
 struct TemplateToolFunction {
     name: String,
-    arguments: Value,
+    arguments: TemplateValue,
 }
 
 #[derive(Debug, Serialize)]
@@ -259,7 +261,7 @@ pub(super) struct TemplateTool {
 struct TemplateToolDefinition {
     name: String,
     description: Option<String>,
-    parameters: Value,
+    parameters: TemplateValue,
     strict: Option<bool>,
 }
 
@@ -345,13 +347,14 @@ fn to_template_tool_calls(
     let mut tool_calls = Vec::new();
 
     for tool_call in content.tool_calls() {
-        let arguments = serde_json::from_str::<Value>(&tool_call.arguments).map_err(|error| {
+        let arguments = serde_json::from_str(&tool_call.arguments).map_err(|error| {
             Error::ChatTemplate(format!(
                 "assistant tool call `{}` has invalid JSON arguments: {}",
                 tool_call.id,
                 error.as_report()
             ))
         })?;
+        let arguments = to_template_value(arguments);
 
         tool_calls.push(TemplateToolCall {
             id: tool_call.id.clone(),
@@ -434,7 +437,7 @@ fn to_template_tools(tools: &[ChatTool]) -> Vec<TemplateTool> {
             function: TemplateToolDefinition {
                 name: tool.name.clone(),
                 description: tool.description.clone(),
-                parameters: tool.parameters.clone(),
+                parameters: to_template_value(tool.parameters.clone()),
                 strict: tool.strict,
             },
         })
@@ -794,9 +797,46 @@ mod tests {
         )
         .unwrap();
 
-        let rendered = renderer.render(&request).unwrap().prompt;
+        let rendered = renderer.render(&request).unwrap();
 
-        assert_eq!(rendered, Prompt::Text("max".to_string()));
+        assert_eq!(rendered.prompt, Prompt::Text("max".to_string()));
+        assert_eq!(
+            rendered.effective_template_kwargs.get("reasoning_effort"),
+            Some(&Value::String("max".to_string()))
+        );
+        assert_eq!(
+            rendered.effective_template_kwargs.get("enable_thinking"),
+            Some(&Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn chat_template_reasoning_effort_preserves_request_enable_thinking() {
+        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
+        request.chat_options.reasoning_effort = Some(ReasoningEffort::None);
+        request
+            .chat_options
+            .template_kwargs
+            .insert("enable_thinking".to_string(), Value::Bool(true));
+
+        let renderer = HfChatRenderer::new(
+            Some("{{ reasoning_effort }}|{{ enable_thinking }}".to_string()),
+            HashMap::new(),
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap();
+
+        let rendered = renderer.render(&request).unwrap();
+
+        assert_eq!(rendered.prompt, Prompt::Text("none|true".to_string()));
+        assert_eq!(
+            rendered.effective_template_kwargs.get("reasoning_effort"),
+            Some(&Value::String("none".to_string()))
+        );
+        assert_eq!(
+            rendered.effective_template_kwargs.get("enable_thinking"),
+            Some(&Value::Bool(true))
+        );
     }
 
     #[test]
@@ -907,6 +947,29 @@ mod tests {
         .unwrap();
 
         assert_eq!(rendered, "get_weather|Paris|call_1|Sunny");
+    }
+
+    #[test]
+    fn chat_template_tool_call_argument_items_method_is_not_shadowed_by_field() {
+        let request = sample_request(vec![ChatMessage::assistant_blocks(vec![
+            AssistantContentBlock::ToolCall(crate::AssistantToolCall {
+                id: "call_1".to_string(),
+                name: "add".to_string(),
+                arguments: r#"{"items":"operands","x":2,"y":1.0}"#.to_string(),
+            }),
+        ])]);
+
+        let rendered = render(
+            Some(
+                "{%- set arguments = messages[0].tool_calls[0].function.arguments -%}
+{%- for key, value in arguments.items() -%}{{ key }}={{ value }};{%- endfor -%}
+|{{ arguments['items'] }}",
+            ),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "items=operands;x=2;y=1.0;|operands");
     }
 
     #[test]

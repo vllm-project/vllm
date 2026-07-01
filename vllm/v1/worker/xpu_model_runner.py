@@ -45,7 +45,6 @@ def _torch_cuda_wrapper():
     torch.cuda.default_stream = torch.xpu.current_stream
     torch.cuda.current_stream = torch.xpu.current_stream
     torch.cuda.stream = torch.xpu.stream
-    torch.cuda.mem_get_info = torch.xpu.mem_get_info
     torch.cuda.Event = torch.Event
     torch.cuda.set_stream = torch.xpu.set_stream
     if supports_xpu_graph():

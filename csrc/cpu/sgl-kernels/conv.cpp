@@ -289,19 +289,18 @@ void causal_conv1d_fwd_kernel_impl(
   }
 }
 
-#define LAUNCH_TINYGEMM_VARLEN_KERNEL(K, NB_SIZE)                   \
-  tinygemm_kernel<scalar_t, K, NB_SIZE, has_bias, has_silu>::apply( \
-      input + batch_offset * dim + mb_start * dim + nb_start,       \
-      weight + nb_start * width,                                    \
-      out + batch_offset * dim + mb_start * dim + nb_start,         \
-      has_bias ? bias + nb_start : nullptr,                         \
-      nullptr,                                                      \
-      false,                                                        \
-      mb_size,                                                      \
-      dim,                                                          \
+#define LAUNCH_TINYGEMM_VARLEN_KERNEL(K, NB_SIZE)                                                   \
+  tinygemm_kernel<scalar_t, K, NB_SIZE, has_bias, has_silu>::apply(                                 \
+      input + batch_offset * dim + mb_start * dim + nb_start,                                       \
+      weight + nb_start * width,                                                                    \
+      out + batch_offset * dim + mb_start * dim + nb_start,                                         \
+      has_bias ? bias + nb_start : nullptr,                                                         \
+      has_conv_states ? conv_states + conv_state_index * conv_state_slot_stride + nb_start : nullptr, \
+      has_initial_states_value,                                                                     \
+      mb_size,                                                                                      \
+      dim,                                                                                          \
       mb_start == 0);
 
-// TODO: add `has_initial_state` support for varlen kernel
 template <typename scalar_t>
 void causal_conv1d_fwd_varlen_kernel_impl(
     scalar_t* __restrict__ out,
@@ -343,6 +342,9 @@ void causal_conv1d_fwd_varlen_kernel_impl(
         int64_t nb_start = nb * BLOCK_N;
         int64_t nb_size = std::min(dim - nb_start, BLOCK_N);
 
+        const bool has_initial_states_value = has_conv_states ? has_initial_state[bs] : false;
+        int32_t conv_state_index = has_conv_indices ? conv_indices[bs] : bs;
+
         switch (width << 4 | nb_size >> 4) {
           case 0x42:
             LAUNCH_TINYGEMM_VARLEN_KERNEL(4, 32);
@@ -373,7 +375,7 @@ void causal_conv1d_fwd_varlen_kernel_impl(
             width,
             dim,
             seqlen,
-            /* has_initial_state */ false);
+            has_initial_state[bs]);
       }
     });
   }

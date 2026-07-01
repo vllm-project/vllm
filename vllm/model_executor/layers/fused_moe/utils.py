@@ -32,7 +32,6 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 
 @triton.jit
@@ -202,6 +201,16 @@ def _mxfp4_quantize(
     return A, None
 
 
+def _fp8_quantize_dequantize(
+    A: torch.Tensor,
+    A_scale: torch.Tensor,
+):
+    qA, qA_scale = ops.scaled_fp8_quant(A, A_scale, use_per_token_if_dynamic=False)
+    A = per_tensor_dequantize(qA, qA_scale).to(A.dtype)
+
+    return A, None
+
+
 def _mxfp8_e4m3_quantize(
     A: torch.Tensor,
     A_scale: torch.Tensor | None,
@@ -270,23 +279,17 @@ def moe_kernel_quantize_input(
             # purpose, because there is no native kernel for weight in ocp_mx_scheme
             # and activation in FP8. The implementation is based on existing
             # non-emulation ops.
-            qA, qA_scale = ops.scaled_fp8_quant(
-                A, A_scale, use_per_token_if_dynamic=False
-            )
-            A = per_tensor_dequantize(qA, qA_scale).to(A.dtype)
-            # After QDQ, we don't need further quantization
-            return A, None
+            # TODO: Remove this `ocp_mx_scheme is not None` block and rely solely
+            # on `quantization_emulation`.
+            return _fp8_quantize_dequantize(A, A_scale)
         # else: For other schemes (e.g., *_a_mxfp6_e3m2, *_a_mxfp6_e2m3),
         # weights are already dequantized, and we proceed with normal
         # activation quantization below.
-
     if quant_dtype == current_platform.fp8_dtype():
         if quantization_emulation:
-            raise NotImplementedError(
-                f"moe_kernel_quantize_input does not support quant_dtype={quant_dtype}"
-                " MOE quantization emulation. Please open an issue."
-            )
-        return _fp8_quantize(A, A_scale, per_act_token_quant, block_shape)
+            return _fp8_quantize_dequantize(A, A_scale)
+        else:
+            return _fp8_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == torch.int8:
         if quantization_emulation:
             raise NotImplementedError(
@@ -298,6 +301,7 @@ def moe_kernel_quantize_input(
         if not quantization_emulation:
             return _nvfp4_quantize(A, A_scale, is_sf_swizzled_layout=is_scale_swizzled)
         else:
+            assert A_scale is not None
             A = ref_nvfp4_quant_dequant(A, A_scale, block_size=16)
             return A, None
     elif quant_dtype == "mxfp4":
@@ -315,6 +319,8 @@ def moe_kernel_quantize_input(
                 "moe_kernel_quantize_input does not support quant_dtype='mxfp8' MOE "
                 "quantization emulation. Please open an issue."
             )
+        # Non-swizzled (M, K/32) uint8 UE8M0 scales; deepgemm_moe_permute packs
+        # them for DeepGEMM, TRTLLM takes them as-is.
         return _mxfp8_e4m3_quantize(
             A,
             A_scale,
@@ -366,14 +372,6 @@ def normalize_batched_scales_shape(
             scales = scales.view(num_experts, -1, scales.size(-1))
 
     return scales
-
-
-# Torch custom ops can't deal with outputs aliasing inputs so we need to
-# disable inplace for torch >= 2.9.
-# See https://github.com/vllm-project/vllm/issues/26378
-@functools.cache
-def disable_inplace() -> bool:
-    return is_torch_equal_or_newer("2.9")
 
 
 @triton.jit
@@ -449,3 +447,12 @@ def swiglu_limit_func(
         up = torch.clamp(up, min=-swiglu_limit, max=swiglu_limit)
 
     output.copy_(F.silu(gate) * up)
+
+
+@functools.lru_cache
+def enable_swap_ab(BLOCK_SIZE_M: int, BLOCK_SIZE_N: int) -> bool:
+    return (
+        current_platform.is_device_capability(90)
+        and BLOCK_SIZE_M < 64
+        and BLOCK_SIZE_N >= 64
+    )

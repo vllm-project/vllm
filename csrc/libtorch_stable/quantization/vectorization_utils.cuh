@@ -24,13 +24,21 @@ __device__ inline void vectorize_with_alignment(
     ScaOp&& scalar_op) {  // InT -> OutT
   static_assert(VEC_SIZE > 0 && (VEC_SIZE & (VEC_SIZE - 1)) == 0,
                 "VEC_SIZE must be a positive power-of-two");
-  constexpr int WIDTH = VEC_SIZE * sizeof(InT);  // eg: 64 B
+  constexpr int WIDTH = VEC_SIZE * sizeof(InT);       // eg: 16 B
+  constexpr int OUT_WIDTH = VEC_SIZE * sizeof(OutT);  // eg: 16 B
   uintptr_t addr = reinterpret_cast<uintptr_t>(in);
+  uintptr_t out_addr = reinterpret_cast<uintptr_t>(out);
 
-  // fast path when the whole region is already aligned
-  // Note: currently the output is guaranteed to be same as the input, so we
-  // don't check it here, comments here just for future reference.
-  bool can_vec = ((addr & (WIDTH - 1)) == 0) && ((len & (VEC_SIZE - 1)) == 0);
+  // fast path when input and output are both fully aligned. The vector
+  // load/store below go through vec_n_t<T, VEC_SIZE>, declared
+  // __align__(VEC_SIZE * sizeof(T)), so each side must be aligned to its
+  // own vector width. out is NOT generally co-aligned with in: e.g.
+  // reshape_and_cache_flash writes KV-cache rows whose byte offset is a
+  // multiple of head_size, which for head sizes that are not a multiple
+  // of VEC_SIZE puts some rows off the vector-width boundary.
+  bool can_vec = ((addr & (WIDTH - 1)) == 0) &&
+                 ((out_addr & (OUT_WIDTH - 1)) == 0) &&
+                 ((len & (VEC_SIZE - 1)) == 0);
   if (can_vec) {
     int num_vec = len / VEC_SIZE;
 
@@ -54,6 +62,16 @@ __device__ inline void vectorize_with_alignment(
   int prefix_elems = alignment_bytes & (WIDTH - 1);   // handle 64
   prefix_elems /= sizeof(InT);
   prefix_elems = min(prefix_elems, len);  // 0 ≤ prefix < 16
+
+  // the prefix below aligns in; if that does not also align out (their
+  // addresses differ modulo the vector width), vectorizing is impossible
+  // and the whole copy must stay scalar.
+  if (((out_addr + prefix_elems * sizeof(OutT)) & (OUT_WIDTH - 1)) != 0) {
+    for (int i = tid; i < len; i += stride) {
+      scalar_op(out[i], in[i]);
+    }
+    return;
+  }
 
   // 1. prefill the when it is unsafe to vectorize
   for (int i = tid; i < prefix_elems; i += stride) {

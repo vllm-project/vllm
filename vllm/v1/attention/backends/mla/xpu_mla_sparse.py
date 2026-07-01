@@ -184,7 +184,7 @@ class XPUMLASparseImpl(SparseMLAAttentionImpl[XPUMLASparseMetadata]):
         attn_type: str,
         kv_sharing_target_layer_name: str | None,
         # MLA Specific Arguments
-        topk_indice_buffer: torch.Tensor | None = None,
+        topk_indices_buffer: torch.Tensor | None = None,
         indexer: Optional["Indexer"] = None,
         **mla_args,
     ) -> None:
@@ -195,8 +195,12 @@ class XPUMLASparseImpl(SparseMLAAttentionImpl[XPUMLASparseMetadata]):
         self.kv_cache_dtype = kv_cache_dtype
         self.kv_lora_rank: int = mla_args["kv_lora_rank"]
         self.softmax_scale = scale
-        assert indexer is not None
-        self.topk_indices_buffer: torch.Tensor | None = indexer.topk_indices_buffer
+        # The indexer carries the shared buffer for normal layers and tests;
+        # the explicitly-passed buffer covers backbone skip layers, whose
+        # indexer is not constructed (see deepseek_v2.py).
+        self.topk_indices_buffer: torch.Tensor | None = (
+            indexer.topk_indices_buffer if indexer is not None else topk_indices_buffer
+        )
 
     def _forward_bf16_kv(
         self,

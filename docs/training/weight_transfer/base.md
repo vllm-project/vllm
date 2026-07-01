@@ -156,5 +156,6 @@ from vllm.distributed.weight_transfer.factory import WeightTransferEngineFactory
 engine = WeightTransferEngineFactory.create_engine(
     config=weight_transfer_config,
     parallel_config=parallel_config,
+    model=model,
 )
 ```

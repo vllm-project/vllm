@@ -51,13 +51,6 @@ class XPUwNa16LinearKernel(MPLinearKernel):
                 "XPUwNa16, supported sizes are multiples of 32",
             )
 
-        if c.partition_weight_shape[1] % 32 != 0:
-            return (
-                False,
-                f"Output size ({c.partition_weight_shape[1]}) not supported by "
-                "XPUWNA16, supported sizes are multiples of 32",
-            )
-
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module):

@@ -778,7 +778,7 @@ Then, you can use the OpenAI client as follows:
         base_url=openai_api_base,
     )
 
-    video_url = "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4"
+    video_url = "https://huggingface.co/datasets/raushan-testing-hf/videos-test/resolve/main/sample_demo_1.mp4"
 
     ## Use video url in the payload
     chat_completion_from_url = client.chat.completions.create(

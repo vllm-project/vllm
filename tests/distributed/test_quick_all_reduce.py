@@ -9,6 +9,7 @@ import ray
 import torch
 import torch.distributed as dist
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  # noqa
 from vllm.distributed.device_communicators.quick_all_reduce import (
@@ -349,7 +350,7 @@ def bf16_cast_quickreduce(
 @pytest.mark.skipif(
     not current_platform.is_rocm(), reason="only test quick allreduce for rocm"
 )
-@pytest.mark.parametrize("quant_mode", ["FP", "INT8", "INT6", "INT4"])
+@pytest.mark.parametrize("quant_mode", ["FP", "INT8", "INT6", "INT4", "INT3"])
 @pytest.mark.parametrize("tp_size", [2])
 @pytest.mark.parametrize("pipeline_parallel_size", [1, 2])
 @pytest.mark.parametrize("test_target", [graph_quickreduce, eager_quickreduce])
@@ -397,13 +398,27 @@ def qr_variable_input(rank, world_size):
     ranks = []
     for i in range(world_size):
         ranks.append(i)
-    dist.init_process_group(
-        backend="nccl",
-        init_method="tcp://127.0.0.1:29500",
-        rank=rank,
-        world_size=world_size,
-    )
-    cpu_group = torch.distributed.new_group(ranks, backend="nccl")
+    if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
+        dist.init_process_group(
+            backend="cpu:gloo,cuda:nccl",
+            init_method="tcp://127.0.0.1:29500",
+            rank=rank,
+            world_size=world_size,
+            device_id=device,
+        )
+    else:
+        dist.init_process_group(
+            backend="nccl",
+            init_method="tcp://127.0.0.1:29500",
+            rank=rank,
+            world_size=world_size,
+        )
+    if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
+        cpu_group = torch.distributed.split_group(
+            split_ranks=[ranks], backend="cpu:gloo,cuda:nccl"
+        )
+    else:
+        cpu_group = torch.distributed.new_group(ranks, backend="nccl")
 
     handle = ops.qr_get_handle(_ptr)
     world_size = dist.get_world_size(group=cpu_group)
@@ -423,7 +438,7 @@ def qr_variable_input(rank, world_size):
             s2 = 2048
             inp1 = torch.ones((s1, s2), dtype=dtype, device=device_idx)
         result = torch.empty_like(inp1)
-        # FP = 0 INT8 = 1 INT6 = 2 INT4 = 3 NONE = 4
+        # FP = 0 INT8 = 1 INT6 = 2 INT4 = 3 INT3 = 4
         ops.qr_all_reduce(_ptr, inp1, result, 3, cast_bf2half=True)
         try:
             if inp1[0, 0] == 0:

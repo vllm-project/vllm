@@ -279,11 +279,19 @@ class Gemma4MTPDecoderLayer(nn.Module):
             else config.head_dim
         )
 
+        use_k_eq_v = is_full_attention and getattr(config, "attention_k_eq_v", False)
+        if use_k_eq_v:
+            num_kv_heads = getattr(
+                config, "num_global_key_value_heads", config.num_key_value_heads
+            )
+        else:
+            num_kv_heads = config.num_key_value_heads
+
         self.self_attn = Gemma4MTPAttention(
             config=config,
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
-            num_kv_heads=config.num_key_value_heads,
+            num_kv_heads=num_kv_heads,
             head_dim=head_dim,
             max_position_embeddings=config.max_position_embeddings,
             cache_config=cache_config,
@@ -501,6 +509,7 @@ class Gemma4MTP(nn.Module):
         config = vllm_config.speculative_config.draft_model_config.hf_config
         text_config = _get_text_config(config)
         self.config = config
+        self._stable_full_lm_head_weight: torch.Tensor | None = None
 
         self.model = Gemma4MultiTokenPredictor(
             vllm_config=vllm_config,
@@ -544,6 +553,10 @@ class Gemma4MTP(nn.Module):
         else:
             self.masked_embedding = None
 
+        draft_cfg = vllm_config.speculative_config.draft_model_config
+        gen_cfg = draft_cfg.try_get_generation_config()
+        self._suppress_token_ids = gen_cfg.get("suppress_tokens") if gen_cfg else None
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
@@ -567,6 +580,8 @@ class Gemma4MTP(nn.Module):
         )
 
     def _get_full_lm_head_weight(self) -> torch.Tensor:
+        if self._stable_full_lm_head_weight is not None:
+            return self._stable_full_lm_head_weight
         lm_head_weight = self.lm_head.weight
         tp_size = get_tensor_model_parallel_world_size()
         if tp_size > 1:
@@ -574,7 +589,11 @@ class Gemma4MTP(nn.Module):
                 lm_head_weight,
                 dim=0,
             )
-        return lm_head_weight[: self.masked_embedding.vocab_size]
+        lm_head_weight = lm_head_weight[: self.masked_embedding.vocab_size]
+        if tp_size > 1:
+            lm_head_weight = lm_head_weight.contiguous()
+            self._stable_full_lm_head_weight = lm_head_weight
+        return lm_head_weight
 
     def compute_logits(
         self,
@@ -582,11 +601,15 @@ class Gemma4MTP(nn.Module):
         spec_step_idx: int = 0,
     ) -> torch.Tensor | None:
         if self.masked_embedding is not None:
-            return self.masked_embedding(
+            logits = self.masked_embedding(
                 hidden_states,
                 self._get_full_lm_head_weight(),
             )
-        return self.logits_processor(self.lm_head, hidden_states)
+        else:
+            logits = self.logits_processor(self.lm_head, hidden_states)
+        if logits is not None and self._suppress_token_ids:
+            logits[:, self._suppress_token_ids] = -float("inf")
+        return logits
 
     def get_top_tokens(
         self,
@@ -599,5 +622,6 @@ class Gemma4MTP(nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        self._stable_full_lm_head_weight = None
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

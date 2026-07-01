@@ -1,0 +1,5 @@
+model_name: "google/gemma-4-E4B-it-qat-mobile-ct"
+accuracy_threshold: 0.50
+num_questions: 1319
+num_fewshot: 5
+server_args: "--enforce-eager --max-model-len 4096"

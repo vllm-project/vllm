@@ -4,8 +4,8 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
-from typing import Any, Generic, TypeVar
+from dataclasses import KW_ONLY, dataclass, field
+from typing import Any, Generic, Literal, TypeVar
 
 import torch
 
@@ -28,7 +28,44 @@ class WeightTransferInitInfo(ABC):  # noqa: B024
 class WeightTransferUpdateInfo(ABC):  # noqa: B024
     """Base class for backend-specific weight update info."""
 
-    pass
+    _: KW_ONLY
+    update_kind: Literal["dense", "sparse_flat"] = "dense"
+    """Weight update format."""
+    num_updates_list: list[int] | None = None
+    """Number of sparse entries to receive for each parameter in ``names``."""
+
+    def __post_init__(self) -> None:
+        if self.update_kind not in ("dense", "sparse_flat"):
+            raise ValueError(f"Unsupported update_kind: {self.update_kind}")
+        if self.update_kind == "dense":
+            if self.num_updates_list is not None:
+                raise ValueError(
+                    "Sparse metadata is only supported for `update_kind='sparse_flat'`"
+                )
+            return
+
+        if self.num_updates_list is None:
+            raise ValueError("`num_updates_list` is required for sparse updates")
+        if len(self.num_updates_list) == 0:
+            raise ValueError("`num_updates_list` cannot be empty for sparse updates")
+        if any(num_updates < 0 for num_updates in self.num_updates_list):
+            raise ValueError("Sparse `num_updates_list` entries must be non-negative")
+
+        names = getattr(self, "names", None)
+        if names is not None and len(self.num_updates_list) != len(names):
+            raise ValueError(
+                f"`num_updates_list` should be of the same size as `names`: "
+                f"got {len(self.num_updates_list)} and {len(names)}"
+            )
+
+
+@dataclass
+class SparseWeightPatch:
+    """A sparse in-place patch for one existing parameter."""
+
+    name: str
+    indices: torch.Tensor
+    values: torch.Tensor
 
 
 # API-level request classes (accept dicts for backend-agnostic serialization)
@@ -150,6 +187,16 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
         """
         raise NotImplementedError
 
+    def receive_sparse_weights(
+        self,
+        update_info: TUpdateInfo,
+        apply_patches: Callable[[list[SparseWeightPatch]], None],
+    ) -> None:
+        """Receive sparse weight patches from the trainer."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not support sparse weight updates"
+        )
+
     @abstractmethod
     def shutdown(self) -> None:
         """
@@ -184,3 +231,11 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
             >>> engine.trainer_send_weights(param_iter, trainer_args)
         """
         raise NotImplementedError
+
+    @staticmethod
+    def trainer_send_sparse_weights(
+        _iterator: Iterator[SparseWeightPatch],
+        _trainer_args: dict[str, Any] | Any,
+    ) -> None:
+        """Send sparse weight patches from trainer to inference workers."""
+        raise NotImplementedError("Sparse weight updates are not supported")

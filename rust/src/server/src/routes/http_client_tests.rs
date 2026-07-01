@@ -223,6 +223,7 @@ impl ChatRenderer for FakeChatBackend {
         }
         Ok(RenderedPrompt {
             prompt: Prompt::Text(prompt),
+            effective_template_kwargs: Default::default(),
         })
     }
 }

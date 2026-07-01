@@ -181,10 +181,6 @@ pub struct SchedulerStats {
     pub spec_decoding_stats: Option<SpecDecodingStats>,
     /// Connector-specific KV transfer stats, kept opaque for now.
     pub kv_connector_stats: Option<BTreeMap<String, OpaqueValue>>,
-    /// Waiting request counts per LoRA adapter.
-    pub waiting_lora_adapters: BTreeMap<String, u64>,
-    /// Running request counts per LoRA adapter.
-    pub running_lora_adapters: BTreeMap<String, u64>,
     /// CUDA graph runtime stats when graph metrics are enabled.
     pub cudagraph_stats: Option<CudagraphStat>,
     /// Estimated MFU/performance stats, when enabled.

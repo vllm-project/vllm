@@ -21,7 +21,7 @@
 #include "cutlass/util/packed_stride.hpp"
 #include "cutlass/util/mixed_dtype_utils.hpp"
 
-#include "cutlass_extensions/common.hpp"
+#include "libtorch_stable/cutlass_extensions/common.hpp"
 #include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
 
 #include <cuda_runtime.h>

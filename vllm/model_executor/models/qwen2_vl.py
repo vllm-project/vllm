@@ -707,7 +707,7 @@ class Qwen2VisionTransformer(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        grid_thw: torch.Tensor | list[list[int]],
+        grid_thw: torch.Tensor | list[list[int]] | None,
         *,
         encoder_metadata: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
@@ -715,9 +715,11 @@ class Qwen2VisionTransformer(nn.Module):
         x = x.to(device=self.device, dtype=self.dtype)
         x = self.patch_embed(x)
 
-        grid_thw_list = grid_thw if isinstance(grid_thw, list) else grid_thw.tolist()
-
         if encoder_metadata is None:
+            assert grid_thw is not None
+            grid_thw_list = (
+                grid_thw if isinstance(grid_thw, list) else grid_thw.tolist()
+            )
             encoder_metadata = self.prepare_encoder_metadata(grid_thw_list)
 
         rotary_pos_emb_cos = encoder_metadata["rotary_pos_emb_cos"]
@@ -1460,11 +1462,8 @@ class Qwen2VLForConditionalGeneration(
         max_frames = self.get_max_frames_per_video()
         return EncoderCudaGraphConfig(
             modalities=["image", "video"],
-            input_key_by_modality={
-                "image": "pixel_values",
-                "video": "pixel_values_videos",
-            },
             buffer_keys=[
+                "pixel_values",
                 "rotary_pos_emb_cos",
                 "rotary_pos_emb_sin",
                 "cu_seqlens",
@@ -1580,6 +1579,7 @@ class Qwen2VLForConditionalGeneration(
         max_frames_per_batch: int,
         device: torch.device,
         dtype: torch.dtype,
+        path: str = "default",
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
@@ -1622,7 +1622,7 @@ class Qwen2VLForConditionalGeneration(
         )
 
         # max_seqlen.item() gets baked into the CUDA graph at capture time.
-        buffers = self.visual.prepare_encoder_metadata(
+        metadata = self.visual.prepare_encoder_metadata(
             grid_config,
             max_batch_size=max_batch_size,
             max_frames_per_batch=max_frames_per_batch,
@@ -1632,14 +1632,12 @@ class Qwen2VLForConditionalGeneration(
 
         # Capture with image-format kwargs; pixel_values shape is compatible with
         # both image and video replay paths.
-        mm_kwargs = {
+        values = metadata | {
             "pixel_values": dummy_pixel_values,
-            "image_grid_thw": grid_config,
         }
 
         return EncoderCudaGraphCaptureInputs(
-            mm_kwargs=mm_kwargs,
-            buffers=buffers,
+            values=values,
         )
 
     def prepare_encoder_cudagraph_replay_buffers(
@@ -1647,33 +1645,40 @@ class Qwen2VLForConditionalGeneration(
         mm_kwargs: dict[str, Any],
         max_batch_size: int,
         max_frames_per_batch: int,
+        path: str = "default",
     ) -> EncoderCudaGraphReplayBuffers:
         modality = self.get_input_modality(mm_kwargs)
         grid_thw_list = self._get_grid_thw_by_modality(mm_kwargs)
 
         if modality == "image":
-            buffers = self.visual.prepare_encoder_metadata(
+            metadata = self.visual.prepare_encoder_metadata(
                 grid_thw_list,
                 max_batch_size=max_batch_size,
             )
         else:
-            buffers = self.visual.prepare_encoder_metadata(
+            metadata = self.visual.prepare_encoder_metadata(
                 grid_thw_list,
                 max_frames_per_batch=max_frames_per_batch,
             )
 
-        return EncoderCudaGraphReplayBuffers(buffers=buffers)
+        values = metadata | {
+            "pixel_values": self._get_pixel_values_by_modality(mm_kwargs),
+        }
+        return EncoderCudaGraphReplayBuffers(values=values)
 
     def encoder_cudagraph_forward(
-        self, mm_kwargs: dict[str, Any], buffers: dict[str, torch.Tensor]
+        self,
+        values: dict[str, torch.Tensor],
+        path: str = "default",
     ) -> torch.Tensor:
-        pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
-        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
-        return self.visual(pixel_values, grid_thw, encoder_metadata=buffers)
+        pixel_values = values.pop("pixel_values")
+        metadata = values
+        return self.visual(pixel_values, None, encoder_metadata=metadata)
 
     def encoder_eager_forward(
         self,
         mm_kwargs: dict[str, Any],
+        path: str = "default",
     ) -> torch.Tensor:
         pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
         grid_thw = self._get_grid_thw_by_modality(mm_kwargs)

@@ -108,7 +108,7 @@ class CPUWorker(Worker):
         self.device = torch.device("cpu")
 
         # Check whether critical libraries are loaded
-        def check_preloaded_libs(name: str):
+        def check_preloaded_libs(name: str) -> bool:
             ld_preload_list = os.environ.get("LD_PRELOAD", "")
             if name not in ld_preload_list:
                 logger.warning(
@@ -119,11 +119,22 @@ class CPUWorker(Worker):
                     "to setup required pre-loaded libraries.",
                     name,
                 )
+                return False
+            return True
 
         if sys.platform.startswith("linux"):
             check_preloaded_libs("libtcmalloc")
             if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
-                check_preloaded_libs("libiomp")
+                iomp_loaded = check_preloaded_libs("libiomp")
+                if not iomp_loaded and self.vllm_config.speculative_config is not None:
+                    logger.warning(
+                        "Speculative decoding on CPU without Intel OpenMP in "
+                        "LD_PRELOAD will cause significant performance loss. "
+                        "Please follow the section `set LD_PRELOAD` in "
+                        "https://docs.vllm.ai/en/latest/getting_started/"
+                        "installation/cpu/ "
+                        "to setup libiomp5.",
+                    )
 
         def skip_set_num_threads(x: int):
             logger.warning(

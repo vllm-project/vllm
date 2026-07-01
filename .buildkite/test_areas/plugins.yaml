@@ -27,6 +27,10 @@ steps:
   - pip install -e ./plugins/bge_m3_sparse_plugin
   - pytest -v -s plugins_tests/test_bge_m3_sparse_io_processor_plugins.py
   - pip uninstall bge_m3_sparse_plugin -y
+  # test colbert_query io_processor plugin
+  - pip install -e ./plugins/colbert_query_plugin
+  - pytest -v -s plugins_tests/test_colbert_query_io_processor_plugins.py
+  - pip uninstall colbert_query_plugin -y
   # end io_processor plugins test
   # begin stat_logger plugins test
   - pip install -e ./plugins/vllm_add_dummy_stat_logger
@@ -37,6 +41,20 @@ steps:
   - pytest -v -s plugins_tests/test_scheduler_plugins.py
   - pip install -e ./plugins/vllm_add_dummy_model
   - pytest -v -s distributed/test_distributed_oot.py
-  - pytest -v -s entrypoints/openai/chat_completion/test_oot_registration.py # it needs a clean process
-  - pytest -v -s models/test_oot_registration.py # it needs a clean process
-  - pytest -v -s plugins/lora_resolvers # unit tests for in-tree lora resolver plugins
+  - pytest -v -s plugins_tests/test_oot_registration_online.py # it needs a clean process
+  - pytest -v -s plugins_tests/test_oot_registration_offline.py # it needs a clean process
+  - pytest -v -s plugins_tests/lora_resolvers # unit tests for in-tree lora resolver plugins
+
+
+- label: GGUF Plugin
+  key: gguf-plugin
+  device: h200_18gb
+  timeout_in_minutes: 30
+  soft_fail: true
+  optional: true
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization
+  - tests/plugins_tests/test_gguf_plugin.py
+  commands:
+    - pip install "vllm-gguf-plugin >= 0.0.2"
+    - pytest -v -s plugins_tests/gguf

@@ -463,16 +463,15 @@ def run_ultravox(question: str, audio_count: int) -> ModelRequestData:
 # Voxtral
 # Make sure to install mistral-common[audio].
 def run_voxtral(question: str, audio_count: int) -> ModelRequestData:
-    from mistral_common.audio import Audio
     from mistral_common.protocol.instruct.chunk import (
         AudioChunk,
-        RawAudio,
         TextChunk,
     )
     from mistral_common.protocol.instruct.messages import (
         UserMessage,
     )
     from mistral_common.protocol.instruct.request import ChatCompletionRequest
+    from mistral_common.tokens.tokenizers.audio import Audio
     from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 
     model_name = "mistralai/Voxtral-Mini-3B-2507"
@@ -495,9 +494,7 @@ def run_voxtral(question: str, audio_count: int) -> ModelRequestData:
         Audio.from_file(str(audio_assets[i].get_local_path()), strict=False)
         for i in range(audio_count)
     ]
-    audio_chunks = [
-        AudioChunk(input_audio=RawAudio.from_audio(audio)) for audio in audios
-    ]
+    audio_chunks = [AudioChunk.from_audio(audio) for audio in audios]
 
     messages = [UserMessage(content=[*audio_chunks, text_chunk])]
 

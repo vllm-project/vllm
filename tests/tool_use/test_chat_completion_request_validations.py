@@ -116,3 +116,68 @@ def test_no_reasoning_fields_unchanged():
     assistant_msg = request.messages[1]
     assert assistant_msg.get("reasoning") is None
     assert "reasoning_content" not in assistant_msg
+
+
+SAMPLE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Get the weather",
+        "parameters": {
+            "type": "object",
+            "properties": {"location": {"type": "string"}},
+        },
+    },
+}
+
+
+def test_structured_outputs_with_named_tool_choice_rejected():
+    """structured_outputs cannot be combined with a named tool_choice."""
+    with pytest.raises(
+        ValueError,
+        match="structured outputs or tools, not both",
+    ):
+        ChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "Hello"}],
+                "model": "facebook/opt-125m",
+                "tools": [SAMPLE_TOOL],
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "get_weather"},
+                },
+                "structured_outputs": {"json": {"type": "object"}},
+            }
+        )
+
+
+def test_structured_outputs_with_auto_tool_choice_allowed():
+    """structured_outputs with tool_choice 'auto' should be allowed."""
+    request = ChatCompletionRequest.model_validate(
+        {
+            "messages": [{"role": "user", "content": "Hello"}],
+            "model": "facebook/opt-125m",
+            "tools": [SAMPLE_TOOL],
+            "tool_choice": "auto",
+            "structured_outputs": {"json": {"type": "object"}},
+        }
+    )
+    assert request.tool_choice == "auto"
+
+
+def test_multiple_structured_outputs_rejected():
+    """Only one kind of structured output constraint is allowed."""
+    with pytest.raises(
+        ValueError,
+        match="You can only use one kind of constraints",
+    ):
+        ChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "Hello"}],
+                "model": "facebook/opt-125m",
+                "structured_outputs": {
+                    "json": {"type": "object"},
+                    "regex": ".*",
+                },
+            }
+        )

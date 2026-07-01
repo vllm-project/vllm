@@ -217,7 +217,9 @@ class Resampler2_5(BaseResampler):
         for i in range(bs):
             tgt_h, tgt_w = tgt_sizes[i].tolist()
             pos_embed.append(
-                self.pos_embed[:tgt_h, :tgt_w, :].reshape((tgt_h * tgt_w, -1)).to(dtype)
+                self.pos_embed[:tgt_h, :tgt_w, :]
+                .reshape((tgt_h * tgt_w, -1))
+                .to(device=device, dtype=dtype)
             )  # patches * D
             key_padding_mask[i, patch_len[i] :] = True
         pos_embed = torch.nn.utils.rnn.pad_sequence(
@@ -545,6 +547,14 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object):
         hf_processor = self.ctx.get_hf_processor(**kwargs)
 
+        from vllm.transformers_utils.processors.minicpmv import MiniCPMVProcessor
+
+        vendored_processor = MiniCPMVProcessor(
+            image_processor=hf_processor.image_processor,
+            tokenizer=hf_processor.tokenizer,
+        )
+        hf_processor = vendored_processor
+
         # NumPy arrays are considered as Iterable but not Sequence in
         # https://github.com/huggingface/transformers/blob/main/src/transformers/image_transforms.py#L428
         image_processor = hf_processor.image_processor  # type: ignore
@@ -588,50 +598,6 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         if version == (2, 0) or version == (2, 5):
             return image_processor.get_slice_image_placeholder(image_size)
 
-        if version == (4, 6):
-            if max_slice_nums is None:
-                max_slice_nums = image_processor.max_slice_nums
-            grids = image_processor.get_sliced_grid(
-                image_size,
-                max_slice_nums=max_slice_nums,
-            )
-            patch_size = image_processor.patch_size
-            scale_resolution = image_processor.scale_resolution
-
-            allow_upscale = grids is None
-            best_size = image_processor.find_best_resize(
-                image_size,
-                scale_resolution,
-                patch_size,
-                allow_upscale=allow_upscale,
-            )
-            h_patches = best_size[1] // patch_size
-            w_patches = best_size[0] // patch_size
-            source_image_visual_tokens = (h_patches // 4) * (w_patches // 4)
-
-            if grids is not None:
-                refine_size = image_processor.get_refine_size(
-                    image_size,
-                    grids,
-                    scale_resolution,
-                    patch_size,
-                    allow_upscale=True,
-                )
-                pw = refine_size[0] // grids[0]
-                ph = refine_size[1] // grids[1]
-                patch_visual_tokens = (ph // patch_size // 4) * (pw // patch_size // 4)
-            else:
-                patch_visual_tokens = source_image_visual_tokens
-
-            return image_processor.get_slice_image_placeholder(
-                grids if grids is not None else [0, 0],
-                image_idx=image_idx,
-                max_slice_nums=max_slice_nums,
-                use_image_id=use_image_id,
-                source_image_visual_tokens=source_image_visual_tokens,
-                patch_visual_tokens=patch_visual_tokens,
-            )
-
         return image_processor.get_slice_image_placeholder(
             image_size,
             image_idx=image_idx,
@@ -665,43 +631,11 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
         max_slice_nums: int | None = None,
     ) -> int:
         image_processor = self.get_image_processor()
-        version = self.get_model_version()
 
         grid = self.get_sliced_grid(
             image_size,
             max_slice_nums=max_slice_nums,
         )
-
-        if version == (4, 6):
-            patch_size = image_processor.patch_size
-            scale_resolution = image_processor.scale_resolution
-
-            allow_upscale = grid is None
-            best_size = image_processor.find_best_resize(
-                image_size,
-                scale_resolution,
-                patch_size,
-                allow_upscale=allow_upscale,
-            )
-            h_p = best_size[1] // patch_size
-            w_p = best_size[0] // patch_size
-            source_tokens = (h_p // 4) * (w_p // 4)
-
-            if grid is None:
-                return source_tokens
-
-            refine_size = image_processor.get_refine_size(
-                image_size,
-                grid,
-                scale_resolution,
-                patch_size,
-                allow_upscale=True,
-            )
-            pw = refine_size[0] // grid[0]
-            ph = refine_size[1] // grid[1]
-            patch_tokens = (ph // patch_size // 4) * (pw // patch_size // 4)
-            ncols, nrows = grid
-            return source_tokens + ncols * nrows * patch_tokens
 
         if grid is None:
             ncols = nrows = 0

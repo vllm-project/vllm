@@ -146,6 +146,11 @@ pub struct CompletionRequest {
     /// Additional kwargs for structured outputs
     pub structured_outputs: Option<Value>,
 
+    /// Token budget for reasoning/thinking. Accepts a non-negative integer, or
+    /// `-1` for unlimited (mirroring the Python frontend, which normalizes `-1`
+    /// to "no budget").
+    pub thinking_token_budget: Option<i64>,
+
     /// Request scheduling priority (lower means earlier; default 0)
     pub priority: Option<i32>,
 

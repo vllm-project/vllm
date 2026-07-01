@@ -61,7 +61,7 @@ from openai.types.responses.response_reasoning_item import (
 from openai_harmony import Message as HarmonyMessage
 
 from vllm.entrypoints.mcp.tool_server import ToolServer
-from vllm.entrypoints.openai.engine.protocol import DeltaMessage
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage, DeltaToolCall
 from vllm.entrypoints.openai.parser.harmony_utils import (
     extract_function_from_recipient,
     is_function_recipient,
@@ -491,7 +491,7 @@ def emit_function_call_done_events(
         type="function_call",
         arguments=arguments,
         name=function_name,
-        item_id=state.current_item_id,
+        id=state.current_item_id,
         output_index=state.current_output_index,
         sequence_number=-1,
         call_id=state.current_call_id,
@@ -1118,6 +1118,38 @@ class _StateHandlers(NamedTuple):
     done_fn: Callable[..., list[StreamingResponsesResponse]]
 
 
+def split_delta(delta: DeltaMessage) -> list[DeltaMessage]:
+    """Decompose a DeltaMessage with multiple fields into atomic deltas.
+
+    The Responses API emits typed SSE events (one type per event), so a
+    compound DeltaMessage must be split before entering the state machine.
+    Order: reasoning -> content -> tool_calls (grouped by index).
+    """
+    has_reasoning = delta.reasoning is not None
+    has_content = delta.content is not None
+    has_tools = bool(delta.tool_calls)
+    parts = int(has_reasoning) + int(has_content) + int(has_tools)
+
+    if parts <= 1 and (
+        not has_tools
+        or len({tc.index for tc in delta.tool_calls if tc.index is not None}) <= 1
+    ):
+        return [delta]
+
+    deltas: list[DeltaMessage] = []
+    if has_reasoning:
+        deltas.append(DeltaMessage(reasoning=delta.reasoning))
+    if has_content:
+        deltas.append(DeltaMessage(content=delta.content))
+    if has_tools:
+        groups: dict[int | None, list[DeltaToolCall]] = {}
+        for tc in delta.tool_calls:
+            groups.setdefault(tc.index, []).append(tc)
+        for tcs in groups.values():
+            deltas.append(DeltaMessage(tool_calls=tcs))
+    return deltas or [delta]
+
+
 class SimpleStreamingEventProcessor:
     """
     State-machine processor for the simple (non-Harmony) streaming path.
@@ -1223,38 +1255,17 @@ class SimpleStreamingEventProcessor:
         ]
         | None = None,
     ) -> list[StreamingResponsesResponse]:
-        """
-        Emit incremental events for the current state from the delta.
-
-        Special case: when already in REASONING and the same delta also
-        carries content, we emit the reasoning delta, close reasoning,
-        open content, and then emit the content delta.
-        """
+        """Emit incremental events for the current state from the delta."""
         handlers = self._STATE_HANDLERS[self.state.current_state]
-        events: list[StreamingResponsesResponse] = []
-
-        # Special case: reasoning -> content inside a single delta.
-        if (
-            self.state.current_state == _StateType.REASONING
-            and delta_message.reasoning is not None
-            and delta_message.content is not None
-        ):
-            events.extend(handlers.delta_fn(self.state, delta_message.reasoning))
-            events.extend(self.close_current())
-            events.extend(self.open(_StateType.CONTENT))
-            content_handlers = self._STATE_HANDLERS[_StateType.CONTENT]
-            logprobs = get_logprobs(output) if get_logprobs else []
-            events.extend(
-                content_handlers.delta_fn(self.state, delta_message.content, logprobs)
-            )
-            return events
 
         if self.state.current_state == _StateType.TOOL_CALL:
             assert delta_message.tool_calls is not None
-            tool_call_function = delta_message.tool_calls[0].function
-            assert tool_call_function is not None
-            if tool_call_function.arguments:
-                return handlers.delta_fn(self.state, tool_call_function.arguments)
+            combined_args = ""
+            for tc in delta_message.tool_calls:
+                if tc.function is not None and tc.function.arguments:
+                    combined_args += tc.function.arguments
+            if combined_args:
+                return handlers.delta_fn(self.state, combined_args)
             return []
         elif self.state.current_state == _StateType.REASONING:
             assert delta_message.reasoning is not None

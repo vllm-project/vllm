@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
-from dataclasses import fields, is_dataclass
+from dataclasses import fields
 from typing import Any
 
 from transformers import PretrainedConfig
@@ -16,11 +16,8 @@ class SpeculatorsConfig(PretrainedConfig):
     model_type = "speculators"
 
     def __init__(self, **kwargs):
-        # Transformers v4 - super().__init__ which sets all kwargs as attributes
-        if not is_dataclass(PretrainedConfig):
-            return super().__init__(**kwargs)
-        # Transformers v5 - super().__init__ performs some validation before
-        # setting all kwargs as attributes, so we set them first to be safe
+        # super().__init__ performs some validation before setting all kwargs as
+        # attributes, so we set them first to be safe
         pre_trained_config_fields = {f.name for f in fields(PretrainedConfig)}
         super_kwargs = dict()
         for key, value in kwargs.items():

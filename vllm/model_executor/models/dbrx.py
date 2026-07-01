@@ -17,6 +17,7 @@ from vllm.distributed import (
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
+    RoutedExperts,
 )
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
@@ -73,27 +74,17 @@ class DbrxRouter(nn.Module):
         return router_logits
 
 
-class DbrxExperts(FusedMoE):
+class DbrxExperts(RoutedExperts):
     def __init__(
         self,
+        *args,
         config: DbrxConfig,
-        quant_config: QuantizationConfig | None = None,
-        params_dtype: torch.dtype | None = None,
-        prefix: str = "",
+        **kwargs,
     ):
-        super().__init__(
-            num_experts=config.ffn_config.moe_num_experts,
-            top_k=config.ffn_config.moe_top_k,
-            hidden_size=config.d_model,
-            intermediate_size=config.ffn_config.ffn_hidden_size,
-            params_dtype=params_dtype,
-            renormalize=True,
-            quant_config=quant_config,
-            tp_size=get_tensor_model_parallel_world_size(),
-            prefix=prefix,
-        )
+        super().__init__(*args, **kwargs)
         self.config = config
         self.d_model = config.d_model
+        self.tp_size = self.moe_config.tp_size
         self.intermediate_size = self.config.ffn_config.ffn_hidden_size // self.tp_size
 
     # Define custom weight loader for dbrx model
@@ -168,11 +159,18 @@ class DbrxMoE(nn.Module):
 
         self.router = DbrxRouter(config, self.params_dtype)
 
-        self.experts = DbrxExperts(
-            config=config,
-            quant_config=quant_config,
+        self.experts = FusedMoE(
+            num_experts=config.ffn_config.moe_num_experts,
+            top_k=config.ffn_config.moe_top_k,
+            hidden_size=config.d_model,
+            intermediate_size=config.ffn_config.ffn_hidden_size,
             params_dtype=self.params_dtype,
-            prefix=f"{prefix}.experts",
+            renormalize=True,
+            quant_config=quant_config,
+            tp_size=get_tensor_model_parallel_world_size(),
+            prefix=prefix,
+            routed_experts_cls=DbrxExperts,
+            routed_experts_args={"config": config},
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -394,19 +392,6 @@ class DbrxModel(nn.Module):
         loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                # Loading kv cache quantization scales
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = (
-                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
-                )
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
-                continue
-
             if name.endswith(("w1", "w2", "v1")):
                 name = name + "_weight"
             for param_name, weight_name in expert_params_mapping:

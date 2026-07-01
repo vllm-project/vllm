@@ -75,7 +75,7 @@ def get_ref_results(
 @pytest.mark.parametrize("shape", SHAPES)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
-@pytest.mark.parametrize("backend", ["cutlass", "cudnn", "trtllm", "b12x"])
+@pytest.mark.parametrize("backend", ["cute-dsl", "cutlass", "cudnn", "trtllm", "b12x"])
 @pytest.mark.parametrize("autotune", [False, True])
 @torch.inference_mode()
 def test_flashinfer_nvfp4_gemm(
@@ -88,6 +88,8 @@ def test_flashinfer_nvfp4_gemm(
 ) -> None:
     if "trtllm" in backend and dtype == torch.float16:
         pytest.skip("Only torch.bfloat16 is supported for TRTLLM FP4 GEMM operations")
+    if backend == "cute-dsl" and not current_platform.is_device_capability_family(100):
+        pytest.skip("FlashInfer cutedsl backend is only supported on SM10x")
     if backend == "b12x" and not current_platform.has_device_capability(120):
         pytest.skip("b12x FP4 GEMM requires SM120+ (CC 12.0+)")
     if backend == "b12x" and not has_flashinfer_b12x_gemm():

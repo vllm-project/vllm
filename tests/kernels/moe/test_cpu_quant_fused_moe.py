@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for CPU quantized fused MoE kernels (FP8 W8A16 and MXFP4 W4A16)."""
+"""Tests for CPU quantized fused MoE kernels."""
 
 import math
 import sys
@@ -31,7 +31,10 @@ def _prepack_experts(w: torch.Tensor) -> torch.Tensor:
     return torch.ops._C.convert_weight_packed(w)
 
 
-# FP8 W8A16 block-scaled fused MoE
+# ===========================================================================
+# FP8 W8A16 MoE
+# ===========================================================================
+
 
 BLOCK_SIZE = [128, 128]  # [block_n, block_k]
 
@@ -216,7 +219,9 @@ def test_w8a16_block_fp8_cpu_fused_moe(M, N, K, E, topk, seed):
     torch.testing.assert_close(out_inplace, out, atol=0, rtol=0)
 
 
-# MXFP4 W4A16 fused MoE
+# ===========================================================================
+# MXFP4 W4A16 MoE
+# ===========================================================================
 
 
 class MXFP4QuantizeUtil:
@@ -494,6 +499,389 @@ def test_mxfp4_cpu_fused_moe_bias_swiglu(M, N, K, E, topk, seed):
     )
 
     torch.testing.assert_close(ref_out.bfloat16(), out, atol=1e-2, rtol=1e-2)
+
+
+# ===========================================================================
+# INT4 W4A16 MoE
+# ===========================================================================
+
+
+def _pack_int4_gptq(w_int4: torch.Tensor) -> torch.Tensor:
+    """Pack INT4 values [N, K] → [N, K//8] int32 along K dim (GPTQ format)."""
+    N, K = w_int4.shape
+    assert K % 8 == 0
+    w = w_int4.to(torch.int32)
+    w_packed = torch.zeros(N, K // 8, dtype=torch.int32)
+    for j in range(8):
+        w_packed |= (w[:, j::8] & 0xF) << (j * 4)
+    return w_packed
+
+
+def _pack_int4_awq(w_int4: torch.Tensor) -> torch.Tensor:
+    """Pack INT4 values [..., N] → [..., N//8] int32 along last dim (AWQ format)."""
+    # AWQ packing bitshifts: indices {0,4,1,5,2,6,3,7} * 4 bits each
+    _AWQ_BITSHIFTS = [0, 16, 4, 20, 8, 24, 12, 28]
+
+    N = w_int4.shape[-1]
+    assert N % 8 == 0
+    w = w_int4.to(torch.int32)
+    w_packed = torch.zeros(*w.shape[:-1], N // 8, dtype=torch.int32)
+    for j, shift in enumerate(_AWQ_BITSHIFTS):
+        w_packed |= (w[..., j::8] & 0xF) << shift
+    return w_packed
+
+
+def _ref_int4_moe(
+    a: torch.Tensor,
+    w1_int4: torch.Tensor,
+    w2_int4: torch.Tensor,
+    w1_zeros: torch.Tensor | None,
+    w2_zeros: torch.Tensor | None,
+    w1_s: torch.Tensor,
+    w2_s: torch.Tensor,
+    topk_weight: torch.Tensor,
+    topk_ids: torch.Tensor,
+    group_size: int,
+) -> torch.Tensor:
+    """Reference INT4 W4A16 group-quantized fused MoE in pure torch."""
+    B = a.shape[0]
+    topk = topk_ids.size(1)
+    K_out = a.shape[1]
+
+    out = torch.zeros(B, topk, K_out, dtype=torch.float32)
+    for b in range(B):
+        for t in range(topk):
+            eid = topk_ids[b, t].item()
+            x = a[b : b + 1].float()
+
+            # Dequantize w1: [K, 2*N], groups along K (input dim)
+            K_dim = w1_int4.shape[1]
+            w1_dq = torch.zeros(K_dim, w1_int4.shape[2], dtype=torch.float32)
+            for g in range(w1_s.shape[1]):
+                k_start = g * group_size
+                k_end = min((g + 1) * group_size, K_dim)
+                zp = w1_zeros[eid, g, :].float() if w1_zeros is not None else 8.0
+                w1_dq[k_start:k_end, :] = (
+                    w1_int4[eid, k_start:k_end, :].float() - zp
+                ) * w1_s[eid, g, :].float()
+
+            ic = torch.matmul(x, w1_dq)  # [1, K] @ [K, 2*N] → [1, 2*N]
+            ic = _silu_and_mul(ic)  # [1, N]
+
+            # Dequantize w2: [N, K], groups along N (input dim)
+            N_dim = w2_int4.shape[1]
+            w2_dq = torch.zeros(N_dim, w2_int4.shape[2], dtype=torch.float32)
+            for g in range(w2_s.shape[1]):
+                n_start = g * group_size
+                n_end = min((g + 1) * group_size, N_dim)
+                zp = w2_zeros[eid, g, :].float() if w2_zeros is not None else 8.0
+                w2_dq[n_start:n_end, :] = (
+                    w2_int4[eid, n_start:n_end, :].float() - zp
+                ) * w2_s[eid, g, :].float()
+
+            oc = torch.matmul(ic, w2_dq)  # [1, N] @ [N, K] → [1, K]
+            out[b, t] = oc.squeeze(0)
+
+    return (out * topk_weight.unsqueeze(-1)).sum(dim=1).to(a.dtype)
+
+
+def _make_int4_moe_weights(E, N, K, group_size, quant_algo):
+    """Create INT4 MoE weights in GPTQ or AWQ packed format.
+
+    Canonical layout (input × output):
+      w1_int4: [E, K, 2*N]  w2_int4: [E, N, K]
+
+    GPTQ packed (pack transposed weight along input/K dim):
+      w1_packed: [E, K//8, 2*N]  w2_packed: [E, N//8, K]
+      zeros: actual int4 zero points, same packing as weights
+
+    AWQ packed (pack along output/N dim):
+      w1_packed: [E, K, 2*N//8]  w2_packed: [E, N, K//8]
+      zeros: actual int4 zero points, same packing as weights
+
+    Returns:
+        w1_int4, w2_int4,
+        w1_packed, w2_packed,
+        w1_zeros, w2_zeros,
+        w1_zeros_packed, w2_zeros_packed,
+        w1_s, w2_s
+    """
+    w1_int4 = torch.randint(0, 16, (E, K, 2 * N), dtype=torch.int32)
+    w2_int4 = torch.randint(0, 16, (E, N, K), dtype=torch.int32)
+
+    num_groups_w1 = K // group_size
+    num_groups_w2 = N // group_size
+    w1_s = (
+        torch.randn(E, num_groups_w1, 2 * N, dtype=torch.bfloat16) * 0.01
+    ).abs() + 0.001
+    w2_s = (torch.randn(E, num_groups_w2, K, dtype=torch.bfloat16) * 0.01).abs() + 0.001
+
+    if quant_algo == ops.CPUQuantAlgo.GPTQ:
+        # Pack: canonical [E, K, 2*N] → transpose [E, 2*N, K] → GPTQ pack
+        # [E, 2*N, K//8] → transpose [E, K//8, 2*N]
+        w1_t = w1_int4.transpose(1, 2).contiguous()  # [E, 2*N, K]
+        w1_packed = (
+            torch.stack([_pack_int4_gptq(w1_t[e]) for e in range(E)])
+            .transpose(1, 2)
+            .contiguous()
+        )  # [E, K//8, 2*N]
+        w2_t = w2_int4.transpose(1, 2).contiguous()  # [E, K, N]
+        w2_packed = (
+            torch.stack([_pack_int4_gptq(w2_t[e]) for e in range(E)])
+            .transpose(1, 2)
+            .contiguous()
+        )  # [E, N//8, K]
+        w1_zeros = w2_zeros = None
+        w1_zeros_packed = torch.full(
+            (E, num_groups_w1, 2 * N // 8), 0x77777777, dtype=torch.int32
+        )
+        w2_zeros_packed = torch.full(
+            (E, num_groups_w2, K // 8), 0x77777777, dtype=torch.int32
+        )
+    else:  # AWQ
+        # Asymmetric: actual zero points, packed along output dim.
+        w1_zeros = torch.randint(1, 15, (E, num_groups_w1, 2 * N), dtype=torch.int32)
+        w2_zeros = torch.randint(1, 15, (E, num_groups_w2, K), dtype=torch.int32)
+        w1_packed = torch.stack(
+            [_pack_int4_awq(w1_int4[e]) for e in range(E)]
+        )  # [E, K, 2*N//8]
+        w2_packed = torch.stack(
+            [_pack_int4_awq(w2_int4[e]) for e in range(E)]
+        )  # [E, N, K//8]
+        w1_zeros_packed = torch.stack(
+            [_pack_int4_awq(w1_zeros[e]) for e in range(E)]
+        )  # [E, K//gs, 2*N//8]
+        w2_zeros_packed = torch.stack(
+            [_pack_int4_awq(w2_zeros[e]) for e in range(E)]
+        )  # [E, N//gs, K//8]
+
+    return (
+        w1_int4,
+        w2_int4,
+        w1_packed,
+        w2_packed,
+        w1_zeros,
+        w2_zeros,
+        w1_zeros_packed,
+        w2_zeros_packed,
+        w1_s,
+        w2_s,
+    )
+
+
+INT4_MOE_CONFIGS = [
+    # (N, K, E, topk, group_size)
+    (256, 512, 8, 2, 128),
+    (512, 256, 8, 2, 128),
+    (512, 512, 8, 4, 128),
+    (768, 2048, 8, 2, 128),
+]
+
+
+@pytest.mark.parametrize("M", [1, 2, 64, 121])
+@pytest.mark.parametrize("N,K,E,topk,group_size", INT4_MOE_CONFIGS)
+@pytest.mark.parametrize("quant_algo", [ops.CPUQuantAlgo.GPTQ, ops.CPUQuantAlgo.AWQ])
+@pytest.mark.parametrize("seed", [0])
+def test_int4_w4a16_cpu_fused_moe(M, N, K, E, topk, group_size, quant_algo, seed):
+    """Test fused_experts_cpu INT4 W4A16 for both GPTQ and AWQ quant formats."""
+    set_random_seed(seed)
+
+    a = torch.randn(M, K, dtype=torch.bfloat16) / (0.5 * K**0.5)
+    (
+        w1_int4,
+        w2_int4,
+        w1_packed,
+        w2_packed,
+        w1_zeros,
+        w2_zeros,
+        w1_zeros_packed,
+        w2_zeros_packed,
+        w1_s,
+        w2_s,
+    ) = _make_int4_moe_weights(E, N, K, group_size, quant_algo)
+
+    score = torch.randn(M, E, dtype=torch.bfloat16)
+    score = torch.softmax(score, dim=-1, dtype=torch.float32)
+    topk_weight, topk_ids = torch.topk(score, topk)
+    topk_ids = topk_ids.to(torch.int32)
+
+    ref_out = _ref_int4_moe(
+        a,
+        w1_int4,
+        w2_int4,
+        w1_zeros,
+        w2_zeros,
+        w1_s,
+        w2_s,
+        topk_weight,
+        topk_ids,
+        group_size,
+    )
+
+    from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+        prepare_int4_moe_layer_for_cpu,
+    )
+
+    (blocked_w1, blocked_w2, blocked_s1, blocked_s2, blocked_z1, blocked_z2) = (
+        prepare_int4_moe_layer_for_cpu(
+            w1_packed,
+            w2_packed,
+            w1_s,
+            w2_s,
+            quant_algo=quant_algo,
+            w13_zeros=w1_zeros_packed,
+            w2_zeros=w2_zeros_packed,
+        )
+    )
+
+    out = ops.fused_experts_cpu(
+        a.clone(),
+        blocked_w1,
+        blocked_w2,
+        topk_weight,
+        topk_ids,
+        False,  # inplace
+        ops.CPUQuantMethod.INT4_W4A8,
+        blocked_s1,
+        blocked_s2,
+        blocked_z1,
+        blocked_z2,
+        None,  # block_size
+        None,  # w1_bias
+        None,  # w2_bias
+        None,  # alpha
+        None,  # limit
+        True,  # is_vnni
+    )
+    torch.testing.assert_close(ref_out.bfloat16(), out, atol=1e-2, rtol=1e-2)
+
+
+# ===========================================================================
+# INT8 W8A8 MoE
+# ===========================================================================
+
+
+def _quantize_per_channel(w):
+    """Symmetric per-channel INT8 quantisation. w: [N, K] -> (int8, scale)."""
+    amax = w.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12)
+    scale = amax / 127.0
+    w_q = (w / scale).round().clamp(-128, 127).to(torch.int8)
+    return w_q, scale.float()
+
+
+def _quantize_per_token(x):
+    """Symmetric per-token INT8 quantisation. x: [M, K] -> (int8, scale)."""
+    amax = x.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12)
+    scale = amax / 127.0
+    x_q = (x / scale).round().clamp(-128, 127).to(torch.int8)
+    return x_q, scale.float()
+
+
+def _ref_int8_moe(a, w1, w2, w1_s, w2_s, topk_weight, topk_ids):
+    """Reference INT8 W8A8 per-channel fused MoE in pure torch."""
+    B, D = a.shape
+    topk = topk_ids.size(1)
+
+    out = torch.zeros(B, topk, w2.shape[1], dtype=torch.float32)
+    for b in range(B):
+        for t in range(topk):
+            eid = topk_ids[b, t].item()
+
+            x = a[b : b + 1].float()
+            x_q, x_s = _quantize_per_token(x)
+            ic = torch.matmul(x_q.float(), w1[eid].float().t())
+            ic = ic * x_s * w1_s[eid].view(1, -1)
+            ic = _silu_and_mul(ic)
+
+            ic_q, ic_s = _quantize_per_token(ic)
+            oc = torch.matmul(ic_q.float(), w2[eid].float().t())
+            oc = oc * ic_s * w2_s[eid].view(1, -1)
+            out[b, t] = oc.squeeze(0)
+
+    result = (out * topk_weight.unsqueeze(-1)).sum(dim=1)
+    return result.to(a.dtype)
+
+
+def _make_int8_moe_weights(E, N, K):
+    factor = 1e-2
+    w1_f = (torch.randn(E, 2 * N, K) - 0.5) * 2
+    w2_f = (torch.randn(E, K, N) - 0.5) * 2
+
+    w1_q_list, w1_s_list = [], []
+    w2_q_list, w2_s_list = [], []
+    for e in range(E):
+        q, s = _quantize_per_channel(w1_f[e])
+        w1_q_list.append(q)
+        w1_s_list.append(s)
+        q, s = _quantize_per_channel(w2_f[e])
+        w2_q_list.append(q)
+        w2_s_list.append(s)
+
+    return (
+        torch.stack(w1_q_list),
+        torch.stack(w2_q_list),
+        torch.stack(w1_s_list) * factor,
+        torch.stack(w2_s_list) * factor,
+    )
+
+
+INT8_NUM_TOKENS = [1, 2, 64, 121]
+INT8_MOE_CONFIGS = [
+    # (N, K, E, topk)
+    (256, 512, 8, 2),
+    (512, 256, 8, 2),
+    (512, 512, 8, 4),
+    (768, 2048, 8, 2),
+]
+
+
+@pytest.mark.parametrize("M", INT8_NUM_TOKENS)
+@pytest.mark.parametrize("N,K,E,topk", INT8_MOE_CONFIGS)
+@pytest.mark.parametrize("seed", [0])
+@pytest.mark.parametrize("is_vnni", [False, True])
+@pytest.mark.parametrize("inplace", [False, True])
+def test_int8_w8a8_cpu_fused_moe(M, N, K, E, topk, seed, is_vnni, inplace):
+    """Test fused_experts_cpu INT8 W8A8 against torch reference."""
+    set_random_seed(seed)
+
+    a = torch.randn(M, K, dtype=torch.bfloat16) / (0.5 * K**0.5)
+    w1_q, w2_q, w1_s, w2_s = _make_int8_moe_weights(E, N, K)
+
+    score = torch.randn(M, E, dtype=torch.bfloat16)
+    score = torch.softmax(score, dim=-1, dtype=torch.float32)
+    topk_weight, topk_ids = torch.topk(score, topk)
+    topk_ids = topk_ids.to(torch.int32)
+
+    ref_out = _ref_int8_moe(a, w1_q, w2_q, w1_s, w2_s, topk_weight, topk_ids)
+
+    w1 = _prepack_experts(w1_q) if is_vnni else w1_q
+    w2 = _prepack_experts(w2_q) if is_vnni else w2_q
+
+    out = ops.fused_experts_cpu(
+        a.clone(),
+        w1,
+        w2,
+        topk_weight,
+        topk_ids,
+        inplace,
+        ops.CPUQuantMethod.INT8_W8A8,
+        w1_s,
+        w2_s,
+        None,  # w1_zero
+        None,  # w2_zero
+        None,  # block_size
+        None,  # w1_bias
+        None,  # w2_bias
+        None,  # alpha
+        None,  # limit
+        is_vnni,
+    )
+    torch.testing.assert_close(
+        ref_out.bfloat16(),
+        out,
+        atol=2e-1,
+        rtol=2e-1,
+    )
 
 
 if __name__ == "__main__":
