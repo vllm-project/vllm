@@ -136,6 +136,8 @@ class SpeculativeConfig:
     for draft token generation. Reduces communication from O(vocab_size) to
     O(2 * tp_size) per token. Only applies to greedy draft selection in
     non-tree speculation."""
+    relaxed_thinking: bool = False
+    """Enable relaxed speculative acceptance inside reasoning spans."""
 
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)
@@ -1052,6 +1054,11 @@ class SpeculativeConfig:
             raise ValueError(
                 "Expected num_speculative_tokens to be greater "
                 f"than zero ({self.num_speculative_tokens})."
+            )
+
+        if self.relaxed_thinking and self.rejection_sample_method == "synthetic":
+            raise ValueError(
+                "relaxed_thinking is only supported with standard rejection sampling."
             )
 
         if self.rejection_sample_method == "synthetic":

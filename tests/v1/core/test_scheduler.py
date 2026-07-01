@@ -28,6 +28,7 @@ from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.sched.utils import maybe_update_thinking_state
 from vllm.v1.engine import FinishReason
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -1036,6 +1037,57 @@ def test_reset_connector_cache_no_connector_is_no_op_success():
     # End-to-end: reset_prefix_cache(reset_connector=True) on an idle
     # scheduler succeeds with or without a connector.
     assert scheduler.reset_prefix_cache(reset_connector=True) is True
+
+
+def test_make_cached_request_data_includes_thinking_states_when_enabled():
+    scheduler = object.__new__(Scheduler)
+    scheduler.relaxed_thinking = True
+    scheduler.use_pp = False
+    scheduler.use_v2_model_runner = False
+    scheduler.prev_step_scheduled_req_ids = set()
+
+    class FakeBlocks:
+        def get_block_ids(self, allow_none: bool = False):
+            return ([1],)
+
+    req_a = Mock(
+        request_id="req_a",
+        all_token_ids=[1, 2],
+        num_computed_tokens=1,
+        num_output_tokens=1,
+        num_output_placeholders=0,
+        thinking_state=True,
+    )
+    req_b = Mock(
+        request_id="req_b",
+        all_token_ids=[3, 4],
+        num_computed_tokens=1,
+        num_output_tokens=1,
+        num_output_placeholders=0,
+        thinking_state=False,
+    )
+
+    data = Scheduler._make_cached_request_data(
+        scheduler,
+        running_reqs=[req_a, req_b],
+        resumed_reqs=[],
+        num_scheduled_tokens={"req_a": 1, "req_b": 1},
+        spec_decode_tokens={},
+        req_to_new_blocks={"req_a": FakeBlocks(), "req_b": FakeBlocks()},
+    )
+
+    assert data.req_ids == ["req_a", "req_b"]
+    assert data.thinking_states == [True, False]
+
+
+def test_maybe_update_thinking_state_flips_on_boundaries():
+    request = Mock(thinking_state=False)
+
+    maybe_update_thinking_state(request, 10, 10, 11)
+    assert request.thinking_state is True
+
+    maybe_update_thinking_state(request, 11, 10, 11)
+    assert request.thinking_state is False
 
 
 # Note - these test cases mirror some of those in test_rejection_sampler.py
