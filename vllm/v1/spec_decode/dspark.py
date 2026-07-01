@@ -8,7 +8,7 @@ import torch
 from typing_extensions import override
 
 from vllm.config import VllmConfig
-from vllm.distributed.parallel_state import graph_capture
+from vllm.distributed.parallel_state import get_pp_group, graph_capture
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -306,6 +306,49 @@ class DSparkProposer(DFlashProposer):
                 return
             self.model = _DSparkForwardCUDAGraph(self, self.model)
             logger.info("DSpark draft forward CUDA graph is enabled.")
+
+    @override
+    def _maybe_share_embeddings(self, target_language_model: Any) -> None:
+        if get_pp_group().world_size != 1:
+            logger.info(
+                "DSpark draft model keeps separate embeddings under pipeline "
+                "parallelism."
+            )
+            return
+
+        target_inner_model = getattr(target_language_model, "model", None)
+        target_embed_tokens = getattr(target_inner_model, "embed_tokens", None)
+        if target_embed_tokens is None or not hasattr(self.model, "embed_tokens"):
+            logger.warning(
+                "DSpark could not share target embeddings; keeping draft "
+                "embed_tokens."
+            )
+            return
+
+        del self.model.embed_tokens
+        self.model.embed_tokens = target_embed_tokens
+        logger.info("Shared target model embeddings with DSpark draft model.")
+
+    @override
+    def _maybe_share_lm_head(self, target_language_model: Any) -> None:
+        if get_pp_group().world_size != 1:
+            logger.info(
+                "DSpark draft model keeps separate lm_head under pipeline "
+                "parallelism."
+            )
+            return
+
+        if not hasattr(target_language_model, "lm_head") or not hasattr(
+            self.model, "head"
+        ):
+            logger.warning(
+                "DSpark could not share target lm_head; keeping draft head."
+            )
+            return
+
+        del self.model.head
+        self.model.head = target_language_model.lm_head
+        logger.info("Shared target model lm_head with DSpark draft model.")
 
     @override
     def initialize_attn_backend(
