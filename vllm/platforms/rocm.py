@@ -18,7 +18,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ParallelConfig, VllmConfig
     from vllm.config.kernel import IrOpPriorityConfig
     from vllm.v1.attention.selector import AttentionSelectorConfig
 
@@ -818,6 +818,36 @@ class RocmPlatform(Platform):
 
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
+
+        cls._verify_aiter_fused_shared_experts(parallel_config)
+
+    @classmethod
+    def _verify_aiter_fused_shared_experts(
+        cls, parallel_config: "ParallelConfig"
+    ) -> None:
+        """Guard AITER fused shared-experts against incompatible features.
+
+        VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS fuses the shared expert into
+        the routed-expert MoE by appending a per-rank shared-expert slot. That
+        extra slot changes the routed-expert count each rank sees, which is
+        incompatible with EPLB's per-expert bookkeeping/relocation. Reject the
+        combination up front with a clear message instead of failing deep in
+        the MoE path. This is the single place to extend as other mutually
+        exclusive features (e.g. batch-overlap schedulers) are added.
+        """
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        if not rocm_aiter_ops.is_fusion_moe_shared_experts_enabled():
+            return
+
+        if parallel_config.enable_eplb:
+            raise ValueError(
+                "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is incompatible with "
+                "EPLB: the fused shared-expert slot changes the routed-expert "
+                "count and breaks EPLB's per-expert bookkeeping. Disable one of "
+                "them (unset VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS or run "
+                "without --enable-eplb)."
+            )
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
