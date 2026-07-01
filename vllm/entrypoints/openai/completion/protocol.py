@@ -543,6 +543,15 @@ class CompletionResponseChoice(OpenAIBaseModel):
     # or (b) ``enable_return_routed_experts`` is off server-side.
     routed_experts: str | None = None
 
+    # Per-token indexer topk indices (sparse-attention selected KV
+    # slots), base64-encoded ``.npy`` bytes. Shape after decode:
+    #   (num_tokens, num_indexer_layers, index_topk)  dtype int32
+    # Decode:
+    #   np.load(io.BytesIO(base64.b64decode(s)))
+    # ``None`` if (a) the request was aborted before any forward pass,
+    # or (b) ``enable_return_indexer_topk`` is off server-side.
+    indexer_topk: str | None = None
+
 
 class CompletionResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"cmpl-{random_uuid()}")
