@@ -152,8 +152,8 @@ impl axum::serve::Listener for Listener {
 
 /// Allow the unified listener to be adaptable to `tls_listener`.
 impl AsyncAccept for Listener {
-    type Connection = ListenerIo;
     type Address = ListenerAddr;
+    type Connection = ListenerIo;
     type Error = std::io::Error;
 
     fn poll_accept(
