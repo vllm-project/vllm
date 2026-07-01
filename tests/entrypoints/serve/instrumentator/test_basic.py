@@ -220,3 +220,209 @@ async def test_health_check_engine_dead_error():
 
     # Assert that it returns 503 Service Unavailable
     assert response.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# Unit tests for /live liveness probe and /health draining behavior
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_request(
+    engine_client=None,
+    draining=False,
+):
+    """Create a mock FastAPI Request with configurable app state."""
+    mock_request = Mock(spec=Request)
+    mock_app_state = Mock()
+    mock_app_state.engine_client = engine_client
+    mock_app_state.draining = draining
+    mock_request.app.state = mock_app_state
+    return mock_request
+
+
+class TestLiveEndpoint:
+    """Tests for the /live liveness probe."""
+
+    @pytest.mark.asyncio
+    async def test_live_healthy_engine(self):
+        from vllm.entrypoints.serve.instrumentator.health import live
+
+        mock_client = Mock()
+        mock_client.is_engine_dead = False
+        request = _make_mock_request(engine_client=mock_client)
+
+        response = await live(request)
+        assert response.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_live_dead_engine(self):
+        from vllm.entrypoints.serve.instrumentator.health import live
+
+        mock_client = Mock()
+        mock_client.is_engine_dead = True
+        request = _make_mock_request(engine_client=mock_client)
+
+        response = await live(request)
+        assert response.status_code == 503
+
+    @pytest.mark.asyncio
+    async def test_live_during_drain(self):
+        """Liveness probe returns 200 during graceful drain."""
+        from vllm.entrypoints.serve.instrumentator.health import live
+
+        mock_client = Mock()
+        mock_client.is_engine_dead = False
+        request = _make_mock_request(engine_client=mock_client, draining=True)
+
+        response = await live(request)
+        assert response.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_live_render_only_server(self):
+        """Render-only servers have no engine client."""
+        from vllm.entrypoints.serve.instrumentator.health import live
+
+        request = _make_mock_request(engine_client=None)
+
+        response = await live(request)
+        assert response.status_code == 200
+
+
+class TestHealthDraining:
+    """Tests for /health readiness probe draining behavior."""
+
+    @pytest.mark.asyncio
+    async def test_health_returns_503_when_draining(self):
+        from vllm.entrypoints.serve.instrumentator.health import health
+
+        mock_client = AsyncMock()
+        request = _make_mock_request(engine_client=mock_client, draining=True)
+
+        response = await health(request)
+        assert response.status_code == 503
+        # check_health should NOT be called when draining
+        mock_client.check_health.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_health_returns_200_when_not_draining(self):
+        from vllm.entrypoints.serve.instrumentator.health import health
+
+        mock_client = AsyncMock()
+        request = _make_mock_request(engine_client=mock_client, draining=False)
+
+        response = await health(request)
+        assert response.status_code == 200
+        mock_client.check_health.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_health_render_only_server(self):
+        """Render-only servers have no engine; always healthy."""
+        from vllm.entrypoints.serve.instrumentator.health import health
+
+        request = _make_mock_request(engine_client=None)
+
+        response = await health(request)
+        assert response.status_code == 200
+
+
+class TestScalingMiddlewareExemptions:
+    """Tests for ScalingMiddleware exempt paths (/live, /metrics)."""
+
+    @pytest.mark.asyncio
+    async def test_live_exempt_during_scaling(self):
+        from vllm.entrypoints.serve.elastic_ep.middleware import (
+            ScalingMiddleware,
+            set_scaling_elastic_ep,
+        )
+
+        received_scopes = []
+
+        async def mock_app(scope, receive, send):
+            received_scopes.append(scope)
+
+        middleware = ScalingMiddleware(mock_app)
+        scope = {"type": "http", "path": "/live"}
+
+        try:
+            set_scaling_elastic_ep(True)
+            await middleware(scope, None, None)
+        finally:
+            set_scaling_elastic_ep(False)
+
+        # /live should pass through to the app
+        assert len(received_scopes) == 1
+
+    @pytest.mark.asyncio
+    async def test_metrics_exempt_during_scaling(self):
+        from vllm.entrypoints.serve.elastic_ep.middleware import (
+            ScalingMiddleware,
+            set_scaling_elastic_ep,
+        )
+
+        received_scopes = []
+
+        async def mock_app(scope, receive, send):
+            received_scopes.append(scope)
+
+        middleware = ScalingMiddleware(mock_app)
+        scope = {"type": "http", "path": "/metrics"}
+
+        try:
+            set_scaling_elastic_ep(True)
+            await middleware(scope, None, None)
+        finally:
+            set_scaling_elastic_ep(False)
+
+        assert len(received_scopes) == 1
+
+    @pytest.mark.asyncio
+    async def test_other_paths_blocked_during_scaling(self):
+        from vllm.entrypoints.serve.elastic_ep.middleware import (
+            ScalingMiddleware,
+            set_scaling_elastic_ep,
+        )
+
+        received_scopes = []
+        sent_responses = []
+
+        async def mock_app(scope, receive, send):
+            received_scopes.append(scope)
+
+        async def mock_send(message):
+            sent_responses.append(message)
+
+        middleware = ScalingMiddleware(mock_app)
+        scope = {"type": "http", "path": "/v1/completions"}
+
+        try:
+            set_scaling_elastic_ep(True)
+            await middleware(scope, None, mock_send)
+        finally:
+            set_scaling_elastic_ep(False)
+
+        # Should NOT pass through to the app
+        assert len(received_scopes) == 0
+        # Should have sent a 503 response
+        assert any(
+            r.get("status") == 503 for r in sent_responses if isinstance(r, dict)
+        )
+
+    @pytest.mark.asyncio
+    async def test_all_paths_pass_when_not_scaling(self):
+        from vllm.entrypoints.serve.elastic_ep.middleware import (
+            ScalingMiddleware,
+            set_scaling_elastic_ep,
+        )
+
+        received_scopes = []
+
+        async def mock_app(scope, receive, send):
+            received_scopes.append(scope)
+
+        middleware = ScalingMiddleware(mock_app)
+        set_scaling_elastic_ep(False)
+
+        for path in ["/live", "/health", "/v1/completions", "/metrics"]:
+            await middleware({"type": "http", "path": path}, None, None)
+
+        assert len(received_scopes) == 4
