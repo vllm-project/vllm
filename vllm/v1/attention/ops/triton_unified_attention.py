@@ -98,11 +98,18 @@ def _load_q_td(
         + (cur_batch_in_all_start_index + q_block_local_idx * BLOCK_Q) * query_stride_0
         + (kv_head_idx * num_queries_per_kv) * query_stride_1
     )
+    # ``BLOCK_M == BLOCK_Q * NQ_PADDED`` where ``NQ_PADDED`` is
+    # ``next_power_of_2(num_queries_per_kv)``. The TD validator requires the
+    # flattened inner extent to be a power of 2, so read ``NQ_PADDED`` heads
+    # worth of columns; the descriptor zero-pads the read past the real
+    # ``num_queries_per_kv * HEAD_SIZE`` extent (same as HEAD_SIZE_PADDED), and
+    # the padded head rows are masked out downstream via ``query_mask_1``.
+    NQ_PADDED: tl.constexpr = BLOCK_M // BLOCK_Q
     q_desc = tl.make_tensor_descriptor(
         base=q_base,
         shape=(q_block_local_len, num_queries_per_kv * HEAD_SIZE),
         strides=(query_stride_0, 1),
-        block_shape=(BLOCK_Q, num_queries_per_kv * HEAD_SIZE_PADDED),
+        block_shape=(BLOCK_Q, NQ_PADDED * HEAD_SIZE_PADDED),
     )
     return q_desc.load([0, 0]).reshape(BLOCK_M, HEAD_SIZE_PADDED)
 
@@ -279,6 +286,13 @@ def kernel_unified_attention(
     USE_PER_TOKEN_HEAD_SCALES: tl.constexpr = KV_QUANT_MODE >= 2
     USE_FP8_Q_DESCALE: tl.constexpr = KV_QUANT_MODE == 1 and Q_IS_FP8
 
+    # The TD *store* writes the real ``num_queries_per_kv`` heads and cannot pad
+    # (padded heads would corrupt the adjacent KV group's output). It is only
+    # valid when NQ_PADDED == num_queries_per_kv, i.e. pow2 GQA. The TD *load*
+    # can pad (zero-padded read), so non-pow2 GQA still benefits from a TD Q
+    # load while falling back to the masked pointer store.
+    USE_TD_STORE: tl.constexpr = USE_TD_QO and (BLOCK_M // BLOCK_Q == num_queries_per_kv)
+
     if USE_TD:
         tl.static_assert(
             BLOCK_SIZE % TILE_SIZE == 0,
@@ -318,10 +332,17 @@ def kernel_unified_attention(
     offs_m = tl.arange(0, BLOCK_M)
     offs_d = tl.arange(0, HEAD_SIZE_PADDED)
     offs_t = tl.arange(0, TILE_SIZE)
-    query_pos = q_block_local_idx * BLOCK_Q + offs_m // num_queries_per_kv
+    # Rows are packed as BLOCK_Q query positions x NQ_PADDED head slots, where
+    # NQ_PADDED = next_power_of_2(num_queries_per_kv) = BLOCK_M // BLOCK_Q.
+    # For pow2 GQA NQ_PADDED == num_queries_per_kv and this is unchanged; for
+    # non-pow2 GQA (e.g. Qwen2-7B nq=7) there are NQ_PADDED - nq padding slots
+    # per group that must be masked off so they don't alias the next KV group.
+    NQ_PADDED: tl.constexpr = BLOCK_M // BLOCK_Q
+    head_in_group = offs_m % NQ_PADDED
+    query_pos = q_block_local_idx * BLOCK_Q + offs_m // NQ_PADDED
 
     query_offset_0 = cur_batch_in_all_start_index + query_pos
-    query_offset_1 = kv_head_idx * num_queries_per_kv + offs_m % num_queries_per_kv
+    query_offset_1 = kv_head_idx * num_queries_per_kv + head_in_group
     query_offset = (
         query_offset_0[:, None] * query_stride_0
         + query_offset_1[:, None] * query_stride_1
@@ -330,7 +351,13 @@ def kernel_unified_attention(
 
     dim_mask = tl.where(offs_d < HEAD_SIZE, 1, 0).to(tl.int1)
     query_mask_0 = tl.where(query_pos < cur_batch_query_len, 1, 0).to(tl.int1)
-    query_mask_1 = tl.where(query_offset_1 < num_query_heads, 1, 0).to(tl.int1)
+    # Mask both out-of-range query heads AND padding head slots
+    # (head_in_group >= num_queries_per_kv) introduced by NQ_PADDED packing.
+    query_mask_1 = tl.where(
+        (query_offset_1 < num_query_heads) & (head_in_group < num_queries_per_kv),
+        1,
+        0,
+    ).to(tl.int1)
 
     # Q : (BLOCK_M, HEAD_SIZE_PADDED)
     if USE_TD_QO:
@@ -567,7 +594,7 @@ def kernel_unified_attention(
         if USE_FP8_Q_DESCALE:
             acc *= value_scale
         # Store per-segment partials; finalized by ``reduce_segments``.
-        if USE_TD_QO:
+        if USE_TD_STORE:
             # 3D target: segm_output[token, head, segm_idx, :].  Advance
             # the base to the correct (token-start, head-start, segm)
             # slice; strides step between tokens / heads of the flattened
@@ -626,7 +653,7 @@ def kernel_unified_attention(
         if USE_FP8:
             acc = acc * tl.load(out_scale)
             acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
-        if USE_TD_QO:
+        if USE_TD_STORE:
             # 2D target: flat output[token, head, :].  Strides come
             # straight from the caller (``output_stride_0`` per token,
             # ``output_stride_1`` per head).
@@ -902,7 +929,14 @@ def unified_attention(
     BLOCK_M = (
         16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
     )
-    BLOCK_Q = BLOCK_M // num_queries_per_kv
+    # Pack BLOCK_M rows as BLOCK_Q query positions x NQ_PADDED head slots, where
+    # NQ_PADDED = next_power_of_2(num_queries_per_kv). For pow2 GQA this equals
+    # the original BLOCK_M // num_queries_per_kv; for non-pow2 GQA the padded
+    # head slots are masked in the kernel. Recompute BLOCK_M so it is an exact
+    # multiple of (BLOCK_Q * NQ_PADDED) -- required for the TD Q load.
+    nq_padded = triton.next_power_of_2(num_queries_per_kv)
+    BLOCK_Q = max(BLOCK_M // nq_padded, 1)
+    BLOCK_M = BLOCK_Q * nq_padded
 
     # Tuned launch parameters; ``None`` lets Triton pick its defaults.
     launch_num_warps: int | None = None
@@ -980,9 +1014,12 @@ def unified_attention(
     # for Q/O in that case — KV tile loads are unaffected because their
     # ``shape`` already matches ``block_shape`` on the inner axis.
     head_size_padded = triton.next_power_of_2(head_size)
-    _is_pow2_nq = (num_queries_per_kv & (num_queries_per_kv - 1)) == 0
     _is_pow2_hs = head_size == head_size_padded
-    use_td_qo = use_td and _is_pow2_nq and _is_pow2_hs
+    # Non-pow2 num_queries_per_kv is now supported by the TD Q load (it pads the
+    # head dimension to next_power_of_2 and the kernel masks the padding). The
+    # TD store still requires pow2 nq and is gated separately in-kernel
+    # (USE_TD_STORE); non-pow2 nq uses the masked pointer store.
+    use_td_qo = use_td and _is_pow2_hs
 
     # ``_load_q_td`` / ``_store_output_td`` flatten ``(num_queries_per_kv,
     # HEAD_SIZE)`` into a single contiguous inner axis.  That's only
