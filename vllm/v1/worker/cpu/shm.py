@@ -30,6 +30,7 @@ class _EventPlaceholder:
 class _StreamPlaceholder:
     def __init__(self, *args, **kwargs) -> None:
         self.wait_stream = noop
+        self.device = torch.device("cpu")
 
     def __enter__(self, *args, **kwargs):
         return self
