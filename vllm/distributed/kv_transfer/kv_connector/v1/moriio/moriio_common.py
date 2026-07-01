@@ -4,7 +4,7 @@ import contextlib
 import os
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -228,6 +228,38 @@ def get_moriio_node_hosts(
         return node_hosts
 
     return [default_host]
+
+
+def get_moriio_trusted_remote_hosts(
+    kv_transfer_config: KVTransferConfig,
+    node_hosts: Collection[str],
+) -> frozenset[str]:
+    extra_config = kv_transfer_config.kv_connector_extra_config
+    trusted_remote_hosts = _normalize_node_hosts(
+        extra_config.get("trusted_remote_hosts"),
+        "kv_connector_extra_config['trusted_remote_hosts']",
+    )
+    return frozenset(trusted_remote_hosts or node_hosts)
+
+
+def validate_moriio_remote_hosts(
+    value: Any,
+    trusted_remote_hosts: Collection[str],
+    config_key: str,
+) -> list[str]:
+    remote_hosts = _normalize_node_hosts(value, config_key)
+    if not remote_hosts:
+        return []
+    if not trusted_remote_hosts:
+        raise ValueError(
+            f"{config_key} requires kv_connector_extra_config['trusted_remote_hosts']"
+        )
+    untrusted_hosts = sorted(set(remote_hosts).difference(trusted_remote_hosts))
+    if untrusted_hosts:
+        raise ValueError(
+            f"{config_key} contains untrusted remote_hosts: {untrusted_hosts}"
+        )
+    return remote_hosts
 
 
 _DEPRECATED_ENV_VARS: dict[str, str] = {
@@ -462,11 +494,15 @@ class ReqMeta:
 
 
 class MoRIIOConnectorMetadata(KVConnectorMetadata):
-    def __init__(self):
+    def __init__(
+        self,
+        trusted_remote_hosts: Collection[str] = (),
+    ):
         self.reqs_to_recv: dict[ReqId, ReqMeta] = {}
         self.reqs_to_save: dict[ReqId, ReqMeta] = {}
         self.reqs_to_send: dict[ReqId, float] = {}
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
+        self.trusted_remote_hosts = frozenset(trusted_remote_hosts)
 
     def __repr__(self):
         return (
@@ -493,8 +529,9 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         # `kv_transfer_params.remote_hosts` (forwarded for multi-node TP) and
         # MoRIIO's default well-known ports. Once a valid host/port triple is
         # available, the rest of the path is unchanged.
-        remote_hosts = _normalize_node_hosts(
+        remote_hosts = validate_moriio_remote_hosts(
             kv_transfer_params.get("remote_hosts"),
+            self.trusted_remote_hosts,
             "kv_transfer_params['remote_hosts']",
         )
         if (

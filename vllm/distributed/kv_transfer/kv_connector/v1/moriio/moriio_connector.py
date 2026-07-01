@@ -38,12 +38,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     WriteTask,
     get_moriio_mode,
     get_moriio_node_hosts,
+    get_moriio_trusted_remote_hosts,
     get_peer_zmq_from_request_id,
     get_port_offset,
     get_role,
     parse_moriio_zmq_address,
     resolve_host_ip,
     set_role,
+    validate_moriio_remote_hosts,
     zmq_ctx,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
@@ -392,6 +394,9 @@ class MoRIIOConnectorScheduler:
         # request_finished's kv_transfer_params so workers can dial the rank
         # owner. Single-node TP falls back to [host_ip].
         self.node_hosts = get_moriio_node_hosts(self.kv_transfer_config, self.host_ip)
+        self.trusted_remote_hosts = get_moriio_trusted_remote_hosts(
+            self.kv_transfer_config, self.node_hosts
+        )
         self.handshake_port = self.kv_transfer_config.kv_connector_extra_config[
             "handshake_port"
         ]
@@ -627,9 +632,11 @@ class MoRIIOConnectorScheduler:
 
                 block_ids = blocks.get_block_ids()[0]
 
-                remote_hosts = request.kv_transfer_params.get("remote_hosts")
-                if isinstance(remote_hosts, str):
-                    remote_hosts = [remote_hosts] if remote_hosts else None
+                remote_hosts = validate_moriio_remote_hosts(
+                    request.kv_transfer_params.get("remote_hosts"),
+                    self.trusted_remote_hosts,
+                    "kv_transfer_params['remote_hosts']",
+                )
 
                 for tp_index in range(self.tp_size):
                     target_port = remote_notify_port + get_port_offset(
@@ -660,7 +667,7 @@ class MoRIIOConnectorScheduler:
         self,
         scheduler_output: SchedulerOutput,
     ) -> KVConnectorMetadata:
-        meta = MoRIIOConnectorMetadata()
+        meta = MoRIIOConnectorMetadata(self.trusted_remote_hosts)
         meta.transfer_id_to_request_id = self.transfer_id_to_request_id
 
         if self.mode == MoRIIOMode.WRITE and get_role() == ROLE.PRODUCER:

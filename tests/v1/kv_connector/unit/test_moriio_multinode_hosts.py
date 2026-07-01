@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+from types import SimpleNamespace
 
 import pytest
 
@@ -9,9 +10,12 @@ from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOConnectorMetadata,
     MoRIIOConstants,
+    MoRIIOMode,
     get_moriio_node_hosts,
+    get_moriio_trusted_remote_hosts,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
+    MoRIIOConnectorScheduler,
     _pick_remote_rank_host,
 )
 
@@ -34,6 +38,23 @@ def test_moriio_node_hosts_come_from_explicit_config_or_local_fallback(
     )
 
     assert get_moriio_node_hosts(config, "local-host") == expected
+
+
+def test_moriio_trusted_remote_hosts_use_explicit_config_or_node_hosts():
+    config = KVTransferConfig(
+        kv_connector_extra_config={
+            "trusted_remote_hosts": "peer-a, peer-b",
+            "node_hosts": ["local-a"],
+        }
+    )
+    assert get_moriio_trusted_remote_hosts(config, ["local-a"]) == frozenset(
+        {"peer-a", "peer-b"}
+    )
+
+    config = KVTransferConfig(kv_connector_extra_config={})
+    assert get_moriio_trusted_remote_hosts(config, ["local-a"]) == frozenset(
+        {"local-a"}
+    )
 
 
 @pytest.mark.parametrize(
@@ -83,7 +104,7 @@ def test_remote_rank_host_uses_dp_rank_when_remote_dp_spans_hosts(
 
 
 def test_connector_metadata_uses_remote_hosts_for_plain_request_id():
-    metadata = MoRIIOConnectorMetadata()
+    metadata = MoRIIOConnectorMetadata(trusted_remote_hosts={"prefill-a", "prefill-b"})
 
     metadata.add_new_req(
         request_id="plain-request-id",
@@ -107,6 +128,60 @@ def test_connector_metadata_uses_remote_hosts_for_plain_request_id():
     assert req_meta.tp_size == 16
     assert req_meta.remote_dp_size == 16
     assert req_meta.remote_dp_rank == 8
+
+
+def test_connector_metadata_rejects_untrusted_remote_hosts():
+    metadata = MoRIIOConnectorMetadata(trusted_remote_hosts={"prefill-a"})
+
+    with pytest.raises(ValueError, match="untrusted remote_hosts"):
+        metadata.add_new_req(
+            request_id="plain-request-id",
+            local_block_ids=[1],
+            kv_transfer_params={
+                "transfer_id": "tx-1",
+                "remote_block_ids": [2],
+                "remote_engine_id": "prefill-engine",
+                "remote_hosts": ["prefill-a", "metadata.example"],
+                "remote_tp_size": 16,
+            },
+        )
+
+
+def test_scheduler_rejects_untrusted_remote_hosts_before_notify(monkeypatch):
+    scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
+    scheduler.mode = MoRIIOMode.WRITE
+    scheduler.tp_size = 2
+    scheduler.dp_rank = 0
+    scheduler.transfer_id_to_request_id = {}
+    scheduler.request_id_to_transfer_id = {}
+    scheduler.trusted_remote_hosts = frozenset({"prefill-a"})
+    sent = []
+    monkeypatch.setattr(
+        scheduler,
+        "send_notify_block",
+        lambda **kwargs: sent.append(kwargs),
+    )
+    request = SimpleNamespace(
+        request_id=(
+            "___prefill_addr_host:prefill-a,handshake:6301,notify:61005"
+            "___decode_addr_host:decode-a,handshake:6301,notify:61005"
+            "_0123456789abcdef0123456789abcdef"
+        ),
+        kv_transfer_params={
+            "transfer_id": "tx-1",
+            "do_remote_prefill": True,
+            "remote_hosts": ["prefill-a", "notify.example"],
+        },
+    )
+
+    with pytest.raises(ValueError, match="untrusted remote_hosts"):
+        scheduler.update_state_after_alloc(
+            request,
+            SimpleNamespace(get_block_ids=lambda: ([1, 2],)),
+            0,
+        )
+
+    assert sent == []
 
 
 @pytest.mark.asyncio
