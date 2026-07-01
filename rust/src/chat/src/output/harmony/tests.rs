@@ -1,14 +1,8 @@
-//! Harmony output tests share the upstream `openai-harmony` tiktoken cache.
-//!
-//! Use a file lock for tests that load the encoding so `cargo nextest` cannot
-//! start multiple processes that concurrently populate the same cache file.
-
 use std::sync::Arc;
 
 use futures::executor::block_on;
 use futures::{TryStreamExt as _, stream};
 use openai_harmony::chat::{Message, Role};
-use serial_test::file_serial;
 use vllm_text::output::{DecodedLogprobs, DecodedPositionLogprobs, DecodedTextEvent, Finished};
 
 use super::*;
@@ -92,7 +86,6 @@ fn request_with_tools() -> ChatRequest {
 }
 
 #[test]
-#[file_serial(harmony_tiktoken_cache)]
 fn interrupted_final_message_is_preserved() {
     let tokens = completion_tokens(&[text_message("final", "hello")]);
     let events = block_on(collect_events(
@@ -129,7 +122,6 @@ fn interrupted_final_message_is_preserved() {
 }
 
 #[test]
-#[file_serial(harmony_tiktoken_cache)]
 fn eos_flush_preserves_trailing_replacement_text() {
     let mut tokens = completion_tokens(&[text_message("final", "Hi")]);
     tokens.pop();
@@ -155,7 +147,6 @@ fn eos_flush_preserves_trailing_replacement_text() {
 }
 
 #[test]
-#[file_serial(harmony_tiktoken_cache)]
 fn interrupted_analysis_message_is_preserved() {
     let tokens = completion_tokens(&[text_message("analysis", "think")]);
     let events = block_on(collect_events(
@@ -192,7 +183,6 @@ fn interrupted_analysis_message_is_preserved() {
 }
 
 #[test]
-#[file_serial(harmony_tiktoken_cache)]
 fn commentary_preamble_is_visible_but_commentary_tool_payload_is_not() {
     let tokens = completion_tokens(&[
         text_message("commentary", "Let me check."),
@@ -220,7 +210,6 @@ fn commentary_preamble_is_visible_but_commentary_tool_payload_is_not() {
 }
 
 #[test]
-#[file_serial(harmony_tiktoken_cache)]
 fn multiple_messages_get_newline_separators() {
     let tokens = completion_tokens(&[
         text_message("analysis", "first think"),
@@ -252,7 +241,6 @@ fn multiple_messages_get_newline_separators() {
 }
 
 #[test]
-#[file_serial(harmony_tiktoken_cache)]
 fn tool_calls_stream_arguments_and_finish_with_local_id_shape() {
     let tokens = completion_tokens(&[tool_message(
         "get_weather",
@@ -305,7 +293,6 @@ fn tool_calls_stream_arguments_and_finish_with_local_id_shape() {
 }
 
 #[test]
-#[file_serial(harmony_tiktoken_cache)]
 fn semantic_events_precede_same_update_logprobs() {
     let tokens = completion_tokens(&[text_message("final", "hello")]);
     let events = block_on(collect_events(
@@ -356,7 +343,6 @@ fn rejects_generic_parser_overrides() {
 }
 
 #[test]
-#[file_serial(harmony_tiktoken_cache)]
 fn allows_auto_auto_only() {
     validate_harmony_parser_overrides(&ParserSelection::Auto, &ParserSelection::Auto).unwrap();
     let _ = HarmonyChatOutputProcessor::new(&ChatRequest::for_test()).unwrap();

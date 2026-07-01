@@ -1286,18 +1286,24 @@ async fn dropping_multiple_live_streams_aborts_all_in_a_burst() {
                 )
                 .await;
 
-                let abort =
-                    timeout(Duration::from_secs(1), recv_engine_message(dealer)).await.unwrap();
-                assert_eq!(abort[0].as_ref(), &[0x01]);
-                let ids: Vec<String> = rmp_serde::from_slice(&abort[1]).unwrap();
+                // Aborts may coalesce into one burst or split across several.
+                let mut aborted = BTreeSet::new();
+                while aborted.len() < 3 {
+                    let abort =
+                        timeout(Duration::from_secs(1), recv_engine_message(dealer)).await.unwrap();
+                    assert_eq!(abort[0].as_ref(), &[0x01]);
+                    let ids: Vec<String> = rmp_serde::from_slice(&abort[1]).unwrap();
+                    aborted.extend(ids);
+                }
                 assert_eq!(
-                    ids,
-                    vec![
+                    aborted,
+                    BTreeSet::from([
                         "req-1".to_string(),
                         "req-2".to_string(),
                         "req-3".to_string()
-                    ]
+                    ])
                 );
+                // No spurious extra aborts.
                 assert!(
                     timeout(Duration::from_millis(100), recv_engine_message(dealer)).await.is_err()
                 );
