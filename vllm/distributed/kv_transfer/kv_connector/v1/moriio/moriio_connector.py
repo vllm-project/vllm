@@ -3,7 +3,6 @@
 import logging
 import math
 import queue
-import random
 import threading
 import time
 from collections import defaultdict
@@ -2984,72 +2983,73 @@ class MoRIIOConnectorWorker:
                 tp_arg,
             )
 
+    def _next_flex_tp_rank(self, remote_tp_size: int) -> int:
+        """Deterministic round-robin over prefill tp0..N-1 for the flexible read.
+
+        Round-robin rather than random: the spread is exactly uniform (not just
+        uniform in expectation) and trivially testable, with the same prefill-NIC
+        balancing effect. The counter is seeded from this decode rank's dp_rank
+        so concurrent decode DP ranks are phase-staggered — at any given read
+        index distinct decode ranks target distinct prefill TP ranks — instead
+        of every decode rank landing on the same prefill rank at once.
+        """
+        rr = getattr(self, "_flex_tp_rr", None)
+        if rr is None:
+            rr = int(getattr(self, "dp_rank", 0) or 0)
+        self._flex_tp_rr = rr + 1
+        return rr % remote_tp_size
+
+    def _resolve_read_source(self, meta: ReqMeta) -> tuple[int, bool, str]:
+        """Resolve (chosen_tp, flexible, host) for reading THIS request's KV.
+
+        Single decision point shared by the handshake dial, the per-(dp, tp)
+        session key, the peer host, and the read-completion notify port, so all
+        four address the SAME prefill rank. Any drift reads KV from one rank but
+        notifies another, so the read rank's prefill buffer is never freed
+        (leak -> MR overflow).
+
+        Two regimes:
+          * Flexible mirror — decode TP1 + MLA + pure-TP prefill (gate below):
+            MLA replicates the latent KV across the prefill TP ranks, so any is
+            a valid source. Round-robin across tp0..N-1 to spread RDMA reads and
+            prefill NICs evenly. The decision lives HERE (connector), not the
+            proxy, and is safe because decode is TP1 (no local TP collective to
+            keep in lockstep over the choice).
+          * Otherwise — partitioned-KV DP prefill, or symmetric TP: the source
+            rank is fixed by the local-rank mapping (_remote_tp_rank). Forward
+            DP8EP->TP8 -> tp0; symmetric TP -> tp_rank. Byte-identical to
+            pre-flexible behaviour.
+
+        Gate (all four): G1 world_size == 1 (decode owns the whole read); G2
+        use_mla (KV replicated -> any prefill rank valid); G3 remote_dp_size == 1
+        (pure-TP prefill, no DP partition constraining the source); G4
+        remote_tp_size > 1 (more than one prefill rank to spread across).
+        """
+        remote_tp_size = int(meta.tp_size)
+        flexible = (
+            self.world_size == 1
+            and self.use_mla
+            and int(meta.remote_dp_size) == 1
+            and remote_tp_size > 1
+        )
+        if flexible:
+            chosen_tp = self._next_flex_tp_rank(remote_tp_size)
+        else:
+            chosen_tp = self._remote_tp_rank(remote_tp_size)
+        host = self._pick_host_for_dp_rank_tp(meta, int(meta.remote_dp_rank), chosen_tp)
+        return chosen_tp, flexible, host
+
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         logger.debug(
             "Remote agent %s available, calling _read_blocks for req %s",
             meta.remote_engine_id,
             req_id,
         )
-        # Flexible prefill-TP read: resolve the chosen remote TP rank ONCE here
-        # so the handshake dial, the per-(dp,tp) session key, the peer host, and
-        # the post-read notify port all address the SAME prefill rank. Drift
-        # between any of them reads KV from one rank but notifies another, so the
-        # read rank's prefill buffer is never freed (leak -> MR overflow).
-        remote_tp_size = int(meta.tp_size)
-        base_tp = self._remote_tp_rank(remote_tp_size)
-        # Gate (all four). G1 self.world_size == 1: decode is TP1, so this engine
-        # owns the whole read (no local TP collective to keep in lockstep over
-        # the choice). G2 use_mla: MLA replicates the latent KV across prefill TP
-        # ranks, so any rank is a valid source. G3 remote_dp_size == 1: prefill
-        # is pure TP (no DP partition that would also constrain the source). G4
-        # remote_tp_size > 1: there is more than one prefill TP rank to spread
-        # across.
-        flexible_ok = (
-            self.world_size == 1
-            and self.use_mla
-            and int(meta.remote_dp_size) == 1
-            and remote_tp_size > 1
-        )
-        if flexible_ok:
-            # The decision lives HERE, in the connector — not the proxy. Because
-            # MLA replicates the latent KV across the prefill TP ranks, every
-            # rank holds this request's KV, so the connector is free to choose.
-            # Pick a RANDOM prefill TP rank per read to spread the RDMA-read load
-            # (and prefill NICs) uniformly across tp0..N-1, independent of the
-            # proxy and robust to decode-engine load skew. (Decode is TP1 here,
-            # so there is no local TP collective that the differing choice across
-            # engines could desync.)
-            chosen_tp = random.randrange(remote_tp_size)
-            # Read-distribution log: histogram of chosen prefill TP ranks, logged
-            # periodically so a run can be verified uniform across tp0..N-1 (the
-            # whole point of flexible reads). Lazy-init + throttled to avoid
-            # per-request spam.
-            hist = getattr(self, "_flex_tp_hist", None)
-            if hist is None:
-                hist = self._flex_tp_hist = defaultdict(int)
-            hist[chosen_tp] += 1
-            n_flex = getattr(self, "_flex_tp_reads", 0) + 1
-            self._flex_tp_reads = n_flex
-            if n_flex % 200 == 0:
-                logger.info(
-                    "MoRIIO flexible read distribution (dp_rank=%s, %d reads): %s",
-                    getattr(self, "dp_rank", "?"),
-                    n_flex,
-                    dict(sorted(hist.items())),
-                )
-        else:
-            # Partitioned KV or symmetric TP: the source rank is fixed by the
-            # local-rank mapping (forward DP8EP->TP8 -> tp0; symmetric TP ->
-            # tp_rank). Byte-identical to pre-flexible behaviour.
-            chosen_tp = base_tp
-
+        chosen_tp, flexible_ok, actual_remote_host = self._resolve_read_source(meta)
         # Build-on-demand: guarantee this request's remote prefill (dp, tp) rank
         # is handshaked before any read (heterogeneous DP-prefill <-> TP-decode,
         # and flexible TP-prefill <-> DP-decode).
         self._ensure_remote_dp_tp_handshaked(meta, chosen_tp, flexible=flexible_ok)
-        actual_remote_host = self._pick_host_for_dp_rank_tp(
-            meta, int(meta.remote_dp_rank), chosen_tp
-        )
         self._read_blocks(
             request_id=req_id,
             transfer_id=meta.transfer_id,
@@ -3059,7 +3059,7 @@ class MoRIIOConnectorWorker:
             remote_host=actual_remote_host,
             remote_notify_port=meta.remote_notify_port,
             remote_dp_rank=meta.remote_dp_rank,
-            remote_tp_size=remote_tp_size,
+            remote_tp_size=int(meta.tp_size),
             chosen_tp=chosen_tp,
             flexible=flexible_ok,
         )
@@ -3237,7 +3237,7 @@ class MoRIIOConnectorWorker:
         # else the producer never sees finished_sending -> KV leak. For legacy
         # configs eff_tp == _remote_tp_rank (tp0 for a TP1 prefill; tp_rank for
         # symmetric) -> identical port to before. For the flexible mirror eff_tp
-        # is the chosen random prefill rank, matching the session key + dial.
+        # is the round-robin-chosen prefill rank, matching the session key + dial.
         notify_port = str(
             remote_notify_port
             + get_port_offset(
