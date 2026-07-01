@@ -1,24 +1,18 @@
 use std::collections::BTreeSet;
-use std::fs;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use thiserror_ext::AsReport as _;
+use vllm_model_files::read_json_file;
 
 use crate::error::{Error, Result};
 
 /// Minimal subset of `tokenizer_config.json` needed by chat/EOS handling.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub struct HfTokenizerConfig {
+pub struct TokenizerConfig {
     #[serde(flatten)]
-    pub special_tokens: HfSpecialTokens,
+    pub special_tokens: SpecialTokens,
     pub chat_template: Option<String>,
-    /// The `tokenizer_class` field from HuggingFace tokenizer configs. Some
-    /// tiktoken-based models (e.g. DeepSeek, Kimi K2) set this to a value
-    /// containing "Tiktoken" which can be used as a hint for backend
-    /// selection.
-    pub tokenizer_class: Option<String>,
 }
 
 /// Hugging Face named special tokens may be serialized as a string or an
@@ -61,14 +55,14 @@ impl NamedSpecialToken {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
-pub struct HfSpecialTokens {
+pub struct SpecialTokens {
     pub bos_token: Option<NamedSpecialToken>,
     pub eos_token: Option<NamedSpecialToken>,
     pub unk_token: Option<NamedSpecialToken>,
     pub pad_token: Option<NamedSpecialToken>,
 }
 
-impl HfSpecialTokens {
+impl SpecialTokens {
     /// Returns true if we don't discover any special tokens in the config.
     pub fn is_empty(&self) -> bool {
         self.bos_token.is_none()
@@ -234,42 +228,19 @@ impl ModelConfig {
     }
 }
 
-/// Load the tokenizer-side EOS metadata if a config file is present.
-pub fn load_tokenizer_config(path: Option<&Path>) -> Result<HfTokenizerConfig> {
-    read_json_file(path)
-}
-
 /// Load the generation-side EOS metadata if a config file is present.
 pub(super) fn load_generation_config(path: Option<&Path>) -> Result<GenerationConfig> {
-    read_json_file(path)
+    Ok(read_json_file(path)?)
+}
+
+/// Load the tokenizer-side EOS metadata if a config file is present.
+pub fn load_tokenizer_config(path: Option<&Path>) -> Result<TokenizerConfig> {
+    Ok(read_json_file(path)?)
 }
 
 /// Load the model-side config (`config.json`) if present.
 pub fn load_model_config(path: Option<&Path>) -> Result<ModelConfig> {
-    read_json_file(path)
-}
-
-fn read_json_file<T>(path: Option<&Path>) -> Result<T>
-where
-    T: for<'de> Deserialize<'de> + Default,
-{
-    let Some(path) = path else {
-        return Ok(T::default());
-    };
-    let content = fs::read_to_string(path).map_err(|error| {
-        Error::Tokenizer(format!(
-            "failed to read {}: {}",
-            path.display(),
-            error.as_report()
-        ))
-    })?;
-    serde_json::from_str(&content).map_err(|error| {
-        Error::Tokenizer(format!(
-            "failed to parse {}: {}",
-            path.display(),
-            error.as_report()
-        ))
-    })
+    Ok(read_json_file(path)?)
 }
 
 #[cfg(test)]

@@ -6,7 +6,7 @@ use thiserror_ext::AsReport as _;
 use tracing::{info, trace, warn};
 use vllm_text::Prompt;
 use vllm_text::backend::hf::{
-    HfSpecialTokens, HfTokenizerConfig, ResolvedModelFiles, load_tokenizer_config,
+    ResolvedModelFiles, SpecialTokens, TokenizerConfig, load_tokenizer_config,
 };
 
 use self::format::{
@@ -42,7 +42,7 @@ pub struct HfChatRenderer {
     default_template: Option<CompiledChatTemplate>,
     default_template_kwargs: HashMap<String, JsonValue>,
     content_format: ContentFormatOption,
-    special_tokens: Option<HfSpecialTokens>,
+    special_tokens: Option<SpecialTokens>,
     multimodal: Option<MultimodalRenderInfo>,
 }
 
@@ -67,7 +67,7 @@ impl HfChatRenderer {
         })
     }
 
-    pub fn with_special_tokens(mut self, special_tokens: Option<HfSpecialTokens>) -> Self {
+    pub fn with_special_tokens(mut self, special_tokens: Option<SpecialTokens>) -> Self {
         self.special_tokens = special_tokens;
         self
     }
@@ -83,7 +83,7 @@ impl HfChatRenderer {
         options: LoadModelBackendsOptions,
         multimodal: Option<MultimodalRenderInfo>,
     ) -> Result<Self> {
-        let HfTokenizerConfig {
+        let TokenizerConfig {
             special_tokens,
             chat_template,
             ..
@@ -451,7 +451,7 @@ mod tests {
     use expect_test::expect;
     use serde_json::Value;
     use vllm_text::Prompt;
-    use vllm_text::backend::hf::{HfSpecialTokens, NamedSpecialToken};
+    use vllm_text::backend::hf::{NamedSpecialToken, SpecialTokens};
 
     use super::{ChatTemplateContentFormatOption, HfChatRenderer, MultimodalRenderInfo};
     use crate::request::{
@@ -675,7 +675,7 @@ mod tests {
     #[test]
     fn chat_template_injects_special_tokens_into_context() {
         let request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
-        let special_tokens = HfSpecialTokens {
+        let special_tokens = SpecialTokens {
             bos_token: Some(NamedSpecialToken::Text("<bos>".to_string())),
             ..Default::default()
         };

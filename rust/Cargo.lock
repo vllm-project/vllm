@@ -5099,6 +5099,7 @@ dependencies = [
  "uuid",
  "vllm-engine-core-client",
  "vllm-llm",
+ "vllm-model-files",
  "vllm-parser",
  "vllm-text",
  "vllm-tokenizer",
@@ -5237,6 +5238,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "vllm-model-files"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hf-hub",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "thiserror-ext",
+ "tokio",
+]
+
+[[package]]
 name = "vllm-parser"
 version = "0.1.0"
 dependencies = [
@@ -5324,7 +5339,6 @@ dependencies = [
  "enum-as-inner",
  "expect-test",
  "futures",
- "hf-hub",
  "itertools 0.14.0",
  "reqwest",
  "serde",
@@ -5339,6 +5353,7 @@ dependencies = [
  "trait-set",
  "vllm-engine-core-client",
  "vllm-llm",
+ "vllm-model-files",
  "vllm-tokenizer",
 ]
 

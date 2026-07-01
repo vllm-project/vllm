@@ -1,0 +1,20 @@
+[package]
+name = "vllm-model-files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+hf-hub.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+thiserror-ext.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

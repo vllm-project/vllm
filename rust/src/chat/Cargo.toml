@@ -32,6 +32,7 @@ trait-set.workspace = true
 uuid.workspace = true
 vllm-engine-core-client.workspace = true
 vllm-llm.workspace = true
+vllm-model-files.workspace = true
 vllm-parser.workspace = true
 vllm-text.workspace = true
 vllm-tokenizer.workspace = true

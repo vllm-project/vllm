@@ -1,6 +1,7 @@
 use thiserror::Error;
 use vllm_engine_core_client::Error as EngineCoreError;
 use vllm_llm::Error as LlmError;
+use vllm_model_files::Error as ModelFilesError;
 
 pub use crate::lower::logprobs::LogprobsError;
 pub use crate::lower::token_ids::TokenIdsError;
@@ -20,6 +21,8 @@ pub enum Error {
     Logprobs(#[from] LogprobsError),
     #[error(transparent)]
     TokenIds(#[from] TokenIdsError),
+    #[error(transparent)]
+    ModelFiles(#[from] ModelFilesError),
     #[error(
         "`min_tokens` must be less than or equal to `max_tokens`, \
          got min_tokens={min_tokens}, max_tokens={max_tokens}"

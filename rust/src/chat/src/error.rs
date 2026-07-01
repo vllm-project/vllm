@@ -1,5 +1,6 @@
 use thiserror::Error;
 use thiserror_ext::Macro;
+use vllm_model_files::Error as ModelFilesError;
 
 type BoxedError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -68,6 +69,8 @@ pub enum Error {
     StructuralTag { message: String },
     #[error(transparent)]
     Text(#[from] vllm_text::Error),
+    #[error(transparent)]
+    ModelFiles(#[from] ModelFilesError),
     #[error(transparent)]
     Tokenizer(#[from] vllm_tokenizer::TokenizerError),
 }

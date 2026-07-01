@@ -4,7 +4,7 @@ use hf_hub::Cache;
 use hf_hub::api::tokio::{Api, ApiBuilder, ApiRepo};
 use thiserror_ext::AsReport as _;
 
-use super::config::{HfTokenizerConfig, load_tokenizer_config};
+use crate::config::{TokenizerConfig, load_tokenizer_config};
 use crate::error::{Error, Result};
 
 const HF_TOKEN_ENV: &str = "HF_TOKEN";
@@ -26,6 +26,7 @@ pub enum TokenizerSource {
 }
 
 impl TokenizerSource {
+    /// Return the local filesystem path for this tokenizer source.
     pub fn path(&self) -> &Path {
         match self {
             Self::HuggingFace(path) | Self::Tiktoken(path) | Self::Tekken(path) => path,
@@ -38,10 +39,15 @@ impl TokenizerSource {
 pub struct ResolvedModelFiles {
     /// The selected tokenizer source for this model.
     pub tokenizer: TokenizerSource,
+    /// Path to `tokenizer_config.json` when present.
     pub tokenizer_config_path: Option<PathBuf>,
+    /// Path to `generation_config.json` when present.
     pub generation_config_path: Option<PathBuf>,
+    /// Path to `preprocessor_config.json` when present.
     pub preprocessor_config_path: Option<PathBuf>,
+    /// Path to a discovered chat template file when present.
     pub chat_template_path: Option<PathBuf>,
+    /// Path to `config.json` when present.
     pub config_path: Option<PathBuf>,
 }
 
@@ -76,10 +82,10 @@ fn resolve_local_model_files(model_dir: &Path) -> Result<ResolvedModelFiles> {
 }
 
 async fn resolve_remote_model_files(model_id: &str) -> Result<ResolvedModelFiles> {
-    let api = build_api().map_err(|error| Error::Tokenizer(error.to_report_string()))?;
+    let api = build_api().map_err(|error| Error::new(format!("{}", error.as_report())))?;
     let repo = api.model(model_id.to_string());
     let info = repo.info().await.map_err(|error| {
-        Error::Tokenizer(format!(
+        Error::new(format!(
             "failed to fetch model '{model_id}': {}",
             error.as_report()
         ))
@@ -138,9 +144,10 @@ fn resolve_cached_model_files(model_id: &str) -> Result<Option<ResolvedModelFile
         None => return Ok(None),
     };
 
-    let model_dir = tokenizer.path().parent().ok_or_else(|| {
-        Error::Tokenizer("resolved tokenizer file has no parent directory".to_string())
-    })?;
+    let model_dir = tokenizer
+        .path()
+        .parent()
+        .ok_or_else(|| Error::new("resolved tokenizer file has no parent directory"))?;
     let generation_config_path = cache_repo.get("generation_config.json");
     let preprocessor_config_path = cache_repo.get("preprocessor_config.json");
     let chat_template_path = discover_chat_template_in_dir(model_dir);
@@ -171,7 +178,7 @@ async fn resolve_remote_tokenizer_source(
     } else if let Some(tiktoken_name) = find_tiktoken_sibling(siblings) {
         download_known_file(repo, model_id, tiktoken_name).await?
     } else {
-        return Err(Error::Tokenizer(format!(
+        return Err(Error::new(format!(
             "model '{model_id}' does not expose a supported tokenizer file \
              (tokenizer.json, tiktoken.model, or *.tiktoken) on Hugging Face"
         )));
@@ -186,7 +193,7 @@ async fn resolve_remote_tokenizer_source(
 
 fn resolve_cached_tokenizer_source(
     cache_repo: &hf_hub::CacheRepo,
-    tokenizer_config: &HfTokenizerConfig,
+    tokenizer_config: &TokenizerConfig,
 ) -> Result<Option<TokenizerSource>> {
     let tekken_path = cache_repo.get("tekken.json");
 
@@ -214,7 +221,7 @@ fn resolve_cached_tokenizer_source(
 
 fn resolve_local_tokenizer_source(
     model_dir: &Path,
-    tokenizer_config: &HfTokenizerConfig,
+    tokenizer_config: &TokenizerConfig,
 ) -> Result<TokenizerSource> {
     let tekken_path = local_file_if_exists(model_dir, "tekken.json");
     if let Some(tekken_path) = tekken_path {
@@ -225,7 +232,7 @@ fn resolve_local_tokenizer_source(
         .or_else(|| local_file_if_exists(model_dir, "tiktoken.model"))
         .or_else(|| discover_tiktoken_in_dir(model_dir))
         .ok_or_else(|| {
-            Error::Tokenizer(format!(
+            Error::new(format!(
                 "local model directory '{}' does not contain a supported tokenizer file \
                  (tokenizer.json, tiktoken.model, or *.tiktoken)",
                 model_dir.display()
@@ -286,7 +293,7 @@ async fn download_if_present(
 
 async fn download_known_file(repo: &ApiRepo, model_id: &str, filename: &str) -> Result<PathBuf> {
     repo.get(filename).await.map_err(|error| {
-        Error::Tokenizer(format!(
+        Error::new(format!(
             "failed to download '{filename}' for model '{model_id}': {}",
             error.as_report()
         ))
@@ -317,7 +324,7 @@ fn find_tiktoken_sibling<'a>(siblings: &std::collections::BTreeSet<&'a str>) -> 
 }
 
 /// Discover a tiktoken model file in a local directory.
-pub(super) fn discover_tiktoken_in_dir(dir: &std::path::Path) -> Option<PathBuf> {
+fn discover_tiktoken_in_dir(dir: &std::path::Path) -> Option<PathBuf> {
     let tiktoken_model = dir.join("tiktoken.model");
     if tiktoken_model.exists() {
         return Some(tiktoken_model);
@@ -337,7 +344,7 @@ pub(super) fn discover_tiktoken_in_dir(dir: &std::path::Path) -> Option<PathBuf>
 }
 
 /// Returns `true` if `path` points to a tiktoken-format file (by name).
-pub(super) fn is_tiktoken_file(path: &std::path::Path) -> bool {
+fn is_tiktoken_file(path: &std::path::Path) -> bool {
     path.file_name()
         .and_then(|n| n.to_str())
         .is_some_and(|name| name == "tiktoken.model" || name.ends_with(".tiktoken"))
@@ -368,7 +375,6 @@ mod tests {
     use std::fs;
 
     use tempfile::tempdir;
-    use vllm_tokenizer::{TiktokenTokenizer, Tokenizer};
 
     use super::{ResolvedModelFiles, TokenizerSource};
 
@@ -398,62 +404,5 @@ mod tests {
             files.tokenizer_config_path,
             Some(dir.path().join("tokenizer_config.json"))
         );
-    }
-
-    #[tokio::test]
-    #[ignore = "too slow for CI and requires network access to Hugging Face"]
-    async fn tiktoken_real_kimi_k25_tokenizer_files_load_and_handle_special_tokens() {
-        let files = ResolvedModelFiles::new("moonshotai/Kimi-K2.5")
-            .await
-            .expect("resolve real Kimi K2.5 model files");
-
-        let tokenizer_path = match &files.tokenizer {
-            TokenizerSource::Tiktoken(path) => path.clone(),
-            other => panic!("expected tiktoken tokenizer source, got {other:?}"),
-        };
-
-        for backend in [
-            TiktokenTokenizer::new_riptoken(&tokenizer_path).expect("load riptoken backend"),
-            TiktokenTokenizer::new_tiktoken_rs(&tokenizer_path).expect("load tiktoken-rs backend"),
-        ] {
-            let think_id = backend.token_to_id("<think>").expect("resolve <think>");
-            let end_think_id = backend.token_to_id("</think>").expect("resolve </think>");
-            let tool_section_id = backend
-                .token_to_id("<|tool_calls_section_begin|>")
-                .expect("resolve tool call section marker");
-            let contraction_heavy_text =
-                "I'm sure it's fine, but I can't say I'd trust that it's what we'd ship.";
-            let contraction_heavy_ids = backend.encode(contraction_heavy_text, false).unwrap();
-
-            assert_eq!(
-                (think_id, end_think_id, tool_section_id),
-                (163606, 163607, 163595)
-            );
-            assert_eq!(backend.decode(&[think_id], true).unwrap(), "<think>");
-            assert_eq!(backend.decode(&[end_think_id], true).unwrap(), "</think>");
-            assert_eq!(
-                backend.decode(&[tool_section_id], true).unwrap(),
-                "<|tool_calls_section_begin|>"
-            );
-
-            // This demonstrates that we're using Kimi's custom BPE pattern.
-            // With CL100K this will be 23 tokens instead.
-            assert_eq!(
-                contraction_heavy_ids,
-                vec![
-                    17172, 3287, 4643, 8201, 11, 996, 374, 8971, 3637, 20020, 8173, 473, 4643,
-                    1573, 56229, 13922, 13,
-                ]
-            );
-            assert_eq!(contraction_heavy_ids.len(), 17);
-            assert_eq!(
-                backend.decode(&contraction_heavy_ids, false).unwrap(),
-                contraction_heavy_text
-            );
-
-            // Special-looking text that is not actually registered should fail gracefully.
-            assert_eq!(backend.token_to_id("◁think▷"), None);
-            assert_eq!(backend.token_to_id("<|definitely_not_registered|>"), None);
-        }
     }
 }

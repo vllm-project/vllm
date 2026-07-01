@@ -6,6 +6,7 @@ members = [
     "src/llm",
     "src/managed-engine",
     "src/metrics",
+    "src/model-files",
     "src/mock-engine",
     "src/parser",
     "src/parser/python",
@@ -126,6 +127,7 @@ vllm-chat = { path = "src/chat" }
 vllm-engine-core-client = { path = "src/engine-core-client" }
 vllm-llm = { path = "src/llm" }
 vllm-managed-engine = { path = "src/managed-engine" }
+vllm-model-files = { path = "src/model-files" }
 vllm-metrics = { path = "src/metrics" }
 vllm-parser = { path = "src/parser" }
 vllm-server = { path = "src/server" }

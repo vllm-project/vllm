@@ -2,7 +2,7 @@
 //!
 //! This module is inlined from SMG's tokenizer crate with local adaptations:
 //! - thinking-related detection/state is removed
-//! - special tokens are wired to `vllm_text::backends::hf::HfSpecialTokens`
+//! - special tokens are wired to `vllm_text::backends::hf::SpecialTokens`
 
 use std::collections::HashMap;
 use std::fs;
@@ -11,7 +11,7 @@ use std::path::Path;
 use minijinja::Environment;
 use serde::{Deserialize, Serialize};
 use serde_json::{self};
-use vllm_text::backend::hf::HfSpecialTokens;
+use vllm_text::backend::hf::SpecialTokens;
 
 use super::error::TemplateError;
 use super::format::{
@@ -46,7 +46,7 @@ pub(super) struct TemplateContext<'a> {
     pub(super) tools: Option<&'a [TemplateTool]>,
     pub(super) documents: Option<&'a [serde_json::Value]>,
     #[serde(flatten)]
-    pub(super) special_tokens: Option<&'a HfSpecialTokens>,
+    pub(super) special_tokens: Option<&'a SpecialTokens>,
     #[serde(flatten)]
     pub(super) template_kwargs: Option<&'a HashMap<String, serde_json::Value>>,
 }
@@ -133,7 +133,7 @@ mod tests {
     use std::fs;
 
     use tempfile::TempDir;
-    use vllm_text::backend::hf::{HfSpecialTokens, NamedSpecialToken};
+    use vllm_text::backend::hf::{NamedSpecialToken, SpecialTokens};
 
     use super::*;
 
@@ -170,7 +170,7 @@ mod tests {
             CompiledChatTemplate::new(template.to_string(), ChatTemplateContentFormatOption::Auto)
                 .unwrap();
 
-        let special_tokens = HfSpecialTokens {
+        let special_tokens = SpecialTokens {
             bos_token: Some(NamedSpecialToken::Text("<s>".to_string())),
             eos_token: Some(NamedSpecialToken::Text("</s>".to_string())),
             ..Default::default()
@@ -205,7 +205,7 @@ mod tests {
             CompiledChatTemplate::new(template.to_string(), ChatTemplateContentFormatOption::Auto)
                 .unwrap();
 
-        let special_tokens = HfSpecialTokens {
+        let special_tokens = SpecialTokens {
             bos_token: Some(NamedSpecialToken::Text("<s>".to_string())),
             eos_token: None,
             ..Default::default()
