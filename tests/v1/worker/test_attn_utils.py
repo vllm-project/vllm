@@ -3,7 +3,13 @@
 
 import torch
 
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVQuantMode
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheTensor,
+    KVQuantMode,
+)
 from vllm.v1.worker.gpu.attn_utils import _reshape_kv_cache
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -123,6 +129,67 @@ def test_reshape_padded_hnd_flash_attention_kv_cache_strides_by_page():
         == (
             spec.page_size_bytes
             + spec.real_page_size_bytes // 2
+            + 3 * spec.head_size * 4
+            + 2 * spec.block_size * spec.head_size * 4
+        )
+        // 4
+    )
+
+
+def test_reshape_packed_hnd_flash_attention_kv_cache_keeps_logical_block_dim():
+    num_blocks = 3
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=3,
+        head_size=2,
+        dtype=torch.float32,
+    )
+    page_size = spec.page_size_bytes
+    block_stride = page_size * 2
+
+    raw_tensors = {"layer": torch.zeros(block_stride * num_blocks, dtype=torch.int8)}
+    attn_groups = [
+        AttentionGroup(
+            backend=FakeHNDFlashAttentionBackend,
+            layer_names=["layer"],
+            kv_cache_spec=spec,
+            kv_cache_group_id=0,
+        )
+    ]
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=block_stride * num_blocks,
+                shared_by=["layer"],
+                offset=page_size,
+                block_stride=block_stride,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(["layer"], spec)],
+    )
+
+    kv_cache = _reshape_kv_cache(
+        attn_groups,
+        raw_tensors,
+        "auto",
+        [spec.block_size],
+        {},
+        kv_cache_config,
+    )["layer"]
+
+    assert kv_cache.shape == (num_blocks, 2, 16, 3, 2)
+    assert kv_cache.stride(0) == block_stride // 4
+    assert kv_cache.stride(1) == page_size // 2 // 4
+    assert kv_cache.stride(2) == spec.head_size
+    assert kv_cache.stride(3) == spec.block_size * spec.head_size
+    assert kv_cache[0].storage_offset() == page_size // 4
+    assert (
+        kv_cache[1, 1, 3, 2].storage_offset()
+        == (
+            block_stride
+            + page_size
+            + page_size // 2
             + 3 * spec.head_size * 4
             + 2 * spec.block_size * spec.head_size * 4
         )
