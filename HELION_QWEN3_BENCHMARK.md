@@ -56,9 +56,11 @@ env $ENV VLLM_USE_HELION_KERNELS=1 vllm bench latency $COMMON
 env $ENV VLLM_USE_HELION_KERNELS=0 vllm bench latency $COMMON
 ```
 
-## Results (2×H100, Qwen3-1.7B-FP8, `VLLM_USE_DEEP_GEMM=0`)
+## Results (2×H100, Qwen3-1.7B-FP8)
 
-input 256 / output 128 / batch 16, warmup 10 / iters 30:
+input 256 / output 128 / batch 16, warmup 10 / iters 30.
+
+### Helion vs native, both on the `VLLM_USE_DEEP_GEMM=0` path
 
 | metric | Helion ON | native OFF | delta |
 |---|---|---|---|
@@ -69,11 +71,36 @@ Confirmed active in the ON run: `HelionKernelSwapPass` swaps the ops and the
 `_helion_rms_norm_per_block_quant` / `_helion_per_token_group_fp8_quant` Triton
 kernels execute; the pass is absent in the OFF run.
 
+### vs the default DeepGEMM path — DeepGEMM wins
+
+| configuration | P50 latency |
+|---|---|
+| **DeepGEMM ON (default)** | **0.368 s** |
+| Helion, DeepGEMM off | 0.444 s |
+| native, DeepGEMM off | 0.465 s |
+
+**The default DeepGEMM path is ~17% faster than Helion-with-DeepGEMM-off.** For
+Qwen3 block-fp8, DeepGEMM fuses the activation quant *into* the GEMM (eliminating
+the standalone quant kernel entirely) and uses a highly tuned fp8 GEMM. Helion only
+accelerates the separate norm/quant kernels, so disabling DeepGEMM to reach the
+Helion path is a **net loss**. Helion would only be a win where quant is *not*
+fused into the GEMM (e.g. per-token dynamic fp8 with a GEMM that consumes
+pre-quantized activations, or fused rms_norm+dynamic-per-token-quant paths).
+
 Notes:
-- The ~4% end-to-end gain is modest because norm+quant is a small share of total
-  latency (GEMM + attention dominate).
+- The Helion-vs-native ~4% gain is modest because norm+quant is a small share of
+  total latency (GEMM + attention dominate).
 - Helion Triton kernels JIT lazily per shape → a one-time P99 latency spike unless
   warmup covers every shape; amortized under sustained serving.
+
+## Qwen3-8B-FP8 and Qwen3-32B-FP8
+
+Same quantization scheme as 1.7B — `fp8 e4m3, weight_block_size=[128,128],
+activation_scheme=dynamic` (block-fp8, group 128). Therefore they take the **same
+DeepGEMM path by default** and, like 1.7B, do **not** use the Helion kernels unless
+`VLLM_USE_DEEP_GEMM=0`. Helion configs are tuned for their hidden sizes
+(8B: 4096, 32B: 5120 — both in the tuned `hidden_size_list`), so the swap would
+engage on the DeepGEMM-off path, with the same DeepGEMM-wins caveat.
 
 ## Kernel-level microbenchmark (isolated, CUDA-graph capture, hidden=2048)
 
