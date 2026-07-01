@@ -723,9 +723,9 @@ def _support_torch_compile(
 
 def _make_cudagraph_partition_wrapper(vllm_config: VllmConfig) -> Callable[..., Any]:
     """Build the customized Inductor graph-partition wrapper that wraps each
-    partition with vLLM's PIECEWISE static cudagraph wrapper. Shared by the
-    VLLM_COMPILE decorator path and the STOCK_TORCH_COMPILE graph-partition path so
-    the two cannot diverge on the per-partition cudagraph options.
+    partition with vLLM's PIECEWISE static cudagraph wrapper. Used by the
+    VLLM_COMPILE decorator path (the STOCK_TORCH_COMPILE path uses its own
+    StockCUDAGraphWrapper via _make_stock_cudagraph_partition_wrapper).
     """
     from torch._inductor.utils import CUDAGraphWrapperMetadata
 
@@ -756,20 +756,55 @@ def _make_cudagraph_partition_wrapper(vllm_config: VllmConfig) -> Callable[..., 
     return customized_cudagraph_wrapper
 
 
+def _make_stock_cudagraph_partition_wrapper(
+    vllm_config: VllmConfig,
+) -> Callable[..., Any]:
+    """Like _make_cudagraph_partition_wrapper but wraps each Inductor partition with
+    the STOCK-only StockCUDAGraphWrapper (vllm/compilation/stock_cudagraph.py). The
+    stock torch.compile path deliberately does not reuse the shared CUDAGraphWrapper,
+    which is coupled to vLLM's non-torch.compile full-cudagraph path.
+    """
+    from torch._inductor.utils import CUDAGraphWrapperMetadata
+
+    from vllm.compilation.stock_cudagraph import (
+        StockCUDAGraphOptions,
+        StockCUDAGraphWrapper,
+    )
+    from vllm.config import CUDAGraphMode
+
+    def customized_cudagraph_wrapper(
+        f: Callable[..., Any], metadata: CUDAGraphWrapperMetadata
+    ) -> Any:
+        partition_id = metadata.partition_index
+        num_partitions = metadata.num_partitions
+        return StockCUDAGraphWrapper(
+            runnable=f,
+            vllm_config=vllm_config,
+            runtime_mode=CUDAGraphMode.PIECEWISE,
+            cudagraph_options=StockCUDAGraphOptions(
+                debug_log_enable=partition_id == 0,
+                gc_disable=partition_id != 0,
+                weak_ref_output=partition_id == num_partitions - 1,
+            ),
+        )
+
+    return customized_cudagraph_wrapper
+
+
 def install_cudagraph_partition_wrapper(vllm_config: VllmConfig) -> None:
-    """Persistently install the graph-partition cudagraph wrapper for the
+    """Persistently install the STOCK graph-partition cudagraph wrapper for the
     engine-global STOCK_TORCH_COMPILE path. Stock torch.compile is lazy (the real
     Inductor compile + post_compile partition wrapping run on the first forward),
     so a scoped context manager cannot bracket it the way VLLM_COMPILE does -- the
     install must outlive this call. Stock mode is engine-global and compiles the
     target once. It is never unset: any later graph_partition compile would also be
     wrapped, but the wrapper is a no-op pass-through unless a PIECEWISE forward
-    context dispatches to it (see CUDAGraphWrapper.__call__), so a stray compile is
+    context dispatches to it (StockCUDAGraphWrapper.__call__), so a stray compile is
     not wrongly captured. A scoped unset (around the capture phase) is a possible
     future hardening once a clean hook exists.
     """
     torch._inductor.utils.set_customized_partition_wrappers(
-        _make_cudagraph_partition_wrapper(vllm_config)
+        _make_stock_cudagraph_partition_wrapper(vllm_config)
     )
 
 

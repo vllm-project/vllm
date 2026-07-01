@@ -28,6 +28,7 @@ from vllm.compilation.breakable_cudagraph import (
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
+from vllm.compilation.stock_cudagraph import StockCUDAGraphWrapper
 from vllm.config import (
     CompilationMode,
     CUDAGraphMode,
@@ -5314,9 +5315,16 @@ class GPUModelRunner(
             cudagraph_mode.has_full_cudagraphs()
             and not self.parallel_config.use_ubatching
         ):
-            self.model = CUDAGraphWrapper(
-                self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
-            )
+            if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
+                # Stock path uses its own decoupled wrapper, not the shared
+                # CUDAGraphWrapper (which is coupled to vLLM full cudagraphs).
+                self.model = StockCUDAGraphWrapper(
+                    self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
+                )
+            else:
+                self.model = CUDAGraphWrapper(
+                    self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
+                )
         elif self.parallel_config.use_ubatching:
             if cudagraph_mode.has_full_cudagraphs():
                 self.model = UBatchWrapper(
@@ -6469,6 +6477,7 @@ class GPUModelRunner(
             # graph destruction can surface HSA faults in the next engine startup.
             CUDAGraphWrapper.clear_all_graphs()
             BreakableCUDAGraphWrapper.clear_all_graphs()
+            StockCUDAGraphWrapper.clear_all_graphs()
             self.encoder_cudagraph_manager = None
         self.compilation_config.static_forward_context.clear()
         self.model = None  # type: ignore[assignment]
@@ -6593,8 +6602,10 @@ class GPUModelRunner(
         profiling_pool = current_platform.graph_pool_handle()
         encoder_profiling_pool = current_platform.graph_pool_handle()
         original_pools: dict[int, Any] = {}
-        all_wrappers = list(CUDAGraphWrapper._all_instances) + list(
-            BreakableCUDAGraphWrapper._all_instances
+        all_wrappers = (
+            list(CUDAGraphWrapper._all_instances)
+            + list(BreakableCUDAGraphWrapper._all_instances)
+            + list(StockCUDAGraphWrapper._all_instances)
         )
         for instance in all_wrappers:
             original_pools[id(instance)] = instance.graph_pool
@@ -6668,10 +6679,13 @@ class GPUModelRunner(
             set_cudagraph_capturing_enabled(False)
             CUDAGraphWrapper.clear_all_graphs()
             BreakableCUDAGraphWrapper.clear_all_graphs()
+            StockCUDAGraphWrapper.clear_all_graphs()
             if encoder_cudagraph_manager is not None:
                 encoder_cudagraph_manager.clear()
-            all_wrappers = list(CUDAGraphWrapper._all_instances) + list(
-                BreakableCUDAGraphWrapper._all_instances
+            all_wrappers = (
+                list(CUDAGraphWrapper._all_instances)
+                + list(BreakableCUDAGraphWrapper._all_instances)
+                + list(StockCUDAGraphWrapper._all_instances)
             )
             for instance in all_wrappers:
                 if id(instance) in original_pools:

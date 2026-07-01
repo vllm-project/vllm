@@ -207,6 +207,32 @@ def test_stock_torch_compile_piecewise_graph_partition(vllm_runner, monkeypatch)
 
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
 @pytest.mark.forked
+def test_stock_uses_decoupled_cudagraph_wrapper(vllm_runner, monkeypatch):
+    # The stock path must capture via its own StockCUDAGraphWrapper, never the shared
+    # CUDAGraphWrapper (which is coupled to vLLM's non-torch.compile full-cudagraph
+    # path). Forked so the wrapper-class instance registries start empty.
+    from vllm.compilation.cuda_graph import CUDAGraphWrapper
+    from vllm.compilation.stock_cudagraph import StockCUDAGraphWrapper
+    from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+    if not is_torch_equal_or_newer("2.9.0.dev"):
+        pytest.skip("use_inductor_graph_partition requires torch>=2.9.0.dev")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    with vllm_runner(
+        "facebook/opt-125m",
+        compilation_config={
+            "mode": CompilationMode.STOCK_TORCH_COMPILE,
+            "use_inductor_graph_partition": True,
+            "cudagraph_capture_sizes": [100],
+        },
+        gpu_memory_utilization=0.4,
+    ) as _:
+        assert len(StockCUDAGraphWrapper._all_instances) > 0
+        assert len(CUDAGraphWrapper._all_instances) == 0
+
+
+# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
+@pytest.mark.forked
 def test_no_compilation(vllm_runner, monkeypatch):
     # Disable multiprocessing so that the counter is in the same process
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
