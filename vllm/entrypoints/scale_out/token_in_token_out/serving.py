@@ -320,7 +320,7 @@ class ServingTokens(OpenAIServing):
         request_metadata.final_usage_info = usage
 
         response = GenerateResponse(
-            id=request_id,
+            request_id=request_id,
             created=created_time,
             model=model_name,
             choices=choices,
