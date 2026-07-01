@@ -1933,37 +1933,38 @@ class DPEngineCoreProc(EngineCoreProc):
         super().add_request(request, request_wave)
         if not self.has_coordinator:
             return
-        if request_wave != self.current_wave:
-            if request_wave > self.current_wave:
-                self.current_wave = request_wave
-            elif (
-                not self.engines_running
-                and self.scheduler.pause_state == PauseState.UNPAUSED
-            ):
-                # Request received for an already-completed wave, notify
-                # front-end that we need to start the next one.
-                self.engines_running = True
-                self.output_queue.put_nowait(
-                    (-1, EngineCoreOutputs(start_wave=self.current_wave))
-                )
-        elif (
-            self.external_lb
-            and not self.engines_running
+        if request_wave > self.current_wave:
+            self.current_wave = request_wave
+        # Wake the DP group whenever the engines are idle and the scheduler is
+        # unpaused -- INCLUDING the very first request of the current wave
+        # (request_wave == current_wave). This must NOT be gated on
+        # ``request_wave != self.current_wave``: both default to 0, so the
+        # first cold request would hit ``0 != 0 == False``, no ``start_wave``
+        # would be broadcast, and the rank that received it would block forever
+        # on the EP all2all while the other ranks -- seeing
+        # ``engines_running=False`` and no local work -- skip
+        # ``execute_dummy_batch`` and never join the collective.
+        #
+        # The DP coordinator's own front-end ``FIRST_REQ`` wake is NOT
+        # sufficient on its own here: it was already present in the tree when
+        # the DP=8/16 EP DeepSeek-V3 cold-start hang reproduced 100%
+        # deterministically, so the engine re-broadcasts as well. Platform-
+        # agnostic and applies to every LB mode:
+        #   * internal / hybrid LB -- belt-and-suspenders over the coordinator
+        #     wake (empirically required for ROCm DP+EP disagg cold start).
+        #   * external LB -- the router addresses engines directly, so the
+        #     coordinator is not in the per-request path at all and this is the
+        #     only wake for the current wave's first request.
+        # Re-broadcasting is harmless in steady state (engines already running).
+        if (
+            not self.engines_running
             and self.scheduler.pause_state == PauseState.UNPAUSED
         ):
-            # External-LB DP: the external router addresses this engine
-            # directly, so the coordinator is not in the per-request path and
-            # does not drive the wake for the current wave's first request
-            # (request_wave == current_wave). Without this, a request that
-            # arrives while the wave is idle can stall until the next wave,
-            # deadlocking the DP all-to-all on cold start. Internal/hybrid LB
-            # is unaffected (coordinator drives the wake there), so this stays
-            # bit-identical to upstream for those modes.
             logger.debug(
-                "External-LB wave wake: starting wave %d for directly-routed "
-                "request (engine %d).",
+                "DP wave wake: starting wave %d (engine %d, external_lb=%s).",
                 self.current_wave,
                 self.engine_index,
+                self.external_lb,
             )
             self.engines_running = True
             self.output_queue.put_nowait(
