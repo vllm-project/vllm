@@ -35,6 +35,14 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.request import RequestStatus
 
 
+def _reduce_kv_connector_stats(runner):
+    reduced = {}
+    for stats in runner.kv_connector_stats:
+        for key, value in stats.reduce().items():
+            reduced[key] = reduced.get(key, 0) + value
+    return reduced
+
+
 def test_scheduler_reports_allocation_failure(request_runner):
     runner = request_runner(
         block_size=4,
@@ -46,9 +54,8 @@ def test_scheduler_reports_allocation_failure(request_runner):
 
     runner.run(decoded_tokens=[EOS_TOKEN_ID])
 
-    stats = runner.connector_scheduler.get_stats()
-    assert stats is not None
-    assert stats.reduce()[_ConnectorMetricName.ALLOCATION_FAILURE] == 1
+    reduced = _reduce_kv_connector_stats(runner)
+    assert reduced[_ConnectorMetricName.ALLOCATION_FAILURE] == 1
 
 
 def test_scheduler_reports_lookup_sync_delay(request_runner):
@@ -64,9 +71,7 @@ def test_scheduler_reports_lookup_sync_delay(request_runner):
 
     runner.run(decoded_tokens=[EOS_TOKEN_ID])
 
-    stats = runner.connector_scheduler.get_stats()
-    assert stats is not None
-    reduced = stats.reduce()
+    reduced = _reduce_kv_connector_stats(runner)
     assert reduced[f"{_ConnectorMetricName.LOOKUP_SYNC_DELAY}_count"] == 1
     assert reduced[f"{_ConnectorMetricName.LOOKUP_SYNC_DELAY}_sum"] > 0
 
@@ -86,9 +91,7 @@ def test_scheduler_reports_lookup_async_delay_on_resolve(request_runner):
     runner.new_request(token_ids=[1] * 4)
     runner.run(decoded_tokens=[EOS_TOKEN_ID])
 
-    stats = runner.connector_scheduler.get_stats()
-    assert stats is not None
-    reduced = stats.reduce()
+    reduced = _reduce_kv_connector_stats(runner)
     assert reduced[f"{_ConnectorMetricName.LOOKUP_ASYNC_DELAY}_count"] == 1
     assert reduced[f"{_ConnectorMetricName.LOOKUP_ASYNC_DELAY}_sum"] > 0
 
