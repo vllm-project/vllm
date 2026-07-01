@@ -8,6 +8,7 @@ import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )
@@ -31,6 +32,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
+from vllm.utils.flashinfer import has_flashinfer_b12x_moe_activation
 
 logger = init_logger(__name__)
 
@@ -192,6 +194,12 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.FLASHINFER_CUTLASS,
         NvFp4MoeBackend.MARLIN,
     }
+    # b12x applies the clamp only inside its swigluoai_uninterleave activation.
+    if (
+        config.activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE
+        and has_flashinfer_b12x_moe_activation()
+    ):
+        NVFP4_BACKENDS_WITH_CLAMP.add(NvFp4MoeBackend.FLASHINFER_B12X)
 
     if config.swiglu_limit is not None:
         AVAILABLE_BACKENDS = [
@@ -259,7 +267,9 @@ def select_nvfp4_moe_backend(
                 f"Model sets swiglu_limit={config.swiglu_limit}, but the "
                 f"explicitly requested moe_backend={runner_backend!r} does "
                 f"not apply the SwiGLU clamp. Use 'flashinfer_trtllm' or "
-                f"'flashinfer_cutlass' instead."
+                f"'flashinfer_cutlass' instead; on SM12x, 'flashinfer_b12x' "
+                f"applies the clamp for swigluoai_uninterleave when the "
+                f"installed FlashInfer supports the swiglu kwargs."
             )
         return _return_or_raise(
             requested_backend, config, weight_key, activation_key, activation_format

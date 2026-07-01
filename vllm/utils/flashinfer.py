@@ -9,6 +9,7 @@ import contextlib
 import functools
 import importlib
 import importlib.util
+import inspect
 import os
 import shutil
 from collections.abc import Callable
@@ -340,6 +341,17 @@ def has_flashinfer_b12x_moe() -> bool:
         if not mod or not hasattr(mod, attr_name):
             return False
     return True
+
+
+@functools.cache
+def has_flashinfer_b12x_moe_activation() -> bool:
+    """Return ``True`` if ``B12xMoEWrapper`` accepts the ``swiglu_*`` kwargs."""
+    if not has_flashinfer_b12x_moe():
+        return False
+    mod = _get_submodule("flashinfer.fused_moe")
+    if mod is None or not hasattr(mod, "B12xMoEWrapper"):
+        return False
+    return "swiglu_limit" in inspect.signature(mod.B12xMoEWrapper).parameters
 
 
 @functools.cache
@@ -1041,6 +1053,7 @@ __all__ = [
     "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
     "has_flashinfer_cutedsl_moe_nvfp4",
     "has_flashinfer_b12x_moe",
+    "has_flashinfer_b12x_moe_activation",
     "has_flashinfer_b12x_gemm",
     "has_flashinfer_fp8_blockscale_gemm",
     "has_nvidia_artifactory",
