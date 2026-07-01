@@ -221,10 +221,12 @@ class DeepSeekV4DSparkLayer(nn.Module):
         )
         self.materialized_head_block_size = triton_sparse_mla_head_block_size() or 1
         # The f32 score buffer is scratch for the materialized-attention kernel
-        # only (see the ``use_materialized_attention`` branch in ``_attention``).
-        # When that path is disabled the buffer is never read, so allocate an
-        # empty placeholder instead of a full [max_batch*block, heads, window+block]
-        # tensor.
+        # only. Triton attention bypasses that path even when the materialized
+        # fallback flag is true, so do not reserve the scratch in the default
+        # Triton configuration.
+        needs_score_buffer = (
+            self.use_materialized_attention and not self.use_triton_attention
+        )
         score_buffer = (
             torch.empty(
                 max_batch * self.block_size,
@@ -232,7 +234,7 @@ class DeepSeekV4DSparkLayer(nn.Module):
                 window + self.block_size,
                 dtype=torch.float32,
             )
-            if self.use_materialized_attention
+            if needs_score_buffer
             else torch.empty(0, dtype=torch.float32)
         )
         self.register_buffer("_score_buffer", score_buffer, persistent=False)

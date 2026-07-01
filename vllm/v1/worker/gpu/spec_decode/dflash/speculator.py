@@ -31,11 +31,17 @@ logger = init_logger(__name__)
 class DFlashSpeculator(DraftModelSpeculator):
     _speculator_name = "DFlash"  # For logging, so we can share methods with subclasses
 
-    def __init__(self, vllm_config: VllmConfig, device: torch.device):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        hidden_states_size: int | None = None,
+    ):
         super().__init__(vllm_config, device)
 
+        hidden_states_size = hidden_states_size or self.hidden_size
         self.hidden_states = torch.zeros(
-            self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
+            self.max_num_tokens, hidden_states_size, dtype=self.dtype, device=device
         )
 
         # Multimodal inputs not currently supported.
