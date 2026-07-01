@@ -20,6 +20,8 @@ PLATFORM_PLUGINS_GROUP = "vllm.platform_plugins"
 # Stat logger plugins group will be loaded in process0 only when serve vLLM with
 # async mode.
 STAT_LOGGER_PLUGINS_GROUP = "vllm.stat_logger_plugins"
+# Observation plugins group for tracking and steering execution
+OBSERVATION_PLUGINS_GROUP = "vllm.observation_plugins"
 
 # make sure one process only loads plugins once
 plugins_loaded = False
