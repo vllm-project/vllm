@@ -2411,7 +2411,10 @@ def _rocm_sparse_attn_decode_ragged_triton(
     comb_dim = nope_head_dim + rope_head_dim
     is_fnuz = current_platform.is_fp8_fnuz()
 
-    if not _ON_GFX950:  # Fallback path for un-tuned architectures.
+    if not (_ON_GFX942 or _ON_GFX950):
+        # Fallback path for un-tuned architectures. The split-KV (flash-decoding)
+        # path is enabled on the validated archs (gfx942, gfx950); every other
+        # arch uses the ragged path.
         block_k = 16 if head_dim >= 256 else 32
         _sparse_attn_decode_ragged_kernel[(num_queries, heads_blocks)](
             q,
@@ -2448,7 +2451,9 @@ def _rocm_sparse_attn_decode_ragged_triton(
         )
         return out
 
-    block_k = 32  # KV tokens walked per split-K iteration. Tuned on gfx950.
+    # KV tokens walked per split-K iteration. gfx942 is fastest at 16 (paired
+    # with the partial kernel at num_warps=8 below); gfx950 tuned at 32.
+    block_k = 16 if _ON_GFX942 else 32
     # Average per-query segment lengths, read sync-free from the ragged index
     # sizes, let the split heuristic avoid over-splitting
     # main_indices/extra_indices are flat [nnz] int32.
@@ -2509,7 +2514,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
         BLOCK_K=block_k,
         NUM_SPLITS=num_splits,
         NUM_STAGES=1,
-        num_warps=4,
+        num_warps=8 if _ON_GFX942 else 4,
     )
 
     _sparse_attn_decode_reduce_kernel[(num_queries, heads_blocks)](
