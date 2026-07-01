@@ -91,44 +91,6 @@ def run_cohere_asr(question: str, audio_count: int) -> ModelRequestData:
     )
 
 
-# MusicFlamingo
-def run_musicflamingo(question: str, audio_count: int) -> ModelRequestData:
-    model_name = "nvidia/music-flamingo-2601-hf"
-    engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=4096,
-        max_num_seqs=2,
-        limit_mm_per_prompt={"audio": audio_count},
-        enforce_eager=True,
-    )
-
-    # MusicFlamingo prompt placeholders use <sound>; vLLM's MusicFlamingo
-    # multimodal processor expands each one into <|sound_bos|> + audio tokens +
-    # <|sound_eos|> based on extracted audio feature lengths.
-    audio_placeholder = "<sound>" * audio_count
-    system_prompt = (
-        "You are Music Flamingo, a multimodal assistant for language and music. "
-        "On each turn you receive an audio clip which contains music and optional "
-        "text, you will receive at least one or both; use your world knowledge and "
-        "reasoning to help the user with any task. Interpret the entirety of the "
-        "content any input music--regardlenss of whether the user calls it audio, "
-        "music, or sound."
-    )
-
-    prompt = (
-        "<|im_start|>system\n"
-        f"{system_prompt}<|im_end|>\n"
-        "<|im_start|>user\n"
-        f"{audio_placeholder}{question}<|im_end|>\n"
-        "<|im_start|>assistant\n"
-    )
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-    )
-
-
 # Gemma3N
 def run_gemma3n(question: str, audio_count: int) -> ModelRequestData:
     model_name = "google/gemma-3n-E2B-it"
@@ -565,7 +527,6 @@ model_example_map = {
     "kimi_audio": run_kimi_audio,
     "midashenglm": run_midashenglm,
     "minicpmo": run_minicpmo,
-    "musicflamingo": run_musicflamingo,
     "phi4_mm": run_phi4mm,
     "qwen2_audio": run_qwen2_audio,
     "qwen2_5_omni": run_qwen2_5_omni,

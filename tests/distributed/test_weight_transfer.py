@@ -37,23 +37,18 @@ from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 
 
-def _weight_transfer_ray_env_vars() -> dict[str, str]:
-    if not current_platform.is_rocm():
-        return {}
-
-    return {
-        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
-        "RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES": "1",
-        "RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES": "1",
-    }
-
-
 def _init_ray_for_weight_transfer() -> None:
     if ray.is_initialized():
         return
     ray.init(
         ignore_reinit_error=True,
-        runtime_env={"env_vars": _weight_transfer_ray_env_vars()},
+        runtime_env={
+            "env_vars": {
+                "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
+                "RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES": "1",
+                "RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES": "1",
+            }
+        },
     )
 
 
@@ -66,7 +61,7 @@ def _get_ray_assigned_device() -> torch.device:
 
 def _set_ray_assigned_device() -> torch.device:
     device = _get_ray_assigned_device()
-    torch.accelerator.set_device_index(device)
+    current_platform.set_device(device)
     return device
 
 
