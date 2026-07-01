@@ -547,17 +547,26 @@ class RocmPlatform(Platform):
                 )
             except ImportError:
                 invalid_reasons = ["ImportError"]
-            if invalid_reasons:
-                raise ValueError(
-                    f"Selected backend {selected_backend} is not valid for "
-                    f"this configuration. Reason: {invalid_reasons}"
-                )
-            else:
+            if not invalid_reasons:
                 logger.info_once(
                     "Using %s backend (selected via --attention-backend).",
                     selected_backend.name,
                 )
                 return selected_backend.get_path()
+            # The explicitly selected backend is incompatible with this
+            # specific layer (e.g. user passed ROCM_AITER_UNIFIED_ATTN but
+            # this layer needs TURBOQUANT for a quantized KV cache dtype).
+            # Fall through to auto-selection so the correct per-layer backend
+            # is chosen rather than raising an error. This preserves the
+            # mixed-backend setup (AITER for prefill / non-TQ layers,
+            # TURBOQUANT for turboquant_* KV-cache layers).
+            logger.debug(
+                "Selected backend %s is incompatible with this layer "
+                "(%s); falling back to auto-selection. Reason: %s",
+                selected_backend.name,
+                attn_selector_config.attn_type,
+                invalid_reasons,
+            )
 
         # No selected backend or the selected backend is invalid,
         # so we try finding a valid backend.
