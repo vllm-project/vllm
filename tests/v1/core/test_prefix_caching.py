@@ -1271,6 +1271,9 @@ def test_hybrid_full_attention_partial_hash_hit_uses_cow():
         )
         in manager.take_kv_cache_block_copies()
     )
+    assert partial_full_block[0].ref_cnt == 1
+    manager.new_step_starts()
+    assert partial_full_block[0].ref_cnt == 0
 
 
 def test_hybrid_partial_hash_truncates_full_attention_hit_length():
