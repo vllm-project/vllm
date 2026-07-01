@@ -137,6 +137,8 @@ class PoolKey:
         key_metadata: KeyMetadata,
         *,
         tp_rank: int | None = None,
+        pcp_rank: int | None = None,
+        dcp_rank: int | None = None,
         pp_rank: int | None = None,
     ) -> str:
         """Return the stable prefix for a Mooncake pool key."""
@@ -145,8 +147,8 @@ class PoolKey:
             f"{prefix}"
             f"{key_metadata.model_name}"
             f"@tp_rank:{key_metadata.tp_rank if tp_rank is None else tp_rank}"
-            f"@pcp{key_metadata.pcp_rank}"
-            f"@dcp{key_metadata.dcp_rank}"
+            f"@pcp{key_metadata.pcp_rank if pcp_rank is None else pcp_rank}"
+            f"@dcp{key_metadata.dcp_rank if dcp_rank is None else dcp_rank}"
             f"@pp_rank:{key_metadata.pp_rank if pp_rank is None else pp_rank}"
             f"@group:{key_metadata.group_id}"
         )
@@ -321,7 +323,7 @@ class ReqMeta:
     can_save: bool | None = None
     load_spec: LoadSpec | None = None
     is_last_chunk: bool | None = None
-    current_event: torch.cuda.Event | None = None
+    current_event: torch.Event | None = None
 
     token_ids: list[int] | None = None
     num_prompt_tokens: int | None = None

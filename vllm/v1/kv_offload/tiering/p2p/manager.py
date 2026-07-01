@@ -21,6 +21,7 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     ReqContext,
     RequestOffloadingContext,
+    ScheduleEndContext,
 )
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.base import (
@@ -482,7 +483,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             time.sleep(_DRAIN_SLEEP_S)
 
     @override
-    def on_schedule_end(self) -> None:
+    def on_schedule_end(self, context: ScheduleEndContext) -> None:
         # Flush any p2p lookups aggregated during this step.
         # One LookupMsg per (peer, kv_request_id) with unsent entries;
         # send-gating happens inside the session if not yet ready.
