@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for the Transformers backend's fx-based fusion (GLU and QKV).
+"""Unit tests for the Transformers backend's fx-based fusers (GLU, QKV, RMSNorm).
 
 These exercise the structural detection and surgical subgraph rewrite in
-`vllm.model_executor.models.transformers.fusion` without needing a distributed
+`vllm.model_executor.models.transformers.fuser` without needing a distributed
 environment; the real `MergedColumnParallelLinear` / `QKVParallelLinear` /
 `...AndMul` integration is covered end-to-end by `test_fusion`, `test_models`
 and `test_quantization` in `tests/models/test_transformers.py`.
@@ -20,10 +20,10 @@ import torch.nn.functional as F
 
 # Registers the "vllm" attention interface in ALL_ATTENTION_FUNCTIONS
 import vllm.model_executor.models.transformers.base  # noqa: F401
-from vllm.model_executor.models.transformers import fusion
-from vllm.model_executor.models.transformers.fusion import (
+from vllm.model_executor.models.transformers.fuser import (
     GLUFuser,
     QKVFuser,
+    RMSNormFuser,
     get_fuser,
 )
 
@@ -186,9 +186,9 @@ class FakeSelfAttn(nn.Module):
 
 @pytest.fixture(autouse=True)
 def _clear_fuser_cache():
-    fusion.get_fuser.cache_clear()
+    get_fuser.cache_clear()
     yield
-    fusion.get_fuser.cache_clear()
+    get_fuser.cache_clear()
 
 
 def _apply_glu_fuser_with_stubs(module: nn.Module, fuser: GLUFuser):
@@ -316,7 +316,7 @@ def test_fuser_is_cached_per_class():
         fuser_a = get_fuser(GLUMLP())
         fuser_b = get_fuser(GLUMLP())
     assert fuser_a is fuser_b
-    assert GLUMLP in fusion.get_fuser.cache
+    assert GLUMLP in get_fuser.cache
 
 
 @pytest.mark.parametrize("cls", [NotAnMLP, UntraceableMLP])
@@ -412,14 +412,137 @@ def test_act_and_mul_derived_from_module(default_vllm_config):
 
     from vllm.model_executor.layers.activation import GeluAndMul, SiluAndMul
 
-    assert isinstance(fusion.GLUFuser._get_act_and_mul(nn.SiLU()), SiluAndMul)
-    assert isinstance(fusion.GLUFuser._get_act_and_mul(SiLUActivation()), SiluAndMul)
-    gelu_tanh = fusion.GLUFuser._get_act_and_mul(GELUTanh())
+    assert isinstance(GLUFuser._get_act_and_mul(nn.SiLU()), SiluAndMul)
+    assert isinstance(GLUFuser._get_act_and_mul(SiLUActivation()), SiluAndMul)
+    gelu_tanh = GLUFuser._get_act_and_mul(GELUTanh())
     assert isinstance(gelu_tanh, GeluAndMul) and gelu_tanh.approximate == "tanh"
-    gelu = fusion.GLUFuser._get_act_and_mul(nn.GELU())
+    gelu = GLUFuser._get_act_and_mul(nn.GELU())
     assert isinstance(gelu, GeluAndMul) and gelu.approximate == "none"
     # Not activations at all -> no fusion
-    assert fusion.GLUFuser._get_act_and_mul_name(nn.Dropout()) is None
-    assert fusion.GLUFuser._get_act_and_mul_name(nn.LayerNorm(8)) is None
+    assert GLUFuser._get_act_and_mul_name(nn.Dropout()) is None
+    assert GLUFuser._get_act_and_mul_name(nn.LayerNorm(8)) is None
     with pytest.raises(ValueError, match="No AndMul equivalent"):
-        fusion.GLUFuser._get_act_and_mul(nn.Dropout())
+        GLUFuser._get_act_and_mul(nn.Dropout())
+
+
+class LlamaRMSNorm(nn.Module):
+    """The canonical HF RMSNorm: `weight * x * rsqrt(mean(x**2) + eps)`."""
+
+    def __init__(self, hidden: int = 16, eps: float = 1e-5):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden))
+        self.variance_epsilon = eps
+
+    def forward(self, hidden_states):
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.to(torch.float32)
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        return self.weight * hidden_states.to(input_dtype)
+
+
+class GemmaRMSNorm(nn.Module):
+    """Zero-centered weight: `(1 + weight) * normalized`."""
+
+    def __init__(self, dim: int = 16, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.zeros(dim))
+
+    def _norm(self, x):
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+    def forward(self, x):
+        output = self._norm(x.float())
+        output = output * (1.0 + self.weight.float())
+        return output.type_as(x)
+
+
+class WeightlessRMSNorm(nn.Module):
+    """No scale parameter (e.g. Gemma3n `with_scale=False`)."""
+
+    def __init__(self, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, x):
+        xf = x.float()
+        normed = xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + self.eps)
+        return normed.type_as(x)
+
+
+class T5LayerNorm(nn.Module):
+    """An RMSNorm whose class name is *not* `*RMSNorm` (name-independence)."""
+
+    def __init__(self, hidden: int = 16, eps: float = 1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden))
+        self.variance_epsilon = eps
+
+    def forward(self, hidden_states):
+        variance = hidden_states.to(torch.float32).pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        return self.weight * hidden_states
+
+
+class NotAnRMSNorm(nn.Module):
+    """Mean-subtracting LayerNorm-like math -> not an RMSNorm."""
+
+    def __init__(self, hidden: int = 16, eps: float = 1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden))
+        self.eps = eps
+
+    def forward(self, x):
+        x = x - x.mean(-1, keepdim=True)
+        return self.weight * x / torch.sqrt(x.var(-1, keepdim=True) + self.eps)
+
+
+@pytest.mark.parametrize(
+    "cls,eps,has_weight,zero_centered",
+    [
+        (LlamaRMSNorm, 1e-5, True, False),
+        (GemmaRMSNorm, 1e-6, True, True),
+        (WeightlessRMSNorm, 1e-6, False, False),
+        (T5LayerNorm, 1e-6, True, False),
+    ],
+)
+def test_detects_rms_norm_variants(cls, eps, has_weight, zero_centered):
+    with torch.device("meta"):
+        fuser = get_fuser(cls())
+    assert isinstance(fuser, RMSNormFuser)
+    # eps and the weight form are read from the graph, not the class name.
+    assert fuser.eps == eps
+    assert fuser.has_weight == has_weight
+    assert fuser.zero_centered == zero_centered
+
+
+@pytest.mark.parametrize("cls", [NotAnRMSNorm, nn.LayerNorm, nn.SiLU])
+def test_non_rms_norms_are_not_matched(cls):
+    with torch.device("meta"):
+        module = cls(16) if cls is nn.LayerNorm else cls()
+    assert not isinstance(get_fuser(module), RMSNormFuser)
+
+
+@pytest.mark.parametrize(
+    "cls,expected,zero_centered",
+    [
+        (LlamaRMSNorm, "RMSNorm", False),
+        (GemmaRMSNorm, "GemmaRMSNorm", True),
+        (WeightlessRMSNorm, "RMSNorm", False),
+    ],
+)
+def test_rms_norm_builds_vllm_class(cls, expected, zero_centered, default_vllm_config):
+    from vllm.model_executor.layers.layernorm import GemmaRMSNorm as VLLMGemmaRMSNorm
+    from vllm.model_executor.layers.layernorm import RMSNorm as VLLMRMSNorm
+
+    # `default_vllm_config` supplies the config context the CustomOp needs; the
+    # weightless path reads hidden size from the model config, so stub it.
+    model_config = SimpleNamespace(get_hidden_size=lambda: 16)
+    with torch.device("meta"):
+        module = cls()
+        fuser = get_fuser(module)
+        built = fuser.fuse(module, "norm", model_config, None)
+    types_by_name = {"RMSNorm": VLLMRMSNorm, "GemmaRMSNorm": VLLMGemmaRMSNorm}
+    assert type(built) is types_by_name[expected]
+    assert built.variance_epsilon == fuser.eps
