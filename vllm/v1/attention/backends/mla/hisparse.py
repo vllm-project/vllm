@@ -101,7 +101,8 @@ class HiSparseConfig:
 
         top_k = int(raw_config.get("top_k", model_top_k))
         device_buffer_size = int(raw_config["device_buffer_size"])
-        host_to_device_ratio = int(raw_config["host_to_device_ratio"])
+        # Optional: only used to size the host pool when host_pool_gib is unset.
+        host_to_device_ratio = int(raw_config.get("host_to_device_ratio", 2))
         host_pool_gib = raw_config.get("host_pool_gib")
         host_pool_gib = None if host_pool_gib is None else float(host_pool_gib)
 
