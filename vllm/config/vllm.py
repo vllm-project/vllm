@@ -1033,12 +1033,9 @@ class VllmConfig:
                     "window before the request thinking state is refreshed."
                 )
             if self.device_config.device_type == "cpu":
-                raise ValueError(
-                    "relaxed_thinking is not supported on CPU workers."
-                )
-            if (
-                self.model_config is not None
-                and getattr(self.model_config, "skip_tokenizer_init", False)
+                raise ValueError("relaxed_thinking is not supported on CPU workers.")
+            if self.model_config is not None and getattr(
+                self.model_config, "skip_tokenizer_init", False
             ):
                 raise ValueError(
                     "relaxed_thinking cannot be used with "
