@@ -30,6 +30,8 @@ logger = init_logger(__name__)
 # the same step. Determinism of the *draft* noise across runs is harmless: output
 # randomness still comes from the target's synchronized rejection sampler, and
 # the counter keeps advancing across requests so proposals are not repeated.
+# If sampling is ever CUDA-graph-captured, keep this seed outside replay or pass
+# it as graph input; otherwise the replayed graph would reuse one draft seed.
 _FUSED_MARKOV_SEED_COUNTER = 0x9E3779B1
 
 
@@ -335,7 +337,9 @@ def sample_dspark_markov_block_fused(
         sample_logits = step_logits
         sample_inv_temp = inv_temp
         if uses_top_k_top_p:
-            sample_logits = step_logits.to(torch.float32).clone()
+            sample_logits = step_logits.to(torch.float32)
+            if sample_logits.dtype == step_logits.dtype:
+                sample_logits = sample_logits.clone()
             sample_logits.mul_(inv_temp.view(-1, 1))
             sample_logits = apply_top_k_top_p(sample_logits, top_k, top_p)
             assert unit_inv_temp is not None
