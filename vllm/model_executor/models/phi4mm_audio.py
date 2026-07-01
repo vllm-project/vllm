@@ -529,6 +529,13 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
             except StopIteration:
                 device = torch.device("cpu")
 
+        if chunk_size_train_eff <= 0:
+            return torch.ones(
+                (1, int(seq_len), int(seq_len)),
+                device=device,
+                dtype=torch.bool,
+            ).expand(batch_size, -1, -1)
+
         seq_range = torch.arange(int(seq_len), device=device, dtype=torch.long)
         chunk_idx = torch.div(
             seq_range, chunk_size_train_eff, rounding_mode="floor"
