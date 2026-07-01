@@ -28,7 +28,12 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Protocol
 
-from vllm.v1.kv_offload.base import LookupResult, OffloadKey, ReqContext
+from vllm.v1.kv_offload.base import (
+    LookupResult,
+    OffloadKey,
+    ReqContext,
+    RequestOffloadingContext,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.tiering.base import JobMetadata
@@ -36,6 +41,16 @@ if TYPE_CHECKING:
 
 class TieringCallbacks(Protocol):
     """TieringManager-facing callbacks invoked by the P2P server role."""
+
+    def on_new_request(self, ctx: ReqContext) -> RequestOffloadingContext:
+        """Open per-request bookkeeping for the synthetic peer-driven
+        ``ctx`` before its first :meth:`lookup`.
+
+        Called once per inbound LookupMsg, before any hash is queried.
+        Mirrors :meth:`finish_request`, which releases the same
+        bookkeeping once every hash has settled.
+        """
+        ...
 
     def lookup(self, key: OffloadKey, ctx: ReqContext) -> LookupResult:
         """Look up a single hash. See :class:`LookupResult` for the
@@ -76,6 +91,9 @@ class _AllMissCallbacks:
     the all-miss behaviour the server role had before the lookup-phase
     integration.
     """
+
+    def on_new_request(self, ctx: ReqContext) -> RequestOffloadingContext:
+        return RequestOffloadingContext()
 
     def lookup(self, key: OffloadKey, ctx: ReqContext) -> LookupResult:
         return LookupResult.MISS

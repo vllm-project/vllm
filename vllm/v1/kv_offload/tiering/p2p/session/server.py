@@ -358,6 +358,11 @@ class ServerRole:
             deadline=time.monotonic() + _LOOKUP_PENDING_TIMEOUT_S,
         )
 
+        # Open per-request bookkeeping for this synthetic ctx before the
+        # first lookup; released by ``finish_request`` once every hash
+        # has settled.
+        self._cb.on_new_request(ctx)
+
         hit_hashes: list[OffloadKey] = []
         for h in lookup.hashes:
             if h in lookup.resolved or h in lookup.pending:

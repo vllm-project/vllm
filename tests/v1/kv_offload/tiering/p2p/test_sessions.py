@@ -18,7 +18,12 @@ from collections.abc import Sequence
 import numpy as np
 import pytest
 
-from vllm.v1.kv_offload.base import LookupResult, OffloadKey, ReqContext
+from vllm.v1.kv_offload.base import (
+    LookupResult,
+    OffloadKey,
+    ReqContext,
+    RequestOffloadingContext,
+)
 from vllm.v1.kv_offload.tiering.base import JobMetadata
 from vllm.v1.kv_offload.tiering.p2p.session import (
     LoadResult,
@@ -216,6 +221,10 @@ class FakeCallbacks:
         self.retry: set[OffloadKey] = set(retry or ())
         self._next_job_id: int = 1000
         self.calls: list[tuple] = []
+
+    def on_new_request(self, ctx: ReqContext) -> RequestOffloadingContext:
+        self.calls.append(("on_new_request", ctx.req_id))
+        return RequestOffloadingContext()
 
     def lookup(self, key: OffloadKey, ctx: ReqContext) -> LookupResult:
         self.calls.append(("lookup", key, ctx.req_id))
