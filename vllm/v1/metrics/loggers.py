@@ -71,8 +71,21 @@ class StatLoggerBase(ABC):
         pass
 
 
+_runtime_stat_logger_factories: list[StatLoggerFactory] = []
+
+
+def register_stat_logger_factory(factory: StatLoggerFactory) -> None:
+    """Register a stat logger factory at runtime.
+
+    This is an alternative to the entry-point mechanism for frameworks
+    that embed vLLM and need to inject custom stat loggers without
+    package metadata.
+    """
+    _runtime_stat_logger_factories.append(factory)
+
+
 def load_stat_logger_plugin_factories() -> list[StatLoggerFactory]:
-    factories: list[StatLoggerFactory] = []
+    factories: list[StatLoggerFactory] = list(_runtime_stat_logger_factories)
 
     for name, plugin_class in load_plugins_by_group(STAT_LOGGER_PLUGINS_GROUP).items():
         if not isinstance(plugin_class, type) or not issubclass(
