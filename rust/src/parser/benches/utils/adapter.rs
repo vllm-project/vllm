@@ -27,6 +27,10 @@ impl Tokenizer for BenchTokenizer {
     fn token_to_id(&self, _token: &str) -> Option<u32> {
         Some(u32::MAX)
     }
+
+    fn id_to_token(&self, _id: u32) -> Option<String> {
+        Some("\u{FFFD}".to_string())
+    }
 }
 
 /// Bench-only adapter that exposes a unified parser through the tool-parser
