@@ -257,6 +257,7 @@ async def test_build_transfer_params_multi_group_trimming(monkeypatch):
             },
             kv_caches_base_addr=[0x2000],
             block_lens=[block_len],
+            kv_block_lens=[block_len],
         )
 
         local_regions = [
@@ -348,6 +349,7 @@ async def test_build_transfer_params_group_count_mismatch(monkeypatch):
             },
             kv_caches_base_addr=[0x2000],
             block_lens=[block_len],
+            kv_block_lens=[block_len],
         )
 
         local_regions = [

@@ -35,34 +35,6 @@ if TYPE_CHECKING:
     from vllm.tokenizers import TokenizerLike
     from vllm.tool_parsers.abstract_tool_parser import Tool
 
-# Tokens the model generates that must not leak into response content.
-_GEMMA4_MODEL_DROP_TOKENS: set[str] = {
-    # Turn boundaries
-    "<|turn>",
-    "<turn|>",
-    # Channel / reasoning
-    "<|channel>",
-    "<channel|>",
-    # Tool protocol tokens
-    "<|tool>",
-    "<tool|>",
-    "<|tool_call>",
-    "<tool_call|>",
-    "<|tool_response>",
-    "<tool_response|>",
-    '<|"|>',
-    # Thinking
-    "<|think|>",
-    # Multi-modal (defensive — not expected during text completion)
-    "<|image>",
-    "<|image|>",
-    "<image|>",
-    "<|audio>",
-    "<|audio|>",
-    "<audio|>",
-    "<|video|>",
-}
-
 CHANNEL_START = "<|channel>"
 CHANNEL_END = "<channel|>"
 TOOL_CALL_START = "<|tool_call>"
@@ -322,14 +294,6 @@ def _gemma4_arg_converter(raw_args: str, partial: bool) -> str:
 
 @functools.cache
 def gemma4_config() -> ParserEngineConfig:
-    used_tokens = {
-        CHANNEL_START,
-        CHANNEL_END,
-        TOOL_CALL_START,
-        TOOL_CALL_END,
-        '<|"|>',
-    }
-
     return ParserEngineConfig(
         name="gemma4",
         initial_state=ParserState.CONTENT,
@@ -375,6 +339,10 @@ def gemma4_config() -> ParserEngineConfig:
                 ParserState.TOOL_PREAMBLE,
                 (EventType.REASONING_END, EventType.TOOL_CALL_START),
             ),
+            (ParserState.TOOL_PREAMBLE, "TOOL_END"): Transition(
+                ParserState.CONTENT,
+                (EventType.TOOL_CALL_END,),
+            ),
             (ParserState.TOOL_PREAMBLE, "CALL_PREFIX"): Transition(
                 ParserState.TOOL_NAME,
                 (),
@@ -408,7 +376,7 @@ def gemma4_config() -> ParserEngineConfig:
         arg_converter=_gemma4_arg_converter,
         tool_args_json=False,
         arg_structural_chars=frozenset(",:{}[]<"),
-        drop_tokens=frozenset(_GEMMA4_MODEL_DROP_TOKENS - used_tokens),
+        preserve_tokens=frozenset({STRING_DELIM}),
     )
 
 
@@ -446,27 +414,6 @@ class Gemma4Parser(ParserEngine):
         self._reasoning_text: str = ""
         self._prefix_stripped: bool = False
         self._is_first_feed: bool = True
-
-    def adjust_request(
-        self,
-        request: ChatCompletionRequest | ResponsesRequest,
-    ) -> ChatCompletionRequest | ResponsesRequest:
-        """Keep special tokens when thinking or tool calls need them.
-
-        ``skip_special_tokens`` must stay ``False`` when there is something to
-        preserve: reasoning channel tokens (thinking enabled) or tool-call
-        delimiters (tools active). Otherwise keep the default so stray
-        delimiters do not leak into content (e.g. ``tool_choice="none"`` with
-        thinking disabled).
-        """
-        request = super().adjust_request(request)
-        chat_template_kwargs = getattr(request, "chat_template_kwargs", None) or {}
-        enable_thinking = chat_template_kwargs.get("enable_thinking", True)
-        has_tools = bool(getattr(request, "tools", None))
-        tools_active = has_tools and request.tool_choice != "none"
-        if not enable_thinking and not tools_active:
-            request.skip_special_tokens = True
-        return request
 
     def _reset(self, initial_state=None) -> None:
         super()._reset(initial_state=initial_state)

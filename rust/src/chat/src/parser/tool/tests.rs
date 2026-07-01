@@ -1,6 +1,6 @@
-use vllm_tool_parser::Result;
+use vllm_parser::tool::{Result, ToolParserOutput};
 
-use super::{ToolParser, ToolParserFactory, ToolParserOutput, names};
+use super::{ToolParser, ToolParserFactory, names};
 use crate::Error;
 use crate::request::ChatTool;
 
