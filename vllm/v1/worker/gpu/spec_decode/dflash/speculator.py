@@ -366,7 +366,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.query_cudagraph_manager.run_fullgraph(batch_desc)
         else:
             self._generate_draft(
-                num_reqs_padded,
+                num_reqs,
                 num_tokens_padded,
                 draft_attn_metadata,
                 draft_slot_mappings_by_layer,
@@ -496,7 +496,9 @@ def _prepare_dflash_inputs_kernel(
                 mask = block < max_num_reqs
                 tl.store(out_seq_lens_ptr + block, 0, mask=mask)
             # Padded sample slots point at query index 0 (a valid row in
-            # last_hidden_states) so CG replay never reads OOB.
+            # last_hidden_states) so CG replay never reads OOB. Padded
+            # sample idx mappings point to -1, which is ignored during
+            # sampling to prevent writing stale values to draft logits.
             pad_start = num_reqs * num_speculative_steps
             pad_end = max_num_reqs * num_speculative_steps
             for i in range(pad_start, pad_end, BLOCK_SIZE):
@@ -504,7 +506,7 @@ def _prepare_dflash_inputs_kernel(
                 mask = block < pad_end
                 tl.store(out_sample_indices_ptr + block, 0, mask=mask)
                 tl.store(out_sample_pos_ptr + block, 0, mask=mask)
-                tl.store(out_sample_idx_mapping_ptr + block, 0, mask=mask)
+                tl.store(out_sample_idx_mapping_ptr + block, -1, mask=mask)
             # Pad query slot mappings past num_query_tokens with PAD so the
             # captured CG sees PAD slots (no K/V write) for replay sizes
             # larger than the current request count.
