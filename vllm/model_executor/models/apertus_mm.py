@@ -338,7 +338,8 @@ class ApertusForConditionalGeneration(ApertusForCausalLM, SupportsMultiModal):
                 img_codes = info[2].view(pixel_values.shape[0], max_h_tok, max_w_tok)
 
             valid_codes_embeds = []
-            vocab_offset = getattr(self.config, "image_token_offset", 0)
+            # TODO better find the offset
+            vocab_offset = getattr(self.config, "image_token_offset", 131272)
 
             for i, size in enumerate(image_sizes):
                 h_tok, w_tok = size.tolist()
@@ -367,6 +368,7 @@ class ApertusForConditionalGeneration(ApertusForCausalLM, SupportsMultiModal):
                 audio_codes = audio_codes.squeeze(1)  # [B, Max_Tokens]
 
             valid_codes_embeds = []
+            # TODO better find the offset
             vocab_offset = getattr(self.config, "audio_token_offset", 262344)
 
             for i, length in enumerate(audio_lengths):
