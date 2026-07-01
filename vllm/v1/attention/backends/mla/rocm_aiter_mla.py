@@ -54,19 +54,10 @@ def _fp8_mla_prefill_supported() -> bool:
 def _asm_prefill_backend_active(vllm_config: VllmConfig) -> bool:
     """True when the dedicated AITER ASM MLA prefill backend owns prefill.
 
-    Invariant: AITER_ASM is active  <=>  aiter has been upgraded past
-    ROCm/aiter#3606.  ``AiterAsmPrefillBackend.is_available`` gates on the
-    ``max_kvlen`` kwarg of ``get_ps_metadata_info_v1`` (added by #3606) as a
-    proxy for the fix, and AITER_ASM is priority #1 on gfx950, so it is only
-    selected once that aiter version is present.  Until then this returns
-    False and the in-impl FP8 PS path keeps its exact main-branch behavior.
-
-    When it is active, all prefill (new tokens and context chunks) runs
-    through ``AiterAsmPrefillBackend``, superseding ``AiterMLAImpl``'s in-impl
-    FP8 PS path entirely.  That path is then dead, and its
-    ``_init_fp8_prefill_ps_buffers`` reservation (sized off aiter's multi-TB
-    worst case) would still run from the builder used for decode and OOM at
-    startup, so we gate the whole in-impl FP8 path off here.
+    If true, all prefill-related PS ASM logic will be disabled in the AITER MLA backend,
+    including pre-reservation of workspace buffers which can cause OOMs due to
+    currently pessimistic PS metadata bounds in AITER. It's safe to disable this logic
+    since all prefill related logic is handled by the AITER ASM prefill backend instead.
     """
     try:
         from vllm.v1.attention.backends.mla.prefill.registry import (
@@ -269,6 +260,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             device=device,
         )
 
+        # Only use fp8 prefill PS path here in the AITER MLA backend if the dedicated
+        # AITER ASM prefill backend is inactive. When the AITER ASM prefill backend is
+        # active, it owns all prefill related logic and hence initializing the PS
+        # buffers here would be redundant.
         self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
             not _asm_prefill_backend_active(vllm_config)
         )
@@ -752,12 +747,12 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         self.flash_attn_varlen_func = flash_attn_varlen_func
 
-        # FP8 MLA prefill kernel imports (lazy, only when enabled).
-        # Auto-enabled on gfx950 when AITER ships the kernels, unless the
-        # dedicated AITER ASM prefill backend owns prefill (then this
-        # in-impl path is dead and must stay disabled).
         from vllm.config import get_current_vllm_config
 
+        # Only use fp8 prefill PS path here in the AITER MLA backend if the dedicated
+        # AITER ASM prefill backend is inactive. When the AITER ASM prefill backend is
+        # active, it owns all prefill related logic and hence initializing the PS
+        # buffers here would be redundant.
         self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
             not _asm_prefill_backend_active(get_current_vllm_config())
         )
