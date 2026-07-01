@@ -62,7 +62,7 @@ class SAECachePolicy(CachePolicy):
     @override
     def get(self, key: OffloadKey) -> BlockStatus | None:
         block = self._blocks.get(key)
-        if block is not None:
+        if block is not None and block.is_ready:
             self._key_ghost[key] = (
                 self._key_ghost.get(key, 0.0) + self._ghost_hit_weight
             )
