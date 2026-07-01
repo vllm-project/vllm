@@ -47,6 +47,7 @@ DSML_TOOL_END = f"</{_DSML}tool_calls>"
 DSML_INVOKE_PREFIX = f'<{_DSML}invoke name="'
 DSML_INVOKE_NAME_END = '">'
 DSML_INVOKE_END = f"</{_DSML}invoke>"
+DSML_PARAM_CLOSE = f"</{_DSML}parameter>"
 
 _ESCAPED_DSML = re.escape(_DSML)
 _PARAM_RE = re.compile(
@@ -102,6 +103,7 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
             "INVOKE_PREFIX": DSML_INVOKE_PREFIX,
             "INVOKE_NAME_END": DSML_INVOKE_NAME_END,
             "INVOKE_END": DSML_INVOKE_END,
+            "PARAM_CLOSE": DSML_PARAM_CLOSE,
         },
         token_id_terminals={
             "THINK_START": DSML_THINK_START,

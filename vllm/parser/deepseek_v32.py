@@ -26,6 +26,7 @@ from vllm.parser.deepseek_v4 import (
     DSML_INVOKE_END,
     DSML_INVOKE_NAME_END,
     DSML_INVOKE_PREFIX,
+    DSML_PARAM_CLOSE,
     _dsml_arg_converter,
 )
 from vllm.parser.engine.events import EventType
@@ -58,6 +59,7 @@ def deepseek_v32_config() -> ParserEngineConfig:
             "INVOKE_PREFIX": DSML_INVOKE_PREFIX,
             "INVOKE_NAME_END": DSML_INVOKE_NAME_END,
             "INVOKE_END": DSML_INVOKE_END,
+            "PARAM_CLOSE": DSML_PARAM_CLOSE,
         },
         token_id_terminals={
             "TOOL_START": DSML_FUNC_START,
