@@ -50,6 +50,7 @@ class GLUFuser(StackedFuser):
     gate_name: str
     up_name: str
     merged_name: ClassVar[str] = "gate_up_proj"
+    merged_cls: ClassVar[str] = "MergedColumnParallelLinear"
 
     @property
     def shards(self) -> list[tuple[str, ShardId]]:

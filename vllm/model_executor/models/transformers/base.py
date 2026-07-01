@@ -502,6 +502,7 @@ class Base(
                     new_module = fuser.fuse(
                         child_module, qual_name, self.model_config, self.quant_config
                     )
+                    logger.info_once(fuser.info)
                     _recursive_replace(new_module, prefix=qual_name)
                 else:
                     _recursive_replace(child_module, prefix=qual_name)

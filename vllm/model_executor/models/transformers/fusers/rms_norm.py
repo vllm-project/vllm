@@ -70,6 +70,13 @@ class RMSNormFuser(BaseFuser):
     has_weight: bool
     zero_centered: bool
     """Gemma-style `(1 + weight)` scaling (weight initialised at zero)."""
+    source_cls: str
+    """Class name of the HF norm this was matched from (for logging)."""
+
+    @property
+    def info(self) -> str:
+        norm = "GemmaRMSNorm" if self.zero_centered else "RMSNorm"
+        return f"Fused {self.source_cls} -> {norm} (CustomOp)"
 
     @classmethod
     def match(cls, graph: fx.Graph, module: nn.Module) -> "RMSNormFuser | None":
@@ -108,7 +115,12 @@ class RMSNormFuser(BaseFuser):
                 has_weight = True
                 zero_centered = _is_one_plus(weight)
                 break
-        return cls(eps=eps, has_weight=has_weight, zero_centered=zero_centered)
+        return cls(
+            eps=eps,
+            has_weight=has_weight,
+            zero_centered=zero_centered,
+            source_cls=type(module).__name__,
+        )
 
     def validate(self, module: nn.Module, model_config: "ModelConfig") -> bool:
         return True
