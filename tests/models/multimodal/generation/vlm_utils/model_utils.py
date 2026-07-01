@@ -167,15 +167,6 @@ def llava_onevision_vllm_to_hf_output(
     return hf_output_ids, hf_output_str, out_logprobs
 
 
-def mantis_vllm_to_hf_output(vllm_output: RunnerOutput, model: str) -> RunnerOutput:
-    """Sanitize vllm output [mantis] to compare with hf output."""
-    output_ids, output_str, out_logprobs = vllm_output
-
-    hf_output_str = output_str + "<|eot_id|>"
-
-    return output_ids, hf_output_str, out_logprobs
-
-
 def phi3v_vllm_to_hf_output(vllm_output: RunnerOutput, model: str) -> RunnerOutput:
     """Sanitize vllm output [phi3v] to be comparable with hf output."""
     _, output_str, out_logprobs = vllm_output
@@ -938,29 +929,6 @@ def _internvl_generate(
     )
 
     return outputs
-
-
-def mantis_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
-    from mantis.models.mllava import MLlavaProcessor
-
-    hf_model.processor = MLlavaProcessor.from_pretrained(hf_model.model_name)
-
-    orig_generate = hf_model.model.generate
-    tokenizer = hf_model.processor.tokenizer
-
-    def _generate(self, *args, **kwargs):
-        return orig_generate(
-            *args,
-            **kwargs,
-            eos_token_id=[
-                tokenizer.eos_token_id,
-                tokenizer.convert_tokens_to_ids("<|eot_id|>"),
-            ],
-        )
-
-    hf_model.model.generate = types.MethodType(_generate, hf_model.model)
-
-    return hf_model
 
 
 def minicpmv_25_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
