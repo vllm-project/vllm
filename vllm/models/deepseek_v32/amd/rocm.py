@@ -28,8 +28,8 @@ from vllm.model_executor.models.deepseek_v2 import (
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.utils.torch_utils import is_quantized_kv_cache
 
-from ..common.attention import DeepseekV32Indexer
-from ..common.kernels import fused_norm_rope, fused_q
+from vllm.models.deepseek_v32.common.attention import DeepseekV32Indexer
+from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
 
 
 class DeepseekV32ROCMAiterMLAAttention(MLAAttention):
