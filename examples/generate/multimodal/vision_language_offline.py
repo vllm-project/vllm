@@ -68,28 +68,6 @@ def run_aria(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
-# Aya Vision
-def run_aya_vision(questions: list[str], modality: str) -> ModelRequestData:
-    assert modality == "image"
-    model_name = "CohereLabs/aya-vision-8b"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=2048,
-        max_num_seqs=2,
-        mm_processor_kwargs={"crop_to_patches": True},
-        limit_mm_per_prompt={modality: 1},
-    )
-    prompts = [
-        f"<|START_OF_TURN_TOKEN|><|USER_TOKEN|><image>{question}<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
-        for question in questions
-    ]
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
-
-
 # Bee-8B
 def run_bee(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -2327,7 +2305,6 @@ def run_step_vl(questions: list[str], modality: str) -> ModelRequestData:
 
 model_example_map = {
     "aria": run_aria,
-    "aya_vision": run_aya_vision,
     "bagel": run_bagel,
     "cheers": run_cheers,
     "bee": run_bee,
