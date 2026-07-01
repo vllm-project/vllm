@@ -15,6 +15,12 @@ def make_block(block_id: int) -> BlockStatus:
     return BlockStatus(block_id)
 
 
+def make_ready_block(block_id: int) -> BlockStatus:
+    b = BlockStatus(block_id)
+    b.ref_cnt = 0
+    return b
+
+
 def test_construction_and_missing_key_returns_none():
     policy = SAECachePolicy(cache_capacity=4)
     assert policy.get(key(1)) is None
@@ -104,7 +110,7 @@ def test_clear_resets_all_state():
 
 def test_get_hit_accumulates_ghost_score():
     policy = SAECachePolicy(cache_capacity=4, ghost_hit_weight=3.0)
-    policy.insert(key(1), make_block(0))
+    policy.insert(key(1), make_ready_block(0))
     policy.get(key(1))
     policy.get(key(1))
     assert policy._key_ghost[key(1)] == 6.0
