@@ -4,8 +4,8 @@
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
-from vllm.model_executor.layers.quantization.awq_marlin import AWQMarlinConfig
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -154,7 +154,7 @@ def _resolve_gptq_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
 
 
 def _resolve_awq_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
-    from vllm.model_executor.layers.quantization.awq_marlin import AWQMarlinMoEMethod
+    from vllm.model_executor.layers.quantization.auto_awq import AutoAWQMoEMethod
     from vllm.model_executor.layers.quantization.moe_wna16 import (
         MoeWNA16Config,
         MoeWNA16Method,
@@ -177,8 +177,8 @@ def _resolve_awq_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
         ) and check_moe_marlin_supports_layer(layer, layer_config.group_size)
 
     if use_marlin:
-        return AWQMarlinMoEMethod(
-            AWQMarlinConfig(
+        return AutoAWQMoEMethod(
+            AutoAWQConfig(
                 weight_bits=layer_config.bits,
                 group_size=layer_config.group_size,
                 zero_point=not layer_config.sym,

@@ -16,7 +16,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.platform_utils import num_compute_units
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.utils.torch_utils import is_quantized_kv_cache, np_to_pinned_tensor
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -503,7 +503,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         # Zero-fill for cudagraphs
         self.req_id_per_token_buffer.fill_(0)
         self.req_id_per_token_buffer[: req_id_per_token.shape[0]].copy_(
-            torch.from_numpy(req_id_per_token), non_blocking=True
+            np_to_pinned_tensor(req_id_per_token), non_blocking=True
         )
         req_id_per_token = self.req_id_per_token_buffer[:num_tokens]
 
@@ -568,8 +568,12 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
         self.kv_cache_dtype = kv_cache_dtype
         self.kv_lora_rank: int = mla_args["kv_lora_rank"]
         self.softmax_scale = scale
-        assert indexer is not None
-        self.topk_indices_buffer: torch.Tensor | None = indexer.topk_indices_buffer
+        # The indexer carries the shared buffer for normal layers and tests;
+        # the explicitly-passed buffer covers backbone skip layers, whose
+        # indexer is not constructed (see deepseek_v2.py).
+        self.topk_indices_buffer: torch.Tensor | None = (
+            indexer.topk_indices_buffer if indexer is not None else topk_indices_buffer
+        )
         # Prefill BF16 kernel requires 64 on Hopper, 128 on Blackwell
         self.prefill_padding = (
             128 if current_platform.is_device_capability_family(100) else 64

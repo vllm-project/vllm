@@ -3,7 +3,8 @@
 
 use tonic::Status;
 use uuid::Uuid;
-use vllm_engine_core_client::protocol::{StopReason, StructuredOutputsParams};
+use vllm_engine_core_client::protocol::output::StopReason;
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_text::{
     DecodedLogprobs, DecodedPromptLogprobs, FinishReason, Finished, Prompt, SamplingParams,
     TextDecodeOptions, TextRequest,
@@ -91,6 +92,7 @@ pub fn to_text_request(
         cache_salt: kv.map(|k| &k.cache_salt).filter(|s| !s.is_empty()).cloned(),
         add_special_tokens: true,
         data_parallel_rank: None,
+        reasoning_parser_kwargs: None,
         lora_request: None,
     })
 }
@@ -501,7 +503,7 @@ impl ResponseOpts {
 
 #[cfg(test)]
 mod tests {
-    use vllm_engine_core_client::protocol::StopReason;
+    use vllm_engine_core_client::protocol::output::StopReason;
     use vllm_text::{FinishReason, Finished, Prompt};
 
     use super::pb::finish_info::{FinishReason as PbFinishReason, StopReason as PbStopReason};
