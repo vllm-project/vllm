@@ -563,6 +563,7 @@ def _create_input_tensors(
 
     prefill_inputs = {
         "q": prefill_q,
+        "mqa_q": decode_inputs,
         "k_c_normed": k_c_normed,
         "k_pe": k_pe,
         "k_scale": k_scale,
@@ -925,19 +926,21 @@ def _run_single_benchmark(
             prefill_quant_op = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
 
     fused_output = output_scale is not None and fuse_quant_op
+    mha_mode = getattr(config, "sparse_mla_mha_mode", "auto")
 
     # Build forward function (runs a single decode/prefill pass)
     def forward_fn():
         results = []
         impl._sparse_mla_force_masked_mha = (  # type: ignore[attr-defined]
-            getattr(config, "sparse_mla_mha_mode", "auto") == "masked"
+            mha_mode == "masked"
         )
         impl._sparse_mla_force_dense_mha = (  # type: ignore[attr-defined]
-            getattr(config, "sparse_mla_mha_mode", "auto") == "dense"
+            mha_mode == "dense"
         )
         if has_decode:
             results.append(impl.forward_mqa(decode_inputs, kv_cache, metadata, layer))
         if has_prefill:
+            prefill_mqa_q = prefill_inputs["mqa_q"] if mha_mode == "auto" else None
             out = impl.forward_mha(
                 prefill_inputs["q"],
                 prefill_inputs["k_c_normed"],
@@ -946,6 +949,7 @@ def _run_single_benchmark(
                 metadata,
                 prefill_inputs["k_scale"],
                 prefill_fp8_output if fused_output else prefill_inputs["output"],
+                mqa_q=prefill_mqa_q,
             )
             if fused_output:
                 out = prefill_fp8_output

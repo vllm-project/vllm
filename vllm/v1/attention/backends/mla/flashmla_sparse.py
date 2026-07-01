@@ -10,8 +10,10 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
+    SparseMLAChunkedContextMetadata,
     SparseMLACommonImpl,
     SparseMLACommonMetadataBuilder,
+    _profile_context_time,
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
@@ -165,6 +167,7 @@ class FlashMLASparseMetadata(AttentionMetadata):
     prefill_max_query_len: int = 0
     has_context: bool = False
     prefill_query_lens_cpu: torch.Tensor | None = None
+    chunked_context: SparseMLAChunkedContextMetadata | None = None
 
     @dataclass
     class FP8KernelMetadata:
@@ -587,11 +590,14 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         kv_c_and_k_pe_cache: torch.Tensor,
         topk_indices: torch.Tensor,
         attn_metadata: FlashMLASparseMetadata,
-    ) -> torch.Tensor:
+        req_id_per_token: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # Convert per-request indices to global slots (decode) or workspace
         # offsets (prefill).
+        if req_id_per_token is None:
+            req_id_per_token = attn_metadata.req_id_per_token
         topk_indices, topk_length = triton_convert_req_index_to_global_index(
-            attn_metadata.req_id_per_token,
+            req_id_per_token,
             attn_metadata.block_table,
             topk_indices,
             BLOCK_SIZE=attn_metadata.block_size,
@@ -710,7 +716,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                     chunk_workspace,
                     chunk_topk_indices_workspace,
                     chunk_topk_length,
-                )
+                )[0]
 
         return attn_out
 
@@ -798,7 +804,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         kv_c_and_k_pe_cache: torch.Tensor,
         topk_indices: torch.Tensor,
         topk_length: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         num_tokens = q.shape[0]
         kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
             -1, 1, kv_c_and_k_pe_cache.shape[-1]
@@ -817,15 +823,58 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             q = q_padded
 
         topk_indices = topk_indices.view(num_tokens, 1, -1)
-        output = flash_mla_sparse_fwd(
+        output, _, lse = flash_mla_sparse_fwd(
             q,
             kv_c_and_k_pe_cache,
             topk_indices,
             self.scale,
             topk_length=topk_length,
-        )[0]
+        )
         output = output[:, : self.num_heads, :]
-        return output
+        lse = lse[:, : self.num_heads].T.contiguous()
+        return output, lse
+
+    def _compute_context_mqa(
+        self,
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: FlashMLASparseMetadata,
+        q_lens: list[int],
+        topk_per_req: list[torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        if self.kv_cache_dtype == "fp8_ds_mla":
+            return None
+        if isinstance(q, tuple):
+            ql_nope, q_pe = q
+            q_concat = self.q_concat_buffer[: ql_nope.shape[0]]
+            ops.concat_mla_q(ql_nope, q_pe, q_concat)
+            q = q_concat
+
+        chunked_context = attn_metadata.chunked_context
+        assert chunked_context is not None
+
+        context_lens = chunked_context.context_lens_cpu.tolist()
+        context_topk = self._remap_topk_to_ranges(
+            topk_per_req,
+            [0] * len(context_lens),
+            context_lens,
+        )
+        context_topk_all = torch.cat(context_topk, dim=0)
+
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        req_id_per_token = attn_metadata.req_id_per_token[
+            num_decode_tokens : num_decode_tokens + q.shape[0]
+        ]
+        return _profile_context_time(
+            "mqa_context.flashmla_sparse_fwd",
+            lambda: self._forward_bf16_kv(
+                q,
+                kv_c_and_k_pe_cache,
+                context_topk_all,
+                attn_metadata,
+                req_id_per_token=req_id_per_token,
+            ),
+        )
 
     def forward_mqa(
         self,
@@ -852,16 +901,18 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         use_fp8_cache = self.kv_cache_dtype == "fp8_ds_mla"
 
         if not use_fp8_cache:
-            attn_out = self._forward_bf16_kv(
+            attn_out, lse = self._forward_bf16_kv(
                 q, kv_c_and_k_pe_cache, topk_indices, attn_metadata
             )
         elif attn_metadata.fp8_use_mixed_batch:
             attn_out = self._forward_fp8_kv_mixed_batch(
                 q, kv_c_and_k_pe_cache, topk_indices, attn_metadata
             )
+            lse = None
         else:
             attn_out = self._forward_fp8_kv_separate_prefill_decode(
                 q, kv_c_and_k_pe_cache, topk_indices, attn_metadata
             )
+            lse = None
 
-        return attn_out, None
+        return attn_out, lse

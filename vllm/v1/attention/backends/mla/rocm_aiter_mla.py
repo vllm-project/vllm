@@ -842,7 +842,9 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         k_scale: torch.Tensor,
         output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
+        mqa_q: torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> None:
+        del mqa_q
         """Dispatch prefill to the FP8 ASM kernel when available.
 
         Falls back to the parent (``flash_attn_varlen_func``) when FP8

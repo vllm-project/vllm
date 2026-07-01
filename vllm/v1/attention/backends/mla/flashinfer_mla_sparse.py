@@ -11,6 +11,7 @@ from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLAAttentionImpl,
+    SparseMLAChunkedContextMetadata,
     SparseMLACommonImpl,
     SparseMLACommonMetadataBuilder,
 )
@@ -259,6 +260,7 @@ class FlashInferMLASparseMetadata(AttentionMetadata):
     prefill_max_query_len: int = 0
     has_context: bool = False
     prefill_query_lens_cpu: torch.Tensor | None = None
+    chunked_context: SparseMLAChunkedContextMetadata | None = None
 
 
 class FlashInferMLASparseMetadataBuilder(

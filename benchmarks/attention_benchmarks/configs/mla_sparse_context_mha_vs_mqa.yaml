@@ -1,0 +1,43 @@
+# Sparse MLA benchmark: masked MHA with context vs MQA, capped at 64k context.
+#
+# In this benchmark grammar, q<q_len>s<seq_len> means total KV length is
+# seq_len, so context length is seq_len - q_len. For example, 4q16ks80k
+# has 16k new tokens and 64k cached context per request.
+#
+# Usage:
+#   python benchmark.py --config configs/mla_sparse_context_mha_vs_mqa.yaml
+
+mode: mha_vs_mqa
+
+model:
+  name: "deepseek-v3"
+  num_layers: 60
+  num_q_heads: 16
+  num_kv_heads: 1
+  head_dim: 576
+  kv_lora_rank: 512
+  qk_nope_head_dim: 128
+  qk_rope_head_dim: 64
+  v_head_dim: 128
+  block_size: 128
+  max_model_len: 81920
+
+batch_specs:
+  # Scheduler-like chunks for four long prefills, growing cached context.
+  - "4q16k"       # 0 context
+  - "4q16ks32k"  # 16k context
+  - "4q16ks48k"  # 32k context
+  - "4q16ks64k"  # 48k context
+  - "4q16ks80k"  # 64k context
+
+backends:
+  - FLASHMLA_SPARSE
+
+device: "cuda:0"
+profile_memory: true
+kv_cache_dtype: "auto"
+
+# Keep this focused on masked-MHA-context vs MQA.
+sparse_mla_dense_mha_max_seq_len: 0
+sparse_mla_masked_mha_max_seq_len: 81920
+sparse_mla_topk_pattern: "random"
