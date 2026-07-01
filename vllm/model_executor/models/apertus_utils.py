@@ -174,6 +174,7 @@ class ApertusImageTokenizer:
         token = getattr(tokenizer, attr_name, None)
         return token if isinstance(token, str) and token else fallback
 
+    # TODO delete dead code
     @classmethod
     def placeholder_aliases(
             cls,
@@ -279,6 +280,7 @@ class ApertusImageTokenizer:
         self._vision_tokenizer_cache[cache_key] = vision_tokenizer
         return vision_tokenizer
 
+    # TODO delete dead code
     def build_apertus_image_prompt(
             self,
             image_tokens: torch.Tensor,
@@ -314,6 +316,7 @@ class ApertusImageTokenizer:
 
         return f"{boi_token}{height}*{width}{img_token}{imgstr}{eoi_token}"
 
+    # TODO delete dead code
     def encode_images(
             self,
             images: Sequence[object],
