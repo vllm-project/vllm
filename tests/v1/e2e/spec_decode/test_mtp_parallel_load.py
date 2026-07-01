@@ -83,10 +83,15 @@ def _inline_kwargs(config: InlineConfig, *, with_spec: bool) -> dict[str, Any]:
     }
     if config.enable_eplb:
         kwargs["enable_eplb"] = True
+        # Rearrangement first fires after step_interval // 4 forward steps
+        # (the step counter starts at 3/4 of step_interval, see
+        # vllm/distributed/eplb/eplb_state.py). Keep these small so the EPLB
+        # routine actually runs within the short MAX_TOKENS generation instead
+        # of never triggering.
         kwargs["eplb_config"] = {
             "num_redundant_experts": config.tp_size,
-            "window_size": 128,
-            "step_interval": 1024,
+            "window_size": 2,
+            "step_interval": 4,
             "log_balancedness": False,
         }
     if with_spec:
