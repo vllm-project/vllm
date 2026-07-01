@@ -9,6 +9,20 @@ from vllm.model_executor.model_loader import get_model
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import _should_share
 
 
+def _inner_model(model: nn.Module) -> nn.Module:
+    return getattr(model, "model", model)
+
+
+def _find_module_attr(
+    model: nn.Module, *names: str
+) -> tuple[nn.Module, str, nn.Module | None]:
+    for name in names:
+        value = getattr(model, name, None)
+        if value is not None:
+            return model, name, value
+    return model, names[0], None
+
+
 def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Module:
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
@@ -40,8 +54,8 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
         if hasattr(target_model, "get_language_model")
         else target_model
     )
-    target_inner = target_language_model.model
-    draft_inner = draft_model.model
+    target_inner = _inner_model(target_language_model)
+    draft_inner = _inner_model(draft_model)
 
     target_embed = getattr(target_inner, "embed_tokens", None)
     draft_embed = getattr(draft_inner, "embed_tokens", None)
@@ -53,12 +67,14 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
         draft_inner.embed_tokens = target_embed
 
     target_lm_head = getattr(target_model, "lm_head", None)
-    draft_lm_head = getattr(draft_model, "lm_head", None)
+    draft_head_owner, draft_head_name, draft_lm_head = _find_module_attr(
+        draft_model, "lm_head", "head"
+    )
     if target_lm_head is not None and _should_share(
         draft_model, "has_own_lm_head", draft_lm_head, target_lm_head
     ):
         if draft_lm_head is not None:
-            del draft_model.lm_head
-        draft_model.lm_head = target_lm_head
+            delattr(draft_head_owner, draft_head_name)
+        setattr(draft_head_owner, draft_head_name, target_lm_head)
 
     return draft_model

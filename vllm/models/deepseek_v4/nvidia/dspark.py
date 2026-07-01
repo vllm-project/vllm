@@ -675,6 +675,8 @@ class DeepSeekV4DSparkLayer(nn.Module):
 class DeepSeekV4DSpark(nn.Module):
     """DSpark draft model for fixed-block speculative decoding."""
 
+    uses_query_start_loc_context_kv = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         assert vllm_config.speculative_config is not None
@@ -776,6 +778,9 @@ class DeepSeekV4DSpark(nn.Module):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
+    def combine_hidden_states(self, aux_hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.main_norm(_linear_output(self.main_proj(aux_hidden_states)))
+
     def precompute_and_store_context_kv(
         self,
         context_states: torch.Tensor,
@@ -791,8 +796,11 @@ class DeepSeekV4DSpark(nn.Module):
             return None
         if batch_size is None:
             batch_size = int(query_start_loc.shape[0] - 1)
-        main_x = _linear_output(self.main_proj(context_states))
-        main_x = self.main_norm(main_x)
+        main_x = (
+            self.combine_hidden_states(context_states)
+            if context_states.shape[-1] == self.dspark_aux_hidden_size
+            else context_states
+        )
         for idx, layer in enumerate(self.layers.values()):
             if idx >= self.runtime_num_dspark_layers:
                 break
@@ -932,6 +940,12 @@ class DeepSeekV4DSpark(nn.Module):
 
     def _markov_w1_embedding(self, prev_token_ids: torch.Tensor) -> torch.Tensor:
         return self.markov_w1(prev_token_ids.long())
+
+    def markov_embed(self, token_ids: torch.Tensor) -> torch.Tensor:
+        return self._markov_w1_embedding(token_ids)
+
+    def markov_bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
+        return _linear_output(self.markov_w2(markov_embed))
 
     def apply_dspark_markov_bias(
         self,

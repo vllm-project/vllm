@@ -133,15 +133,19 @@ def _deepseek_v4_mtp_uniform_decode_warmup_requests(
 
 def _deepseek_v4_slot_mapping_warmup(runner: "GPUModelRunner") -> None:
     max_tokens = getattr(runner, "max_num_tokens", 1)
-    block_table = runner.input_batch.block_table
+    block_tables = getattr(runner, "block_tables", None)
+    if block_tables is None:
+        return
+    input_buffers = getattr(runner, "input_buffers", None)
+    idx_mapping = torch.zeros(1, dtype=torch.int32, device=runner.device)
 
     # Snapshot the runner buffers we mutate so warmup never leaks state into
     # the first real request.
-    saved_query_start_loc_np: np.ndarray | None = None
     saved_query_start_loc_gpu: torch.Tensor | None = None
-    if hasattr(runner, "query_start_loc"):
-        saved_query_start_loc_np = runner.query_start_loc.np[:2].copy()
-        saved_query_start_loc_gpu = runner.query_start_loc.gpu[:2].clone()
+    query_start_loc_buf = None
+    if input_buffers is not None:
+        query_start_loc_buf = input_buffers.query_start_loc
+        saved_query_start_loc_gpu = query_start_loc_buf[:2].clone()
 
     try:
         for requested_tokens in _DEEPSEEK_V4_SLOT_MAPPING_WARMUP_TOKENS:
@@ -152,37 +156,44 @@ def _deepseek_v4_slot_mapping_warmup(runner: "GPUModelRunner") -> None:
             positions_source = torch.arange(
                 num_tokens, dtype=torch.int64, device=runner.device
             )
-            if hasattr(runner, "query_start_loc"):
-                runner.query_start_loc.np[0] = 0
-                runner.query_start_loc.np[1] = num_tokens
-                runner.query_start_loc.copy_to_gpu(2)
-                query_start_loc = runner.query_start_loc.gpu[:2]
+            if query_start_loc_buf is not None:
+                query_start_loc_buf[:2].copy_(
+                    torch.tensor(
+                        [0, num_tokens], dtype=torch.int32, device=runner.device
+                    )
+                )
+                query_start_loc = query_start_loc_buf[:2]
             else:
                 query_start_loc = torch.tensor(
                     [0, num_tokens], dtype=torch.int32, device=runner.device
                 )
 
-            if hasattr(runner, "positions"):
-                saved_positions: torch.Tensor | None = runner.positions[
-                    :num_tokens
-                ].clone()
-                runner.positions[:num_tokens].copy_(positions_source)
-                positions = runner.positions[:num_tokens]
+            positions_buf = (
+                None if input_buffers is None else input_buffers.positions[:num_tokens]
+            )
+            if positions_buf is not None:
+                saved_positions: torch.Tensor | None = positions_buf.clone()
+                positions_buf.copy_(positions_source)
+                positions = positions_buf
             else:
                 saved_positions = None
                 positions = positions_source
 
             try:
-                block_table.commit_block_table(1)
-                block_table.compute_slot_mapping(1, query_start_loc, positions)
+                block_tables.compute_slot_mappings(
+                    idx_mapping,
+                    query_start_loc,
+                    positions,
+                    num_tokens_padded=num_tokens,
+                )
             finally:
                 if saved_positions is not None:
-                    runner.positions[:num_tokens].copy_(saved_positions)
+                    assert positions_buf is not None
+                    positions_buf.copy_(saved_positions)
     finally:
-        if saved_query_start_loc_np is not None:
-            runner.query_start_loc.np[:2] = saved_query_start_loc_np
-            assert saved_query_start_loc_gpu is not None
-            runner.query_start_loc.gpu[:2].copy_(saved_query_start_loc_gpu)
+        if saved_query_start_loc_gpu is not None:
+            assert query_start_loc_buf is not None
+            query_start_loc_buf[:2].copy_(saved_query_start_loc_gpu)
 
 
 def _deepseek_v4_structured_output_bitmask_warmup(
@@ -414,9 +425,7 @@ def _run_deepseek_v4_mtp_spec_decode_warmup_kernels(
         norm_w = torch.ones(hidden_size, dtype=torch.bfloat16, device=device)
         mtp_shared_head_rmsnorm(hs, norm_w, 1e-6)
     except Exception as exc:  # noqa: BLE001 - warmup must never break startup
-        logger.warning(
-            "DeepSeek V4 MTP shared-head RMSNorm warmup skipped: %s", exc
-        )
+        logger.warning("DeepSeek V4 MTP shared-head RMSNorm warmup skipped: %s", exc)
 
 
 def _deepseek_v4_indexed_d512_split_prefill_warmup(runner: "GPUModelRunner") -> None:
@@ -501,10 +510,9 @@ def _deepseek_v4_indexed_d512_split_prefill_warmup(runner: "GPUModelRunner") -> 
         # layer yields identical strides; the first one is representative.
         layer = None
         for module in runner.get_model().modules():
-            if (
-                isinstance(module, DeepseekV4FlashMLAAttention)
-                and module.compress_ratio in (4, 128)
-            ):
+            if isinstance(
+                module, DeepseekV4FlashMLAAttention
+            ) and module.compress_ratio in (4, 128):
                 layer = module
                 break
         if layer is None:
@@ -583,15 +591,11 @@ def _deepseek_v4_indexed_d512_split_prefill_warmup(runner: "GPUModelRunner") -> 
         q = torch.zeros(
             (num_tokens, padded_heads, head_dim), dtype=torch.bfloat16, device=device
         )
-        kv_flat = torch.zeros(
-            (max_topk, head_dim), dtype=torch.bfloat16, device=device
-        )
+        kv_flat = torch.zeros((max_topk, head_dim), dtype=torch.bfloat16, device=device)
         max_score = torch.zeros(
             (num_tokens, num_heads), dtype=torch.float32, device=device
         )
-        denom = torch.zeros(
-            (num_tokens, num_heads), dtype=torch.float32, device=device
-        )
+        denom = torch.zeros((num_tokens, num_heads), dtype=torch.float32, device=device)
         acc = torch.zeros(
             (num_tokens, num_heads, head_dim), dtype=torch.float32, device=device
         )
@@ -601,9 +605,7 @@ def _deepseek_v4_indexed_d512_split_prefill_warmup(runner: "GPUModelRunner") -> 
             # indices=0 (valid row) + lens=width keep every candidate active so
             # the full kernel body, including the tl.dot MMA, compiles rather
             # than an early-return stub.
-            indices = torch.zeros(
-                (num_tokens, width), dtype=torch.int32, device=device
-            )
+            indices = torch.zeros((num_tokens, width), dtype=torch.int32, device=device)
             scores = torch.zeros(
                 (num_tokens, num_heads, width), dtype=torch.float32, device=device
             )

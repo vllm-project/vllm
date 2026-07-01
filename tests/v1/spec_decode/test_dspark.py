@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -479,6 +481,56 @@ def test_dspark_shares_target_embedding_and_lm_head(monkeypatch):
     assert proposer.model.head is target.lm_head
     assert proposer.model.embed_tokens is not old_embed
     assert proposer.model.head is not old_head
+
+
+def test_load_dspark_model_shares_direct_draft_embedding_and_head(monkeypatch):
+    class DummyPPGroup:
+        world_size = 1
+
+    class TargetModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = torch.nn.Module()
+            self.model.embed_tokens = torch.nn.Embedding(8, 4)
+            self.lm_head = torch.nn.Linear(4, 8, bias=False)
+
+    class DraftModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embed_tokens = torch.nn.Embedding(8, 4)
+            self.head = torch.nn.Linear(4, 8, bias=False)
+
+    from vllm.v1.worker.gpu.spec_decode.dspark import utils as dspark_utils
+
+    def fake_replace(obj, **kwargs):
+        values = getattr(obj, "__dict__", {}).copy()
+        values.update(kwargs)
+        return SimpleNamespace(**values)
+
+    target = TargetModel()
+    draft = DraftModel()
+    old_embed = draft.embed_tokens
+    old_head = draft.head
+    spec_config = SimpleNamespace(
+        draft_model_config=object(),
+        attention_backend="FLASH_ATTN",
+    )
+    vllm_config = SimpleNamespace(
+        speculative_config=spec_config,
+        attention_config=SimpleNamespace(),
+    )
+
+    monkeypatch.setattr(dspark_utils, "get_pp_group", lambda: DummyPPGroup())
+    monkeypatch.setattr(dspark_utils, "get_model", lambda **kwargs: draft)
+    monkeypatch.setattr(dspark_utils, "replace", fake_replace)
+
+    loaded = dspark_utils.load_dspark_model(target, vllm_config)
+
+    assert loaded is draft
+    assert draft.embed_tokens is target.model.embed_tokens
+    assert draft.head is target.lm_head
+    assert draft.embed_tokens is not old_embed
+    assert draft.head is not old_head
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
