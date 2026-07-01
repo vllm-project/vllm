@@ -117,6 +117,213 @@ def _deepseek_v4_sm12x_fp8_einsum_kernel(
     )
 
 
+@triton.jit(
+    do_not_specialize=[
+        "num_tokens",
+        "a_stride_group",
+        "a_scale_stride_group",
+        "a_scale_stride_hidden",
+    ]
+)
+def _deepseek_v4_sm12x_fp8_einsum_quant_kernel(
+    a_ptr,
+    a_scale_ptr,
+    b_ptr,
+    b_scale_ptr,
+    out_fp8_ptr,
+    out_scale_ptr,
+    num_tokens,
+    num_groups: tl.constexpr,
+    out_rank: tl.constexpr,
+    hidden_size: tl.constexpr,
+    a_stride_token: tl.constexpr,
+    a_stride_group,
+    a_stride_hidden: tl.constexpr,
+    a_scale_stride_token: tl.constexpr,
+    a_scale_stride_group,
+    a_scale_stride_hidden,
+    b_stride_group: tl.constexpr,
+    b_stride_out: tl.constexpr,
+    b_stride_hidden: tl.constexpr,
+    b_scale_stride_group: tl.constexpr,
+    b_scale_stride_out: tl.constexpr,
+    b_scale_stride_hidden: tl.constexpr,
+    out_stride_token: tl.constexpr,
+    out_stride_k: tl.constexpr,
+    out_scale_stride_token: tl.constexpr,
+    out_scale_stride_block: tl.constexpr,
+    blocks_per_group: tl.constexpr,
+    fp8_max: tl.constexpr,
+    eps: tl.constexpr,
+    BLOCK_TOKENS: tl.constexpr,
+    BLOCK_OUT: tl.constexpr,
+    BLOCK_HIDDEN: tl.constexpr,
+) -> None:
+    """Same matmul as ``_deepseek_v4_sm12x_fp8_einsum_kernel``, with a fused
+    per-token-per-128-block FP8 quantization epilogue instead of a BF16 store.
+
+    ``BLOCK_OUT`` must equal the downstream GEMM's ``block_k`` (128) so the
+    per-token-per-block scale produced here lines up 1:1 with what
+    ``w8a8_triton_block_scaled_mm`` expects as its ``As`` argument: row-major
+    ``(tokens, K/128)`` FP32. This eliminates the separate
+    ``per_token_group_quant_fp8`` kernel launch that would otherwise quantize
+    this same accumulator's BF16 store right back down to FP8 one step later.
+    """
+    token_block = tl.program_id(0)
+    out_block = tl.program_id(1)
+    group = tl.program_id(2)
+
+    token_offsets = token_block * BLOCK_TOKENS + tl.arange(0, BLOCK_TOKENS)
+    out_offsets = out_block * BLOCK_OUT + tl.arange(0, BLOCK_OUT)
+    hidden_offsets = tl.arange(0, BLOCK_HIDDEN)
+    accum = tl.zeros((BLOCK_TOKENS, BLOCK_OUT), dtype=tl.float32)
+
+    for hidden_start in range(0, hidden_size, BLOCK_HIDDEN):
+        hidden = hidden_start + hidden_offsets
+        a = tl.load(
+            a_ptr
+            + token_offsets[:, None] * a_stride_token
+            + group * a_stride_group
+            + hidden[None, :] * a_stride_hidden,
+            mask=(token_offsets[:, None] < num_tokens)
+            & (hidden[None, :] < hidden_size),
+            other=0.0,
+        )
+        b = tl.load(
+            b_ptr
+            + group * b_stride_group
+            + out_offsets[None, :] * b_stride_out
+            + hidden[:, None] * b_stride_hidden,
+            mask=(out_offsets[None, :] < out_rank) & (hidden[:, None] < hidden_size),
+            other=0.0,
+        )
+        raw = tl.dot(a, b, out_dtype=tl.float32)
+        hidden_scale_block = hidden_start // BLOCK_HIDDEN
+        a_scale = tl.load(
+            a_scale_ptr
+            + token_offsets * a_scale_stride_token
+            + group * a_scale_stride_group
+            + hidden_scale_block * a_scale_stride_hidden,
+            mask=token_offsets < num_tokens,
+            other=0.0,
+        )
+        b_scale = tl.load(
+            b_scale_ptr
+            + group * b_scale_stride_group
+            + (out_offsets // 128) * b_scale_stride_out
+            + hidden_scale_block * b_scale_stride_hidden,
+            mask=out_offsets < out_rank,
+            other=0.0,
+        )
+        accum += raw * a_scale[:, None] * b_scale[None, :]
+
+    row_absmax = tl.maximum(tl.max(tl.abs(accum), axis=1), eps)
+    scale = row_absmax * (1.0 / fp8_max)
+    quant = tl.clamp(accum / scale[:, None], -fp8_max, fp8_max).to(tl.float8e4nv)
+
+    k_block = group * blocks_per_group + out_block
+    tl.store(
+        out_fp8_ptr
+        + token_offsets[:, None] * out_stride_token
+        + (out_offsets[None, :] + group * out_rank) * out_stride_k,
+        quant,
+        mask=(token_offsets[:, None] < num_tokens) & (out_offsets[None, :] < out_rank),
+    )
+    tl.store(
+        out_scale_ptr
+        + token_offsets * out_scale_stride_token
+        + k_block * out_scale_stride_block,
+        scale,
+        mask=token_offsets < num_tokens,
+    )
+
+
+def deepseek_v4_sm12x_fp8_einsum_quant(
+    a: torch.Tensor,
+    a_scale: torch.Tensor,
+    b: torch.Tensor,
+    b_scale: torch.Tensor,
+    out_fp8: torch.Tensor,
+    out_scale: torch.Tensor,
+) -> None:
+    """``bhr,hdr->bhd`` fused with FP8 block quantization of the result.
+
+    ``out_fp8`` / ``out_scale`` are the flattened ``(tokens, groups*out_rank)``
+    / ``(tokens, groups*out_rank // 128)`` views ready to pass directly as
+    ``A``/``As`` to ``w8a8_triton_block_scaled_mm``, skipping the separate
+    BF16-output-then-requantize step that ``deepseek_v4_sm12x_fp8_einsum``
+    plus a downstream ``per_token_group_quant_fp8`` call would otherwise need.
+    """
+    num_tokens, num_groups, hidden_size = a.shape
+    b_groups, out_rank, b_hidden_size = b.shape
+    assert b_groups == num_groups
+    assert b_hidden_size == hidden_size
+    assert hidden_size % 128 == 0
+    assert out_rank % 128 == 0
+    assert a.dtype == torch.float8_e4m3fn
+    assert b.dtype == torch.float8_e4m3fn
+    block_out = 128
+    assert out_fp8.shape == (num_tokens, num_groups * out_rank)
+    assert out_scale.shape == (num_tokens, num_groups * out_rank // block_out)
+    e8m0_dtype = getattr(torch, "float8_e8m0fnu", None)
+    if a_scale.dtype == e8m0_dtype:
+        a_scale = _upcast_e8m0_to_fp32(a_scale)
+    if b_scale.dtype == e8m0_dtype:
+        b_scale = _upcast_e8m0_to_fp32(b_scale)
+    assert a_scale.dtype == torch.float32
+    assert b_scale.dtype == torch.float32
+
+    if num_tokens == 0:
+        return
+
+    block_tokens = 16
+    block_hidden = 128
+    fp8_dtype = torch.float8_e4m3fn
+    fp8_max = float(torch.finfo(fp8_dtype).max)
+    blocks_per_group = out_rank // block_out
+    grid = (
+        triton.cdiv(num_tokens, block_tokens),
+        triton.cdiv(out_rank, block_out),
+        num_groups,
+    )
+    _deepseek_v4_sm12x_fp8_einsum_quant_kernel[grid](
+        a,
+        a_scale,
+        b,
+        b_scale,
+        out_fp8,
+        out_scale,
+        num_tokens,
+        num_groups,
+        out_rank,
+        hidden_size,
+        a.stride(0),
+        a.stride(1),
+        a.stride(2),
+        a_scale.stride(0),
+        a_scale.stride(1),
+        a_scale.stride(2),
+        b.stride(0),
+        b.stride(1),
+        b.stride(2),
+        b_scale.stride(0),
+        b_scale.stride(1),
+        b_scale.stride(2),
+        out_fp8.stride(0),
+        out_fp8.stride(1),
+        out_scale.stride(0),
+        out_scale.stride(1),
+        blocks_per_group=blocks_per_group,
+        fp8_max=fp8_max,
+        eps=1e-10,
+        BLOCK_TOKENS=block_tokens,
+        BLOCK_OUT=block_out,
+        BLOCK_HIDDEN=block_hidden,
+        num_warps=4,
+        num_stages=3,
+    )
+
+
 def deepseek_v4_sm12x_fp8_einsum(
     a: torch.Tensor,
     a_scale: torch.Tensor,

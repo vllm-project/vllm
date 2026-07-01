@@ -106,7 +106,12 @@ class SpecDecodeBaseProposer:
             1 if not self.parallel_drafting else self.num_speculative_tokens
         )
         self.net_num_new_slots_per_request = self.extra_slots_per_request - (
-            1 if (self.pass_hidden_states_to_model and self.method != "dflash") else 0
+            1
+            if (
+                self.pass_hidden_states_to_model
+                and self.method not in ("dflash", "dspark")
+            )
+            else 0
         )
         self.needs_extra_input_slots = self.net_num_new_slots_per_request > 0
 
@@ -239,7 +244,7 @@ class SpecDecodeBaseProposer:
         self._enable_probabilistic_draft_probs = (
             self.speculative_config.rejection_sample_method == "standard"
             and self.speculative_config.draft_sample_method == "probabilistic"
-        ) or self.method == "mtp"
+        ) or self.method in ("mtp", "dspark")
         # MTP drafts benefit from probabilistic sampling at ``temperature > 0``:
         # the draft model is a near-copy of the target, so sampling from
         # ``softmax(draft_logits)`` covers the target distribution much better
@@ -351,6 +356,8 @@ class SpecDecodeBaseProposer:
         dflash_config = getattr(model_hf_config, "dflash_config", None)
         if dflash_config and "mask_token_id" in dflash_config:
             self.parallel_drafting_token_id = dflash_config["mask_token_id"]
+        elif hasattr(model_hf_config, "dspark_noise_token_id"):
+            self.parallel_drafting_token_id = model_hf_config.dspark_noise_token_id
         elif hasattr(model_hf_config, "pard_token"):
             self.parallel_drafting_token_id = model_hf_config.pard_token
         elif hasattr(model_hf_config, "ptd_token_id"):
@@ -1025,7 +1032,7 @@ class SpecDecodeBaseProposer:
             return "DeepSeekMTPModel" in (
                 self.draft_model_config.hf_config.architectures or []
             )
-        return self.method not in ("mtp", "draft_model", "dflash")
+        return self.method not in ("mtp", "draft_model", "dflash", "dspark")
 
     def prepare_next_token_ids_cpu(
         self,
@@ -1429,6 +1436,9 @@ class SpecDecodeBaseProposer:
         we share the target model's embedding layers with the draft model to save
         memory.
         """
+        if self.method == "dspark":
+            return
+
         if get_pp_group().world_size == 1:
             inner_model = getattr(target_language_model, "model", None)
             if inner_model is None:
@@ -1497,6 +1507,9 @@ class SpecDecodeBaseProposer:
         duplicate copy of the target model's LM head. In these cases, we share
         the target model's LM head with the draft model to save memory.
         """
+        if self.method == "dspark":
+            return
+
         share_lm_head = False
         if hasattr(self.model, "has_own_lm_head"):
             # EAGLE model
