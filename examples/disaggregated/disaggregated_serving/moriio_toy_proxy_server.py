@@ -181,7 +181,7 @@ async def send_request_to_prefill(
                 raise RuntimeError(error_message)
 
 
-async def start_decode_request(endpoint, req_data, request_id):
+async def start_decode_request(endpoint, req_data, request_id, selected_dp_rank=None):
     session = aiohttp.ClientSession(
         timeout=aiohttp.ClientTimeout(total=6 * 6000 * 6000)
     )
@@ -189,6 +189,10 @@ async def start_decode_request(endpoint, req_data, request_id):
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
         "X-Request-Id": request_id,
     }
+    # Pin the decode leg to the same DP rank as its prefill leg so both land on
+    # the same rank (vLLM reads this header directly; no engine-side routing).
+    if selected_dp_rank is not None:
+        headers["X-data-parallel-rank"] = str(selected_dp_rank)
     response = await session.post(url=endpoint, json=req_data, headers=headers)
     return session, response
 
@@ -361,7 +365,9 @@ async def handle_request(api: str, request: Request):
 
         decode_request_url = decode_instance_endpoint["request_address"] + api
         decode_request_task = asyncio.create_task(
-            start_decode_request(decode_request_url, req_data, request_id)
+            start_decode_request(
+                decode_request_url, req_data, request_id, selected_prefill_dp_rank
+            )
         )
 
         session, decode_response = await decode_request_task
