@@ -93,6 +93,26 @@ Notes:
 - Helion Triton kernels JIT lazily per shape → a one-time P99 latency spike unless
   warmup covers every shape; amortized under sustained serving.
 
+## RedHatAI/Qwen3-1.7B-FP8-dynamic (compressed-tensors W8A8)
+
+Different scheme: `compressed-tensors`, per-channel static fp8 weights + **per-token
+dynamic** fp8 activations, **no** `weight_block_size`. So:
+
+- **Does not use DeepGEMM.** The GEMM is CUTLASS scaled_mm
+  (`CutlassFP8ScaledMMLinearKernel` for `CompressedTensorsW8A8Fp8`). The
+  "DeepGEMM enabled" startup lines are capability probes, not usage.
+- **Does not use Helion by default either.** For this config vLLM leaves the
+  fusion passes off (`custom_ops=['none']`, `fuse_norm_quant=False`,
+  `fuse_act_quant=False`), so the fused `_C` quant ops are never created — the
+  activation quant folds into the cutlass linear. `HelionKernelSwapPass` runs but
+  swaps 0. ON == OFF: both P50 ≈ 0.348 s.
+- **Helion *can* engage if fusion is forced on:**
+  `--compilation-config '{"mode":3,"custom_ops":["+quant_fp8"],"pass_config":{"fuse_norm_quant":true,"fuse_act_quant":true}}'`
+  — then it swaps `rms_norm_dynamic_per_token_quant` +
+  `dynamic_per_token_scaled_fp8_quant` (the per-token ops Helion was designed for)
+  and `_helion_*` kernels execute. Whether that net-beats the default fusion-off
+  cutlass path is untested.
+
 ## Qwen3-8B-FP8 and Qwen3-32B-FP8
 
 Same quantization scheme as 1.7B — `fp8 e4m3, weight_block_size=[128,128],
