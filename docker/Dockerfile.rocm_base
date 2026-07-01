@@ -47,7 +47,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Install Python and other dependencies
 RUN apt-get update -y \
-    && apt-get install -y software-properties-common git curl sudo vim less libgfortran5 libopenmpi-dev libpci-dev liblzma-dev pkg-config g++ libnuma-dev\
+    && apt-get install -y software-properties-common git curl sudo vim less libgfortran5 libopenmpi-dev libpci-dev liblzma-dev pkg-config g++ \
     && for i in 1 2 3; do \
     add-apt-repository -y ppa:deadsnakes/ppa && break || \
     { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
@@ -171,19 +171,23 @@ RUN mkdir -p /app/install && cp ${SITE_PACKAGES}/_rocm_sdk_core/share/amd_smi/di
 
 
 ###
-### MORI Build
+### MORI Build TODO(Build needs fixing)
 ###
 FROM base AS build_mori
 ARG MORI_BRANCH
 ARG MORI_REPO
 ARG MORI_GPU_ARCHS
 RUN mkdir -p /app/install; \
+    if echo "${PYTORCH_ROCM_ARCH}" | grep -q "gfx1250"; then \
+    echo "gfx1250 in PYTORCH_ROCM_ARCH; skipping MORI build"; \
+    else \
     git clone ${MORI_REPO} \
     && cd mori \
     && git checkout ${MORI_BRANCH} \
     && git submodule update --init --recursive \
     && python3 setup.py bdist_wheel --dist-dir=dist && ls /app/mori/dist/*.whl \
-    && cp /app/mori/dist/*.whl /app/install;
+    && cp /app/mori/dist/*.whl /app/install; \
+    fi
 
 
 ###
