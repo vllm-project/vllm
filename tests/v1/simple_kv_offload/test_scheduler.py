@@ -687,8 +687,7 @@ def test_eager_intra_request_dedup_swa_reuse() -> None:
 
     assert meta.store_event >= 0
     assert len(meta.store_gpu_blocks) == len(set(meta.store_gpu_blocks)), (
-        f"Duplicate gpu_block_ids leaked into store event: "
-        f"{meta.store_gpu_blocks}"
+        f"Duplicate gpu_block_ids leaked into store event: {meta.store_gpu_blocks}"
     )
     assert set(meta.store_gpu_blocks) == {a, b, c, d}
     # One CPU block allocated per distinct GPU block — no wasted CPU slots.
