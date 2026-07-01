@@ -156,3 +156,24 @@ def test_decay_prunes_below_threshold():
     policy._key_ghost[key(99)] = 0.05  # non-resident
     policy.get(key(1))  # triggers decay; 0.05 * 0.1 = 0.005 < 0.01
     assert key(99) not in policy._key_ghost
+
+
+def test_mark_evictable_adds_to_evictable_set():
+    policy = SAECachePolicy(cache_capacity=4)
+    policy.insert(key(1), make_block(0))
+    policy.mark_evictable(key(1))
+    assert key(1) in policy._evictable_keys
+
+
+def test_mark_non_evictable_removes_from_evictable_set():
+    policy = SAECachePolicy(cache_capacity=4)
+    policy.insert(key(1), make_block(0))
+    policy.mark_evictable(key(1))
+    policy.mark_non_evictable(key(1))
+    assert key(1) not in policy._evictable_keys
+
+
+def test_mark_non_evictable_missing_key_is_safe():
+    policy = SAECachePolicy(cache_capacity=4)
+    # Should not raise
+    policy.mark_non_evictable(key(99))
