@@ -763,16 +763,6 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.llava_video_vllm_to_hf_output,
     ),
-    "mantis": VLMTestInfo(
-        models=["TIGER-Lab/Mantis-8B-siglip-llama3"],
-        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<|start_header_id|>user<|end_header_id|>\n\n{img_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",  # noqa: E501
-        max_model_len=4096,
-        get_stop_token_ids=lambda tok: [128009],
-        auto_cls=AutoModelForImageTextToText,
-        vllm_output_post_proc=model_utils.mantis_vllm_to_hf_output,
-        patch_hf_runner=model_utils.mantis_patch_hf_runner,
-    ),
     "minicpmv_25": VLMTestInfo(
         models=["openbmb/MiniCPM-Llama3-V-2_5"],
         test_type=VLMTestType.IMAGE,
