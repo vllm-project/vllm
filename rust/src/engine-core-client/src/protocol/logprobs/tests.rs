@@ -3,8 +3,8 @@ use std::collections::BTreeSet;
 use bytes::Bytes;
 use rmpv::Value;
 
-use super::{Logprobs, PositionLogprobs, TokenLogprob, decode_engine_core_outputs};
-use crate::protocol::EngineCoreFinishReason;
+use super::{Logprobs, PositionLogprobs, TokenLogprob};
+use crate::protocol::output::{EngineCoreFinishReason, decode_engine_core_outputs};
 
 fn encode_value(value: &Value) -> Vec<u8> {
     let mut out = Vec::new();
