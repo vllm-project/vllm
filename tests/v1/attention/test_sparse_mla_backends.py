@@ -1361,6 +1361,67 @@ def test_hisparse_plan_once_matches_independent():
     run(False)
 
 
+def test_hisparse_overlap_prefetch_matches_independent():
+    """Overlapped prefetch (#1): a full layer prefetching its shared layers'
+    gathers on the copy stream yields the same hot buffers as independent
+    per-layer swap_in. Validates the copy-stream fork + per-shared event sync +
+    correctness (eager; capture-safety is covered by the capture spike + e2e).
+    """
+    from vllm.v1.attention.backends.mla import hisparse as _hs
+
+    device = torch.device(DEVICE_TYPE)
+    torch.manual_seed(0)
+    block_size, row_width, num_blocks, top_k, buf, num_reqs = 64, 64, 64, 128, 256, 4
+    kv_cache = torch.randn(
+        (num_blocks, block_size, row_width), dtype=torch.float32, device=device
+    )
+    _hs._GROUP_PLANS.clear()
+
+    def make() -> HiSparseCoordinator:
+        c = _make_hisparse_coordinator(
+            top_k=top_k, device_buffer_size=buf, max_num_reqs=num_reqs,
+            row_width=row_width,
+        )
+        _mirror_block_slots(c, kv_cache, list(range(num_blocks)), block_size)
+        return c
+
+    leader, s1, s2, i1, i2 = make(), make(), make(), make(), make()
+    if not leader._kernel_path():
+        pytest.skip("pinned host memory unavailable")
+    for c in (leader, s1, s2):
+        c._overlap_enabled = True
+        c._copy_stream = _hs._get_copy_stream(device)
+    leader.group_shared = [s1, s2]
+    s1.leader = s2.leader = leader
+
+    blocks_per_req = num_blocks // num_reqs
+    block_table = torch.arange(
+        num_blocks, dtype=torch.int32, device=device
+    ).view(num_reqs, blocks_per_req)
+    req_ids = torch.arange(num_reqs, dtype=torch.int32, device=device)
+    seq_len = blocks_per_req * block_size
+    slot_mapping = block_table[:, -1].to(torch.int64) * block_size + (block_size - 1)
+    kw = dict(
+        kv_cache=kv_cache, req_id_per_token=req_ids, block_table=block_table,
+        block_size=block_size, slot_mapping=slot_mapping,
+    )
+
+    for _ in range(8):
+        topk = torch.stack([
+            torch.randperm(seq_len, device=device)[:top_k].to(torch.int32)
+            for _ in range(num_reqs)
+        ])
+        topk[:, -1] = -1
+        leader.swap_in(topk_indices=topk.clone(), produce_plan=True, **kw)  # + prefetch
+        i1.swap_in(topk_indices=topk.clone(), **kw)
+        i2.swap_in(topk_indices=topk.clone(), **kw)
+        s1.apply_plan(kv_cache=kv_cache, block_size=block_size, num_tokens=num_reqs)
+        s2.apply_plan(kv_cache=kv_cache, block_size=block_size, num_tokens=num_reqs)
+        torch.cuda.synchronize()
+        torch.testing.assert_close(s1.hot_cache, i1.hot_cache)
+        torch.testing.assert_close(s2.hot_cache, i2.hot_cache)
+
+
 @pytest.mark.skipif(
     not _has_hisparse_ops(),
     reason="HiSparse host-resident mode requires compiled CUDA ops",

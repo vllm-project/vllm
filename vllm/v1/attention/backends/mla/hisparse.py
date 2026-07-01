@@ -272,6 +272,21 @@ def _get_group_plan(device: torch.device, max_rows: int, top_k: int) -> _GroupPl
     return plan
 
 
+_COPY_STREAMS: dict[str, "torch.cuda.Stream"] = {}
+
+
+def _get_copy_stream(device: torch.device) -> "torch.cuda.Stream":
+    """One dedicated copy stream per device, shared across a group's coordinators
+    for overlapped prefetch (#1). Capturing a fork/join around work on it into a
+    FULL_DECODE_ONLY graph is supported (verified by the capture spike)."""
+    key = str(device)
+    s = _COPY_STREAMS.get(key)
+    if s is None:
+        s = torch.cuda.Stream(device=device)
+        _COPY_STREAMS[key] = s
+    return s
+
+
 class HiSparseCoordinator:
     """Per-layer decode-time hot buffer for sparse MLA KV rows.
 
@@ -333,6 +348,23 @@ class HiSparseCoordinator:
 
         # Group-shared plan buffers for index-sharing plan-once (see _GroupPlan).
         self._plan = _get_group_plan(self.device, max_num_reqs, config.top_k)
+
+        # Overlapped prefetch (#1, opt-in): a "full" layer issues its group's
+        # "shared" gathers early on a copy stream, overlapping the PCIe transfer
+        # with intervening compute. group_shared/leader are wired by the impl
+        # (which knows full vs shared); _prefetch_event is recorded on the copy
+        # stream by the leader and awaited in the shared layer's apply_plan.
+        self.group_shared: list[HiSparseCoordinator] = []
+        self.leader: HiSparseCoordinator | None = None
+        self._prefetch_event: torch.cuda.Event | None = None
+        self._overlap_enabled = (
+            os.environ.get("VLLM_HISPARSE_OVERLAP", "0") == "1"
+            and self.device.type == "cuda"
+            and _has_hisparse_ops()
+        )
+        self._copy_stream = (
+            _get_copy_stream(self.device) if self._overlap_enabled else None
+        )
 
         self._source_cache: torch.Tensor | None = None
         self._source_is_host = False
@@ -812,10 +844,56 @@ class HiSparseCoordinator:
         if produce_plan:
             # Shared layers reuse the group's counts (identical top-k).
             self._plan.valid_counts = valid_counts
+            # Overlap (#1): issue the group's shared gathers early on the copy
+            # stream so their PCIe transfer overlaps intervening compute.
+            if self._overlap_enabled and self.group_shared:
+                self._prefetch_group(num_tokens)
 
         if valid_counts is None:
             return self.hot_cache_paged(block_size), hot_indices
         return self.hot_cache_paged(block_size), hot_indices, valid_counts
+
+    def _gather_plan_into(self, num_tokens: int) -> None:
+        """Gather THIS coord's misses per the group-shared plan into its own hot
+        cache, on the current stream. Host-resident: misses come from the host
+        pool (kernel_source is the hot cache, a no-op fallback source)."""
+        # At prefetch time the shared layer may not have bound its per-forward
+        # source yet; the hot cache is always a valid CUDA source and host-valid
+        # misses are served from the host pool regardless.
+        kernel_source = (
+            self._source_cache
+            if (not self._source_is_host and self._source_cache is not None)
+            else self.hot_cache
+        )
+        torch.ops._C_cache_ops.hisparse_gather_plan(
+            kernel_source,
+            self._host_cache,
+            self._host_cache_valid,
+            self.hot_cache,
+            self._plan.global_indices[:num_tokens],
+            self._plan.hot_indices[:num_tokens],
+            self._plan.miss_mask[:num_tokens],
+            self.num_real_reqs,
+        )
+
+    def _prefetch_group(self, num_tokens: int) -> None:
+        """Leader-side: fork the copy stream from the compute stream (plan is
+        ready) and issue each shared layer's gather on it, recording a per-shared
+        event the shared layer's apply_plan awaits. Fork here + wait_event there
+        is captured into the decode graph (verified by the capture spike)."""
+        compute = torch.cuda.current_stream(self.device)
+        self._copy_stream.wait_stream(compute)  # fork
+        with torch.cuda.stream(self._copy_stream):
+            for shared in self.group_shared:
+                # Need the host pool bound to serve misses. Until then, the
+                # shared layer gathers inline in apply_plan.
+                if shared._host_cache is None:
+                    shared._prefetch_event = None
+                    continue
+                shared._gather_plan_into(num_tokens)
+                if shared._prefetch_event is None:
+                    shared._prefetch_event = torch.cuda.Event()
+                shared._prefetch_event.record(self._copy_stream)
 
     def _swap_in_fallback(
         self,
@@ -934,27 +1012,34 @@ class HiSparseCoordinator:
         this gathers only THIS layer's own missed rows into the identical
         planned hot slots, with no LRU resolution. Fixed shape -> capture-safe.
         """
-        self.bind_source_cache(kv_cache)
         n = num_tokens
-        global_indices = self._plan.global_indices[:n]
         hot_indices = self._plan.hot_indices[:n]
-        miss_mask = self._plan.miss_mask[:n]
-        if self._kernel_path():
-            kernel_source = (
-                self.hot_cache if self._source_is_host else self._source_cache
-            )
-            torch.ops._C_cache_ops.hisparse_gather_plan(
-                kernel_source,
-                self._host_cache,
-                self._host_cache_valid,
-                self.hot_cache,
-                global_indices,
-                hot_indices,
-                miss_mask,
-                self.num_real_reqs,
-            )
+        if self._overlap_enabled and self._prefetch_event is not None:
+            # Leader already gathered this layer's misses on the copy stream;
+            # just join so attention sees them, then consume the event so the
+            # next step re-prefetches (or falls back if it can't).
+            torch.cuda.current_stream(self.device).wait_event(self._prefetch_event)
+            self._prefetch_event = None
         else:
-            self._apply_plan_fallback(global_indices, hot_indices, miss_mask)
+            self.bind_source_cache(kv_cache)
+            global_indices = self._plan.global_indices[:n]
+            miss_mask = self._plan.miss_mask[:n]
+            if self._kernel_path():
+                kernel_source = (
+                    self.hot_cache if self._source_is_host else self._source_cache
+                )
+                torch.ops._C_cache_ops.hisparse_gather_plan(
+                    kernel_source,
+                    self._host_cache,
+                    self._host_cache_valid,
+                    self.hot_cache,
+                    global_indices,
+                    hot_indices,
+                    miss_mask,
+                    self.num_real_reqs,
+                )
+            else:
+                self._apply_plan_fallback(global_indices, hot_indices, miss_mask)
         if return_valid_counts:
             assert self._plan.valid_counts is not None, (
                 "apply_plan(return_valid_counts=True) requires the group's full "

@@ -59,6 +59,11 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# Overlap (#1) group wiring: the coordinator of the most-recently-constructed
+# "full" layer, so the shared layers that follow can attach to it. Per-process
+# (one model per vLLM process); reset implicitly as each full layer is built.
+_HISPARSE_CURRENT_LEADER = None
+
 # For FP8 sparse attention we have two implementations:
 # 1. Mixed batch mode: use the FP8 decode kernel for both prefill and decode this is
 #    done by treating all tokens as single batch.
@@ -612,6 +617,20 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
                 _hf = get_current_vllm_config().model_config.hf_config
                 self._hisparse_index_sharing = getattr(_hf, "index_topk_freq", 1) > 1
                 self._hisparse_is_full_layer = indexer is not None
+                # Wire the overlap group in layer-construction order: a full
+                # layer becomes the current leader; the shared layers that
+                # follow (until the next full layer) attach to it. Overlapped
+                # prefetch (#1) uses these refs; harmless when overlap is off.
+                if self._hisparse_index_sharing:
+                    global _HISPARSE_CURRENT_LEADER
+                    if self._hisparse_is_full_layer:
+                        self.hisparse_coordinator.group_shared = []
+                        _HISPARSE_CURRENT_LEADER = self.hisparse_coordinator
+                    elif _HISPARSE_CURRENT_LEADER is not None:
+                        _HISPARSE_CURRENT_LEADER.group_shared.append(
+                            self.hisparse_coordinator
+                        )
+                        self.hisparse_coordinator.leader = _HISPARSE_CURRENT_LEADER
         self._hisparse_decode_batch = False
         # Prefill BF16 kernel requires 64 on Hopper, 128 on Blackwell
         self.prefill_padding = (
