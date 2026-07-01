@@ -14,20 +14,11 @@ import torch.nn.functional as F
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
-    QKVParallelLinear,
-    ReplicatedLinear,
-    RowParallelLinear,
-)
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -38,9 +29,8 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.interfaces import EagleModelMixin, SupportsEagle3
 from vllm.multimodal.inputs import NestedTensors
-from vllm.v1.attention.backend import AttentionType
 
-from .laguna import LagunaMLP
+from .laguna import LagunaDecoderLayer
 from .qwen3_dflash import DFlashQwen3Model
 from .utils import (
     AutoWeightsLoader,
@@ -70,254 +60,12 @@ def _get_dflash_layer_types(config) -> tuple[str, ...]:
     return tuple(layer_types)
 
 
-def _resolve_rope_params(config, layer_type: str) -> dict:
-    """Return a flat rope-parameters dict for one Laguna layer flavor.
-
-    Laguna configs may store RoPE either as a flat dict or nested by layer
-    type. SWA layers may also override it via `swa_rope_parameters`.
-    """
-    is_sliding = layer_type == "sliding_attention"
-
-    top_rope = getattr(config, "rope_parameters", None) or {}
-    if any(isinstance(v, dict) for v in top_rope.values()):
-        base_rope = top_rope.get(layer_type) or top_rope.get("full_attention") or {}
-    else:
-        base_rope = top_rope
-
-    swa_rope = getattr(config, "swa_rope_parameters", None)
-    rope_params = dict(swa_rope if (is_sliding and swa_rope is not None) else base_rope)
-
-    top_partial = getattr(config, "partial_rotary_factor", None)
-    if top_partial is not None and "partial_rotary_factor" not in rope_params:
-        rope_params["partial_rotary_factor"] = top_partial
-    top_theta = getattr(config, "rope_theta", None)
-    if top_theta is not None and "rope_theta" not in rope_params:
-        rope_params["rope_theta"] = top_theta
-    return rope_params
-
-
-class DFlashLagunaAttention(nn.Module):
-    """Laguna attention variant used by the DFlash drafter.
-
-    This mirrors `LagunaAttention` for query projection, RoPE, QK norm,
-    attention, and softplus gating.  The DFlash-specific part is
-    KV ownership: verifier-context K/V is projected and inserted into this
-    layer's KV cache before forward, so forward only receives draft query
-    tokens.
-    """
-
-    def __init__(
-        self,
-        hidden_size: int,
-        num_heads: int,
-        num_kv_heads: int,
-        max_position_embeddings: int = 131072,
-        head_dim: int | None = None,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-        rope_parameters: dict | None = None,
-        rms_norm_eps: float = 1e-06,
-        sliding_window: int | None = None,
-        gating: bool | str = True,
-    ) -> None:
-        super().__init__()
-        self.layer_name = prefix
-        self.hidden_size = hidden_size
-        tp_size = get_tensor_model_parallel_world_size()
-        self.total_num_heads = num_heads
-        assert self.total_num_heads % tp_size == 0
-        self.num_heads = self.total_num_heads // tp_size
-        self.total_num_kv_heads = num_kv_heads
-        if self.total_num_kv_heads >= tp_size:
-            assert self.total_num_kv_heads % tp_size == 0
-        else:
-            assert tp_size % self.total_num_kv_heads == 0
-        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        self.head_dim = head_dim or hidden_size // self.total_num_heads
-        self.q_size = self.num_heads * self.head_dim
-        self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim**-0.5
-        self.max_position_embeddings = max_position_embeddings
-
-        self.qkv_proj = QKVParallelLinear(
-            self.hidden_size,
-            self.head_dim,
-            self.total_num_heads,
-            self.total_num_kv_heads,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.qkv_proj",
-        )
-        self.o_proj = RowParallelLinear(
-            self.total_num_heads * self.head_dim,
-            self.hidden_size,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.o_proj",
-        )
-
-        assert rope_parameters is not None
-        self.rotary_emb = get_rope(
-            head_size=self.head_dim,
-            max_position=max_position_embeddings,
-            is_neox_style=True,
-            rope_parameters=rope_parameters,
-        )
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            per_layer_sliding_window=sliding_window,
-            prefix=f"{prefix}.attn",
-            attn_type=AttentionType.DECODER,
-        )
-        if sliding_window is not None:
-            # Keep full KV allocation: context K/V is inserted manually at
-            # absolute slots, while SWA is only a compute-time attention limit.
-            self.attn.sliding_window = None
-        self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
-        self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
-
-        if gating is True:
-            gating = "per-head"
-        elif gating is False:
-            gating = "disabled"
-        if gating not in ("per-head", "per-element", "disabled"):
-            raise NotImplementedError(
-                "Laguna DFlash drafter only supports per-head, per-element, "
-                f"or disabled gating, got {gating!r}."
-            )
-        self.gating = gating
-        if self.gating != "disabled":
-            self.gate_per_head = self.gating == "per-head"
-            g_out = (
-                self.total_num_heads
-                if self.gate_per_head
-                else self.total_num_heads * self.head_dim
-            )
-            self.g_proj = ColumnParallelLinear(
-                hidden_size,
-                g_out,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.g_proj",
-            )
-        else:
-            self.g_proj = None
-            self.gate_per_head = False
-
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-
-        q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
-        q_by_head = self.q_norm(q_by_head)
-        q = q_by_head.view(q.shape)
-
-        k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
-        k_by_head = self.k_norm(k_by_head)
-        k = k_by_head.view(k.shape)
-
-        q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v)
-
-        if self.gating and self.g_proj is not None:
-            gate, _ = self.g_proj(hidden_states)
-            gate = F.softplus(gate.float()).type_as(attn_output)
-            if self.gate_per_head:
-                attn_shape = attn_output.shape
-                attn_output = (
-                    attn_output.view(*attn_shape[:-1], self.num_heads, self.head_dim)
-                    * gate.unsqueeze(-1)
-                ).view(attn_shape)
-            else:
-                attn_output = attn_output * gate
-
-        output, _ = self.o_proj(attn_output)
-        return output
-
-
-class DFlashLagunaDecoderLayer(nn.Module):
-    def __init__(
-        self,
-        *,
-        config,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        layer_type: str = "full_attention",
-        prefix: str = "",
-    ) -> None:
-        super().__init__()
-        self.hidden_size = config.hidden_size
-        self.layer_type = layer_type
-        sliding_window = (
-            config.sliding_window if layer_type == "sliding_attention" else None
-        )
-        rope_params = _resolve_rope_params(config, layer_type)
-
-        self.self_attn = DFlashLagunaAttention(
-            hidden_size=self.hidden_size,
-            num_heads=config.num_attention_heads,
-            num_kv_heads=config.num_key_value_heads,
-            max_position_embeddings=config.max_position_embeddings,
-            head_dim=config.head_dim,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.self_attn",
-            rope_parameters=rope_params,
-            rms_norm_eps=config.rms_norm_eps,
-            sliding_window=sliding_window,
-            gating=getattr(config, "gating", True),
-        )
-        self.mlp = LagunaMLP(
-            hidden_size=self.hidden_size,
-            intermediate_size=config.intermediate_size,
-            hidden_act=config.hidden_act,
-            quant_config=quant_config,
-            prefix=f"{prefix}.mlp",
-        )
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
-
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if residual is not None:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
-        else:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
-
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        hidden_states = self.mlp(hidden_states)
-        return hidden_states, residual
-
-
 @support_torch_compile
 class DFlashLagunaModel(DFlashQwen3Model, EagleModelMixin):
     def __init__(
         self,
         *,
         vllm_config: VllmConfig,
-        weight_layer_offset: int = 0,
         prefix: str = "",
     ) -> None:
         nn.Module.__init__(self)
@@ -339,20 +87,27 @@ class DFlashLagunaModel(DFlashQwen3Model, EagleModelMixin):
         )
 
         self.layer_types = _get_dflash_layer_types(self.config)
+        target_layer_count = self.config.target_layer_count
         self.layers = nn.ModuleList(
             [
-                DFlashLagunaDecoderLayer(
-                    prefix=maybe_prefix(
-                        prefix, f"layers.{layer_idx + weight_layer_offset}"
-                    ),
+                LagunaDecoderLayer(
+                    prefix=maybe_prefix(prefix, f"layers.{layer_idx}"),
                     config=self.config,
                     cache_config=vllm_config.cache_config,
                     quant_config=self.quant_config,
-                    layer_type=self.layer_types[layer_idx],
+                    layer_idx=layer_idx,
+                    attention_prefix=maybe_prefix(
+                        prefix, f"layers.{layer_idx + target_layer_count}"
+                    ),
                 )
                 for layer_idx in range(self.config.num_hidden_layers)
             ]
         )
+        for layer in self.layers:
+            if getattr(layer.self_attn, "sliding_window", None) is not None:
+                # DFlash inserts verifier-context K/V at absolute cache slots.
+                # Keep full KV allocation; SWA remains a compute-time limit.
+                layer.self_attn.attn.sliding_window = None
         num_features_to_use = len(target_layer_ids)
         target_hidden_size = vllm_config.model_config.get_hidden_size()
         fc_input_size = target_hidden_size * num_features_to_use
@@ -386,7 +141,7 @@ class DFlashLagunaModel(DFlashQwen3Model, EagleModelMixin):
 
     def _build_context_kv_buffers(
         self,
-        layers_attn: list[DFlashLagunaAttention],
+        layers_attn: list[nn.Module],
         has_bias: bool,
     ) -> None:
         self._kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
@@ -476,8 +231,6 @@ class DFlashLagunaForCausalLM(nn.Module, SupportsEagle3):
         self.model = DFlashLagunaModel(
             vllm_config=vllm_config,
             prefix="model",
-            # DFlash drafter layers are saved after the target verifier layers.
-            weight_layer_offset=target_layer_num,
         )
 
         self.lm_head = ParallelLMHead(
