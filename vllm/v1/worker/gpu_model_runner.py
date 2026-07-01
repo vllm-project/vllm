@@ -6639,7 +6639,7 @@ class GPUModelRunner(
         with self._freeze_gc(), graph_capture(device=self.device):
             torch.accelerator.synchronize()
             torch.accelerator.empty_cache()
-            start_free_gpu_memory = torch.accelerator.get_memory_info()[0]
+            start_free_gpu_memory = get_device_memory_info(self.device)[0]
 
             for (
                 runtime_mode,
@@ -6657,7 +6657,7 @@ class GPUModelRunner(
                 self.encoder_cudagraph_manager.capture(graph_pool=encoder_graph_pool)
 
             torch.accelerator.synchronize()
-            end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
+            end_free_gpu_memory = get_device_memory_info(self.device)[0]
 
         # Disable cudagraph capturing globally, so any unexpected cudagraph
         # capturing will be detected and raise an error after here.
@@ -6675,7 +6675,10 @@ class GPUModelRunner(
 
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time
-        cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
+        # Clamp to >= 0: on UMA free memory can rise across a capture, so a
+        # negative size would understate non-KV memory in the logged
+        # --kv-cache-memory suggestion (mirrors profile_cudagraph_memory).
+        cuda_graph_size = max(start_free_gpu_memory - end_free_gpu_memory, 0)
         # This usually takes 5~20 seconds.
         logger.info_once(
             "Graph capturing finished in %.0f secs, took %.2f GiB",
