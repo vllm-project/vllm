@@ -210,6 +210,10 @@ def select_unquantized_moe_backend(
                 TrtLlmBf16LoRAExperts,
             )
 
+            logger.info_once(
+                "Using FLASHINFER_TRTLLM Unquantized MoE LoRA backend "
+                "(TrtLlmBf16LoRAExperts)."
+            )
             return UnquantizedMoeBackend.FLASHINFER_TRTLLM, TrtLlmBf16LoRAExperts
         return UnquantizedMoeBackend.TRITON, backend_to_kernel_cls(
             UnquantizedMoeBackend.TRITON
