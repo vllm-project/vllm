@@ -228,10 +228,20 @@ class SpecDecodeBaseProposer:
                 (self.max_num_tokens,), dtype=torch.bool, device=device
             )
 
-        self.inputs_embeds = torch.zeros(
-            (self.max_num_tokens, self.inputs_embeds_size),
-            dtype=self.dtype,
-            device=device,
+        # ``inputs_embeds`` is only ever read on the multimodal path (guarded by
+        # ``self.supports_mm_inputs`` in ``propose``/model-kwargs building). For
+        # text-only draft models (DSpark, MTP, EAGLE-text, ...) this full-size
+        # [max_num_tokens, hidden] staging buffer is never touched, so skip the
+        # allocation. ``supports_mm_inputs`` only ever flips True->False after
+        # this point, never the reverse, so a False here is stable.
+        self.inputs_embeds = (
+            torch.zeros(
+                (self.max_num_tokens, self.inputs_embeds_size),
+                dtype=self.dtype,
+                device=device,
+            )
+            if self.supports_mm_inputs
+            else None
         )
 
         self.backup_next_token_ids = CpuGpuBuffer(

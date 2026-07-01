@@ -220,16 +220,22 @@ class DeepSeekV4DSparkLayer(nn.Module):
             "dspark_fused_o_proj_quant",
         )
         self.materialized_head_block_size = triton_sparse_mla_head_block_size() or 1
-        self.register_buffer(
-            "_score_buffer",
+        # The f32 score buffer is scratch for the materialized-attention kernel
+        # only (see the ``use_materialized_attention`` branch in ``_attention``).
+        # When that path is disabled the buffer is never read, so allocate an
+        # empty placeholder instead of a full [max_batch*block, heads, window+block]
+        # tensor.
+        score_buffer = (
             torch.empty(
                 max_batch * self.block_size,
                 self.attn.n_local_heads,
                 window + self.block_size,
                 dtype=torch.float32,
-            ),
-            persistent=False,
+            )
+            if self.use_materialized_attention
+            else torch.empty(0, dtype=torch.float32)
         )
+        self.register_buffer("_score_buffer", score_buffer, persistent=False)
 
     @property
     def window_size(self) -> int:
