@@ -58,7 +58,7 @@ def encode_params(head_dim: int, isa_type: str, kv_cache: str = "auto") -> int:
 
 
 def _make_case(
-    head_dim: int, isa: str, kv_cache: str = "auto", isa_override = None
+    head_dim: int, isa: str, kv_cache: str = "auto", isa_override: str | None = None
 ) -> str:
     """Generate a single switch case line."""
     encoded = encode_params(head_dim, isa, kv_cache)
@@ -174,7 +174,7 @@ def generate_header_file() -> str:
 // in cpu_types_x86.hpp. Non-x86 platforms (#else fallback) have fp8=False.
 """
 
-    def _macro_block(guard: str, isa_list, fp8: bool) -> str:
+    def _macro_block(guard: str, isa_list: list[str], fp8: bool) -> str:
         """Return one CPU_ATTN_DISPATCH macro block for a given guard."""
         enc = (
             "    int64_t encoded_params = encode_cpu_attn_params("
