@@ -134,19 +134,19 @@ The default is `_AllMissCallbacks` (every `lookup` returns `MISS`,
 which preserves the pre-integration all-miss behaviour until the real
 adapter on `TieringOffloadingManager` is wired.
 
-#### Per-LookupMsg batch
+#### Per-LookupMsg tracking
 
-`ServerRole._lookup_batches: dict[batch_id, _LookupBatch]` tracks the
-state for each inbound `LookupMsg` independently. Each batch carries
-its own synthetic `ReqContext`:
+`ServerRole._inbound_lookups: dict[lookup_id, _LookupBlocks]` tracks
+the state for each inbound `LookupMsg` independently. Each entry
+carries its own synthetic `ReqContext`:
 
 ```text
-ctx = ReqContext(req_id=f"p2p:{peer_id}:{kv_request_id}:b{batch_id}")
+ctx = ReqContext(req_id=f"p2p:{peer_id}:{kv_request_id}:lu{lookup_id}")
 ```
 
 A fresh ctx per LookupMsg gives the TieringManager a clean,
 bounded-lifetime request to attach state to — created on the first
-`lookup` call, closed by `finish_request` once the batch's last hash
+`lookup` call, closed by `finish_request` once the lookup's last hash
 has been answered on the wire.
 
 #### `on_lookup(kv_request_id, block_hashes)`
@@ -155,9 +155,9 @@ For each hash, call `cb.lookup(h, ctx)` and bucket:
 
 | `LookupResult` | Action |
 | --- | --- |
-| `HIT` | Add to the immediate-HIT batch. |
-| `MISS` | Add to the immediate-MISS batch. |
-| `HIT_PENDING` / `RETRY` | Park in `batch.pending[h] = now`. |
+| `HIT` | Add to the immediate-HIT list. |
+| `MISS` | Add to the immediate-MISS list. |
+| `HIT_PENDING` / `RETRY` | Park in `lookup.pending[h] = now`. |
 
 Then, in one shot:
 
@@ -169,9 +169,9 @@ Then, in one shot:
    consumes — no fetch-side changes needed.
 2. Send one `LookupRespMsg(kv_request_id, immediate_hashes, hits)`
    (HITs first, then MISS es in their own order).
-3. If `batch.pending` is empty (everything resolved on first sight),
-   call `cb.finish_request(ctx)` immediately and drop the batch.
-   Otherwise stash it in `_lookup_batches`.
+3. If `lookup.pending` is empty (everything resolved on first sight),
+   call `cb.finish_request(ctx)` immediately and drop the entry.
+   Otherwise stash it in `_inbound_lookups`.
 
 Single-thread guarantee: `lookup → HIT → create_store_job` happens in
 one synchronous sequence, so no eviction can race in between.
@@ -181,7 +181,7 @@ partial-result branch.
 
 #### `_resolve_pending_lookups` (driven from `collect_results`)
 
-Called every poll tick. For every parked batch:
+Called every poll tick. For every parked lookup:
 
 - Re-call `cb.lookup` per remaining pending hash.
     - `HIT` → move to the newly-HIT list, drop from `pending`.
@@ -191,23 +191,23 @@ Called every poll tick. For every parked batch:
     to local prefill rather than waiting on a stuck producer.
     - Otherwise leave the entry to try again next tick.
 - For the newly-HIT list: one `cb.create_store_job(...)` call per
-  batch, plumbed through `add_stored_blocks` as in `on_lookup`.
-- Send one follow-up `LookupRespMsg(kv_request_id, ...)` per batch
+  lookup, plumbed through `add_stored_blocks` as in `on_lookup`.
+- Send one follow-up `LookupRespMsg(kv_request_id, ...)` per lookup
   with the freshly-resolved hashes (the wire protocol's
   self-describing pairs make split responses safe).
-- Sweep any batch whose `pending` is now empty: call
+- Sweep any lookup whose `pending` is now empty: call
   `cb.finish_request(ctx)` and drop.
 
 #### Cleanup
 
-- `finish(kv_request_id)` (PD path) — drops every parked batch
+- `finish(kv_request_id)` (PD path) — drops every parked lookup
   matching `kv_request_id` and fires `finish_request(ctx)` for each.
   In symmetric P2P this rarely fires: the producer has no local
   request lifecycle for the consumer's id, so the `on_request_finished`
   path that calls into `session.finish_request` is not exercised on
   this side.
 - `close()` — best-effort `finish_request` (under `contextlib.suppress`)
-  for every remaining batch, then clears `_lookup_batches`. Wedged
+  for every remaining lookup, then clears `_inbound_lookups`. Wedged
   callbacks can't block teardown.
 
 #### Pin lifetime

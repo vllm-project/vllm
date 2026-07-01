@@ -729,7 +729,7 @@ class TestServerLookupHandling:
         assert resps[0][LookupRespMsg.HITS] == [True, False]
         # batch is parked, finish_request not yet called
         assert all(c[0] != "finish_request" for c in cb.calls)
-        assert len(session._server._lookup_batches) == 1
+        assert len(session._server._inbound_lookups) == 1
 
     def test_pending_resolves_in_followup_creates_second_store_job(self):
         """A HIT_PENDING hash that becomes HIT on a later poll fires a
@@ -785,8 +785,8 @@ class TestServerLookupHandling:
         assert _lookup_resps(conn, sent_before) == []
 
         # Forge timestamp to trigger the timeout branch.
-        batch = next(iter(session._server._lookup_batches.values()))
-        batch.pending[b"hA"] = time.monotonic() - _LOOKUP_PENDING_TIMEOUT_S - 0.1
+        lookup = next(iter(session._server._inbound_lookups.values()))
+        lookup.pending[b"hA"] = time.monotonic() - _LOOKUP_PENDING_TIMEOUT_S - 0.1
 
         session.poll()
 
@@ -826,7 +826,7 @@ class TestServerLookupHandling:
 
         _send_lookup(conn, "req-1", [b"hA"])
         session.poll()
-        assert len(session._server._lookup_batches) == 1
+        assert len(session._server._inbound_lookups) == 1
         assert all(c[0] != "finish_request" for c in cb.calls)
 
         session.close()
@@ -845,13 +845,13 @@ class TestServerLookupHandling:
         session.poll()
         _send_lookup(conn, "req-2", [b"hB"])
         session.poll()
-        assert len(session._server._lookup_batches) == 2
+        assert len(session._server._inbound_lookups) == 2
 
         session._server.finish("req-1")
 
         # req-1 batch dropped, finish_request fired exactly once
         remaining_kv_request_ids = {
-            b.kv_request_id for b in session._server._lookup_batches.values()
+            b.kv_request_id for b in session._server._inbound_lookups.values()
         }
         assert remaining_kv_request_ids == {"req-2"}
         finish_calls = [c for c in cb.calls if c[0] == "finish_request"]

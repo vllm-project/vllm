@@ -148,17 +148,17 @@ class _OutboundRequestState:
 
 
 @dataclass
-class _LookupBatch:
+class _LookupBlocks:
     """In-flight state for one inbound LookupMsg.
 
     Tracks the synthetic ReqContext used for TieringCallbacks calls and
     the still-unresolved hashes (HIT_PENDING / RETRY) so the resolver
     sweep can re-poll and emit follow-up LookupRespMsgs as they settle.
     Empty ``pending`` ⇒ all hashes have been answered to the peer; the
-    resolver sweep then calls ``finish_request(ctx)`` and drops the batch.
+    resolver sweep then calls ``finish_request(ctx)`` and drops the lookup.
     """
 
-    batch_id: int
+    lookup_id: int
     kv_request_id: str
     ctx: ReqContext
     pending: dict[OffloadKey, float] = field(default_factory=dict)
@@ -215,8 +215,8 @@ class ServerRole:
         # on every poll tick; entries leave the dict either when their
         # last hash settles to HIT or MISS (definitive answer) or after
         # ``_LOOKUP_PENDING_TIMEOUT_S`` has elapsed (force-MISS).
-        self._lookup_batches: dict[int, _LookupBatch] = {}
-        self._lookup_batch_counter: int = 0
+        self._inbound_lookups: dict[int, _LookupBlocks] = {}
+        self._lookup_id_counter: int = 0
 
     # ------------------------------------------------------------------
     # Public API
@@ -301,16 +301,16 @@ class ServerRole:
         ``LookupRespMsg`` and the HITs are pinned via ``cb.create_store_job``,
         plumbed into the existing ``add_stored_blocks`` matching path so
         the eventual FetchMsg finds them. HIT_PENDING and RETRY hashes
-        park in :class:`_LookupBatch` for re-polling by
-        :meth:`_resolve_pending_lookups`. When every hash in the batch
-        has settled, ``cb.finish_request`` is fired and the batch is
-        dropped.
+        park in :class:`_LookupBlocks` for re-polling by
+        :meth:`_resolve_pending_lookups`. When every hash in the
+        lookup has settled, ``cb.finish_request`` is fired and the
+        lookup is dropped.
         """
-        self._lookup_batch_counter += 1
-        batch_id = self._lookup_batch_counter
-        ctx = ReqContext(req_id=f"p2p:{self._peer_id}:{kv_request_id}:b{batch_id}")
-        batch = _LookupBatch(
-            batch_id=batch_id,
+        self._lookup_id_counter += 1
+        lookup_id = self._lookup_id_counter
+        ctx = ReqContext(req_id=f"p2p:{self._peer_id}:{kv_request_id}:lu{lookup_id}")
+        lookup = _LookupBlocks(
+            lookup_id=lookup_id,
             kv_request_id=kv_request_id,
             ctx=ctx,
         )
@@ -328,7 +328,7 @@ class ServerRole:
                 # HIT_PENDING / RETRY — defer until the next poll tick
                 # gives the underlying primary write or promotion time
                 # to settle.
-                batch.pending[h] = now
+                lookup.pending[h] = now
 
         if hit_hashes:
             self._pin_and_register_hits(kv_request_id, hit_hashes, ctx)
@@ -345,8 +345,8 @@ class ServerRole:
                 }
             )
 
-        if batch.pending:
-            self._lookup_batches[batch_id] = batch
+        if lookup.pending:
+            self._inbound_lookups[lookup_id] = lookup
         else:
             # Every hash resolved on first sight — close the synthetic
             # request immediately so the TieringManager doesn't keep
@@ -378,9 +378,9 @@ class ServerRole:
     def _resolve_pending_lookups(self) -> None:
         """Re-poll deferred LookupMsg hashes; emit follow-up responses.
 
-        Walks every parked :class:`_LookupBatch` and re-calls
+        Walks every parked :class:`_LookupBlocks` and re-calls
         ``cb.lookup`` per remaining hash. HIT/MISS resolutions are
-        accumulated per batch and sent as one follow-up LookupRespMsg;
+        accumulated per lookup and sent as one follow-up LookupRespMsg;
         HIT/HIT_PENDING/RETRY hashes that have been pending past
         ``_LOOKUP_PENDING_TIMEOUT_S`` are forced to MISS so the consumer
         can fall back instead of waiting on a stuck producer. Newly-HIT
@@ -388,26 +388,26 @@ class ServerRole:
         affected ``kv_request_id``. Batches whose ``pending`` empties
         out fire ``finish_request`` and are dropped.
         """
-        if not self._lookup_batches:
+        if not self._inbound_lookups:
             return
         deadline = time.monotonic() - _LOOKUP_PENDING_TIMEOUT_S
-        finished_batches: list[int] = []
-        for batch_id, batch in self._lookup_batches.items():
+        finished_lookups: list[int] = []
+        for lookup_id, lookup in self._inbound_lookups.items():
             new_hits: list[OffloadKey] = []
             new_misses: list[OffloadKey] = []
-            for h, started_at in list(batch.pending.items()):
-                result = self._cb.lookup(h, batch.ctx)
+            for h, started_at in list(lookup.pending.items()):
+                result = self._cb.lookup(h, lookup.ctx)
                 if result is LookupResult.HIT:
                     new_hits.append(h)
-                    del batch.pending[h]
+                    del lookup.pending[h]
                 elif result is LookupResult.MISS or started_at <= deadline:
                     new_misses.append(h)
-                    del batch.pending[h]
+                    del lookup.pending[h]
                 # else still HIT_PENDING / RETRY within the deadline:
                 # leave the entry to try again next tick.
 
             if new_hits:
-                self._pin_and_register_hits(batch.kv_request_id, new_hits, batch.ctx)
+                self._pin_and_register_hits(lookup.kv_request_id, new_hits, lookup.ctx)
 
             if new_hits or new_misses:
                 resolved_hashes = new_hits + new_misses
@@ -415,18 +415,18 @@ class ServerRole:
                 self._send(
                     {
                         TYPE_KEY: LookupRespMsg.TYPE,
-                        LookupRespMsg.KV_REQUEST_ID: batch.kv_request_id,
+                        LookupRespMsg.KV_REQUEST_ID: lookup.kv_request_id,
                         LookupRespMsg.BLOCK_HASHES: resolved_hashes,
                         LookupRespMsg.HITS: resolved_hits,
                     }
                 )
 
-            if not batch.pending:
-                finished_batches.append(batch_id)
+            if not lookup.pending:
+                finished_lookups.append(lookup_id)
 
-        for batch_id in finished_batches:
-            batch = self._lookup_batches.pop(batch_id)
-            self._cb.finish_request(batch.ctx)
+        for lookup_id in finished_lookups:
+            lookup = self._inbound_lookups.pop(lookup_id)
+            self._cb.finish_request(lookup.ctx)
 
     def finish(self, kv_request_id: str) -> None:
         """Mark an outbound request finishing.
@@ -436,11 +436,11 @@ class ServerRole:
         peer to stop waiting (TransferDoneMsg success=False) instead of
         letting it hit _LOAD_TIMEOUT_S.
 
-        Also drops any in-flight LookupMsg batches for this kv_request_id
-        and fires their ``finish_request`` so the TieringManager can
+        Also drops any in-flight lookups for this kv_request_id and
+        fires their ``finish_request`` so the TieringManager can
         release per-request bookkeeping. (For symmetric P2P this path
-        is rarely hit since the producer has no local request lifecycle
-        for the consumer's id; the TieringMsg-batch sweep is mostly
+        is rarely hit since the producer has no local request
+        lifecycle for the consumer's id; this cleanup is mostly
         active on the PD side.)
 
         If the decoder hasn't sent fetch yet (no demand received),
@@ -449,14 +449,14 @@ class ServerRole:
         If inflight transfers exist for this id, defer — the last
         completing transfer in collect_results will fire the message.
         """
-        finished_batches = [
+        finished_lookups = [
             bid
-            for bid, b in self._lookup_batches.items()
+            for bid, b in self._inbound_lookups.items()
             if b.kv_request_id == kv_request_id
         ]
-        for bid in finished_batches:
-            batch = self._lookup_batches.pop(bid)
-            self._cb.finish_request(batch.ctx)
+        for bid in finished_lookups:
+            lookup = self._inbound_lookups.pop(bid)
+            self._cb.finish_request(lookup.ctx)
 
         req = self._outbound.get(kv_request_id)
         if req is None:
@@ -479,7 +479,7 @@ class ServerRole:
 
         # Re-poll any LookupMsg hashes parked under HIT_PENDING / RETRY.
         # Newly-resolved hashes get a follow-up LookupRespMsg; fully
-        # resolved batches fire ``finish_request`` and drop.
+        # resolved lookups fire ``finish_request`` and drop.
         self._resolve_pending_lookups()
 
         if self._pending_store_results:
@@ -601,12 +601,12 @@ class ServerRole:
         self._pending_aborts.clear()
         self._pending_store_results.clear()
         # Best-effort: tell the TieringManager to release per-request
-        # bookkeeping for any in-flight LookupMsg batches; suppress so
+        # bookkeeping for any in-flight lookups; suppress so
         # a wedged callback can't block teardown.
-        for batch in self._lookup_batches.values():
+        for lookup in self._inbound_lookups.values():
             with contextlib.suppress(Exception):
-                self._cb.finish_request(batch.ctx)
-        self._lookup_batches.clear()
+                self._cb.finish_request(lookup.ctx)
+        self._inbound_lookups.clear()
         return failed_stores
 
     # ------------------------------------------------------------------
