@@ -41,8 +41,8 @@ models:
       VLLM_USE_AITER_TRITON_SILU_MUL: "0"
     base_flags: "--trust-remote-code --kv-cache-dtype fp8"
     prefill:
-      tp: "--gpu-memory-utilization 0.95"
+      tp: "--gpu-memory-utilization 0.85"
       ep: "--gpu-memory-utilization 0.85 --enforce-eager"
     decode:
-      tp: "--gpu-memory-utilization 0.95"
+      tp: "--gpu-memory-utilization 0.85"
       ep: '--gpu-memory-utilization 0.75 --compilation-config {"cudagraph_mode":"PIECEWISE","custom_ops":["+quant_fp8"]}'

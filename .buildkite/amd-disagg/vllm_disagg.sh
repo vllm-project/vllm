@@ -84,6 +84,18 @@ load_config() {
     # node-mode orchestration knobs
     RUN_AFTER_HEALTH="${RUN_AFTER_HEALTH:-bench}"     # bench | accuracy | none
     HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-2400}"
+
+    # MoRIIO KV transfer direction. 0 (default)
+    MORIIO_READ_MODE="${MORIIO_READ_MODE:-0}"
+}
+
+# Emits the `read_mode` KV-config fragment (leading comma + newline) when read
+# mode is enabled, else nothing (leaving MoRIIO's write-mode default).
+moriio_read_mode_kv() {
+    case "${MORIIO_READ_MODE:-0}" in
+        1|true|True|TRUE|yes|on) printf ',\n    "read_mode": true' ;;
+        *) : ;;
+    esac
 }
 
 # ----------------------------------------------------------------- topology
@@ -125,7 +137,7 @@ start_proxy_bg() {
 }
 
 run_bench() {
-    local base_url="http://127.0.0.1:${PROXY_PORT}"
+    local base_url="http://127.0.0.1:${GATEWAY_PORT:-${PROXY_PORT}}"
     local result_dir="${LOG_PATH}/bench_$(date +%Y%m%d_%H%M%S)"
     mkdir -p "${result_dir}"
     log "bench -> ${base_url} model=${MODEL_PATH} wide_ep_mode=${WIDE_EP_MODE}(${PARALLEL_MODE})"
@@ -164,7 +176,7 @@ run_accuracy() {
         log "lm_eval not found — installing ${ACCURACY_PIP_SPEC:-lm_eval[api]}"
         python3 -m pip install --no-cache-dir "${ACCURACY_PIP_SPEC:-lm_eval[api]}"
     fi
-    local base_url="http://127.0.0.1:${PROXY_PORT}/v1/completions"
+    local base_url="http://127.0.0.1:${GATEWAY_PORT:-${PROXY_PORT}}/v1/completions"
     local ts; ts="$(date +%Y%m%d_%H%M%S)"
     local logf="${LOG_PATH}/accuracy_${MODEL_NAME}_${PARALLEL_MODE}_${ts}.log"
     local outdir="${LOG_PATH}/lm_eval_${MODEL_NAME}_${PARALLEL_MODE}_${ts}"
@@ -302,7 +314,8 @@ build_tp_cmd() {
     [[ -n "${HOST_IP}" ]] && CMD+=(--host "${HOST_IP}")
     CMD+=(--port "${port}" --tensor-parallel-size "${TP_SIZE}")
     local _mc; read -ra _mc <<< "${MODEL_CONFIG}"; CMD+=("${_mc[@]}")
-    local kv_cfg
+    local kv_cfg read_mode_kv
+    read_mode_kv="$(moriio_read_mode_kv)"
     kv_cfg=$(cat <<EOF
 {
   "kv_connector": "MoRIIOConnector",
@@ -312,13 +325,13 @@ build_tp_cmd() {
     "proxy_ping_port": "${PROXY_PING_PORT}",
     "http_port": "${port}",
     "handshake_port": "${HANDSHAKE_PORT}",
-    "notify_port": "${NOTIFY_PORT}"
+    "notify_port": "${NOTIFY_PORT}"${read_mode_kv}
   }
 }
 EOF
 )
     CMD+=(--kv-transfer-config "${kv_cfg}")
-    log "role=${ROLE} mode=tp host=${HOST_IP:-0.0.0.0}:${port} kv_role=${KV_ROLE} tp=${TP_SIZE}"
+    log "role=${ROLE} mode=tp host=${HOST_IP:-0.0.0.0}:${port} kv_role=${KV_ROLE} tp=${TP_SIZE} read_mode=${MORIIO_READ_MODE}"
 }
 
 # Build the EP-mode (WIDE_EP_MODE=1) serve command into the global CMD array.
@@ -348,7 +361,8 @@ build_ep_cmd() {
 
     if [[ "${IS_MASTER}" == "1" ]]; then
         CMD+=(--api-server-count="${GPUS_PER_NODE}")
-        local kv_cfg
+        local kv_cfg read_mode_kv
+        read_mode_kv="$(moriio_read_mode_kv)"
         kv_cfg=$(cat <<EOF
 {
   "kv_connector": "MoRIIOConnector",
@@ -361,13 +375,13 @@ build_ep_cmd() {
     "http_port": "${port}",
     "local_ping_port": "${LOCAL_PING_PORT}",
     "handshake_port": "${HANDSHAKE_PORT}",
-    "notify_port": "${NOTIFY_PORT}"
+    "notify_port": "${NOTIFY_PORT}"${read_mode_kv}
   }
 }
 EOF
 )
         CMD+=(--kv-transfer-config "${kv_cfg}")
-        log "role=${ROLE} mode=ep MASTER node_rank=${NODE_RANK} dp_size=${DP_GROUP_SIZE} dp_addr=${DP_MASTER_ADDR} kv_role=${KV_ROLE} all2all=${backend}"
+        log "role=${ROLE} mode=ep MASTER node_rank=${NODE_RANK} dp_size=${DP_GROUP_SIZE} dp_addr=${DP_MASTER_ADDR} kv_role=${KV_ROLE} all2all=${backend} read_mode=${MORIIO_READ_MODE}"
     else
         CMD+=(--data-parallel-start-rank "${DP_START_RANK}" --headless)
         log "role=${ROLE} mode=ep CHILD  node_rank=${NODE_RANK} dp_size=${DP_GROUP_SIZE} dp_start_rank=${DP_START_RANK} dp_addr=${DP_MASTER_ADDR} all2all=${backend}"
@@ -465,7 +479,15 @@ run_workload() {
 # rank 0: proxy + health-gate + workload, then write the completion sentinel.
 orchestrate_master() {
     local sentinel="$1" rc=0
-    start_proxy_bg
+    # Front door: the toy proxy runs in-container (started here); the vllm-router
+    # runs as a SEPARATE container started by the SLURM job on this (rank-0) node,
+    # so in that mode we don't start anything here.
+    PROXY_PID=""
+    if [[ "${ROUTER_TYPE:-toy}" == "vllm-router" ]]; then
+        log "ROUTER_TYPE=vllm-router: external router expected on gateway :${GATEWAY_PORT:-${ROUTER_PORT}} (not starting toy proxy)"
+    else
+        start_proxy_bg
+    fi
     if wait_all_healthy; then
         set +e
         run_workload
@@ -476,7 +498,8 @@ orchestrate_master() {
     fi
     echo "${rc}" > "${sentinel}" 2>/dev/null || true
     log "master: workload rc=${rc}; sentinel=${sentinel}; tearing down local proxy+server"
-    kill "${PROXY_PID}" "${SERVER_PID}" 2>/dev/null || true
+    [[ -n "${PROXY_PID:-}" ]] && kill "${PROXY_PID}" 2>/dev/null || true
+    kill "${SERVER_PID}" 2>/dev/null || true
     wait "${SERVER_PID}" 2>/dev/null || true
     return "${rc}"
 }

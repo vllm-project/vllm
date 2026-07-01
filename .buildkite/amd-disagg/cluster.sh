@@ -69,6 +69,30 @@ export NOTIFY_PORT="${NOTIFY_PORT:-61005}"
 # TODO: needs to be removed after PR #46482 is merged.
 export PROXY_SCRIPT="${PROXY_SCRIPT:-${_CLUSTER_SH_DIR}/moriio_toy_proxy_server.py}"
 
+# MoRIIO KV transfer direction (injected into --kv-transfer-config by the launcher):
+#   0 -> omit read_mode     (default; MoRIIO write mode: prefill pushes to decode)
+#   1 -> "read_mode": true  (decode pulls KV from prefill; matches upstream disagg)
+export MORIIO_READ_MODE="${MORIIO_READ_MODE:-0}"
+
+# ----------------------------------------------------------------- router / gateway
+# Selection for client (bench/accuracy) traffic:
+#   toy         -> the in-container MoRIIO toy proxy started by the launcher (default)
+#   vllm-router -> an external `vllm/vllm-router` container started by the SLURM job
+#                  on the rank-0 node
+# Both use the SAME MoRIIO discovery mechanism (prefill/decode register to
+# PROXY_IP:PROXY_PING_PORT=36367); only the client HTTP front door differs.
+export ROUTER_TYPE="${ROUTER_TYPE:-toy}"
+export ROUTER_PORT="${ROUTER_PORT:-30000}"
+export ROUTER_POLICY="${ROUTER_POLICY:-consistent_hash}"
+export VLLM_ROUTER_IMAGE="${VLLM_ROUTER_IMAGE:-vllm/vllm-router:nightly}"
+# Single client-facing port bench/accuracy target: the router port when routing,
+# else the toy proxy port. Env override always wins.
+if [[ "${ROUTER_TYPE}" == "vllm-router" ]]; then
+    export GATEWAY_PORT="${GATEWAY_PORT:-${ROUTER_PORT}}"
+else
+    export GATEWAY_PORT="${GATEWAY_PORT:-${PROXY_PORT}}"
+fi
+
 # Where per-run logs / benchmark results are written. A $SLURM_JOB_ID subdir is
 # appended so each CI run is self-scoped (falls back to 'local' off-SLURM).  [site]
 _LOG_BASE="${LOG_BASE:-/shared_inference/csrikris/disagg_logs}"
@@ -112,8 +136,8 @@ export MORI_SHMEM_HEAP_SIZE="${MORI_SHMEM_HEAP_SIZE:-16G}"
 # ----------------------------------------------------------------- benchmark
 # Space-separated ISL/OSL pairs and concurrency levels for the bench sweep.
 # Defaults are tuned for the CI gate; override inline for a fuller prod sweep.
-export BENCHMARK_COMBINATIONS="${BENCHMARK_COMBINATIONS:-1024/128 2048/128}"
-export BENCHMARK_CON="${BENCHMARK_CON:-32 64}"
+export BENCHMARK_COMBINATIONS="${BENCHMARK_COMBINATIONS:-1024/1024 8192/1024}"
+export BENCHMARK_CON="${BENCHMARK_CON:-8 16 32 64 128 256}"
 # num-prompts per point = NUM_PROMPTS_FACTOR * concurrency (min BENCHMARK_MIN_PROMPTS).
 export NUM_PROMPTS_FACTOR="${NUM_PROMPTS_FACTOR:-2}"
 export BENCHMARK_MIN_PROMPTS="${BENCHMARK_MIN_PROMPTS:-32}"

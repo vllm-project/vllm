@@ -18,6 +18,22 @@ SHARED_MOUNT="${SHARED_MOUNT:-/shared_inference}"
 LOG_ROOT="${LOG_ROOT:-${SHARED_MOUNT}/${USER:-$(whoami)}/disagg_logs}"
 RUN_AFTER_HEALTH="${RUN_AFTER_HEALTH:-accuracy}"   # bench | accuracy
 DRY_RUN="${DRY_RUN:-0}"
+MORIIO_READ_MODE="${MORIIO_READ_MODE:-0}"   # 0 -> prefill writes (default); 1 -> decode reads KV (read_mode)
+
+# ---- router / gateway (host-side; also forwarded into the container) --------
+# toy         -> in-container MoRIIO toy proxy (default; no extra container)
+# vllm-router -> external `vllm/vllm-router` container started on the rank-0 node
+ROUTER_TYPE="${ROUTER_TYPE:-toy}"
+ROUTER_PORT="${ROUTER_PORT:-30000}"
+ROUTER_POLICY="${ROUTER_POLICY:-consistent_hash}"
+VLLM_ROUTER_IMAGE="${VLLM_ROUTER_IMAGE:-vllm/vllm-router:nightly}"
+PROXY_PING_PORT="${PROXY_PING_PORT:-36367}"   # must equal vllm-router --vllm-discovery-address port
+PROXY_PORT="${PROXY_PORT:-10001}"
+if [[ "${ROUTER_TYPE}" == "vllm-router" ]]; then
+    GATEWAY_PORT="${GATEWAY_PORT:-${ROUTER_PORT}}"
+else
+    GATEWAY_PORT="${GATEWAY_PORT:-${PROXY_PORT}}"
+fi
 
 # Where the disagg scripts live ON THE HOST (this dir, i.e. the sbatch submit
 # dir)
@@ -155,10 +171,15 @@ echo "[disagg-pd] LOG_PATH=$LOG_PATH"
 #   rank xP .. end   -> decode
 export IPADDRS="$(echo "${IPS[*]}" | sed 's/ /,/g')"
 
-export WIDE_EP_MODE xP yD GPUS_PER_NODE RUN_AFTER_HEALTH HEALTH_TIMEOUT_S DRY_RUN
+export WIDE_EP_MODE xP yD GPUS_PER_NODE RUN_AFTER_HEALTH HEALTH_TIMEOUT_S DRY_RUN MORIIO_READ_MODE
 export IMAGE SHARED_MOUNT CONTAINER_SCRIPTS DISAGG_SCRIPTS_DIR
 export CLUSTER_ENV="${CLUSTER_ENV_IN}"
 export DOCKER_CONT_NAME="vllm_disagg_${MODEL_NAME:-model}_${SLURM_JOB_ID}"
+
+# Router env: forwarded into the main container (cluster.sh honors these) and used
+# host-side to launch the external router container on rank 0.
+export ROUTER_TYPE ROUTER_PORT ROUTER_POLICY VLLM_ROUTER_IMAGE PROXY_PING_PORT GATEWAY_PORT
+export ROUTER_CONT_NAME="vllm_router_${SLURM_JOB_ID}"
 
 echo "[disagg-pd] IPADDRS=${IPADDRS}"
 echo "[disagg-pd] launching ${NUM_NODES} containers (1/node) -> vllm_disagg.sh node"
@@ -177,6 +198,27 @@ srun --label \
     docker rm -f "$DOCKER_CONT_NAME" 2>/dev/null || true
     stale=$(docker ps -aq --filter name=vllm_disagg_ 2>/dev/null) || true
     [ -n "$stale" ] && { echo "Reaping stale containers on $(hostname): $stale"; docker rm -f $stale 2>/dev/null || true; }
+
+    # Start the external vLLM router as a SEPARATE container on the rank-0 node.
+    # It shares the host network with the main container (both --network host):
+    # prefill/decode register to :$PROXY_PING_PORT (discovery) and clients hit
+    # :$ROUTER_PORT. Only started when ROUTER_TYPE=vllm-router.
+    if [ "$ROUTER_TYPE" = "vllm-router" ] && [ "$SLURM_PROCID" = "0" ] && [ "$DRY_RUN" = "1" ]; then
+        echo "DRY_RUN: would start vllm-router on $(hostname): $VLLM_ROUTER_IMAGE (discovery :$PROXY_PING_PORT, port :$ROUTER_PORT, policy $ROUTER_POLICY)"
+    elif [ "$ROUTER_TYPE" = "vllm-router" ] && [ "$SLURM_PROCID" = "0" ]; then
+        docker rm -f "$ROUTER_CONT_NAME" 2>/dev/null || true
+        echo "Starting vllm-router on $(hostname): $VLLM_ROUTER_IMAGE (discovery :$PROXY_PING_PORT, port :$ROUTER_PORT)"
+        mkdir -p "$LOG_PATH" 2>/dev/null || true
+        docker run -d \
+            --name "$ROUTER_CONT_NAME" \
+            --network host \
+            -v "$LOG_PATH":/run_logs \
+            -v "$SHARED_MOUNT":"$SHARED_MOUNT" \
+            "$VLLM_ROUTER_IMAGE" \
+            bash -lc "exec vllm-router --vllm-pd-disaggregation --kv-connector moriio --vllm-discovery-address 0.0.0.0:$PROXY_PING_PORT --port $ROUTER_PORT --host 0.0.0.0 --policy $ROUTER_POLICY --prefill-policy $ROUTER_POLICY --decode-policy $ROUTER_POLICY --log-level info > $LOG_PATH/vllm_router.log 2>&1" \
+          || echo "WARN: failed to start vllm-router container on $(hostname)"
+    fi
+
     docker run --rm \
         --device /dev/dri \
         --device /dev/kfd \
@@ -206,16 +248,30 @@ srun --label \
         -e RUN_AFTER_HEALTH="$RUN_AFTER_HEALTH" \
         -e HEALTH_TIMEOUT_S="$HEALTH_TIMEOUT_S" \
         -e DRY_RUN="$DRY_RUN" \
+        -e MORIIO_READ_MODE="$MORIIO_READ_MODE" \
+        -e ROUTER_TYPE="$ROUTER_TYPE" \
+        -e ROUTER_PORT="$ROUTER_PORT" \
+        -e ROUTER_POLICY="$ROUTER_POLICY" \
+        -e GATEWAY_PORT="$GATEWAY_PORT" \
         --name "$DOCKER_CONT_NAME" \
         --entrypoint /bin/bash \
         "$IMAGE" -c "bash $CONTAINER_SCRIPTS/vllm_disagg.sh node" \
       2>&1 | tee "$LOG_PATH/main_NODE${SLURM_PROCID}.log"
+    node_rc=${PIPESTATUS[0]}   # docker run exit code (not tee), for rank-0 pass/fail
+
+    # Stop the external router (rank-0 node) once the main container returns, so
+    # other ranks do not block and the node is left clean.
+    if [ "$ROUTER_TYPE" = "vllm-router" ] && [ "$SLURM_PROCID" = "0" ]; then
+        docker rm -f "$ROUTER_CONT_NAME" 2>/dev/null || true
+    fi
+    exit "$node_rc"
   ' || RC=$?
 
-# Best-effort teardown of any lingering containers
+# Best-effort teardown of any lingering containers (main + external router)
 srun --nodelist="$SELECTED_NODELIST_STR" \
      --nodes="$NUM_NODES" --ntasks="$NUM_NODES" --ntasks-per-node=1 \
-  bash -c 'docker rm -f "$DOCKER_CONT_NAME" 2>/dev/null || true' || true
+  bash -c 'docker rm -f "$DOCKER_CONT_NAME" 2>/dev/null || true
+           [ "$ROUTER_TYPE" = "vllm-router" ] && docker rm -f "$ROUTER_CONT_NAME" 2>/dev/null || true' || true
 
 echo "[disagg-pd] srun finished rc=${RC}; logs in ${LOG_PATH}"
 exit "${RC}"

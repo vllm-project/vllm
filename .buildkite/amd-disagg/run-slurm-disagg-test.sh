@@ -34,6 +34,12 @@ HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-5400}"   # P/D bring-up budget (big models
 SHARED_MOUNT="${SHARED_MOUNT:-/shared_inference}"
 LOG_ROOT="${LOG_ROOT:-${SHARED_MOUNT}/${USER:-$(whoami)}/disagg_logs}"
 DRY_RUN="${DRY_RUN:-0}"
+MORIIO_READ_MODE="${MORIIO_READ_MODE:-0}"
+
+# Front door: toy (in-container proxy, default) | vllm-router (external container).
+ROUTER_TYPE="${ROUTER_TYPE:-toy}"
+ROUTER_PORT="${ROUTER_PORT:-30000}"
+VLLM_ROUTER_IMAGE="${VLLM_ROUTER_IMAGE:-vllm/vllm-router:nightly}"
 # Dry-run only validates wiring; cap its walltime low so it never holds the queue.
 [[ "${DRY_RUN}" == "1" ]] && TIME_LIMIT="${SLURM_TIME_LIMIT:-00:10:00}"
 
@@ -52,6 +58,8 @@ EXPORTS+=",RUN_AFTER_HEALTH=${RUN_AFTER_HEALTH},HEALTH_TIMEOUT_S=${HEALTH_TIMEOU
 EXPORTS+=",SHARED_MOUNT=${SHARED_MOUNT},LOG_ROOT=${LOG_ROOT}"
 EXPORTS+=",DISAGG_SCRIPTS_DIR=${SCRIPT_DIR}"
 EXPORTS+=",DRY_RUN=${DRY_RUN}"
+EXPORTS+=",MORIIO_READ_MODE=${MORIIO_READ_MODE}"
+EXPORTS+=",ROUTER_TYPE=${ROUTER_TYPE},ROUTER_PORT=${ROUTER_PORT},VLLM_ROUTER_IMAGE=${VLLM_ROUTER_IMAGE}"
 
 SBATCH_ARGS=(
     --parsable
@@ -65,7 +73,7 @@ SBATCH_ARGS=(
 )
 [[ -n "${PARTITION}" ]] && SBATCH_ARGS+=(--partition="${PARTITION}")
 
-echo "[slurm-submit] image=${IMAGE} nodes=${NODES} gpus/node=${GPUS_PER_NODE} mode=$([[ ${WIDE_EP_MODE} == 0 ]] && echo tp || echo ep)"
+echo "[slurm-submit] image=${IMAGE} nodes=${NODES} gpus/node=${GPUS_PER_NODE} mode=$([[ ${WIDE_EP_MODE} == 0 ]] && echo tp || echo ep) router=${ROUTER_TYPE}"
 JOB_ID=$(sbatch "${SBATCH_ARGS[@]}" "${JOB_SCRIPT}")
 echo "[slurm-submit] submitted job ${JOB_ID}${PARTITION:+ on ${PARTITION}}"
 

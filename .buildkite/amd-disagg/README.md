@@ -19,7 +19,35 @@ single- and multi-node `xP`/`yD` topologies and two parallelism modes via
 | `cluster.sh` | **Single** config (sourced): `WIDE_EP_MODE`, topology, ports, RDMA/NIC, vLLM env, benchmark/accuracy defaults, plus the site defaults (model dir, fallback IPs, NIC list, log path, partition — tagged `[site]`). All `${VAR:-default}`; precedence is **env > built-in**. Edit the `[site]` defaults for a new cluster. |
 | `models.yaml` | **Per-model** perf flags (split by mode `tp`/`ep` and role) plus an `env:` block of model/arch-specific env (e.g. AITER kernel toggles). |
 | `apply_moriio_2pd_patches.sh` | Applies vLLM PR #39276 (MoRIIO multi-node DP). Auto-run when `WIDE_EP_MODE=1` and `xP>1`/`yD>1`. |
-| `moriio_toy_proxy_server.py` | MoRIIO toy proxy (self-contained copy of the in-repo example). |
+| `moriio_toy_proxy_server.py` | MoRIIO toy proxy (self-contained copy of the in-repo example). Default front door. |
+
+### toy proxy vs. vLLM router (`ROUTER_TYPE`)
+
+The client-facing gateway is selectable via **`ROUTER_TYPE`** (default `toy`):
+
+| `ROUTER_TYPE` | What runs | Client port |
+|---------------|-----------|-------------|
+| `toy` (default) | `moriio_toy_proxy_server.py` as a background process **inside** the rank-0 container | `PROXY_PORT` (10001) |
+| `vllm-router` | a **separate** `vllm/vllm-router` container on the rank-0 node (started by the SLURM job) | `ROUTER_PORT` (30000) |
+
+Note: There are few existing issues while running vllm-router with DP mode, once that is fixed can be switched as default.
+
+Both use the identical MoRIIO discovery mechanism — prefill/decode register to
+`PROXY_IP:PROXY_PING_PORT` (`36367`) — so the prefill/decode serve commands and
+`--kv-transfer-config` are unchanged. Only the HTTP front door differs, abstracted
+behind `GATEWAY_PORT` (which `bench`/`accuracy` target). With `vllm-router`, rank 0's
+node runs **two** containers: the router (`VLLM_ROUTER_IMAGE`) and the usual main
+container (`IMAGE`) running `vllm_disagg.sh node`.
+
+Relevant knobs (in `cluster.sh`, env-overridable): `ROUTER_TYPE`, `ROUTER_PORT`,
+`ROUTER_POLICY` (`consistent_hash`), `VLLM_ROUTER_IMAGE`
+(`vllm/vllm-router:nightly`), `GATEWAY_PORT`.
+
+```bash
+# opt in to the production router (1P1D):
+ROUTER_TYPE=vllm-router NODES=2 \
+  bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
+```
 
 ### SLURM / Buildkite CI glue
 | File | Purpose |
@@ -132,16 +160,13 @@ WIDE_EP_MODE=1 ./vllm_disagg.sh prefill     # DP/EP
 ## Notes / gotchas
 
 - **Proxy first, on the prefill master.** `PROXY_PING_PORT` must stay `36367`
-  (toy proxy hardcodes its zmq discovery there). `proxy_ip` = prefill master.
+  (toy proxy hardcodes its zmq discovery there; `vllm-router` must use the same
+  via `--vllm-discovery-address`). `proxy_ip` = prefill master.
+- **`ROUTER_TYPE=vllm-router`** swaps the toy proxy for an external
+  `vllm/vllm-router` container on rank 0 ; clients then hit
+  `ROUTER_PORT`. Nothing else in the P/D topology changes.
 - **PR #39276 is mandatory for multi-node DP** (`WIDE_EP_MODE=1`, `xP>1`/`yD>1`); the
   launcher aborts if the patch is required but unavailable.
 - **Same model on both sides** — single shared `MODEL_NAME`/`MODEL_DIR`.
 - **EP masters only** expose the API server + KV transfer; children are `--headless`.
 
-## Roadmap
-
-- SLURM/`srun` wrapper allocating `xP+yD` nodes, invoking the role per
-  `$SLURM_PROCID` + co-locating the proxy on rank 0 (the launcher is already
-  structured for this).
-- Inter-node container barrier (socket_barrier) for ordered startup.
-- Results parsing + pass/fail gating for CI.
