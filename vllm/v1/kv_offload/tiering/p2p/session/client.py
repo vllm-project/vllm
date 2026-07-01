@@ -266,19 +266,22 @@ class ClientRole:
             state.result = hit
 
     def cancel_lookups(self, kv_request_id: str) -> None:
-        """Drop lookup state and, if needed, close the peer's lookup phase.
+        """Drop lookup state and, if needed, close the peer's request.
 
-        Every FetchMsg the server receives signals "lookup phase done"
-        for its kv_request_id. In the happy path the FetchMsg carrying
-        blocks is that signal. But if the client's lookups all missed
-        (or timed out) no FetchMsg is ever sent, so on the finish path
-        we emit an empty FetchMsg to let the server drop its
-        _lookup_batches and call cb.finish_request.
+        Every FetchMsg the server receives in p2p mode is the
+        server-side "request finished" signal for its kv_request_id:
+        no further ``cb.create_store_job`` will fire, all server-side
+        lookup state for the id is released, and ``cb.finish_request``
+        fires on the TieringManager. In the happy path the FetchMsg
+        carrying blocks is that signal. But if the client's lookups
+        all missed (or timed out) no FetchMsg is ever sent, so on the
+        finish path we emit an empty FetchMsg purely to trigger those
+        semantics on the peer.
 
         We only send the terminal FetchMsg when a LookupMsg was actually
         flushed (``kv_request_id in _flushed_req_ids``): if the peer
-        never received a LookupMsg for this id, it has nothing to clean
-        up.
+        never received a LookupMsg for this id, it has no state to
+        release.
         """
         if (
             kv_request_id in self._flushed_req_ids

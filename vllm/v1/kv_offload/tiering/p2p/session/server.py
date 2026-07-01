@@ -244,12 +244,23 @@ class ServerRole:
     ) -> None:
         """Handle a FetchMsg from the peer.
 
-        FetchMsg also terminates the peer's lookup phase for
-        ``kv_request_id``: any parked ``_lookup_batches`` are dropped
-        and their ``cb.finish_request`` fires so the TieringManager can
-        release per-batch bookkeeping. The client contract guarantees
-        exactly one FetchMsg per lookup-touched request — including an
-        empty one when no blocks end up being fetched.
+        In p2p mode FetchMsg is the server-side "request finished"
+        signal for ``kv_request_id``. Three consequences flow from that:
+
+        - No further ``cb.create_store_job`` will fire for this id:
+          parked ``_lookup_batches`` are popped here (via
+          ``_finish_lookup_batches``) before the same poll tick's
+          ``collect_results`` calls ``_resolve_pending_lookups``, so
+          any HIT_PENDING / RETRY hash that would otherwise later
+          promote to HIT and pin a slot is dropped instead.
+        - All server-side lookup state for the id is cleaned up (the
+          ``_lookup_batches`` entries themselves).
+        - ``cb.finish_request(batch.ctx)`` fires so the TieringManager
+          can release per-batch bookkeeping.
+
+        The client contract guarantees exactly one FetchMsg per
+        lookup-touched request — including an empty one when no
+        blocks end up being fetched.
 
         Raises ``ValueError`` on a duplicate fetch for the same
         ``kv_request_id``; the coordinator's dispatch loop turns that
@@ -271,9 +282,11 @@ class ServerRole:
         result = req.add_fetch_demand(block_hashes, block_indexes)
         if result.local_idxs:
             self._submit_transfer(kv_request_id, result)
-        # Close the lookup phase for this kv_request_id before any
-        # finalize path runs so the TieringManager releases per-batch
-        # bookkeeping in-order.
+        # Close the peer's request as far as the server's lookup phase
+        # is concerned: pop parked batches so no further
+        # ``cb.create_store_job`` fires for this id, and fire
+        # ``cb.finish_request`` on each. Done before the finalize path
+        # below so bookkeeping releases in-order.
         self._finish_lookup_batches(kv_request_id)
         # Prefiller-first mode: finish_request may have run before
         # fetch arrived. If so, finalize once we know what was
@@ -440,13 +453,19 @@ class ServerRole:
             self._cb.finish_request(batch.ctx)
 
     def _finish_lookup_batches(self, kv_request_id: str) -> None:
-        """Drop parked LookupMsg batches for this id, firing finish_request.
+        """Close the server-side lookup phase for ``kv_request_id``.
+
+        Pops every parked ``_LookupBatch`` for this id (so
+        ``_resolve_pending_lookups`` cannot promote a HIT_PENDING /
+        RETRY hash into a fresh ``cb.create_store_job`` after this
+        point) and fires ``cb.finish_request(batch.ctx)`` on each so
+        the TieringManager can release per-batch bookkeeping.
 
         Called on the two events that mean "no more lookup traffic for
         ``kv_request_id`` is expected on this session": the terminal
         FetchMsg from the peer (client contract: exactly one FetchMsg
         per lookup-touched request, even if empty), and a local
-        ``finish`` — the last one to fire is a no-op.
+        ``finish``. Whichever fires second is a no-op.
         """
         finished_batch_ids = [
             bid
