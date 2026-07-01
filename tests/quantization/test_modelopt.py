@@ -147,9 +147,7 @@ def test_modelopt_mixed_precision_infers_fused_gate_up_projection():
     with patch(
         "vllm.model_executor.layers.quantization.modelopt.init_nvfp4_linear_kernel"
     ):
-        method = config.get_quant_method(
-            fake_layer, "model.layers.0.mlp.gate_up_proj"
-        )
+        method = config.get_quant_method(fake_layer, "model.layers.0.mlp.gate_up_proj")
 
     assert isinstance(method, ModelOptNvFp4LinearMethod)
 

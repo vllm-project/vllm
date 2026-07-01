@@ -2460,20 +2460,18 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         if shard_names is not None:
             for candidate in self._quantized_layer_prefix_candidates(prefix):
                 parent_dot = candidate.rsplit(".", 1)[0] + "."
-                algos: set[str] = set()
+                shard_algos: set[str] = set()
                 for shard_name in shard_names:
                     shard_prefix = f"{parent_dot}{shard_name}"
                     if shard_prefix in self.quantized_layers:
-                        algo = self.quantized_layers[shard_prefix][
-                            "quant_algo"
-                        ].upper()
-                        algos.add(algo)
-                if len(algos) == 1:
-                    return algos.pop()
-                if len(algos) > 1:
+                        algo = self.quantized_layers[shard_prefix]["quant_algo"].upper()
+                        shard_algos.add(algo)
+                if len(shard_algos) == 1:
+                    return shard_algos.pop()
+                if len(shard_algos) > 1:
                     raise ValueError(
                         f"Mixed quant_algo within fused layer {prefix}: "
-                        f"{algos}. All shards must use the same quantization."
+                        f"{shard_algos}. All shards must use the same quantization."
                     )
 
         return None
