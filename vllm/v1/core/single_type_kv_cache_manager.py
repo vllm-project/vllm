@@ -4,7 +4,6 @@ import itertools
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
 from collections.abc import Sequence
-from dataclasses import dataclass
 from typing import ClassVar
 
 from vllm.utils.math_utils import cdiv
@@ -33,12 +32,6 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
-
-
-@dataclass
-class _RetainedKVCacheBlockCopy:
-    source_block: KVCacheBlock
-    copy: KVCacheBlockCopy
 
 
 class SingleTypeKVCacheManager(ABC):
@@ -107,6 +100,12 @@ class SingleTypeKVCacheManager(ABC):
         # aligned segment (SWA). Initialized lazily by the coordinator after
         # determining the attention groups.
         self.use_eagle = False
+
+        # Partial-hit copy-on-write bookkeeping. Populated only by fine-grained
+        # managers (full attention, mamba "align"); harmlessly empty elsewhere.
+        self._partial_hit_reqs: dict[str, tuple[int, KVCacheBlock]] = {}
+        self._kv_cache_block_copies: list[KVCacheBlockCopy] = []
+        self._cow_sources_to_release: list[KVCacheBlock] = []
 
     @classmethod
     def _get_num_evictable_blocks(cls, blocks: Sequence[KVCacheBlock]):
@@ -334,7 +333,9 @@ class SingleTypeKVCacheManager(ABC):
 
     def take_kv_cache_block_copies(self) -> list[KVCacheBlockCopy]:
         """Drain and return pending KV cache block copies."""
-        return []
+        copies = self._kv_cache_block_copies
+        self._kv_cache_block_copies = []
+        return copies
 
     def _retain_block(self, block: KVCacheBlock) -> None:
         if block.is_null:
@@ -355,13 +356,32 @@ class SingleTypeKVCacheManager(ABC):
                 freed_blocks.append(block)
         self.block_pool.free_block_queue.append_n(freed_blocks)
 
-    def _free_retained_copies(
+    def _apply_cow(
         self,
-        copies: list[_RetainedKVCacheBlockCopy],
+        request_id: str,
+        block_idx: int,
+        source_block: KVCacheBlock,
+        cow_block: KVCacheBlock,
     ) -> None:
-        if not copies:
-            return
-        self._free_retained_blocks([copy.source_block for copy in copies])
+        """Redirect ``req_blocks[block_idx]`` from a shared, partially-hit
+        ``source_block`` to a private ``cow_block``.
+
+        Records the block copy for the worker and defers releasing the source's
+        hit-ref to the next step (``new_step_starts``), after the copy has run.
+        """
+        req_blocks = self.req_to_blocks[request_id]
+        assert block_idx < len(req_blocks)
+        assert req_blocks[block_idx] is source_block
+        self._retain_block(source_block)
+        req_blocks[block_idx] = cow_block
+        self.block_pool.free_blocks([source_block])
+        self._kv_cache_block_copies.append(
+            KVCacheBlockCopy(
+                src_block_id=source_block.block_id,
+                dst_block_id=cow_block.block_id,
+            )
+        )
+        self._cow_sources_to_release.append(source_block)
 
     def cache_blocks(
         self,
@@ -444,6 +464,7 @@ class SingleTypeKVCacheManager(ABC):
         # Default to [] in case a request is freed (aborted) before alloc.
         req_blocks = self.req_to_blocks.pop(request_id, [])
         self.num_cached_block.pop(request_id, None)
+        self._partial_hit_reqs.pop(request_id, None)
         return req_blocks
 
     def free(self, request_id: str) -> None:
@@ -579,37 +600,15 @@ class SingleTypeKVCacheManager(ABC):
         return 0
 
     def new_step_starts(self) -> None:
-        # do nothing by default
-        return None
+        # Release the previous step's COW source blocks; their copies have now
+        # run on the worker. Empty (no-op) for managers without partial hits.
+        if self._cow_sources_to_release:
+            self._free_retained_blocks(self._cow_sources_to_release)
+            self._cow_sources_to_release = []
 
 
 class FullAttentionManager(SingleTypeKVCacheManager):
     supports_fine_grained_hash_lookup: ClassVar[bool] = True
-
-    def __init__(
-        self,
-        kv_cache_spec: KVCacheSpec,
-        block_pool: BlockPool,
-        enable_caching: bool,
-        kv_cache_group_id: int,
-        scheduler_block_size: int,
-        dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
-        max_admission_blocks_per_request: int | None = None,
-    ) -> None:
-        super().__init__(
-            kv_cache_spec=kv_cache_spec,
-            block_pool=block_pool,
-            enable_caching=enable_caching,
-            kv_cache_group_id=kv_cache_group_id,
-            scheduler_block_size=scheduler_block_size,
-            dcp_world_size=dcp_world_size,
-            pcp_world_size=pcp_world_size,
-            max_admission_blocks_per_request=max_admission_blocks_per_request,
-        )
-        self._partial_hit_reqs: dict[str, tuple[int, KVCacheBlock]] = {}
-        self._kv_cache_block_copies: list[KVCacheBlockCopy] = []
-        self._copy_refs_to_release: list[_RetainedKVCacheBlockCopy] = []
 
     @classmethod
     def _find_fine_grained_cache_hit(
@@ -807,25 +806,9 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         new_blocks: list[KVCacheBlock] = []
         if request_id in self._partial_hit_reqs:
             block_idx, source_block = self._partial_hit_reqs.pop(request_id)
-            self._retain_block(source_block)
             cow_block = self.block_pool.get_new_blocks(1)[0]
-            req_blocks = self.req_to_blocks[request_id]
-            assert block_idx < len(req_blocks)
-            assert req_blocks[block_idx] is source_block
-            req_blocks[block_idx] = cow_block
-            self.block_pool.free_blocks([source_block])
+            self._apply_cow(request_id, block_idx, source_block, cow_block)
             self.new_block_ids.append(cow_block.block_id)
-            block_copy = KVCacheBlockCopy(
-                src_block_id=source_block.block_id,
-                dst_block_id=cow_block.block_id,
-            )
-            self._kv_cache_block_copies.append(block_copy)
-            self._copy_refs_to_release.append(
-                _RetainedKVCacheBlockCopy(
-                    source_block=source_block,
-                    copy=block_copy,
-                )
-            )
             new_blocks.append(cow_block)
 
         new_blocks.extend(
@@ -874,19 +857,6 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             kv_cache_group_id=self.kv_cache_group_id,
             block_size=self.block_size,
         )
-
-    def take_kv_cache_block_copies(self) -> list[KVCacheBlockCopy]:
-        copies = self._kv_cache_block_copies
-        self._kv_cache_block_copies = []
-        return copies
-
-    def free(self, request_id: str) -> None:
-        self._partial_hit_reqs.pop(request_id, None)
-        super().free(request_id)
-
-    def new_step_starts(self) -> None:
-        self._free_retained_copies(self._copy_refs_to_release)
-        self._copy_refs_to_release = []
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         blocks = self.req_to_blocks[running_request_id]
@@ -1288,9 +1258,6 @@ class MambaManager(SingleTypeKVCacheManager):
             self.last_state_block_idx: dict[str, int] = {}
             # The set of the requests that have been allocated blocks
             self._allocated_block_reqs: set[str] = set()
-            self._partial_hit_reqs: dict[str, tuple[int, KVCacheBlock]] = {}
-            self._kv_cache_block_copies: list[KVCacheBlockCopy] = []
-            self._copy_refs_to_release: list[_RetainedKVCacheBlockCopy] = []
 
     @classmethod
     def find_longest_cache_hit(
@@ -1576,22 +1543,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 if partial_hit is not None:
                     block_idx, source_block = partial_hit
                     cow_block = new_blocks[0]
-                    assert block_idx < len(req_blocks)
-                    assert req_blocks[block_idx] is source_block
-                    self._retain_block(source_block)
-                    req_blocks[block_idx] = cow_block
-                    self.block_pool.free_blocks([source_block])
-                    block_copy = KVCacheBlockCopy(
-                        src_block_id=source_block.block_id,
-                        dst_block_id=cow_block.block_id,
-                    )
-                    self._kv_cache_block_copies.append(block_copy)
-                    self._copy_refs_to_release.append(
-                        _RetainedKVCacheBlockCopy(
-                            source_block=source_block,
-                            copy=block_copy,
-                        )
-                    )
+                    self._apply_cow(request_id, block_idx, source_block, cow_block)
                     returned_blocks = [cow_block] + returned_blocks
                     new_blocks = new_blocks[1:]
                 req_blocks.extend(new_blocks)
@@ -1604,7 +1556,6 @@ class MambaManager(SingleTypeKVCacheManager):
         if self.mamba_cache_mode == "align":
             self._allocated_block_reqs.discard(request_id)
             self.last_state_block_idx.pop(request_id, None)
-            self._partial_hit_reqs.pop(request_id, None)
         return super().pop_blocks_for_free(request_id)
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
@@ -1638,9 +1589,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 self.cached_blocks_this_step.add(block.block_hash)
 
     def new_step_starts(self) -> None:
-        if self.mamba_cache_mode == "align":
-            self._free_retained_copies(self._copy_refs_to_release)
-            self._copy_refs_to_release = []
+        super().new_step_starts()
         self.cached_blocks_this_step.clear()
 
     def _cache_partial_tail_block(
@@ -1680,11 +1629,6 @@ class MambaManager(SingleTypeKVCacheManager):
             self._partial_hit_reqs[request.request_id] = (block_idx, source_block)
             self.num_cached_block[request.request_id] = block_idx
         return partial_hash
-
-    def take_kv_cache_block_copies(self) -> list[KVCacheBlockCopy]:
-        copies = self._kv_cache_block_copies
-        self._kv_cache_block_copies = []
-        return copies
 
     def add_local_computed_blocks(
         self,
