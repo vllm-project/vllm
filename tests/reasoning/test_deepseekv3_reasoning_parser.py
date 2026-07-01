@@ -11,6 +11,8 @@ from vllm.reasoning.deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParse
 from vllm.reasoning.deepseek_v3_reasoning_parser import DeepSeekV3ReasoningParser
 from vllm.reasoning.identity_reasoning_parser import IdentityReasoningParser
 
+pytestmark = pytest.mark.skip_global_cleanup
+
 REASONING_MODEL_NAME = "deepseek-ai/DeepSeek-V3.1"
 
 

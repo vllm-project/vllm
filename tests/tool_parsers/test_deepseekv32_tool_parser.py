@@ -21,6 +21,8 @@ from vllm.tool_parsers.deepseekv32_engine_tool_parser import (
     DeepSeekV32EngineToolParser,
 )
 
+pytestmark = pytest.mark.skip_global_cleanup
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -224,7 +226,6 @@ class TestExtractToolCalls:
         assert args == {"value": 42}
         assert isinstance(args["value"], int)
 
-    @pytest.mark.skip_global_cleanup
     def test_composed_schema_converts_object_and_array_params(self):
         """Composed JSON Schema types must still drive DSML type coercion."""
         tool = ChatCompletionToolsParam(
@@ -284,7 +285,6 @@ class TestExtractToolCalls:
         assert isinstance(args["wait"], dict)
         assert isinstance(args["patches"], list)
 
-    @pytest.mark.skip_global_cleanup
     def test_string_attr_true_coerced_by_composed_schema(self):
         """string="true" delivers a JSON string, but the engine's schema-aware
         type fixer coerces it to the composed schema type (object)."""
@@ -681,7 +681,6 @@ class TestExtractToolCallsStreaming:
         assert args == {"value": 42}
         assert isinstance(args["value"], int)
 
-    @pytest.mark.skip_global_cleanup
     def test_composed_schema_conversion_in_streaming(self):
         tool = ChatCompletionToolsParam(
             function=FunctionDefinition(
