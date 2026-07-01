@@ -304,12 +304,6 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.mhc_pre = MHCPreOp()
         self.mhc_post = MHCPostOp()
         self.mhc_fused_post_pre = MHCFusedPostPreOp()
-        # Backend selection mirrors the per-op dispatch in mhc.py: prefer the
-        # unfused aiter mHC pre/post path, and only fall back to the tilelang
-        # fused post+pre path when aiter is unavailable (the aiter kernels need
-        # a hidden size that is a multiple of 256). When neither aiter nor
-        # tilelang is available, the unfused path handles the torch/triton
-        # reference fallback.
         self.use_fused_mhc = HAS_TILELANG_MHC and not (
             HAS_AITER_MHC and self.hidden_size % 256 == 0
         )
@@ -352,10 +346,6 @@ class DeepseekV4DecoderLayer(nn.Module):
         res_mix: torch.Tensor | None = None,
         residual: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        # Fused mHC post+pre (tilelang) path, selected when aiter is unavailable
-        # (see ``use_fused_mhc``). Retained so the aiter mhc_fused_post_pre kernel
-        # can be wired into MHCFusedPostPreOp for easy enablement later. The final
-        # layer's hc_post is deferred to the caller (DeepseekV4Model / MTP forward).
         if residual is None:
             # Run standalone hc_pre on first layer
             residual = x
@@ -410,8 +400,6 @@ class DeepseekV4DecoderLayer(nn.Module):
     ) -> tuple[
         torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None
     ]:
-        # Unfused mHC: hc_pre and hc_post each select the backend directly
-        # (aiter -> tilelang -> torch); hc_post is applied inline.
         residual = x
         x, post, comb = self.hc_pre(
             x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
@@ -594,7 +582,6 @@ class DeepseekV4Model(nn.Module):
                 res_mix,
                 residual,
             )
-        # The fused post+pre path defers the final layer's hc_post to here.
         if layer is not None and layer.use_fused_mhc:
             hidden_states = layer.hc_post(hidden_states, residual, post_mix, res_mix)
 

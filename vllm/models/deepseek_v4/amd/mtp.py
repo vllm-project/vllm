@@ -155,7 +155,6 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         hidden_states, residual, post_mix, res_mix = self.mtp_block(
             positions=positions, x=hidden_states, input_ids=None
         )
-        # The fused post+pre path defers the block's final hc_post to here.
         if self.mtp_block.use_fused_mhc:
             hidden_states = self.mtp_block.hc_post(
                 hidden_states, residual, post_mix, res_mix

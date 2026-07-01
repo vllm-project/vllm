@@ -26,9 +26,6 @@ def _has_tilelang_mhc() -> bool:
 
 
 HAS_TILELANG_MHC = _has_tilelang_mhc()
-# aiter mHC pre/post kernels are available on supported ROCm devices (gfx9 /
-# MI3xx with aiter installed). Combined with the kernel's hidden-size % 256 == 0
-# constraint, this drives the ROCm backend dispatch: aiter -> tilelang -> torch.
 HAS_AITER_MHC = is_aiter_found_and_supported()
 
 
@@ -92,12 +89,6 @@ class MHCPreOp(CustomOp):
         norm_weight: torch.Tensor | None = None,
         norm_eps: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # mHC backend dispatch on ROCm (forward_hip): aiter pre/post kernels
-        # (preferred) -> tilelang -> torch/triton reference. The aiter mhc_pre
-        # kernel only supports hidden sizes that are a multiple of 256, and
-        # requires aiter >= 0.1.14 for correct results at large token counts
-        # (sqrsum race-condition fix in ``mhc_pre_gemm_sqrsum_kernel``,
-        # commit b639cb6).
         hidden_size = residual.shape[-1]
         if HAS_AITER_MHC and hidden_size % 256 == 0:
             return torch.ops.vllm.mhc_pre_aiter(
@@ -233,10 +224,6 @@ class MHCPostOp(CustomOp):
         post_layer_mix: torch.Tensor,
         comb_res_mix: torch.Tensor,
     ) -> torch.Tensor:
-        # aiter (preferred) -> tilelang -> torch/triton reference. The aiter
-        # mhc_post kernel only supports hidden sizes that are a multiple of 256,
-        # and requires aiter >= 0.1.14 for correct results at large token counts
-        # (sqrsum race-condition fix, commit b639cb6).
         hidden_size = residual.shape[-1]
         if HAS_AITER_MHC and hidden_size % 256 == 0:
             return torch.ops.vllm.mhc_post_aiter(
