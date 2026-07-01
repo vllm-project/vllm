@@ -72,6 +72,12 @@ class CPUOffloadingManager(OffloadingManager):
             OrderedDict() if store_threshold >= 2 else None
         )
 
+        # Cache effectiveness counters (deltas flushed by get_stats()).
+        self._lookups_delta: int = 0
+        self._hits_delta: int = 0
+        self._misses_delta: int = 0
+        self._evictions_delta: int = 0
+
     # --- block pool ---
 
     def _get_num_free_blocks(self) -> int:
@@ -121,10 +127,19 @@ class CPUOffloadingManager(OffloadingManager):
                 self.counts[key] = 1
         block = self._policy.get(key)
         if block is None:
-            return LookupResult.MISS
-        if not block.is_ready:
-            return LookupResult.HIT_PENDING
-        return LookupResult.HIT
+            result = LookupResult.MISS
+        elif not block.is_ready:
+            result = LookupResult.HIT_PENDING
+        else:
+            result = LookupResult.HIT
+        # HIT_PENDING counts as HIT; RETRY is not emitted by this method.
+        if result == LookupResult.MISS:
+            self._lookups_delta += 1
+            self._misses_delta += 1
+        elif result in (LookupResult.HIT, LookupResult.HIT_PENDING):
+            self._lookups_delta += 1
+            self._hits_delta += 1
+        return result
 
     @override
     def prepare_load(
@@ -200,6 +215,7 @@ class CPUOffloadingManager(OffloadingManager):
             if evicted is None:
                 return None
 
+            self._evictions_delta += len(evicted)
             # cache-policy removes only idle blocks.
             self._num_evictable_cache_blocks -= len(evicted)
             assert self._num_evictable_cache_blocks >= 0
@@ -324,4 +340,30 @@ class CPUOffloadingManager(OffloadingManager):
             )
             self.stores_skipped_in_current_batch = 0
 
+        # Per-policy cache effectiveness counters.
+        policy_label = (self._policy_name,)
+        stats.increase_counter(
+            CPUOffloadingMetrics.CPU_BLOCK_LOOKUP,
+            self._lookups_delta,
+            labelvalues=policy_label,
+        )
+        stats.increase_counter(
+            CPUOffloadingMetrics.CPU_BLOCK_HIT,
+            self._hits_delta,
+            labelvalues=policy_label,
+        )
+        stats.increase_counter(
+            CPUOffloadingMetrics.CPU_BLOCK_MISS,
+            self._misses_delta,
+            labelvalues=policy_label,
+        )
+        stats.increase_counter(
+            CPUOffloadingMetrics.BLOCK_EVICTION,
+            self._evictions_delta,
+            labelvalues=policy_label,
+        )
+        self._lookups_delta = 0
+        self._hits_delta = 0
+        self._misses_delta = 0
+        self._evictions_delta = 0
         return stats
