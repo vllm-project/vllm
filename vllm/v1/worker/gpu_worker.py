@@ -1075,8 +1075,13 @@ class Worker(WorkerBase):
                 )
 
         # NCCL broadcast/packed path are asynchronous.
-        # Sync here so the next step uses the new weights.
-        torch.accelerator.synchronize()
+        # Sync here so the next step uses the new weights. Engines that defer
+        # post-processing to a background thread (sharded-RDT pull/process
+        # pipelining) must NOT be synced here: a device-wide sync would block on
+        # that thread and serialize the pipeline. They guarantee completion in
+        # drain_pending(), called from finish_weight_update before finalize.
+        if not self.weight_transfer_engine.defers_processing:
+            torch.accelerator.synchronize()
 
     def finish_weight_update(self) -> None:
         """
@@ -1093,6 +1098,12 @@ class Worker(WorkerBase):
             )
 
         is_checkpoint_format = self._is_checkpoint_format
+
+        # Drain any deferred background post-processing (pull/process pipelining)
+        # so every layer is fully loaded before finalize scans them. No-op for
+        # engines that process synchronously.
+        assert self.weight_transfer_engine is not None
+        self.weight_transfer_engine.drain_pending()
 
         if is_checkpoint_format:
             from vllm.model_executor.model_loader.reload import (

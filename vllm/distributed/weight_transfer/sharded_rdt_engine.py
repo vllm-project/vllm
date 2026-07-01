@@ -126,6 +126,27 @@ class _BakedGroup:
 
 
 @dataclass
+class _ProcItem:
+    """One unit of deferred post-processing handed from the RPC thread (which did
+    the synchronous pull) to the background process thread.
+
+    ``results`` are views aliasing the double-buffer arena ``slot``; they are held
+    as strong refs here so they outlive the RPC-thread frame until the background
+    scatter consumes them. The timing fields were measured on the RPC thread
+    during the pull and are logged (together with the process-phase split) by the
+    background thread after it finishes the item.
+    """
+
+    groups: "list[_BakedGroup]"
+    results: "dict[FetchKey, torch.Tensor]"
+    slot: int
+    t_recv: float
+    pull_seconds: float
+    nixl_delta: dict
+    pull_bytes: int
+
+
+@dataclass
 class _BakeRecorder:
     """Shared recording context for the dry-run bake.
 
@@ -518,6 +539,10 @@ class ShardedRDTWeightTransferEngine(
 
     init_info_cls = ShardedRDTWeightTransferInitInfo
     update_info_cls = ShardedRDTWeightTransferUpdateInfo
+    # receive_weights pulls synchronously but defers the GPU post-processing
+    # (materialize/scatter/quant/kernel-copy) to a background thread so it
+    # overlaps the next group's pull. See _pull_groups / _process_item.
+    defers_processing = True
 
     def __init__(
         self,
@@ -547,16 +572,39 @@ class ShardedRDTWeightTransferEngine(
         #   src FetchKey -> produced slice shape / torch dtype.
         self._src_shapes: dict[FetchKey, tuple[int, ...]] = {}
         self._src_dtypes: dict[FetchKey, torch.dtype] = {}
-        # Persistent receive arenas, ONE PER DTYPE (1-D). We register each arena's
-        # STORAGE once with NIXL (register_nixl_memory) and carve a contiguous view
-        # per slice as the set_target_for_ref target. Because the registration
-        # cache (_add_tensor_descs) is keyed by untyped_storage().data_ptr() and
-        # registers the full storage, every view into an arena is a cache hit -> the
-        # recv path never re-registers or deregisters. Grown (and re-registered)
-        # only if a pull needs more than it currently holds; steady state does zero
-        # registration. Per-dtype (not one arena) so mixed-dtype groups (e.g. Kimi
-        # fp8 weights + fp32 weight_scale_inv + bf16 norms) still use the arena.
-        self._dest_arenas: dict[torch.dtype, torch.Tensor] = {}
+        # Persistent receive arenas, ONE PER DTYPE (1-D), DOUBLE-BUFFERED. We
+        # register each arena's STORAGE once with NIXL (register_nixl_memory) and
+        # carve a contiguous view per slice as the set_target_for_ref target.
+        # Because the registration cache (_add_tensor_descs) is keyed by
+        # untyped_storage().data_ptr() and registers the full storage, every view
+        # into an arena is a cache hit -> the recv path never re-registers or
+        # deregisters. Grown (and re-registered) only if a pull needs more than it
+        # currently holds; steady state does zero registration. Per-dtype (not one
+        # arena) so mixed-dtype groups (e.g. Kimi fp8 weights + fp32
+        # weight_scale_inv + bf16 norms) still use the arena.
+        #
+        # Two slots (fixed depth 2): pull(N+1) writes slot (N+1)%2 while the
+        # background thread is still scattering out of slot N%2. A per-slot CUDA
+        # event records when the background scatter finished reading a slot; the
+        # RPC thread blocks on it before overwriting that slot with a later pull
+        # (replaces the old end-of-replay global torch.cuda.synchronize()).
+        self._NSLOTS = 2
+        self._dest_arenas: list[dict[torch.dtype, torch.Tensor]] = [
+            {} for _ in range(self._NSLOTS)
+        ]
+        self._slot_read_done: list[Any] = []  # one torch.cuda.Event per slot
+        self._pull_slot = 0
+
+        # ---- Background post-processing thread (pull/process pipelining) -------
+        # receive_weights pulls synchronously on the RPC thread, then hands the
+        # pulled arena views to this single worker thread, which runs
+        # materialize/scatter/quant/kernel_copy on its own CUDA stream while the
+        # next group's pull proceeds. Drained by drain_pending() (called from the
+        # worker's finish_weight_update) before finalize_layerwise_reload runs.
+        self._proc_queue: Any | None = None
+        self._proc_thread: Any | None = None
+        self._proc_stream: Any | None = None
+        self._proc_error: BaseException | None = None
 
     def init_transfer_engine(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
         """Resolve the trainer actor and bind its batched producer method."""
@@ -654,6 +702,9 @@ class ShardedRDTWeightTransferEngine(
         # record how each slice is fetched and where it lands, then restore the
         # model. Every later update_weights is a replay.
         self._bake(init_info)
+
+        # Start the background post-processing worker (pull/process pipelining).
+        self._ensure_proc_worker()
 
     def _select_producer_index(self, num_producers: int) -> int:
         """Pick which trainer producer this worker pulls from (static 1:1).
@@ -759,6 +810,8 @@ class ShardedRDTWeightTransferEngine(
             raise RuntimeError(
                 "Sharded RDT engine not initialized. Call init_transfer_engine() first."
             )
+        # Surface any error the background thread hit on a prior item promptly.
+        self._raise_proc_error()
         names = update_info.names
         groups: list[_BakedGroup] = []
         seen: set[int] = set()
@@ -776,8 +829,18 @@ class ShardedRDTWeightTransferEngine(
                 seen.add(id(g))
                 groups.append(g)
         if groups:
-            self._replay(groups)
+            # Pull synchronously on this RPC thread (keeps the pull on the driver's
+            # critical path and preserves the producer's double-buffer safety),
+            # then hand the pulled slices to the background thread for
+            # scatter/quant/kernel-copy and return -- so the NEXT group's pull
+            # overlaps this group's processing.
+            item = self._pull_groups(groups)
+            assert self._proc_queue is not None
+            self._proc_queue.put(item)
         if residual:
+            # Rare/absent path (0% for Kimi after unbaked-skip); run inline. It
+            # touches only non-baked layers, so it does not race the background
+            # thread's baked layers, and it completes before this call returns.
             self._load_unbaked(residual, load_weights)
 
     def _build_lazy_weights(
@@ -822,7 +885,9 @@ class ShardedRDTWeightTransferEngine(
             )
         return dict(zip(keys, tensors))
 
-    def _pull_into_registered(self, keys: list[FetchKey]) -> dict[FetchKey, torch.Tensor]:
+    def _pull_into_registered(
+        self, keys: list[FetchKey], slot: int
+    ) -> dict[FetchKey, torch.Tensor]:
         """Batched NIXL pull that reads each slice straight into a persistent,
         pre-registered receive arena -- eliminating the per-pull dest allocation
         and registration that the default recv path does.
@@ -835,17 +900,28 @@ class ShardedRDTWeightTransferEngine(
         register/deregister. ``set_target_for_ref`` routes the transfer into our
         views instead of letting Ray allocate fresh (unregistered) buffers.
 
-        The arena is reused across all groups and syncs (calls are serialized by
-        the driver's await-previous-update_weights). It grows (and re-registers)
-        only if a call needs more than it currently holds; steady state is zero
-        registration. The returned views alias the arena and MUST be consumed
-        (scatter-copied into params) before the next call -- ``_replay`` syncs at
-        the end of its scatter loop to guarantee that.
+        Double-buffered: ``slot`` selects one of ``_NSLOTS`` per-dtype arena sets,
+        so this pull can write into slot (N+1)%2 while the background thread is
+        still scattering out of slot N%2. Each set grows (and re-registers) only if
+        a call needs more than it currently holds; steady state is zero
+        registration. The returned views alias ``slot``'s arena and MUST be
+        consumed (scatter-copied into params) before this slot is pulled into
+        again -- guaranteed by the per-slot read-done event this method waits on
+        below (recorded by ``_process_item`` after its scatter).
         """
         if not keys:
             return {}
         import ray
         from ray.experimental import register_nixl_memory, set_target_for_ref
+
+        # Block until the background thread's scatter out of this slot (from the
+        # pull two calls ago that reused it) has completed on the GPU, so the NIXL
+        # read below does not overwrite data still being read. Freshly-created
+        # events (first use of a slot) are already "complete" -> returns instantly.
+        if self._slot_read_done:
+            self._slot_read_done[slot].synchronize()
+
+        arenas = self._dest_arenas[slot]
 
         # Lay each slice into the persistent arena FOR ITS DTYPE, so mixed-dtype
         # groups (Kimi: fp8 weights + fp32 weight_scale_inv + bf16 norms) all use
@@ -860,13 +936,13 @@ class ShardedRDTWeightTransferEngine(
             totals[dt] = off + ((n + 7) & ~7)  # 8-element alignment
 
         for dt, total in totals.items():
-            arena = self._dest_arenas.get(dt)
+            arena = arenas.get(dt)
             if arena is None or arena.numel() < total:
                 arena = torch.empty(total, dtype=dt, device=self.device)
                 # One-time (per growth) registration of the whole storage; pinned
                 # for the process lifetime so views never register/deregister.
                 register_nixl_memory(arena)
-                self._dest_arenas[dt] = arena
+                arenas[dt] = arena
 
         # Carve a contiguous view per slice (keys order). Held in ``targets``
         # (strong refs) through the ray.get -- set_target_for_ref stores weakrefs.
@@ -875,7 +951,7 @@ class ShardedRDTWeightTransferEngine(
             dt, off = layout[k]
             shape = self._src_shapes[k]
             n = prod(shape) or 1
-            targets.append(self._dest_arenas[dt][off : off + n].reshape(shape))
+            targets.append(arenas[dt][off : off + n].reshape(shape))
 
         # Stamp pull-start so the NIXL patch can cleave this pull into
         # produce_wait (blocked on the producer: serve + Ray dispatch + meta
@@ -1094,40 +1170,79 @@ class ShardedRDTWeightTransferEngine(
         if hasattr(model, "_original_do_torchao_reload"):
             model._do_torchao_reload = model._original_do_torchao_reload
 
-    def _replay(self, groups: "list[_BakedGroup]") -> None:
-        """Fast path: one batched pull, then scatter each baked slice into its
-        destination param — no ``load_weights``, no discovery, no lazy-tensor
-        dispatch.
+    # ---------------- Background post-processing (pull/process pipeline) -------
 
-        Mirrors ``_layerwise_process`` minus the loader replay: materialize ->
-        scatter via ``as_strided().copy_()`` -> ``process_weights_after_loading``
-        -> copy into persistent kernel storage -> ``info.reset()`` (the reset is
-        what makes ``finalize_layerwise_reload`` skip the layer instead of
-        clobbering it with the old kernel tensors).
+    def _ensure_proc_worker(self) -> None:
+        """Lazily create the per-slot events, the background CUDA stream, the work
+        queue, and the single processing thread. Idempotent."""
+        if self._proc_thread is not None:
+            return
+        import queue
+        import threading
 
-        FUTURE: today we pull into Ray-allocated buffers and scatter with
-        ``copy_`` because Ray's NIXL receiver allocates the destination. On Ray
-        >= 2.55.1, ``ray.experimental.set_target_for_ref(ref, [dst_views])`` lets
-        NIXL read each slice **straight into** the pre-materialized destination
-        view — dropping the intermediate buffer and the scatter copy. Wire that
-        in once we're on a Ray version that has it.
+        self._slot_read_done = [torch.cuda.Event() for _ in range(self._NSLOTS)]
+        self._proc_stream = torch.cuda.Stream(device=self.device)
+        self._proc_queue = queue.Queue()
+        self._proc_error = None
+        t = threading.Thread(
+            target=self._proc_worker_loop, name="rdt-postprocess", daemon=True
+        )
+        self._proc_thread = t
+        t.start()
+
+    def _proc_worker_loop(self) -> None:
+        """Single persistent thread: run each queued item's process phase on the
+        background stream. Exits on the ``None`` sentinel (shutdown). An item that
+        raises is recorded in ``_proc_error`` and re-raised on the RPC thread /
+        at drain, so a failed sync fails loudly rather than corrupting silently.
         """
-        from vllm.model_executor.layers.quantization.base_config import (
-            QuantizeMethodBase,
-        )
-        from vllm.model_executor.model_loader.reload.layerwise import (
-            LAYERWISE_INFO,
-            _copy_and_restore_kernel_tensors,
-        )
-        from vllm.model_executor.model_loader.reload.meta import materialize_layer
+        torch.cuda.set_device(self.device)
+        q = self._proc_queue
+        assert q is not None
+        while True:
+            item = q.get()
+            try:
+                if item is None:
+                    return
+                self._process_item(item)
+            except BaseException as e:  # noqa: BLE001 - surfaced on the RPC thread
+                self._proc_error = e
+                logger.exception("RDT background post-processing failed")
+            finally:
+                q.task_done()
 
-        _t_recv = time.perf_counter()
+    def _raise_proc_error(self) -> None:
+        """Re-raise (once) any error captured by the background thread."""
+        if self._proc_error is not None:
+            err = self._proc_error
+            self._proc_error = None
+            raise RuntimeError("RDT background post-processing failed") from err
 
-        # One batched pull for every unique source slice this group needs.
-        # Snapshot the consumer-side NIXL counters around the pull so the delta
-        # is exactly this pull's registration / transfer / deregistration split.
+    def drain_pending(self) -> None:
+        """Block until the background thread has processed every queued item and
+        its stream work is complete, then re-raise any error it hit. Called from
+        the worker's ``finish_weight_update`` before ``finalize_layerwise_reload``
+        so every baked layer is fully loaded (and ``info.reset()``-ed) first."""
+        if self._proc_queue is not None:
+            self._proc_queue.join()  # every put() item task_done()'d
+        if self._proc_stream is not None:
+            self._proc_stream.synchronize()
+        self._raise_proc_error()
+
+    def _pull_groups(self, groups: "list[_BakedGroup]") -> "_ProcItem":
+        """RPC-thread half of the pipeline: one batched NIXL pull for every unique
+        source slice the groups need, into the next double-buffer slot. Returns a
+        work item for the background thread; performs NO post-processing so this
+        call returns as soon as the pull's ``ray.get`` completes and the next
+        group's pull can begin.
+
+        Snapshot the consumer-side NIXL counters around the pull so the delta is
+        exactly this pull's registration / transfer split (logged later by the
+        background thread together with the process-phase split).
+        """
         from vllm.distributed.weight_transfer import _nixl_profile
 
+        _t_recv = time.perf_counter()
         _nixl_before = _nixl_profile.snapshot()
         _t_pull = time.perf_counter()
         # De-duplicated, ORDER-STABLE source keys: the producer returns slices in
@@ -1139,67 +1254,109 @@ class ShardedRDTWeightTransferEngine(
                 if c.src not in seen_keys:
                     seen_keys.add(c.src)
                     keys.append(c.src)
-        results = self._pull_into_registered(keys)
+        slot = self._pull_slot
+        self._pull_slot = (slot + 1) % self._NSLOTS
+        results = self._pull_into_registered(keys, slot)
         pull_seconds = time.perf_counter() - _t_pull
         _nixl_delta = _nixl_profile.delta(_nixl_before, _nixl_profile.snapshot())
         # Bytes this worker actually pulled (for true per-worker BW / straggler
         # diagnosis: slow worker + more bytes = imbalance; slow + equal bytes =
         # transport straggler).
-        pull_bytes = sum(prod(self._src_shapes[k]) * self._src_dtypes[k].itemsize
-                         for k in keys)
+        pull_bytes = sum(
+            prod(self._src_shapes[k]) * self._src_dtypes[k].itemsize for k in keys
+        )
+        return _ProcItem(
+            groups=groups,
+            results=results,
+            slot=slot,
+            t_recv=_t_recv,
+            pull_seconds=pull_seconds,
+            nixl_delta=_nixl_delta,
+            pull_bytes=pull_bytes,
+        )
 
+    def _process_item(self, item: "_ProcItem") -> None:
+        """Background-thread half: scatter each baked slice into its destination
+        param, run ``process_weights_after_loading``, and copy into persistent
+        kernel storage -- all on the dedicated process stream so it overlaps the
+        next group's pull on the RPC thread.
+
+        Mirrors ``_layerwise_process`` minus the loader replay: materialize ->
+        scatter via ``as_strided().copy_()`` -> quant -> kernel-copy ->
+        ``info.reset()`` (the reset is what makes ``finalize_layerwise_reload``
+        skip the layer instead of clobbering it with the old kernel tensors).
+
+        After all scatters that read ``item.slot``'s arena are enqueued on the
+        process stream, record the slot's read-done event so the RPC thread can
+        block on it before overwriting the slot with a later pull.
+        """
         from vllm.distributed.weight_transfer._nixl_profile import PhaseTimer
+        from vllm.model_executor.layers.quantization.base_config import (
+            QuantizeMethodBase,
+        )
+        from vllm.model_executor.model_loader.reload.layerwise import (
+            LAYERWISE_INFO,
+            _copy_and_restore_kernel_tensors,
+        )
+        from vllm.model_executor.model_loader.reload.meta import materialize_layer
 
+        results = item.results
+        ph = PhaseTimer(self._proc_stream)  # stream-scoped syncs, not global
         _t_proc = time.perf_counter()
-        ph = PhaseTimer()  # per-phase split of process (materialize/scatter/quant/kernel)
-        for g in groups:
-            layer = g.layer
-            info = LAYERWISE_INFO.get(layer)
-            if info is None or not info.can_load():
-                raise RuntimeError(
-                    f"Baked replay: layer {type(layer).__name__} was not set up "
-                    "for reload this sync (start_weight_update must run before "
-                    "update_weights)."
-                )
-            with ph.phase("materialize_seconds"):
-                materialize_layer(layer, info)  # cheap empty HF params
-            with ph.phase("scatter_seconds"):
-                for c in g.copies:
-                    param = getattr(layer, c.param_name)
-                    dst = param.as_strided(c.shape, c.stride, c.offset)
-                    with torch._C.DisableTorchFunctionSubclass():
-                        dst.copy_(results[c.src])
-            # Quantization / repack, exactly as _layerwise_process: run it iff
-            # the layer has a QuantizeMethodBase quant method (a no-op for
-            # unquantized layers, real work for quantized ones).
-            quant_method = getattr(layer, "quant_method", None)
-            if isinstance(quant_method, QuantizeMethodBase):
-                if hasattr(layer, "_already_called_process_weights_after_loading"):
-                    delattr(layer, "_already_called_process_weights_after_loading")
-                with ph.phase("quant_seconds"):
-                    quant_method.process_weights_after_loading(layer)
-            # Copy into persistent kernel storage (preserves cudagraph refs).
-            if info.kernel_tensors is not None:
-                with ph.phase("kernel_copy_seconds"):
-                    _copy_and_restore_kernel_tensors(layer, info)
-            # Reset so finalize_layerwise_reload skips this (already-loaded) layer.
-            info.reset()
-        # The receive arena is reused by the NEXT _replay's NIXL read, which is
-        # not ordered against this stream's scatter copies that READ from it.
-        # Sync so those reads finish before the arena can be overwritten. (The
-        # per-phase syncs above already drained the stream; this is a cheap
-        # backstop and covers the no-baked-group path.)
-        torch.cuda.synchronize()
+        with (
+            torch.cuda.device(self.device),
+            torch.cuda.stream(self._proc_stream),
+            torch.device(self.device),
+        ):
+            for g in item.groups:
+                layer = g.layer
+                info = LAYERWISE_INFO.get(layer)
+                if info is None or not info.can_load():
+                    raise RuntimeError(
+                        f"Baked replay: layer {type(layer).__name__} was not set "
+                        "up for reload this sync (start_weight_update must run "
+                        "before update_weights)."
+                    )
+                with ph.phase("materialize_seconds"):
+                    materialize_layer(layer, info)  # cheap empty HF params
+                with ph.phase("scatter_seconds"):
+                    for c in g.copies:
+                        param = getattr(layer, c.param_name)
+                        dst = param.as_strided(c.shape, c.stride, c.offset)
+                        with torch._C.DisableTorchFunctionSubclass():
+                            dst.copy_(results[c.src])
+                # Quantization / repack, exactly as _layerwise_process: run it iff
+                # the layer has a QuantizeMethodBase quant method (a no-op for
+                # unquantized layers, real work for quantized ones).
+                quant_method = getattr(layer, "quant_method", None)
+                if isinstance(quant_method, QuantizeMethodBase):
+                    if hasattr(
+                        layer, "_already_called_process_weights_after_loading"
+                    ):
+                        delattr(
+                            layer, "_already_called_process_weights_after_loading"
+                        )
+                    with ph.phase("quant_seconds"):
+                        quant_method.process_weights_after_loading(layer)
+                # Copy into persistent kernel storage (preserves cudagraph refs).
+                if info.kernel_tensors is not None:
+                    with ph.phase("kernel_copy_seconds"):
+                        _copy_and_restore_kernel_tensors(layer, info)
+                # Reset so finalize_layerwise_reload skips this (loaded) layer.
+                info.reset()
+            # All reads of this slot's arena are now enqueued on the process
+            # stream; mark it so the RPC thread can safely reuse the slot.
+            self._slot_read_done[item.slot].record(self._proc_stream)
         process_seconds = time.perf_counter() - _t_proc
         self._log_timing(
             "replay",
-            time.perf_counter() - _t_recv,
-            pull_seconds,
+            time.perf_counter() - item.t_recv,
+            item.pull_seconds,
             1,
             process_seconds,
-            _nixl_delta,
+            item.nixl_delta,
             dict(ph.t),
-            pull_bytes,
+            item.pull_bytes,
         )
 
     # Hardcoded profiling sink: vLLM workers run in an EngineCore subprocess
@@ -1268,6 +1425,20 @@ class ShardedRDTWeightTransferEngine(
             f.write(json.dumps(record) + "\n")
 
     def shutdown(self) -> None:
+        # Stop the background post-processing thread (drain, then sentinel + join)
+        # before dropping the state it touches.
+        if self._proc_thread is not None:
+            try:
+                self.drain_pending()
+            except Exception:
+                logger.exception("RDT drain during shutdown failed")
+            assert self._proc_queue is not None
+            self._proc_queue.put(None)  # sentinel
+            self._proc_thread.join(timeout=30)
+            self._proc_thread = None
+            self._proc_queue = None
+            self._proc_stream = None
+        self._slot_read_done = []
         self._trainer_actor = None
         self._produce_method = None
         # Drop strong references to baked modules so the model can be freed.
@@ -1278,7 +1449,7 @@ class ShardedRDTWeightTransferEngine(
         self._live_names.clear()
         # Release the receive arenas (their NIXL registration is pinned for the
         # process lifetime; freeing the tensors just drops our strong refs).
-        self._dest_arenas.clear()
+        self._dest_arenas = [{} for _ in range(self._NSLOTS)]
 
     @staticmethod
     def trainer_send_weights(

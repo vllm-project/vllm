@@ -67,6 +67,22 @@ class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
     init_info_cls: type[TInitInfo]
     update_info_cls: type[TUpdateInfo]
 
+    # When True, ``receive_weights`` returns after issuing the transfer and
+    # defers the GPU post-processing to a background thread. The worker must then
+    # NOT insert a per-update device-wide sync (it would block on that thread and
+    # serialize the pull/process pipeline) and must call ``drain_pending()``
+    # before finalize so all deferred work has completed. Default False.
+    defers_processing: bool = False
+
+    def drain_pending(self) -> None:
+        """Block until any background post-processing started by
+        ``receive_weights`` has completed (and re-raise any error it hit).
+
+        Default no-op; overridden by engines that set ``defers_processing``.
+        Called by the worker's ``finish_weight_update`` before finalize.
+        """
+        return
+
     def __init__(
         self,
         config: WeightTransferConfig,

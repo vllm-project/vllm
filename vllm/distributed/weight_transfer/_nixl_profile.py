@@ -41,8 +41,13 @@ class PhaseTimer:
     vs the un-instrumented path (the doc measured this overhead as negligible).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, stream=None) -> None:
         self.t: dict = defaultdict(float)
+        # When the process phase runs on a dedicated background stream (pull/
+        # process pipelining), sync only THAT stream at each phase exit. A global
+        # ``torch.cuda.synchronize()`` here would stall the RPC thread's
+        # concurrent next-group pull and defeat the pipeline.
+        self._stream = stream
 
     @contextmanager
     def phase(self, name: str):
@@ -52,7 +57,10 @@ class PhaseTimer:
         try:
             yield
         finally:
-            torch.cuda.synchronize()
+            if self._stream is not None:
+                self._stream.synchronize()
+            else:
+                torch.cuda.synchronize()
             self.t[name] += time.perf_counter() - t0
 
 
