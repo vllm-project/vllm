@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Transformers modeling backend fusion patterns and utilities.
+"""Fusion patterns for the Transformers modeling backend.
 
-Patterns are detected by tracing each module class once with `torch.fx` and
-matching on the dataflow graph. The rewrite is performed on the forward's
-*source* (AST), replacing only the matched call expressions: the rest of the
-forward stays live Python, so nothing is baked in. The rewritten forward is
-compiled once per class and bound to each fused instance in place.
+Each module class is traced once with `torch.fx` to detect a pattern from its
+dataflow, then its forward *source* is rewritten (AST) to replace only the
+matched calls; the rest stays live Python. The rewritten forward is compiled
+once per class and bound to each fused instance in place.
 """
 
 import ast
@@ -18,7 +17,7 @@ from abc import ABC, abstractmethod
 from collections import UserDict
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 from cachetools import cached
 from torch import fx, nn
@@ -33,7 +32,7 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
 )
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.utils import ShardId, maybe_prefix
 
 if TYPE_CHECKING:
     from vllm.config.model import ModelConfig
@@ -51,11 +50,10 @@ ACT_AND_MUL_NAMES = frozenset(_ACTIVATION_AND_MUL_REGISTRY.keys())
 
 
 def _infer_len(node: fx.Node) -> int | None:
-    """Infer a concrete length for a proxy's value by walking its node chain.
+    """Concrete length of a proxy's value, inferred from its node chain.
 
-    Allows tracing through shape unpacks and `*`-splats like
-    `(*input_shape, -1, head_dim)`, which precede the patterns in HF attention
-    forwards.
+    Lets tracing pass through the shape unpacks and `*`-splats (e.g.
+    `(*input_shape, -1, head_dim)`) that precede the patterns in HF attention.
     """
     # `x.shape` has the rank of `x`, when known
     if (
@@ -95,11 +93,10 @@ class _SizedProxy(fx.Proxy):
 class _AllLeafTracer(fx.Tracer):
     """Tracer that treats every submodule as a leaf.
 
-    Each child stays a single `call_module` node, so matching sees the module's
-    own forward structure (HF activation modules are not decomposed into e.g.
-    `sigmoid * x`). `iter` lets tracing proceed through the shape unpacks which
-    precede the patterns (see `_infer_len`); anything else untraceable just
-    ends the trace early, and the partial graph is matched (see `get_fuser`).
+    Each child stays one `call_module` node, so matching sees the module's own
+    forward structure (activations aren't decomposed into e.g. `sigmoid * x`).
+    `iter` traces through the leading shape unpacks (see `_infer_len`); anything
+    else untraceable ends the trace early and the partial graph is matched.
     """
 
     def is_leaf_module(self, m: nn.Module, module_qualified_name: str) -> bool:
@@ -157,10 +154,10 @@ def _compile_forward(funcdef: ast.FunctionDef, fn: Callable) -> Callable:
 
 
 def _single_self_call(funcdef: ast.FunctionDef, name: str) -> ast.Call:
-    """The unique single-argument `self.<name>(...)` call in `funcdef`.
+    """The unique `self.<name>(arg)` call in `funcdef`.
 
-    Raises unless `name` is referenced exactly once, as such a call, so that
-    the source rewrite agrees with the fx match.
+    Raises unless `name` appears exactly once, as such a call, so the source
+    rewrite agrees with the fx match.
     """
     uses = [
         node
@@ -231,18 +228,13 @@ def _is_linear(node: fx.Node, module: nn.Module) -> bool:
 
 @dataclass
 class BaseFuser(ABC):
-    """A per-module-class fusion plan and the steps to apply it.
+    """A per-class fusion plan and the steps to apply it.
 
-    `match` finds the pattern in a traced graph (used only as evidence of the
-    dataflow) and `update_forward` rewrites and compiles the forward's source;
-    both run once per class and the result is cached (see `get_fuser`). `fuse`
-    then applies the fuser to each instance in place (`validate`,
-    `prepare_quant_config`, `update_attrs`, bind `fused_forward`); the instance
-    keeps its class and every attribute not consumed by the fusion.
+    `match` and `update_forward` analyse the module *class* once (cached, see
+    `get_fuser`); `fuse` then builds the merged submodule and binds the compiled
+    forward on an instance in place, so it keeps its class and any attribute the
+    fusion does not consume.
     """
-
-    model_config: "ModelConfig"
-    quant_config: "QuantizationConfig"
 
     merged_name: ClassVar[str]
     """Attribute name of the merged module created by `update_attrs`."""
@@ -252,43 +244,65 @@ class BaseFuser(ABC):
 
     @property
     @abstractmethod
-    def orig_to_new_stacked(self) -> dict[str, tuple[str, Any]]:
-        """The mapping from original to new stacked modules to
-        be given to the model's WeightsMapper for this fuser."""
+    def shards(self) -> list[tuple[str, ShardId]]:
+        """Each projection's original name and its shard id in the merged module.
+
+        Source for both `orig_to_new_stacked` and `packed_modules_mapping`."""
+
+    def orig_to_new_stacked(self, prefix: str) -> dict[str, tuple[str, ShardId]]:
+        """`WeightsMapper.orig_to_new_stacked` entries for one fused instance.
+
+        Maps each checkpoint name to `(merged_name, shard_id)`, keyed by qualname
+        so only this exact layer is remapped, never a same-named projection
+        elsewhere (e.g. an unfused MoE expert's `gate_proj`)."""
+        merged = maybe_prefix(prefix, self.merged_name)
+        return {
+            maybe_prefix(prefix, name): (merged, shard) for name, shard in self.shards
+        }
+
+    @property
+    def packed_modules_mapping(self) -> dict[str, list[str]]:
+        """`{merged_name: [projection names]}` so quantization can unpack the
+        fused layer into its per-shard configs."""
+        return {self.merged_name: [name for name, _ in self.shards]}
 
     @classmethod
     @abstractmethod
-    def match(cls, graph: fx.Graph, module: nn.Module, **kwargs) -> "BaseFuser | None":
+    def match(cls, graph: fx.Graph, module: nn.Module) -> "BaseFuser | None":
         """Match the pattern in `graph`, returning a fuser if found."""
 
     @abstractmethod
     def update_forward(self, module: nn.Module) -> None:
-        """Rewrite `type(module)`'s forward source and compile it.
+        """Rewrite and compile `type(module)`'s forward source.
 
-        Raises if the source does not admit the rewrite (fusion is skipped).
+        Raises if the source does not admit the rewrite (fusion is then skipped).
         """
 
     @abstractmethod
-    def validate(self, module: nn.Module) -> bool:
-        """Whether this fuser can be applied to `module`."""
+    def validate(self, module: nn.Module, model_config: "ModelConfig") -> bool:
+        """Whether this fuser can be applied to this `module` instance."""
 
     @abstractmethod
     def update_attrs(
         self,
         module: nn.Module,
         prefix: str,
+        model_config: "ModelConfig",
+        quant_config: "QuantizationConfig",
     ) -> None:
-        """Update `module`'s submodules to match the rewritten forward."""
+        """Replace `module`'s submodules with the merged module."""
 
     def fuse(
         self,
         module: nn.Module,
         prefix: str,
+        model_config: "ModelConfig",
+        quant_config: "QuantizationConfig",
     ) -> nn.Module:
-        """Apply this fuser to `module` in place, returning it."""
-        if not self.validate(module):
-            return module
-        self.update_attrs(module, prefix)
+        """Fuse an already-validated `module` in place (see `Fusers.__getitem__`).
+
+        Builds the merged submodule and binds the compiled forward."""
+        self.update_attrs(module, prefix, model_config, quant_config)
         module.forward = types.MethodType(self.fused_forward, module)
         return module
 
@@ -303,11 +317,8 @@ class GLUFuser(BaseFuser):
     merged_name: ClassVar[str] = "gate_up_proj"
 
     @property
-    def orig_to_new_stacked(self) -> dict[str, tuple[str, int]]:
-        return {
-            f".{self.gate_name}": (f".{self.merged_name}", 0),
-            f".{self.up_name}": (f".{self.merged_name}", 1),
-        }
+    def shards(self) -> list[tuple[str, ShardId]]:
+        return [(self.gate_name, 0), (self.up_name, 1)]
 
     @classmethod
     def _is_act_of_gate(cls, node: fx.Node, module: nn.Module) -> bool:
@@ -366,7 +377,7 @@ class GLUFuser(BaseFuser):
         raise ValueError(f"No AndMul equivalent for {type(act)}")
 
     @classmethod
-    def match(cls, graph: fx.Graph, module: nn.Module, **kwargs) -> "GLUFuser | None":
+    def match(cls, graph: fx.Graph, module: nn.Module) -> "GLUFuser | None":
         if (glu_nodes := cls._get_glu_nodes(graph, module)) is None:
             return None
         act_node, gate_node, up_node = glu_nodes
@@ -377,7 +388,7 @@ class GLUFuser(BaseFuser):
         if gate.in_features == up.in_features and (gate.bias is None) == (
             up.bias is None
         ):
-            return cls(act_node.target, gate_node.target, up_node.target, **kwargs)
+            return cls(act_node.target, gate_node.target, up_node.target)
         return None
 
     def update_forward(self, module: nn.Module) -> None:
@@ -406,7 +417,7 @@ class GLUFuser(BaseFuser):
         _replace_expr(funcdef, muls[0], act_call)
         self.fused_forward = _compile_forward(funcdef, fn)
 
-    def validate(self, module: nn.Module) -> bool:
+    def validate(self, module: nn.Module, model_config: "ModelConfig") -> bool:
         act = module.get_submodule(self.act_name)
         if self._get_act_and_mul_name(act) is None:
             logger.debug("No AndMul equivalent for %s; skipping fusion", type(act))
@@ -417,6 +428,8 @@ class GLUFuser(BaseFuser):
         self,
         module: nn.Module,
         prefix: str,
+        model_config: "ModelConfig",
+        quant_config: "QuantizationConfig",
     ) -> None:
         act_fn = self._get_act_and_mul(module.get_submodule(self.act_name))
         gate = module.get_submodule(self.gate_name)
@@ -425,7 +438,7 @@ class GLUFuser(BaseFuser):
             input_size=gate.in_features,
             output_sizes=[gate.out_features, up.out_features],
             bias=gate.bias is not None,
-            quant_config=self.quant_config,
+            quant_config=quant_config,
             prefix=maybe_prefix(prefix, self.merged_name),
             return_bias=False,
         )
@@ -440,7 +453,7 @@ class GLUFuser(BaseFuser):
         )
         setattr(module, self.merged_name, merged)
         setattr(module, self.act_name, act_fn)
-        # Drop the consumed projections so their (meta) params are not expected.
+        # Drop the consumed submodules so their (meta) params are not expected.
         delattr(module, self.gate_name)
         delattr(module, self.up_name)
 
@@ -455,12 +468,8 @@ class QKVFuser(BaseFuser):
     merged_name: ClassVar[str] = "qkv_proj"
 
     @property
-    def orig_to_new_stacked(self) -> dict[str, tuple[str, str]]:
-        return {
-            f".{self.q_name}": (f".{self.merged_name}", "q"),
-            f".{self.k_name}": (f".{self.merged_name}", "k"),
-            f".{self.v_name}": (f".{self.merged_name}", "v"),
-        }
+    def shards(self) -> list[tuple[str, ShardId]]:
+        return [(self.q_name, "q"), (self.k_name, "k"), (self.v_name, "v")]
 
     @classmethod
     def _get_qkv_nodes(
@@ -494,14 +503,11 @@ class QKVFuser(BaseFuser):
         return q_node, k_node, v_node
 
     @classmethod
-    def match(cls, graph: fx.Graph, module: nn.Module, **kwargs) -> "QKVFuser | None":
+    def match(cls, graph: fx.Graph, module: nn.Module) -> "QKVFuser | None":
         if (qkv_nodes := cls._get_qkv_nodes(graph, module)) is None:
             return None
         q, k, v = qkv_nodes
-        fuser = cls(q_name=q.target, k_name=k.target, v_name=v.target, **kwargs)
-        if not fuser.validate(module):
-            return None
-        return fuser
+        return cls(q_name=q.target, k_name=k.target, v_name=v.target)
 
     def update_forward(self, module: nn.Module) -> None:
         """Replace `q(x), k(x), v(x)` with `qkv(x).split(sizes, -1)` in source."""
@@ -558,18 +564,18 @@ class QKVFuser(BaseFuser):
             _replace_expr(funcdef, call, ast.Name(id=temp, ctx=ast.Load()))
         self.fused_forward = _compile_forward(funcdef, fn)
 
-    def validate(self, module: nn.Module) -> bool:
+    def validate(self, module: nn.Module, model_config: "ModelConfig") -> bool:
         """Shapes must be compatible for a single merged, head-sharded GEMM."""
         q = module.get_submodule(self.q_name)
         k = module.get_submodule(self.k_name)
         v = module.get_submodule(self.v_name)
-        head_size = self.model_config.get_head_size()
+        head_size = model_config.get_head_size()
         compatible = (
             q.in_features == k.in_features == v.in_features
             and len({proj.bias is None for proj in (q, k, v)}) == 1
             and k.out_features == v.out_features
-            and (head_size is None or q.out_features % head_size == 0)
-            and (head_size is None or k.out_features % head_size == 0)
+            and q.out_features % head_size == 0
+            and k.out_features % head_size == 0
         )
         if not compatible:
             logger.debug("%s is not compatible with QKV fusion", type(module))
@@ -579,8 +585,10 @@ class QKVFuser(BaseFuser):
         self,
         module: nn.Module,
         prefix: str,
+        model_config: "ModelConfig",
+        quant_config: "QuantizationConfig",
     ) -> None:
-        head_size = self.model_config.get_head_size()
+        head_size = model_config.get_head_size()
         q = module.get_submodule(self.q_name)
         k = module.get_submodule(self.k_name)
         merged = QKVParallelLinear(
@@ -589,7 +597,7 @@ class QKVFuser(BaseFuser):
             total_num_heads=q.out_features // head_size,
             total_num_kv_heads=k.out_features // head_size,
             bias=q.bias is not None,
-            quant_config=self.quant_config,
+            quant_config=quant_config,
             prefix=maybe_prefix(prefix, self.merged_name),
             return_bias=False,
         )
@@ -612,28 +620,14 @@ class QKVFuser(BaseFuser):
             merged.num_kv_heads * merged.v_head_size,
         ]
         setattr(module, self.merged_name, merged)
-        # Drop the consumed projections so their (meta) params are not expected.
+        # Drop the consumed submodules so their (meta) params are not expected.
         for name in (self.q_name, self.k_name, self.v_name):
             delattr(module, name)
 
-    def fuse(
-        self,
-        module: nn.Module,
-        prefix: str,
-    ) -> nn.Module:
-        """Apply this fuser to `module` in place, returning it."""
-        if not self.validate(module):
-            return module
-        self.update_attrs(module, prefix)
-        module.forward = types.MethodType(self.fused_forward, module)
-        return module
-
 
 @cached(cache={}, key=type)
-def get_fuser(module: nn.Module, **kwargs) -> BaseFuser | None:
-    """Trace `type(module)` once and return its fuser (cached per module class).
-
-    Returns `None` if the class matches no fusable pattern."""
+def get_fuser(module: nn.Module) -> BaseFuser | None:
+    """The fuser for `type(module)` (cached per class), or `None` if no match."""
     # Currently, all patterns require at least 2 linears, this is a cheap early skip
     if sum(isinstance(c, nn.Linear) for c in module.children()) < 2:
         return None
@@ -648,7 +642,7 @@ def get_fuser(module: nn.Module, **kwargs) -> BaseFuser | None:
         if (graph := getattr(tracer, "graph", None)) is None:
             return None
     for fuser_cls in (GLUFuser, QKVFuser):
-        if (fuser := fuser_cls.match(graph, module, **kwargs)) is not None:
+        if (fuser := fuser_cls.match(graph, module)) is not None:
             try:
                 fuser.update_forward(module)
             except Exception as exc:
@@ -662,10 +656,12 @@ def get_fuser(module: nn.Module, **kwargs) -> BaseFuser | None:
 class Fusers(UserDict):
     """Mapping from module class to fuser, for all fusable classes in a model."""
 
-    def __init__(self, model: nn.Module, **kwargs):
-        super().__init__({type(m): get_fuser(m, **kwargs) for m in model.modules()})
+    def __init__(self, model: nn.Module, model_config: "ModelConfig"):
+        self.model_config = model_config
+        super().__init__({type(m): get_fuser(m) for m in model.modules()})
 
     def __getitem__(self, m: nn.Module) -> BaseFuser | None:
-        if (fuser := self.data.get(type(m))) is not None and fuser.validate(m):
+        fuser = self.data.get(type(m))
+        if fuser is not None and fuser.validate(m, self.model_config):
             return fuser
         return None

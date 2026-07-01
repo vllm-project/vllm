@@ -351,9 +351,9 @@ def test_weight_mappings_are_scoped_to_fused_prefixes():
 
     mapper = WeightsMapper()
     for prefix in ("model.layers.0.mlp", "model.layers.1.mlp"):
-        mapper.orig_to_new_substr.update(glu_fuser.weight_mappings(prefix))
-    mapper.orig_to_new_substr.update(
-        qkv_fuser.weight_mappings("model.layers.0.self_attn")
+        mapper.orig_to_new_stacked.update(glu_fuser.orig_to_new_stacked(prefix))
+    mapper.orig_to_new_stacked.update(
+        qkv_fuser.orig_to_new_stacked("model.layers.0.self_attn")
     )
 
     names = [
@@ -367,33 +367,44 @@ def test_weight_mappings_are_scoped_to_fused_prefixes():
         "model.layers.2.mlp.experts.0.gate_proj.weight",
         "model.layers.1.self_attn.q_proj.weight",
     ]
-    mapped = mapper.apply_list(names)
-    assert mapped == [
-        "model.layers.0.mlp.gate_up_proj.0.weight",
-        "model.layers.0.mlp.gate_up_proj.1.weight",
-        "model.layers.1.mlp.gate_up_proj.0.weight",
-        "model.layers.0.self_attn.qkv_proj.q.weight",
-        "model.layers.0.self_attn.qkv_proj.k.weight",
-        "model.layers.0.self_attn.qkv_proj.v.weight",
+    # `apply` rewrites the name and stamps the shard id onto each tensor.
+    weights = [(name, torch.empty(0)) for name in names]
+    mapped = list(mapper.apply(weights))
+    mapped_names = [name for name, _ in mapped]
+    shard_ids = [getattr(data, "shard_id", None) for _, data in mapped]
+
+    assert mapped_names == [
+        "model.layers.0.mlp.gate_up_proj.weight",
+        "model.layers.0.mlp.gate_up_proj.weight",
+        "model.layers.1.mlp.gate_up_proj.weight",
+        "model.layers.0.self_attn.qkv_proj.weight",
+        "model.layers.0.self_attn.qkv_proj.weight",
+        "model.layers.0.self_attn.qkv_proj.weight",
+        # Only the exact fused layers are remapped; everything else is untouched.
         "model.layers.2.mlp.experts.0.gate_proj.weight",
         "model.layers.1.self_attn.q_proj.weight",
     ]
-    # The mappings must also be visible to the quantization machinery,
-    # which derives packed modules from substr (not regex) entries.
-    assert mapper.get_packed_modules_mapping() == {
-        "gate_up_proj": ["gate_up_proj.0", "gate_up_proj.1"],
-        "qkv_proj": ["qkv_proj.q", "qkv_proj.k", "qkv_proj.v"],
+    assert shard_ids == [0, 1, 0, "q", "k", "v", None, None]
+
+    # The fused layers are exposed to the quantization machinery via their
+    # original constituent projection names (what the checkpoint stores).
+    assert glu_fuser.packed_modules_mapping == {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
+    assert qkv_fuser.packed_modules_mapping == {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
     }
 
 
 @pytest.mark.parametrize("cls", [NotAnMLP, NotAnActGLUMLP])
-def test_unfusable_modules_are_not_fused(cls):
+def test_unfusable_modules_are_not_fused(cls, default_vllm_config):
     with torch.device("meta"):
         module = cls()
     fuser = get_fuser(module)
     # Either no pattern matches the class, or this instance fails validation
     # (`recursive_replace` gates fusion and its weight mappings on `validate`)
-    assert fuser is None or not fuser.validate(module)
+    model_config = default_vllm_config.model_config
+    assert fuser is None or not fuser.validate(module, model_config)
 
 
 def test_act_and_mul_derived_from_module(default_vllm_config):

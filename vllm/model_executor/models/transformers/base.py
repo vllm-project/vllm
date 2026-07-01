@@ -142,6 +142,9 @@ class Base(
         """Ignore unexpected weights whose qualname starts with these prefixes."""
         self.ignore_unexpected_suffixes: list[str] = []
         """Ignore unexpected weights whose qualname ends with these suffixes."""
+        self.packed_modules_mapping: dict[str, list[str]] = {}
+        """Fused module -> constituent projections, populated by `recursive_replace`
+        for the quantization machinery and loaders (e.g. bitsandbytes)."""
 
         # Attrs for Eagle3 (see self.set_aux_hidden_state_layers)
         self._target_class: type[nn.Module] = nn.Module
@@ -445,18 +448,18 @@ class Base(
 
         # Prefix the patterns because we always start from `self.model`
         tp_plan = {maybe_prefix("model", k): v for k, v in tp_plan.items()}
-        # Get possible fusers for this model (cached per class, so this is cheap)
-        kwargs = dict(model_config=self.model_config, quant_config=self.quant_config)
-        fusers = Fusers(self.model, **kwargs)
-        orig_to_new_stacked = self.hf_to_vllm_mapper.orig_to_new_stacked
+        # Detect fusable patterns once per module class (cached, so this is cheap)
+        fusers = Fusers(self.model, self.model_config)
 
-        def update_fuser_mappings(fuser: BaseFuser):
-            # Only update and apply fuser mappings once per fuser
-            if fuser.orig_to_new_stacked.items() <= orig_to_new_stacked.items():
-                return
-            # Fuser weight mappings must be updated before fusion
-            orig_to_new_stacked.update(fuser.orig_to_new_stacked)
-            self._maybe_apply_model_mapping()
+        def register_fusion(fuser: BaseFuser, prefix: str):
+            """Register a fused layer's mappings just before it is built."""
+            orig_to_new_stacked = fuser.orig_to_new_stacked(prefix)
+            self.hf_to_vllm_mapper.orig_to_new_stacked.update(orig_to_new_stacked)
+
+            packed_modules_mapping = fuser.packed_modules_mapping
+            self.packed_modules_mapping.update(packed_modules_mapping)
+            if self.quant_config is not None:
+                self.quant_config.packed_modules_mapping.update(packed_modules_mapping)
 
         def _recursive_replace(module: nn.Module, prefix: str):
             for child_name, child_module in module.named_children():
@@ -500,8 +503,10 @@ class Base(
                         child_module, self.text_config.hidden_size
                     )
                 elif (fuser := fusers[child_module]) is not None:
-                    update_fuser_mappings(fuser)
-                    new_module = fuser.fuse(child_module, qual_name)
+                    register_fusion(fuser, qual_name)
+                    new_module = fuser.fuse(
+                        child_module, qual_name, self.model_config, self.quant_config
+                    )
                     _recursive_replace(new_module, prefix=qual_name)
                 else:
                     _recursive_replace(child_module, prefix=qual_name)
