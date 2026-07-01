@@ -66,13 +66,13 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     extract_function_from_recipient,
     is_function_recipient,
 )
-from vllm.entrypoints.openai.responses.context import StreamingHarmonyContext
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseReasoningPartAddedEvent,
     ResponseReasoningPartDoneEvent,
     StreamingResponsesResponse,
 )
 from vllm.outputs import CompletionOutput
+from vllm.parser.harmony import Segment
 from vllm.utils import random_uuid
 
 TOOL_NAME_TO_MCP_SERVER_LABEL: Final[dict[str, str]] = {
@@ -110,6 +110,7 @@ class StreamingState:
     def reset_for_new_item(self) -> None:
         """Reset state when expecting a new output item."""
         self.current_output_index += 1
+        self.current_content_index = -1
         self.sent_output_item_added = False
         self.is_first_function_call_delta = False
         self.current_call_id = ""
@@ -558,20 +559,21 @@ def emit_mcp_completion_events(
 
 
 def emit_content_delta_events(
-    ctx: StreamingHarmonyContext,
+    segment: Segment,
     state: StreamingState,
+    function_tool_names: frozenset[str] | None = None,
 ) -> list[StreamingResponsesResponse]:
     """Emit events for content delta streaming based on channel type.
 
     This is a Harmony-specific dispatcher that extracts values from the
-    Harmony context and delegates to shared leaf helpers.
+    latest append segment and delegates to shared leaf helpers.
     """
-    delta = ctx.last_content_delta
+    delta = segment.delta
     if not delta:
         return []
 
-    channel = ctx.parser.current_channel
-    recipient = ctx.parser.current_recipient
+    channel = segment.channel
+    recipient = segment.recipient
 
     if channel in ("final", "commentary") and recipient is None:
         # Preambles (commentary with no recipient) and final messages
@@ -580,7 +582,7 @@ def emit_content_delta_events(
     elif channel == "analysis" and recipient is None:
         return emit_reasoning_delta_events(delta, state)
     elif recipient is not None:
-        fn_names = ctx.function_tool_names
+        fn_names = function_tool_names
         if is_function_recipient(recipient, fn_names):
             function_name = extract_function_from_recipient(recipient)
             return emit_function_call_delta_events(delta, function_name, state)
@@ -604,6 +606,12 @@ def emit_previous_item_done_events(
     This is a Harmony-specific dispatcher that extracts values from the
     Harmony parser's message object and delegates to shared leaf helpers.
     """
+    if not state.sent_output_item_added and not state.is_first_function_call_delta:
+        # Suppress done events for items had no delta and thus had no
+        # added/in-progress lifecycle events. This is a bug.
+        # TODO: Ensure added/in-progress events are emitted for zero-delta items.
+        return []
+
     text = previous_item.content[0].text
     if previous_item.recipient is not None:
         # Deal with tool call
@@ -769,47 +777,22 @@ def emit_code_interpreter_completion_events(
 
 
 def emit_tool_action_events(
-    ctx: StreamingHarmonyContext,
+    previous_item: HarmonyMessage,
     state: StreamingState,
     tool_server: ToolServer | None,
 ) -> list[StreamingResponsesResponse]:
-    """Emit events for tool action turn."""
-    if not ctx.is_assistant_action_turn() or len(ctx.parser.messages) == 0:
-        return []
-
-    events: list[StreamingResponsesResponse] = []
-    previous_item = ctx.parser.messages[-1]
-
+    """Emit events for a completed assistant action turn."""
     # Handle browser tool
     if (
-        tool_server is not None
-        and tool_server.has_tool("browser")
+        previous_item.author.role == "assistant"
         and previous_item.recipient is not None
         and previous_item.recipient.startswith("browser.")
+        and tool_server is not None
+        and tool_server.has_tool("browser")
     ):
-        events.extend(emit_browser_tool_events(previous_item, state))
+        return emit_browser_tool_events(previous_item, state)
 
-    # Handle tool completion
-    if (
-        tool_server is not None
-        and previous_item.recipient is not None
-        and state.current_item_id is not None
-        and state.sent_output_item_added
-    ):
-        recipient = previous_item.recipient
-        fn_names = ctx.function_tool_names
-        if recipient == "python":
-            events.extend(emit_code_interpreter_completion_events(previous_item, state))
-        elif recipient.startswith("mcp.") or is_mcp_tool_by_namespace(
-            recipient, fn_names
-        ):
-            events.extend(
-                emit_mcp_completion_events(
-                    recipient, previous_item.content[0].text, state
-                )
-            )
-
-    return events
+    return []
 
 
 # =====================================================================
