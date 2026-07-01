@@ -9,8 +9,6 @@ steps:
   - label: "AMD: :docker: refresh ROCm base"
     key: refresh-rocm-base-amd
     depends_on: []
-    source_file_dependencies:
-      - docker/Dockerfile.rocm_base
     device: amd_cpu
     no_plugin: true
     commands:
@@ -79,8 +77,6 @@ steps:
     soft_fail: false
     depends_on:
       - image-build-amd
-    source_file_dependencies:
-      - docker/Dockerfile.rocm_base
     device: amd_cpu
     no_plugin: true
     commands:
