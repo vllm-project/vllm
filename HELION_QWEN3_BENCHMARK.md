@@ -56,42 +56,35 @@ env $ENV VLLM_USE_HELION_KERNELS=1 vllm bench latency $COMMON
 env $ENV VLLM_USE_HELION_KERNELS=0 vllm bench latency $COMMON
 ```
 
-## Results (2×H100, Qwen3-1.7B-FP8)
+## Benchmarking methodology (IMPORTANT)
 
-input 256 / output 128 / batch 16, warmup 10 / iters 30.
+All numbers below are **sole-process, sequential, same GPU (gpu0), nothing else
+running**. On this shared 2×H100 node, running comparisons in parallel (gpu0 +
+gpu1) or alongside other GPU work (downloads, builds, profilers) produces large
+**contention artifacts** — an earlier draft reported a spurious "2.8× Helion
+slowdown" that was entirely GPU contention and vanished under clean measurement.
+Never benchmark in parallel here. input 256 / output 128 / batch 16, warmup 5 /
+iters 20.
 
-### Helion vs native, both on the `VLLM_USE_DEEP_GEMM=0` path
+## Results (2×H100, Qwen3-1.7B-FP8, block-fp8)
 
-| metric | Helion ON | native OFF | delta |
+| configuration | P50 | Avg | note |
 |---|---|---|---|
-| P50 latency | **0.444 s** | 0.465 s | **−4.5%** |
-| P90 latency | **0.451 s** | 0.469 s | **−3.8%** |
+| **DeepGEMM ON (default)** | **0.363 s** | 0.363 s | Helion not used on this path |
+| DeepGEMM OFF + Helion | 0.448 s | 0.515 s | P99 1.54 s = one-time JIT spike |
+| DeepGEMM OFF + native | 0.466 s | 0.463 s | |
 
-Confirmed active in the ON run: `HelionKernelSwapPass` swaps the ops and the
-`_helion_rms_norm_per_block_quant` / `_helion_per_token_group_fp8_quant` Triton
-kernels execute; the pass is absent in the OFF run.
-
-### vs the default DeepGEMM path — DeepGEMM wins
-
-| configuration | P50 latency |
-|---|---|
-| **DeepGEMM ON (default)** | **0.368 s** |
-| Helion, DeepGEMM off | 0.444 s |
-| native, DeepGEMM off | 0.465 s |
-
-**The default DeepGEMM path is ~17% faster than Helion-with-DeepGEMM-off.** For
-Qwen3 block-fp8, DeepGEMM fuses the activation quant *into* the GEMM (eliminating
-the standalone quant kernel entirely) and uses a highly tuned fp8 GEMM. Helion only
-accelerates the separate norm/quant kernels, so disabling DeepGEMM to reach the
-Helion path is a **net loss**. Helion would only be a win where quant is *not*
-fused into the GEMM (e.g. per-token dynamic fp8 with a GEMM that consumes
-pre-quantized activations, or fused rms_norm+dynamic-per-token-quant paths).
-
-Notes:
-- The Helion-vs-native ~4% gain is modest because norm+quant is a small share of
-  total latency (GEMM + attention dominate).
-- Helion Triton kernels JIT lazily per shape → a one-time P99 latency spike unless
-  warmup covers every shape; amortized under sustained serving.
+Reading it:
+- **The default DeepGEMM path (0.363 s) is fastest** and does not use Helion at
+  all: for block-fp8, DeepGEMM fuses the activation quant *into* the GEMM, so the
+  standalone `_C` quant ops never exist and `HelionKernelSwapPass` swaps 0.
+- On the (slower) `VLLM_USE_DEEP_GEMM=0` path where Helion does engage
+  (`_helion_rms_norm_per_block_quant` + `_helion_per_token_group_fp8_quant`),
+  **Helion is ~4% faster than native at P50 (0.448 vs 0.466)** — but its **Avg is
+  worse (0.515)** because the Helion Triton kernels JIT lazily and cause a one-time
+  P99 spike (1.54 s). A warmup pass that pre-JITs the kernels would remove that.
+- Net: on block-fp8 the default DeepGEMM path already wins; forcing the
+  DeepGEMM-off path just to use Helion is not worthwhile.
 
 ## RedHatAI/Qwen3-1.7B-FP8-dynamic (compressed-tensors W8A8)
 
@@ -110,8 +103,19 @@ dynamic** fp8 activations, **no** `weight_block_size`. So:
   `--compilation-config '{"mode":3,"custom_ops":["+quant_fp8"],"pass_config":{"fuse_norm_quant":true,"fuse_act_quant":true}}'`
   — then it swaps `rms_norm_dynamic_per_token_quant` +
   `dynamic_per_token_scaled_fp8_quant` (the per-token ops Helion was designed for)
-  and `_helion_*` kernels execute. But this is a large net loss vs the default —
-  see "Forced-fusion Helion vs default" below.
+  and `_helion_*` kernels execute. Clean numbers (sole-process):
+
+  | configuration | P50 | Avg |
+  |---|---|---|
+  | **default (fusion off, CUTLASS)** | **0.349 s** | 0.349 s |
+  | forced-fusion + Helion | 0.360 s | 0.360 s |
+  | forced-fusion + native | 0.365 s | 0.365 s |
+
+  So forced-fusion + Helion (0.360 s) is **marginally faster than forced-fusion +
+  native (0.365 s)** and only slightly slower than the default fusion-off path
+  (0.349 s, the fusion overhead). It is **not** a large loss — the earlier
+  "0.976 s / 2.8× slower" was a GPU-contention artifact (see methodology). No JIT
+  spike here (P99 0.369 s).
 
 ## Qwen3-8B-FP8 and Qwen3-32B-FP8
 
@@ -135,21 +139,23 @@ by the rest of the forward pass.
 (Measured under CUDA-graph replay — eager mode shows a flat ~30 µs custom-op Python
 dispatch floor that cudagraphs/compile remove, so do not benchmark these in eager.)
 
-### Forced-fusion Helion vs default (RedHatAI FP8-dynamic) — Helion loses badly
+## Overall conclusion
 
-P50, matched config (input256/out128/bs16, warmup10/iters30):
-
-| configuration | P50 latency |
-|---|---|
-| **default (fusion off, CUTLASS)** | **0.348 s** |
-| fusion on + native | 0.363 s |
-| fusion on + Helion | 0.976 s (~2.8x slower) |
-
-Forcing fusion to reach Helion is a large **net loss**. The Helion kernels execute
-but the run is consistently ~2.8x slower (P50 > Avg, i.e. steady, not JIT spikes) —
-the Helion custom ops appear not to be captured into the full CUDA graph on this
-path, so they pay the ~30 us/call custom-op dispatch overhead per layer per step.
-(In isolated CUDA-graph capture the same kernels were 1.2-1.4x *faster*, so this is
-a graph-capture/integration cost, not the kernel.)
+- The Helion integration is **correct**: ops are cudagraph-captured, kernels run,
+  and in isolation they are 1.2–4× faster than native.
+- End-to-end on these Qwen3 FP8 variants, Helion is **roughly neutral** — never a
+  clear win, never a real regression:
+  - block-fp8: default DeepGEMM (0.363 s) wins and doesn't use Helion; on the
+    DeepGEMM-off path Helion is ~4% faster than native at P50 but its Avg is hurt
+    by JIT spikes.
+  - W8A8-dynamic: default fusion-off CUTLASS (0.349 s) is fastest; forcing fusion
+    to reach Helion (0.360 s) ≈ forced-fusion native (0.365 s).
+- The earlier "8.85× nvjet GEMM regression / 2.8× slowdown / GPU idle / broken
+  run-ahead" narrative was a **GPU-contention measurement artifact** from running
+  benchmarks in parallel; it does not reproduce under sole-process measurement.
+  ncu confirmed all kernels (including the bf16 lm_head nvjet GEMM) are healthy.
+- Lowest-hanging improvement: a **warmup pass** to pre-JIT the Helion Triton
+  kernels before cudagraph capture, removing the one-time P99 spikes seen on the
+  block-fp8 DeepGEMM-off path.
 
 **Overall:** Helion is not a net win for any Qwen3-1.7B FP8 variant tested.
