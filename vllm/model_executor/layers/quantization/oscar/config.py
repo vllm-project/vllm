@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""OSCAR configuration."""
+"""OSCAR INT2 KV-cache quantization config."""
 
 from __future__ import annotations
 
@@ -22,14 +22,10 @@ if TYPE_CHECKING:
 
 @dataclass
 class OscarConfig(QuantizationConfig):
-    """Configuration for OSCAR INT2 KV-cache quantization.
+    """Config for OSCAR INT2 KV-cache quantization.
 
-    Applies per-layer orthogonal rotation followed by clipped INT2
-    scalar quantization for both keys and values.
-
-    Expected environment variables:
-      - VLLM_OSCAR_K_CLIP_RATIO: Clip ratio for K (default: 0.96)
-      - VLLM_OSCAR_V_CLIP_RATIO: Clip ratio for V (default: 0.92)
+    Per-layer orthogonal rotation + clipped INT2 scalar quantization
+    for both keys and values.
     """
 
     head_dim: int = 128
@@ -39,26 +35,16 @@ class OscarConfig(QuantizationConfig):
 
     @property
     def key_packed_size(self) -> int:
-        """Packed bytes for a single KEY vector.
-
-        INT2 quant: ceil(head_dim * 2 / 8) bytes.
-        + 4 bytes for scale (fp16) and zero (fp16).
-        Aligned to 16 bytes for safe vectorized access.
-        """
-        data_bytes = math.ceil(self.head_dim * 2 / 8)
-        raw_size = data_bytes + 4
-        return (raw_size + 15) // 16 * 16
+        raw = math.ceil(self.head_dim * 2 / 8) + 4
+        return (raw + 15) // 16 * 16
 
     @property
     def value_packed_size(self) -> int:
-        """Packed bytes for a single VALUE vector."""
-        data_bytes = math.ceil(self.head_dim * 2 / 8)
-        raw_size = data_bytes + 4
-        return (raw_size + 15) // 16 * 16
+        raw = math.ceil(self.head_dim * 2 / 8) + 4
+        return (raw + 15) // 16 * 16
 
     @property
     def slot_size(self) -> int:
-        """Total packed bytes per head per position."""
         return self.key_packed_size + self.value_packed_size
 
     @property
@@ -74,14 +60,9 @@ class OscarConfig(QuantizationConfig):
         return float(os.environ.get("VLLM_OSCAR_V_CLIP_RATIO", "0.92"))
 
     @staticmethod
-    def from_cache_dtype(
-        cache_dtype: str, head_dim: int
-    ) -> OscarConfig:
+    def from_cache_dtype(cache_dtype: str, head_dim: int) -> OscarConfig:
         if cache_dtype != "oscar_int2":
-            raise ValueError(
-                f"Unknown OSCAR cache dtype: {cache_dtype!r}. "
-                "Only 'oscar_int2' is currently supported."
-            )
+            raise ValueError(f"Unknown OSCAR cache dtype: {cache_dtype!r}")
         return OscarConfig(head_dim=head_dim)
 
     def get_name(self) -> QuantizationMethods:
