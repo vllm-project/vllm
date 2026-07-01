@@ -2534,11 +2534,11 @@ steps:
   - tests/utils.py
   commands:
   - pytest -v -s tests/distributed/test_context_parallel.py
-  - pytest -v -s tests/v1/distributed/test_dbo.py
   - pytest -v -s tests/distributed/test_rocm_aiter_custom_all_reduce.py
   - pytest -v -s tests/v1/e2e/general/test_rocm_aiter_custom_ar.py
   - pytest -v -s tests/distributed/test_rocm_quick_reduce.py
   - pytest -v -s tests/distributed/test_quick_all_reduce.py
+  - pytest -v -s tests/v1/distributed/test_dbo.py
 
 #--------------------------------------------------------  mi355 · entrypoints  --------------------------------------------------------#
 
