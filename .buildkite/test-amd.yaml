@@ -1374,8 +1374,6 @@ steps:
   - tests/lora
   - vllm/platforms/rocm.py
   commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   - pytest -v -s -x lora/test_chatglm3_tp.py
   - pytest -v -s -x lora/test_llama_tp.py
   - pytest -v -s -x lora/test_qwen3_with_multi_loras.py
