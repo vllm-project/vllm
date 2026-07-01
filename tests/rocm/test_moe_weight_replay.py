@@ -71,14 +71,6 @@ def _set_backend_env(monkeypatch: pytest.MonkeyPatch, backend: str) -> None:
     if backend == "aiter":
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
         monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
-        # Keep this test focused on MoE weight replay. Other AITER subpaths
-        # such as GDN/MHA are unrelated to the storage update being tested.
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER_MHA", "0")
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER_RMSNORM", "0")
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER_LINEAR", "0")
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER_MLA", "0")
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER_PAGED_ATTN", "0")
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION", "0")
     elif backend == "triton":
         monkeypatch.delenv("VLLM_ROCM_USE_AITER", raising=False)
         monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "0")
