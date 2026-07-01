@@ -39,9 +39,7 @@ def _dspark_qkv_postprocess_kernel(
     pair_idx = rope_offsets // 2
     pair_base = nope_dim + pair_idx * 2
     even = tl.load(q_ptr + q_base + pair_base, mask=mask, other=0.0).to(tl.float32)
-    odd = tl.load(q_ptr + q_base + pair_base + 1, mask=mask, other=0.0).to(
-        tl.float32
-    )
+    odd = tl.load(q_ptr + q_base + pair_base + 1, mask=mask, other=0.0).to(tl.float32)
     even = (even * rrms).to(tl.bfloat16).to(tl.float32)
     odd = (odd * rrms).to(tl.bfloat16).to(tl.float32)
     cos = tl.load(
@@ -366,7 +364,9 @@ def dspark_context_kv_store(
     if cache.dim() != 3:
         raise ValueError(f"cache must be [batch, window, dim], got {cache.shape}")
     if kv.shape[1] != cache.shape[2]:
-        raise ValueError(f"kv/cache head-dim mismatch: kv={kv.shape}, cache={cache.shape}")
+        raise ValueError(
+            f"kv/cache head-dim mismatch: kv={kv.shape}, cache={cache.shape}"
+        )
     if kv.stride(-1) != 1 or cache.stride(-1) != 1:
         raise ValueError("kv and cache must have contiguous last dimensions")
     if kv.dtype is not torch.bfloat16 or cache.dtype is not torch.bfloat16:
@@ -378,9 +378,7 @@ def dspark_context_kv_store(
     rope_dim = cos_sin_cache.shape[-1]
     block_d = triton.next_power_of_2(head_dim)
     rejected = (
-        num_rejected_tokens
-        if num_rejected_tokens is not None
-        else query_start_loc
+        num_rejected_tokens if num_rejected_tokens is not None else query_start_loc
     )
     _dspark_context_kv_store_kernel[(num_tokens,)](
         kv,
@@ -417,35 +415,55 @@ def _dspark_attention_kernel(
     n_heads: tl.constexpr,
     head_dim: tl.constexpr,
     window_size: tl.constexpr,
-    block_n: tl.constexpr,
-    block_d: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_D: tl.constexpr,
 ):
-    token_pid = tl.program_id(0)
-    head_pid = tl.program_id(1)
-    batch_idx = token_pid // block_size
-    draft_idx = token_pid - batch_idx * block_size
+    """KV-shared tensor-core DSpark draft attention.
 
-    offs_d = tl.arange(0, block_d)
+    DSpark draft attention is head-less on the KV side: the main-window KV and
+    the draft-block KV are shared across all heads, so every (draft-token, head)
+    query for a batch element attends the SAME [window + block, head_dim] KV
+    under the SAME validity mask. A one-program-per-(token, head) launch would
+    therefore re-read that KV block_size*n_heads times per batch element. This
+    kernel instead tiles the block_size*n_heads query rows (BLOCK_M at a time),
+    streams the shared KV once per tile in BLOCK_N chunks, and runs a flash
+    online-softmax with the per-head attention sink folded in as the running-max
+    initializer (a keyless logit that contributes to the denominator only).
+    QK^T and P@V use tl.dot; KV is bf16 in storage, so P@V runs in bf16.
+    """
+    batch_idx = tl.program_id(0)
+    m_tile = tl.program_id(1)
+
+    rows_per_batch: tl.constexpr = block_size * n_heads
+    offs_m = m_tile * BLOCK_M + tl.arange(0, BLOCK_M)
+    m_valid = offs_m < rows_per_batch
+    head_of_row = offs_m % n_heads
+
+    offs_d = tl.arange(0, BLOCK_D)
     d_mask = offs_d < head_dim
 
-    q_base = ((batch_idx * block_size + draft_idx) * n_heads + head_pid) * head_dim
-    q = tl.load(q_ptr + q_base + offs_d, mask=d_mask, other=0.0).to(tl.float32)
+    # q_flat[batch] is [block*heads, head_dim] contiguous; row = draft*heads + head
+    q_base = batch_idx * rows_per_batch * head_dim
+    q_ptrs = q_ptr + q_base + offs_m[:, None] * head_dim + offs_d[None, :]
+    q = tl.load(q_ptrs, mask=m_valid[:, None] & d_mask[None, :], other=0.0)
+
+    sink = tl.load(sink_ptr + head_of_row, mask=m_valid, other=0.0).to(tl.float32)
 
     valid_main_end = tl.load(main_pos_ptr + batch_idx)
     valid_main_end = tl.minimum(valid_main_end, window_size - 1)
-    sink = tl.load(sink_ptr + head_pid).to(tl.float32)
-    max_score = sink
+
+    # sink folded in as a keyless logit: init running max=sink, denom=1, acc=0
+    m_i = sink
+    l_i = tl.full((BLOCK_M,), 1.0, dtype=tl.float32)
+    acc = tl.zeros((BLOCK_M, BLOCK_D), dtype=tl.float32)
 
     total_kv: tl.constexpr = window_size + block_size
-    for start in range(0, total_kv, block_n):
-        offs_n = start + tl.arange(0, block_n)
+    for start in range(0, total_kv, BLOCK_N):
+        offs_n = start + tl.arange(0, BLOCK_N)
         main_mask = offs_n < window_size
-        draft_offsets = offs_n - window_size
-        valid = tl.where(
-            main_mask,
-            offs_n <= valid_main_end,
-            draft_offsets < block_size,
-        )
+        draft_off = offs_n - window_size
+        valid_n = tl.where(main_mask, offs_n <= valid_main_end, draft_off < block_size)
 
         main_ptrs = (
             main_kv_ptr
@@ -454,53 +472,26 @@ def _dspark_attention_kernel(
         )
         draft_ptrs = (
             draft_kv_ptr
-            + (batch_idx * block_size + draft_offsets[:, None]) * head_dim
+            + (batch_idx * block_size + draft_off[:, None]) * head_dim
             + offs_d[None, :]
         )
-        ptrs = tl.where(main_mask[:, None], main_ptrs, draft_ptrs)
-        kv = tl.load(ptrs, mask=valid[:, None] & d_mask[None, :], other=0.0).to(
-            tl.float32
-        )
-        scores = tl.sum(kv * q[None, :], axis=1) * scale
-        scores = tl.where(valid, scores, -float("inf"))
-        max_score = tl.maximum(max_score, tl.max(scores, axis=0))
+        kv_ptrs = tl.where(main_mask[:, None], main_ptrs, draft_ptrs)
+        kv = tl.load(kv_ptrs, mask=valid_n[:, None] & d_mask[None, :], other=0.0)
 
-    denom = tl.exp(sink - max_score)
-    acc = tl.zeros((block_d,), dtype=tl.float32)
-    for start in range(0, total_kv, block_n):
-        offs_n = start + tl.arange(0, block_n)
-        main_mask = offs_n < window_size
-        draft_offsets = offs_n - window_size
-        valid = tl.where(
-            main_mask,
-            offs_n <= valid_main_end,
-            draft_offsets < block_size,
-        )
+        scores = tl.dot(q, tl.trans(kv)).to(tl.float32) * scale
+        scores = tl.where(valid_n[None, :], scores, -float("inf"))
 
-        main_ptrs = (
-            main_kv_ptr
-            + (batch_idx * window_size + offs_n[:, None]) * head_dim
-            + offs_d[None, :]
-        )
-        draft_ptrs = (
-            draft_kv_ptr
-            + (batch_idx * block_size + draft_offsets[:, None]) * head_dim
-            + offs_d[None, :]
-        )
-        ptrs = tl.where(main_mask[:, None], main_ptrs, draft_ptrs)
-        kv = tl.load(ptrs, mask=valid[:, None] & d_mask[None, :], other=0.0).to(
-            tl.float32
-        )
-        scores = tl.sum(kv * q[None, :], axis=1) * scale
-        scores = tl.where(valid, scores, -float("inf"))
-        probs = tl.exp(scores - max_score)
-        probs = tl.where(valid, probs, 0.0)
-        denom += tl.sum(probs, axis=0)
-        acc += tl.sum(kv * probs[:, None], axis=0)
+        m_new = tl.maximum(m_i, tl.max(scores, axis=1))
+        alpha = tl.exp(m_i - m_new)
+        p = tl.exp(scores - m_new[:, None])
+        p = tl.where(valid_n[None, :], p, 0.0)
+        l_i = l_i * alpha + tl.sum(p, axis=1)
+        acc = acc * alpha[:, None] + tl.dot(p.to(tl.bfloat16), kv)
+        m_i = m_new
 
-    out = acc / denom
-    out_base = ((batch_idx * block_size + draft_idx) * n_heads + head_pid) * head_dim
-    tl.store(out_ptr + out_base + offs_d, out, mask=d_mask)
+    out = acc / l_i[:, None]
+    out_ptrs = out_ptr + q_base + offs_m[:, None] * head_dim + offs_d[None, :]
+    tl.store(out_ptrs, out, mask=m_valid[:, None] & d_mask[None, :])
 
 
 def dspark_triton_attention(
@@ -518,7 +509,14 @@ def dspark_triton_attention(
     window_size = main_kv.shape[1]
     out = torch.empty_like(q)
     block_d = triton.next_power_of_2(head_dim)
-    _dspark_attention_kernel[(batch_size * block_size, n_heads)](
+
+    # One program per (batch, query-row tile). BLOCK_M x BLOCK_N x BLOCK_D bf16
+    # tiles fit the shared-memory budget with num_stages=1 (the KV loop is only
+    # a few iterations, so software pipelining buys nothing here).
+    block_m, block_n = 32, 32
+    rows_per_batch = block_size * n_heads
+    grid = (batch_size, triton.cdiv(rows_per_batch, block_m))
+    _dspark_attention_kernel[grid](
         q,
         main_kv,
         draft_kv,
@@ -530,9 +528,11 @@ def dspark_triton_attention(
         n_heads=n_heads,
         head_dim=head_dim,
         window_size=window_size,
-        block_n=64,
-        block_d=block_d,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_D=block_d,
         num_warps=4,
+        num_stages=1,
     )
     return out
 
@@ -639,18 +639,22 @@ def dspark_markov_greedy_argmax(
         )
     rank = w1_weight.shape[1]
     if w2_weight.shape[1] != rank:
-        raise ValueError(f"Markov rank mismatch: w1={w1_weight.shape}, w2={w2_weight.shape}")
+        raise ValueError(
+            f"Markov rank mismatch: w1={w1_weight.shape}, w2={w2_weight.shape}"
+        )
     if prev_token_ids.shape[0] < batch_size or out_token_ids.shape[0] < batch_size:
         raise ValueError("prev_token_ids and out_token_ids must cover batch_size")
 
     num_blocks = triton.cdiv(vocab_size, block_v)
     if block_vals.shape[0] < batch_size or block_vals.shape[1] < num_blocks:
         raise ValueError(
-            f"block_vals too small: have {block_vals.shape}, need {(batch_size, num_blocks)}"
+            "block_vals too small: "
+            f"have {block_vals.shape}, need {(batch_size, num_blocks)}"
         )
     if block_ids.shape[0] < batch_size or block_ids.shape[1] < num_blocks:
         raise ValueError(
-            f"block_ids too small: have {block_ids.shape}, need {(batch_size, num_blocks)}"
+            "block_ids too small: "
+            f"have {block_ids.shape}, need {(batch_size, num_blocks)}"
         )
 
     block_r = triton.next_power_of_2(rank)
@@ -785,7 +789,9 @@ def _dspark_markov_probs_reduce_kernel(
     int_max = 2147483647
     greedy = tl.load(is_greedy_ptr + batch_pid)
 
-    bgval = tl.load(block_gval_ptr + base, mask=mask, other=-float("inf")).to(tl.float32)
+    bgval = tl.load(block_gval_ptr + base, mask=mask, other=-float("inf")).to(
+        tl.float32
+    )
     bgid = tl.load(block_gid_ptr + base, mask=mask, other=int_max).to(tl.int64)
     gmax = tl.max(bgval, axis=0)
     gumbel_token = tl.min(tl.where((bgval == gmax) & mask, bgid, int_max), axis=0)
@@ -870,15 +876,21 @@ def dspark_markov_probs_sample(
     for name in ("block_max", "block_sumexp", "block_gval"):
         buf = scratch.get(name)
         if buf is None or buf.shape[0] < batch_size or buf.shape[1] < num_blocks:
-            raise ValueError(f"scratch['{name}'] too small: {None if buf is None else buf.shape}")
+            raise ValueError(
+                f"scratch['{name}'] too small: {None if buf is None else buf.shape}"
+            )
     for name in ("block_maxid", "block_gid"):
         buf = scratch.get(name)
         if buf is None or buf.shape[0] < batch_size or buf.shape[1] < num_blocks:
-            raise ValueError(f"scratch['{name}'] too small: {None if buf is None else buf.shape}")
+            raise ValueError(
+                f"scratch['{name}'] too small: {None if buf is None else buf.shape}"
+            )
     for name in ("row_max", "row_invz"):
         buf = scratch.get(name)
         if buf is None or buf.shape[0] < batch_size:
-            raise ValueError(f"scratch['{name}'] too small: {None if buf is None else buf.shape}")
+            raise ValueError(
+                f"scratch['{name}'] too small: {None if buf is None else buf.shape}"
+            )
 
     block_max = scratch["block_max"]
     block_sumexp = scratch["block_sumexp"]

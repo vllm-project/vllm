@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import torch
 import pytest
+import torch
 
 from vllm.config.speculative import SpeculativeConfig
-from vllm.platforms import current_platform
 from vllm.models.deepseek_v4.nvidia.dspark import (
     _apply_rope_gptj_last,
     _rmsnorm_no_weight,
@@ -15,10 +14,12 @@ from vllm.models.deepseek_v4.nvidia.dspark_triton import (
     dspark_inv_rope_bf16_layout,
     dspark_markov_greedy_argmax,
     dspark_qkv_postprocess,
+    dspark_triton_attention,
 )
-from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
+from vllm.platforms import current_platform
 from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.spec_decode.dspark import DSparkProposer
 from vllm.v1.spec_decode.dspark_sampling import (
     sample_dspark_markov_block,
@@ -26,6 +27,53 @@ from vllm.v1.spec_decode.dspark_sampling import (
 )
 
 DEVICE_TYPE = current_platform.device_type
+
+
+def _dspark_attention_ref(
+    q: torch.Tensor,
+    main_kv: torch.Tensor,
+    draft_kv: torch.Tensor,
+    main_positions: torch.Tensor,
+    attn_sink: torch.Tensor,
+    scale: float,
+) -> torch.Tensor:
+    batch_size, block_size, n_heads, _ = q.shape
+    window_size = main_kv.shape[1]
+    kv = torch.cat([main_kv, draft_kv], dim=1)
+
+    cache_arange = torch.arange(
+        window_size,
+        device=q.device,
+        dtype=main_positions.dtype,
+    )
+    valid_cache = cache_arange.unsqueeze(0) <= torch.minimum(
+        main_positions.long().unsqueeze(1),
+        torch.full_like(main_positions.long().unsqueeze(1), window_size - 1),
+    )
+    valid = torch.cat(
+        [
+            valid_cache,
+            torch.ones(
+                batch_size,
+                block_size,
+                dtype=torch.bool,
+                device=q.device,
+            ),
+        ],
+        dim=1,
+    )
+
+    scores = torch.einsum("bqhd,bnd->bqhn", q.float(), kv.float())
+    scores *= scale
+    scores = scores.masked_fill(~valid[:, None, None, :], float("-inf"))
+
+    sink = attn_sink[:n_heads].view(1, 1, -1, 1).float()
+    max_score = torch.maximum(scores.max(dim=-1, keepdim=True).values, sink)
+    exp_scores = torch.exp(scores - max_score).masked_fill(
+        ~valid[:, None, None, :], 0.0
+    )
+    denom = exp_scores.sum(dim=-1, keepdim=True) + torch.exp(sink - max_score)
+    return torch.einsum("bqhn,bnd->bqhd", exp_scores / denom, kv.float()).to(q.dtype)
 
 
 def _sampling_metadata(all_greedy: bool, batch_size: int) -> SamplingMetadata:
@@ -51,6 +99,66 @@ def _sampling_metadata(all_greedy: bool, batch_size: int) -> SamplingMetadata:
         logitsprocs=LogitsProcessors(),
         spec_token_ids=[],
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("batch_size", [1, 4, 12])
+def test_dspark_triton_attention_matches_reference(batch_size):
+    torch.manual_seed(0)
+    block_size = 5
+    n_heads = 32
+    head_dim = 512
+    window_size = 128
+    q = torch.randn(
+        batch_size,
+        block_size,
+        n_heads,
+        head_dim,
+        device=DEVICE_TYPE,
+        dtype=torch.bfloat16,
+    )
+    main_kv = torch.randn(
+        batch_size,
+        window_size,
+        head_dim,
+        device=DEVICE_TYPE,
+        dtype=torch.bfloat16,
+    )
+    draft_kv = torch.randn(
+        batch_size,
+        block_size,
+        head_dim,
+        device=DEVICE_TYPE,
+        dtype=torch.bfloat16,
+    )
+    main_positions = torch.linspace(
+        0,
+        window_size * 2,
+        steps=batch_size,
+        device=DEVICE_TYPE,
+        dtype=torch.int64,
+    )
+    attn_sink = torch.randn(n_heads, device=DEVICE_TYPE, dtype=torch.float32)
+    scale = head_dim**-0.5
+
+    actual = dspark_triton_attention(
+        q,
+        main_kv,
+        draft_kv,
+        main_positions,
+        attn_sink,
+        scale,
+    )
+    expected = _dspark_attention_ref(
+        q,
+        main_kv,
+        draft_kv,
+        main_positions,
+        attn_sink,
+        scale,
+    )
+
+    torch.testing.assert_close(actual, expected, atol=5e-3, rtol=5e-3)
 
 
 def test_dspark_markov_sampling_chains_sampled_tokens():
@@ -440,9 +548,9 @@ def test_dspark_triton_inv_rope_bf16_layout_matches_reference():
     odd = rope[..., 1]
     inv_even = even * cos + odd * sin
     inv_odd = odd * cos - even * sin
-    ref[..., nope_dim:] = torch.stack((inv_even, inv_odd), dim=-1).reshape(
-        shape
-    ).to(dtype)
+    ref[..., nope_dim:] = (
+        torch.stack((inv_even, inv_odd), dim=-1).reshape(shape).to(dtype)
+    )
     ref = ref.view(tokens, n_groups, heads_per_group, head_dim)
     ref = ref.reshape(tokens, n_groups, heads_per_group * head_dim)
     assert torch.allclose(out.float(), ref.float(), atol=2e-2, rtol=2e-2)
@@ -497,7 +605,9 @@ def test_dspark_triton_markov_greedy_argmax_matches_reference():
     rank = 16
     dtype = torch.bfloat16
 
-    base_logits = torch.randn(batch_size, vocab_size, dtype=torch.float32, device=device)
+    base_logits = torch.randn(
+        batch_size, vocab_size, dtype=torch.float32, device=device
+    )
     w1 = torch.randn(vocab_size, rank, dtype=dtype, device=device)
     w2 = torch.randn(vocab_size, rank, dtype=dtype, device=device)
     prev_token_ids = torch.tensor([3, 41], dtype=torch.int64, device=device)
@@ -517,8 +627,5 @@ def test_dspark_triton_markov_greedy_argmax_matches_reference():
         block_v=32,
     )
 
-    reference = (
-        base_logits
-        + w1[prev_token_ids].float() @ w2.float().T
-    ).argmax(dim=-1)
+    reference = (base_logits + w1[prev_token_ids].float() @ w2.float().T).argmax(dim=-1)
     assert out.tolist() == reference.tolist()
