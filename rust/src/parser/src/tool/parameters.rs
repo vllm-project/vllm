@@ -418,21 +418,41 @@ fn admits_string(param_type: &JsonParamType) -> bool {
 
 /// Order union member types by Python's fixed coercion precedence.
 ///
-/// Python's `coerce_to_schema_type` tries candidate types in a fixed priority
-/// order (`null > integer > number > boolean > object > array > string`) rather
-/// than schema declaration order, returning the first successful coercion. We
-/// mirror that here so a union like `["string", "integer"]` and `["integer",
-/// "string"]` both coerce `"42"` to the integer `42`. Ties (e.g. nested unions)
-/// keep their original relative order via the stable sort.
+/// Python's `extract_types_from_schema` recursively flattens nested
+/// `anyOf`/`oneOf`/`allOf` into a flat set of type names, and
+/// `coerce_to_schema_type` then tries them in a fixed priority order
+/// (`null > integer > number > boolean > object > array > string`) rather than
+/// schema declaration order, returning the first successful coercion. We mirror
+/// both steps here: nested unions are flattened before ranking, so a schema like
+/// `anyOf: [{"type":"string"}, {"type":["integer","null"]}]` coerces `"42"` to
+/// the integer `42` and `"null"` to JSON null (the nested `integer`/`null`
+/// members compete at their own precedence instead of losing to the sibling
+/// `string`). Ties keep their original relative order via the stable sort.
 ///
-/// Source: `vllm/tool_parsers/utils.py::coerce_to_schema_type`.
+/// Source: `vllm/tool_parsers/utils.py::{extract_types_from_schema,
+/// coerce_to_schema_type}`.
 fn one_of_by_precedence(types: &[JsonParamType]) -> Vec<&JsonParamType> {
-    let mut ordered: Vec<&JsonParamType> = types.iter().collect();
+    let mut ordered: Vec<&JsonParamType> = Vec::new();
+    flatten_union_members(types, &mut ordered);
     ordered.sort_by_key(|param_type| precedence_rank(param_type));
     ordered
 }
 
+/// Collect union members, recursively flattening nested `OneOf` unions so every
+/// leaf type is ranked directly (mirrors Python's recursive
+/// `extract_types_from_schema`).
+fn flatten_union_members<'a>(types: &'a [JsonParamType], out: &mut Vec<&'a JsonParamType>) {
+    for param_type in types {
+        match param_type {
+            JsonParamType::OneOf(nested) => flatten_union_members(nested, out),
+            other => out.push(other),
+        }
+    }
+}
+
 /// Rank one union member by Python's fixed coercion precedence (lower wins).
+/// Nested unions are removed by [`flatten_union_members`] before ranking, so
+/// `OneOf` never reaches this function.
 fn precedence_rank(param_type: &JsonParamType) -> u8 {
     match param_type {
         JsonParamType::Null => 0,
@@ -442,8 +462,8 @@ fn precedence_rank(param_type: &JsonParamType) -> u8 {
         JsonParamType::Object { .. } => 4,
         JsonParamType::Array { .. } => 5,
         JsonParamType::String => 6,
-        // Nested unions are flattened only conceptually; rank them last and let
-        // the recursive conversion resolve their own members by precedence.
+        // Flattened out before ranking; rank last as a defensive fallback so a
+        // stray nested union still yields deterministic output.
         JsonParamType::OneOf(_) => 7,
     }
 }
@@ -659,6 +679,53 @@ mod tests {
             bool_or_string.convert("value", text("maybe")),
             json!("maybe")
         );
+    }
+
+    #[test]
+    fn nested_union_flattens_before_precedence() {
+        // A nested union (`anyOf` containing a `["integer","null"]` member next
+        // to a sibling `string`) must be flattened before applying precedence,
+        // exactly like Python's recursive `extract_types_from_schema`. Without
+        // flattening the sibling `string` would swallow "42"/"null" first.
+        // Pinned explicitly (not only via the differential oracle) so the
+        // semantics survive oracle drift. Live Python `coerce_to_schema_type`
+        // on the flattened `{integer,null,string}` set yields:
+        //   "42" -> 42, "null" -> null, "3.14" -> "3.14" (no number member).
+        let nested = ToolSchema::from_schema(&json!({
+            "type": "object",
+            "properties": {
+                "value": {
+                    "anyOf": [
+                        { "type": "string" },
+                        { "type": ["integer", "null"] }
+                    ]
+                }
+            }
+        }));
+
+        assert_eq!(nested.convert("value", text("42")), json!(42));
+        assert_eq!(nested.convert("value", text("null")), json!(null));
+        // No `number` member is admissible, so a float stays a string.
+        assert_eq!(nested.convert("value", text("3.14")), json!("3.14"));
+        // A plain word matches no higher-precedence member -> string fallback.
+        assert_eq!(nested.convert("value", text("hello")), json!("hello"));
+    }
+
+    #[test]
+    fn string_or_null_union_coerces_literal_null() {
+        // For a flat `["string","null"]` union, `null` (precedence 0) wins over
+        // `string` (precedence 6), so the literal text "null" coerces to JSON
+        // null, while a value that matches no non-string member (there is no
+        // integer member here) stays the string. Matches live Python:
+        //   ["string","null"] on "null" -> None, on "42" -> "42".
+        let string_or_null = ToolSchema::from_schema(&json!({
+            "type": "object",
+            "properties": { "value": { "type": ["string", "null"] } }
+        }));
+
+        assert_eq!(string_or_null.convert("value", text("null")), json!(null));
+        assert_eq!(string_or_null.convert("value", text("NULL")), json!(null));
+        assert_eq!(string_or_null.convert("value", text("42")), json!("42"));
     }
 
     #[test]
@@ -1095,6 +1162,27 @@ mod proptest_differential {
         }))
     }
 
+    /// Build a one-property schema whose value nests the first two members inside
+    /// an `anyOf`, e.g. `["string","integer","null"]` becomes
+    /// `anyOf: [{"type":["string","integer"]}, {"type":"null"}]`. Python's
+    /// `extract_types_from_schema` flattens this back to the same type set, so
+    /// the coercion result must match the flat schema (and the oracle). This
+    /// exercises the nested-union flattening the flat generator cannot reach.
+    fn nested_union_schema(types: &[&str]) -> ToolSchema {
+        let value = if types.len() >= 2 {
+            let (head, tail) = types.split_at(2);
+            let mut members = vec![json!({ "type": head })];
+            members.extend(tail.iter().map(|t| json!({ "type": t })));
+            json!({ "anyOf": members })
+        } else {
+            json!({ "type": types })
+        };
+        ToolSchema::from_schema(&json!({
+            "type": "object",
+            "properties": { "value": value }
+        }))
+    }
+
     /// The primitive schema types the Rust converter understands and Python
     /// ranks. (`object`/`array` are covered separately via JSON-shaped values.)
     fn arb_type() -> impl Strategy<Value = &'static str> {
@@ -1200,13 +1288,27 @@ mod proptest_differential {
         ) {
             prop_assume!(decided_by_typed_branch(&value, &types));
 
-            let schema = union_schema(&types);
-            let rust = schema.convert("value", ParamInput::Text(value.clone()));
             let python = python_coerce(&value, &types);
+
+            // Flat schema (`type: [..]`).
+            let flat = union_schema(&types).convert("value", ParamInput::Text(value.clone()));
             prop_assert_eq!(
-                rust,
+                &flat,
+                &python,
+                "flat union coercion diverged for value={:?} types={:?}",
+                value,
+                types
+            );
+
+            // Nested schema (`anyOf` wrapping some members). Python flattens
+            // nesting, so the result must equal the flat/oracle result — this is
+            // the regression guard for the nested-union flattening fix.
+            let nested =
+                nested_union_schema(&types).convert("value", ParamInput::Text(value.clone()));
+            prop_assert_eq!(
+                nested,
                 python,
-                "union coercion diverged for value={:?} types={:?}",
+                "nested union coercion diverged for value={:?} types={:?}",
                 value,
                 types
             );
