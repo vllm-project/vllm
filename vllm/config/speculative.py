@@ -9,7 +9,7 @@ from typing_extensions import Self
 
 from vllm.config import LoadConfig
 from vllm.config.kernel import MoEBackend
-from vllm.config.model import ModelConfig
+from vllm.config.model import HfOverrides, ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -45,6 +45,7 @@ MTPModelTypes = Literal[
     "qwen3_next_mtp",
     "qwen3_5_mtp",
     "longcat_flash_mtp",
+    "minimax_m3_mtp",
     "mtp",
     "pangu_ultra_moe_mtp",
     "step3p5_mtp",
@@ -66,7 +67,7 @@ SpeculativeMethod = Literal[
     EagleModelTypes,
     NgramGPUTypes,
 ]
-RejectionSampleMethod = Literal["standard", "synthetic"]
+RejectionSampleMethod = Literal["standard", "synthetic", "block"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]
 
 
@@ -157,6 +158,14 @@ class SpeculativeConfig:
     target_parallel_config: SkipValidation[ParallelConfig] = None  # type: ignore
     """The parallel configuration for the target model."""
 
+    # dynamic speculative decoding control
+    num_speculative_tokens_per_batch_size: list[tuple[int, int, int]] | None = None
+    """Batch-size schedule used to dynamically choose speculative-token count.
+
+    Each entry is ``(range_start, range_end, num_speculative_tokens)`` with an
+    inclusive batch-size range.
+    """
+
     # params generated in the post-init stage
     draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """The configuration of the draft model initialized internal."""
@@ -192,7 +201,9 @@ class SpeculativeConfig:
     """The rejection sampling method to use. 'standard' uses probabilistic
     rejection sampling (with or without cached draft logits, controlled by
     draft_sample_method). 'synthetic' accepts draft tokens with a decaying
-    probability calibrated to synthetic_acceptance_rate."""
+    probability calibrated to synthetic_acceptance_rate. 'block' uses block
+    verification (Sun et al.), which jointly verifies the draft tokens as a
+    block instead of one at a time."""
 
     synthetic_acceptance_rates: list[float] | None = None
     """Per-position *unconditional* acceptance rates for synthetic rejection
@@ -520,6 +531,36 @@ class SpeculativeConfig:
                 text_config.num_kv_shared_layers = 0
             hf_config.update({"n_predict": 1, "architectures": ["Gemma4MTPModel"]})
 
+        if (
+            hf_config.model_type == "minimax_m3_vl"
+            or initial_architecture == "MiniMaxM3SparseForConditionalGeneration"
+        ):
+            # MTP modules live on the language model of this VL checkpoint, so
+            # promote text_config before rewriting it into an MTP config.
+            quantization_config = getattr(hf_config, "quantization_config", None)
+            hf_config = getattr(hf_config, "text_config", hf_config)
+            if (
+                quantization_config is not None
+                and getattr(hf_config, "quantization_config", None) is None
+            ):
+                hf_config.update({"quantization_config": quantization_config})
+            hf_config.model_type = "minimax_m3_mtp"
+            n_predict = getattr(hf_config, "num_mtp_modules", 1)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["MiniMaxM3MTP"]}
+            )
+        elif (
+            hf_config.model_type == "minimax_m3_mtp"
+            or initial_architecture == "MiniMaxM3MTP"
+        ):
+            # Standalone MTP checkpoints already use a flat MTP config with no
+            # VL wrapper / text_config to promote, so just normalize the
+            # architecture and derive n_predict from num_mtp_modules.
+            n_predict = getattr(hf_config, "num_mtp_modules", 1)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["MiniMaxM3MTP"]}
+            )
+
         return hf_config
 
     def __post_init__(self):
@@ -671,6 +712,15 @@ class SpeculativeConfig:
             self.prompt_lookup_min = 0
 
             if self.model is not None:
+                # Old-format Medusa checkpoints (e.g. FasterDecoding/medusa-*)
+                # lack a model_type key in config.json, so AutoConfig cannot
+                # detect them. When the method is explicitly "medusa", inject
+                # model_type so MedusaConfig.from_pretrained is used instead.
+                draft_hf_overrides: HfOverrides
+                if self.method == "medusa":
+                    draft_hf_overrides = {"model_type": "medusa"}
+                else:
+                    draft_hf_overrides = SpeculativeConfig.hf_config_override
                 self.draft_model_config = ModelConfig(
                     model=self.model,
                     runner="draft",
@@ -689,9 +739,20 @@ class SpeculativeConfig:
                     quantization=self.quantization,
                     enforce_eager=self.target_model_config.enforce_eager,
                     max_logprobs=self.target_model_config.max_logprobs,
-                    hf_overrides=SpeculativeConfig.hf_config_override,
+                    hf_overrides=draft_hf_overrides,
                     config_format=self.target_model_config.config_format,
                 )
+
+                # Old-format Medusa checkpoints (e.g. FasterDecoding/medusa-*)
+                # omit vocab_size in config.json, so MedusaConfig falls back to
+                # its default (32001). Align with the target model's vocab size
+                # to avoid shape mismatches when loading LM-head weights.
+                if self.method == "medusa":
+                    target_vocab = self.target_model_config.hf_config.vocab_size
+                    draft_hf = self.draft_model_config.hf_config
+                    if draft_hf.vocab_size != target_vocab:
+                        draft_hf.vocab_size = target_vocab
+                        draft_hf.truncated_vocab_size = target_vocab
 
                 # Automatically detect the method
                 if self.method in ("eagle", "eagle3", "dflash"):
@@ -1072,6 +1133,9 @@ class SpeculativeConfig:
 
     def use_dflash(self) -> bool:
         return self.method == "dflash"
+
+    def uses_dynamic_speculative_decoding(self) -> bool:
+        return self.num_speculative_tokens_per_batch_size is not None
 
     def uses_draft_model(self) -> bool:
         return self.method == "draft_model"
