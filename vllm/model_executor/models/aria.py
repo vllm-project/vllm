@@ -325,6 +325,9 @@ class AriaTextDecoderLayer(LlamaDecoderLayer):
         self.mlp = AriaTextMoELayer(
             config, quant_config=quant_config, prefix=f"{prefix}.mlp"
         )
+        # Rebuild so the stream captures the MoE mlp (no gate_up_proj/down_proj)
+        # TODO add MoE module property
+        self.residual_stream = self._build_residual_stream(vllm_config)
 
 
 class AriaTextModel(LlamaModel, SupportsQuant):

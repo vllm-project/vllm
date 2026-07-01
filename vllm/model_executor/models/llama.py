@@ -329,7 +329,7 @@ class LlamaDecoderLayer(nn.Module):
         # Distribution state this layer leaves its output in (read by the model's
         # final norm). Deferred (fused) decoders skip o_proj/down_proj reduce.
         self.output_scatter = Scatter.FULL if reduce_results else Scatter.PARTIAL
-        self.residual_stream = ResidualStream(self, vllm_config=vllm_config)
+        self.residual_stream = self._build_residual_stream(vllm_config)
 
     def forward(
         self,
@@ -350,6 +350,19 @@ class LlamaDecoderLayer(nn.Module):
     def get_quant_config(self, vllm_config: VllmConfig) -> QuantizationConfig | None:
         """Get quantization config for this layer. Override in subclasses."""
         return vllm_config.quant_config
+
+    def _build_residual_stream(self, vllm_config: VllmConfig) -> ResidualStream:
+        # Hand the stream this layer's norms and consumer linears explicitly.
+
+        return ResidualStream(
+            vllm_config=vllm_config,
+            input_layernorm=self.input_layernorm,
+            post_attention_layernorm=self.post_attention_layernorm,
+            qkv_proj=getattr(self.self_attn, "qkv_proj", None),
+            o_proj=getattr(self.self_attn, "o_proj", None),
+            gate_up_proj=getattr(self.mlp, "gate_up_proj", None),
+            down_proj=getattr(self.mlp, "down_proj", None),
+        )
 
 
 @support_torch_compile(

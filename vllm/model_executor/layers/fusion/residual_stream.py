@@ -12,10 +12,14 @@ This is the manual-fusion endgame shape for RFC #43224: model ``forward`` become
 or ``fuse_allreduce`` branch, and is the only abstraction model code touches (it
 subsumes the standalone ``fused_ar_rms_norm_quant`` kernel-dispatch helper).
 
-It reads the layer's modules *live*, so it tracks late changes (e.g. eagle
-replacing its layer-0 norm with ``nn.Identity()`` after ``__init__``). Whether the
-layer defers its reduce is read from the row-linear's existing ``reduce_results``
-flag -- the single source of truth -- so there is no separate fusion flag:
+It receives the layer's norms and consumer linears directly at construction, so
+each model spells out which module is ``qkv_proj``/``gate_up_proj``/... instead of
+this file guessing by name. A layer that swaps one of those modules *after*
+building its stream (e.g. eagle replacing its layer-0 norm with ``nn.Identity()``,
+aria swapping in an MoE ``mlp``) must rebuild the stream so it captures the
+replacement. Whether the layer defers its reduce is read from the row-linear's
+existing ``reduce_results`` flag -- the single source of truth -- so there is no
+separate fusion flag:
 - linears defer (``reduce_results=False``): inputs arrive ``PARTIAL``; the stream
   reduces them once while normalizing.
 - linears reduce themselves (``reduce_results=True``): inputs arrive ``FULL``; the
@@ -28,7 +32,6 @@ Scope: plain all-reduce only. Sequence-parallelism (a future token-shard state
 with reduce-scatter/all-gather transitions) is out of scope.
 """
 
-from dataclasses import dataclass
 from enum import Enum, auto
 
 import torch
@@ -38,7 +41,6 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
-from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.layers.fusion.ar_rms_quant import fused_ar_rms_norm_quant
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -53,83 +55,41 @@ class Scatter(Enum):
     PARTIAL = auto()  # per-rank partial sum; owes exactly one all-reduce
 
 
-@dataclass(frozen=True)
-class ModuleName:
-    qkv_proj: str = "qkv_proj"
-    o_proj: str = "o_proj"
-    gate_up_proj: str = "gate_up_proj"
-    down_proj: str = "down_proj"
-    input_layernorm: str = "input_layernorm"
-    post_attention_layernorm: str = "post_attention_layernorm"
-
-
-def _get_module_from_name(module: torch.nn.Module, name: str) -> torch.nn.Module | None:
-    """Find the submodule ``name`` on the decoder layer or its direct children.
-
-    The consumer linears sit at most two levels down (``self_attn.qkv_proj``,
-    ``mlp.gate_up_proj``, ...), so this looks ``name`` up on the layer itself and
-    on each child, finding them by leaf name without hard-coding the
-    ``self_attn``/``mlp`` parent. Returns None if absent (e.g. MoE layers without
-    ``gate_up_proj``), mirroring the old ``getattr(..., None)`` lookups.
-    """
-    for parent in (module, *module.children()):
-        child = getattr(parent, name, None)
-        if isinstance(child, torch.nn.Module):
-            return child
-    return None
-
-
 class ResidualStream:
     """Owns (AR +) residual-add + RMSNorm(+quant) for one decoder layer.
 
-    Holds the decoder ``layer`` and reads its norms / consumer linears / reduce
-    mode live, so model ``forward`` is just ``prepare_attn`` -> attn ->
-    ``prepare_mlp`` -> mlp, with no ``tp_size``/``do_allreduce``/fuse branch.
+    Receives the layer's norms and consumer linears directly, so model
+    ``forward`` is just ``prepare_attn`` -> attn -> ``prepare_mlp`` -> mlp, with
+    no ``tp_size``/``do_allreduce``/fuse branch. The modules are captured at
+    construction: a layer that swaps one *after* building its stream (eagle's
+    Identity norm, aria's MoE ``mlp``) must rebuild the stream.
+
+    ``qkv_proj``/``gate_up_proj`` may be None (e.g. an MoE ``mlp`` has no
+    ``gate_up_proj``); the consumer-linear quant fusion is then simply skipped.
+    The linears are captured before any LoRA wrapping, so they are already the
+    base layers -- no unwrapping needed.
     """
 
     def __init__(
         self,
-        layer: torch.nn.Module,
         *,
         vllm_config: VllmConfig,
-        module_name: ModuleName | None = None,
+        input_layernorm: torch.nn.Module,
+        post_attention_layernorm: torch.nn.Module,
+        qkv_proj: torch.nn.Module | None,
+        o_proj: torch.nn.Module | None,
+        gate_up_proj: torch.nn.Module | None,
+        down_proj: torch.nn.Module | None,
     ) -> None:
-        self.layer = layer
+        self.input_layernorm = input_layernorm
+        self.post_attention_layernorm = post_attention_layernorm
+        self.qkv_proj = qkv_proj
+        self.o_proj = o_proj
+        self.gate_up_proj = gate_up_proj
+        self.down_proj = down_proj
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.module_name = module_name or ModuleName()
         self.is_lora_enable = vllm_config.lora_config is not None
         self.is_pp_enable = vllm_config.parallel_config.pipeline_parallel_size > 1
-
-    @property
-    def input_layernorm(self) -> torch.nn.Module | None:
-        return _get_module_from_name(self.layer, self.module_name.input_layernorm)
-
-    @property
-    def post_attention_layernorm(self) -> torch.nn.Module | None:
-        return _get_module_from_name(
-            self.layer, self.module_name.post_attention_layernorm
-        )
-
-    @property
-    def qkv_proj(self) -> torch.nn.Module | None:
-        layer = _get_module_from_name(self.layer, self.module_name.qkv_proj)
-        return layer.base_layer if isinstance(layer, BaseLayerWithLoRA) else layer
-
-    @property
-    def o_proj(self) -> torch.nn.Module | None:
-        layer = _get_module_from_name(self.layer, self.module_name.o_proj)
-        return layer.base_layer if isinstance(layer, BaseLayerWithLoRA) else layer
-
-    @property
-    def gate_up_proj(self) -> torch.nn.Module | None:
-        layer = _get_module_from_name(self.layer, self.module_name.gate_up_proj)
-
-        return layer.base_layer if isinstance(layer, BaseLayerWithLoRA) else layer
-
-    @property
-    def down_proj(self) -> torch.nn.Module | None:
-        layer = _get_module_from_name(self.layer, self.module_name.down_proj)
-        return layer.base_layer if isinstance(layer, BaseLayerWithLoRA) else layer
 
     @property
     def defer_attn(self) -> bool:

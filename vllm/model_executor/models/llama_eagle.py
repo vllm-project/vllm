@@ -48,6 +48,8 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         if disable_input_layernorm:
             del self.input_layernorm
             self.input_layernorm = nn.Identity()
+            # Rebuild so the stream captures the Identity norm
+            self.residual_stream = self._build_residual_stream(vllm_config)
 
     def get_quant_config(self, vllm_config: VllmConfig) -> QuantizationConfig | None:
         """Use drafter's quantization config instead of verifier's."""

@@ -231,7 +231,15 @@ class Qwen3DecoderLayer(nn.Module):
         # Qwen3 always defers (o_proj/down_proj run reduce_results=False), so this
         # layer leaves a per-rank PARTIAL sum for the next layer / the final norm.
         self.output_scatter = Scatter.PARTIAL
-        self.residual_stream = ResidualStream(self, vllm_config=vllm_config)
+        self.residual_stream = ResidualStream(
+            vllm_config=vllm_config,
+            input_layernorm=self.input_layernorm,
+            post_attention_layernorm=self.post_attention_layernorm,
+            qkv_proj=self.self_attn.qkv_proj,
+            o_proj=self.self_attn.o_proj,
+            gate_up_proj=self.mlp.gate_up_proj,
+            down_proj=self.mlp.down_proj,
+        )
 
     def forward(
         self,
