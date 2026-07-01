@@ -8,6 +8,7 @@ from fractions import Fraction
 import torch
 from compressed_tensors.quantization import ActivationOrdering
 
+from vllm.distributed.utils import verify_group_size_divides_partition
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     MarlinLinearKernel,
@@ -151,7 +152,9 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         scales_and_zp_size = input_size // group_size
 
         if partition_scales:
-            assert input_size_per_partition % group_size == 0
+            verify_group_size_divides_partition(
+                input_size_per_partition, group_size, self.layer_name
+            )
             scales_and_zp_size = input_size_per_partition // group_size
 
         packed_input_dim = math.ceil(input_size_per_partition * self.num_bits / 32)

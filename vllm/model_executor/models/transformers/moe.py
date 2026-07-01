@@ -16,7 +16,6 @@
 # limitations under the License.
 """Transformers modeling backend mixin for Mixture of Experts (MoE) models."""
 
-from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -82,11 +81,6 @@ class TransformersMoERunner(MoERunner):
     ) -> torch.Tensor:
         return super().forward(hidden_states, topk_weights)
 
-    def load_weights(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> Iterable[str]:
-        return self.routed_experts.load_weights(weights)
-
 
 def _transformers_moe_forward(
     hidden_states: torch.Tensor,
@@ -119,6 +113,20 @@ direct_register_custom_op(
 )
 
 
+class TransformersRoutedExperts(RoutedExperts):
+    def get_expert_mapping(
+        self, include_fused: bool = False
+    ) -> list[tuple[str, str, int, str]]:
+        common_names = ("gate_proj", "down_proj", "up_proj")
+        common_map = super().get_expert_mapping(*common_names, include_fused)
+        mixtral_map = super().get_expert_mapping("w1", "w2", "w3", include_fused)
+        if not include_fused:
+            return common_map + mixtral_map
+        common_fused, common_unfused = common_map[:3], common_map[3:]
+        mixtral_fused, mixtral_unfused = mixtral_map[:3], mixtral_map[3:]
+        return common_fused + mixtral_fused + common_unfused + mixtral_unfused
+
+
 class MoEMixin(MixtureOfExperts):
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         self.check_version("5.0.0", "MoE models support")
@@ -139,43 +147,6 @@ class MoEMixin(MixtureOfExperts):
             mlp.n_physical_experts = num_physical_experts
             mlp.n_redundant_experts = self.num_redundant_experts
             mlp.experts.update_expert_map()
-
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        """
-        Params for weights, fp8 weight scales, fp8 activation scales
-        (param_name, weight_name, expert_id, shard_id)
-        """
-        # Models saved with fused experts. These are checkpoints released:
-        # - After Transformers v5
-        # - Before Transformers v5, but re-saved with save_original_format=False
-        # In the fused experts case, we repurpose the expert_id as shard_idx for
-        # deconcatenating w1 and w3 in FusedMoE.load_weights.
-        expert_mapping = [
-            ("experts.w13_weight", "experts.gate_up_proj", 0, "w1"),
-            ("experts.w13_weight", "experts.gate_up_proj", 1, "w3"),
-            ("experts.w2_weight", "experts.down_proj", 0, "w2"),
-        ]
-        # Models saved with ModuleList experts
-        ckpt_names = [
-            # (ckpt_gate_proj_name, ckpt_down_proj_name, ckpt_up_proj_name)
-            ("gate_proj", "down_proj", "up_proj"),  # Most common MoE style
-            ("w1", "w2", "w3"),  # Granite, Mixtral, Phi MoE style
-        ]
-        num_experts = self.model_config.get_num_experts()
-        num_redundant_experts = self.parallel_config.eplb_config.num_redundant_experts
-        for gate_proj, down_proj, up_proj in ckpt_names:
-            expert_mapping.extend(
-                RoutedExperts.make_expert_params_mapping(
-                    self,
-                    ckpt_gate_proj_name=gate_proj,
-                    ckpt_down_proj_name=down_proj,
-                    ckpt_up_proj_name=up_proj,
-                    num_experts=num_experts,
-                    num_redundant_experts=num_redundant_experts,
-                    routed_experts_prefix="",
-                )
-            )
-        return expert_mapping
 
     def recursive_replace(self):
         """Initialize the MoE layers."""
@@ -217,9 +188,6 @@ class MoEMixin(MixtureOfExperts):
         wrapped_arch = self.config.architectures[0].lower()
         if "gptoss" in wrapped_arch:
             activation = "swigluoai"
-
-        # Expert mapping for `AutoWeightsLoader`
-        expert_mapping = self.get_expert_mapping()
 
         # Expert parallel load balancing kwargs
         enable_eplb = self.parallel_config.enable_eplb
@@ -308,12 +276,12 @@ class MoEMixin(MixtureOfExperts):
                         enable_eplb=enable_eplb,
                         num_redundant_experts=num_redundant_experts,
                         has_bias=has_bias,
-                        expert_mapping=expert_mapping,
                         custom_routing_function=partial(
                             custom_routing_function,
                             moe_state=moe_state,
                         ),
                         runner_cls=TransformersMoERunner,
+                        routed_experts_cls=TransformersRoutedExperts,
                         runner_args={"moe_state": moe_state},
                     )
                     mlp.experts = fused_experts

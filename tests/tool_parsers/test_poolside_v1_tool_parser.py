@@ -77,7 +77,9 @@ def _build_chat_request(*, tool_choice: str | dict[str, Any]) -> ChatCompletionR
     )
 
 
-def _build_responses_request(*, tool_choice: str | dict[str, Any]) -> ResponsesRequest:
+def _build_responses_request(
+    *, tool_choice: str | dict[str, Any], include: list[str] | None = None
+) -> ResponsesRequest:
     return ResponsesRequest(
         model="poolside-test",
         input=[{"role": "user", "content": "write the file"}],
@@ -85,6 +87,7 @@ def _build_responses_request(*, tool_choice: str | dict[str, Any]) -> ResponsesR
         tool_choice=tool_choice,
         stream=True,
         max_output_tokens=200,
+        include=include,
     )
 
 
@@ -215,3 +218,31 @@ def test_responses_extract_tool_calls_with_flat_tools() -> None:
     assert result.tools_called
     args = json.loads(result.tool_calls[0].function.arguments)
     assert args["content"] == content
+
+
+def _stream_partial_start_token(request: ResponsesRequest):
+    parser = _make_parser(request)
+    delta = parser.tool_call_start_token[0]
+    return parser.extract_tool_calls_streaming(
+        previous_text="",
+        current_text=delta,
+        delta_text=delta,
+        previous_token_ids=[],
+        current_token_ids=[],
+        delta_token_ids=[],
+        request=request,
+    )
+
+
+def test_streaming_responses_request_without_logprobs() -> None:
+    request = _build_responses_request(tool_choice="auto")
+    assert _stream_partial_start_token(request) is None
+
+
+def test_streaming_responses_request_with_logprobs_emits_empty_delta() -> None:
+    request = _build_responses_request(
+        tool_choice="auto", include=["message.output_text.logprobs"]
+    )
+    result = _stream_partial_start_token(request)
+    assert result is not None
+    assert result.content == ""

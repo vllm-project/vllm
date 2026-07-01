@@ -30,6 +30,7 @@ class _EventPlaceholder:
 class _StreamPlaceholder:
     def __init__(self, *args, **kwargs) -> None:
         self.wait_stream = noop
+        self.device = torch.device("cpu")
 
     def __enter__(self, *args, **kwargs):
         return self
@@ -47,7 +48,6 @@ def get_memory_info(*args: Any, **kwargs: Any) -> tuple[int, int]:
 
 
 torch.Event = _EventPlaceholder
-torch.cuda.Event = _EventPlaceholder
 torch.cuda.Stream = _StreamPlaceholder
 torch.cuda.set_stream = noop
 torch.cuda.current_stream = lambda *args, **kwargs: _StreamPlaceholder()

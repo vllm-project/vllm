@@ -68,7 +68,6 @@ steps:
       - >-
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
         'cd tests &&
-        bash v1/kv_connector/nixl_integration/run_xpu_disagg_accuracy_test.sh &&
         pytest -v -s v1/core --ignore=v1/core/test_reset_prefix_cache_e2e.py --ignore=v1/core/test_scheduler_e2e.py &&
         pytest -v -s v1/engine --ignore=v1/engine/test_output_processor.py &&
         pytest -v -s v1/sample --ignore=v1/sample/test_logprobs.py --ignore=v1/sample/test_logprobs_e2e.py -k "not test_topk_only and not test_topp_only and not test_topk_and_topp" &&

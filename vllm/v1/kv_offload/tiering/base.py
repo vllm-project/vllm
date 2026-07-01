@@ -17,6 +17,7 @@ from vllm.v1.kv_offload.base import (
     OffloadKey,
     ReqContext,
     RequestOffloadingContext,
+    ScheduleEndContext,
 )
 
 if TYPE_CHECKING:
@@ -209,7 +210,7 @@ class SecondaryTierManager(ABC):
         """
         return
 
-    def on_schedule_end(self) -> None:
+    def on_schedule_end(self, context: ScheduleEndContext) -> None:
         """Called once at the end of each scheduler step.
 
         Secondary tiers may override this for per-step cleanup or

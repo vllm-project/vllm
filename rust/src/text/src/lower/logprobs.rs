@@ -3,8 +3,9 @@
 //! `-1` is expanded only for bounds checks. The original request values are
 //! passed through to engine-core.
 
-use crate::backend::SamplingLimits;
 use thiserror::Error;
+
+use crate::backend::SamplingLimits;
 
 #[derive(Debug, Error)]
 pub enum LogprobsError {

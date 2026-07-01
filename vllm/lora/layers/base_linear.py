@@ -89,7 +89,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         vllm_config = get_current_vllm_config()
         self._lora_stream = _get_lora_aux_cuda_stream()
         assert current_platform.is_cuda_alike()
-        self._events = [torch.cuda.Event(), torch.cuda.Event()]
+        self._events = [torch.Event(), torch.Event()]
         # lora_linear avoids prefix conflicts with the base layer
         self.layer_name = self.base_layer.prefix + ".lora_linear_async"
         compilation_config = vllm_config.compilation_config

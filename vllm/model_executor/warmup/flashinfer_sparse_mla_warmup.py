@@ -130,7 +130,7 @@ def _run_flashinfer_sparse_mla_decode_autotune(
     with torch.inference_mode():
         warmup_executed = True
         if is_leader:
-            if _uses_v2_model_runner(runner):
+            if _uses_v2_model_runner(runner) and runner.max_num_reqs >= 2:
                 v2_runner = cast("V2GPUModelRunner", runner)
                 warmup_executed = run_mixed_prefill_decode_warmup(
                     v2_runner,
@@ -144,7 +144,7 @@ def _run_flashinfer_sparse_mla_decode_autotune(
                 with flashinfer_autotune(True, cache=str(cache_path)):
                     runner._dummy_run(**dummy_run_kwargs)
         else:
-            if _uses_v2_model_runner(runner):
+            if _uses_v2_model_runner(runner) and runner.max_num_reqs >= 2:
                 v2_runner = cast("V2GPUModelRunner", runner)
                 warmup_executed = run_mixed_prefill_decode_warmup(
                     v2_runner,
@@ -236,7 +236,7 @@ def deepseek_v4_sparse_mla_attention_warmup(worker: "Worker") -> None:
     )
     mixed_warmup_done = _deepseek_v4_sparse_mla_decode_autotune(worker, mixed_tokens)
     if not mixed_warmup_done:
-        if _uses_v2_model_runner(runner):
+        if _uses_v2_model_runner(runner) and runner.max_num_reqs >= 2:
             v2_runner = cast("V2GPUModelRunner", runner)
             run_mixed_prefill_decode_warmup(
                 v2_runner,
