@@ -9,6 +9,7 @@ import pybase64
 import torch
 from PIL import Image
 
+import vllm.envs as envs
 from vllm.utils.serial_utils import tensor2base64
 
 from ..image import convert_image_mode, normalize_image, rgba_to_rgb
@@ -72,6 +73,14 @@ class ImageMediaIO(MediaIO[Image.Image]):
     def load_bytes(self, data: bytes) -> MediaWithBytes[Image.Image]:
         try:
             image = Image.open(BytesIO(data))
+            w, h = image.size
+            max_pixels = envs.VLLM_MAX_IMAGE_PIXELS
+            if max_pixels > 0 and w * h > max_pixels:
+                raise ValueError(
+                    f"Image dimensions {w}x{h} ({w * h} pixels) exceed "
+                    f"the maximum of {max_pixels} pixels. Set "
+                    f"VLLM_MAX_IMAGE_PIXELS to increase this limit."
+                )
             image = normalize_image(image)
             image.load()
             image = self._convert_image_mode(image)
