@@ -1,12 +1,25 @@
 # CUDA architecture lists — following PyTorch RELEASE.md
 # (https://github.com/pytorch/pytorch/blob/main/RELEASE.md)
 # SM86 included for broader Ampere coverage; SM89 for marlin fp8 support
+# These requested arches are filtered by CMake's CUDA_SUPPORTED_ARCHS before
+# per-kernel arch selection. Do not add +PTX here: top-level +PTX is stripped
+# during that filtering, so kernels that need PTX must request it locally.
 env:
-  CUDA_ARCH_X86: "7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX"
-  # aarch64 only architectures: 8.7 for Orin, 11.0 for Thor (since CUDA 13)
-  CUDA_ARCH_AARCH64: "8.0 8.7 8.9 9.0 10.0 11.0 12.0+PTX"
+  # for CUDA >=13, sm_100+ targets have family specifiers (see CMakeLists.txt)
+  # so targets like 10.3 and 12.1 are automatically supported with this list
+  CUDA_ARCH_X86: "7.5 8.0 8.6 8.9 9.0 10.0 12.0"
+  # aarch64-only targets: Orin (8.7), Thor (11.0, CUDA 13+)
+  CUDA_ARCH_AARCH64: "8.0 8.7 8.9 9.0 10.0 11.0 12.0"
+
+  # for CUDA <13, we need to specify all needed targets
+  # some targets (10.3, 12.1) are skipped to limit the wheel size (< 500MB)
+  # please use CUDA 13 wheels or compile yourself on these new devices
   CUDA_ARCH_X86_CU129: "7.5 8.0 8.6 8.9 9.0 10.0 12.0"
   CUDA_ARCH_AARCH64_CU129: "8.0 8.7 8.9 9.0 10.0 12.0"
+  
+  # pre-built mooncake wheels
+  # the manylinux_2_35 wheel has compatibility issue on Ubuntu 24.04
+  # so we use different wheels for the time being
   MOONCAKE_WHEEL_AARCH64_2_35: "https://vllm-wheels.s3.amazonaws.com/mooncake/mooncake_transfer_engine-0.3.10.post2-0da9dfea3-cp312-cp312-manylinux_2_35_aarch64.whl"
   MOONCAKE_WHEEL_AARCH64_2_39: "https://vllm-wheels.s3.amazonaws.com/mooncake/mooncake_transfer_engine-0.3.10.post2-0da9dfea3-cp312-cp312-manylinux_2_39_aarch64.whl"
   MOONCAKE_WHEEL_X86_64: "https://vllm-wheels.s3.amazonaws.com/mooncake/mooncake_transfer_engine-0.3.10.post2-0da9dfea3-cp312-cp312-manylinux_2_35_x86_64.whl"
@@ -737,7 +750,7 @@ steps:
       - "bash tools/vllm-rocm/generate-rocm-wheels-root-index.sh"
     env:
       S3_BUCKET: "vllm-wheels"
-      VARIANT: "rocm722"
+      VARIANT: "rocm723"
 
   # ROCm Job 6: Build ROCm Release Docker Image
   - label: ":docker: Build release image - x86_64 - ROCm"
@@ -846,7 +859,6 @@ steps:
         allow_failure: true
       - step: build-cpu-release-image-arm64
         allow_failure: true
-    if: build.env("NIGHTLY") != "1"
 
   - label: "Publish release images to DockerHub"
     depends_on:

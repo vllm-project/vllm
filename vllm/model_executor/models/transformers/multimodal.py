@@ -55,6 +55,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+_MODALITY_TO_TOKEN_TYPE_ID = {"image": 1, "video": 2, "audio": 3}
+
 
 class MultiModalProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self):
@@ -206,12 +208,8 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             )
 
         # For gemma3 we check `token_type_ids` as the key
-        token_type_key = (
-            "mm_token_type_ids"
-            if "mm_token_type_ids" in processed_data
-            else "token_type_ids"
-        )
-        mm_token_type_ids = processed_data.get(token_type_key)
+        mm_token_type_ids = processed_data.pop("token_type_ids", None)
+        mm_token_type_ids = processed_data.pop("mm_token_type_ids", mm_token_type_ids)
 
         # We can infer vLLM style placeholder from token type ids, if we split
         # it for each input `mm_data`.
@@ -264,8 +262,6 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
 
 class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
-    supports_multimodal_raw_input_only = True
-
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         # Skip SupportsMRoPE.__init__ and call the next class in MRO
         super(SupportsMRoPE, self).__init__(vllm_config=vllm_config, prefix=prefix)
@@ -338,15 +334,12 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
-        # Gemma3 and PaliGemma needs `token_type_ids` to work correctly
-        # Other models will not have `token_type_ids` in kwargs
-        kwargs = {k: v for k, v in kwargs.items() if k == "token_type_ids"}
         # Positions shape handling for MRoPE models
         if self.model_config.uses_mrope:
             # [3, seq_len] -> [3, 1, seq_len]
             positions = positions[:, None]
         model_output = super().forward(
-            input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
+            input_ids, positions, intermediate_tensors, inputs_embeds
         )
         return model_output
 
@@ -385,8 +378,6 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             return None
 
         num_image_patches = kwargs.pop("num_image_patches")
-        kwargs.pop("token_type_ids", None)  # used only in `forward`
-        kwargs.pop("mm_token_type_ids", None)  # used only in `model.get_rope_index`
 
         if pixel_values is not None:
             # ROCm: Force math SDP backend for vision encoder to avoid accuracy issues
@@ -477,24 +468,18 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             {
                 "image_grid_thw",
                 "video_grid_thw",
-                "mm_token_type_ids",
                 "second_per_grid_ts",
                 "audio_feature_lengths",
                 "use_audio_in_video",
             },
         )
-        if any(
-            v
-            for k, v in kwargs.items()
-            if k not in {"image_grid_thw", "mm_token_type_ids"}
-        ):
+        if any(v for k, v in kwargs.items() if k not in {"image_grid_thw"}):
             raise NotImplementedError(
                 "Transformers modeling backend only supports images."
             )
 
         image_grid_thw = kwargs.get("image_grid_thw", [])
         video_grid_thw = kwargs.get("video_grid_thw", [])
-        mm_token_type_ids = kwargs.get("mm_token_type_ids")
 
         image_grid_thw = (torch.stack if image_grid_thw else torch.tensor)(
             image_grid_thw
@@ -503,8 +488,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             video_grid_thw
         )
 
-        # In v4 `get_rope_index` doesn't have wildcard `kwargs`, and
-        # can't accept arbitrary args, even if its value is `None`
+        # `get_rope_index` doesn't always accept arbitrary `kwargs`
         kwargs = {}
         if not hasattr(self, "_get_rope_index_accepts_mm_token_type_ids"):
             import inspect
@@ -516,11 +500,13 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
                 or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
             )
         if self._get_rope_index_accepts_mm_token_type_ids:
-            if mm_token_type_ids:
-                kwargs["mm_token_type_ids"] = torch.cat(mm_token_type_ids)
-            else:
-                shape = (1, len(input_tokens))
-                kwargs["mm_token_type_ids"] = torch.zeros(*shape, dtype=torch.int)
+            mm_token_type_ids = torch.zeros(len(input_tokens), dtype=torch.int)
+            for feature in mm_features:
+                position = feature.mm_position
+                offset, length = position.offset, position.length
+                mm_token_type_id = _MODALITY_TO_TOKEN_TYPE_ID[feature.modality]
+                mm_token_type_ids[offset : offset + length] = mm_token_type_id
+            kwargs["mm_token_type_ids"] = mm_token_type_ids.unsqueeze(0)
 
         mrope_positions, mrope_position_delta = self.model.get_rope_index(
             input_ids=torch.tensor(input_tokens).unsqueeze(0),

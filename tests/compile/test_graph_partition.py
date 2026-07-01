@@ -565,6 +565,8 @@ def test_size_used_in_multiple_consumer_subgraphs():
     torch._dynamo.mark_dynamic(x, 0)
     torch._dynamo.mark_dynamic(y, 0)
     torch.compile(model_fn, backend=capturing_backend)(x, y)
+    assert captured_graph is not None, "Graph should be captured by backend"
+    assert captured_inputs is not None, "Example inputs should be captured by backend"
 
     split_gm, split_items = split_graph(captured_graph, ["aten::sigmoid"])
 

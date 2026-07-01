@@ -22,8 +22,11 @@ from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
 )
+from vllm.lora.layers import LoRAMappingType
+from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.mem_constants import GiB_bytes
@@ -39,8 +42,12 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheTensor,
 )
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.worker.gpu.lora_utils import LoraState
+from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
+from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.utils import select_common_block_size
@@ -76,7 +83,6 @@ def initialize_kv_cache(runner: GPUModelRunner):
         max_model_len=runner.max_model_len,
         max_num_batched_tokens=runner.max_num_tokens,
         device=runner.device,
-        pin_memory=runner.pin_memory,
         vocab_size=runner.model_config.get_vocab_size(),
         block_sizes=[kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size],
         kernel_block_sizes=[
@@ -279,7 +285,8 @@ def test_sample_tokens_receives_pp_sampled_ids_only_on_non_last_rank(
         lambda: SimpleNamespace(world_size=world_size, is_last_rank=is_last_rank),
     )
 
-    assert GPUModelRunner.sample_tokens(runner, None) is None
+    output = GPUModelRunner.sample_tokens(runner, None)
+    assert output in (EMPTY_MODEL_RUNNER_OUTPUT, None)
     assert receive_calls == expected_calls
 
 
@@ -298,7 +305,8 @@ def test_sample_tokens_skips_pp_group_lookup_without_async_scheduling(
         pytest.fail,
     )
 
-    assert GPUModelRunner.sample_tokens(runner, None) is None
+    output = GPUModelRunner.sample_tokens(runner, None)
+    assert output in (EMPTY_MODEL_RUNNER_OUTPUT, None)
 
 
 def test_select_common_block_size_no_valid_option():
@@ -307,6 +315,79 @@ def test_select_common_block_size_no_valid_option():
 
     with pytest.raises(ValueError):
         select_common_block_size(48, [backend_a, backend_b])
+
+
+def test_set_active_mm_loras_builds_tower_and_connector_mappings():
+    model = Mock()
+    model.get_num_mm_encoder_tokens.side_effect = lambda num_embeds: num_embeds + 1
+    model.get_mm_mapping.return_value = SimpleNamespace(connector=True)
+    model.get_num_mm_connector_tokens.side_effect = lambda num_tokens: num_tokens + 10
+
+    lora_manager = Mock()
+    lora_manager.supports_tower_connector_lora.return_value = True
+
+    encoder_cache = EncoderCache()
+    encoder_cache.mm_features["req-with-lora"] = [
+        MultiModalFeatureSpec(
+            data=None,
+            modality="image",
+            identifier="img-0",
+            mm_position=PlaceholderRange(offset=0, length=2),
+        ),
+        MultiModalFeatureSpec(
+            data=None,
+            modality="image",
+            identifier="img-1",
+            mm_position=PlaceholderRange(offset=2, length=3),
+        ),
+    ]
+    encoder_cache.mm_features["req-no-lora"] = [
+        MultiModalFeatureSpec(
+            data=None,
+            modality="image",
+            identifier="img-2",
+            mm_position=PlaceholderRange(offset=0, length=1),
+        )
+    ]
+
+    lora_state = LoraState(max_num_reqs=4)
+    lora_request = LoRARequest("vision-lora", 7, "/tmp/vision-lora")
+    lora_state.add_request("req-with-lora", 0, lora_request)
+    lora_state.add_request("req-no-lora", 1, None)
+
+    set_active_mm_loras(
+        model=model,
+        lora_manager=lora_manager,
+        encoder_cache=encoder_cache,
+        req_id_to_index={
+            "req-with-lora": 0,
+            "req-no-lora": 1,
+        },
+        lora_state=lora_state,
+        scheduled_encoder_inputs={
+            "req-with-lora": [1, 0],
+            "req-no-lora": [0],
+            "missing-req": [0],
+        },
+    )
+
+    assert lora_manager.set_active_adapters.call_count == 2
+
+    tower_requests, tower_mapping = lora_manager.set_active_adapters.call_args_list[
+        0
+    ].args
+    assert tower_requests == {lora_request}
+    assert tower_mapping.type is LoRAMappingType.TOWER
+    assert tower_mapping.prompt_mapping == (7, 7, 0)
+    assert tower_mapping.index_mapping == (7, 7, 7, 7, 7, 7, 7, 0, 0)
+
+    connector_requests, connector_mapping = (
+        lora_manager.set_active_adapters.call_args_list[1].args
+    )
+    assert connector_requests == {lora_request}
+    assert connector_mapping.type is LoRAMappingType.CONNECTOR
+    assert connector_mapping.prompt_mapping == (7, 7, 0)
+    assert connector_mapping.index_mapping == ((7,) * 14 + (7,) * 13 + (0,) * 12)
 
 
 def test_update_states_new_request(model_runner, dist_init):
@@ -1000,8 +1081,8 @@ def test_init_kv_cache_with_kv_sharing_valid(default_vllm_config):
 
 
 @pytest.mark.skipif(
-    current_platform.is_rocm(),
-    reason="Attention backend FLASHINFER is not supported on ROCm.",
+    not current_platform.is_cuda(),
+    reason="Attention backend FLASHINFER is only supported on CUDA.",
 )
 def test_hybrid_attention_mamba_tensor_shapes():
     """
@@ -1254,7 +1335,6 @@ def test_input_batch_with_kernel_block_sizes():
     max_model_len = 512
     max_num_batched_tokens = 512
     device = torch.device(DEVICE_TYPE)
-    pin_memory = False
     vocab_size = 50272
 
     # Test with different kernel block sizes
@@ -1266,7 +1346,6 @@ def test_input_batch_with_kernel_block_sizes():
         max_model_len=max_model_len,
         max_num_batched_tokens=max_num_batched_tokens,
         device=device,
-        pin_memory=pin_memory,
         vocab_size=vocab_size,
         block_sizes=block_sizes,
         kernel_block_sizes=kernel_block_sizes,
@@ -1327,7 +1406,6 @@ def test_hybrid_cache_integration(default_vllm_config, dist_init):
         max_model_len=runner.max_model_len,
         max_num_batched_tokens=runner.max_num_tokens,
         device=runner.device,
-        pin_memory=runner.pin_memory,
         vocab_size=runner.model_config.get_vocab_size(),
         block_sizes=[kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size],
         kernel_block_sizes=[16],
@@ -1436,8 +1514,8 @@ def test_is_uniform_decode() -> None:
 
 
 @pytest.mark.skipif(
-    current_platform.is_rocm(),
-    reason="Attention backend FLASHINFER is not supported on ROCm.",
+    not current_platform.is_cuda(),
+    reason="Attention backend FLASHINFER is only supported on CUDA.",
 )
 def test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks():
     """Test that a ValueError is raised when max_num_seqs exceeds the

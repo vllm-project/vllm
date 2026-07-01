@@ -32,6 +32,7 @@ logger = init_logger(__name__)
 
 
 class Hermes2ProToolParser(ToolParser):
+    structural_tag_model = "hermes"
     tool_call_start_token: str = "<tool_call>"
     tool_call_end_token: str = "</tool_call>"
     tool_call_regex = re.compile(

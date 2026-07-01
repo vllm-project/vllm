@@ -21,12 +21,24 @@ import os
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
+try:
+    from vllm.fs_io_C import batch_lookup as batch_lookup_C
+
+    _HAS_BATCH_LOOKUP_C = True
+except ImportError:
+    _HAS_BATCH_LOOKUP_C = False
+
+from typing_extensions import override
+
 from vllm.logger import init_logger
-from vllm.v1.kv_offload.base import OffloadKey, ReqContext
+from vllm.v1.kv_offload.base import LookupResult, OffloadKey, ReqContext
 from vllm.v1.kv_offload.file_mapper import FileMapper
+from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
 from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     JobResult,
+    RequestOffloadingContext,
+    ScheduleEndContext,
     SecondaryTierManager,
 )
 from vllm.v1.kv_offload.tiering.fs.io import load_block, store_block
@@ -38,6 +50,27 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+class FsAsyncLookupManager(AsyncLookupManager):
+    """Async lookup manager for FileSystemTierManager."""
+
+    def __init__(
+        self,
+        tier: "FileSystemTierManager",
+        tier_type: str,
+    ) -> None:
+        super().__init__(tier_type=tier_type)
+        self._tier = tier
+
+    def batch_lookup(
+        self, keys: list[OffloadKey], req_context: ReqContext
+    ) -> Iterable[bool]:
+        paths = [self._tier.file_mapper.get_file_name(k) for k in keys]
+        if _HAS_BATCH_LOOKUP_C:
+            # C extension: GIL released for the entire faccessat() batch.
+            return batch_lookup_C(paths)
+        return (os.path.exists(p) for p in paths)
+
+
 class FileSystemTierManager(SecondaryTierManager):
     """
     Pure-Python disk-backed secondary tier.
@@ -47,8 +80,16 @@ class FileSystemTierManager(SecondaryTierManager):
     queue, so neither starves.
 
     submit_store / submit_load are non-blocking: they enqueue tasks and return.
-    get_finished() polls job completion and returns completed JobResults.
+    get_finished_jobs() polls job completion and returns completed JobResults.
 
+    Cross-process sharing:
+        In order to enable KV cache sharing between multiple vLLM instances
+        using the same ``root_dir`` (e.g., via a shared PVC) the environment
+        variable ``PYTHONHASHSEED`` must be set to the same fixed value
+        (e.g., "0") on all instances. Without this, each process initializes
+        ``NONE_HASH`` (the chain-hash seed for block content hashes) with
+        random bytes, producing different block filenames for identical token
+        content.
     """
 
     def __init__(
@@ -78,11 +119,12 @@ class FileSystemTierManager(SecondaryTierManager):
         )
         self._block_size: int = primary_kv_view.strides[0]
 
-        # Create file mapper
+        # Opt in; FileMapper enables it only for a parallelism-invariant block.
         self.file_mapper = FileMapper.from_offloading_spec(
             root_dir=root_dir,
             offloading_spec=offloading_spec,
             gpu_blocks_per_file=offloading_spec.block_size_factor,
+            parallel_agnostic=True,
         )
 
         # Write config file
@@ -100,11 +142,20 @@ class FileSystemTierManager(SecondaryTierManager):
             thread_name_prefix="vllm_kv_py_fs",
         )
 
-    def lookup(
-        self, key: OffloadKey, req_context: ReqContext | None = None
-    ) -> bool | None:
-        return os.path.exists(self.file_mapper.get_file_name(key))
+        self._lookup_manager = FsAsyncLookupManager(tier=self, tier_type=self.tier_type)
 
+    @override
+    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+        return RequestOffloadingContext()
+
+    @override
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
+        result = self._lookup_manager.lookup(key, req_context)
+        if result is None:
+            return LookupResult.RETRY
+        return LookupResult.HIT if result else LookupResult.MISS
+
+    @override
     def submit_store(self, job_metadata: JobMetadata) -> None:
         tasks = (
             functools.partial(
@@ -118,6 +169,7 @@ class FileSystemTierManager(SecondaryTierManager):
         )
         self._pool.enqueue_store(job_metadata.job_id, len(job_metadata.keys), tasks)
 
+    @override
     def submit_load(self, job_metadata: JobMetadata) -> None:
         tasks = (
             functools.partial(
@@ -131,7 +183,8 @@ class FileSystemTierManager(SecondaryTierManager):
         )
         self._pool.enqueue_load(job_metadata.job_id, len(job_metadata.keys), tasks)
 
-    def get_finished(self) -> Iterable[JobResult]:
+    @override
+    def get_finished_jobs(self) -> Iterable[JobResult]:
         """
         Collect completed jobs from the finished-jobs queue.
         """
@@ -140,11 +193,25 @@ class FileSystemTierManager(SecondaryTierManager):
             for job_id, success in self._pool.get_finished()
         )
 
+    @override
+    def drain_jobs(self) -> None:
+        """Block until all in-flight transfers in the threadpool finish."""
+        self._pool.wait_idle()
+
+    def on_request_finished(self, req_context: ReqContext) -> None:
+        self._lookup_manager.cleanup(req_context.req_id)
+
+    @override
+    def on_schedule_end(self, context: ScheduleEndContext) -> None:
+        self._lookup_manager.flush()
+
+    @override
     def shutdown(self) -> None:
         """
         Release resources held by this tier.
 
-        Shuts down the thread pool, clearing pending tasks and waiting for
-        active threads to complete.
+        Shuts down the lookup manager and the thread pool,
+        clearing pending tasks and waiting for active threads to complete.
         """
+        self._lookup_manager.shutdown()
         self._pool.shutdown(wait=True)

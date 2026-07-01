@@ -41,7 +41,6 @@ from transformers.models.qwen2_vl.configuration_qwen2_vl import (
     Qwen2VLVisionConfig,
 )
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
-from transformers.models.qwen2_vl.video_processing_qwen2_vl import Qwen2VLVideoProcessor
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -61,7 +60,6 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.common import (
     ApplyRotaryEmb,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -86,7 +84,6 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.tokenizers import TokenizerLike
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
@@ -524,6 +521,15 @@ class Qwen2VisionPatchMerger(nn.Module):
 
 
 class Qwen2VisionTransformer(nn.Module):
+    # Vision checkpoints store qkv pre-fused; merge separate q/k/v into qkv.
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".q_proj": (".qkv", "q"),
+            ".k_proj": (".qkv", "k"),
+            ".v_proj": (".qkv", "v"),
+        }
+    )
+
     def __init__(
         self,
         vision_config: Qwen2VLVisionConfig,
@@ -707,7 +713,7 @@ class Qwen2VisionTransformer(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        grid_thw: torch.Tensor | list[list[int]],
+        grid_thw: torch.Tensor | list[list[int]] | None,
         *,
         encoder_metadata: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
@@ -715,9 +721,11 @@ class Qwen2VisionTransformer(nn.Module):
         x = x.to(device=self.device, dtype=self.dtype)
         x = self.patch_embed(x)
 
-        grid_thw_list = grid_thw if isinstance(grid_thw, list) else grid_thw.tolist()
-
         if encoder_metadata is None:
+            assert grid_thw is not None
+            grid_thw_list = (
+                grid_thw if isinstance(grid_thw, list) else grid_thw.tolist()
+            )
             encoder_metadata = self.prepare_encoder_metadata(grid_thw_list)
 
         rotary_pos_emb_cos = encoder_metadata["rotary_pos_emb_cos"]
@@ -742,31 +750,8 @@ class Qwen2VisionTransformer(nn.Module):
         return x
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 def _create_qwen2vl_field_factory(
@@ -1460,11 +1445,8 @@ class Qwen2VLForConditionalGeneration(
         max_frames = self.get_max_frames_per_video()
         return EncoderCudaGraphConfig(
             modalities=["image", "video"],
-            input_key_by_modality={
-                "image": "pixel_values",
-                "video": "pixel_values_videos",
-            },
             buffer_keys=[
+                "pixel_values",
                 "rotary_pos_emb_cos",
                 "rotary_pos_emb_sin",
                 "cu_seqlens",
@@ -1580,6 +1562,7 @@ class Qwen2VLForConditionalGeneration(
         max_frames_per_batch: int,
         device: torch.device,
         dtype: torch.dtype,
+        path: str = "default",
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
@@ -1622,7 +1605,7 @@ class Qwen2VLForConditionalGeneration(
         )
 
         # max_seqlen.item() gets baked into the CUDA graph at capture time.
-        buffers = self.visual.prepare_encoder_metadata(
+        metadata = self.visual.prepare_encoder_metadata(
             grid_config,
             max_batch_size=max_batch_size,
             max_frames_per_batch=max_frames_per_batch,
@@ -1632,14 +1615,12 @@ class Qwen2VLForConditionalGeneration(
 
         # Capture with image-format kwargs; pixel_values shape is compatible with
         # both image and video replay paths.
-        mm_kwargs = {
+        values = metadata | {
             "pixel_values": dummy_pixel_values,
-            "image_grid_thw": grid_config,
         }
 
         return EncoderCudaGraphCaptureInputs(
-            mm_kwargs=mm_kwargs,
-            buffers=buffers,
+            values=values,
         )
 
     def prepare_encoder_cudagraph_replay_buffers(
@@ -1647,33 +1628,40 @@ class Qwen2VLForConditionalGeneration(
         mm_kwargs: dict[str, Any],
         max_batch_size: int,
         max_frames_per_batch: int,
+        path: str = "default",
     ) -> EncoderCudaGraphReplayBuffers:
         modality = self.get_input_modality(mm_kwargs)
         grid_thw_list = self._get_grid_thw_by_modality(mm_kwargs)
 
         if modality == "image":
-            buffers = self.visual.prepare_encoder_metadata(
+            metadata = self.visual.prepare_encoder_metadata(
                 grid_thw_list,
                 max_batch_size=max_batch_size,
             )
         else:
-            buffers = self.visual.prepare_encoder_metadata(
+            metadata = self.visual.prepare_encoder_metadata(
                 grid_thw_list,
                 max_frames_per_batch=max_frames_per_batch,
             )
 
-        return EncoderCudaGraphReplayBuffers(buffers=buffers)
+        values = metadata | {
+            "pixel_values": self._get_pixel_values_by_modality(mm_kwargs),
+        }
+        return EncoderCudaGraphReplayBuffers(values=values)
 
     def encoder_cudagraph_forward(
-        self, mm_kwargs: dict[str, Any], buffers: dict[str, torch.Tensor]
+        self,
+        values: dict[str, torch.Tensor],
+        path: str = "default",
     ) -> torch.Tensor:
-        pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
-        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
-        return self.visual(pixel_values, grid_thw, encoder_metadata=buffers)
+        pixel_values = values.pop("pixel_values")
+        metadata = values
+        return self.visual(pixel_values, None, encoder_metadata=metadata)
 
     def encoder_eager_forward(
         self,
         mm_kwargs: dict[str, Any],
+        path: str = "default",
     ) -> torch.Tensor:
         pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
         grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
@@ -1750,83 +1738,3 @@ class Qwen2VLForConditionalGeneration(
         vision_config = hf_config.vision_config
         merge_size = vision_config.spatial_merge_size
         return num_vision_tokens // merge_size**2
-
-
-class Tarsier2MultiModalProcessor(Qwen2VLMultiModalProcessor):
-    pass
-
-
-class Tarsier2ImageProcessor(Qwen2VLImageProcessor):
-    def __init__(
-        self,
-        size: dict[str, int] | None = None,
-        **kwargs,
-    ) -> None:
-        if size is not None and "min_pixels" in size and "max_pixels" in size:
-            # Remap if Tarsier2-specific format is provided
-            remapped_size = {
-                "shortest_edge": size["min_pixels"],
-                "longest_edge": size["max_pixels"],
-            }
-            super().__init__(size=remapped_size, **kwargs)
-        else:
-            super().__init__(size=size, **kwargs)
-
-
-class Tarsier2Processor(Qwen2VLProcessor):
-    def __init__(
-        self,
-        image_processor: Tarsier2ImageProcessor,
-        tokenizer: TokenizerLike,
-        video_processor: Qwen2VLVideoProcessor,
-        **kwargs,
-    ):
-        super().__init__(
-            image_processor=image_processor,
-            tokenizer=tokenizer,
-            video_processor=video_processor,
-            chat_template=None,
-            **kwargs,
-        )
-
-
-class Tarsier2ProcessingInfo(Qwen2VLProcessingInfo):
-    def get_hf_config(self) -> Qwen2VLConfig:
-        model_path = self.ctx.model_config.model
-        correct_config = Qwen2VLConfig.from_pretrained(model_path)
-
-        return correct_config
-
-    def get_hf_processor(self, **kwargs: object) -> Tarsier2Processor:
-        vision_config = self.ctx.get_hf_image_processor_config()
-        image_processor = Tarsier2ImageProcessor(**vision_config)
-        video_processor = Qwen2VLVideoProcessor(**vision_config)
-        return Tarsier2Processor(
-            image_processor=image_processor,
-            video_processor=video_processor,
-            tokenizer=self.get_tokenizer(),
-            **kwargs,
-        )
-
-    def get_image_processor(self) -> Tarsier2ImageProcessor:
-        return Tarsier2ImageProcessor(**self.ctx.get_hf_image_processor_config())
-
-
-@MULTIMODAL_REGISTRY.register_processor(
-    Tarsier2MultiModalProcessor,
-    info=Tarsier2ProcessingInfo,
-    dummy_inputs=Qwen2VLDummyInputsBuilder,
-)
-class Tarsier2ForConditionalGeneration(Qwen2VLForConditionalGeneration):
-    hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_prefix={
-            "vision_tower.": "visual.",
-        }
-    )
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        skip_prefixes = []
-        if self.visual is None:
-            skip_prefixes.extend(["visual."])
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
