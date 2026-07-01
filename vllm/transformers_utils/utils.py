@@ -49,12 +49,18 @@ def modelscope_list_repo_files(
     api = HubApi()
     api.login(token)
     # same as huggingface_hub.list_repo_files
-    files = [
-        file["Path"]
-        for file in api.get_model_files(
+    # modelscope >= 1.38 removed the `revision` kwarg from the
+    # LegacyHubApi compat layer; fall back to calling without it.
+    try:
+        model_files = api.get_model_files(
             model_id=repo_id, revision=revision, recursive=True
         )
-        if file["Type"] == "blob"
+    except TypeError:
+        model_files = api.get_model_files(
+            model_id=repo_id, recursive=True
+        )
+    files = [
+        file["Path"] for file in model_files if file["Type"] == "blob"
     ]
     return files
 
