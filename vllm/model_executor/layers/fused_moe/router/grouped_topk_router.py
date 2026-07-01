@@ -30,7 +30,7 @@ def fused_grouped_topk(
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
-    e_score_correction_bias: torch.Tensor,
+    e_score_correction_bias: torch.Tensor | None,
     num_expert_group: int = 0,
     topk_group: int = 0,
     scoring_func: str = "softmax",
@@ -40,6 +40,9 @@ def fused_grouped_topk(
 
     if scoring_func == "sigmoid":
         # Fully fused kernel path for sigmoid
+        assert e_score_correction_bias is not None, (
+            "sigmoid scoring requires e_score_correction_bias"
+        )
         topk_values, topk_indices = ops.grouped_topk(
             gating_output,  # raw logits
             num_expert_group,
@@ -49,21 +52,41 @@ def fused_grouped_topk(
             routed_scaling_factor,
             e_score_correction_bias,
             1,  # scoring_func=1 for sigmoid
+            0,  # group_scoring_func=0 (top2, sigmoid models always use bias)
         )
     elif scoring_func == "softmax":
         # Apply softmax in Python, then use fused kernel
         # TODO: Add support for softmax in kernel
         scores = torch.softmax(gating_output, dim=-1)
-        topk_values, topk_indices = ops.grouped_topk(
-            scores,  # pre-computed scores
-            num_expert_group,
-            topk_group,
-            topk,
-            renormalize,
-            routed_scaling_factor,
-            e_score_correction_bias,
-            0,  # scoring_func=0 (no activation, scores already computed)
-        )
+        if e_score_correction_bias is None:
+            # No bias: use max-per-group scoring (Mistral-style) and a zero
+            # bias tensor so the kernel interface is satisfied.
+            zero_bias = torch.zeros(
+                gating_output.size(-1), dtype=scores.dtype, device=scores.device
+            )
+            topk_values, topk_indices = ops.grouped_topk(
+                scores,
+                num_expert_group,
+                topk_group,
+                topk,
+                renormalize,
+                routed_scaling_factor,
+                zero_bias,
+                0,  # scoring_func=0 (scores pre-computed)
+                1,  # group_scoring_func=1 (max per group)
+            )
+        else:
+            topk_values, topk_indices = ops.grouped_topk(
+                scores,  # pre-computed scores
+                num_expert_group,
+                topk_group,
+                topk,
+                renormalize,
+                routed_scaling_factor,
+                e_score_correction_bias,
+                0,  # scoring_func=0 (no activation, scores already computed)
+                0,  # group_scoring_func=0 (top2, bias models use sum-of-top2)
+            )
     else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
@@ -93,7 +116,7 @@ def grouped_topk(
         and current_platform.is_cuda()
         and num_expert_group <= 32
         and topk <= 32
-        and e_score_correction_bias is not None
+        and (e_score_correction_bias is not None or scoring_func == "softmax")
     ):
         return fused_grouped_topk(
             hidden_states=hidden_states,
