@@ -159,3 +159,11 @@ class SAECachePolicy(CachePolicy):
         self._lookup_count = 0
         self._open_sid = None
         self._last_event = "clear"
+
+    @override
+    def mark_evictable(self, key: OffloadKey) -> None:
+        self._evictable_keys[key] = None
+
+    @override
+    def mark_non_evictable(self, key: OffloadKey) -> None:
+        self._evictable_keys.pop(key, None)
