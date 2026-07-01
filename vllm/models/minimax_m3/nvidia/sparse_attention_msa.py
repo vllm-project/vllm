@@ -48,6 +48,8 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
         kv_cache = (
             kv_cache.view(self.kv_cache_fp8_dtype) if self.use_fp8_kv else kv_cache
         )
+        k_scale = getattr(layer, "_k_scale", None) if self.use_fp8_kv else None
+        v_scale = getattr(layer, "_v_scale", None) if self.use_fp8_kv else None
 
         # Decode [:nd]: Triton split-K placeholder (no MSA decode yet).
         if main_md.num_decodes > 0:
@@ -63,6 +65,8 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
                 self.scale,
                 out[:nd],
                 d.decode_query_len,
+                k_scale=k_scale,
+                v_scale=v_scale,
             )
 
         # Prefill [nd:]: MSA sparse FMHA over the selected blocks.
