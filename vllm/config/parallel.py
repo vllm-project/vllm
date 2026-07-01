@@ -50,6 +50,8 @@ All2AllBackend = Literal[
     "flashinfer_all2allv",  # temporary alias for flashinfer_nvlink_two_sided
     "flashinfer_nvlink_two_sided",
     "flashinfer_nvlink_one_sided",
+    "flashinfer_ep_low_latency",  # flashinfer.moe_ep (NCCL-EP) low-latency
+    "flashinfer_ep_high_throughput",  # flashinfer.moe_ep (NCCL-EP) high-throughput
 ]
 
 
