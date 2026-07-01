@@ -57,6 +57,14 @@ class FlashAttnMLABackend(MLACommonBackend):
         return [MultipleOf(16)]
 
     @staticmethod
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
+        if include_num_layers_dimension:
+            return (1, 0, 2, 3)
+        return (0, 1, 2)
+
+    @staticmethod
     def get_name() -> str:
         return "FLASH_ATTN_MLA"
 
@@ -886,6 +894,7 @@ class FlashAttnStaticSinkMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
         attn_metadata: MLACommonMetadata,
         k_scale: torch.Tensor,
         output: torch.Tensor,
+        output_scale: torch.Tensor | None = None,
     ) -> None:
         if self.sink_len == 0:
             super().forward_mha(
@@ -896,8 +905,12 @@ class FlashAttnStaticSinkMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
                 attn_metadata,
                 k_scale,
                 output,
+                output_scale,
             )
             return
+        assert output_scale is None, (
+            "Fused FP8 output is not supported for FlashAttnStaticSinkMLAImpl yet"
+        )
 
         assert attn_metadata.prefill is not None
         prefill_metadata = attn_metadata.prefill

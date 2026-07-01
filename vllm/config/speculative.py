@@ -45,6 +45,7 @@ MTPModelTypes = Literal[
     "qwen3_next_mtp",
     "qwen3_5_mtp",
     "longcat_flash_mtp",
+    "minimax_m3_mtp",
     "mtp",
     "openpangu_mtp",
     "pangu_ultra_moe_mtp",
@@ -528,6 +529,36 @@ class SpeculativeConfig:
             if hasattr(text_config, "num_kv_shared_layers"):
                 text_config.num_kv_shared_layers = 0
             hf_config.update({"n_predict": 1, "architectures": ["Gemma4MTPModel"]})
+
+        if (
+            hf_config.model_type == "minimax_m3_vl"
+            or initial_architecture == "MiniMaxM3SparseForConditionalGeneration"
+        ):
+            # MTP modules live on the language model of this VL checkpoint, so
+            # promote text_config before rewriting it into an MTP config.
+            quantization_config = getattr(hf_config, "quantization_config", None)
+            hf_config = getattr(hf_config, "text_config", hf_config)
+            if (
+                quantization_config is not None
+                and getattr(hf_config, "quantization_config", None) is None
+            ):
+                hf_config.update({"quantization_config": quantization_config})
+            hf_config.model_type = "minimax_m3_mtp"
+            n_predict = getattr(hf_config, "num_mtp_modules", 1)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["MiniMaxM3MTP"]}
+            )
+        elif (
+            hf_config.model_type == "minimax_m3_mtp"
+            or initial_architecture == "MiniMaxM3MTP"
+        ):
+            # Standalone MTP checkpoints already use a flat MTP config with no
+            # VL wrapper / text_config to promote, so just normalize the
+            # architecture and derive n_predict from num_mtp_modules.
+            n_predict = getattr(hf_config, "num_mtp_modules", 1)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["MiniMaxM3MTP"]}
+            )
 
         return hf_config
 

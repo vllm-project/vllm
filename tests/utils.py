@@ -1464,7 +1464,7 @@ def error_on_warning(category: type[Warning] = Warning):
         yield
 
 
-def get_physical_device_indices(devices):
+def get_physical_device_indices(devices: list[int]):
     visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
     if visible_devices is None:
         return devices
@@ -1475,82 +1475,114 @@ def get_physical_device_indices(devices):
 
 
 @_nvml()
+def record_gpu_memory_usage_stats(
+    *,
+    devices: list[int],
+) -> dict[int, tuple[float, float]]:
+    output: dict[int, tuple[float, float]] = {}
+    for device in devices:
+        if current_platform.is_rocm():
+            dev_handle = amdsmi_get_processor_handles()[device]
+            mem_info = amdsmi_get_gpu_vram_usage(dev_handle)
+            gb_used = mem_info["vram_used"] / 2**10
+            gb_total = mem_info["vram_total"] / 2**10
+        else:
+            dev_handle = nvmlDeviceGetHandleByIndex(device)
+            mem_info = nvmlDeviceGetMemoryInfo(dev_handle)
+            gb_used = mem_info.used / 2**30
+            gb_total = mem_info.total / 2**30
+        output[device] = (gb_used, gb_total)
+    return output
+
+
 def wait_for_gpu_memory_to_clear(
     *,
     devices: list[int],
-    threshold_bytes: int | None = None,
-    threshold_ratio: float | None = None,
+    threshold_bytes: int | dict[int, int] | None = None,
+    threshold_ratio: float | dict[int, float] | None = None,
     timeout_s: float = 120,
 ) -> None:
     assert threshold_bytes is not None or threshold_ratio is not None
-    if (
-        current_platform.is_rocm()
-        and threshold_ratio is not None
-        and threshold_ratio < 0.05
-    ):
+    devices = get_physical_device_indices(devices)
+    if isinstance(threshold_bytes, int):
+        threshold_bytes = {device: threshold_bytes for device in devices}
+    elif isinstance(threshold_bytes, dict):
+        assert threshold_bytes.keys() == set(devices)
+    if isinstance(threshold_ratio, float):
+        threshold_ratio = {device: threshold_ratio for device in devices}
+    elif isinstance(threshold_ratio, dict):
+        assert threshold_ratio.keys() == set(devices)
+    if current_platform.is_rocm() and threshold_ratio is not None:
         # ROCm can keep a small runtime/driver footprint resident even after
         # all model allocations are gone. On MI300 this has been observed
         # around 2.5 GiB, which is above a strict 1% idle threshold but nowhere
         # near the amount of free memory needed by the next vLLM runner.
-        min_threshold_bytes = 4 * 1024**3
-        threshold_bytes = max(threshold_bytes or 0, min_threshold_bytes)
+        min_threshold_b = 4 * 1024**3
+        if threshold_bytes is None:
+            threshold_bytes = {}
+        for device, ratio in threshold_ratio.items():
+            threshold_bytes[device] = max(
+                threshold_bytes.get(device, 0), min_threshold_b if ratio < 0.05 else 0
+            )
 
     # Use nvml instead of pytorch to reduce measurement error from torch cuda
     # context.
-    devices = get_physical_device_indices(devices)
     start_time = time.time()
     while True:
-        output: dict[int, str] = {}
-        output_raw: dict[int, tuple[float, float]] = {}
-        for device in devices:
-            if current_platform.is_rocm():
-                dev_handle = amdsmi_get_processor_handles()[device]
-                mem_info = amdsmi_get_gpu_vram_usage(dev_handle)
-                gb_used = mem_info["vram_used"] / 2**10
-                gb_total = mem_info["vram_total"] / 2**10
-            else:
-                dev_handle = nvmlDeviceGetHandleByIndex(device)
-                mem_info = nvmlDeviceGetMemoryInfo(dev_handle)
-                gb_used = mem_info.used / 2**30
-                gb_total = mem_info.total / 2**30
-            output_raw[device] = (gb_used, gb_total)
-            output[device] = f"{gb_used:.02f}/{gb_total:.02f}"
-
+        output_raw = record_gpu_memory_usage_stats(devices=devices)
+        output = {
+            device: f"{gb_used:.02f}/{gb_total:.02f}"
+            for device, (gb_used, gb_total) in output_raw.items()
+        }
         print("gpu memory used/total (GiB): ", end="")
         for k, v in output.items():
             print(f"{k}={v}; ", end="")
         print("")
 
         if threshold_bytes is not None and threshold_ratio is not None:
-            threshold_gib = threshold_bytes / 2**30
-            threshold = f"max({threshold_gib:.2f} GiB, {threshold_ratio:.3f})"
+            threshold_gib = {
+                device: threshold_b / 2**30
+                for device, threshold_b in threshold_bytes.items()
+            }
+            threshold = "; ".join(
+                f"{device=}: max({threshold_gib[device]:.2f} GiB, "
+                f"{threshold_ratio[device]:.3f})"
+                for device in devices
+            )
             all_free = all(
-                used <= max(threshold_gib, total * threshold_ratio)
-                for used, total in output_raw.values()
+                used <= max(threshold_gib[device], total * threshold_ratio[device])
+                for device, (used, total) in output_raw.items()
             )
         elif threshold_bytes is not None:
-            threshold_gib = threshold_bytes / 2**30
-            threshold = f"{threshold_gib} GiB"
-            all_free = all(used <= threshold_gib for used, _ in output_raw.values())
+            threshold_gib = {
+                device: threshold_b / 2**30
+                for device, threshold_b in threshold_bytes.items()
+            }
+            threshold = "; ".join(
+                f"{device=}: {threshold_gib[device]:.2f} GiB" for device in devices
+            )
+            all_free = all(
+                used <= threshold_gib[device]
+                for device, (used, _) in output_raw.items()
+            )
         else:
             assert threshold_ratio is not None
-            threshold = f"{threshold_ratio:.3f}"
+            threshold = "; ".join(
+                f"{device=}: {threshold_ratio[device]:.3f}" for device in devices
+            )
             all_free = all(
-                used / total <= threshold_ratio for used, total in output_raw.values()
+                used / total <= threshold_ratio[device]
+                for device, (used, total) in output_raw.items()
             )
 
         dur_s = time.time() - start_time
         if all_free:
-            print(
-                f"Done waiting for free GPU memory on devices {devices=} "
-                f"({threshold=}) {dur_s=:.02f}"
-            )
+            print(f"Done waiting for free GPU memory on ({threshold=}) {dur_s=:.02f}")
             break
 
         if dur_s >= timeout_s:
             raise ValueError(
-                f"Memory of devices {devices=} not free after "
-                f"{dur_s=:.02f} ({threshold=})"
+                f"Memory of devices not free after {dur_s=:.02f} ({threshold=})"
             )
 
         time.sleep(5)
@@ -1558,7 +1590,7 @@ def wait_for_gpu_memory_to_clear(
 
 def wait_for_rocm_memory_to_settle(
     *,
-    threshold_ratio: float = 0.1,
+    threshold_ratio: float | dict[int, float] | None = 0.1,
     timeout_s: float = 240,
 ) -> None:
     """Block until ROCm device VRAM usage drops below ``threshold_ratio``.

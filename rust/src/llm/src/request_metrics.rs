@@ -98,27 +98,33 @@ impl RequestMetricsTracker {
             self.observe_events(engine_index, events);
         }
 
-        if self.is_prefilling {
-            if let Some(prefill_stats) = &output.prefill_stats {
-                record_prompt_tokens(&self.model_name, engine_index, prefill_stats);
+        // Only outputs that actually carry tokens drive token-timing metrics.
+        // A terminal output with no new tokens (e.g. the synthesized abort
+        // output) must not log a stray time-to-first-token or inter-token
+        // sample.
+        if !output.new_token_ids.is_empty() {
+            if self.is_prefilling {
+                if let Some(prefill_stats) = &output.prefill_stats {
+                    record_prompt_tokens(&self.model_name, engine_index, prefill_stats);
+                }
+                self.first_token_latency = received_at - self.arrival_time;
+                observe_time_to_first_token_seconds(
+                    &self.model_name,
+                    engine_index,
+                    self.first_token_latency,
+                );
+                self.first_token_ts = batch_timestamp;
+                self.is_prefilling = false;
+            } else if self.last_token_ts > 0.0 {
+                observe_inter_token_latency_seconds(
+                    &self.model_name,
+                    engine_index,
+                    batch_timestamp - self.last_token_ts,
+                );
             }
-            self.first_token_latency = received_at - self.arrival_time;
-            observe_time_to_first_token_seconds(
-                &self.model_name,
-                engine_index,
-                self.first_token_latency,
-            );
-            self.first_token_ts = batch_timestamp;
-            self.is_prefilling = false;
-        } else if self.last_token_ts > 0.0 {
-            observe_inter_token_latency_seconds(
-                &self.model_name,
-                engine_index,
-                batch_timestamp - self.last_token_ts,
-            );
-        }
 
-        self.last_token_ts = batch_timestamp;
+            self.last_token_ts = batch_timestamp;
+        }
     }
 
     /// Emit the terminal request metrics once a finished output has been

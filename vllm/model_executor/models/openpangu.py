@@ -430,6 +430,14 @@ class StaticSinkMultiHeadLatentAttentionWrapper(PluggableLayer):
             StaticSinkMLAAttention,
         )
 
+        attn_backend = None
+        if self.is_sparse:
+            from vllm.v1.attention.backends.mla.flashmla_sparse import (
+                FlashMLASparseBackend,
+            )
+
+            attn_backend = FlashMLASparseBackend
+
         self.mla_attn = StaticSinkMLAAttention(
             num_heads=self.num_heads,
             scale=scale,
@@ -443,6 +451,7 @@ class StaticSinkMultiHeadLatentAttentionWrapper(PluggableLayer):
             prefix=f"{prefix}.attn",
             kv_b_proj=self.kv_b_proj,
             use_sparse=self.is_sparse,
+            attn_backend=attn_backend,
             indexer=self.indexer,
             sink_len=sink_len,
             sliding_window=sliding_window,
@@ -2108,7 +2117,6 @@ class OpenPanguMoEModel(OpenPanguModelBase, MixtureOfExperts):
         config = vllm_config.model_config.hf_config
 
         # Set MoE hyperparameters
-        self.expert_weights = []
         self.num_moe_layers = config.num_hidden_layers - config.first_k_dense_replace
         self.num_expert_groups = 1
 

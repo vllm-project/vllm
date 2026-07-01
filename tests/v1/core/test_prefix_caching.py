@@ -22,7 +22,7 @@ from vllm.multimodal.inputs import (
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor
 from vllm.v1.core.block_pool import BlockHashToBlockMap, BlockPool
-from vllm.v1.core.kv_cache_manager import KVCacheManager, Request
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager, Request
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashWithGroupId,
@@ -291,13 +291,12 @@ def test_prefill(hash_fn):
     # All blocks should be available.
     assert free_block_queue.num_free_blocks == 10
     # The order should be
+    # [partial without hashes from req1 and req0 (5, 4) - prepended for immediate reuse]
     # [unallocated (6, 7, 8, 9, 10)]
-    # [unique_req0 (4)]
-    # [unique_req1 (5)]
     # [common (3, 2, 1)]
     assert [
         b.block_id for b in manager.block_pool.free_block_queue.get_all_free_blocks()
-    ] == [6, 7, 8, 9, 10, 4, 5, 3, 2, 1]
+    ] == [5, 4, 6, 7, 8, 9, 10, 3, 2, 1]
 
     # Cache hit in the common prefix when the original block is already free.
     # Incomplete 1 block (6 tokens)
@@ -311,7 +310,7 @@ def test_prefill(hash_fn):
     blocks = manager.allocate_slots(
         req2, num_new_tokens, len(computed_blocks.blocks[0]) * 16, computed_blocks
     )
-    assert blocks is not None and blocks.get_block_ids() == ([6],)
+    assert blocks is not None and blocks.get_block_ids() == ([5],)  # reuse partial [5]
 
     # Although we only have 6 free blocks, we have 8 blocks in
     # the free block queue due to lazy removal.
@@ -331,7 +330,7 @@ def test_prefill(hash_fn):
     )
     # This block ID order also checks the eviction order.
     assert blocks is not None and blocks.get_block_ids() == (
-        [7, 8, 9, 10, 4, 5, 6, 3, 2, 1],
+        [5, 4, 6, 7, 8, 9, 10, 3, 2, 1],
     )
 
     assert free_block_queue.num_free_blocks == 0
@@ -1216,13 +1215,12 @@ def test_prefill_plp():
     # All blocks should be available.
     assert manager.block_pool.free_block_queue.num_free_blocks == 10
     # The order should be
+    # [partial without hashes from req1 and req0 (5, 4) - prepended for immediate reuse]
     # [unallocated (6, 7, 8, 9, 10)]
-    # [unique_req0 (4)]
-    # [unique_req1 (5)]
     # [common (3, 2, 1)]
     assert [
         b.block_id for b in manager.block_pool.free_block_queue.get_all_free_blocks()
-    ] == [6, 7, 8, 9, 10, 4, 5, 3, 2, 1]
+    ] == [5, 4, 6, 7, 8, 9, 10, 3, 2, 1]
 
     # Request #2 is a prompt-logprobs request:
     # NO cache hit in the common prefix; duplicates request #0 cached blocks
@@ -1351,11 +1349,15 @@ def test_evict():
     assert manager.block_pool.free_block_queue.num_free_blocks == 1
 
     manager.free(req0)
+    # partial blocks (without hash) at head, other at tail (LRU policy):
+    assert [
+        b.block_id for b in manager.block_pool.free_block_queue.get_all_free_blocks()
+    ] == [6, 10, 5, 4, 3, 2, 1]
     manager.free(req1)
     assert manager.block_pool.free_block_queue.num_free_blocks == 10
     assert [
         b.block_id for b in manager.block_pool.free_block_queue.get_all_free_blocks()
-    ] == [10, 6, 5, 4, 3, 2, 1, 9, 8, 7]
+    ] == [6, 10, 5, 4, 3, 2, 1, 9, 8, 7]
 
     # Touch the first 2 blocks.
     req2 = make_request("2", list(range(2 * 16 + 3)), block_size, sha256)
@@ -1365,7 +1367,7 @@ def test_evict():
     blocks = manager.allocate_slots(
         req2, 3, len(computed_blocks.blocks[0]) * 16, computed_blocks
     )
-    assert blocks is not None and blocks.get_block_ids() == ([10],)
+    assert blocks is not None and blocks.get_block_ids() == ([6],)
     assert manager.block_pool.free_block_queue.num_free_blocks == 7
 
 
@@ -2001,7 +2003,7 @@ def test_maybe_evict_cached_block():
     assert len(pool.blocks) == len(block_hashes)
     # Manually add all blocks to cached_blocks
     for block, block_hash in zip(pool.blocks, block_hashes):
-        block.block_hash = block_hash
+        block.set_block_hash(block_hash)
         pool.cached_block_hash_to_block.insert(block_hash, block)
 
     block0, block1, block2, block3 = pool.blocks
@@ -3519,6 +3521,180 @@ def test_can_fit_full_sequence_full_attention_still_gates_oversized():
     assert manager.allocate_slots(req, block_size, full_sequence_must_fit=True) is None
 
 
+def test_cache_hit_local_and_external():
+    # Regression test for #33775: when a request hits the local prefix cache
+    # in one KV cache group and needs external (connector) blocks in another,
+    # the external allocation of an earlier group must not evict the local
+    # cache-hit blocks of a later group. Otherwise the same physical block can
+    # be handed out twice, producing duplicate block IDs / ref_cnt corruption.
+    block_size = 16
+    kv_cache_config = make_kv_cache_config_hybrid_model(block_size, 31, 100)
+    del kv_cache_config.kv_cache_groups[2:]
+    req_id = "test"
+    manager = make_kv_cache_manager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        use_eagle=True,
+    )
+
+    top_blocks = []
+    head = manager.block_pool.free_block_queue.fake_free_list_head
+    for _ in range(10):
+        top_blocks.append(head.next_free_block)
+        head = head.next_free_block
+    cache_hit = KVCacheBlocks((top_blocks[:5], top_blocks[5:]))
+
+    manager.allocate_slots(
+        make_request(req_id, [0] * (8 * block_size), block_size, sha256),
+        16,
+        5 * block_size,
+        cache_hit,
+        0,
+        2 * block_size,
+    )
+
+    req_blocks = manager.get_blocks(req_id)
+    req_block_ids = req_blocks.get_block_ids()
+    all_block_ids = req_block_ids[0] + req_block_ids[1]
+    assert len(set(all_block_ids)) == len(all_block_ids), "Block IDs are not unique"
+
+
+def _take_free_blocks(manager: KVCacheManager, num_blocks: int) -> list[KVCacheBlock]:
+    """Grab the first ``num_blocks`` blocks at the head of the free queue
+    without removing them. These ref_cnt==0 blocks stand in for evictable
+    cache-hit blocks left behind by a previous (e.g. preempted) request, and
+    sitting at the head guarantees a later group's external ``get_new_blocks``
+    would contend for them on unpatched code (issue #33775)."""
+    blocks: list[KVCacheBlock] = []
+    head = manager.block_pool.free_block_queue.fake_free_list_head
+    for _ in range(num_blocks):
+        head = head.next_free_block
+        blocks.append(head)
+    return blocks
+
+
+def _assert_no_double_allocation(manager: KVCacheManager, req_id: str) -> None:
+    """No physical block may be handed out twice across groups, and every
+    block referenced by the request must have a live ref_cnt."""
+    block_ids = manager.get_blocks(req_id).get_block_ids()
+    flat = [block_id for group in block_ids for block_id in group]
+    assert len(set(flat)) == len(flat), "Block IDs are not unique across groups"
+    null_id = manager.block_pool.null_block.block_id
+    for block_id in flat:
+        if block_id == null_id:
+            continue
+        assert manager.block_pool.blocks[block_id].ref_cnt >= 1, (
+            f"block {block_id} referenced by the request has ref_cnt 0"
+        )
+
+
+def _two_phase_block_size(manager: KVCacheManager) -> int:
+    return manager.kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
+
+
+def _cross_group_cache_hit(
+    manager: KVCacheManager,
+    req_id: str,
+    num_groups: int,
+    local_blocks_per_group: int = 5,
+    num_external_blocks: int = 2,
+    num_new_blocks: int = 1,
+) -> Request:
+    """Allocate ``req_id`` with a per-group local prefix hit plus external
+    (connector) computed tokens, driving the coordinator's two-phase path.
+    Returns the allocated request so callers can free it (e.g. to preempt)."""
+    block_size = _two_phase_block_size(manager)
+    hit_blocks = _take_free_blocks(manager, num_groups * local_blocks_per_group)
+    cache_hit = KVCacheBlocks(
+        tuple(
+            hit_blocks[i * local_blocks_per_group : (i + 1) * local_blocks_per_group]
+            for i in range(num_groups)
+        )
+    )
+    prompt_blocks = local_blocks_per_group + num_external_blocks + num_new_blocks
+    request = make_request(
+        req_id, [0] * (prompt_blocks * block_size), block_size, sha256
+    )
+    manager.allocate_slots(
+        request,
+        num_new_blocks * block_size,
+        local_blocks_per_group * block_size,
+        cache_hit,
+        0,
+        num_external_blocks * block_size,
+    )
+    return request
+
+
+def _make_two_phase_manager(num_groups: int) -> KVCacheManager:
+    assert num_groups in (2, 3)
+    block_size = 16
+    kv_cache_config = make_kv_cache_config_hybrid_model(block_size, 31, 100)
+    del kv_cache_config.kv_cache_groups[num_groups:]
+    return make_kv_cache_manager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        use_eagle=True,
+    )
+
+
+def test_cache_hit_local_and_external_three_groups():
+    # Scenario 1 (issue #33775): SWA + full attention with *three* KV cache
+    # groups (1 full + 2 sliding-window). A local prefix hit in some groups
+    # combined with external (connector) blocks in others must not let one
+    # group's external `get_new_blocks` evict another group's not-yet-touched
+    # cache-hit blocks, which would hand the same physical block out twice.
+    manager = _make_two_phase_manager(num_groups=3)
+    _cross_group_cache_hit(manager, "test", num_groups=3)
+    _assert_no_double_allocation(manager, "test")
+
+
+def test_cache_hit_local_and_external_three_groups_preempt_and_reallocate():
+    # Scenario 2: the same 3-group hybrid config, but the request is preempted
+    # (freed) and then reallocated. After the free, the coordinator must treat
+    # the request as new again so external blocks are re-allocated, and the
+    # two-phase ordering must still prevent cross-group double allocation when
+    # reallocating against the now-evictable cache-hit blocks.
+    manager = _make_two_phase_manager(num_groups=3)
+
+    request = _cross_group_cache_hit(manager, "test", num_groups=3)
+    _assert_no_double_allocation(manager, "test")
+
+    # Preempt: free the request; its blocks return to the pool (full ones stay
+    # cached/evictable) and the coordinator forgets it.
+    manager.free(request)
+    assert manager.get_blocks("test").get_block_ids() == ([], [], [])
+
+    # Reallocate the same request id against fresh cache-hit blocks taken from
+    # the current free-queue head, mirroring a preempted request being
+    # scheduled again. Because the request is no longer known, the coordinator
+    # re-arms `is_new_request` and re-runs external allocation, which must still
+    # not double-allocate across groups.
+    _cross_group_cache_hit(manager, "test", num_groups=3)
+    _assert_no_double_allocation(manager, "test")
+    assert manager.get_blocks("test").get_block_ids() != ([], [], [])
+
+
+def test_cache_hit_local_and_external_two_groups_preempt_and_reallocate():
+    # Scenario 3: the minimal 2-group hybrid config (1 full + 1 sliding-window)
+    # exercised through the same preempt -> reallocate cycle as scenario 2.
+    manager = _make_two_phase_manager(num_groups=2)
+
+    request = _cross_group_cache_hit(manager, "test", num_groups=2)
+    _assert_no_double_allocation(manager, "test")
+
+    manager.free(request)
+    assert manager.get_blocks("test").get_block_ids() == ([], [])
+
+    _cross_group_cache_hit(manager, "test", num_groups=2)
+    _assert_no_double_allocation(manager, "test")
+    assert manager.get_blocks("test").get_block_ids() != ([], [])
+
+
 def test_swa_free_split_keeps_cached_tail_ahead_of_scratch(monkeypatch):
     """Default path (no retention): freeing an SWA request must place its
     uncached scratch blocks at the front of the free queue (recycled first)
@@ -3729,3 +3905,41 @@ def test_pure_swa_retention_dense_default_caches_all(monkeypatch):
         is not None
     }
     assert cached == set(range(16))
+
+
+def test_mamba_reachable_block_mask_sparsifies_retention():
+    """Mamba state-snapshot retention: with VLLM_PREFIX_CACHE_RETENTION_INTERVAL
+    the manager keeps one cached state per interval-sized segment (plus the
+    latest replay boundary) instead of a snapshot per block, which is what
+    lets a small attention block_size avoid Mamba dominating the KV pool."""
+    from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+
+    block_size = 16
+    spec = MambaSpec(
+        block_size=block_size,
+        shapes=(1, 1),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+
+    def retained(retention_interval, num_prompt_tokens=256, end_block=16):
+        m = MambaManager.reachable_block_mask(
+            start_block=0,
+            end_block=end_block,
+            alignment_tokens=block_size,
+            kv_cache_spec=spec,
+            use_eagle=False,
+            retention_interval=retention_interval,
+            num_prompt_tokens=num_prompt_tokens,
+        )
+        return None if m is None else {i for i, v in enumerate(m) if v}
+
+    # Dense default (None) -> no mask, every block cached (unchanged behavior).
+    assert retained(None) is None
+    # interval == block_size -> every block is a boundary -> stays dense.
+    assert retained(block_size) is None
+    # interval 64 = 4 blocks: segment tails at i%4==3 -> {3,7,11,15}; latest
+    # replay boundary 240//16 - 1 = 14. Sparse subset of the 16 blocks.
+    assert retained(64) == {3, 7, 11, 14, 15}
+    # interval 0 -> only the latest replay boundary (block 14).
+    assert retained(0) == {14}

@@ -36,7 +36,6 @@ from vllm.entrypoints.serve.disagg.protocol import (
     GenerateResponseStreamChoice,
     GenerateStreamResponse,
 )
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import EngineInput, mm_input
@@ -48,6 +47,7 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.outputs import RequestOutput
+from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.utils.collection_utils import as_list
 
@@ -61,7 +61,7 @@ class ServingTokens(OpenAIServing):
         self,
         engine_client: EngineClient,
         models: OpenAIServingModels,
-        openai_serving_render: OpenAIServingRender,
+        online_renderer: OnlineRenderer,
         *,
         request_logger: RequestLogger | None,
         force_no_detokenize: bool = False,
@@ -75,7 +75,7 @@ class ServingTokens(OpenAIServing):
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
         )
-        self.openai_serving_render = openai_serving_render
+        self.online_renderer = online_renderer
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_log_outputs = enable_log_outputs
         self.force_no_detokenize = force_no_detokenize
@@ -168,7 +168,7 @@ class ServingTokens(OpenAIServing):
                 cache_salt=request.cache_salt,
             )
         else:
-            (engine_input,) = await self.openai_serving_render.preprocess_completion(
+            (engine_input,) = await self.online_renderer.preprocess_completion(
                 request,
                 prompt_input=request.token_ids,
                 prompt_embeds=None,
@@ -400,6 +400,14 @@ class ServingTokens(OpenAIServing):
                     else:
                         logprobs = None
 
+                    routed_experts_b64 = None
+                    if output.routed_experts is not None:
+                        buf = io.BytesIO()
+                        np.save(buf, output.routed_experts)
+                        routed_experts_b64 = base64.b64encode(buf.getvalue()).decode(
+                            "ascii"
+                        )
+
                     chunk = GenerateStreamResponse(
                         request_id=request_id,
                         choices=[
@@ -408,6 +416,7 @@ class ServingTokens(OpenAIServing):
                                 logprobs=logprobs,
                                 finish_reason=finish_reason,
                                 token_ids=as_list(delta_token_ids),
+                                routed_experts=routed_experts_b64,
                             )
                         ],
                     )

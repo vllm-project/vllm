@@ -150,6 +150,7 @@ class StaticSinkMLAAttention(MLAAttention, CustomOp):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        attn_backend: type[AttentionBackend] | None = None,
         use_sparse: bool = False,
         indexer: nn.Module | None = None,
         sink_len: int | None = None,
@@ -163,14 +164,17 @@ class StaticSinkMLAAttention(MLAAttention, CustomOp):
         else:
             kv_cache_dtype = "auto"
         dtype = torch.get_default_dtype()
-        underlying_attn_backend = get_attn_backend(
-            head_size,
-            dtype,
-            kv_cache_dtype,
-            use_mla=True,
-            use_sparse=use_sparse,
-            num_heads=num_heads,
-        )
+        if attn_backend is not None:
+            underlying_attn_backend = attn_backend
+        else:
+            underlying_attn_backend = get_attn_backend(
+                head_size,
+                dtype,
+                kv_cache_dtype,
+                use_mla=True,
+                use_sparse=use_sparse,
+                num_heads=num_heads,
+            )
         sink_attn_backend = create_static_sink_attention_backend(
             underlying_attn_backend,
         )

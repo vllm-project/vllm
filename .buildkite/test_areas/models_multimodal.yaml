@@ -30,7 +30,6 @@ steps:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen3 or gemma"
     - pytest -v -s models/multimodal/generation/test_qwen2_5_vl.py -m core_model
-    - pytest -v -s models/multimodal/generation/test_vit_cudagraph.py -m core_model
   mirror:
     amd:
       device: mi325_1
@@ -63,9 +62,15 @@ steps:
   - tests/models/multimodal
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-    - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py  --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/processing
+    - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py  --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/generation/test_vit_cudagraph.py --ignore models/multimodal/processing
+    - pytest -v -s models/multimodal/generation/test_vit_cudagraph.py -m core_model
     - pytest models/multimodal/generation/test_memory_leak.py -m core_model
     - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
 
 - label: Multi-Modal Processor (CPU)
   key: multi-modal-processor-cpu
@@ -104,6 +109,17 @@ steps:
   - vllm/v1/core/
   commands:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
+  mirror:
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/multimodal/
+      - vllm/inputs/
+      - vllm/v1/core/
+      - vllm/platforms/rocm.py
+      - vllm/model_executor/model_loader/
 
 - label: Multi-Modal Models (Extended Generation 1)
   key: multi-modal-models-extended-generation-1
