@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import aiohttp
 import asyncio
 import atexit
 import contextlib
@@ -15,6 +16,7 @@ from urllib.request import url2pathname
 
 import numpy as np
 import numpy.typing as npt
+import requests
 import torch
 from PIL import Image, UnidentifiedImageError
 from urllib3.util import Url, parse_url
@@ -68,37 +70,28 @@ def _wrap_media_fetch_error(
         Original exception for transient errors (5xx, 408, 429, network blips)
             or other exceptions
     """
-    import aiohttp
-    import requests
-
     if isinstance(exc, aiohttp.ClientResponseError):
-        # 408 (timeout) and 429 (rate limit) are transient/retryable
         if exc.status in (408, 429):
             return exc
-        # 4xx responses indicate invalid/unavailable resources
         if exc.status < 500:
             return VLLMUnprocessableEntityError(
                 f"Failed to fetch media from URL: HTTP {exc.status} error",
                 parameter="image_url",
                 value=url,
             )
-        # 5xx responses are transient server errors
         return exc
 
     if isinstance(exc, requests.exceptions.HTTPError):
         if exc.response is not None:
             status_code = exc.response.status_code
-            # 408 (timeout) and 429 (rate limit) are transient/retryable
             if status_code in (408, 429):
                 return exc
-            # 4xx responses indicate invalid/unavailable resources
             if status_code < 500:
                 return VLLMUnprocessableEntityError(
                     f"Failed to fetch media from URL: HTTP {status_code} error",
                     parameter="image_url",
                     value=url,
                 )
-        # 5xx responses or unknown status are transient
         return exc
 
     if isinstance(exc, requests.exceptions.InvalidURL):
@@ -114,8 +107,6 @@ def _wrap_media_fetch_error(
             parameter="image_url",
             value=url,
         )
-
-    # Transient errors (DNS, connection, timeout, etc.) remain as-is for retry
     return exc
 
 
