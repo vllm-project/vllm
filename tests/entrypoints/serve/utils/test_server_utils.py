@@ -16,7 +16,10 @@ from types import SimpleNamespace
 import pytest
 from fastapi.exceptions import RequestValidationError
 
-from vllm.entrypoints.serve.utils.server_utils import validation_exception_handler
+from vllm.entrypoints.serve.utils.server_utils import (
+    clean_loc_for_param,
+    validation_exception_handler,
+)
 
 
 def _fake_request(log_error_stack: bool = False) -> SimpleNamespace:
@@ -63,3 +66,37 @@ class TestValidationErrorParamFallback:
         body = json.loads(response.body)
 
         assert body["error"]["param"] is None
+
+
+class TestCleanLocForParam:
+    """Guards against PR #1's naive dot-joined `loc` fallback leaking
+    Pydantic-internal wrapper/union-branch markers into `param`, e.g.
+    'body.function-wrap[__log_extra_fields__()].prompt' instead of the
+    clean 'body.prompt' an API consumer would recognize.
+    """
+
+    @pytest.mark.parametrize(
+        "loc,expected",
+        [
+            (("body", "prompt"), "body.prompt"),
+            (("body", "messages", 2, "content"), "body.messages.2.content"),
+            (
+                ("body", "function-wrap[__log_extra_fields__()]", "prompt"),
+                "body.prompt",
+            ),
+            (("body", "stop", "str"), "body.stop"),
+            (("body", "stop", "list[str]"), "body.stop"),
+            (
+                ("body", "prompt", "list[constrained-int]"),
+                "body.prompt",
+            ),
+        ],
+    )
+    def test_strips_internal_markers(self, loc, expected):
+        assert clean_loc_for_param(loc) == expected
+
+    def test_all_internal_falls_back_to_raw_join(self):
+        """If every loc segment looks internal, fall back to the raw
+        dot-join rather than returning an empty string."""
+        loc = ("function-wrap[__log_extra_fields__()]",)
+        assert clean_loc_for_param(loc) == "function-wrap[__log_extra_fields__()]"

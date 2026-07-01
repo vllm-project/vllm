@@ -40,8 +40,9 @@ use vllm_engine_core_client::{
 };
 use vllm_llm::Llm;
 use vllm_metrics::METRICS;
-use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
+use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{Prompt, TextBackend};
+use vllm_tokenizer::test_utils::TestTokenizer;
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
@@ -417,82 +418,20 @@ struct FakeChatBackend {
 }
 
 /// Synthetic BOS id used when `add_special_tokens` is true in tests.
-const FAKE_BOS_TOKEN_ID: u32 = 1;
+const FAKE_BOS_TOKEN_ID: u32 = 256;
+const UNKNOWN_DECODE_TOKEN_ID: u32 = 10_000;
 
-#[derive(Debug)]
-struct FakeChatTokenizer;
-
-impl Tokenizer for FakeChatTokenizer {
-    fn encode(
-        &self,
-        text: &str,
-        add_special_tokens: bool,
-    ) -> vllm_text::tokenizer::Result<Vec<u32>> {
-        let mut token_ids = Vec::new();
-        if add_special_tokens {
-            token_ids.push(FAKE_BOS_TOKEN_ID);
-        }
-        let mut rest = text;
-        while !rest.is_empty() {
-            if let Some(stripped) = rest.strip_prefix("<image>") {
-                token_ids.push(999);
-                rest = stripped;
-                continue;
-            }
-            if let Some(stripped) = rest.strip_prefix("<|image_pad|>") {
-                token_ids.push(151655);
-                rest = stripped;
-                continue;
-            }
-
-            let ch = rest.chars().next().expect("rest is not empty");
-            let mut buf = [0; 4];
-            token_ids.extend(ch.encode_utf8(&mut buf).bytes().map(u32::from));
-            rest = &rest[ch.len_utf8()..];
-        }
-        Ok(token_ids)
-    }
-
-    fn decode(
-        &self,
-        token_ids: &[u32],
-        _skip_special_tokens: bool,
-    ) -> vllm_text::tokenizer::Result<String> {
-        Ok(
-            String::from_utf8_lossy(&token_ids.iter().map(|id| *id as u8).collect::<Vec<_>>())
-                .into_owned(),
-        )
-    }
-
-    fn token_to_id(&self, token: &str) -> Option<u32> {
-        match token {
-            "<image>" => Some(999),
-            "<|image_pad|>" => Some(151655),
-            "<think>" => Some(0xF001),
-            "</think>" => Some(0xF002),
-            "<|START_THINKING|>" => Some(0xF003),
-            "<|END_THINKING|>" => Some(0xF004),
-            "◁think▷" => Some(0xF005),
-            "◁/think▷" => Some(0xF006),
-            _ => None,
-        }
-    }
-
-    fn id_to_token(&self, id: u32) -> Option<String> {
-        match id {
-            FAKE_BOS_TOKEN_ID => Some("<bos>".to_string()),
-            999 => Some("<image>".to_string()),
-            151655 => Some("<|image_pad|>".to_string()),
-            0xF001 => Some("<think>".to_string()),
-            0xF002 => Some("</think>".to_string()),
-            0xF003 => Some("<|START_THINKING|>".to_string()),
-            0xF004 => Some("<|END_THINKING|>".to_string()),
-            0xF005 => Some("◁think▷".to_string()),
-            0xF006 => Some("◁/think▷".to_string()),
-            id if id < 128 => char::from_u32(id).map(|ch| ch.to_string()),
-            _ => None,
-        }
-    }
+fn fake_chat_tokenizer() -> TestTokenizer {
+    TestTokenizer::new()
+        .with_bos_token("<bos>", FAKE_BOS_TOKEN_ID)
+        .with_regular_token("<image>", 999)
+        .with_regular_token("<|image_pad|>", 151655)
+        .with_regular_token("<think>", 0xF001)
+        .with_regular_token("</think>", 0xF002)
+        .with_regular_token("<|START_THINKING|>", 0xF003)
+        .with_regular_token("<|END_THINKING|>", 0xF004)
+        .with_regular_token("◁think▷", 0xF005)
+        .with_regular_token("◁/think▷", 0xF006)
 }
 
 impl FakeChatBackend {
@@ -530,7 +469,7 @@ impl fmt::Debug for FakeChatBackend {
 
 impl TextBackend for FakeChatBackend {
     fn tokenizer(&self) -> DynTokenizer {
-        Arc::new(FakeChatTokenizer)
+        Arc::new(fake_chat_tokenizer())
     }
 
     fn model_id(&self) -> &str {
@@ -581,6 +520,7 @@ impl ChatRenderer for FakeChatBackend {
         }
         Ok(vllm_chat::RenderedPrompt {
             prompt: Prompt::Text(prompt),
+            effective_template_kwargs: Default::default(),
         })
     }
 }
@@ -629,76 +569,12 @@ fn qwen_multimodal_model_info() -> vllm_chat::multimodal::MultimodalModelInfo {
         Some("qwen2_vl".to_string()),
         Some(&config_path),
         None,
-        Arc::new(FakeChatTokenizer),
+        Arc::new(fake_chat_tokenizer()),
     )
     .expect("load multimodal info")
     .expect("qwen multimodal info is registered");
     let _ = fs::remove_file(config_path);
     info
-}
-
-#[derive(Clone, Debug)]
-struct FailingDecodeChatBackend;
-
-#[derive(Debug)]
-struct FailingDecodeTokenizer;
-
-impl Tokenizer for FailingDecodeTokenizer {
-    fn encode(
-        &self,
-        text: &str,
-        add_special_tokens: bool,
-    ) -> vllm_text::tokenizer::Result<Vec<u32>> {
-        FakeChatTokenizer.encode(text, add_special_tokens)
-    }
-
-    fn decode(
-        &self,
-        token_ids: &[u32],
-        skip_special_tokens: bool,
-    ) -> vllm_text::tokenizer::Result<String> {
-        if token_ids.contains(&(b'i' as u32)) {
-            return Err(vllm_text::tokenizer::TokenizerError(
-                "forced decode failure for streaming test".to_string(),
-            ));
-        }
-
-        FakeChatTokenizer.decode(token_ids, skip_special_tokens)
-    }
-
-    fn token_to_id(&self, token: &str) -> Option<u32> {
-        FakeChatTokenizer.token_to_id(token)
-    }
-}
-
-impl TextBackend for FailingDecodeChatBackend {
-    fn tokenizer(&self) -> DynTokenizer {
-        Arc::new(FailingDecodeTokenizer)
-    }
-
-    fn model_id(&self) -> &str {
-        "test-model"
-    }
-}
-
-impl ChatBackend for FailingDecodeChatBackend {
-    fn chat_renderer(&self) -> DynChatRenderer {
-        Arc::new(self.clone())
-    }
-
-    fn new_chat_output_processor(
-        &self,
-        _request: &mut ChatRequest,
-        _options: NewChatOutputProcessorOptions<'_>,
-    ) -> vllm_chat::Result<DynChatOutputProcessor> {
-        Ok(Box::new(DefaultChatOutputProcessor::plain_text_only()))
-    }
-}
-
-impl ChatRenderer for FailingDecodeChatBackend {
-    fn render(&self, request: &ChatRequest) -> vllm_chat::Result<vllm_chat::RenderedPrompt> {
-        FakeChatBackend::new().render(request)
-    }
 }
 
 async fn test_models_with_engine_outputs_and_backend_inner(
@@ -2754,8 +2630,8 @@ async fn load_endpoint_resets_when_stream_response_is_dropped() {
 #[serial]
 async fn stream_error_is_returned_as_openai_error_sse() {
     let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
-        Arc::new(FailingDecodeChatBackend),
-        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+        vec![(vec![UNKNOWN_DECODE_TOKEN_ID], None)],
     )
     .await;
     let response = app
@@ -2788,7 +2664,9 @@ async fn stream_error_is_returned_as_openai_error_sse() {
     assert!(text.contains("\"role\":\"assistant\""), "{text}");
     assert!(text.contains("\"type\":\"server_error\""), "{text}");
     assert!(
-        text.contains("forced decode failure for streaming test"),
+        text.contains(&format!(
+            "test tokenizer cannot decode unknown token id {UNKNOWN_DECODE_TOKEN_ID}"
+        )),
         "{text}"
     );
     assert!(!text.contains("\"usage\":"), "{text}");
@@ -3511,6 +3389,46 @@ async fn non_stream_chat_completions_still_succeed() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn chat_completions_accepts_request_body_larger_than_axum_default() {
+    let (chat, engine_task) = test_chat_with_engine_outputs(
+        b"engine-openai-chat-large-body",
+        default_stream_output_specs(),
+    )
+    .await;
+    let mut app = build_router(Arc::new(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat,
+    )));
+
+    let large_template_arg = "a".repeat(2 * 1024 * 1024);
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": false,
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "chat_template_kwargs": {"large": large_template_arg}
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn non_stream_completions_still_succeed() {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
@@ -4086,6 +4004,45 @@ async fn raw_generate_rejects_empty_token_ids() {
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
     assert_eq!(json["error"]["param"], "token_ids");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn raw_generate_rejects_streaming_prompt_logprobs() {
+    let mut app = test_app().await;
+
+    for prompt_logprobs in [0, 1] {
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/inference/v1/generate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "model": "Qwen/Qwen1.5-0.5B-Chat",
+                            "token_ids": [11, 22],
+                            "stream": true,
+                            "sampling_params": {
+                                "prompt_logprobs": prompt_logprobs
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+        assert_eq!(json["error"]["param"], "sampling_params");
+        assert_eq!(
+            json["error"]["message"],
+            "`prompt_logprobs` are not available when `stream=true`."
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

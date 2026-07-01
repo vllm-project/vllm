@@ -391,16 +391,19 @@ def get_configs_compute_bound(use_fp16, block_quant_shape) -> list[dict[str, int
         config = dict(zip(keys, config_values))
         configs.append(config)
 
-    # Remove configs that are not compatible with fp8 block quantization
-    # BLOCK_SIZE_K must be a multiple of block_k
-    # BLOCK_SIZE_N must be a multiple of block_n
+    # Drop configs incompatible with fp8 block quantization. A tile must align
+    # to the quant-block scale grid, i.e. tile and block must divide one
+    # another. The kernel indexes scales per element (offs_bn // group_n,
+    # k_start // group_k), so a tile narrower than the block (e.g. N=64 with
+    # block_n=128) is valid -- and often faster at small batch. An exact
+    # multiple was required before, which dropped those smaller tiles entirely.
     if block_quant_shape is not None and not use_fp16:
         block_n, block_k = block_quant_shape[0], block_quant_shape[1]
         for config in configs[:]:
-            if (
-                config["BLOCK_SIZE_K"] % block_k != 0
-                or config["BLOCK_SIZE_N"] % block_n != 0
-            ):
+            bn, bk = config["BLOCK_SIZE_N"], config["BLOCK_SIZE_K"]
+            n_aligned = bn % block_n == 0 or block_n % bn == 0
+            k_aligned = bk % block_k == 0 or block_k % bk == 0
+            if not (n_aligned and k_aligned):
                 configs.remove(config)
     return configs
 
