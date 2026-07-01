@@ -611,6 +611,19 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     && rm /tmp/install_torchcodec.sh \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
+# Rebuild flash-attn from source for ROCm/torch ABI compatibility. The base
+# image's flash-attn is built against its pinned torch (release/2.11); after
+# reinstalling the torch test-channel wheels above, its prebuilt
+# flash_attn_2_cuda.so fails to import (undefined c10 COW symbol). Recompile it
+# against the installed torch. No-op once the wheel imports cleanly.
+COPY tools/install_flash_attn_rocm.sh /tmp/install_flash_attn_rocm.sh
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/root/.cache/flash-attn-wheels \
+    bash /tmp/install_flash_attn_rocm.sh \
+    && rm /tmp/install_flash_attn_rocm.sh
+
 # Pre-install shared ROCm runtime dependencies.
 COPY requirements/common.txt requirements/rocm.txt /tmp/ci-base-requirements/
 RUN --mount=type=cache,target=/root/.cache/uv \
