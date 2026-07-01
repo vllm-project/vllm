@@ -12,7 +12,9 @@ import torch
 
 from vllm.models.minimax_m3.common.ops.sparse_attn import (
     _FP8_DTYPES,
+    _KV_SCALE_NONE,
     SPARSE_BLOCK_SIZE,
+    _kv_scale_args,
     minimax_m3_sparse_attn_decode,
 )
 from vllm.platforms.rocm import on_gfx950, on_mi3xx
@@ -71,6 +73,8 @@ def _sparse_attn_prefill_kwargs() -> dict:
 def _gqa_sparse_fwd_kernel(
     q_ptr,  # [total_q, num_heads, head_dim]
     kv_cache_ptr,  # main cache: [num_blocks, 2, 128, num_kv_heads, head_dim]
+    k_scale_ptr,
+    v_scale_ptr,
     t_ptr,  # topk_idx: [num_kv_heads, total_q, topk]
     o_ptr,  # [total_q, num_heads, head_dim]
     block_table_ptr,  # [num_reqs, max_blocks]
@@ -92,6 +96,10 @@ def _gqa_sparse_fwd_kernel(
     stride_kv_pos,
     stride_kv_h,
     stride_kv_d,
+    stride_ks_h,
+    stride_ks_t,
+    stride_vs_h,
+    stride_vs_t,
     stride_th,
     stride_tn,
     stride_tk,
@@ -106,6 +114,7 @@ def _gqa_sparse_fwd_kernel(
     BLOCK_SIZE_T: tl.constexpr,
     BLOCK_SIZE_QH: tl.constexpr,
     USE_FP8: tl.constexpr,  # fp8 KV cache: dequantize K/V to q.dtype on load
+    KV_SCALE_MODE: tl.constexpr,  # 0: none, 1: scalar, 2: [kv_head, token]
     SUB_K: tl.constexpr,  # CDNA only: KV sub-tile width (see _IS_MI3XX)
 ):
     sm_scale_log2e = sm_scale * 1.4426950409
@@ -169,6 +178,17 @@ def _gqa_sparse_fwd_kernel(
                 )
                 if USE_FP8:
                     k_sub = k_sub.to(q.dtype)
+                    if KV_SCALE_MODE == 1:
+                        k_sub = (k_sub * tl.load(k_scale_ptr)).to(q.dtype)
+                    elif KV_SCALE_MODE == 2:
+                        k_scale = tl.load(
+                            k_scale_ptr
+                            + pid_kh * stride_ks_h
+                            + (page * BLOCK_SIZE_K + off_sub) * stride_ks_t,
+                            mask=pos_mask_sub,
+                            other=1.0,
+                        )
+                        k_sub = (k_sub * k_scale[None, :]).to(q.dtype)
                 off_q_sub = (
                     tl.arange(0, BLOCK_SIZE_Q)[:, None]
                     + pid_q_j * BLOCK_SIZE_Q
@@ -195,6 +215,17 @@ def _gqa_sparse_fwd_kernel(
                 )
                 if USE_FP8:
                     v_sub = v_sub.to(q.dtype)
+                    if KV_SCALE_MODE == 1:
+                        v_sub = (v_sub * tl.load(v_scale_ptr)).to(q.dtype)
+                    elif KV_SCALE_MODE == 2:
+                        v_scale = tl.load(
+                            v_scale_ptr
+                            + pid_kh * stride_vs_h
+                            + (page * BLOCK_SIZE_K + off_sub) * stride_vs_t,
+                            mask=pos_mask_sub,
+                            other=1.0,
+                        )
+                        v_sub = (v_sub * v_scale[:, None]).to(q.dtype)
                 acc_o += tl.dot(p_sub.to(v_sub.dtype), v_sub)
                 m_i = m_ij
                 lse_i = m_ij + tl.log2(tl.exp2(lse_i - m_ij) + l_ij)
@@ -224,6 +255,8 @@ def minimax_m3_sparse_attn(
     num_kv_heads: int,
     sm_scale: float,
     output: torch.Tensor,  # [total_q, num_heads, head_dim]
+    k_scale: torch.Tensor | None = None,
+    v_scale: torch.Tensor | None = None,
 ) -> None:
     """GQA block-sparse attention over the selected blocks. block_size_q == 1."""
     total_q, num_heads, head_dim = q.shape
@@ -231,10 +264,33 @@ def minimax_m3_sparse_attn(
     topk = topk_idx.shape[-1]
     gqa_group_size = num_heads // num_kv_heads
     use_fp8 = kv_cache.dtype in _FP8_DTYPES
+    (
+        k_scale_arg,
+        v_scale_arg,
+        stride_ks_h,
+        stride_ks_t,
+        stride_vs_h,
+        stride_vs_t,
+        kv_scale_mode,
+    ) = (
+        _kv_scale_args(output, num_kv_heads, k_scale, v_scale)
+        if use_fp8
+        else (
+            output,
+            output,
+            0,
+            0,
+            0,
+            0,
+            _KV_SCALE_NONE,
+        )
+    )
     grid = (max_query_len, num_kv_heads, batch)
     _gqa_sparse_fwd_kernel[grid](
         q,
         kv_cache,
+        k_scale_arg,
+        v_scale_arg,
         topk_idx,
         output,
         block_table,
@@ -256,6 +312,10 @@ def minimax_m3_sparse_attn(
         kv_cache.stride(2),
         kv_cache.stride(3),
         kv_cache.stride(4),
+        stride_ks_h,
+        stride_ks_t,
+        stride_vs_h,
+        stride_vs_t,
         topk_idx.stride(0),
         topk_idx.stride(1),
         topk_idx.stride(2),
@@ -266,6 +326,7 @@ def minimax_m3_sparse_attn(
         BLOCK_SIZE_Q=1,
         BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
         USE_FP8=use_fp8,
+        KV_SCALE_MODE=kv_scale_mode,
         SUB_K=_SPARSE_ATTN_SUB_K,
         **_sparse_attn_prefill_kwargs(),
     )

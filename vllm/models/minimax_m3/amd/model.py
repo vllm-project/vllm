@@ -35,6 +35,7 @@ from vllm.config import (
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention.attention import set_default_quant_scales
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
     fused_allreduce_gemma_rms_norm,
@@ -636,6 +637,11 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
             self.kv_cache_dtype, vllm_config.model_config
         )
+        # MiniMax-M3 sparse attention owns its KV-cache insert/read path instead
+        # of wrapping the generic Attention module. Keep the same runtime scale
+        # attributes so FP8 KV reads can honor vLLM's per-layer descale contract.
+        self.calculate_kv_scales = False
+        set_default_quant_scales(self, register_buffer=True)
 
         # Shared top-k buffer: the indexer writes the selected blocks into it and
         # the attend impl reads them back (no Python value crosses the break).
