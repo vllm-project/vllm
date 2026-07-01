@@ -347,13 +347,6 @@ class SingleTypeKVCacheManager(ABC):
         self._kv_cache_block_copies = []
         return copies
 
-    def _retain_block(self, block: KVCacheBlock) -> None:
-        if block.is_null:
-            return
-        if block.ref_cnt == 0:
-            self.block_pool.free_block_queue.remove(block)
-        block.ref_cnt += 1
-
     def _free_retained_blocks(self, blocks: Sequence[KVCacheBlock]) -> None:
         freed_blocks: list[KVCacheBlock] = []
         ref_counts_by_id = Counter(block.block_id for block in blocks)
@@ -376,15 +369,17 @@ class SingleTypeKVCacheManager(ABC):
         """Redirect ``req_blocks[block_idx]`` from a shared, partially-hit
         ``source_block`` to a private ``cow_block``.
 
-        Records the block copy for the worker and defers releasing the source's
-        hit-ref to the next step (``new_step_starts``), after the copy has run.
+        The request already holds a ref on ``source_block`` (from the
+        prefix-cache touch, or from allocation for the mamba producer). We keep
+        that ref and release it next step (``new_step_starts``), after the
+        worker copy has run, rather than freeing it now -- this keeps the block
+        alive and out of the free queue across the step without a retain/free
+        round-trip.
         """
         req_blocks = self.req_to_blocks[request_id]
         assert block_idx < len(req_blocks)
         assert req_blocks[block_idx] is source_block
-        self._retain_block(source_block)
         req_blocks[block_idx] = cow_block
-        self.block_pool.free_blocks([source_block])
         self._kv_cache_block_copies.append(
             KVCacheBlockCopy(
                 src_block_id=source_block.block_id,
