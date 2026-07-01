@@ -74,6 +74,7 @@ steps:
     - tests/basic_correctness/test_basic_correctness.py
     - tests/v1/distributed/test_async_llm_dp.py
     - tests/v1/distributed/test_eagle_dp.py
+    - tests/v1/e2e/spec_decode/test_spec_decode.py
   commands:
     - set -x
     - export VLLM_USE_V2_MODEL_RUNNER=1
@@ -83,6 +84,7 @@ steps:
     - export NCCL_CUMEM_HOST_ENABLE=0
     - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py -k "not ray"
     - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
+    - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "tensor_parallelism"
 
 - label: Model Runner V2 Pipeline Parallelism (4 GPUs)
   key: model-runner-v2-pipeline-parallelism-4-gpus
@@ -119,4 +121,4 @@ steps:
   - pytest -v -s v1/spec_decode/test_max_len.py -k "eagle or mtp"
   - pytest -v -s v1/spec_decode/test_rejection_sampler_utils.py
   - pytest -v -s v1/spec_decode/test_synthetic_rejection_sampler_utils.py
-  - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle or mtp"
+  - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle or mtp or draft_model"
