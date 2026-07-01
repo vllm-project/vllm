@@ -4,7 +4,6 @@
 
 import asyncio
 import io
-import time
 from collections.abc import AsyncGenerator
 from collections.abc import Sequence as GenericSequence
 
@@ -246,7 +245,6 @@ class ServingTokens(OpenAIServing):
         model_name: str,
         request_metadata: RequestResponseMetadata,
     ) -> ErrorResponse | GenerateResponse:
-        created_time = int(time.time())
         final_res: RequestOutput | None = None
         sampling_params: SamplingParams = request.sampling_params
 
@@ -320,9 +318,7 @@ class ServingTokens(OpenAIServing):
         request_metadata.final_usage_info = usage
 
         response = GenerateResponse(
-            id=request_id,
-            created=created_time,
-            model=model_name,
+            request_id=request_id,
             choices=choices,
             usage=usage,
             prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
