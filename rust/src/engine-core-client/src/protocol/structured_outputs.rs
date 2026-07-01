@@ -113,23 +113,23 @@ impl StructuredOutputsParams {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 struct WireStructuredOutputsParams {
-    pub json: Option<Value>,
-    pub regex: Option<String>,
-    pub choice: Option<Vec<String>>,
-    pub grammar: Option<String>,
-    pub json_object: Option<bool>,
+    json: Option<Value>,
+    regex: Option<String>,
+    choice: Option<Vec<String>>,
+    grammar: Option<String>,
+    json_object: Option<bool>,
     #[serde(skip_serializing_if = "crate::protocol::is_false")]
-    pub disable_any_whitespace: bool,
+    disable_any_whitespace: bool,
     #[serde(skip_serializing_if = "crate::protocol::is_false")]
-    pub disable_additional_properties: bool,
-    pub whitespace_pattern: Option<String>,
-    pub structural_tag: Option<String>,
+    disable_additional_properties: bool,
+    whitespace_pattern: Option<String>,
+    structural_tag: Option<String>,
     #[serde(
         default,
         rename = "_backend",
         deserialize_with = "serde_with::rust::deserialize_ignore_any"
     )]
-    pub backend: StructuredOutputBackend,
+    backend: StructuredOutputBackend,
 }
 
 impl TryFrom<WireStructuredOutputsParams> for StructuredOutputsParams {
