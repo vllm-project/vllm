@@ -1072,7 +1072,8 @@ def test_row_parallel_dora_forward_tp2(
     lora_linear = RowParallelLinearWithLoRA(linear)
     lora_linear.create_lora_weights(max_loras, lora_config)
     lora_linear.set_mapping(punica_wrapper)
-    x_local = x[:, start:stop]
+    x_local = x[:, start:stop].contiguous()
+
     local_dora_weight = dora_magnitude.float().unsqueeze(1)
     local_dora_weight = local_dora_weight * (
         base_weight[:, start:stop].float()
@@ -1082,12 +1083,18 @@ def test_row_parallel_dora_forward_tp2(
     expected_local = x_local.float() @ base_weight[:, start:stop].float().T
     expected_local[dora_rows] = x_local[dora_rows].float() @ local_dora_weight.T
 
+    norm_reduce_called = False
+    output_reduce_called = False
+
     def fake_all_reduce(tensor: torch.Tensor) -> torch.Tensor:
+        nonlocal norm_reduce_called, output_reduce_called
         if tensor.ndim == 1:
+            norm_reduce_called = True
             torch.testing.assert_close(
                 tensor, local_norm_sq[tp_rank], rtol=1e-3, atol=1e-3
             )
             return global_norm_sq.to(device=tensor.device, dtype=tensor.dtype)
+        output_reduce_called = True
         torch.testing.assert_close(
             tensor,
             expected_local.to(dtype=tensor.dtype),
@@ -1108,6 +1115,8 @@ def test_row_parallel_dora_forward_tp2(
         )
         actual = lora_linear(x_local)[0]
 
+    assert norm_reduce_called
+    assert output_reduce_called
     rtol, atol = TOLERANCES[actual.dtype]
     torch.testing.assert_close(
         actual, expected.to(dtype=actual.dtype), rtol=rtol, atol=atol
