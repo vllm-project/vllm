@@ -456,6 +456,7 @@ def test_lora_model_manager_deactivate_resets_dora_slot(
             max_lora_rank=8, max_cpu_loras=2, max_loras=2, lora_dtype=DEFAULT_DTYPE
         ),
         device=device,
+        vllm_config=default_vllm_config,
     )
     lora_layer = manager.model.get_submodule("dense1")
     assert isinstance(lora_layer, ColumnParallelLinearWithLoRA)
@@ -492,6 +493,7 @@ def test_lora_model_manager_activation_failure_resets_dora_slot(
             max_lora_rank=8, max_cpu_loras=2, max_loras=2, lora_dtype=DEFAULT_DTYPE
         ),
         device=device,
+        vllm_config=default_vllm_config,
     )
     lora_layer = manager.model.get_submodule("dense1")
     assert isinstance(lora_layer, ColumnParallelLinearWithLoRA)
