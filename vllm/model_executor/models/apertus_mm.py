@@ -17,13 +17,14 @@ from transformers import ApertusConfig
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.distributed import get_pp_group
 from vllm.inputs import MultiModalDataDict, MultiModalInput, mm_input
+from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import (
     AudioProcessorItems,
     ImageProcessorItems,
-    MultiModalDataItems,
     MultiModalDataParser,
     )
 from vllm.multimodal.processing import (
@@ -31,12 +32,9 @@ from vllm.multimodal.processing import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     ProcessorInputs,
-    PromptReplacement,
     PromptUpdate,
     TimingContext,
     )
-from vllm.logger import init_logger
-
 from .apertus import ApertusForCausalLM
 from .apertus_utils import ApertusAudioTokenizer, ApertusImageTokenizer
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal
@@ -60,7 +58,7 @@ class ApertusProcessingInfo(BaseProcessingInfo):
         return {"image": None, "audio": None}
 
     def get_mm_max_tokens_per_item(
-            self, seq_len: int, mm_counts: Mapping[str, int]
+            self, seq_len: int, mm_counts: Mapping[str, int],
             ) -> Mapping[str, int] | None:
         del mm_counts
         ds = ApertusImageTokenizer.EMU35_DS_FACTOR
@@ -81,17 +79,27 @@ class ApertusDummyInputsBuilder(BaseDummyInputsBuilder[ApertusProcessingInfo]):
         )
 
     def get_dummy_mm_data(
-            self, seq_len: int, mm_counts: Mapping[str, int], mm_options: Mapping[str, BaseDummyOptions]
+            self,
+            seq_len: int,
+            mm_counts: Mapping[str, int],
+            mm_options: Mapping[str, BaseDummyOptions],
             ) -> MultiModalDataDict:
         max_side = int(ApertusImageTokenizer.DEFAULT_MAX_PIXELS ** 0.5)
         audio_length = ApertusAudioTokenizer.DEFAULT_TARGET_SAMPLING_RATE
+        image_overrides = mm_options.get("image")
+        audio_overrides = mm_options.get("audio")
 
         return {
             "image": self._get_dummy_images(
-                    width=max_side, height=max_side, num_images=mm_counts.get("image", 0)
+                    width=max_side,
+                    height=max_side,
+                    num_images=mm_counts.get("image", 0),
+                    overrides=image_overrides,
                     ),
             "audio": self._get_dummy_audios(
-                    length=audio_length, num_audios=mm_counts.get("audio", 0)
+                    length=audio_length,
+                    num_audios=mm_counts.get("audio", 0),
+                    overrides=audio_overrides,
                     ),
             }
 
@@ -100,20 +108,24 @@ class ApertusMultiModalProcessor(BaseMultiModalProcessor[ApertusProcessingInfo])
     """CPU-bound API Processor. Strict YAGNI Rule: NO heavy neural networks run here."""
 
     def __init__(
-            self, info: ApertusProcessingInfo, dummy_inputs: BaseDummyInputsBuilder, *, cache: object | None = None
+            self,
+            info: ApertusProcessingInfo,
+            dummy_inputs: BaseDummyInputsBuilder,
+            *,
+            cache: object | None = None,
             ) -> None:
         super().__init__(info, dummy_inputs, cache=cache)
         self.image_tokenizer = ApertusImageTokenizer()
         self.audio_tokenizer = ApertusAudioTokenizer()
 
     def _get_mm_fields_config(
-            self, hf_inputs: object, hf_processor_mm_kwargs: Mapping[str, object]
+            self, hf_inputs: object, hf_processor_mm_kwargs: Mapping[str, object],
             ) -> Mapping[str, MultiModalFieldConfig]:
-        """Routes batched tensors and metadata directly to the GPU Worker's embed_input_ids kwargs."""
+        """Routes batched tensors and metadata directly to the GPU Worker's embed_multimodal kwargs."""
         return {
-            "pixel_values": MultiModalFieldConfig.batched("pixel_values"),
-            "image_sizes": MultiModalFieldConfig.batched("image_sizes"),
-            "audio_values": MultiModalFieldConfig.batched("audio_values"),
+            "pixel_values":  MultiModalFieldConfig.batched("pixel_values"),
+            "image_sizes":   MultiModalFieldConfig.batched("image_sizes"),
+            "audio_values":  MultiModalFieldConfig.batched("audio_values"),
             "audio_lengths": MultiModalFieldConfig.batched("audio_lengths"),
             }
 
@@ -133,7 +145,6 @@ class ApertusMultiModalProcessor(BaseMultiModalProcessor[ApertusProcessingInfo])
         num_audios = inputs.mm_data_items.get_count("audio", strict=False)
 
         mm_kwargs: dict[str, torch.Tensor] = {}
-        prompt_replacements: list[PromptReplacement] = []
         mm_counts: dict[str, int] = {}
 
         # 1. Vision Preprocessing (Mathematical Layout & Padding Only)
@@ -218,7 +229,7 @@ class ApertusMultiModalProcessor(BaseMultiModalProcessor[ApertusProcessingInfo])
 class ApertusForConditionalGeneration(ApertusForCausalLM, SupportsMultiModal):
     """
     GPU Worker Domain.
-    Heavy inference executes natively. Output IDs substitute dummies via instant boolean mask.
+    Heavy inference executes natively on GPU. Returns embeddings of substituted tokens.
     """
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
@@ -228,40 +239,152 @@ class ApertusForConditionalGeneration(ApertusForCausalLM, SupportsMultiModal):
         self.vision_tower: Any | None = None
         self.audio_tower: Any | None = None
 
+        config = vllm_config.model_config.hf_config
+        dummy_image_token_id = getattr(config, "dummy_image_token_id", -1)
+        dummy_audio_token_id = getattr(config, "dummy_audio_token_id", -1)
+
+        self.configure_mm_token_handling(
+                vocab_size=config.vocab_size,
+                mm_token_ids=[dummy_image_token_id, dummy_audio_token_id],
+                )
+
+    def get_language_model(self) -> torch.nn.Module:
+        return self.model
+
+    def forward(
+            self,
+            input_ids: torch.Tensor | None,
+            positions: torch.Tensor,
+            intermediate_tensors: IntermediateTensors | None = None,
+            inputs_embeds: torch.Tensor | None = None,
+            **kwargs: object,
+            ) -> torch.Tensor | IntermediateTensors:
+        # Absorb multimodal kwargs (e.g. pixel_values, etc.) which are already processed in embed_multimodal
+        return self.model(
+                input_ids,
+                positions,
+                intermediate_tensors,
+                inputs_embeds,
+                )
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loaded_keys = super().load_weights(weights)
 
-        model_path = getattr(self.config, "_name_or_path", "")
-        mm_kwargs = {"model_name_or_path": model_path}
-        if model_path and os.path.isdir(model_path):
-            mm_kwargs["apertus_vq_hub"] = os.path.abspath(model_path)
-            mm_kwargs["apertus_audio_tokenizer_path"] = os.path.abspath(model_path)
+        # Encoders are only executed on the first pipeline stage (first PP rank)
+        if get_pp_group().is_first_rank:
+            model_path = getattr(self.config, "_name_or_path", "")
+            mm_kwargs = {"model_name_or_path": model_path}
+            if model_path and os.path.isdir(model_path):
+                mm_kwargs["apertus_vq_hub"] = os.path.abspath(model_path)
+                mm_kwargs["apertus_audio_tokenizer_path"] = os.path.abspath(model_path)
 
-        # Strictly synchronize precision with the Backbone to prevent VRAM fragmentation
-        try:
-            sample_param = next(self.parameters())
-            target_device, target_dtype = sample_param.device, sample_param.dtype
-        except StopIteration:
-            target_device, target_dtype = torch.device("cuda"), torch.bfloat16
+            # Strictly synchronize precision with the Backbone to prevent VRAM fragmentation
+            try:
+                sample_param = next(self.parameters())
+                target_device, target_dtype = sample_param.device, sample_param.dtype
+            except StopIteration:
+                target_device, target_dtype = torch.device("cuda"), torch.bfloat16
 
-        mm_kwargs.update(
-                {
-                    "apertus_vision_tokenizer_device": str(target_device),
-                    "apertus_vision_tokenizer_dtype":  target_dtype,
-                    "apertus_audio_tokenizer_device":  str(target_device),
-                    }
-                )
+            mm_kwargs.update(
+                    {
+                        "apertus_vision_tokenizer_device": str(target_device),
+                        "apertus_vision_tokenizer_dtype":  target_dtype,
+                        "apertus_audio_tokenizer_device":  str(target_device),
+                        },
+                    )
 
-        logger.info("[Apertus Worker] Loading Vision Tower natively on %s (%s)", target_device, target_dtype)
-        self.vision_tower = self.image_tokenizer.load_vision_tokenizer(mm_kwargs)
+            logger.info("[Apertus Worker] Loading Vision Tower natively on %s (%s)", target_device, target_dtype)
+            self.vision_tower = self.image_tokenizer.load_vision_tokenizer(mm_kwargs)
 
-        logger.info("[Apertus Worker] Loading Audio Tower natively on %s", target_device)
-        self.audio_tower = self.audio_tokenizer.get_audio_tokenizer(mm_kwargs)
+            logger.info("[Apertus Worker] Loading Audio Tower natively on %s", target_device)
+            self.audio_tower = self.audio_tokenizer.get_audio_tokenizer(mm_kwargs)
 
         return loaded_keys
 
-    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
-        """Disabled: Managed explicitly via input_ids overriding before layer lookup."""
+    def embed_multimodal(
+            self,
+            *,
+            pixel_values: torch.Tensor | None = None,
+            image_sizes: torch.Tensor | None = None,
+            audio_values: torch.Tensor | None = None,
+            audio_lengths: torch.Tensor | None = None,
+            **kwargs: object,
+            ) -> MultiModalEmbeddings:
+        """Executes encoders on GPU natively and returns the embeddings of generated tokens."""
+
+        # Get device of model parameters to ensure correct placement
+        try:
+            device = next(self.parameters()).device
+        except StopIteration:
+            device = torch.device("cuda")
+
+        # 1. GPU Vision Execution & Embedding Retrieval
+        if pixel_values is not None and self.vision_tower is not None and image_sizes is not None:
+            # Move pixel_values to the same device and dtype as vision_tower parameters
+            try:
+                target_device = next(self.vision_tower.parameters()).device
+                target_dtype = next(self.vision_tower.parameters()).dtype
+            except StopIteration:
+                target_device = pixel_values.device
+                target_dtype = torch.bfloat16
+
+            pixel_values = pixel_values.to(device=target_device, dtype=target_dtype)
+
+            with torch.inference_mode():
+                _, _, info = self.vision_tower.encode(pixel_values)
+                # Recover 2D grid shape based on the padded Max H/W of the batch
+                max_h_tok = pixel_values.shape[2] // self.image_tokenizer.EMU35_DS_FACTOR
+                max_w_tok = pixel_values.shape[3] // self.image_tokenizer.EMU35_DS_FACTOR
+                img_codes = info[2].view(pixel_values.shape[0], max_h_tok, max_w_tok)
+
+            valid_codes_embeds = []
+            vocab_offset = getattr(self.config, "image_token_offset", 0)
+
+            for i, size in enumerate(image_sizes):
+                h_tok, w_tok = size.tolist()
+                # Emu3.5-VisionTokenizer is a fully convolutional network that preserves 
+                # spatial layout. Because padding was added at the right/bottom during 
+                # CPU data prep, we slice the top-left [:h_tok, :w_tok] active region.
+                # This completely discards the padded margins and recovers the original grid.
+                valid_codes_i = img_codes[i, :h_tok, :w_tok].flatten()
+
+                # Convert codebook indices to the language model vocabulary space
+                llm_img_ids_i = valid_codes_i.to(torch.long) + vocab_offset
+
+                # Fetch embeddings from text embedding layer for the resolved token IDs
+                img_embeds_i = super().embed_input_ids(llm_img_ids_i.to(device))
+                valid_codes_embeds.append(img_embeds_i)
+
+            return valid_codes_embeds
+
+        # 2. GPU Audio Execution & Embedding Retrieval
+        if audio_values is not None and self.audio_tower is not None and audio_lengths is not None:
+            audio_values = audio_values.to(device=device)
+
+            with torch.inference_mode():
+                audio_codes = self.audio_tower.encode_audio(audio_values)
+            if audio_codes.dim() == 3:
+                audio_codes = audio_codes.squeeze(1)  # [B, Max_Tokens]
+
+            valid_codes_embeds = []
+            vocab_offset = getattr(self.config, "audio_token_offset", 262344)
+
+            for i, length in enumerate(audio_lengths):
+                # Calculate the exact number of valid tokens (1 token per 600 audio samples)
+                num_tok = (length.item() + 600 - 1) // 600
+
+                # Slice the active region to discard padded audio frames at the end
+                valid_codes_i = audio_codes[i, :num_tok]
+
+                # Convert WavTokenizer codes to language model vocabulary space
+                llm_audio_ids_i = valid_codes_i.to(torch.long) + vocab_offset
+
+                # Fetch embeddings from text embedding layer for the resolved token IDs
+                audio_embeds_i = super().embed_input_ids(llm_audio_ids_i.to(device))
+                valid_codes_embeds.append(audio_embeds_i)
+
+            return valid_codes_embeds
+
         return []
 
     def embed_input_ids(
@@ -269,73 +392,13 @@ class ApertusForConditionalGeneration(ApertusForCausalLM, SupportsMultiModal):
             input_ids: torch.Tensor,
             multimodal_embeddings: MultiModalEmbeddings | None = None,
             *,
-            pixel_values: torch.Tensor | None = None,
-            image_sizes: torch.Tensor | None = None,
-            audio_values: torch.Tensor | None = None,
-            audio_lengths: torch.Tensor | None = None,
+            is_multimodal: torch.Tensor | None = None,
+            **kwargs: object,
             ) -> torch.Tensor:
-        """Executes encoders on GPU natively and injects generated tokens into the sequence."""
-
-        # Clone array so we can mutate IDs in place safely
-        input_ids = input_ids.clone()
-
-        # 1. GPU Vision Execution & Slice Masking
-        if pixel_values is not None and self.vision_tower is not None and image_sizes is not None:
-            pixel_values = pixel_values.to(device=input_ids.device, dtype=next(self.vision_tower.parameters()).dtype)
-
-            with torch.inference_mode():
-                _, _, info = self.vision_tower.encode(pixel_values)
-                # Recover grid shape based on the padded Max H/W
-                max_h_tok = pixel_values.shape[2] // self.image_tokenizer.EMU35_DS_FACTOR
-                max_w_tok = pixel_values.shape[3] // self.image_tokenizer.EMU35_DS_FACTOR
-                img_codes = info[2].view(pixel_values.shape[0], max_h_tok, max_w_tok)
-
-                # Slice the valid tokens out of the padded batch
-            valid_codes = []
-            for i, size in enumerate(image_sizes):
-                h_tok, w_tok = size.tolist()
-                valid_codes.append(img_codes[i, :h_tok, :w_tok].flatten())
-
-            vocab_offset = getattr(self.config, "image_token_offset", 0)
-            llm_img_ids = torch.cat(valid_codes).to(torch.long) + vocab_offset
-
-            dummy_img_id = getattr(self.config, "dummy_image_token_id", -1)
-            mask = (input_ids == dummy_img_id)
-
-            if mask.sum() != llm_img_ids.shape[0]:
-                logger.error(
-                    "[Apertus MM] Image mask mismatch. Processor: %d, Generated: %d", mask.sum(), llm_img_ids.shape[0]
-                    )
-            else:
-                input_ids[mask] = llm_img_ids.to(input_ids.device)
-
-        # 2. GPU Audio Execution & Slice Masking
-        if audio_values is not None and self.audio_tower is not None and audio_lengths is not None:
-            audio_values = audio_values.to(device=input_ids.device)
-
-            with torch.inference_mode():
-                audio_codes = self.audio_tower.encode_audio(audio_values)
-            if audio_codes.dim() == 3:
-                audio_codes = audio_codes.squeeze(1)  # [B, Max_Tokens]
-
-            # Slice the valid tokens out of the padded batch
-            valid_codes = []
-            for i, length in enumerate(audio_lengths):
-                num_tok = (length.item() + 600 - 1) // 600
-                valid_codes.append(audio_codes[i, :num_tok])
-
-            vocab_offset = getattr(self.config, "audio_token_offset", 262344)
-            llm_audio_ids = torch.cat(valid_codes).to(torch.long) + vocab_offset
-
-            dummy_audio_id = getattr(self.config, "dummy_audio_token_id", -1)
-            mask = (input_ids == dummy_audio_id)
-
-            if mask.sum() != llm_audio_ids.shape[0]:
-                logger.error(
-                    "[Apertus MM] Audio mask mismatch. Processor: %d, Generated: %d", mask.sum(), llm_audio_ids.shape[0]
-                    )
-            else:
-                input_ids[mask] = llm_audio_ids.to(input_ids.device)
-
-        # Handoff fully resolved ID array to standard Text Embedding mechanism
-        return super().embed_input_ids(input_ids)
+        # Route to standard vLLM multi-modal merge
+        return SupportsMultiModal.embed_input_ids(
+                self,
+                input_ids,
+                multimodal_embeddings=multimodal_embeddings,
+                is_multimodal=is_multimodal,
+                )
