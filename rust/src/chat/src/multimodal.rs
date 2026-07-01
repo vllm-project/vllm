@@ -245,16 +245,15 @@ pub(crate) async fn finalize_rendered_prompt(
         return Ok((rendered.prompt, None));
     }
     let info = info.ok_or(Error::UnsupportedMultimodalRenderer)?;
-    let Prompt::Text(prompt) = rendered.prompt else {
-        bail_multimodal!("multimodal chat renderer must return a text prompt before expansion");
+    let mut prompt_token_ids = match rendered.prompt {
+        Prompt::Text(prompt) => info
+            .context
+            .tokenizer()
+            .encode(&prompt, request.add_special_tokens)
+            .map_err(|error| multimodal!("{error}"))?,
+        Prompt::TokenIds(token_ids) => token_ids,
     };
     let media_parts = extract_media_parts(request)?;
-
-    let mut prompt_token_ids = info
-        .context
-        .tokenizer()
-        .encode(&prompt, request.add_special_tokens)
-        .map_err(|error| multimodal!("{error}"))?;
     let prepared = info.prepare_multimodal(media_parts, &mut prompt_token_ids, model_dtype).await?;
 
     Ok((Prompt::TokenIds(prompt_token_ids), Some(prepared)))
@@ -564,7 +563,7 @@ mod tests {
 
     use llm_multimodal::TokenId;
     use vllm_engine_core_client::protocol::tensor::WireArrayData;
-    use vllm_text::tokenizer::{IncrementalDecoder, Tokenizer, TokenizerError};
+    use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::*;
 
@@ -575,60 +574,14 @@ mod tests {
     const LLAMA4_TILE_X_SEPARATOR_ID: u32 = 200093;
     const LLAMA4_TILE_Y_SEPARATOR_ID: u32 = 200094;
 
-    struct TestTokenizer;
-
-    impl Tokenizer for TestTokenizer {
-        fn encode(
-            &self,
-            text: &str,
-            _add_special_tokens: bool,
-        ) -> std::result::Result<Vec<u32>, TokenizerError> {
-            Ok(match text {
-                "<|image|>" => vec![LLAMA4_IMAGE_ID],
-                text => text.bytes().map(u32::from).collect(),
-            })
-        }
-
-        fn decode(
-            &self,
-            _token_ids: &[u32],
-            _skip_special_tokens: bool,
-        ) -> std::result::Result<String, TokenizerError> {
-            Ok(String::new())
-        }
-
-        fn token_to_id(&self, token: &str) -> Option<u32> {
-            match token {
-                "<|image_start|>" => Some(LLAMA4_IMAGE_START_ID),
-                "<|image_end|>" => Some(LLAMA4_IMAGE_END_ID),
-                "<|image|>" => Some(LLAMA4_IMAGE_ID),
-                "<|patch|>" => Some(LLAMA4_PATCH_ID),
-                "<|tile_x_separator|>" => Some(LLAMA4_TILE_X_SEPARATOR_ID),
-                "<|tile_y_separator|>" => Some(LLAMA4_TILE_Y_SEPARATOR_ID),
-                _ => None,
-            }
-        }
-
-        fn id_to_token(&self, id: u32) -> Option<String> {
-            match id {
-                LLAMA4_IMAGE_START_ID => Some("<|image_start|>".to_string()),
-                LLAMA4_IMAGE_END_ID => Some("<|image_end|>".to_string()),
-                LLAMA4_IMAGE_ID => Some("<|image|>".to_string()),
-                LLAMA4_PATCH_ID => Some("<|patch|>".to_string()),
-                LLAMA4_TILE_X_SEPARATOR_ID => Some("<|tile_x_separator|>".to_string()),
-                LLAMA4_TILE_Y_SEPARATOR_ID => Some("<|tile_y_separator|>".to_string()),
-                _ => None,
-            }
-        }
-
-        fn create_decode_stream(
-            &self,
-            _prompt_token_ids: &[u32],
-            _skip_special_tokens: bool,
-            _min_bytes_to_buffer: usize,
-        ) -> Box<dyn IncrementalDecoder + '_> {
-            unreachable!("not used")
-        }
+    fn llama4_tokenizer() -> TestTokenizer {
+        TestTokenizer::new()
+            .with_regular_token("<|image_start|>", LLAMA4_IMAGE_START_ID)
+            .with_regular_token("<|image_end|>", LLAMA4_IMAGE_END_ID)
+            .with_regular_token("<|image|>", LLAMA4_IMAGE_ID)
+            .with_regular_token("<|patch|>", LLAMA4_PATCH_ID)
+            .with_regular_token("<|tile_x_separator|>", LLAMA4_TILE_X_SEPARATOR_ID)
+            .with_regular_token("<|tile_y_separator|>", LLAMA4_TILE_Y_SEPARATOR_ID)
     }
 
     fn test_info(model_type: &str, config: serde_json::Value) -> MultimodalModelInfo {
@@ -636,7 +589,7 @@ mod tests {
             model_id: format!("{model_type}-test"),
             model_type: Some(model_type.to_string()),
             config,
-            tokenizer: TokenizerResolver(Arc::new(TestTokenizer)),
+            tokenizer: TokenizerResolver(Arc::new(llama4_tokenizer())),
         };
         let spec = context
             .resolve_model_spec()
