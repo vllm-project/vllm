@@ -97,7 +97,6 @@ def _make_bf16_monolithic_experts(
         num_logical_experts=num_experts,
         moe_parallel_config=parallel_cfg,
         in_dtype=torch.bfloat16,
-
         activation=MoEActivation.SILU,
         device=device,
         routing_method=routing_method,
@@ -467,7 +466,6 @@ def _make_fp8_block_scale_monolithic_experts(
         num_logical_experts=num_experts,
         moe_parallel_config=parallel_cfg,
         in_dtype=torch.bfloat16,
-
         activation=MoEActivation.SILU,
         device=device,
         routing_method=RoutingMethodType.DeepSeekV3,
@@ -653,7 +651,6 @@ def _make_nvfp4_monolithic_experts(
         num_logical_experts=num_experts,
         moe_parallel_config=parallel_cfg,
         in_dtype=torch.bfloat16,
-
         activation=MoEActivation.SILU,
         device=device,
         routing_method=RoutingMethodType.DeepSeekV3,
