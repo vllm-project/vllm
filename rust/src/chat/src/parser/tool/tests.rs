@@ -146,6 +146,14 @@ fn factory_new_resolves_default_patterns() {
         Some(names::GEMMA4)
     );
     assert_eq!(
+        factory.resolve_name_for_model("google/functiongemma-270m-it"),
+        Some(names::FUNCTIONGEMMA)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("google/function-gemma-270m-it"),
+        Some(names::FUNCTIONGEMMA)
+    );
+    assert_eq!(
         factory.resolve_name_for_model("ibm-granite/granite-4.0-h-tiny"),
         Some(names::GRANITE4)
     );

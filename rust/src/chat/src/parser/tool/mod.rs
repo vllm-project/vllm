@@ -4,10 +4,10 @@ use std::sync::{Arc, LazyLock};
 
 pub use vllm_parser::tool::{
     DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser, DeepSeekV32ToolParser,
-    Glm45MoeToolParser, Glm47MoeToolParser, Granite4ToolParser, HermesToolParser, HyV3ToolParser,
-    Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser, MinimaxM2ToolParser,
-    MinimaxM3ToolParser, MistralToolParser, Phi4MiniJsonToolParser, Qwen3CoderToolParser,
-    Qwen3XmlToolParser, ToolParser, ToolParserError,
+    FunctionGemmaToolParser, Glm45MoeToolParser, Glm47MoeToolParser, Granite4ToolParser,
+    HermesToolParser, HyV3ToolParser, Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser,
+    MinimaxM2ToolParser, MinimaxM3ToolParser, MistralToolParser, Phi4MiniJsonToolParser,
+    Qwen3CoderToolParser, Qwen3XmlToolParser, ToolParser, ToolParserError,
 };
 
 use crate::parser::ParserFactory;
@@ -21,6 +21,7 @@ pub mod names {
     pub const DEEPSEEK_V4: &str = "deepseek_v4";
     pub const GLM45: &str = "glm45";
     pub const GLM47: &str = "glm47";
+    pub const FUNCTIONGEMMA: &str = "functiongemma";
     pub const GEMMA4: &str = "gemma4";
     pub const GRANITE4: &str = "granite4";
     pub const HERMES: &str = "hermes";
@@ -67,6 +68,7 @@ impl ToolParserFactory {
             .register_parser::<Glm45MoeToolParser>(names::GLM45)
             .register_parser::<Glm47MoeToolParser>(names::GLM47)
             .register_unified_dummy(names::GEMMA4)
+            .register_parser::<FunctionGemmaToolParser>(names::FUNCTIONGEMMA)
             .register_parser::<Granite4ToolParser>(names::GRANITE4)
             .register_parser::<HermesToolParser>(names::HERMES)
             .register_parser::<HyV3ToolParser>(names::HY_V3)
@@ -112,6 +114,8 @@ impl ToolParserFactory {
             .register_pattern("glm-4.5", names::GLM45)
             .register_pattern("gemma4", names::GEMMA4)
             .register_pattern("gemma-4", names::GEMMA4)
+            .register_pattern("functiongemma", names::FUNCTIONGEMMA)
+            .register_pattern("function-gemma", names::FUNCTIONGEMMA)
             .register_pattern("granite-4", names::GRANITE4)
             .register_pattern("kimi-k2", names::KIMI_K2)
             .register_pattern("minimax-m3", names::MINIMAX_M3)
