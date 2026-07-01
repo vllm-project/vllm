@@ -418,6 +418,7 @@ def nvfp4_kv_cache_full_dim(head_size: int) -> int:
 
 def _nvfp4_split_data_scale(
     kv_side: torch.Tensor,
+    head_size: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Split a single NVFP4 KV-side buffer into data and scale views.
 
@@ -440,22 +441,63 @@ def _nvfp4_split_data_scale(
     num_pages = kv_side.shape[0]
     dim_1, dim_2 = kv_side.shape[1], kv_side.shape[2]
     full_dim = kv_side.shape[3]
-    data_dim = full_dim * 8 // 9
-    scale_dim = full_dim - data_dim
+    if head_size is None:
+        if full_dim % 9 != 0:
+            raise ValueError(
+                "NVFP4 KV side last dimension cannot be inferred from "
+                f"packed width: last_dim={full_dim}"
+            )
+        data_dim = full_dim * 8 // 9
+        scale_dim = full_dim - data_dim
+    else:
+        data_dim = head_size // 2
+        scale_dim = head_size // 16
+        expected_full_dim = data_dim + scale_dim
+        if full_dim != expected_full_dim:
+            raise ValueError(
+                "NVFP4 KV side last dimension does not match head size: "
+                f"last_dim={full_dim}, head_size={head_size}, "
+                f"expected={expected_full_dim}"
+            )
 
     data_per_kv = dim_1 * dim_2 * data_dim
     page_bytes = kv_side.stride(0)
 
-    # Derive inner strides from the kv_side strides, scaling by the
-    # ratio of the target dim to full_dim.  This preserves the physical
-    # layout (NHD vs HND) encoded in the input tensor's strides.
-    s1 = kv_side.stride(1) * data_dim // full_dim
-    s2 = kv_side.stride(2) * data_dim // full_dim
+    # This helper expects a compact single-side page layout:
+    # [all data | all scale].  Mixed K/V pages are split explicitly in
+    # nvfp4_kv_cache_split_views because slicing them leaves outer strides
+    # based on the combined K+V width and would make data/scale views overlap.
+    stride_1 = kv_side.stride(1)
+    stride_2 = kv_side.stride(2)
+    if (
+        kv_side.stride(3) != 1
+        or (dim_2 > 1 and stride_2 != full_dim)
+        or (dim_1 > 1 and stride_1 != dim_2 * full_dim)
+    ):
+        raise ValueError(
+            "NVFP4 KV cache strides are not compatible with compact "
+            f"data/scale split: shape={kv_side.shape}, "
+            f"strides={kv_side.stride()}, full_dim={full_dim}"
+        )
+    if (
+        stride_1 * data_dim % full_dim != 0
+        or stride_2 * data_dim % full_dim != 0
+        or stride_1 * scale_dim % full_dim != 0
+        or stride_2 * scale_dim % full_dim != 0
+    ):
+        raise ValueError(
+            "NVFP4 KV cache strides are not compatible with packed "
+            f"data/scale split: strides={kv_side.stride()}, "
+            f"full_dim={full_dim}, data_dim={data_dim}, "
+            f"scale_dim={scale_dim}"
+        )
+    s1 = stride_1 * data_dim // full_dim
+    s2 = stride_2 * data_dim // full_dim
     data_shape = (num_pages, dim_1, dim_2, data_dim)
     data_strides = (page_bytes, s1, s2, 1)
 
-    s1_s = kv_side.stride(1) * scale_dim // full_dim
-    s2_s = kv_side.stride(2) * scale_dim // full_dim
+    s1_s = stride_1 * scale_dim // full_dim
+    s2_s = stride_2 * scale_dim // full_dim
     scale_shape = (num_pages, dim_1, dim_2, scale_dim)
     scale_strides = (page_bytes, s1_s, s2_s, 1)
 
@@ -468,11 +510,75 @@ def _nvfp4_split_data_scale(
     return data, scale
 
 
-def nvfp4_kv_cache_split_views(kv_cache: torch.Tensor) -> tuple[tuple, tuple]:
+def _nvfp4_split_mixed_data_scale(
+    kv_cache: torch.Tensor,
+    head_size: int,
+    head_size_v: int,
+) -> tuple[tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
+    """Split a mixed-head NVFP4 page into compact K/V data and scale views."""
+    num_pages = kv_cache.shape[0]
+    dim_1, dim_2 = kv_cache.shape[1], kv_cache.shape[2]
+    k_data_dim = head_size // 2
+    k_scale_dim = head_size // 16
+    v_data_dim = head_size_v // 2
+    v_scale_dim = head_size_v // 16
+    k_full_dim = k_data_dim + k_scale_dim
+    v_full_dim = v_data_dim + v_scale_dim
+
+    if kv_cache.shape[-1] != k_full_dim + v_full_dim:
+        raise ValueError(
+            "Mixed NVFP4 KV cache last dimension does not match head sizes: "
+            f"last_dim={kv_cache.shape[-1]}, head_size={head_size}, "
+            f"head_size_v={head_size_v}, expected={k_full_dim + v_full_dim}"
+        )
+    if kv_cache.stride(-1) != 1:
+        raise ValueError(
+            "Mixed NVFP4 KV cache last dimension must be contiguous: "
+            f"strides={kv_cache.stride()}"
+        )
+
+    page_bytes = kv_cache.stride(0)
+    elements_per_page = dim_1 * dim_2 * (k_full_dim + v_full_dim)
+    if page_bytes < elements_per_page:
+        raise ValueError(
+            "Mixed NVFP4 KV cache page stride is smaller than one page: "
+            f"page_stride={page_bytes}, required={elements_per_page}"
+        )
+
+    base = kv_cache.storage_offset()
+
+    def make_view(offset: int, inner_dim: int) -> torch.Tensor:
+        return torch.as_strided(
+            kv_cache,
+            (num_pages, dim_1, dim_2, inner_dim),
+            (page_bytes, dim_2 * inner_dim, inner_dim, 1),
+            storage_offset=base + offset,
+        )
+
+    k_data_offset = 0
+    k_scale_offset = dim_1 * dim_2 * k_data_dim
+    v_data_offset = dim_1 * dim_2 * k_full_dim
+    v_scale_offset = v_data_offset + dim_1 * dim_2 * v_data_dim
+
+    k_data = make_view(k_data_offset, k_data_dim)
+    k_scale = make_view(k_scale_offset, k_scale_dim).view(torch.float8_e4m3fn)
+    v_data = make_view(v_data_offset, v_data_dim)
+    v_scale = make_view(v_scale_offset, v_scale_dim).view(torch.float8_e4m3fn)
+    return (k_data, v_data), (k_scale, v_scale)
+
+
+def nvfp4_kv_cache_split_views(
+    kv_cache: torch.Tensor,
+    head_size: int | None = None,
+    head_size_v: int | None = None,
+) -> tuple[tuple, tuple]:
     """Split an NVFP4 KV cache tensor into data and scale views.
 
-    Accepts either a 5D tensor ``(num_pages, 2, dim_2, dim_3, full_dim)``
-    or a 4D single-side tensor ``(num_pages, dim_2, dim_3, full_dim)``.
+    Accepts a 5D tensor ``(num_pages, 2, dim_2, dim_3, full_dim)`` for
+    same-size K/V sides, a 4D single-side tensor
+    ``(num_pages, dim_2, dim_3, full_dim)``, or a 4D mixed-head tensor
+    ``(num_pages, dim_2, dim_3, k_full_dim + v_full_dim)`` when
+    ``head_size`` and ``head_size_v`` are provided.
 
     Per-page layout: [K_data | K_scale | V_data | V_scale].
     Each KV side is self-contained (data followed by its scale), so the
@@ -482,8 +588,13 @@ def nvfp4_kv_cache_split_views(kv_cache: torch.Tensor) -> tuple[tuple, tuple]:
     HND), so callers get views matching whichever order they passed in.
 
     Args:
-        kv_cache: 5D or 4D uint8 tensor where the last dimension is
+        kv_cache: 5D or 4D uint8 tensor where each side's last dimension is
             ``full_dim = data_dim + scale_dim = 9 * head_size / 16``.
+        head_size: Optional K head dimension. When provided, split offsets are
+            derived from the logical head dimensions instead of inferring from
+            the packed side width.
+        head_size_v: Optional V head dimension. Defaults to ``head_size`` when
+            ``head_size`` is provided.
 
     Returns:
         For 5D input:
@@ -492,11 +603,18 @@ def nvfp4_kv_cache_split_views(kv_cache: torch.Tensor) -> tuple[tuple, tuple]:
             ``(data,), (scale,)``
     """
     if kv_cache.dim() == 4:
-        data, scale = _nvfp4_split_data_scale(kv_cache)
+        if head_size is not None:
+            head_size_v = head_size if head_size_v is None else head_size_v
+            k_full_dim = nvfp4_kv_cache_full_dim(head_size)
+            v_full_dim = nvfp4_kv_cache_full_dim(head_size_v)
+            if kv_cache.shape[-1] == k_full_dim + v_full_dim:
+                return _nvfp4_split_mixed_data_scale(kv_cache, head_size, head_size_v)
+
+        data, scale = _nvfp4_split_data_scale(kv_cache, head_size)
         return (data,), (scale,)
 
-    k_data, k_scale = _nvfp4_split_data_scale(kv_cache[:, 0])
-    v_data, v_scale = _nvfp4_split_data_scale(kv_cache[:, 1])
+    k_data, k_scale = _nvfp4_split_data_scale(kv_cache[:, 0], head_size)
+    v_data, v_scale = _nvfp4_split_data_scale(kv_cache[:, 1], head_size_v)
     return (k_data, v_data), (k_scale, v_scale)
 
 

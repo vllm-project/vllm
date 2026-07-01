@@ -7136,15 +7136,44 @@ class GPUModelRunner(
                     else:
                         shape_block_size = kernel_block_size
 
-                    kv_cache_shape = attn_backend.get_kv_cache_shape(
-                        kernel_num_blocks,
-                        shape_block_size,
-                        kv_cache_spec.num_kv_heads,
-                        kv_cache_spec.head_size,
-                        cache_dtype_str=self.cache_config.cache_dtype,
-                    )
+                    head_size_v = None
+                    if (
+                        self.cache_config.cache_dtype == "nvfp4"
+                        and attn_backend.get_name() == "FLASHINFER"
+                    ):
+                        head_size_v = getattr(
+                            kv_cache_spec, "head_size_v", kv_cache_spec.head_size
+                        )
+                    if head_size_v is None:
+                        kv_cache_shape = attn_backend.get_kv_cache_shape(
+                            kernel_num_blocks,
+                            shape_block_size,
+                            kv_cache_spec.num_kv_heads,
+                            kv_cache_spec.head_size,
+                            cache_dtype_str=self.cache_config.cache_dtype,
+                        )
+                    else:
+                        kv_cache_shape = attn_backend.get_kv_cache_shape(  # type: ignore[call-arg]
+                            kernel_num_blocks,
+                            shape_block_size,
+                            kv_cache_spec.num_kv_heads,
+                            kv_cache_spec.head_size,
+                            cache_dtype_str=self.cache_config.cache_dtype,
+                            head_size_v=head_size_v,
+                        )
                     try:
-                        kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
+                        if head_size_v is not None:
+                            kv_cache_stride_order = (
+                                attn_backend.get_kv_cache_stride_order(  # type: ignore[call-arg]
+                                    head_size=kv_cache_spec.head_size,
+                                    head_size_v=head_size_v,
+                                    cache_dtype_str=self.cache_config.cache_dtype,
+                                )
+                            )
+                        else:
+                            kv_cache_stride_order = (
+                                attn_backend.get_kv_cache_stride_order()
+                            )
                         assert len(kv_cache_stride_order) == len(kv_cache_shape)
                     except (AttributeError, NotImplementedError):
                         kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
