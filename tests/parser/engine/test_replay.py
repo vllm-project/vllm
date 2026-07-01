@@ -537,10 +537,7 @@ class TestDropTokenReplay:
         for sample in parser_info.samples:
             injected = _inject_drop_tokens(sample)
             tokenizer = make_mock_tokenizer(injected)
-            parser = parser_info.parser_cls(
-                tokenizer,
-                tools=sample.tools,
-            )
+            parser = _make_parser(parser_info.parser_cls, tokenizer, sample)
 
             results = replay_streaming(
                 parser,
@@ -571,10 +568,7 @@ class TestDropTokenNonStreaming:
         for sample in parser_info.samples:
             injected = _inject_drop_tokens(sample)
             tokenizer = make_mock_tokenizer(injected)
-            parser = parser_info.parser_cls(
-                tokenizer,
-                tools=sample.tools,
-            )
+            parser = _make_parser(parser_info.parser_cls, tokenizer, sample)
 
             request = _test_request(tools=sample.tools)
             output = parse_non_streaming(parser, injected, request)
