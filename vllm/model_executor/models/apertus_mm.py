@@ -243,10 +243,14 @@ class ApertusForConditionalGeneration(ApertusForCausalLM, SupportsMultiModal):
         dummy_image_token_id = getattr(config, "dummy_image_token_id", -1)
         dummy_audio_token_id = getattr(config, "dummy_audio_token_id", -1)
 
+        # Register the dummy placeholder token IDs to vLLM. 
+        # This tells the vLLM engine to automatically construct the boolean mask (is_multimodal) 
+        # matching these positions, allowing the engine to slice and route multimodal embeddings 
+        # to the correct locations in the input sequence.
         self.configure_mm_token_handling(
-                vocab_size=config.vocab_size,
-                mm_token_ids=[dummy_image_token_id, dummy_audio_token_id],
-                )
+            vocab_size=config.vocab_size,
+            mm_token_ids=[dummy_image_token_id, dummy_audio_token_id],
+        )
 
     def get_language_model(self) -> torch.nn.Module:
         return self.model
@@ -390,17 +394,20 @@ class ApertusForConditionalGeneration(ApertusForCausalLM, SupportsMultiModal):
         return []
 
     def embed_input_ids(
-            self,
-            input_ids: torch.Tensor,
-            multimodal_embeddings: MultiModalEmbeddings | None = None,
-            *,
-            is_multimodal: torch.Tensor | None = None,
-            **kwargs: object,
-            ) -> torch.Tensor:
-        # Route to standard vLLM multi-modal merge
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
+        *,
+        is_multimodal: torch.Tensor | None = None,
+        **kwargs: object,
+    ) -> torch.Tensor:
+        # Route to standard vLLM multi-modal merge. 
+        # This takes the text embeddings generated from input_ids and overwrites the rows 
+        # corresponding to the dummy placeholders (where is_multimodal is True) with 
+        # the high-fidelity visual/audio embeddings generated in embed_multimodal.
         return SupportsMultiModal.embed_input_ids(
-                self,
-                input_ids,
-                multimodal_embeddings=multimodal_embeddings,
-                is_multimodal=is_multimodal,
-                )
+            self,
+            input_ids,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+        )
