@@ -129,7 +129,7 @@ MTP_MODEL_CONFIGS = [
         method="mtp",
         model="nvidia/DeepSeek-V4-Flash-NVFP4",
         num_speculative_tokens=1,
-        expected_acceptance_length=1.094,
+        expected_acceptance_length=1.70,
         id="deepseek-v4-flash-mtp-nvfp4-tp4",
         tp_size=4,
         gpu_memory_utilization=0.9,
@@ -194,6 +194,10 @@ def get_tp_size_params() -> list[pytest.param]:
 def get_mt_bench_prompts(
     tokenizer, num_prompts: int = DEFAULT_NUM_PROMPTS
 ) -> list[list[int]]:
+    # Some checkpoints (e.g. quantized exports like the NVFP4 build) ship no
+    # chat template; applying one then produces degenerate prompts and tanks
+    # acceptance. Fall back to raw tokenization when no template is present.
+    skip_chat_template = getattr(tokenizer, "chat_template", None) is None
     args = SimpleNamespace(
         dataset_name="hf",
         dataset_path="philschmid/mt-bench",
@@ -210,7 +214,7 @@ def get_mt_bench_prompts(
         hf_output_len=DEFAULT_OUTPUT_LEN,
         no_stream=True,
         disable_shuffle=False,
-        skip_chat_template=False,
+        skip_chat_template=skip_chat_template,
         trust_remote_code=False,
         enable_multimodal_chat=False,
         request_id_prefix="",
