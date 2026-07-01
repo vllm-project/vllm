@@ -272,7 +272,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # [0]: GEMM start / post-GEMM event0. [1..3]: GEMM done events;
         # [1] doubles as post-GEMM event1. Reuse is safe: GEMM fully joins
         # before post-GEMM starts.
-        self.ln_events = [torch.cuda.Event() for _ in range(4)]
+        self.ln_events = [torch.Event() for _ in range(4)]
 
         assert cache_config is not None, "DeepseekV4 attention requires cache_config"
         # ---- Attention / KV-cache setup ----
@@ -760,10 +760,7 @@ class DeepseekV4Indexer(nn.Module):
 
         # None on ROCm — maybe_execute_in_parallel falls back to sequential.
         self.aux_stream = aux_stream
-        self.ln_events: list[torch.cuda.Event] = [
-            torch.cuda.Event(),
-            torch.cuda.Event(),
-        ]
+        self.ln_events: list[torch.Event] = [torch.Event(), torch.Event()]
 
     def forward(
         self,
