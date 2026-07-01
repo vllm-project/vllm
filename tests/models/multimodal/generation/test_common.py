@@ -326,39 +326,6 @@ VLM_TEST_SETTINGS = {
             large_gpu_mark(min_gb=64),
         ],
     ),
-    "aya_vision": VLMTestInfo(
-        models=["CohereLabs/aya-vision-8b"],
-        test_type=(VLMTestType.IMAGE),
-        prompt_formatter=lambda img_prompt: f"<|START_OF_TURN_TOKEN|><|USER_TOKEN|>{img_prompt}<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>",  # noqa: E501
-        single_image_prompts=IMAGE_ASSETS.prompts(
-            {
-                "stop_sign": "<image>What's the content in the center of the image?",
-                "cherry_blossom": "<image>What is the season?",
-            }
-        ),
-        multi_image_prompt="<image><image>Describe the two images in detail.",
-        max_model_len=4096,
-        max_num_seqs=2,
-        auto_cls=AutoModelForImageTextToText,
-        vllm_runner_kwargs={"mm_processor_kwargs": {"crop_to_patches": True}},
-    ),
-    "aya_vision-multi_image": VLMTestInfo(
-        models=["CohereLabs/aya-vision-8b"],
-        test_type=(VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<|START_OF_TURN_TOKEN|><|USER_TOKEN|>{img_prompt}<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>",  # noqa: E501
-        single_image_prompts=IMAGE_ASSETS.prompts(
-            {
-                "stop_sign": "<image>What's the content in the center of the image?",
-                "cherry_blossom": "<image>What is the season?",
-            }
-        ),
-        multi_image_prompt="<image><image>Describe the two images in detail.",
-        max_model_len=4096,
-        max_num_seqs=2,
-        auto_cls=AutoModelForImageTextToText,
-        vllm_runner_kwargs={"mm_processor_kwargs": {"crop_to_patches": True}},
-        marks=[large_gpu_mark(min_gb=32)],
-    ),
     "blip2": VLMTestInfo(
         models=["Salesforce/blip2-opt-2.7b"],
         test_type=VLMTestType.IMAGE,
@@ -762,16 +729,6 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.llava_video_vllm_to_hf_output,
-    ),
-    "mantis": VLMTestInfo(
-        models=["TIGER-Lab/Mantis-8B-siglip-llama3"],
-        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<|start_header_id|>user<|end_header_id|>\n\n{img_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",  # noqa: E501
-        max_model_len=4096,
-        get_stop_token_ids=lambda tok: [128009],
-        auto_cls=AutoModelForImageTextToText,
-        vllm_output_post_proc=model_utils.mantis_vllm_to_hf_output,
-        patch_hf_runner=model_utils.mantis_patch_hf_runner,
     ),
     "minicpmv_25": VLMTestInfo(
         models=["openbmb/MiniCPM-Llama3-V-2_5"],
