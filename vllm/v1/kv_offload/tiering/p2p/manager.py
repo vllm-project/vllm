@@ -278,10 +278,12 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     def on_request_finished(self, req_context: ReqContext) -> None:
         """Cancels pending loads and prunes session-scoped state.
 
-        Decoder side (``prefill`` set): looks up the session by peer_id
-        because the producer's address is what addresses the client-role
-        load to cancel. Prefiller side (``decode`` set): looks up via
-        kv_request_id because peer_id is no longer carried on store-time
+        Consumer side (``prefill`` for PD or ``p2p`` for symmetric-P2P):
+        looks up the session by peer_id because the producer's address
+        is what addresses the client-role load to cancel; also drops any
+        pending symmetric-P2P lookup state via ``session.finish_request``.
+        Prefiller side (``decode`` set): looks up via kv_request_id
+        because peer_id is no longer carried on store-time
         kv_transfer_params; if a session has bound the id, finish it. If
         no session has bound the id yet, this is a no-op: parked batches
         in `_unbound_stores` are left in place and cleaned up only by
@@ -290,15 +292,15 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         kv_params = req_context.kv_transfer_params
         if not kv_params:
             return
-        prefill = _prefill_params(kv_params)
+        consumer = _consumer_params(kv_params)
         decode = _decode_params(kv_params)
-        kv_request_id = (prefill or decode or {}).get("kv_request_id")
+        kv_request_id = (consumer or decode or {}).get("kv_request_id")
         if not kv_request_id:
             return
         self._failed_req_ids.discard(kv_request_id)
 
-        if prefill:
-            peer_id = self._remote_id_from_params(prefill)
+        if consumer:
+            peer_id = self._remote_id_from_params(consumer)
             if peer_id:
                 session = self._sessions.get(peer_id)
                 if session is not None:
