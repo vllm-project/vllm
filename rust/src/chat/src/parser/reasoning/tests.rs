@@ -13,12 +13,14 @@ fn factory_contains_and_lists_registered_parsers() {
     assert!(factory.contains(names::STEP3P5));
     assert!(factory.contains(names::MINIMAX_M3));
     assert!(factory.contains(names::GEMMA4));
+    assert!(factory.contains(names::OLMO3));
     assert!(factory.list().contains(&names::QWEN3.to_string()));
     assert!(factory.list().contains(&names::DEEPSEEK_V4.to_string()));
     assert!(factory.list().contains(&names::SEED_OSS.to_string()));
     assert!(factory.list().contains(&names::STEP3P5.to_string()));
     assert!(factory.list().contains(&names::MINIMAX_M3.to_string()));
     assert!(factory.list().contains(&names::GEMMA4.to_string()));
+    assert!(factory.list().contains(&names::OLMO3.to_string()));
 }
 
 #[test]
@@ -66,6 +68,23 @@ fn factory_routes_seed_oss_models() {
     assert_eq!(
         factory.resolve_name_for_model("seedoss-7b"),
         Some(names::SEED_OSS)
+    );
+}
+
+#[test]
+fn factory_routes_olmo_models() {
+    let factory = ReasoningParserFactory::new();
+    assert_eq!(
+        factory.resolve_name_for_model("allenai/OLMo-3-1124-Instruct"),
+        Some(names::OLMO3)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("olmo3-base"),
+        Some(names::OLMO3)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("olmo-7b"),
+        Some(names::OLMO3)
     );
 }
 

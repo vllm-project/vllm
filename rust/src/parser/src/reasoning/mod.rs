@@ -51,6 +51,8 @@ pub type MiniMaxM2ReasoningParser = Qwen3ReasoningParser;
 pub type NemotronV3ReasoningParser = Qwen3ReasoningParser;
 /// Step3 currently shares the standard `<think>...</think>` parser.
 pub type Step3ReasoningParser = Qwen3ReasoningParser;
+/// olmo3 currently shares the standard `<think>...</think>` parser.
+pub type Olmo3ReasoningParser = Qwen3ReasoningParser;
 
 /// Result alias for reasoning parser operations.
 pub type Result<T> = std::result::Result<T, ReasoningError>;
