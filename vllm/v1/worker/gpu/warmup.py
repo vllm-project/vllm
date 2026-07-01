@@ -17,6 +17,7 @@ from vllm.v1.core.sched.output import (
     NewRequestData,
     SchedulerOutput,
 )
+from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.request import Request
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
@@ -33,7 +34,7 @@ def run_mixed_prefill_decode_warmup(
     req_id_prefix: str = "_v2_mixed_warmup",
 ) -> bool:
     """Run a V2 mixed prefill+decode step through normal scheduler inputs."""
-    if model_runner.is_pooling_model or num_tokens < 3:
+    if model_runner.is_pooling_model or model_runner.max_num_reqs < 2 or num_tokens < 3:
         return False
 
     decode_req_id = f"{req_id_prefix}_decode_"
@@ -177,9 +178,17 @@ def warmup_kernels(
     num_kv_cache_groups = len(kv_cache_groups)
 
     # Compute per-request block counts for each KV cache group.
-    group_block_sizes = [g.kv_cache_spec.block_size for g in kv_cache_groups]
-    prefill_block_counts = [cdiv(prompt_len, bs) for bs in group_block_sizes]
-    decode_block_counts = [cdiv(decode_len, bs) for bs in group_block_sizes]
+    def _warmup_block_count(num_tokens: int, spec: Any) -> int:
+        num_blocks = cdiv(num_tokens, spec.block_size)
+        if isinstance(spec, MambaSpec) and spec.mamba_cache_mode == "align":
+            # Align mode reserves extra blocks beyond the token range for the
+            # speculative-decode running-state snapshots.
+            num_blocks += spec.num_speculative_blocks
+        return num_blocks
+
+    kv_cache_specs = [g.kv_cache_spec for g in kv_cache_groups]
+    prefill_block_counts = [_warmup_block_count(prompt_len, s) for s in kv_cache_specs]
+    decode_block_counts = [_warmup_block_count(decode_len, s) for s in kv_cache_specs]
     decode_block_deltas = [
         d - p for d, p in zip(decode_block_counts, prefill_block_counts)
     ]

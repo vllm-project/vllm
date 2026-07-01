@@ -337,14 +337,6 @@ _MULTIMODAL_MODELS = {
         "audioflamingo3",
         "AudioFlamingo3ForConditionalGeneration",
     ),
-    "MusicFlamingoForConditionalGeneration": (
-        "musicflamingo",
-        "MusicFlamingoForConditionalGeneration",
-    ),
-    "AyaVisionForConditionalGeneration": (
-        "aya_vision",
-        "AyaVisionForConditionalGeneration",
-    ),
     "BagelForConditionalGeneration": ("bagel", "BagelForConditionalGeneration"),
     "BeeForConditionalGeneration": ("bee", "BeeForConditionalGeneration"),
     "Blip2ForConditionalGeneration": ("blip2", "Blip2ForConditionalGeneration"),
@@ -477,7 +469,6 @@ _MULTIMODAL_MODELS = {
         "llava_onevision",
         "LlavaOnevisionForConditionalGeneration",
     ),
-    "MantisForConditionalGeneration": ("llava", "MantisForConditionalGeneration"),
     "MiDashengLMModel": ("midashenglm", "MiDashengLMModel"),
     "MiMoV2OmniForCausalLM": ("mimo_v2_omni", "MiMoV2OmniForCausalLM"),
     "MiniMaxM3SparseForConditionalGeneration": (
@@ -571,11 +562,6 @@ _MULTIMODAL_MODELS = {
     "StepVLForConditionalGeneration": ("step_vl", "StepVLForConditionalGeneration"),
     "Step3VLForConditionalGeneration": ("step3_vl", "Step3VLForConditionalGeneration"),
     "Step3p7ForConditionalGeneration": ("step3p7", "Step3p7ForConditionalGeneration"),
-    "TarsierForConditionalGeneration": ("tarsier", "TarsierForConditionalGeneration"),
-    "Tarsier2ForConditionalGeneration": (
-        "qwen2_vl",
-        "Tarsier2ForConditionalGeneration",
-    ),
     "UltravoxModel": ("ultravox", "UltravoxModel"),
     "VoxtralForConditionalGeneration": ("voxtral", "VoxtralForConditionalGeneration"),
     "VoxtralRealtimeGeneration": ("voxtral_realtime", "VoxtralRealtimeGeneration"),
@@ -736,6 +722,11 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "AquilaForCausalLM": "0.24.0",
     "Grok1ModelForCausalLM": "0.24.0",
     "Grok1ForCausalLM": "0.24.0",
+    "TarsierForConditionalGeneration": "0.24.0",
+    "Tarsier2ForConditionalGeneration": "0.23.0",  # last version with Transformers v4
+    "MantisForConditionalGeneration": "0.24.0",
+    "MusicFlamingoForConditionalGeneration": "0.24.0",
+    "AyaVisionForConditionalGeneration": "0.24.0",
 }
 
 _OOT_SUPPORTED_MODELS = {
