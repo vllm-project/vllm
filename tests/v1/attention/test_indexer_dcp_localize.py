@@ -414,6 +414,7 @@ def test_local_topk_union_is_not_equivalent_to_global_topk_attention():
     assert not torch.allclose(local_union_lse, ref_lse)
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 def test_sparse_decode_dcp_persistent_topk_matches_non_dcp():
     torch.manual_seed(3)
     device = torch.device("cuda")
