@@ -66,6 +66,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "internlm2_tool_parser",
         "Internlm2ToolParser",
     ),
+    "iquest_coder": (
+        "iquest_coder_tool_parser",
+        "IquestCoderToolParser",
+    ),
     "jamba": (
         "jamba_tool_parser",
         "JambaToolParser",
