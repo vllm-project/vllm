@@ -69,7 +69,6 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.common import (
     ApplyRotaryEmb,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.evs import (
@@ -87,9 +86,8 @@ from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
@@ -629,6 +627,16 @@ class Qwen2_5_VisionPatchMerger(nn.Module):
 
 
 class Qwen2_5_VisionTransformer(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".attn.q.": (".attn.qkv.", "q"),
+            ".attn.k.": (".attn.qkv.", "k"),
+            ".attn.v.": (".attn.qkv.", "v"),
+            ".mlp.gate_proj.": (".mlp.gate_up_proj.", 0),
+            ".mlp.up_proj.": (".mlp.gate_up_proj.", 1),
+        }
+    )
+
     def __init__(
         self,
         vision_config: Qwen2_5_VLVisionConfig,
@@ -843,7 +851,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
     @staticmethod
     def invert_permutation(perm: torch.Tensor) -> torch.Tensor:
         # building the inverse permutation in O(n) time
-        inv = torch.empty_like(perm, pin_memory=is_pin_memory_available())
+        inv = torch.empty_like(perm, pin_memory=PIN_MEMORY)
         inv[perm] = torch.arange(perm.numel(), device=perm.device, dtype=perm.dtype)
         return inv
 
@@ -1075,7 +1083,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        grid_thw: list[list[int]],
+        grid_thw: list[list[int]] | None,
         *,
         encoder_metadata: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
@@ -1149,32 +1157,8 @@ class Qwen2_5_VisionTransformer(nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("attn.qkv.", "attn.q.", "q"),
-            ("attn.qkv.", "attn.k.", "k"),
-            ("attn.qkv.", "attn.v.", "v"),
-            ("mlp.gate_up_proj.", "mlp.gate_proj.", 0),
-            ("mlp.gate_up_proj.", "mlp.up_proj.", 1),
-        ]
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class Qwen2_5_VLProcessingInfo(Qwen2VLProcessingInfo):
@@ -1616,11 +1600,11 @@ class Qwen2_5_VLForConditionalGeneration(
 
     def recompute_mrope_positions(
         self,
-        input_ids: list[int],
-        multimodal_embeddings: tuple[torch.Tensor, ...],
+        input_ids: list[int] | torch.Tensor,
+        multimodal_embeddings: Sequence[torch.Tensor],
         mrope_positions: torch.LongTensor,
         num_computed_tokens: int,
-    ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor, int]:
+    ) -> tuple[Sequence[torch.Tensor], torch.Tensor, int]:
         """
         Update part of input mrope positions (starting with
         num_computed_tokens index). Original mrope_positions are computed
@@ -1651,8 +1635,12 @@ class Qwen2_5_VLForConditionalGeneration(
             else mrope_positions.device
         )
 
-        # Tensors.
-        input_ids_t = async_tensor_h2d(input_ids, dtype=torch.long, device=device)
+        # Tensors. input_ids may already be a (device-side) tensor.
+        if isinstance(input_ids, torch.Tensor):
+            assert input_ids.device == device
+            input_ids_t = input_ids.to(torch.long)
+        else:
+            input_ids_t = async_tensor_h2d(input_ids, dtype=torch.long, device=device)
 
         mm_embeddings_out = [mm[:, :-4] for mm in multimodal_embeddings]
         mm_embeddings_pos = [
@@ -1669,7 +1657,7 @@ class Qwen2_5_VLForConditionalGeneration(
             video_token_id,
         )
 
-        return tuple(mm_embeddings_out), positions, mrope_positions_delta
+        return mm_embeddings_out, positions, mrope_positions_delta
 
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
         mm_input_by_modality = {}
@@ -1744,11 +1732,8 @@ class Qwen2_5_VLForConditionalGeneration(
         )
         return EncoderCudaGraphConfig(
             modalities=modalities,
-            input_key_by_modality={
-                "image": "pixel_values",
-                "video": "pixel_values_videos",
-            },
             buffer_keys=[
+                "pixel_values",
                 "rotary_pos_emb_cos",
                 "rotary_pos_emb_sin",
                 "window_index",
@@ -1891,6 +1876,7 @@ class Qwen2_5_VLForConditionalGeneration(
         max_frames_per_batch: int,
         device: torch.device,
         dtype: torch.dtype,
+        path: str = "default",
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
@@ -1962,7 +1948,7 @@ class Qwen2_5_VLForConditionalGeneration(
             // self.visual.patch_size
         )
         max_seqlen_window_override = vit_merger_window_size**2 * (spatial_merge_size**2)
-        buffers = self.visual.prepare_encoder_metadata(
+        metadata = self.visual.prepare_encoder_metadata(
             grid_config,
             max_batch_size=max_batch_size,
             max_frames_per_batch=max_frames_per_batch,
@@ -1974,14 +1960,12 @@ class Qwen2_5_VLForConditionalGeneration(
 
         # Just use image-modality dummy input_buffer for capturing, since it's also
         # compatible for video inputs (has the same shape: [num_patches, C*T*P*P]).
-        mm_kwargs = {
+        values = metadata | {
             "pixel_values": dummy_pixel_values,
-            "image_grid_thw": grid_config,
         }
 
         return EncoderCudaGraphCaptureInputs(
-            mm_kwargs=mm_kwargs,
-            buffers=buffers,
+            values=values,
         )
 
     def prepare_encoder_cudagraph_replay_buffers(
@@ -1989,6 +1973,7 @@ class Qwen2_5_VLForConditionalGeneration(
         mm_kwargs: dict[str, Any],
         max_batch_size: int,
         max_frames_per_batch: int,
+        path: str = "default",
     ):
         modality = self.get_input_modality(mm_kwargs)
         grid_thw_list = self._get_grid_thw_by_modality(mm_kwargs)
@@ -2000,32 +1985,36 @@ class Qwen2_5_VLForConditionalGeneration(
         # bound and can over-pad window attention into many empty FlashAttention
         # CTAs.
         if modality == "image":
-            buffers = self.visual.prepare_encoder_metadata(
+            metadata = self.visual.prepare_encoder_metadata(
                 grid_thw_list,
                 max_batch_size=max_batch_size,
             )
         elif modality == "video":
-            buffers = self.visual.prepare_encoder_metadata(
+            metadata = self.visual.prepare_encoder_metadata(
                 grid_thw_list,
                 max_frames_per_batch=max_frames_per_batch,
             )
         else:
             raise AssertionError("This line should be unreachable.")
 
-        return EncoderCudaGraphReplayBuffers(buffers=buffers)
+        values = metadata | {
+            "pixel_values": self._get_pixel_values_by_modality(mm_kwargs),
+        }
+        return EncoderCudaGraphReplayBuffers(values=values)
 
     def encoder_cudagraph_forward(
         self,
-        mm_kwargs: dict[str, Any],
-        buffers: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
+        path: str = "default",
     ) -> torch.Tensor:
-        pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
-        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
-        return self.visual(pixel_values, grid_thw, encoder_metadata=buffers)
+        pixel_values = values.pop("pixel_values")
+        metadata = values
+        return self.visual(pixel_values, None, encoder_metadata=metadata)
 
     def encoder_eager_forward(
         self,
         mm_kwargs: dict[str, Any],
+        path: str = "default",
     ) -> torch.Tensor:
         pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
         grid_thw = self._get_grid_thw_by_modality(mm_kwargs)

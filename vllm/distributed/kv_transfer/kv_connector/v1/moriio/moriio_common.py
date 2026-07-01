@@ -6,7 +6,7 @@ import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import msgspec
 import regex as re
@@ -43,6 +43,11 @@ ReqId = str
 TransferId = str
 
 
+class MoRIIOTransferAck(NamedTuple):
+    transfer_id: TransferId
+    consumer_tp_size: int = 1
+
+
 @dataclass
 class WriteTask:
     request_id: ReqId
@@ -51,7 +56,7 @@ class WriteTask:
     local_block_ids: list[int]
     remote_block_ids_hint: list[int] | None
     layer_name: str
-    event: torch.cuda.Event
+    event: torch.Event
     remote_notify_port: int
     remote_ip: str
     enqueue_time: float = field(default_factory=time.perf_counter)
@@ -78,8 +83,17 @@ class RemoteAllocInfo:
 
     block_ids: list[int]
     writes_done: int = 0
+    writes_expected: int | None = None
     decode_dp_rank: int = 0
-    transfer_offset: tuple[list[int], list[int], list[int]] | None = None
+    completion_request_id: str | None = None
+    completion_remote_notify_port: int | None = None
+    completion_remote_ip: str | None = None
+    completion_notified: bool = False
+    transfer_statuses: list[Any] = field(default_factory=list)
+    transfer_offsets: dict[
+        tuple[tuple[int, ...], tuple[int, ...], torch.dtype],
+        tuple[list[int], list[int], list[int]],
+    ] = field(default_factory=dict)
 
 
 class ROLE(Enum):
@@ -175,6 +189,18 @@ def get_moriio_mode(kv_transfer_config: KVTransferConfig) -> MoRIIOMode:
 
 def get_port_offset(dp_rank: int, tp_rank: int, tp_size: int = 1) -> int:
     return (dp_rank) * tp_size + tp_rank
+
+
+def resolve_host_ip(extra_config: dict) -> str:
+    """The IP this MoRIIO process advertises for KV transfer.
+
+    Honors an explicit ``host_ip`` in ``kv_connector_extra_config`` before
+    falling back to ``get_ip()``. An external router/orchestrator can set it to
+    the node's routable address; this is required under frameworks (e.g. Ray)
+    where ``get_ip()`` resolves to an unroutable public IP and ``VLLM_HOST_IP``
+    cannot be propagated to the worker processes that bind the transfer engine.
+    """
+    return extra_config.get("host_ip") or get_ip()
 
 
 _DEPRECATED_ENV_VARS: dict[str, str] = {
@@ -276,7 +302,7 @@ class MoRIIOConfig:
         )
 
         return cls(
-            local_ip=get_ip(),
+            local_ip=resolve_host_ip(extra_config),
             local_kv_port=get_open_port(),
             proxy_ip=extra_config["proxy_ip"],
             local_ping_port=get_open_port(),
@@ -324,7 +350,7 @@ class MoRIIOConstants:
     DEFAULT_DEFER_TIMEOUT = 60.0
 
 
-# The router embeds both zmq_addresses in the request_id (similar to P2pNcclConnector):
+# The router embeds both zmq_addresses in the request_id:
 #   "___prefill_addr_{zmq}___decode_addr_{zmq}_{32-hex-uuid}"
 # MoRIIO zmq_address format: "host:IP,handshake:PORT,notify:PORT"
 #
@@ -422,12 +448,21 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
     ):
         transfer_id = kv_transfer_params["transfer_id"]
 
-        # Parse host/ports from the request_id. The router embeds both zmq_addresses
-        # in the request_id
-        peer_zmq = get_peer_zmq_from_request_id(request_id, is_producer=write_mode)
-        remote_host, remote_handshake_port, remote_notify_port = (
-            parse_moriio_zmq_address(peer_zmq)
-        )
+        remote_host = kv_transfer_params.get("remote_host")
+        remote_handshake_port = kv_transfer_params.get("remote_handshake_port")
+        remote_notify_port = kv_transfer_params.get("remote_notify_port")
+        if (
+            remote_host is None
+            or remote_handshake_port is None
+            or remote_notify_port is None
+        ):
+            # Parse host/ports from the request_id. The router embeds both
+            # zmq_addresses in PD request IDs, but WRITE decode requests may carry
+            # a plain request ID and get the remote address via kv_transfer_params.
+            peer_zmq = get_peer_zmq_from_request_id(request_id, is_producer=write_mode)
+            remote_host, remote_handshake_port, remote_notify_port = (
+                parse_moriio_zmq_address(peer_zmq)
+            )
 
         _req = ReqMeta(
             transfer_id=transfer_id,
@@ -435,9 +470,9 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
             remote_block_ids=kv_transfer_params["remote_block_ids"],
             remote_engine_id=kv_transfer_params["remote_engine_id"],
             remote_host=remote_host,
-            remote_port=remote_handshake_port,
-            remote_handshake_port=remote_handshake_port,
-            remote_notify_port=remote_notify_port,
+            remote_port=int(remote_handshake_port),
+            remote_handshake_port=int(remote_handshake_port),
+            remote_notify_port=int(remote_notify_port),
             tp_size=kv_transfer_params.get("tp_size", 1),
             remote_dp_size=kv_transfer_params.get("remote_dp_size", 1),
         )

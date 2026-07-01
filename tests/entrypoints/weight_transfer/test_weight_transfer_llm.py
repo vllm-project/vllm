@@ -48,6 +48,7 @@ class MockUpdateInfo(WeightTransferUpdateInfo):
     names: list[str] | None = None
     dtype_names: list[str] | None = None
     shapes: list[list[int]] | None = None
+    num_updates_list: list[int] | None = None
 
 
 class MockWeightTransferEngine(WeightTransferEngine[MockInitInfo, MockUpdateInfo]):
@@ -86,6 +87,15 @@ class MockWeightTransferEngine(WeightTransferEngine[MockInitInfo, MockUpdateInfo
         # Simulate loading weights by calling load_weights with empty list
         # (In real implementation, this would receive and load actual weights)
         load_weights([])
+
+    def receive_sparse_weights(
+        self,
+        update_info: MockUpdateInfo,
+        apply_patches: Callable[[list], None],
+    ) -> None:
+        MockWeightTransferEngine.receive_weights_called = True
+        MockWeightTransferEngine.last_update_info = update_info
+        apply_patches([])
 
     def shutdown(self) -> None:
         MockWeightTransferEngine.shutdown_called = True
@@ -198,8 +208,6 @@ def test_update_weights_calls_engine():
         llm.init_weight_transfer_engine(
             WeightTransferInitRequest(init_info={"test_param": "init"})
         )
-
-        # Start weight update (required before update_weights)
         llm.start_weight_update(is_checkpoint_format=True)
 
         # Call update_weights
@@ -232,14 +240,67 @@ def test_update_weights_calls_engine():
             assert dtypes == test_dtypes
             assert shapes == test_shapes
 
-        # Finish weight update
+        llm.finish_weight_update()
+
+
+@create_new_process_for_each_test()
+def test_update_weights_passes_sparse_metadata():
+    """Test sparse update metadata is forwarded unchanged to the engine."""
+    if torch.accelerator.device_count() < 1:
+        pytest.skip("Need at least 1 GPU for this test")
+
+    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+    os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
+
+    with patch(
+        "vllm.v1.worker.gpu_worker.WeightTransferEngineFactory.create_engine",
+        mock_create_engine,
+    ):
+        llm = LLM(
+            model=MODEL_NAME,
+            enforce_eager=True,
+            load_format="dummy",
+            tensor_parallel_size=1,
+            weight_transfer_config=WeightTransferConfig(backend="nccl"),
+        )
+
+        llm.init_weight_transfer_engine(
+            WeightTransferInitRequest(init_info={"test_param": "init"})
+        )
+        llm.start_weight_update(is_checkpoint_format=False)
+
+        llm.update_weights(
+            WeightTransferUpdateRequest(
+                update_info={
+                    "names": ["layer.weight"],
+                    "dtype_names": ["bfloat16"],
+                    "shapes": [[100]],
+                    "num_updates_list": [3],
+                    "update_kind": "sparse_flat",
+                }
+            )
+        )
+
+        def check_sparse_update_called(self):
+            engine = self.weight_transfer_engine
+            if not engine.receive_weights_called:
+                return None
+            info = engine.last_update_info
+            return (
+                info.update_kind,
+                info.num_updates_list,
+            )
+
+        results = llm.collective_rpc(check_sparse_update_called)
+        for result in results:
+            assert result == ("sparse_flat", [3])
+
         llm.finish_weight_update()
 
 
 @create_new_process_for_each_test()
 def test_full_weight_transfer_flow():
-    """Test the complete weight transfer flow:
-    init -> start -> update -> finish."""
+    """Test the complete weight transfer flow: init -> start -> update -> finish."""
     if torch.accelerator.device_count() < 1:
         pytest.skip("Need at least 1 GPU for this test")
 

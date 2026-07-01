@@ -10,7 +10,11 @@ import pytest
 from PIL import Image
 
 from vllm.assets.base import get_vllm_public_assets
-from vllm.assets.video import video_to_ndarrays, video_to_pil_images_list
+from vllm.assets.video import (
+    video_get_metadata,
+    video_to_ndarrays,
+    video_to_pil_images_list,
+)
 from vllm.multimodal.media import ImageMediaIO, VideoMediaIO
 from vllm.multimodal.video import VIDEO_LOADER_REGISTRY, VideoLoader
 
@@ -110,6 +114,20 @@ def test_opencv_video_io_colorspace(tmp_path, is_color: bool, fourcc: str, ext: 
         )
         assert np.sum(np.isnan(sim)) / sim.size < 0.001
         assert np.nanmean(sim) > 0.99
+
+
+def test_opencv_video_metadata_matches_sampled_frame_timeline(tmp_path):
+    image_path = f"{tmp_path}/test_metadata_image.png"
+    Image.new("RGB", (8, 8), color=(255, 0, 0)).save(image_path)
+    video_path = f"{tmp_path}/test_metadata_video.mp4"
+    create_video_from_image(image_path, video_path, num_frames=10, fps=5.0)
+
+    metadata = video_get_metadata(video_path, num_frames=4)
+
+    assert metadata["fps"] == pytest.approx(5.0)
+    assert metadata["duration"] == pytest.approx(2.0)
+    assert metadata["frames_indices"] == [0, 3, 6, 9]
+    assert metadata["total_num_frames"] == 4
 
 
 NUM_FRAMES = 10

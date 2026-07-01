@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Check PR label and author merge count
-      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
       with:
         script: |
           const { data: pr } = await github.rest.pulls.get({
@@ -46,12 +46,16 @@ jobs:
   pre-commit:
     needs: pre-run-check
     if: always() && (needs.pre-run-check.result == 'success' || needs.pre-run-check.result == 'skipped')
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, vllm-runners]
     steps:
-    - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
     - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
       with:
         python-version: "3.12"
+    # Provide shellcheck on PATH so tools/pre_commit/shellcheck.sh skips its
+    # wget + tar -xJ self-download, which the self-hosted runner image lacks
+    # (no wget/xz). Pinned to shellcheck 0.10.0 to match the script's "stable".
+    - run: python -m pip install shellcheck-py==0.10.0.1
     - run: echo "::add-matcher::.github/workflows/matchers/actionlint.json"
     - run: echo "::add-matcher::.github/workflows/matchers/markdownlint.json"
     - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"

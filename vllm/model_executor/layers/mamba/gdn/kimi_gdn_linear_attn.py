@@ -85,7 +85,7 @@ direct_register_custom_op(
 class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
     def get_state_dtype(
         self,
-    ) -> tuple[torch.dtype, torch.dtype, torch.dtype, torch.dtype]:
+    ) -> tuple[torch.dtype, torch.dtype]:
         if self.model_config is None or self.cache_config is None:
             raise ValueError("model_config and cache_config must be set")
         return MambaStateDtypeCalculator.kda_state_dtype(
@@ -94,7 +94,7 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
 
     def get_state_shape(
         self,
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+    ) -> tuple[tuple[int, ...], tuple[int, ...]]:
         return MambaStateShapeCalculator.kda_state_shape(
             self.tp_size, self.num_heads, self.head_dim, conv_kernel_size=self.conv_size
         )
@@ -300,13 +300,13 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
         g1 = g1[:, :num_actual_tokens]
         beta = beta[:, :num_actual_tokens]
 
-        (conv_state_q, conv_state_k, conv_state_v, recurrent_state) = constant_caches
+        (conv_state, recurrent_state) = constant_caches
         # conv_state must be (..., dim, width-1) for the conv kernels.
         # DS layout stores it that way directly; SD layout needs a transpose.
         if not is_conv_state_dim_first():
-            conv_state_q = conv_state_q.transpose(-1, -2)
-            conv_state_k = conv_state_k.transpose(-1, -2)
-            conv_state_v = conv_state_v.transpose(-1, -2)
+            conv_state = conv_state.transpose(-1, -2)
+
+        conv_state_q, conv_state_k, conv_state_v = conv_state.chunk(3, dim=-2)
 
         q_conv_weights = self.q_conv1d.weight.view(
             self.q_conv1d.weight.size(0), self.q_conv1d.weight.size(2)
