@@ -5363,6 +5363,7 @@ dependencies = [
  "vllm-llm",
  "vllm-metrics",
  "vllm-text",
+ "xgrammar-structural-tag",
  "zeromq",
 ]
 

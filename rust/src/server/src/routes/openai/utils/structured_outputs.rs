@@ -97,8 +97,24 @@ fn validate_structural_tag_shape(extra: &serde_json::Map<String, Value>) -> Resu
         )
     };
 
+    // Current shape: validate the `format` payload, not just its presence.
+    // Python runs the xgrammar structural-tag validator here, so a malformed
+    // tag such as `{"type":"structural_tag","format":{}}` is a 400 rather than
+    // an opaque engine-core generation failure. We mirror that by deserializing
+    // into the typed `xgrammar_structural_tag::StructuralTag`, which fails for
+    // an unknown/empty `format`.
     if extra.contains_key("format") {
-        return Ok(());
+        let mut object = extra.clone();
+        // `type` was consumed as the enum discriminator, so re-insert it for
+        // the typed round-trip.
+        object
+            .entry("type".to_string())
+            .or_insert_with(|| Value::from("structural_tag"));
+        return serde_json::from_value::<xgrammar_structural_tag::StructuralTag>(Value::Object(
+            object,
+        ))
+        .map(|_| ())
+        .map_err(|_| invalid());
     }
     let legacy_shaped = extra.get("structures").is_some_and(Value::is_array)
         && extra.get("triggers").is_some_and(Value::is_array);
@@ -325,6 +341,10 @@ mod tests {
             json!({ "type": "structural_tag" }),
             json!({ "type": "structural_tag", "structures": [] }),
             json!({ "type": "structural_tag", "triggers": [] }),
+            // Present-but-malformed `format` payloads: Python rejects these via
+            // the xgrammar validator, so key presence alone must not pass.
+            json!({ "type": "structural_tag", "format": {} }),
+            json!({ "type": "structural_tag", "format": { "type": "nope" } }),
         ] {
             let err = convert_from_response_format_value(&Some(raw.clone()), &None).unwrap_err();
             assert!(
@@ -337,7 +357,8 @@ mod tests {
     /// Both accepted structural-tag shapes pass validation.
     #[test]
     fn well_formed_structural_tag_accepted() {
-        let current = json!({ "type": "structural_tag", "format": {} });
+        // Current shape with a valid, typed `format` payload.
+        let current = json!({ "type": "structural_tag", "format": { "type": "any_text" } });
         assert!(convert_from_response_format_value(&Some(current), &None).is_ok());
 
         let legacy = json!({

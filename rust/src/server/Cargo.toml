@@ -48,6 +48,7 @@ vllm-engine-core-client.workspace = true
 vllm-llm.workspace = true
 vllm-metrics.workspace = true
 vllm-text.workspace = true
+xgrammar-structural-tag.workspace = true
 
 [build-dependencies]
 tonic-prost-build.workspace = true
