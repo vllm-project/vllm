@@ -94,6 +94,7 @@ from vllm.models.minimax_m3.common.mm_preprocess import (
 from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3SparseBackend,
     MiniMaxM3SparseImpl,
+    minimax_m3_use_aiter_sparse_pa,
     select_main_impl_cls,
 )
 from vllm.models.minimax_m3.common.vision_tower import MiniMaxVLVisionModel
@@ -104,6 +105,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
     get_kv_quant_mode,
+    is_quantized_kv_cache,
 )
 
 
@@ -653,6 +655,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.impl: MiniMaxM3SparseImpl = select_main_impl_cls(  # type: ignore[assignment]
             topk_blocks=sparse_cfg["sparse_topk_blocks"],
             kv_cache_dtype=self.kv_cache_dtype,
+            num_kv_heads=self.num_kv_heads,
         )(
             self.num_heads,
             self.head_dim,
@@ -662,6 +665,10 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             topk_blocks=sparse_cfg["sparse_topk_blocks"],
             sparse_block_size=sparse_cfg["sparse_block_size"],
         )
+        self.use_aiter_sparse_pa = minimax_m3_use_aiter_sparse_pa(self.num_kv_heads)
+        self.kv_cache_k = torch.tensor([])
+        self.kv_cache_v = torch.tensor([])
+        self._aiter_sparse_pa_cache_data_ptr = 0
         # Self-contained nn.Module: owns its side cache, selects its impl in init
         # (Triton on ROCm, where the SM100 gate is always False).
         self.indexer = MiniMaxM3Indexer(
@@ -700,6 +707,91 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
         )
 
+    def _ensure_aiter_sparse_pa_kv_cache(self) -> None:
+        if self.kv_cache.numel() == 0:
+            return
+        if self._aiter_sparse_pa_cache_data_ptr == self.kv_cache.data_ptr():
+            return
+
+        kv_cache = self.kv_cache
+        if is_quantized_kv_cache(self.kv_cache_dtype):
+            kv_cache = kv_cache.view(self.impl.kv_cache_fp8_dtype)
+        key_cache, value_cache = kv_cache.unbind(1)
+        if not key_cache.is_contiguous() or not value_cache.is_contiguous():
+            raise RuntimeError(
+                "MiniMax-M3 AITER sparse PA requires K/V-separated KV cache "
+                "storage. Set VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT=1 before "
+                "initializing the engine."
+            )
+
+        x = 16 // key_cache.element_size()
+        if self.head_dim % x != 0:
+            raise RuntimeError(
+                "MiniMax-M3 AITER sparse PA requires head_dim divisible by "
+                f"16 / dtype_size, got head_dim={self.head_dim}, x={x}"
+            )
+        num_blocks = key_cache.shape[0]
+        num_phys16 = num_blocks * 8
+        self.kv_cache_k = key_cache.view(
+            num_phys16,
+            self.num_kv_heads,
+            self.head_dim // x,
+            16,
+            x,
+        )
+        self.kv_cache_v = value_cache.view(
+            num_phys16,
+            self.num_kv_heads,
+            16 // x,
+            self.head_dim,
+            x,
+        )
+        self._aiter_sparse_pa_cache_data_ptr = self.kv_cache.data_ptr()
+
+    def get_aiter_sparse_pa_kv_cache(self) -> tuple[torch.Tensor, torch.Tensor]:
+        self._ensure_aiter_sparse_pa_kv_cache()
+        return self.kv_cache_k, self.kv_cache_v
+
+    def _insert_aiter_sparse_pa_kv(
+        self,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        index_k: torch.Tensor | None,
+        slot_mapping: torch.Tensor,
+        index_slot_mapping: torch.Tensor | None,
+    ) -> None:
+        if self.kv_cache.numel() == 0:
+            return
+        from aiter import reshape_and_cache
+
+        from vllm.models.minimax_m3.amd.ops.sparse_pa import (
+            minimax_m3_insert_index_cache,
+        )
+
+        key_cache, value_cache = self.get_aiter_sparse_pa_kv_cache()
+        kv_cache_dtype = (
+            self.kv_cache_dtype
+            if is_quantized_kv_cache(self.kv_cache_dtype)
+            else "auto"
+        )
+        reshape_and_cache(
+            k.contiguous(),
+            v.contiguous(),
+            key_cache,
+            value_cache,
+            slot_mapping,
+            kv_cache_dtype=kv_cache_dtype,
+            k_scale=getattr(self, "_k_scale", None),
+            v_scale=getattr(self, "_v_scale", None),
+            asm_layout=True,
+        )
+        if index_k is None or index_slot_mapping is None:
+            return
+        index_cache = self.indexer.index_cache.kv_cache
+        if index_cache.numel() == 0:
+            return
+        minimax_m3_insert_index_cache(index_k, index_cache, index_slot_mapping)
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -730,31 +822,121 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             return qkv.new_zeros((num_tokens, self.hidden_size))
 
         main_slot_mapping = fwd_slot_mapping[self.layer_name]
-        index_slot_mapping = fwd_slot_mapping[self.indexer.index_cache.prefix]
         q = qkv.new_empty((num_tokens, self.q_size))
-        index_q = qkv.new_empty((num_tokens, self.index_q_size))
-        ops.fused_minimax_m3_qknorm_rope_kv_insert(
-            qkv,
-            self.q_norm.weight,
-            self.k_norm.weight,
-            cos_sin_cache,
-            positions,
-            self.num_heads,
-            self.num_kv_heads,
-            rotary_dim,
-            eps,
-            self.index_q_norm.weight,
-            self.index_k_norm.weight,
-            self.num_idx_heads,
-            main_slot_mapping,
-            index_slot_mapping,
-            self.kv_cache,
-            self.indexer.index_cache.kv_cache,
-            self.kv_cache.size(2),  # paged-cache block size
-            q,
-            index_q,
-            self.kv_cache_dtype,
-        )
+        if self.skip_index_topk:
+            index_q = None
+            if self.use_aiter_sparse_pa:
+                ops.fused_minimax_m3_qknorm_rope_kv_insert(
+                    qkv,
+                    self.q_norm.weight,
+                    self.k_norm.weight,
+                    cos_sin_cache,
+                    positions,
+                    self.num_heads,
+                    self.num_kv_heads,
+                    rotary_dim,
+                    eps,
+                    num_index_heads=self.num_idx_heads,
+                    q_out=q,
+                    skip_index_branch=True,
+                )
+                k_start = self.q_size
+                v_start = k_start + self.kv_size
+                k = qkv[:, k_start:v_start].view(
+                    num_tokens, self.num_kv_heads, self.head_dim
+                )
+                v = qkv[:, v_start : v_start + self.kv_size].view(
+                    num_tokens, self.num_kv_heads, self.head_dim
+                )
+                self._insert_aiter_sparse_pa_kv(
+                    k,
+                    v,
+                    None,
+                    main_slot_mapping,
+                    None,
+                )
+            else:
+                ops.fused_minimax_m3_qknorm_rope_kv_insert(
+                    qkv,
+                    self.q_norm.weight,
+                    self.k_norm.weight,
+                    cos_sin_cache,
+                    positions,
+                    self.num_heads,
+                    self.num_kv_heads,
+                    rotary_dim,
+                    eps,
+                    num_index_heads=self.num_idx_heads,
+                    slot_mapping=main_slot_mapping,
+                    kv_cache=self.kv_cache,
+                    block_size=self.kv_cache.size(2),  # paged-cache block size
+                    q_out=q,
+                    kv_cache_dtype=self.kv_cache_dtype,
+                    skip_index_branch=True,
+                )
+        else:
+            index_slot_mapping = fwd_slot_mapping[self.indexer.index_cache.prefix]
+            index_q = qkv.new_empty((num_tokens, self.index_q_size))
+            if self.use_aiter_sparse_pa:
+                ops.fused_minimax_m3_qknorm_rope_kv_insert(
+                    qkv,
+                    self.q_norm.weight,
+                    self.k_norm.weight,
+                    cos_sin_cache,
+                    positions,
+                    self.num_heads,
+                    self.num_kv_heads,
+                    rotary_dim,
+                    eps,
+                    self.index_q_norm.weight,
+                    self.index_k_norm.weight,
+                    self.num_idx_heads,
+                    q_out=q,
+                    index_q_out=index_q,
+                    kv_cache_dtype=self.kv_cache_dtype,
+                )
+                k_start = self.q_size
+                v_start = k_start + self.kv_size
+                index_k_start = v_start + self.kv_size + self.index_q_size
+                k = qkv[:, k_start:v_start].view(
+                    num_tokens, self.num_kv_heads, self.head_dim
+                )
+                v = qkv[:, v_start : v_start + self.kv_size].view(
+                    num_tokens, self.num_kv_heads, self.head_dim
+                )
+                index_k = qkv[
+                    :, index_k_start : index_k_start + self.idx_head_dim
+                ].view(num_tokens, self.idx_head_dim)
+                self._insert_aiter_sparse_pa_kv(
+                    k,
+                    v,
+                    index_k,
+                    main_slot_mapping,
+                    index_slot_mapping,
+                )
+            else:
+                ops.fused_minimax_m3_qknorm_rope_kv_insert(
+                    qkv,
+                    self.q_norm.weight,
+                    self.k_norm.weight,
+                    cos_sin_cache,
+                    positions,
+                    self.num_heads,
+                    self.num_kv_heads,
+                    rotary_dim,
+                    eps,
+                    self.index_q_norm.weight,
+                    self.index_k_norm.weight,
+                    self.num_idx_heads,
+                    main_slot_mapping,
+                    index_slot_mapping,
+                    self.kv_cache,
+                    self.indexer.index_cache.kv_cache,
+                    self.kv_cache.size(2),  # paged-cache block size
+                    q,
+                    index_q,
+                    self.kv_cache_dtype,
+                )
 
         output = torch.empty_like(q)
         attn_output = self._run_attention(q, index_q, output)
@@ -765,7 +947,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     def _run_attention(
         self,
         query: torch.Tensor,
-        index_query: torch.Tensor,
+        index_query: torch.Tensor | None,
         output: torch.Tensor,
     ) -> torch.Tensor:
         # Single eager break around both: their split-K kernels read per-request
@@ -774,6 +956,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # When skip_index_topk is set (ATOM index_topk_freq), reuse the selection
         # the preceding compute layer wrote into the shared buffer this forward.
         if not self.skip_index_topk:
+            assert index_query is not None
             self.indexer(index_query)
         return self.impl.forward(self, query, self.kv_cache, output)
 
