@@ -7,9 +7,10 @@ use serde_repr::{Deserialize_repr, Serialize_repr};
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 
 use super::utility::UtilityOutput;
-use crate::protocol::OpaqueValue;
+use crate::error::{Error, Result, ext_value_decode};
 use crate::protocol::logprobs::MaybeWireLogprobs;
 use crate::protocol::stats::{PrefillStats, SchedulerStats};
+use crate::protocol::{OpaqueValue, decode_msgpack};
 
 /// The stop reason associated with a finished output.
 ///
@@ -113,6 +114,21 @@ impl EngineCoreOutput {
     pub fn finished(&self) -> bool {
         self.finish_reason.is_some()
     }
+
+    /// Resolve all wire-format fields in-place by looking up aux frames and
+    /// decoding raw-view payloads as needed.
+    fn resolve_in_place<Frame>(&mut self, frames: &[Frame]) -> Result<()>
+    where
+        Frame: AsRef<[u8]>,
+    {
+        self.new_logprobs = (self.new_logprobs.take())
+            .map(|value| value.resolve(frames, "new_logprobs"))
+            .transpose()?;
+        self.new_prompt_logprobs_tensors = (self.new_prompt_logprobs_tensors.take())
+            .map(|value| value.resolve(frames, "new_prompt_logprobs_tensors"))
+            .transpose()?;
+        Ok(())
+    }
 }
 
 /// Batch of engine-core outputs returned to a frontend client.
@@ -187,6 +203,18 @@ pub enum ClassifiedEngineCoreOutputs {
 }
 
 impl EngineCoreOutputs {
+    /// Resolve all wire-format fields in-place by looking up aux frames and
+    /// decoding raw-view payloads as needed.
+    fn resolve_in_place<Frame>(&mut self, frames: &[Frame]) -> Result<()>
+    where
+        Frame: AsRef<[u8]>,
+    {
+        for output in &mut self.outputs {
+            output.resolve_in_place(frames)?;
+        }
+        Ok(())
+    }
+
     /// Classify the raw wire message into a more semantic Rust enum.
     pub fn classify(self) -> ClassifiedEngineCoreOutputs {
         let has_request_payload = !self.outputs.is_empty()
@@ -228,6 +256,19 @@ impl EngineCoreOutputs {
             _ => ClassifiedEngineCoreOutputs::Other(self),
         }
     }
+}
+
+/// Decode one ordinary or multipart engine-core output message into the strong
+/// typed public protocol shape.
+pub fn decode_engine_core_outputs<Frame>(frames: &[Frame]) -> Result<EngineCoreOutputs>
+where
+    Frame: AsRef<[u8]>,
+{
+    let first_frame = frames.first().ok_or_else(|| ext_value_decode!("missing output frame"))?;
+
+    let mut outputs: EngineCoreOutputs = decode_msgpack(first_frame.as_ref())?;
+    outputs.resolve_in_place(frames)?;
+    Ok(outputs)
 }
 
 #[cfg(test)]

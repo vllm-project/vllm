@@ -32,7 +32,6 @@ mod structured_outputs;
 pub mod tensor;
 pub mod utility;
 pub use dtype::ModelDtype;
-pub use logprobs::decode_engine_core_outputs;
 pub use output::*;
 pub use request::*;
 pub use sampling::*;
