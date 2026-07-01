@@ -2,39 +2,32 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
-import torch.nn as nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention import MLAAttention
-from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
-    MergedColumnParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sparse_attn_indexer import sparse_attn_indexer
 from vllm.model_executor.models.deepseek_v2 import (
     DeepSeekV2FusedQkvAProjLinear,
-    DeepseekV32IndexerCache,
     yarn_get_mscale,
 )
 from vllm.model_executor.models.utils import extract_layer_index
-from vllm.utils.torch_utils import is_quantized_kv_cache
-
 from vllm.models.deepseek_v32.common.attention import DeepseekV32Indexer
 from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
+from vllm.utils.torch_utils import is_quantized_kv_cache
 
 
 class DeepseekV32ROCMAiterMLAAttention(MLAAttention):
-    #ROCm sparse MLA for DeepSeek V3.2 DSA.
-
+    # ROCm sparse MLA for DeepSeek V3.2 DSA.
 
     indexer: "DeepseekV32Indexer | None"
 

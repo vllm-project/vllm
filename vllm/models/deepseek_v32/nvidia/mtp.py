@@ -38,6 +38,7 @@ from vllm.model_executor.models.utils import (
     get_pp_missing_layer_names,
     maybe_prefix,
 )
+from vllm.models.deepseek_v32.common.kernels import fused_eh_norm
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.mla.sparse_utils import (

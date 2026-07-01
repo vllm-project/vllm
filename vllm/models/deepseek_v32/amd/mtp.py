@@ -6,6 +6,7 @@ Extends the NVIDIA MTP (nvidia/mtp.py) with:
   - ROCm aiter shared-expert fusion in load_weights
   - DeepseekV32ROCMAiterDecoderLayer for the decoder block inside the MTP layer
 """
+
 import typing
 from collections.abc import Callable, Iterable
 
@@ -38,10 +39,10 @@ from vllm.model_executor.models.utils import (
     get_pp_missing_layer_names,
     maybe_prefix,
 )
+from vllm.models.deepseek_v32.common.kernels import fused_eh_norm
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from vllm.models.deepseek_v32.common.kernels import fused_eh_norm
 from .model import DeepseekV32ROCMAiterDecoderLayer
 
 
