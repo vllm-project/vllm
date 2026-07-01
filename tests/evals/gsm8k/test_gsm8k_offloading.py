@@ -5,7 +5,9 @@ GSM8K correctness test for CPU KV offloading connectors.
 
 Regression guard for stride computation bugs in the offloading worker
 (e.g. https://github.com/vllm-project/vllm/pull/46888) and silent KV
-cache data corruption during CPU offloading.
+cache data corruption during CPU offloading.  Runs GSM8K twice with
+prefix caching disabled to ensure offloaded KV data is correctly
+reloaded on the second pass.
 
 Covers both KV offloading connectors (OffloadingConnector and
 SimpleCPUOffloadConnector) across four architecture families:
@@ -165,7 +167,7 @@ def test_gsm8k_offloading_correctness(cfg: OffloadingModelConfig):
         "--enforce-eager",
         "--max-model-len",
         "4096",
-        "--enable-prefix-caching",
+        "--no-enable-prefix-caching",
         "--no-disable-hybrid-kv-cache-manager",
         "--kv-transfer-config",
         _kv_transfer_config(cfg.connector, cfg.cpu_offload_gib),
@@ -183,21 +185,25 @@ def test_gsm8k_offloading_correctness(cfg: OffloadingModelConfig):
         host_port = url.split("://")[1].split("/")[0]
         host, port = host_port.rsplit(":", 1)
 
-        results = evaluate_gsm8k(
-            num_questions=NUM_QUESTIONS,
-            num_shots=NUM_FEWSHOT,
-            host=f"http://{host}",
-            port=int(port),
-        )
+        for run_idx in range(1, 3):
+            results = evaluate_gsm8k(
+                num_questions=NUM_QUESTIONS,
+                num_shots=NUM_FEWSHOT,
+                host=f"http://{host}",
+                port=int(port),
+            )
 
-        print(
-            f"GSM8K + {cfg.connector} ({cfg.id}): "
-            f"accuracy={results['accuracy']:.4f}, "
-            f"invalid_rate={results['invalid_rate']:.3f}, "
-            f"latency={results['latency']:.1f}s"
-        )
+            print(
+                f"GSM8K run {run_idx}/2 + {cfg.connector} ({cfg.id}): "
+                f"accuracy={results['accuracy']:.4f}, "
+                f"invalid_rate={results['invalid_rate']:.3f}, "
+                f"latency={results['latency']:.1f}s"
+            )
 
-        assert results["accuracy"] >= cfg.accuracy_threshold - cfg.tolerance, (
-            f"GSM8K accuracy {results['accuracy']:.4f} below "
-            f"{cfg.accuracy_threshold - cfg.tolerance:.4f}"
-        )
+            assert results["accuracy"] >= (
+                cfg.accuracy_threshold - cfg.tolerance
+            ), (
+                f"GSM8K run {run_idx}/2 accuracy "
+                f"{results['accuracy']:.4f} below "
+                f"{cfg.accuracy_threshold - cfg.tolerance:.4f}"
+            )
