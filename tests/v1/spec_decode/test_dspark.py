@@ -322,8 +322,18 @@ def test_dspark_speculative_config_predicates_and_hash_include_sampler():
     assert cfg.compute_hash() != hash_without_fused_sampler
 
 
-def test_dspark_fused_markov_sampler_defaults_enabled():
-    assert SpeculativeConfig.dspark_fused_markov_sampler is True
+def test_dspark_fast_path_defaults_enabled():
+    for name in (
+        "dspark_materialized_attention",
+        "dspark_triton_attention",
+        "dspark_triton_qkv_postprocess",
+        "dspark_triton_context_kv_store",
+        "dspark_markov_inplace_add",
+        "dspark_fused_markov_sampler",
+        "dspark_fused_o_proj_quant",
+        "dspark_fused_shared_experts_quant",
+    ):
+        assert getattr(SpeculativeConfig, name) is True
 
 
 def test_dspark_shares_target_embedding_and_lm_head(monkeypatch):

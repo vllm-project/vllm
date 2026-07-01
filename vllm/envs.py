@@ -256,15 +256,8 @@ if TYPE_CHECKING:
     VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY: bool = False
     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
     VLLM_NVTX_SCOPES_FOR_PROFILING: bool = False
-    VLLM_DSPARK_MATERIALIZED_ATTENTION: bool = False
-    VLLM_DSPARK_TRITON_ATTENTION: bool = False
-    VLLM_DSPARK_TRITON_QKV_POSTPROCESS: bool = False
-    VLLM_DSPARK_TRITON_CONTEXT_KV_STORE: bool = False
-    VLLM_DSPARK_MARKOV_INPLACE_ADD: bool = False
     VLLM_DSPARK_FORWARD_CUDAGRAPH: bool = False
     VLLM_DSPARK_FORWARD_CUDAGRAPH_ALLOW_TP: bool = False
-    VLLM_DSPARK_FUSED_O_PROJ_QUANT: bool = False
-    VLLM_DSPARK_FUSED_SHARED_EXPERTS_QUANT: bool = False
     VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
     VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME: str = "VLLM_OBJECT_STORAGE_SHM_BUFFER"
     VLLM_DEEPEP_BUFFER_SIZE_MB: int = 1024
@@ -1832,34 +1825,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_NVTX_SCOPES_FOR_PROFILING": lambda: bool(
         int(os.getenv("VLLM_NVTX_SCOPES_FOR_PROFILING", "0"))
     ),
-    # DSpark branch-local controls. Runtime code mirrors the retained toggles
-    # through SpeculativeConfig where worker-side inheritance is required.
-    "VLLM_DSPARK_MATERIALIZED_ATTENTION": lambda: env_bool(
-        "VLLM_DSPARK_MATERIALIZED_ATTENTION"
-    ),
-    "VLLM_DSPARK_TRITON_ATTENTION": lambda: env_bool(
-        "VLLM_DSPARK_TRITON_ATTENTION"
-    ),
-    "VLLM_DSPARK_TRITON_QKV_POSTPROCESS": lambda: env_bool(
-        "VLLM_DSPARK_TRITON_QKV_POSTPROCESS"
-    ),
-    "VLLM_DSPARK_TRITON_CONTEXT_KV_STORE": lambda: env_bool(
-        "VLLM_DSPARK_TRITON_CONTEXT_KV_STORE"
-    ),
-    "VLLM_DSPARK_MARKOV_INPLACE_ADD": lambda: env_bool(
-        "VLLM_DSPARK_MARKOV_INPLACE_ADD"
-    ),
+    # DSpark branch-local CUDA graph controls. Stable DSpark fast-path kernels
+    # default on through SpeculativeConfig and are not environment-gated.
     "VLLM_DSPARK_FORWARD_CUDAGRAPH": lambda: env_bool(
         "VLLM_DSPARK_FORWARD_CUDAGRAPH"
     ),
     "VLLM_DSPARK_FORWARD_CUDAGRAPH_ALLOW_TP": lambda: env_bool(
         "VLLM_DSPARK_FORWARD_CUDAGRAPH_ALLOW_TP"
-    ),
-    "VLLM_DSPARK_FUSED_O_PROJ_QUANT": lambda: env_bool(
-        "VLLM_DSPARK_FUSED_O_PROJ_QUANT"
-    ),
-    "VLLM_DSPARK_FUSED_SHARED_EXPERTS_QUANT": lambda: env_bool(
-        "VLLM_DSPARK_FUSED_SHARED_EXPERTS_QUANT"
     ),
     # Represent block hashes in KV cache events as 64-bit integers instead of
     # raw bytes. Defaults to True for backward compatibility.

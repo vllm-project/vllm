@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 from typing import Any
 
 import torch
 from typing_extensions import override
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_pp_group, graph_capture
 from vllm.logger import init_logger
@@ -21,12 +21,8 @@ from vllm.v1.spec_decode.dspark_sampling import (
 logger = init_logger(__name__)
 
 
-def _env_bool(name: str) -> bool:
-    return os.getenv(name, "").lower() in ("1", "true", "yes", "on")
-
-
 def _spec_bool(spec_config: Any, attr: str, env_name: str) -> bool:
-    return bool(getattr(spec_config, attr, False)) or _env_bool(env_name)
+    return bool(getattr(spec_config, attr, False)) or envs.env_bool(env_name)
 
 
 class _DSparkForwardCUDAGraph:

@@ -281,26 +281,16 @@ class SpeculativeConfig:
     during rejection sampling. This comes at the cost of additional GPU memory
     usage."""
 
-    dspark_materialized_attention: bool = Field(
-        default_factory=lambda: envs.env_bool("VLLM_DSPARK_MATERIALIZED_ATTENTION")
-    )
-    """DSpark-only opt-in for the materialized local attention path."""
-    dspark_triton_attention: bool = Field(
-        default_factory=lambda: envs.env_bool("VLLM_DSPARK_TRITON_ATTENTION")
-    )
-    """DSpark-only opt-in for the Triton materialized attention path."""
-    dspark_triton_qkv_postprocess: bool = Field(
-        default_factory=lambda: envs.env_bool("VLLM_DSPARK_TRITON_QKV_POSTPROCESS")
-    )
-    """DSpark-only opt-in for fused QKV postprocessing."""
-    dspark_triton_context_kv_store: bool = Field(
-        default_factory=lambda: envs.env_bool("VLLM_DSPARK_TRITON_CONTEXT_KV_STORE")
-    )
-    """DSpark-only opt-in for Triton context KV stores."""
-    dspark_markov_inplace_add: bool = Field(
-        default_factory=lambda: envs.env_bool("VLLM_DSPARK_MARKOV_INPLACE_ADD")
-    )
-    """DSpark-only opt-in for in-place Markov residual adds."""
+    dspark_materialized_attention: bool = True
+    """Use DSpark's materialized local attention path."""
+    dspark_triton_attention: bool = True
+    """Use DSpark's Triton materialized attention path."""
+    dspark_triton_qkv_postprocess: bool = True
+    """Use fused DSpark QKV postprocessing."""
+    dspark_triton_context_kv_store: bool = True
+    """Use Triton DSpark context KV stores."""
+    dspark_markov_inplace_add: bool = True
+    """Use in-place DSpark Markov residual adds."""
     dspark_fused_markov_sampler: bool = True
     """Use fused probabilistic Markov sampling for DSpark."""
     dspark_forward_cudagraph: bool = Field(
@@ -313,16 +303,10 @@ class SpeculativeConfig:
         )
     )
     """Allow the DSpark draft forward CUDA graph under tensor parallelism."""
-    dspark_fused_o_proj_quant: bool = Field(
-        default_factory=lambda: envs.env_bool("VLLM_DSPARK_FUSED_O_PROJ_QUANT")
-    )
-    """DSpark-only opt-in for fused output-projection activation quantization."""
-    dspark_fused_shared_experts_quant: bool = Field(
-        default_factory=lambda: envs.env_bool(
-            "VLLM_DSPARK_FUSED_SHARED_EXPERTS_QUANT"
-        )
-    )
-    """DSpark-only opt-in for fused shared-expert activation quantization."""
+    dspark_fused_o_proj_quant: bool = True
+    """Use fused DSpark output-projection activation quantization."""
+    dspark_fused_shared_experts_quant: bool = True
+    """Use fused DSpark shared-expert activation quantization."""
 
     def compute_hash(self) -> str:
         """

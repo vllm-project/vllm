@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
@@ -85,15 +84,6 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
-
-
-def _env_bool(name: str) -> bool:
-    return os.getenv(name, "").lower() in ("1", "true", "yes", "on")
-
-
-def _dspark_config_bool(vllm_config: VllmConfig, attr: str, env_name: str) -> bool:
-    spec_config = vllm_config.speculative_config
-    return bool(getattr(spec_config, attr, False)) or _env_bool(env_name)
 
 
 def _dspark_linear_scale(layer: nn.Module) -> torch.Tensor | None:
@@ -606,10 +596,12 @@ class DeepseekV4MoE(nn.Module):
         self.prefix = prefix
         self._layer_idx = extract_layer_index(prefix)
         self._is_dspark_runtime_layer = self._layer_idx >= config.num_hidden_layers
-        self._dspark_fused_shared_experts_quant = _dspark_config_bool(
-            vllm_config,
-            "dspark_fused_shared_experts_quant",
-            "VLLM_DSPARK_FUSED_SHARED_EXPERTS_QUANT",
+        self._dspark_fused_shared_experts_quant = bool(
+            getattr(
+                vllm_config.speculative_config,
+                "dspark_fused_shared_experts_quant",
+                True,
+            )
         )
         self.use_mega_moe = (
             vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"

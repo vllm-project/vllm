@@ -7,14 +7,12 @@ decoder blocks under ``mtp.0``-``mtp.2``.  Each block attends over a small
 draft block plus a circular window of target-model hidden-state KVs.
 """
 
-import os
 import typing
 from collections.abc import Callable, Iterable
 
 import regex as re
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from vllm.config import VllmConfig
 from vllm.distributed import (
@@ -41,9 +39,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import get_draft_quant_config
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    _upcast_e8m0_to_fp32,
-)
 from vllm.models.deepseek_v4.common.ops import fused_q_kv_rmsnorm
 from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
     fused_inv_rope_fp8_quant,
@@ -66,7 +61,6 @@ from .model import (
 )
 from .dspark_triton import (
     dspark_context_kv_store,
-    dspark_inv_rope_bf16_layout,
     dspark_qkv_postprocess,
     dspark_triton_attention,
 )
@@ -76,13 +70,9 @@ logger = init_logger(__name__)
 _EXPERT_SCALE_RE = re.compile(r"\.experts\.\d+\.w[123]\.scale$")
 
 
-def _env_bool(name: str) -> bool:
-    return os.getenv(name, "").lower() in ("1", "true", "yes", "on")
-
-
-def _spec_bool(vllm_config: VllmConfig, attr: str, env_name: str) -> bool:
+def _spec_bool(vllm_config: VllmConfig, attr: str, default: bool = True) -> bool:
     spec_config = vllm_config.speculative_config
-    return bool(getattr(spec_config, attr, False)) or _env_bool(env_name)
+    return bool(getattr(spec_config, attr, default))
 
 
 def _linear_output(output: torch.Tensor | tuple[torch.Tensor, object]) -> torch.Tensor:
@@ -212,29 +202,22 @@ class DeepSeekV4DSparkLayer(nn.Module):
         self.use_materialized_attention = _spec_bool(
             vllm_config,
             "dspark_materialized_attention",
-            "VLLM_DSPARK_MATERIALIZED_ATTENTION",
         )
         self.use_triton_attention = _spec_bool(
             vllm_config,
             "dspark_triton_attention",
-            "VLLM_DSPARK_TRITON_ATTENTION",
         )
         self.use_triton_qkv_postprocess = _spec_bool(
             vllm_config,
             "dspark_triton_qkv_postprocess",
-            "VLLM_DSPARK_TRITON_QKV_POSTPROCESS",
         )
         self.use_triton_context_kv_store = _spec_bool(
             vllm_config,
             "dspark_triton_context_kv_store",
-            "VLLM_DSPARK_TRITON_CONTEXT_KV_STORE",
         )
-        self.use_bf16_wo_b = _env_bool("VLLM_DSPARK_BF16_WO_B")
-        self.use_bf16_wo_a = _env_bool("VLLM_DSPARK_BF16_WO_A")
         self.use_fused_o_proj_quant = _spec_bool(
             vllm_config,
             "dspark_fused_o_proj_quant",
-            "VLLM_DSPARK_FUSED_O_PROJ_QUANT",
         )
         self.materialized_head_block_size = triton_sparse_mla_head_block_size() or 1
         self.register_buffer(
@@ -247,152 +230,12 @@ class DeepSeekV4DSparkLayer(nn.Module):
             ),
             persistent=False,
         )
-        self.register_buffer(
-            "_wo_b_bf16_weight",
-            torch.empty(0, dtype=vllm_config.model_config.dtype),
-            persistent=False,
-        )
-        self.register_buffer(
-            "_wo_a_bf16_weight",
-            torch.empty(0, dtype=vllm_config.model_config.dtype),
-            persistent=False,
-        )
 
     @property
     def window_size(self) -> int:
         return int(self.attn.window_size)
 
-    def materialize_bf16_wo_b(self) -> None:
-        if not self.use_bf16_wo_b:
-            return
-        scale = getattr(
-            self.attn.wo_b,
-            "weight_scale_inv",
-            getattr(self.attn.wo_b, "weight_scale", None),
-        )
-        if scale is None:
-            logger.warning_once(
-                "DSpark BF16 wo_b requested but wo_b scale is unavailable; "
-                "falling back to FP8 wo_b"
-            )
-            return
-        weight = self.attn.wo_b.weight.detach()
-        scale = scale.detach()
-        e8m0_dtype = getattr(torch, "float8_e8m0fnu", None)
-        if e8m0_dtype is not None and scale.dtype == e8m0_dtype:
-            scale = _upcast_e8m0_to_fp32(scale)
-        else:
-            scale = scale.float()
-        if scale.numel() == 1:
-            expanded_scale = scale.reshape(1, 1)
-        elif scale.dim() == 2:
-            block_rows = (weight.shape[0] + scale.shape[0] - 1) // scale.shape[0]
-            block_cols = (weight.shape[1] + scale.shape[1] - 1) // scale.shape[1]
-            expanded_scale = (
-                scale.repeat_interleave(block_rows, dim=0)
-                .repeat_interleave(block_cols, dim=1)[: weight.shape[0], : weight.shape[1]]
-            )
-        else:
-            logger.warning_once(
-                "DSpark BF16 wo_b requested but wo_b scale shape %s is unsupported; "
-                "falling back to FP8 wo_b",
-                tuple(scale.shape),
-            )
-            return
-        self._wo_b_bf16_weight = (weight.float() * expanded_scale).to(
-            torch.bfloat16
-        ).contiguous()
-        logger.info_once(
-            "DSpark BF16 wo_b enabled: shape=%s dtype=%s",
-            tuple(self._wo_b_bf16_weight.shape),
-            self._wo_b_bf16_weight.dtype,
-        )
-
-    def materialize_bf16_wo_a(self) -> None:
-        if not self.use_bf16_wo_a:
-            return
-        scale = getattr(
-            self.attn.wo_a,
-            "weight_scale_inv",
-            getattr(self.attn.wo_a, "weight_scale", None),
-        )
-        if scale is None:
-            logger.warning_once(
-                "DSpark BF16 wo_a requested but wo_a scale is unavailable; "
-                "falling back to FP8 wo_a"
-            )
-            return
-        weight = self.attn.wo_a.weight.detach()
-        scale = scale.detach()
-        e8m0_dtype = getattr(torch, "float8_e8m0fnu", None)
-        if e8m0_dtype is not None and scale.dtype == e8m0_dtype:
-            scale = _upcast_e8m0_to_fp32(scale)
-        else:
-            scale = scale.float()
-        if scale.numel() == 1:
-            expanded_scale = scale.reshape(1, 1)
-        elif scale.dim() == 2:
-            block_rows = (weight.shape[0] + scale.shape[0] - 1) // scale.shape[0]
-            block_cols = (weight.shape[1] + scale.shape[1] - 1) // scale.shape[1]
-            expanded_scale = (
-                scale.repeat_interleave(block_rows, dim=0)
-                .repeat_interleave(block_cols, dim=1)[: weight.shape[0], : weight.shape[1]]
-            )
-        else:
-            logger.warning_once(
-                "DSpark BF16 wo_a requested but wo_a scale shape %s is unsupported; "
-                "falling back to FP8 wo_a",
-                tuple(scale.shape),
-            )
-            return
-
-        out_rank = int(self.attn.o_lora_rank)
-        hidden_size = int(self.attn.n_local_heads // self.attn.n_local_groups) * int(
-            self.attn.head_dim
-        )
-        if weight.shape[0] % out_rank != 0 or weight.shape[1] != hidden_size:
-            logger.warning_once(
-                "DSpark BF16 wo_a requested but wo_a shape %s does not match "
-                "out_rank=%d hidden=%d; falling back to FP8 wo_a",
-                tuple(weight.shape),
-                out_rank,
-                hidden_size,
-            )
-            return
-
-        b_groups = weight.shape[0] // out_rank
-        n_groups = int(self.attn.n_local_groups)
-        group_start = 0
-        if b_groups != n_groups:
-            if b_groups % n_groups != 0:
-                logger.warning_once(
-                    "DSpark BF16 wo_a requested but weight_groups=%d does not "
-                    "match local_groups=%d; falling back to FP8 wo_a",
-                    b_groups,
-                    n_groups,
-                )
-                return
-            group_partitions = b_groups // n_groups
-            group_start = (get_tensor_model_parallel_rank() % group_partitions) * n_groups
-
-        weight_bf16 = (weight.float() * expanded_scale).to(torch.bfloat16)
-        self._wo_a_bf16_weight = (
-            weight_bf16.view(b_groups, out_rank, hidden_size)
-            .narrow(0, group_start, n_groups)
-            .contiguous()
-        )
-        logger.info_once(
-            "DSpark BF16 wo_a enabled: shape=%s dtype=%s",
-            tuple(self._wo_a_bf16_weight.shape),
-            self._wo_a_bf16_weight.dtype,
-        )
-
     def _wo_b_output(self, wo_b_input: torch.Tensor) -> torch.Tensor:
-        if self.use_bf16_wo_b and self._wo_b_bf16_weight.numel() > 0:
-            output = F.linear(wo_b_input, self._wo_b_bf16_weight)
-            if get_tensor_model_parallel_world_size() > 1:
-                output = tensor_model_parallel_all_reduce(output)
-            return output
         return _linear_output(self.attn.wo_b(wo_b_input))
 
     def _o_proj_fused_quant(
@@ -695,9 +538,7 @@ class DeepSeekV4DSparkLayer(nn.Module):
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         attn = self.attn
-        if not self.use_bf16_wo_b and not self.use_bf16_wo_a and not (
-            self.use_fused_o_proj_quant
-        ):
+        if not self.use_fused_o_proj_quant:
             return _linear_output(attn._o_proj(o, positions))
 
         required_attrs = (
@@ -724,57 +565,33 @@ class DeepSeekV4DSparkLayer(nn.Module):
             if fused_output is not None:
                 return fused_output
 
-        if self.use_bf16_wo_a and self._wo_a_bf16_weight.numel() > 0:
-            o_bf16 = dspark_inv_rope_bf16_layout(
-                o.contiguous(),
-                positions,
-                attn.rotary_emb.cos_sin_cache,
-                n_groups=attn.n_local_groups,
-                heads_per_group=attn.n_local_heads // attn.n_local_groups,
-                nope_dim=attn.nope_head_dim,
-                rope_dim=attn.rope_head_dim,
-            )
-            z = (
-                torch.bmm(
-                    o_bf16.permute(1, 0, 2),
-                    self._wo_a_bf16_weight.transpose(1, 2),
-                )
-                .permute(1, 0, 2)
-                .contiguous()
-            )
-            o_fp8 = None
-            o_scale = None
-            wo_a_scale = getattr(attn.wo_a, "weight_scale_inv", None)
-            if wo_a_scale is None:
-                wo_a_scale = attn.wo_a.weight_scale
-        else:
-            o_fp8, o_scale = fused_inv_rope_fp8_quant(
-                o,
-                positions,
-                attn.rotary_emb.cos_sin_cache,
-                n_groups=attn.n_local_groups,
-                heads_per_group=attn.n_local_heads // attn.n_local_groups,
-                nope_dim=attn.nope_head_dim,
-                rope_dim=attn.rope_head_dim,
-                tma_aligned_scales=attn._tma_aligned_scales,
-            )
-            z = torch.empty(
-                (o.shape[0], attn.n_local_groups, attn.o_lora_rank),
-                device=o.device,
-                dtype=torch.bfloat16,
-            )
-            wo_a_scale = getattr(attn.wo_a, "weight_scale_inv", None)
-            if wo_a_scale is None:
-                wo_a_scale = attn.wo_a.weight_scale
-            deepseek_v4_fp8_einsum(
-                o_fp8,
-                o_scale,
-                attn.wo_a.weight,
-                wo_a_scale,
-                z,
-                "bhr,hdr->bhd",
-                list(attn._einsum_recipe),
-            )
+        o_fp8, o_scale = fused_inv_rope_fp8_quant(
+            o,
+            positions,
+            attn.rotary_emb.cos_sin_cache,
+            n_groups=attn.n_local_groups,
+            heads_per_group=attn.n_local_heads // attn.n_local_groups,
+            nope_dim=attn.nope_head_dim,
+            rope_dim=attn.rope_head_dim,
+            tma_aligned_scales=attn._tma_aligned_scales,
+        )
+        z = torch.empty(
+            (o.shape[0], attn.n_local_groups, attn.o_lora_rank),
+            device=o.device,
+            dtype=torch.bfloat16,
+        )
+        wo_a_scale = getattr(attn.wo_a, "weight_scale_inv", None)
+        if wo_a_scale is None:
+            wo_a_scale = attn.wo_a.weight_scale
+        deepseek_v4_fp8_einsum(
+            o_fp8,
+            o_scale,
+            attn.wo_a.weight,
+            wo_a_scale,
+            z,
+            "bhr,hdr->bhd",
+            list(attn._einsum_recipe),
+        )
         wo_b_input = z.flatten(1)
         output = self._wo_b_output(wo_b_input)
         return output
@@ -877,20 +694,6 @@ class DeepSeekV4DSpark(nn.Module):
         self.rms_norm_eps = config.rms_norm_eps
         self.num_dspark_layers = len(self.target_layer_ids)
         self.runtime_num_dspark_layers = self.num_dspark_layers
-        runtime_layers_env = os.getenv("VLLM_DSPARK_RUNTIME_LAYERS")
-        if runtime_layers_env:
-            requested_runtime_layers = int(runtime_layers_env)
-            if not 1 <= requested_runtime_layers <= self.num_dspark_layers:
-                raise ValueError(
-                    "VLLM_DSPARK_RUNTIME_LAYERS must be between 1 and "
-                    f"{self.num_dspark_layers}, got {requested_runtime_layers}"
-                )
-            self.runtime_num_dspark_layers = requested_runtime_layers
-            logger.info_once(
-                "DSpark runtime layer count override: %d/%d",
-                self.runtime_num_dspark_layers,
-                self.num_dspark_layers,
-            )
         self.max_batch = max(1, int(vllm_config.scheduler_config.max_num_seqs))
         hidden_size = int(config.hidden_size)
         dtype = vllm_config.model_config.dtype
@@ -962,7 +765,6 @@ class DeepSeekV4DSpark(nn.Module):
         self.use_markov_inplace_add = _spec_bool(
             vllm_config,
             "dspark_markov_inplace_add",
-            "VLLM_DSPARK_MARKOV_INPLACE_ADD",
         )
         self.confidence_head = ReplicatedLinear(
             hidden_size + markov_rank,
@@ -1292,19 +1094,9 @@ class DeepSeekV4DSpark(nn.Module):
                     f"DSpark layer mtp.{layer_idx} weights missing from checkpoint."
                 )
         self.finalize_mega_moe_weights()
-        self.materialize_bf16_wo_a()
-        self.materialize_bf16_wo_b()
         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
         return loaded_params
 
     def finalize_mega_moe_weights(self) -> None:
         for layer in self.layers.values():
             layer.finalize_mega_moe_weights()
-
-    def materialize_bf16_wo_b(self) -> None:
-        for layer in self.layers.values():
-            layer.materialize_bf16_wo_b()
-
-    def materialize_bf16_wo_a(self) -> None:
-        for layer in self.layers.values():
-            layer.materialize_bf16_wo_a()
