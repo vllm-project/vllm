@@ -3,15 +3,15 @@ use std::collections::BTreeSet;
 pub(crate) mod logprobs;
 pub(crate) mod token_ids;
 
-use vllm_engine_core_client::protocol::EngineCoreSamplingParams;
+use logprobs::validate_logprobs;
+use token_ids::{validate_prompt_token_ids, validate_vocab_range};
+use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 use vllm_llm::GenerateRequest;
 use vllm_tokenizer::Tokenizer;
 
 use crate::backend::{SamplingHints, SamplingLimits};
 use crate::error::{Error, Result};
 use crate::request::{SamplingParams, TextRequest};
-use logprobs::validate_logprobs;
-use token_ids::{validate_prompt_token_ids, validate_vocab_range};
 
 /// One text request after it has been lowered into the raw generate boundary.
 #[derive(Debug)]
