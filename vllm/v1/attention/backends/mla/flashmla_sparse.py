@@ -584,6 +584,10 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
             indexer.topk_indices_buffer if indexer is not None else topk_indices_buffer
         )
         self.hisparse_coordinator: HiSparseCoordinator | None = None
+        # Index sharing (GLM-5.2): "full" layers (indexer present) resolve the
+        # plan; "shared" layers (indexer is None) replay it via apply_plan.
+        self._hisparse_index_sharing = False
+        self._hisparse_is_full_layer = True
         attention_config = get_current_vllm_config().attention_config
         if attention_config is not None and attention_config.enable_hisparse:
             if kv_cache_dtype == "fp8_ds_mla":
@@ -604,6 +608,10 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
                 row_width=hisparse_row_width,
                 kv_dtype=hisparse_kv_dtype,
             )
+            if self.hisparse_coordinator is not None:
+                _hf = get_current_vllm_config().model_config.hf_config
+                self._hisparse_index_sharing = getattr(_hf, "index_topk_freq", 1) > 1
+                self._hisparse_is_full_layer = indexer is not None
         self._hisparse_decode_batch = False
         # Prefill BF16 kernel requires 64 on Hopper, 128 on Blackwell
         self.prefill_padding = (
@@ -676,6 +684,15 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
         assert self.hisparse_coordinator is not None
         pure_decode = num_decode_tokens is None
         n = topk_indices.shape[0] if pure_decode else num_decode_tokens
+        # Index-sharing "shared" layer: replay the group's plan (produced by the
+        # "full" layer's swap_in earlier this pass) instead of re-resolving LRU.
+        if self._hisparse_index_sharing and not self._hisparse_is_full_layer:
+            return self.hisparse_coordinator.apply_plan(
+                kv_cache=kv_c_and_k_pe_cache,
+                block_size=attn_metadata.block_size,
+                num_tokens=n,
+                return_valid_counts=return_valid_counts,
+            )
         return self.hisparse_coordinator.swap_in(
             kv_cache=kv_c_and_k_pe_cache,
             req_id_per_token=attn_metadata.req_id_per_token[:n],
@@ -684,6 +701,7 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
             block_size=attn_metadata.block_size,
             slot_mapping=attn_metadata.slot_mapping if pure_decode else None,
             return_valid_counts=return_valid_counts,
+            produce_plan=self._hisparse_index_sharing,
         )
 
     def _hisparse_host_prefill_cache(

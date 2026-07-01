@@ -242,7 +242,7 @@ class _GroupPlan:
     replay is CUDA-graph-capture safe.
     """
 
-    __slots__ = ("global_indices", "hot_indices", "miss_mask")
+    __slots__ = ("global_indices", "hot_indices", "miss_mask", "valid_counts")
 
     def __init__(self, device: torch.device, max_rows: int, top_k: int) -> None:
         self.global_indices = torch.full(
@@ -254,6 +254,10 @@ class _GroupPlan:
         self.miss_mask = torch.zeros(
             (max_rows, top_k), dtype=torch.int32, device=device
         )
+        # Populated only when the producer resolves with return_valid_counts
+        # (the bf16 path); shared layers reuse it (identical top-k -> identical
+        # counts). None until first produced.
+        self.valid_counts: torch.Tensor | None = None
 
 
 _GROUP_PLANS: dict[tuple[str, int, int], _GroupPlan] = {}
@@ -805,6 +809,10 @@ class HiSparseCoordinator:
                 global_indices, newest_global, hot_indices, miss_mask
             )
 
+        if produce_plan:
+            # Shared layers reuse the group's counts (identical top-k).
+            self._plan.valid_counts = valid_counts
+
         if valid_counts is None:
             return self.hot_cache_paged(block_size), hot_indices
         return self.hot_cache_paged(block_size), hot_indices, valid_counts
@@ -915,7 +923,11 @@ class HiSparseCoordinator:
         kv_cache: torch.Tensor,
         block_size: int,
         num_tokens: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return_valid_counts: bool = False,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+    ):
         """Replay the group's plan for an index-sharing "shared" layer.
 
         A "full" layer resolved the plan via ``swap_in(produce_plan=True)``;
@@ -943,6 +955,16 @@ class HiSparseCoordinator:
             )
         else:
             self._apply_plan_fallback(global_indices, hot_indices, miss_mask)
+        if return_valid_counts:
+            assert self._plan.valid_counts is not None, (
+                "apply_plan(return_valid_counts=True) requires the group's full "
+                "layer to have produced the plan with counts (bf16 path)."
+            )
+            return (
+                self.hot_cache_paged(block_size),
+                hot_indices,
+                self._plan.valid_counts[:n],
+            )
         return self.hot_cache_paged(block_size), hot_indices
 
     def _apply_plan_fallback(
