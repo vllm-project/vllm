@@ -1,5 +1,5 @@
 group: Models - Distributed
-depends_on:
+depends_on: 
   - image-build-xpu
 steps:
 - label: Distributed Model Tests (2 GPUs)
