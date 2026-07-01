@@ -988,6 +988,12 @@ class OpenAIServingChat(GenerateBaseServing):
                 np.save(buf, output.routed_experts)
                 routed_experts_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
 
+            indexer_topk_b64 = None
+            if output.indexer_topk is not None:
+                buf = io.BytesIO()
+                np.save(buf, output.indexer_topk)
+                indexer_topk_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,
                 message=message,
@@ -1004,6 +1010,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     else None
                 ),
                 routed_experts=routed_experts_b64,
+                indexer_topk=indexer_topk_b64,
             )
             choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
 

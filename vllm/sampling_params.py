@@ -332,6 +332,10 @@ class SamplingParams(
     already-returned prefix to avoid duplicating routing for prompt tokens
     covered by earlier turns. Default 0 returns routing for all prompt
     tokens."""
+    indexer_topk_prompt_start: int = 0
+    """When enable_return_indexer_topk is active, skip the first
+    indexer_topk_prompt_start prompt tokens from the returned topk
+    indices. Same semantics as routed_experts_prompt_start."""
 
     # Fields used for bad words
     bad_words: list[str] | None = None
