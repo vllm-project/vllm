@@ -451,6 +451,12 @@ class GPUModelRunner(
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
 
+        if self.speculative_config and self.speculative_config.use_orthrus():
+            raise ValueError(
+                "Orthrus speculative decoding is supported only by "
+                "Model Runner V2. Enable Model Runner V2 to use method='orthrus'."
+            )
+
         model_config = self.model_config
         cache_config = self.cache_config
         scheduler_config = self.scheduler_config
@@ -4416,7 +4422,7 @@ class GPUModelRunner(
         if common_attn_metadata is None:
             return False
         assert self.speculative_config is not None
-        # DFlash queries one extra token (the bonus token) beyond num_spec_tokens
+        # Block-diffusion drafters query one extra bonus token beyond num_spec_tokens.
         num_drafter_query_tokens = self.num_spec_tokens + (
             1 if self.speculative_config.use_dflash() else 0
         )
@@ -4509,12 +4515,13 @@ class GPUModelRunner(
             )
             use_gpu_toks = (
                 spec_config.use_eagle()
+                or spec_config.use_dflash()
                 or spec_config.uses_draft_model()
                 or spec_config.uses_extract_hidden_states()
             ) and not spec_config.disable_padded_drafter_batch
             if use_gpu_toks:
-                # EAGLE/DraftModel speculative decoding can use the GPU sampled tokens
-                # as inputs, and does not need to wait for bookkeeping to finish.
+                # Parallel GPU drafters can use the sampled tokens directly
+                # and do not need to wait for CPU bookkeeping to finish.
                 assert isinstance(
                     self.drafter,
                     EagleProposer
