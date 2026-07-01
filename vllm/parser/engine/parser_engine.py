@@ -130,6 +130,9 @@ class ParserEngine(Parser):
         self._strip_content_ws_with_tools = (
             parser_engine_config.strip_content_whitespace_with_tools
         )
+        self._tool_start_prefixes = self._compute_tool_start_prefixes(
+            parser_engine_config
+        )
 
         vocab = self.vocab
         self._reasoning_start_token_id: int | None = None
@@ -194,6 +197,42 @@ class ParserEngine(Parser):
         self._deferred_reasoning = ""
         self._content_has_nonws = False
         self._prompt_streaming_prepared = False
+
+    @staticmethod
+    def _compute_tool_start_prefixes(config: ParserEngineConfig) -> tuple[str, ...]:
+        tool_start_terminals: set[str] = set()
+        for (state, terminal), transition in config.transitions.items():
+            if (
+                state in (ParserState.CONTENT, ParserState.REASONING)
+                and transition.next_state
+                in (
+                    ParserState.TOOL_PREAMBLE,
+                    ParserState.TOOL_NAME,
+                    ParserState.TOOL_ARGS,
+                    ParserState.TOOL_BETWEEN,
+                )
+            ):
+                tool_start_terminals.add(terminal)
+
+        prefixes: set[str] = set()
+        for terminal in tool_start_terminals:
+            terminal_text = config.terminals.get(terminal)
+            if terminal_text is None:
+                continue
+            for prefix_len in range(1, len(terminal_text)):
+                prefixes.add(terminal_text[:prefix_len])
+
+        return tuple(sorted(prefixes, key=len, reverse=True))
+
+    def _strip_truncated_tool_start(self, content: str, finished: bool) -> str:
+        if not finished:
+            return content
+        if self._tool_slots or self._content_has_nonws:
+            return content
+        for prefix in self._tool_start_prefixes:
+            if content == prefix:
+                return ""
+        return content
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -741,6 +780,7 @@ class ParserEngine(Parser):
             self._deferred_content = ""
 
         content_str = "".join(content_parts)
+        content_str = self._strip_truncated_tool_start(content_str, finished)
 
         if self._content_has_nonws:
             pass

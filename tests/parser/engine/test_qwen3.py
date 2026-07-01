@@ -70,6 +70,31 @@ class TestNonStreaming:
         args = json.loads(result.tool_calls[0].function.arguments)
         assert args == {"city": "Tokyo"}
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "<tool",
+            "<tool_call",
+        ],
+    )
+    def test_truncated_tool_call_opener_not_emitted(
+        self,
+        parser,
+        mock_request,
+        text,
+    ):
+        """Incomplete tool-call openers should be treated like streamed holdback.
+
+        When generation stops before a full ``<tool_call>`` terminal is emitted,
+        the parser should not leak the partial markup as content or promote it
+        into a tool call.
+        """
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is False
+        assert result.tool_calls == []
+        assert result.content is None
+
     def test_parallel_tool_calls(self, parser, mock_request):
         text = (
             "<tool_call>\n"
@@ -541,6 +566,63 @@ class TestStreaming:
         assert args_text
         parsed = json.loads(args_text)
         assert parsed["x"] == "1"
+
+    @pytest.mark.parametrize(
+        "chunks",
+        [
+            ["<tool"],
+            ["<tool", "_call"],
+        ],
+    )
+    def test_truncated_tool_call_opener_matches_non_streaming(
+        self,
+        parser,
+        mock_tokenizer,
+        mock_request,
+        chunks,
+    ):
+        """Streaming and non-streaming should both drop truncated openers."""
+        current_text = ""
+        deltas = []
+
+        for i, chunk in enumerate(chunks):
+            current_text += chunk
+            is_last = i == len(chunks) - 1
+
+            delta = parser.parse_delta(
+                chunk,
+                [],
+                mock_request,
+                prompt_token_ids=[] if i == 0 else None,
+                finished=is_last,
+            )
+            deltas.append(delta)
+
+        streaming_content = "".join(
+            delta.content for delta in deltas if delta and delta.content
+        )
+        streaming_tool_calls = [
+            tool_call
+            for delta in deltas
+            if delta and delta.tool_calls
+            for tool_call in delta.tool_calls
+        ]
+
+        non_streaming_parser = ParserEngine(
+            mock_tokenizer,
+            parser_engine_config=qwen3_config(thinking=False),
+        )
+        _, non_streaming_content, non_streaming_tool_calls = (
+            non_streaming_parser.parse(
+                current_text,
+                mock_request,
+                enable_auto_tools=True,
+            )
+        )
+
+        assert streaming_content == (non_streaming_content or "")
+        assert streaming_tool_calls == []
+        assert non_streaming_tool_calls is None
 
     def test_char_by_char_streaming(self, mock_request):
         """Feed text character-by-character to test lexer robustness.
