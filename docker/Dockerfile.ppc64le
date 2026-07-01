@@ -13,21 +13,22 @@ ARG VLLM_TARGET_DEVICE=cpu
 
 USER root
 WORKDIR /root
-ENV HOME=/root
 
-ENV WHEEL_DIR=/wheelsdir
-ENV VIRTUAL_ENV=/opt/vllm
-ENV GRPC_PYTHON_BUILD_SYSTEM_OPENSSL=1
-ENV CARGO_HOME=/root/.cargo
-ENV RUSTUP_HOME=/root/.rustup
-ENV PATH=/root/.cargo/bin:/root/.rustup/bin:${VIRTUAL_ENV}/bin:$PATH
+ENV HOME=/root \
+    WHEEL_DIR=/wheelsdir \
+    VIRTUAL_ENV=/opt/vllm \
+    GRPC_PYTHON_BUILD_SYSTEM_OPENSSL=1 \
+    CARGO_HOME=/root/.cargo \
+    RUSTUP_HOME=/root/.rustup \
+    UV_CACHE_DIR=$HOME/.cache/uv \
+    PATH=/root/.cargo/bin:/root/.rustup/bin:${VIRTUAL_ENV}/bin:$PATH
 
 RUN echo "DEBUG: VLLM_VERSION=${VLLM_VERSION}"
 RUN --mount=type=cache,target=/var/cache/dnf \
     microdnf install -y \
     python${PYTHON_VERSION}-devel python${PYTHON_VERSION}-pip \
     && python${PYTHON_VERSION} -m venv ${VIRTUAL_ENV} \
-    && python -m pip install -U pip uv --no-cache
+    && python${PYTHON_VERSION} -m pip install -U pip uv --no-cache
 
 # Important: Copy only bare minimum required for the script to run
 COPY requirements/ requirements/
