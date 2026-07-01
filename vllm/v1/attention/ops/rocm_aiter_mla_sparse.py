@@ -303,10 +303,9 @@ def cp_gather_indexer_k_quant_cache_triton(
     num_blocks = k_cache.shape[0]
     # Detect the read layout from the ORIGINAL cache stride (before reshape).
     layout = _indexer_read_layout(k_cache, block_size, head_dim)
-    # DeepSeek-V4's indexer cache is a strided slice of the combined per-block
-    # record; materialize it so the kernel reads a clean contiguous buffer.
-    if not k_cache.is_contiguous():
-        k_cache = k_cache.contiguous()
+    # reshape (not view) so V4's strided combined-cache slice yields a strided
+    # view rather than erroring; the gather kernel indexes block_id in int64 and
+    # honours kv_cache_stride, so the slice is read in place — no copy.
     k_cache = k_cache.reshape(num_blocks, -1)
     fp8_dtype = current_platform.fp8_dtype()
     k_cache_value = k_cache[:, : block_size * head_dim].view(fp8_dtype)
@@ -519,6 +518,10 @@ def _fp8_paged_mqa_logits_kernel(
         mask=blk_mask,
         other=0,
     )  # [BLOCK_N] physical block indices
+    # DeepSeek-V4's indexer cache is a strided slice of a combined per-block
+    # record, so the per-block row stride is large enough that phys_blk * stride
+    # overflows int32; index in int64 to keep the strided read in bounds.
+    phys_blk = phys_blk.to(tl.int64)
 
     kv_mask = logi_offs < context_len
     # Within-block byte offset of (position within_blk, dim d). The persistent
@@ -594,21 +597,20 @@ def fp8_paged_mqa_logits_triton(
     batch_size, next_n, H, D = q.shape
     N = kv_cache.shape[0]
     block_size = kv_cache.shape[1]
-    # Determine the read layout from the ORIGINAL stride, then materialize V4's
-    # strided combined-cache slice into a contiguous indexer buffer so the kernel
-    # pointer arithmetic stays within bounds.
+    # Read layout from the stride: V4's indexer cache is a strided slice of a
+    # combined per-block record (read NORMAL/plain); the V3.2/GLM cache is
+    # contiguous SHUFFLE. The kernel indexes by phys_blk in int64 and honours the
+    # row strides below, so the strided V4 slice is read in place — no copy.
     layout = _indexer_read_layout(kv_cache, block_size, D)
-    if not kv_cache.is_contiguous():
-        kv_cache = kv_cache.contiguous()
 
     # Unpack kv_cache [N, block_size, 1, D+4] uint8 without copying. Within each
     # physical block the D*block_size fp8 bytes come first, followed by
     # 4*block_size bytes of per-position float32 scales. The fp8 region is either
     # plain pos-major (NORMAL) or 16x16 tiled (SHUFFLE) depending on the aiter
     # version that wrote it — see _indexer_cache_layout / _indexer_cache_uses_shuffle.
-    kv_2d = kv_cache.reshape(
-        N, (D + 4) * block_size
-    )  # contiguous; reshape never copies here
+    # reshape merges the per-block dims (internally contiguous even for V4's
+    # strided slice) into a view; the per-block row stride is preserved.
+    kv_2d = kv_cache.reshape(N, (D + 4) * block_size)
 
     kv_fp8 = kv_2d.view(fp8_dtype)  # [N, (D+4)*block_size] fp8, same storage
 
@@ -690,17 +692,23 @@ def rocm_fp8_paged_mqa_logits(
     """
 
     block_size = kv_cache_fp8.shape[1]
+    # DeepSeek-V4's indexer cache is a strided slice of a combined per-block
+    # record written in a plain (non-SHUFFLE) layout; aiter's native deepgemm
+    # decode mis-reads it, so always take the in-tree Triton kernel (which detects
+    # and reads that layout) for a non-contiguous cache, regardless of aiter
+    # version. V3.2/GLM caches are contiguous and keep the native fast path.
+    force_triton_v4 = not kv_cache_fp8.is_contiguous()
     # Prefer aiter's native deepgemm decode when the installed aiter version is
     # known-good and faster (gfx942/gfx950, version >= _AITER_NATIVE_PAGED_MQA_MIN);
     # otherwise use the in-tree Triton kernel, which is correct at all block sizes
     # but slower. Both consume the SHUFFLE cache produced by the Triton writer.
     # Force the fallback with VLLM_ROCM_SPARSE_MLA_FORCE_TRITON=1 (e.g. to validate
     # a new aiter, or if a future aiter regresses).
-    if not _use_aiter_native_paged_mqa():
+    if force_triton_v4 or not _use_aiter_native_paged_mqa():
         logger.info_once(
             f"rocm_fp8_paged_mqa_logits: Triton fallback (aiter "
-            f"{_aiter_version_tuple()} < {_AITER_NATIVE_PAGED_MQA_MIN} or forced), "
-            f"block size {block_size}"
+            f"{_aiter_version_tuple()} < {_AITER_NATIVE_PAGED_MQA_MIN}, forced, or "
+            f"non-contiguous V4 cache={force_triton_v4}), block size {block_size}"
         )
         return fp8_paged_mqa_logits_triton(
             q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len
