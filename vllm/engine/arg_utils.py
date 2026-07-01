@@ -1514,9 +1514,11 @@ class EngineArgs:
         vllm_group.add_argument(
             "--spec-tokens", **speculative_kwargs["num_speculative_tokens"]
         )
+        stats_level_kwargs = speculative_kwargs["stats_reporting_level"]
+        stats_level_kwargs["default"] = None
         vllm_group.add_argument(
             "--spec-stats-level",
-            **speculative_kwargs["stats_reporting_level"],
+            **stats_level_kwargs,
         )
         vllm_kwargs["diffusion_config"]["type"] = optional_type(json.loads)
         vllm_group.add_argument(
