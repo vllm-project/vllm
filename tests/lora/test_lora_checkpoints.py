@@ -41,7 +41,7 @@ def _make_peft_helper(use_dora: bool) -> PEFTHelper:
 
 @pytest.fixture
 def disable_lora_pin_memory(monkeypatch):
-    monkeypatch.setattr("vllm.lora.lora_model.is_pin_memory_available", lambda: False)
+    monkeypatch.setattr("vllm.lora.lora_model.PIN_MEMORY", False)
 
 
 @pytest.mark.parametrize("lora_name", lora_lst)
