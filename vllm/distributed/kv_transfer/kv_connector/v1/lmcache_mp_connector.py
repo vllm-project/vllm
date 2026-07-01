@@ -827,13 +827,19 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
         # We must only append the NEW blocks beyond what's already tracked
         # to avoid duplication, which would corrupt the store path's block indexing.
         tracker = self._get_request_tracker(request.request_id)
-        block_ids = reformat_block_ids(blocks.get_block_ids())
 
-        # Only append blocks beyond what's already tracked
-        existing_count = len(tracker.allocated_block_ids)
-        new_block_ids = block_ids[existing_count:]
-        if new_block_ids:
-            tracker.append_block_ids(new_block_ids)
+        # Only track blocks when there's something to load from external cache.
+        # When num_external_tokens == 0 (cold request or non-chosen sub-connector
+        # in MultiConnector), skip block tracking to avoid corrupting
+        # allocated_block_ids which is later used by the store path.
+        if num_external_tokens > 0:
+            block_ids = reformat_block_ids(blocks.get_block_ids())
+
+            # Only append blocks beyond what's already tracked
+            existing_count = len(tracker.allocated_block_ids)
+            new_block_ids = block_ids[existing_count:]
+            if new_block_ids:
+                tracker.append_block_ids(new_block_ids)
 
         # Update the state of the tracker
         condition = tracker.needs_retrieve()
