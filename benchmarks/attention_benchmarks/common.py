@@ -4,6 +4,7 @@
 """Common utilities for attention benchmarking."""
 
 import csv
+import gc
 import json
 import math
 from collections.abc import Sequence
@@ -45,6 +46,8 @@ def run_do_bench(
     kwargs: dict[str, Any] = {"return_mode": "all"}
     if use_cuda_graphs:
         result = triton.testing.do_bench_cudagraph(benchmark_fn, **kwargs)
+        gc.collect()
+        torch.accelerator.empty_cache()
     else:
         if warmup_ms is not None:
             kwargs["warmup"] = warmup_ms
