@@ -248,6 +248,32 @@ def test_deep_sleep_async():
     asyncio.run(test())
 
 
+@create_new_process_for_each_test("fork" if not current_platform.is_rocm() else "spawn")
+def test_cumem_without_sleep_mode():
+    """Verify cumem allocator works independently of sleep mode."""
+    llm = LLM("hmellor/tiny-random-LlamaForCausalLM", enable_cumem_allocator=True)
+    prompt = "How are you?"
+    sampling_params = SamplingParams(temperature=0, max_tokens=10)
+    output = llm.generate(prompt, sampling_params)
+    assert output[0].outputs[0].text
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="Sleep mode requires CUDA or ROCm",
+)
+def test_sleep_mode_auto_enables_cumem():
+    """Verify sleep mode automatically enables cumem allocator."""
+    from vllm.config.model import ModelConfig
+
+    cfg = ModelConfig(
+        "hmellor/tiny-random-LlamaForCausalLM",
+        enable_sleep_mode=True,
+        enable_cumem_allocator=False,
+    )
+    assert cfg.enable_cumem_allocator is True
+
+
 @requires_fp8
 def test_deep_sleep_fp8_kvcache():
     model = "Qwen/Qwen2-0.5B"

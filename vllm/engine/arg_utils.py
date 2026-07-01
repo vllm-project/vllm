@@ -671,7 +671,7 @@ class EngineArgs:
 
     generation_config: str = ModelConfig.generation_config
     enable_sleep_mode: bool = ModelConfig.enable_sleep_mode
-    enable_cumem_allocator: bool = ModelConfig.enable_cumem_allocator
+    enable_cumem_allocator: bool | None = ModelConfig.enable_cumem_allocator
     override_generation_config: dict[str, Any] = get_field(
         ModelConfig, "override_generation_config"
     )

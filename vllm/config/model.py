@@ -289,13 +289,11 @@ class ModelConfig:
     enable_sleep_mode: bool = False
     """Enable sleep mode for the engine (only cuda and
     hip platforms are supported)."""
-    enable_cumem_allocator: bool = False
-    """Enable the custom cumem allocator to leverage advanced GPU memory
-    allocation features such as multi-node NVLink support.
-
-    Sleep mode automatically enables this allocator. Only cuda and hip
-    platforms are supported.
-    """
+    enable_cumem_allocator: bool | None = None
+    """Enable the cumem allocator for GPU memory management.
+    Automatically enabled when a KV connector is configured (for
+    stable physical pages required by MNNVL/RDMA transfers) or
+    when sleep mode is active. Only CUDA and ROCm are supported."""
     model_impl: str | ModelImpl = "auto"
     """Which implementation of the model to use:
 
@@ -520,6 +518,8 @@ class ModelConfig:
                 stacklevel=2,
             )
 
+        if self.enable_cumem_allocator is None:
+            self.enable_cumem_allocator = False
         if self.enable_sleep_mode:
             if not current_platform.is_sleep_mode_available():
                 raise ValueError("Sleep mode is not supported on current platform.")

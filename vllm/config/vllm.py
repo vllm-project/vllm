@@ -827,28 +827,28 @@ class VllmConfig:
         # pins memory, so we conservatively reject the combination whenever
         # any KV connector is configured.
         #
-        # CuMem allocator is exempt: CuMemAllocator.use_memory_pool toggles
-        # expandable_segments off around its pool (see #40812), so the KV
-        # cache allocated within that context lands on stable physical pages
-        # even when the env var is set.
+        # The cumem allocator is exempt: CuMemAllocator.use_memory_pool
+        # toggles expandable_segments off around its pool (see #40812),
+        # so the KV cache allocated within that context lands on stable
+        # physical pages even when the env var is set.
         if "expandable_segments:True" not in os.environ.get(
             "PYTORCH_CUDA_ALLOC_CONF", ""
         ):
             return
-        if self.model_config is not None and (self.model_config.enable_cumem_allocator):
+        if self.model_config is not None and self.model_config.enable_cumem_allocator:
             return
 
         raise ValueError(
             f"KV connector {self.kv_transfer_config.kv_connector} is "
             "incompatible with PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True "
-            "unless enable_cumem_allocator is also enabled. PyTorch's CUDA VMM "
+            "unless the cumem allocator is enabled. PyTorch's CUDA VMM "
             "allocator can remap KV cache virtual addresses to different "
             "physical pages, invalidating any pinned/registered KV memory "
             "(e.g. IB memory regions registered by NIXL or Mooncake). Either "
             "unset expandable_segments:True or enable the cumem allocator "
-            "(sleep mode does this automatically and also "
+            "(--enable-cumem-allocator) which "
             "routes KV allocations through CuMemAllocator's pool, where "
-            "expandable_segments is automatically disabled)."
+            "expandable_segments is automatically disabled."
         )
 
     def __post_init__(self):
@@ -1571,6 +1571,18 @@ class VllmConfig:
             custom_ops = self.compilation_config.custom_ops
             if "-quant_fp8" not in custom_ops:
                 custom_ops.append("+quant_fp8")
+
+        # Auto-enable the cumem allocator when a KV connector is configured.
+        # KV connectors that pin memory (NIXL, Mooncake, etc.) need stable
+        # physical pages — cumem provides that via cuMemCreate.
+        if (
+            self.kv_transfer_config is not None
+            and self.kv_transfer_config.kv_connector is not None
+            and self.model_config is not None
+            and not self.model_config.enable_cumem_allocator
+            and current_platform.is_cumem_allocator_available()
+        ):
+            self.model_config.enable_cumem_allocator = True
 
         self._verify_kv_transfer_compat()
         # Log the custom passes that are enabled

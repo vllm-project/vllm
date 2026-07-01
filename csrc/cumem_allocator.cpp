@@ -1,6 +1,7 @@
 // A CUDAPluggableAllocator based on cumem* APIs.
 // Important: allocation size, CUdeviceptr and CUmemGenericAllocationHandle*
 // need to be unsigned long long
+#include <atomic>
 #include <iostream>
 
 #include "cumem_allocator_compat.h"
@@ -116,6 +117,59 @@ void ensure_context(unsigned long long device) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Cached fabric handle probe (CUDA 12.4+, NVIDIA only):
+
+#if !defined(USE_ROCM) && defined(CUDA_VERSION) && CUDA_VERSION >= 12040
+// Per-device cache: 0 = not probed, 1 = supported, 2 = not supported
+static constexpr int MAX_DEVICES = 32;
+static std::atomic<int> fabric_support[MAX_DEVICES] = {};
+
+static bool probe_fabric_support(unsigned long long device) {
+  if (device >= MAX_DEVICES) return false;
+  int cached = fabric_support[device].load(std::memory_order_acquire);
+  if (cached != 0) return cached == 1;
+
+  int fab_flag = 0;
+  CUresult r = cuDeviceGetAttribute(
+      &fab_flag, CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, device);
+  if (r != CUDA_SUCCESS || !fab_flag) {
+    fabric_support[device].store(2, std::memory_order_release);
+    return false;
+  }
+
+  // Attribute says supported — verify with a real allocation.
+  // cuDeviceGetAttribute can report supported even when IMEX is not
+  // configured, so we need a real probe.
+  CUmemAllocationProp probe_prop = {};
+  probe_prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+  probe_prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+  probe_prop.location.id = device;
+  probe_prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
+
+  size_t granularity;
+  r = cuMemGetAllocationGranularity(&granularity, &probe_prop,
+                                    CU_MEM_ALLOC_GRANULARITY_MINIMUM);
+  if (r != CUDA_SUCCESS) {
+    fabric_support[device].store(2, std::memory_order_release);
+    return false;
+  }
+
+  CUmemGenericAllocationHandle test_handle;
+  r = cuMemCreate(&test_handle, granularity, &probe_prop, 0);
+  if (r == CUDA_SUCCESS) {
+    cuMemRelease(test_handle);
+    fabric_support[device].store(1, std::memory_order_release);
+    return true;
+  }
+
+  fabric_support[device].store(2, std::memory_order_release);
+  return false;
+}
+#endif
+
+// ---------------------------------------------------------------------------
+
 void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
 #ifndef USE_ROCM
                     CUmemGenericAllocationHandle* p_memHandle) {
@@ -136,32 +190,40 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
   CUresult rdma_result = cuDeviceGetAttribute(
       &flag, CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED,
       device);
-  if (rdma_result == CUDA_SUCCESS &&
-      flag) {  // support GPUDirect RDMA if possible
+  if (rdma_result == CUDA_SUCCESS && flag) {
     prop.allocFlags.gpuDirectRDMACapable = 1;
   }
-  int fab_flag = 0;
-  CUresult fab_result = cuDeviceGetAttribute(
-      &fab_flag, CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, device);
-  if (fab_result == CUDA_SUCCESS &&
-      fab_flag) {  // support fabric handle if possible
+
+  #if defined(CUDA_VERSION) && CUDA_VERSION >= 12040
+  if (probe_fabric_support(device)) {
     prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
+  } else {
+    prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
   }
+  #else
+  prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+  #endif
 #endif
 
 #ifndef USE_ROCM
   // Allocate memory using cuMemCreate
   CUresult ret = (CUresult)cuMemCreate(p_memHandle, size, &prop, 0);
   if (ret) {
-    if (fab_flag &&
+  #if defined(CUDA_VERSION) && CUDA_VERSION >= 12040
+    // Safety net: if fabric was probed as available but this allocation
+    // still fails, fall back to POSIX FD and update the cache.
+    if (device < MAX_DEVICES &&
+        fabric_support[device].load(std::memory_order_acquire) == 1 &&
         (ret == CUDA_ERROR_NOT_PERMITTED || ret == CUDA_ERROR_NOT_SUPPORTED)) {
-      // Fabric allocation may fail without multi-node nvlink,
-      // fallback to POSIX file descriptor
+      fabric_support[device].store(2, std::memory_order_release);
       prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
       CUDA_CHECK(cuMemCreate(p_memHandle, size, &prop, 0));
     } else {
       CUDA_CHECK(ret);
     }
+  #else
+    CUDA_CHECK(ret);
+  #endif
   }
   if (error_code != 0) {
     return;
@@ -326,14 +388,13 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
   // first allocation, align the size, and reserve an address, and also allocate
   // a CUmemGenericAllocationHandle
 
-  // Define memory allocation properties
+  // No handle type here; create_and_map sets fabric/POSIX as needed.
   CUmemAllocationProp prop = {};
   prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
   prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
   prop.location.id = device;
   prop.allocFlags.compressionType = CU_MEM_ALLOCATION_COMP_NONE;
 
-  // Check if the allocation is supported
   size_t granularity;
   CUDA_CHECK(cuMemGetAllocationGranularity(&granularity, &prop,
                                            CU_MEM_ALLOC_GRANULARITY_MINIMUM));
