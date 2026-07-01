@@ -94,6 +94,25 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         # - skip input activation quantization (kernel applies scaling)
         self.use_deepseek_fp8_block_scale = quant_config.is_block_quantized
         self.max_capture_size = moe_config.max_capture_size
+
+        # Bug 3a: read the clamped-SwiGLU (swigluoai) constants from the quant
+        # config so the nvfp4 path gets them too. Upstream only set gemm1_alpha/
+        # gemm1_beta in the mxfp4 branch below, so nvfp4 swigluoai (gpt-oss) ran
+        # plain SwiGLU without the clamp. Other models leave these None.
+        self.gemm1_alpha: torch.Tensor | None = None
+        if quant_config.gemm1_alpha is not None:
+            self.gemm1_alpha = torch.tensor(
+                [quant_config.gemm1_alpha] * self.num_experts,
+                dtype=torch.float32,
+                device=self.device,
+            )
+        self.gemm1_beta: torch.Tensor | None = None
+        if quant_config.gemm1_beta is not None:
+            self.gemm1_beta = torch.tensor(
+                [quant_config.gemm1_beta] * self.num_experts,
+                dtype=torch.float32,
+                device=self.device,
+            )
         self.gemm1_clamp_limit: torch.Tensor | None = None
         if quant_config.gemm1_clamp_limit is not None:
             self.gemm1_clamp_limit = torch.tensor(
@@ -322,6 +341,22 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             # FlashInfer API requires weight to be long for nvfp4
             fc1_expert_weights = w1.view(torch.long)
             fc2_expert_weights = w2.view(torch.long)
+            if activation == MoEActivation.SWIGLUOAI:
+                # Bug 3b: pass the expert biases and clamped-SwiGLU params in the
+                # nvfp4 branch (previously only the mxfp4 branch did this).
+                fc1_expert_biases = self.w1_bias
+                fc2_expert_biases = self.w2_bias
+                swiglu_alpha = self.gemm1_alpha
+                swiglu_beta = self.gemm1_beta
+                swiglu_limit = self.gemm1_clamp_limit
+                # Bug 3c: GPT-OSS gate/up bias is interleaved ([g0,u0,...]);
+                # de-interleave to [up, gate] (odd then even) to match the w13
+                # weight reorder in prepare_nvfp4_moe_layer_for_fi_or_cutlass.
+                if fc1_expert_biases is not None:
+                    fc1_expert_biases = torch.cat(
+                        [fc1_expert_biases[..., 1::2], fc1_expert_biases[..., 0::2]],
+                        dim=-1,
+                    ).contiguous()
         elif self.weight_quant_dtype == "mxfp4":
             assert self.w1_scale is not None and self.w2_scale is not None
             assert w1.is_contiguous() and w2.is_contiguous()

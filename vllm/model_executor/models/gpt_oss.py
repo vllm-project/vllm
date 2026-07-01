@@ -219,6 +219,13 @@ class MLPBlock(torch.nn.Module):
             apply_router_weight_on_input=False,
             has_bias=True,
             activation="swigluoai",
+            # Bug 3: gpt-oss uses clamped SwiGLU. Setting these on the layer
+            # routes the MoE to a clamp-capable backend and threads the constants
+            # through to the kernel (needed for the nvfp4 path; mxfp4 already
+            # hardcodes the same values).
+            swiglu_alpha=1.702,
+            swiglu_beta=1.0,
+            swiglu_limit=7.0,
             is_sequence_parallel=self.is_sequence_parallel,
         )
 
@@ -1015,6 +1022,20 @@ class GptOssModel(nn.Module, EagleModelMixin):
             if is_pp_missing_parameter(name, self):
                 continue
 
+            # Bug 2b: load the per-tensor scales. ModelOpt
+            # exports a single global scalar for the fused experts; broadcast
+            # it across the per-expert parameter. (Must precede the
+            # ".w13_weight"/".w2_weight" substring checks below, since
+            # "w13_weight_scale_2" contains "w13_weight".)
+            if name.endswith("_weight_scale_2") or name.endswith("_input_scale"):
+                param = params_dict[name]
+                if weight.numel() == 1:
+                    param.data.fill_(weight.reshape(-1)[0].to(param.dtype))
+                else:
+                    param.data.copy_(weight.to(param.dtype).reshape(param.shape))
+                loaded_params.add(name)
+                continue
+
             if ".w13_weight" in name:
                 # Handle MLP gate and up projection weights
                 # Extract gate and up projection parts
@@ -1196,6 +1217,16 @@ class GptOssForCausalLM(
             ".down_proj.weight_scale": ".w2_weight_scale",
             ".down_proj.bias": ".w2_bias",
             ".down_proj.input_scale": ".w2_input_scale",
+            # Bug 2a: map ModelOpt's underscore scale-key names
+            # (without these, the scales silently fail to load). NOTE: longer
+            # suffixes must precede shorter ones so e.g. _weight_scale_2 is not
+            # shadowed by _weight_scale.
+            ".gate_up_proj_weight_scale_2": ".w13_weight_scale_2",
+            ".down_proj_weight_scale_2": ".w2_weight_scale_2",
+            ".gate_up_proj_weight_scale": ".w13_weight_scale",
+            ".down_proj_weight_scale": ".w2_weight_scale",
+            ".gate_up_proj_input_scale": ".w13_input_scale",
+            ".down_proj_input_scale": ".w2_input_scale",
         },
     )
 
