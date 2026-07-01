@@ -23,6 +23,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.models.mistral import MistralMLP
 from vllm.model_executor.models.whisper import WhisperPosEmbedType
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionMetadata,
@@ -39,7 +40,7 @@ except ImportError:
 from vllm.v1.attention.backends.rocm_attn import RocmAttentionBackend
 from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 from vllm.v1.attention.selector import get_attn_backend
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, SlidingWindowSpec
 
 from .utils import make_layers
 
@@ -329,6 +330,15 @@ class WhisperCausalAttentionWithBlockPooling(Attention):
             kv_cache_spec,
             num_kv_heads=self.block_pool_size * kv_cache_spec.num_kv_heads,
         )
+        if isinstance(kv_cache_spec, SlidingWindowSpec):
+            # The KV cache manager counts blocks in pooled units, so express the
+            # window in pooled units too to avoid reserving `block_pool_size`x
+            # too many blocks. The kernel window is unaffected because it comes
+            # from the attention impl, not this spec.
+            kv_cache_spec = replace(
+                kv_cache_spec,
+                sliding_window=cdiv(kv_cache_spec.sliding_window, self.block_pool_size),
+            )
         return kv_cache_spec
 
 
