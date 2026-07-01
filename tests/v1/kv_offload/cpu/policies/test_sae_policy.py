@@ -71,18 +71,48 @@ def test_insert_seeds_initial_hits_from_ghost_sum():
     assert policy._sid_stats[0]["hits"] == 5.0
 
 
-def test_touch_bumps_hits_and_last_touch_and_closes_session():
+def test_session_hits_truncated_to_int_on_close():
+    """Reference computes initial_hits = int(ghost_sum / ghost_norm). The port
+    accumulates the ghost seed as a float while the session is open, then
+    truncates to int when the session closes (touch/evict/remove/clear)."""
+    policy = SAECachePolicy(cache_capacity=4, ghost_norm=3.0)
+    policy._key_ghost[key(1)] = 5.0
+    policy._key_ghost[key(2)] = 5.0
+    policy.insert(key(1), make_block(0))
+    policy.insert(key(2), make_block(1))
+    # While open, accumulated float: (5.0 + 5.0) / 3.0 = 3.333...
+    assert policy._sid_stats[0]["hits"] > 3.0
+    policy.touch([])  # closes the session -> seal
+    # int(3.333...) = 3
+    assert policy._sid_stats[0]["hits"] == 3
+    assert isinstance(policy._sid_stats[0]["hits"], int)
+
+
+def test_touch_bumps_hits_once_per_unique_session_and_closes_it():
     policy = SAECachePolicy(cache_capacity=4)
     policy.insert(key(1), make_block(0))
     policy.insert(key(2), make_block(1))
     policy.touch([key(1), key(2)])
     sid = 0
-    assert policy._sid_stats[sid]["hits"] == 2.0
+    # Reference bumps hits once per unique session in the batch, not once
+    # per key — touching two keys from the same session bumps hits by 1.
+    assert policy._sid_stats[sid]["hits"] == 1
     assert policy._sid_stats[sid]["last_touch"] == 1
     assert policy._open_sid is None
     # Next insert opens a fresh session
     policy.insert(key(3), make_block(2))
     assert policy._open_sid == 1
+
+
+def test_touch_bumps_hits_once_per_distinct_session():
+    """Two sessions touched in the same batch each get +1."""
+    policy = SAECachePolicy(cache_capacity=4)
+    policy.insert(key(1), make_block(0))
+    policy.touch([])  # close session 0
+    policy.insert(key(2), make_block(1))
+    policy.touch([key(1), key(2)])  # touches sessions 0 and 1
+    assert policy._sid_stats[0]["hits"] == 1
+    assert policy._sid_stats[1]["hits"] == 1
 
 
 def test_touch_ignores_unknown_keys():
@@ -156,6 +186,20 @@ def test_decay_prunes_below_threshold():
     policy._key_ghost[key(99)] = 0.05  # non-resident
     policy.get(key(1))  # triggers decay; 0.05 * 0.1 = 0.005 < 0.01
     assert key(99) not in policy._key_ghost
+
+
+def test_decay_truncates_session_hits_to_int():
+    """Reference does int(hits * decay_factor); the port must too."""
+    policy = SAECachePolicy(
+        cache_capacity=4,
+        decay_interval=1,
+        decay_factor=0.9,
+    )
+    policy.insert(key(1), make_block(0))
+    policy._sid_stats[0]["hits"] = 7
+    policy.get(key(1))  # triggers decay: int(7 * 0.9) = int(6.3) = 6
+    assert policy._sid_stats[0]["hits"] == 6
+    assert isinstance(policy._sid_stats[0]["hits"], int)
 
 
 def test_mark_evictable_adds_to_evictable_set():
@@ -245,28 +289,50 @@ def test_evict_removes_evicted_keys_from_all_state():
     assert 0 not in policy._sid_to_keys
 
 
-def test_evict_admission_gate_denies_when_new_session_score_below_worst():
-    policy = SAECachePolicy(cache_capacity=4, ghost_norm=1.0)
-    # Incumbent session with very high score
+def test_evict_admission_gate_denies_when_worst_incumbent_score_exceeds_baseline():
+    """Reference gate: new_score = logical_timer + 30000.0. When the worst
+    incumbent's score is above that baseline, the gate denies eviction."""
+    policy = SAECachePolicy(cache_capacity=4)
     policy.insert(key(1), make_ready_block(0))
     policy.mark_evictable(key(1))
-    policy._sid_stats[0]["hits"] = 10000.0
-    # Would-be new session has 0 ghost score -> gate denies
-    result = policy.evict(1, {key(2)})
+    # Push incumbent's score well above the new-session baseline via hits
+    # (freq_bonus = hits * 1500.0). 30 hits -> 45000 freq_bonus + 30000 pos
+    # -> 75000, easily above the ~30000 baseline for the would-be session.
+    policy._sid_stats[0]["hits"] = 30
+    result = policy.evict(1, set())
     assert result is None
 
 
-def test_evict_admission_gate_allows_when_new_session_score_above_worst():
-    policy = SAECachePolicy(cache_capacity=4, ghost_norm=1.0)
+def test_evict_admission_gate_allows_when_baseline_beats_worst_incumbent():
+    """When incumbent's score is below new_score = logical_timer + 30000,
+    the gate admits and eviction proceeds."""
+    policy = SAECachePolicy(cache_capacity=4)
     policy.insert(key(1), make_ready_block(0))
     policy.mark_evictable(key(1))
-    # Incumbent has low hits
-    policy._sid_stats[0]["hits"] = 0.0
-    # New session has strong ghost score
-    policy._key_ghost[key(2)] = 100.0
-    result = policy.evict(1, {key(2)})
+    # Incumbent has 0 hits: score = 0 (last_touch) + 0 (freq) + 30000 (pos)
+    # = 30000. New session baseline = logical_timer + 30000 = 0 + 30000 =
+    # 30000. new_score >= worst_score -> gate allows.
+    policy._sid_stats[0]["hits"] = 0
+    result = policy.evict(1, set())
     assert result is not None
     assert len(result) == 1
+
+
+def test_evict_admission_gate_ignores_ghost_scores():
+    """Reference explicitly excludes ghost scores from the gate. A high
+    ghost score on `protected` keys must NOT sway the gate decision."""
+    policy = SAECachePolicy(cache_capacity=4)
+    policy.insert(key(1), make_ready_block(0))
+    policy.mark_evictable(key(1))
+    # Incumbent's score is high enough that the gate would deny WITHOUT
+    # ghost scores helping the newcomer.
+    policy._sid_stats[0]["hits"] = 30  # score ~= 75000
+    # Load a massive ghost score on the would-be new session. If ghost
+    # were factored into the gate, this would allow eviction; the fix
+    # says it must still deny.
+    policy._key_ghost[key(2)] = 10_000_000.0
+    result = policy.evict(1, {key(2)})
+    assert result is None
 
 
 def test_cpu_offloading_manager_accepts_sae_policy_and_kwargs():

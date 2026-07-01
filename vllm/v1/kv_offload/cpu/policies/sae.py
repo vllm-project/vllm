@@ -78,13 +78,23 @@ class SAECachePolicy(CachePolicy):
 
     def _run_decay(self) -> None:
         for stats in self._sid_stats.values():
-            stats["hits"] = stats["hits"] * self._decay_factor
+            stats["hits"] = int(stats["hits"] * self._decay_factor)
         for k in list(self._key_ghost):
             new_score = self._key_ghost[k] * self._decay_factor
             if k not in self._blocks and new_score < 0.01:
                 del self._key_ghost[k]
             else:
                 self._key_ghost[k] = new_score
+
+    def _seal_open_session(self) -> None:
+        """Close the currently-open session, truncating its float-accumulated
+        ``hits`` to int so subsequent arithmetic stays integer (matching the
+        reference's ``initial_hits = int(ghost_sum / ghost_norm)`` step).
+        """
+        if self._open_sid is not None and self._open_sid in self._sid_stats:
+            stats = self._sid_stats[self._open_sid]
+            stats["hits"] = int(stats["hits"])
+        self._open_sid = None
 
     @override
     def insert(self, key: OffloadKey, block: BlockStatus) -> None:
@@ -110,8 +120,8 @@ class SAECachePolicy(CachePolicy):
     def remove(self, key: OffloadKey) -> None:
         block = self._blocks.pop(key, None)
         if block is None:
+            self._seal_open_session()
             self._last_event = "remove"
-            self._open_sid = None
             return
         sid = self._key_to_sid.pop(key, None)
         if sid is not None:
@@ -122,22 +132,22 @@ class SAECachePolicy(CachePolicy):
                 self._sid_to_keys.pop(sid, None)
                 self._sid_stats.pop(sid, None)
         self._evictable_keys.pop(key, None)
-        self._open_sid = None
+        self._seal_open_session()
         self._last_event = "remove"
 
     @override
     def touch(self, keys: Iterable[OffloadKey]) -> None:
+        self._seal_open_session()
         self._logical_timer += 1
         touched_sids: set[int] = set()
         for k in keys:
             sid = self._key_to_sid.get(k)
-            if sid is None:
-                continue
+            if sid is not None:
+                touched_sids.add(sid)
+        for sid in touched_sids:
             stats = self._sid_stats[sid]
             stats["hits"] = stats["hits"] + 1
             stats["last_touch"] = self._logical_timer
-            touched_sids.add(sid)
-        self._open_sid = None
         self._last_event = "touch"
 
     def _score(self, sid: int) -> float:
@@ -146,12 +156,14 @@ class SAECachePolicy(CachePolicy):
         freq_bonus = stats["hits"] * 1500.0
         return stats["last_touch"] + freq_bonus + pos_bonus
 
-    def _admission_gate_allows(self, protected: set[OffloadKey]) -> bool:
+    def _admission_gate_allows(self) -> bool:
+        # Reference excludes ghost scores from the admission gate — the gate
+        # compares the incumbent worst score to a bare timer+pos_bonus baseline
+        # (see the reference's prepare_store comment "Block ghost scores are
+        # intentionally NOT included here").
         if not self._sid_stats:
             return True
-        ghost_sum = sum(self._key_ghost.get(k, 0.0) for k in protected)
-        new_hits = ghost_sum / self._ghost_norm
-        new_score = self._logical_timer + new_hits * 1500.0 + 30000.0
+        new_score = self._logical_timer + 30000.0
         worst_sid = min(self._sid_stats.keys(), key=self._score)
         return new_score >= self._score(worst_sid)
 
@@ -159,11 +171,11 @@ class SAECachePolicy(CachePolicy):
     def evict(
         self, n: int, protected: set[OffloadKey]
     ) -> list[tuple[OffloadKey, BlockStatus]] | None:
-        self._open_sid = None
+        self._seal_open_session()
         self._last_event = "evict"
         if n == 0:
             return []
-        if not self._admission_gate_allows(protected):
+        if not self._admission_gate_allows():
             return None
 
         candidates: list[tuple[OffloadKey, BlockStatus]] = []
