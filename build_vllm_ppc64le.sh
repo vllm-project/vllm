@@ -117,7 +117,7 @@ export GRPC_PYTHON_BUILD_SYSTEM_OPENSSL=1
 ########################################
 # Install Packages From Devpi
 ########################################
-uv pip install numpy==2.3.5 pillow==12.2.0 -extra-index-url "$IBM_DEVPI_URL"
+uv pip install numpy==2.3.5 pillow==12.2.0 --extra-index-url "$IBM_DEVPI_URL"
 try_install_from_devpi "opencv-python-headless==${OPENCV_VERSION}"
 try_install_from_devpi "torch==${TORCH_VERSION}"
 try_install_from_devpi "torchvision==${TORCHVISION_VERSION}"
