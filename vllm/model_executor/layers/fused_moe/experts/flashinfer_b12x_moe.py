@@ -23,17 +23,25 @@ from vllm.utils.flashinfer import (
     flashinfer_b12x_fused_moe,
     flashinfer_convert_sf_to_mma_layout,
     has_flashinfer_b12x_moe,
+    has_flashinfer_b12x_moe_activation,
 )
+
+_B12X_ACTIVATION_STR = {
+    MoEActivation.SILU: "silu",
+    MoEActivation.SWIGLUOAI_UNINTERLEAVE: "swigluoai_uninterleave",
+}
 
 
 class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
     """FlashInfer CuteDSL fused MoE expert for SM12x (SM120/SM121,
     RTX Pro 6000 / DGX Spark).
 
-    Uses ``b12x_fused_moe`` from FlashInfer PR #3080 which fuses token
-    dispatch, two GEMMs, SwiGLU activation, and topk-weight reduction into a
-    single kernel call.  Input quantization (BF16→FP4) is performed inside the
-    kernel so BF16 hidden states are passed directly.
+    Uses ``b12x_fused_moe`` which fuses token dispatch, two GEMMs, the gated
+    activation, and topk-weight reduction into a single kernel call.  Input
+    quantization (BF16→FP4) is performed inside the kernel so BF16 hidden
+    states are passed directly.  Supports silu, plus swigluoai_uninterleave
+    (``swiglu_alpha``/``swiglu_beta``/``swiglu_limit``) when the installed
+    FlashInfer does.
 
     Weight scale factors are converted to the MMA layout produced by
     ``convert_sf_to_mma_layout`` once during ``process_weights_after_loading``
@@ -59,6 +67,28 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         # a synthesized uniform-1.0 tensor for W4A16 checkpoints that lack
         # one. Holding it on the instance keeps apply() alloc-free.
         self._fc2_input_scale: torch.Tensor | None = None
+
+        # ModelOpt NVFP4 checkpoints carry swiglu params on moe_config,
+        # not quant_config.
+        def _resolve(quant_val: float | None, moe_val: float | None) -> float | None:
+            return quant_val if quant_val is not None else moe_val
+
+        self.swiglu_alpha = _resolve(quant_config.gemm1_alpha, moe_config.swiglu_alpha)
+        self.swiglu_beta = _resolve(quant_config.gemm1_beta, moe_config.swiglu_beta)
+        self.swiglu_limit = _resolve(
+            quant_config.gemm1_clamp_limit, moe_config.swiglu_limit
+        )
+        if moe_config.activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
+            if self.swiglu_limit is None:
+                raise ValueError(
+                    "swigluoai_uninterleave requires swiglu_limit "
+                    "(gemm1_clamp_limit), but none was provided."
+                )
+        elif self.swiglu_limit is not None:
+            raise ValueError(
+                "FlashInferB12xExperts only applies swiglu_limit with the "
+                f"swigluoai_uninterleave activation, got {moe_config.activation}."
+            )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Normalise block scales to absorb the per-expert weight global scale
@@ -158,7 +188,11 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation == MoEActivation.SILU
+        if activation == MoEActivation.SILU:
+            return True
+        return (
+            activation in _B12X_ACTIVATION_STR and has_flashinfer_b12x_moe_activation()
+        )
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -227,6 +261,31 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
 
         top_k = topk_ids.shape[1]
 
+        # Omit the kwargs for plain silu so older FlashInfer builds without
+        # swiglu support keep working.
+        activation_kwargs: dict[str, str | float] = {}
+        if activation != MoEActivation.SILU:
+            assert activation in _B12X_ACTIVATION_STR, (
+                f"FlashInferB12xExperts does not support {activation}."
+            )
+            assert has_flashinfer_b12x_moe_activation(), (
+                "Installed FlashInfer b12x_fused_moe does not support the "
+                f"{activation} activation."
+            )
+            activation_kwargs["activation"] = _B12X_ACTIVATION_STR[activation]
+            if activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
+                assert self.swiglu_limit is not None
+                activation_kwargs["swiglu_limit"] = self.swiglu_limit
+                # Unset alpha/beta mean silu-with-clamp in vLLM
+                # (apply_moe_activation); the kernel defaults are
+                # gpt-oss-oriented (1.702/1.0), so pass explicitly.
+                activation_kwargs["swiglu_alpha"] = (
+                    1.0 if self.swiglu_alpha is None else self.swiglu_alpha
+                )
+                activation_kwargs["swiglu_beta"] = (
+                    0.0 if self.swiglu_beta is None else self.swiglu_beta
+                )
+
         flashinfer_b12x_fused_moe(
             x=hidden_states,
             token_selected_experts=topk_ids.to(torch.int32),
@@ -243,4 +302,5 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             num_local_experts=self.num_local_experts,
             output_dtype=self.out_dtype,
             output=output,
+            **activation_kwargs,
         )

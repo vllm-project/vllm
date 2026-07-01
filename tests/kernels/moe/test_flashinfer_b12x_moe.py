@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import dataclasses
+
 import pytest
 import torch
 
@@ -13,24 +15,28 @@ if not current_platform.is_device_capability_family(120):
         allow_module_level=True,
     )
 
-from vllm.utils.flashinfer import has_flashinfer_b12x_moe
+from vllm.utils.flashinfer import (
+    has_flashinfer_b12x_moe,
+    has_flashinfer_b12x_moe_activation,
+)
 
 if not has_flashinfer_b12x_moe():
     pytest.skip(
         reason=(
-            "FlashInfer cute_dsl_fused_moe_nvfp4 / convert_sf_to_mma_layout "
-            "not available in installed FlashInfer (needs PRs #3051 and #3066)."
+            "b12x_fused_moe / convert_sf_to_mma_layout not available in "
+            "installed FlashInfer."
         ),
         allow_module_level=True,
     )
 
-# Import fp4_quantize after the skip guard — FlashInfer must be installed.
+# Import fp4_quantize after the skip guard; FlashInfer must be installed.
 from flashinfer.fp4_quantization import fp4_quantize
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.moe.utils import make_dummy_moe_config
-from tests.kernels.utils import torch_moe
+from tests.kernels.utils import torch_experts
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers.activation import SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
@@ -40,7 +46,10 @@ from vllm.model_executor.layers.fused_moe.config import nvfp4_moe_quant_config
 from vllm.model_executor.layers.fused_moe.experts.flashinfer_b12x_moe import (
     FlashInferB12xExperts,
 )
-from vllm.utils.flashinfer import flashinfer_convert_sf_to_mma_layout
+from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
+from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
+    prepare_nvfp4_moe_layer_for_fi_or_cutlass,
+)
 from vllm.utils.torch_utils import set_random_seed
 
 # Dimensions chosen to satisfy FP4 alignment requirements (k multiple of 256,
@@ -52,21 +61,51 @@ MNK_FACTORS = [
     (64, 256, 512),
 ]
 
+# MiniMax-M3 SwiGLU-OAI parameters.
+SWIGLU_ALPHA = 1.702
+SWIGLU_BETA = 1.0
+SWIGLU_LIMIT = 7.0
 
-def _reorder_gate_up_to_up_gate(
-    w: torch.Tensor,
-    w_s: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Swap gate and up-projection halves along dim=1 to [up, gate] order.
 
-    The SM12x kernel expects weights in [up (w3), gate (w1)] order while the
-    BF16 reference uses [gate (w1), up (w3)].  This replicates the reordering
-    done at model-load time by ``prepare_nvfp4_moe_layer_for_fi_or_cutlass``.
-    """
-    n = w.shape[1] // 2
+def _quantize_nvfp4_linear_sf(w_bf16: torch.Tensor):
+    """Quantize per expert in checkpoint layout: linear block scales,
+    global_scale=1.0."""
+    e, rows, cols = w_bf16.shape
+    gs = torch.ones(1, device="cuda", dtype=torch.float32)
+    q, sf = fp4_quantize(
+        w_bf16.reshape(e * rows, cols),
+        global_scale=gs,
+        sf_vec_size=16,
+        is_sf_swizzled_layout=False,
+    )
+    sf = sf.view(torch.float8_e4m3fn)
+    return q.view(e, rows, cols // 2), sf.view(e, rows, cols // 16)
+
+
+def _torch_ref(
+    a, w13_bf16, w2_bf16, topk_weights, topk_ids, activation, alpha=SWIGLU_ALPHA
+):
+    """BF16 reference on the original [gate, up] weights."""
+    if activation == MoEActivation.SILU:
+        return torch_experts(
+            a, w13_bf16, w2_bf16, topk_weights, topk_ids, activation=activation
+        )
+    assert activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE
+    act = SiluAndMulWithClamp(SWIGLU_LIMIT, alpha, SWIGLU_BETA)
+    m, k = a.shape
+    topk = topk_ids.shape[1]
+    a_rep = a.view(m, 1, k).repeat(1, topk, 1).reshape(-1, k)
+    ids_flat = topk_ids.view(-1)
+    out = torch.zeros(m * topk, k, dtype=a.dtype, device=a.device)
+    for i in range(w13_bf16.shape[0]):
+        mask = ids_flat == i
+        if mask.sum():
+            h = a_rep[mask] @ w13_bf16[i].t()
+            out[mask] = act(h) @ w2_bf16[i].t()
     return (
-        torch.cat([w[:, n:, :], w[:, :n, :]], dim=1),
-        torch.cat([w_s[:, n:, :], w_s[:, :n, :]], dim=1),
+        (out.view(m, topk, k).float() * topk_weights.view(m, topk, 1))
+        .sum(dim=1)
+        .to(a.dtype)
     )
 
 
@@ -74,6 +113,10 @@ def _reorder_gate_up_to_up_gate(
 @pytest.mark.parametrize("e", [8, 16])
 @pytest.mark.parametrize("topk", [1, 2, 4])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize(
+    "activation",
+    [MoEActivation.SILU, MoEActivation.SWIGLUOAI_UNINTERLEAVE],
+)
 @torch.inference_mode()
 def test_flashinfer_b12x_moe(
     m: int,
@@ -82,115 +125,98 @@ def test_flashinfer_b12x_moe(
     e: int,
     topk: int,
     dtype: torch.dtype,
+    activation: MoEActivation,
     workspace_init,
 ):
     """Test FlashInferB12xExperts against a BF16 torch reference.
 
-    The SM12x kernel takes BF16 hidden states directly and fuses token
-    dispatch, W1 GEMM, SwiGLU, and W2 GEMM into one call.  We verify
-    correctness against ``torch_moe`` using generous tolerances to account
-    for the internal FP4 quantization of activations and weights.
+    Weights start in checkpoint layout (fused FC1 as [gate, up], linear
+    block scales) and go through the production weight pipeline
+    (``prepare_nvfp4_moe_layer_for_fi_or_cutlass`` +
+    ``process_weights_after_loading``), so the test catches a broken
+    [gate, up] -> [up, gate] reorder or unplumbed activation params (the
+    garbled MiniMax-M3 swigluoai output).
 
-    Scale convention
-    ----------------
-    The SM12x kernel uses ``w1_alpha`` as *both* the activation-quantisation
-    global scale and the weight dequantisation factor.  These two roles are
-    conflated into a single parameter in ``launch_sm120_moe``, so they must
-    equal the same value.  We use ``global_scale = 1.0`` for
-    ``fp4_quantize`` so that ``w1_alpha = ones`` satisfies both roles
-    simultaneously.  The alternative — vLLM's convention of baking a large
-    ``w_gs`` into block-scale values and compensating with
-    ``g1_alphas = 1/w_gs`` — is incompatible with this kernel.
+    Scale convention: the SM12x kernel uses ``w1_alpha`` as *both* the
+    activation-quantisation global scale and the weight dequantisation
+    factor, so we quantise with ``global_scale = 1.0`` and ``w1_alpha =
+    ones``; vLLM's bake-a-large-``w_gs``-into-block-scales convention is
+    incompatible with this kernel.
     """
+    is_swigluoai = activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE
+    if is_swigluoai and not has_flashinfer_b12x_moe_activation():
+        pytest.skip("Installed FlashInfer b12x_fused_moe lacks swigluoai support.")
+
     set_random_seed(7)
     with set_current_vllm_config(
         VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
     ):
-        a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
+        # O(1)-magnitude outputs; smaller scalings make any comparison
+        # metric pass regardless of kernel correctness.
+        a = torch.randn((m, k), device="cuda", dtype=dtype) / 2
 
-        # Generate BF16 reference weights in [gate, up] order.
-        # Shape: w1=(e, 2n, k), w2=(e, k, n).
-        w1_bf16 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 15
-        w2_bf16 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 15
+        # BF16 reference weights in checkpoint [gate, up] order.
+        w13_bf16 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 8
+        w2_bf16 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 8
 
-        # ------------------------------------------------------------------ #
-        # Quantise weights for the SM12x kernel using FlashInfer's convention:
-        #   global_scale = 1.0   →   block_scale = max_abs_block / fp4_max
-        #   w1_alpha = 1.0       (no extra global factor to compensate)
-        #
-        # The scale factors returned by fp4_quantize(..., is_sf_swizzled_layout=True)
-        # are already in the swizzled 2D layout expected by convert_sf_to_mma_layout.
-        # No additional swizzle_blockscale() call is needed.
-        # ------------------------------------------------------------------ #
-        gs = torch.ones(1, device="cuda", dtype=torch.float32)
-        sf_vec_size = 16
-
-        # W1: reorder BF16 from [gate, up] → [up, gate], then quantise.
-        w1_reordered = torch.cat(
-            [w1_bf16[:, n:, :], w1_bf16[:, :n, :]], dim=1
-        )  # shape (e, 2n, k), [up, gate]
-        w1_flat = w1_reordered.reshape(e * 2 * n, k)
-        w1_q_flat, w1_sf_flat = fp4_quantize(
-            w1_flat,
-            global_scale=gs,
-            sf_vec_size=sf_vec_size,
-            is_sf_swizzled_layout=True,
-        )
-        w1_q = w1_q_flat.view(e, 2 * n, k // 2)  # uint8, packed FP4
-        w1_blockscale = w1_sf_flat.view(e, 2 * n, w1_sf_flat.shape[1])  # float8
-
-        # W2: no row reordering needed for the down-projection.
-        w2_flat = w2_bf16.reshape(e * k, n)
-        w2_q_flat, w2_sf_flat = fp4_quantize(
-            w2_flat,
-            global_scale=gs,
-            sf_vec_size=sf_vec_size,
-            is_sf_swizzled_layout=True,
-        )
-        w2_q = w2_q_flat.view(e, k, n // 2)  # uint8, packed FP4
-        w2_blockscale = w2_sf_flat.view(e, k, w2_sf_flat.shape[1])  # float8
+        w13_q, w13_sf = _quantize_nvfp4_linear_sf(w13_bf16)
+        w2_q, w2_sf = _quantize_nvfp4_linear_sf(w2_bf16)
 
         # All per-expert alphas are 1.0 (global_scale = 1.0, no compensation).
         ones_e = torch.ones(e, device="cuda", dtype=torch.float32)
 
+        layer = torch.nn.Module()
+        layer.activation = activation
+        (w13_q, w13_sf, _, _, w2_q, w2_sf, _, _) = (
+            prepare_nvfp4_moe_layer_for_fi_or_cutlass(
+                backend=NvFp4MoeBackend.FLASHINFER_B12X,
+                layer=layer,
+                w13=w13_q,
+                w13_scale=w13_sf,
+                w13_scale_2=ones_e.clone(),
+                a13_scale=torch.ones(e, 2, device="cuda", dtype=torch.float32),
+                w2=w2_q,
+                w2_scale=w2_sf,
+                w2_scale_2=ones_e.clone(),
+                a2_scale=torch.ones(e, 1, device="cuda", dtype=torch.float32),
+                is_act_and_mul=True,
+            )
+        )
+        layer.w13_weight = w13_q
+        layer.w13_weight_scale = w13_sf
+        layer.w13_weight_scale_2 = ones_e.clone()
+        layer.w2_weight = w2_q
+        layer.w2_weight_scale = w2_sf
+        layer.w2_weight_scale_2 = ones_e.clone()
+
         quant_config = nvfp4_moe_quant_config(
-            g1_alphas=ones_e,
-            g2_alphas=ones_e,
-            a1_gscale=ones_e,
-            a2_gscale=ones_e,
-            w1_scale=w1_blockscale,
-            w2_scale=w2_blockscale,
+            g1_alphas=ones_e.clone(),
+            g2_alphas=ones_e.clone(),
+            a1_gscale=ones_e.clone(),
+            a2_gscale=ones_e.clone(),
+            w1_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
         )
 
-        moe_config = make_dummy_moe_config(
-            num_experts=e,
-            experts_per_token=topk,
-            hidden_dim=k,
-            intermediate_size=n,
-            in_dtype=dtype,
+        moe_config = dataclasses.replace(
+            make_dummy_moe_config(
+                num_experts=e,
+                experts_per_token=topk,
+                hidden_dim=k,
+                intermediate_size=n,
+                in_dtype=dtype,
+            ),
+            activation=activation,
+            swiglu_alpha=SWIGLU_ALPHA if is_swigluoai else None,
+            swiglu_beta=SWIGLU_BETA if is_swigluoai else None,
+            swiglu_limit=SWIGLU_LIMIT if is_swigluoai else None,
         )
 
         experts = FlashInferB12xExperts(
             moe_config=moe_config,
             quant_config=quant_config,
         )
-        # In production, process_weights_after_loading computes these after
-        # normalizing block scales. In the test the scales are already in final
-        # form (global_scale=1.0), so we compute the MMA layouts directly.
-        num_experts_w1, m1, k1_sf = w1_blockscale.shape
-        experts.w1_sf_mma = flashinfer_convert_sf_to_mma_layout(
-            w1_blockscale.reshape(num_experts_w1 * m1, k1_sf),
-            m=m1,
-            k=k1_sf * 16,
-            num_groups=num_experts_w1,
-        )
-        num_experts_w2, m2, k2_sf = w2_blockscale.shape
-        experts.w2_sf_mma = flashinfer_convert_sf_to_mma_layout(
-            w2_blockscale.reshape(num_experts_w2 * m2, k2_sf),
-            m=m2,
-            k=k2_sf * 16,
-            num_groups=num_experts_w2,
-        )
+        experts.process_weights_after_loading(layer)
 
         kernel = mk.FusedMoEKernel(
             maybe_make_prepare_finalize(
@@ -207,22 +233,39 @@ def test_flashinfer_b12x_moe(
 
         sm12x_output = kernel.apply(
             hidden_states=a,
-            w1=w1_q,
-            w2=w2_q,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             global_num_experts=e,
-            activation=MoEActivation.SILU,
+            activation=activation,
             apply_router_weight_on_input=False,
             expert_map=None,
         )
 
-        # Reference: BF16 torch MoE using original [gate, up] BF16 weights.
-        # torch_moe's SiluAndMul expects [gate, up] order, matching w1_bf16.
-        torch_output = torch_moe(a, w1_bf16, w2_bf16, score, topk)
+        torch_output = _torch_ref(
+            a, w13_bf16, w2_bf16, topk_weights, topk_ids, activation
+        )
 
-        torch.testing.assert_close(sm12x_output, torch_output, atol=2e-1, rtol=2e-1)
+        # NVFP4 error is proportional to the signal, so an elementwise
+        # atol/rtol check cannot separate quantisation noise from a swapped
+        # gate/up ordering or a wrong activation; relative Frobenius error can.
+        diff = sm12x_output.float() - torch_output.float()
+        rel_fro = (diff.norm() / torch_output.float().norm()).item()
+        assert rel_fro < 0.45, f"rel_fro={rel_fro:.3f} (expected < 0.45)"
 
-
-if __name__ == "__main__":
-    test_flashinfer_b12x_moe(16, 128, 256, 8, 2, torch.bfloat16)
+        if is_swigluoai:
+            # An alpha regression shifts outputs too little for the threshold
+            # above. Compare against an alpha=1.0 reference instead: the
+            # quantisation noise is common to both, so whichever reference
+            # matches the kernel's actual alpha wins.
+            wrong_alpha_ref = _torch_ref(
+                a, w13_bf16, w2_bf16, topk_weights, topk_ids, activation, alpha=1.0
+            )
+            wrong_diff = sm12x_output.float() - wrong_alpha_ref.float()
+            wrong_rel_fro = (wrong_diff.norm() / wrong_alpha_ref.float().norm()).item()
+            assert rel_fro < wrong_rel_fro, (
+                f"output matches alpha=1.0 reference better than "
+                f"alpha={SWIGLU_ALPHA} ({wrong_rel_fro:.3f} <= {rel_fro:.3f}); "
+                f"swiglu_alpha is likely not reaching the kernel"
+            )
