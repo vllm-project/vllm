@@ -1843,6 +1843,14 @@ def add_cli_args(parser: FlexibleArgumentParser):
         default=None,
     )
     parser.add_argument(
+        "--enable-vad",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable per-request VAD for OpenAI audio benchmarks by setting "
+        '`"vad_config.enabled"` in the multipart request body. '
+        "Only supported with --backend openai-audio.",
+    )
+    parser.add_argument(
         "--skip-tokenizer-init",
         action="store_true",
         default=False,
@@ -2086,6 +2094,13 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
 
     extra_body = args.extra_body or {}
     extra_body = {**sampling_params, **extra_body}
+    if args.enable_vad is not None:
+        if args.backend != "openai-audio":
+            raise ValueError(
+                "--enable-vad/--no-enable-vad is only supported with "
+                "--backend openai-audio."
+            )
+        extra_body["vad_config.enabled"] = args.enable_vad
 
     percentile_metrics: str = args.percentile_metrics or default_percentile_metrics
 
@@ -2154,6 +2169,8 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     )
     result_json["burstiness"] = args.burstiness
     result_json["max_concurrency"] = args.max_concurrency
+    if args.enable_vad is not None:
+        result_json["enable_vad"] = args.enable_vad
 
     if args.ramp_up_strategy is not None:
         result_json["ramp_up_strategy"] = args.ramp_up_strategy

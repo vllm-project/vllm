@@ -198,3 +198,32 @@ def test_async_request_openai_audio_handles_decoded_audio_arrays(
     assert session.uploaded_bytes is not None
     assert output.success is True
     assert output.generated_text == "hello"
+
+
+def test_async_request_openai_audio_forwards_extra_body_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(request_func_module.aiohttp, "FormData", _FakeFormData)
+    session = _FakeSession()
+    request_input = RequestFuncInput(
+        prompt="",
+        api_url="http://localhost:8000/v1/audio/transcriptions",
+        prompt_len=1,
+        output_len=32,
+        model="openai/whisper-large-v3",
+        multi_modal_content={
+            "audio": (np.zeros(1_600, dtype=np.float32), 16_000),
+        },
+        extra_body={"vad_config.enabled": True},
+    )
+
+    output = asyncio.run(
+        request_func_module.async_request_openai_audio(request_input, session)
+    )
+
+    assert session.fields is not None
+    form_fields = {
+        name: value for name, value, _kwargs in session.fields if name != "file"
+    }
+    assert form_fields["vad_config.enabled"] == "True"
+    assert output.success is True

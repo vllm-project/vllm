@@ -32,7 +32,11 @@ from vllm.inputs import EncoderDecoderInput, EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import SupportsTranscription
-from vllm.multimodal.audio import get_audio_duration, split_audio
+from vllm.multimodal.audio import (
+    ThreadLocalVADProvider,
+    get_audio_duration,
+    split_audio_with_vad,
+)
 from vllm.multimodal.media.audio import load_audio
 from vllm.outputs import RequestOutput
 from vllm.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
@@ -146,6 +150,7 @@ class OpenAISpeechToText(OpenAIServing):
         self._decode_and_chunk_speech_async = make_async_with_semaphore(
             self._decode_and_chunk_speech, executor=self._preprocess_executor
         )
+        self._vad_provider = ThreadLocalVADProvider()
 
     @cached_property
     def model_cls(self) -> type[SupportsTranscription]:
@@ -160,6 +165,7 @@ class OpenAISpeechToText(OpenAIServing):
     def _decode_and_chunk_speech(
         self,
         audio_data: bytes,
+        request: SpeechToTextRequest,
     ) -> tuple[list[np.ndarray], float]:
         # Decode audio bytes.  For container formats (MP4, M4A, WebM) that
         # soundfile cannot detect from a BytesIO stream, _load_audio_bytes
@@ -179,23 +185,18 @@ class OpenAISpeechToText(OpenAIServing):
             raise ValueError("Invalid or unsupported audio file.") from exc
 
         duration = get_audio_duration(y=y, sr=sr)
-        do_split_audio = self.asr_config.allow_audio_chunking and (
-            self.asr_config.max_audio_clip_s is not None
-            and duration > self.asr_config.max_audio_clip_s
-        )
+        vad_config = request.build_vad_config()
 
-        if not do_split_audio:
-            chunks = [y]
-        else:
-            assert self.asr_config.max_audio_clip_s is not None
-            assert self.asr_config.min_energy_split_window_size is not None
-            chunks = split_audio(
-                audio_data=y,
-                sample_rate=int(sr),
-                max_clip_duration_s=self.asr_config.max_audio_clip_s,
-                overlap_duration_s=self.asr_config.overlap_chunk_second,
-                min_energy_window_size=self.asr_config.min_energy_split_window_size,
-            )
+        vad = self._vad_provider.get() if vad_config.enabled else None
+
+        chunks = split_audio_with_vad(
+            duration=duration,
+            asr_config=self.asr_config,
+            vad=vad,
+            vad_config=vad_config,
+            audio_data=y,
+            sample_rate=int(sr),
+        )
 
         return chunks, duration
 
@@ -272,7 +273,9 @@ class OpenAISpeechToText(OpenAIServing):
             )
 
         # Run cpu intensive preprocess step in a separate thread pool executor.
-        chunks, duration = await self._decode_and_chunk_speech_async(audio_data)
+        chunks, duration = await self._decode_and_chunk_speech_async(
+            audio_data, request
+        )
 
         if request.language is None and getattr(
             self.model_cls, "supports_explicit_language_detection", False
