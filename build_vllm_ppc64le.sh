@@ -92,7 +92,7 @@ python --version
 pip install -U pip setuptools-rust
 pip install uv
 pip install "setuptools<70" build wheel cmake auditwheel
-uv pip install "setuptools<70" cython meson-python "sympy>=1.13.3" --no-build-isolation
+uv pip install "setuptools<70" cython meson-python pybind11 "sympy>=1.13.3" --no-build-isolation
 
 ########################################
 # Rust
