@@ -197,6 +197,10 @@ class Scheduler(SchedulerInterface):
         self.finished_recving_kv_req_ids: set[str] = set()
         self.failed_recving_kv_req_ids: set[str] = set()
 
+        # req_id -> grammar compile error message; finished as per-request
+        # errors in update_from_output.
+        self.grammar_compile_error_reqs: dict[str, str] = {}
+
         # Encoder-related.
         # Calculate encoder cache size if applicable
         supports_mm_inputs = mm_registry.supports_multimodal_inputs(
@@ -1753,6 +1757,31 @@ class Scheduler(SchedulerInterface):
                     )
                 )
 
+        if self.grammar_compile_error_reqs:
+            compile_errors = self.grammar_compile_error_reqs
+            self.grammar_compile_error_reqs = {}
+            error_reqs = [
+                (self.requests[r], msg)
+                for r, msg in compile_errors.items()
+                if r in self.requests and not self.requests[r].is_finished()
+            ]
+            if error_reqs:
+                self.finish_requests(
+                    [r.request_id for r, _ in error_reqs],
+                    RequestStatus.FINISHED_ERROR,
+                )
+                for request, msg in error_reqs:
+                    outputs[request.client_index].append(
+                        EngineCoreOutput(
+                            request_id=request.request_id,
+                            new_token_ids=[],
+                            finish_reason=request.get_finished_reason(),
+                            stop_reason=f"Structured Grammar Compile Error: {msg}",
+                            events=request.take_events(),
+                            trace_headers=request.trace_headers,
+                        )
+                    )
+
         # KV Connector: update state for finished KV Transfers.
         if kv_connector_output:
             self._update_from_kv_xfer_finished(kv_connector_output)
@@ -2431,6 +2460,15 @@ class Scheduler(SchedulerInterface):
         if request.status == RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR:
             structured_output_req = request.structured_output_request
             if not (structured_output_req and structured_output_req.grammar):
+                if (
+                    structured_output_req is not None
+                    and structured_output_req.grammar_error is not None
+                ):
+                    # Grammar compile failed: record it (update_from_output
+                    # finishes the request) and keep it blocked, unscheduled.
+                    self.grammar_compile_error_reqs[request.request_id] = (
+                        structured_output_req.grammar_error
+                    )
                 return False
             request.status = RequestStatus.WAITING
             return True
