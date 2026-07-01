@@ -21,6 +21,7 @@ from urllib3.util import Url, parse_url
 
 import vllm.envs as envs
 from vllm.connections import HTTPConnection, global_http_connection
+from vllm.exceptions import VLLMUnprocessableEntityError
 from vllm.logger import init_logger
 from vllm.multimodal.video import get_video_loader_backend_for_processor
 from vllm.utils.registry import ExtensionManager
@@ -69,6 +70,56 @@ def merge_media_io_kwargs(
             (overrides or {}).get(key),
         )
     return merged or None
+
+
+def _handle_fetch_exception(e: Exception, url: str, parameter: str) -> None:
+    import aiohttp
+    import requests
+
+    # 1. HTTP Errors with status codes
+    if isinstance(e, requests.exceptions.HTTPError):
+        status_code = e.response.status_code if e.response is not None else 500
+        if 400 <= status_code < 500:
+            raise VLLMUnprocessableEntityError(
+                f"Failed to fetch media from URL: {e}",
+                parameter=parameter,
+                value=url,
+            ) from e
+        raise e
+
+    if isinstance(e, aiohttp.ClientResponseError):
+        status_code = e.status
+        if 400 <= status_code < 500:
+            raise VLLMUnprocessableEntityError(
+                f"Failed to fetch media from URL: {e}",
+                parameter=parameter,
+                value=url,
+            ) from e
+        raise e
+
+    # 2. Other connection / DNS / timeout / client errors
+    if isinstance(e, requests.exceptions.RequestException):
+        raise VLLMUnprocessableEntityError(
+            f"Failed to fetch media from URL: {e}",
+            parameter=parameter,
+            value=url,
+        ) from e
+
+    if isinstance(e, aiohttp.ClientError):
+        raise VLLMUnprocessableEntityError(
+            f"Failed to fetch media from URL: {e}",
+            parameter=parameter,
+            value=url,
+        ) from e
+
+    if isinstance(e, (asyncio.TimeoutError, ValueError, OSError, RuntimeError)):
+        raise VLLMUnprocessableEntityError(
+            f"Failed to fetch media from URL: {e}",
+            parameter=parameter,
+            value=url,
+        ) from e
+
+    raise e
 
 
 @MEDIA_CONNECTOR_REGISTRY.register("http")
@@ -288,85 +339,95 @@ class MediaConnector:
         url: str,
         media_io: MediaIO[_M],
         *,
+        parameter: str = "image_url",
         fetch_timeout: int | None = None,
     ) -> _M:  # type: ignore[type-var]
-        if url[:5].lower() == "data:":
-            return self._load_data_url(url, media_io)
+        try:
+            if url[:5].lower() == "data:":
+                return self._load_data_url(url, media_io)
 
-        url_spec = parse_url(url)
+            url_spec = parse_url(url)
 
-        if url_spec.scheme and url_spec.scheme.startswith("http"):
-            self._assert_url_in_allowed_media_domains(url_spec)
+            if url_spec.scheme and url_spec.scheme.startswith("http"):
+                self._assert_url_in_allowed_media_domains(url_spec)
 
-            cached = self._get_cached_bytes(url)
-            if cached is not None:
-                return media_io.load_bytes(cached)
+                cached = self._get_cached_bytes(url)
+                if cached is not None:
+                    return media_io.load_bytes(cached)
 
-            connection = self.connection
-            data = connection.get_bytes(
-                url_spec.url,
-                timeout=fetch_timeout,
-                allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
-            )
+                connection = self.connection
+                data = connection.get_bytes(
+                    url_spec.url,
+                    timeout=fetch_timeout,
+                    allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
+                )
 
-            self._put_cached_bytes(url, data)
-            return media_io.load_bytes(data)
+                self._put_cached_bytes(url, data)
+                return media_io.load_bytes(data)
 
-        if url_spec.scheme == "file":
-            return self._load_file_url(url_spec, media_io)
+            if url_spec.scheme == "file":
+                return self._load_file_url(url_spec, media_io)
 
-        msg = "The URL must be either a HTTP, data or file URL."
-        raise ValueError(msg)
+            msg = "The URL must be either a HTTP, data or file URL."
+            raise ValueError(msg)
+        except Exception as e:
+            _handle_fetch_exception(e, url, parameter)
 
     async def load_from_url_async(
         self,
         url: str,
         media_io: MediaIO[_M],
         *,
+        parameter: str = "image_url",
         fetch_timeout: int | None = None,
     ) -> _M:
-        loop = asyncio.get_running_loop()
+        try:
+            loop = asyncio.get_running_loop()
 
-        if url[:5].lower() == "data:":
-            future = loop.run_in_executor(
-                global_thread_pool, self._load_data_url, url, media_io
-            )
-            return await future
-
-        url_spec = parse_url(url)
-
-        if url_spec.scheme and url_spec.scheme.startswith("http"):
-            self._assert_url_in_allowed_media_domains(url_spec)
-
-            cached = await loop.run_in_executor(
-                global_thread_pool, self._get_cached_bytes, url
-            )
-            if cached is not None:
+            if url[:5].lower() == "data:":
                 future = loop.run_in_executor(
-                    global_thread_pool, media_io.load_bytes, cached
+                    global_thread_pool, self._load_data_url, url, media_io
                 )
                 return await future
 
-            connection = self.connection
-            data = await connection.async_get_bytes(
-                url_spec.url,
-                timeout=fetch_timeout,
-                allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
-            )
+            url_spec = parse_url(url)
 
-            await loop.run_in_executor(
-                global_thread_pool, self._put_cached_bytes, url, data
-            )
-            future = loop.run_in_executor(global_thread_pool, media_io.load_bytes, data)
-            return await future
+            if url_spec.scheme and url_spec.scheme.startswith("http"):
+                self._assert_url_in_allowed_media_domains(url_spec)
 
-        if url_spec.scheme == "file":
-            future = loop.run_in_executor(
-                global_thread_pool, self._load_file_url, url_spec, media_io
-            )
-            return await future
-        msg = "The URL must be either a HTTP, data or file URL."
-        raise ValueError(msg)
+                cached = await loop.run_in_executor(
+                    global_thread_pool, self._get_cached_bytes, url
+                )
+                if cached is not None:
+                    future = loop.run_in_executor(
+                        global_thread_pool, media_io.load_bytes, cached
+                    )
+                    return await future
+
+                connection = self.connection
+                data = await connection.async_get_bytes(
+                    url_spec.url,
+                    timeout=fetch_timeout,
+                    allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
+                )
+
+                await loop.run_in_executor(
+                    global_thread_pool, self._put_cached_bytes, url, data
+                )
+                future = loop.run_in_executor(
+                    global_thread_pool, media_io.load_bytes, data
+                )
+                return await future
+
+            if url_spec.scheme == "file":
+                future = loop.run_in_executor(
+                    global_thread_pool, self._load_file_url, url_spec, media_io
+                )
+                return await future
+            msg = "The URL must be either a HTTP, data or file URL."
+            raise ValueError(msg)
+        except Exception as e:
+            _handle_fetch_exception(e, url, parameter)
 
     def fetch_audio(
         self,
@@ -380,6 +441,7 @@ class MediaConnector:
         return self.load_from_url(
             audio_url,
             audio_io,
+            parameter="audio_url",
             fetch_timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
         )
 
@@ -395,6 +457,7 @@ class MediaConnector:
         return await self.load_from_url_async(
             audio_url,
             audio_io,
+            parameter="audio_url",
             fetch_timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
         )
 
@@ -417,6 +480,7 @@ class MediaConnector:
             return self.load_from_url(
                 image_url,
                 image_io,
+                parameter="image_url",
                 fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
             )
         except UnidentifiedImageError as e:
@@ -442,6 +506,7 @@ class MediaConnector:
             return await self.load_from_url_async(
                 image_url,
                 image_io,
+                parameter="image_url",
                 fetch_timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
             )
         except UnidentifiedImageError as e:
@@ -471,6 +536,7 @@ class MediaConnector:
         return self.load_from_url(
             video_url,
             video_io,
+            parameter="video_url",
             fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
         )
 
@@ -499,6 +565,7 @@ class MediaConnector:
         return await self.load_from_url_async(
             video_url,
             video_io,
+            parameter="video_url",
             fetch_timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
         )
 
