@@ -214,18 +214,19 @@ class OscarMetadata(AttentionMetadata):
 
 class OscarMetadataBuilder(AttentionMetadataBuilder[OscarMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = (
-        AttentionCGSupport.UNIFORM_BATCH)
+        AttentionCGSupport.NEVER)
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=False)
 
-    def build_for_cudagraph_capture(self, cam):
-        m = self.build(0, cam)
+    def build_for_cudagraph_capture(self, common_attn_metadata):
+        m = self.build(0, common_attn_metadata)
         m.seq_lens.fill_(1)
         return m
 
-    def build(self, common_prefix_len, cam, fast_build=False):
+    def build(self, common_prefix_len, common_attn_metadata, fast_build=False):
+        cam = common_attn_metadata
         nd, _, ndt, _ = split_decodes_and_prefills(
             cam, decode_threshold=self.reorder_batch_threshold)
         return OscarMetadata(
@@ -249,7 +250,7 @@ class OscarAttentionImpl(AttentionImpl["OscarMetadata"]):
     supports_quant_query_input: bool = False
 
     def __init__(self, num_heads, head_size, scale,
-                 num_kv_heads=None, **kwargs):
+                 num_kv_heads=None, *args, **kwargs):
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = scale
@@ -325,16 +326,16 @@ class OscarAttentionImpl(AttentionImpl["OscarMetadata"]):
         return self._prefill_sdpa(q, k, v, meta)
 
     def _prefill_sdpa(self, q, k, v, meta):
-        qsl = (meta.query_start_loc_cpu or meta.query_start_loc).tolist()
-        sl = (meta.seq_lens_cpu or meta.seq_lens).tolist()
+        qsl = (meta.query_start_loc if meta.query_start_loc_cpu is None else meta.query_start_loc_cpu).tolist()
+        sl = (meta.seq_lens if meta.seq_lens_cpu is None else meta.seq_lens_cpu).tolist()
         out = torch.zeros_like(q)
         for i in range(len(qsl) - 1):
             s, e = qsl[i], qsl[i + 1]
             if e <= s:
                 continue
             qt = q[s:e].transpose(0, 1).unsqueeze(0)
-            kt = k[s:e].transpose(0, 1).unsqueeze(0)
-            vt = v[s:e].transpose(0, 1).unsqueeze(0)
+            kt = k[s:e].transpose(0, 1).repeat_interleave(self.kv_group, 0).unsqueeze(0)
+            vt = v[s:e].transpose(0, 1).repeat_interleave(self.kv_group, 0).unsqueeze(0)
             out[s:e] = F.scaled_dot_product_attention(
                 qt, kt, vt, is_causal=True, scale=self.scale,
                 enable_gqa=(self.num_kv_heads < self.num_heads),
