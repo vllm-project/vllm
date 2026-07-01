@@ -85,3 +85,6 @@ CachePolicyFactory.register_cache_policy(
 CachePolicyFactory.register_cache_policy(
     "arc", "vllm.v1.kv_offload.cpu.policies.arc", "ARCCachePolicy"
 )
+CachePolicyFactory.register_cache_policy(
+    "sae", "vllm.v1.kv_offload.cpu.policies.sae", "SAECachePolicy"
+)
