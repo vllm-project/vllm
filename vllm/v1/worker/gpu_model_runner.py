@@ -49,7 +49,6 @@ from vllm.distributed.parallel_state import (
     is_global_first_rank,
     prepare_communication_buffer_for_model,
 )
-from vllm.distributed.weight_transfer.base import SparseWeightPatch
 from vllm.forward_context import (
     BatchDescriptor,
     set_forward_context,
@@ -3243,44 +3242,6 @@ class GPUModelRunner(
             # get raw model out of the cudagraph wrapper.
             return self.model.unwrap()
         return self.model
-
-    def apply_sparse_weight_patches(self, patches: Iterable[SparseWeightPatch]) -> None:
-        """Apply sparse flat-index patches directly to existing model params."""
-        model = self.get_model()
-        for patch in patches:
-            param = model.get_parameter(patch.name)
-            if not param.data.is_contiguous():
-                raise NotImplementedError(
-                    "Sparse weight updates currently require contiguous params: "
-                    f"{patch.name}"
-                )
-
-            if patch.indices.dtype != torch.int32:
-                raise ValueError(
-                    "Sparse weight updates currently require int32 indices: "
-                    f"{patch.name}"
-                )
-            if patch.indices.ndim != 1 or patch.values.ndim != 1:
-                raise ValueError(
-                    f"Sparse weight patches must be 1D flattened updates: {patch.name}"
-                )
-            if patch.indices.numel() != patch.values.numel():
-                raise ValueError(
-                    "`indices` and `values` must have matching lengths for "
-                    f"{patch.name}"
-                )
-            if patch.values.dtype != param.dtype:
-                raise ValueError(
-                    f"Sparse values dtype {patch.values.dtype} does not match "
-                    f"parameter dtype {param.dtype} for {patch.name}"
-                )
-
-            flat_param = param.data.view(-1)
-            flat_param.index_copy_(
-                0,
-                patch.indices.to(device=flat_param.device, dtype=torch.long),
-                patch.values.to(device=flat_param.device),
-            )
 
     def get_supported_generation_tasks(self) -> list[GenerationTask]:
         model = self.get_model()
