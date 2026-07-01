@@ -15,7 +15,9 @@ use crate::output::{
     DefaultChatOutputProcessor, HarmonyChatOutputProcessor, validate_harmony_parser_overrides,
 };
 use crate::renderer::hf::{HfChatRenderer, MultimodalRenderInfo};
-use crate::renderer::{DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer};
+use crate::renderer::{
+    DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer, HarmonyChatRenderer,
+};
 use crate::request::ChatRequest;
 use crate::{DynChatOutputProcessor, RendererSelection};
 
@@ -61,6 +63,7 @@ impl HfChatBackend {
             )?),
             RendererSelection::DeepSeekV32 => Arc::new(DeepSeekV32ChatRenderer::new()),
             RendererSelection::DeepSeekV4 => Arc::new(DeepSeekV4ChatRenderer::new()),
+            RendererSelection::Harmony => Arc::new(HarmonyChatRenderer::new()?),
         };
 
         info!(
@@ -148,13 +151,16 @@ mod tests {
     use std::sync::Arc;
 
     use tempfile::tempdir;
+    use thiserror_ext::AsReport as _;
+    use vllm_text::Prompt;
     use vllm_text::backend::hf::TokenizerSource;
-    use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
+    use vllm_text::tokenizer::DynTokenizer;
+    use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::HfChatBackend;
-    use crate::RendererSelection;
-    use crate::backend::{ChatBackend, LoadModelBackendsOptions};
+    use crate::backend::{ChatBackend, LoadModelBackendsOptions, NewChatOutputProcessorOptions};
     use crate::request::{ChatContent, ChatMessage, ChatRequest};
+    use crate::{ParserSelection, RendererSelection};
 
     fn request_with_user_text(text: &str) -> ChatRequest {
         ChatRequest {
@@ -191,40 +197,16 @@ mod tests {
         }
     }
 
-    struct TestTokenizer;
-
-    impl Tokenizer for TestTokenizer {
-        fn encode(
-            &self,
-            _text: &str,
-            _add_special_tokens: bool,
-        ) -> vllm_text::tokenizer::Result<Vec<u32>> {
-            Ok(Vec::new())
-        }
-
-        fn decode(
-            &self,
-            _token_ids: &[u32],
-            _skip_special_tokens: bool,
-        ) -> vllm_text::tokenizer::Result<String> {
-            Ok(String::new())
-        }
-
-        fn token_to_id(&self, _token: &str) -> Option<u32> {
-            None
-        }
-    }
-
     fn test_tokenizer() -> DynTokenizer {
-        Arc::new(TestTokenizer)
+        Arc::new(TestTokenizer::new())
     }
 
-    fn render_prompt(
+    fn backend_for_selection(
         renderer: RendererSelection,
         config_json: &str,
         tokenizer_config_json: &str,
-    ) -> String {
-        let backend = HfChatBackend::from_resolved_model_files(
+    ) -> HfChatBackend {
+        HfChatBackend::from_resolved_model_files(
             resolved_files(config_json, tokenizer_config_json),
             "test-model".to_string(),
             LoadModelBackendsOptions {
@@ -236,9 +218,15 @@ mod tests {
             },
             test_tokenizer(),
         )
-        .unwrap();
+        .unwrap()
+    }
 
-        backend
+    fn render_prompt(
+        renderer: RendererSelection,
+        config_json: &str,
+        tokenizer_config_json: &str,
+    ) -> String {
+        backend_for_selection(renderer, config_json, tokenizer_config_json)
             .chat_renderer()
             .render(&request_with_user_text("hello"))
             .unwrap()
@@ -270,6 +258,35 @@ mod tests {
         );
 
         assert_eq!(prompt, "hello");
+    }
+
+    #[test]
+    fn auto_uses_harmony_renderer_and_output_processor_for_gpt_oss_model_type() {
+        let backend = backend_for_selection(
+            RendererSelection::Auto,
+            r#"{"model_type":"gpt_oss"}"#,
+            r#"{"chat_template":"{{ messages[0].content }}"}"#,
+        );
+
+        let prompt =
+            backend.chat_renderer().render(&request_with_user_text("hello")).unwrap().prompt;
+        assert!(matches!(prompt, Prompt::TokenIds(_)));
+
+        let mut request = request_with_user_text("hello");
+        let error = match backend.new_chat_output_processor(
+            &mut request,
+            NewChatOutputProcessorOptions {
+                tool_call_parser: &ParserSelection::Explicit("json".to_string()),
+                reasoning_parser: &ParserSelection::Auto,
+            },
+        ) {
+            Ok(_) => panic!("gpt_oss should reject generic parser overrides"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_report_string(),
+            "gpt_oss uses native Harmony output parsing; generic tool parser override `json` is not supported"
+        );
     }
 
     #[test]

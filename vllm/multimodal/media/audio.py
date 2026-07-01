@@ -9,6 +9,7 @@ import numpy.typing as npt
 import pybase64
 import torch
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.multimodal.audio import resample_audio_pyav
 from vllm.utils.import_utils import PlaceholderModule
@@ -235,7 +236,11 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
         self.kwargs = kwargs
 
     def load_bytes(self, data: bytes) -> tuple[npt.NDArray, float]:
-        return load_audio(BytesIO(data), sr=None)
+        return load_audio(
+            BytesIO(data),
+            sr=None,
+            max_duration_s=envs.VLLM_MAX_AUDIO_DECODE_DURATION_S,
+        )
 
     def load_base64(
         self,
@@ -245,7 +250,11 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
         return self.load_bytes(pybase64.b64decode(data))
 
     def load_file(self, filepath: Path) -> tuple[npt.NDArray, float]:
-        return load_audio(filepath, sr=None)
+        return load_audio(
+            filepath,
+            sr=None,
+            max_duration_s=envs.VLLM_MAX_AUDIO_DECODE_DURATION_S,
+        )
 
     def encode_base64(
         self,
