@@ -2003,7 +2003,7 @@ def test_maybe_evict_cached_block():
     assert len(pool.blocks) == len(block_hashes)
     # Manually add all blocks to cached_blocks
     for block, block_hash in zip(pool.blocks, block_hashes):
-        block.block_hash = block_hash
+        block.set_block_hash(block_hash)
         pool.cached_block_hash_to_block.insert(block_hash, block)
 
     block0, block1, block2, block3 = pool.blocks
@@ -3905,3 +3905,41 @@ def test_pure_swa_retention_dense_default_caches_all(monkeypatch):
         is not None
     }
     assert cached == set(range(16))
+
+
+def test_mamba_reachable_block_mask_sparsifies_retention():
+    """Mamba state-snapshot retention: with VLLM_PREFIX_CACHE_RETENTION_INTERVAL
+    the manager keeps one cached state per interval-sized segment (plus the
+    latest replay boundary) instead of a snapshot per block, which is what
+    lets a small attention block_size avoid Mamba dominating the KV pool."""
+    from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+
+    block_size = 16
+    spec = MambaSpec(
+        block_size=block_size,
+        shapes=(1, 1),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+
+    def retained(retention_interval, num_prompt_tokens=256, end_block=16):
+        m = MambaManager.reachable_block_mask(
+            start_block=0,
+            end_block=end_block,
+            alignment_tokens=block_size,
+            kv_cache_spec=spec,
+            use_eagle=False,
+            retention_interval=retention_interval,
+            num_prompt_tokens=num_prompt_tokens,
+        )
+        return None if m is None else {i for i, v in enumerate(m) if v}
+
+    # Dense default (None) -> no mask, every block cached (unchanged behavior).
+    assert retained(None) is None
+    # interval == block_size -> every block is a boundary -> stays dense.
+    assert retained(block_size) is None
+    # interval 64 = 4 blocks: segment tails at i%4==3 -> {3,7,11,15}; latest
+    # replay boundary 240//16 - 1 = 14. Sparse subset of the 16 blocks.
+    assert retained(64) == {3, 7, 11, 14, 15}
+    # interval 0 -> only the latest replay boundary (block 14).
+    assert retained(0) == {14}

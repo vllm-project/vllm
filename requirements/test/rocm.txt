@@ -130,6 +130,8 @@ cloudpickle==3.1.2
     # via
     #   -r requirements/test/../common.txt
     #   tilelang
+cohere-melody==0.9.0
+    # via -r requirements/test/rocm.in
 colorama==0.4.6
     # via
     #   perceptron
@@ -205,7 +207,6 @@ docstring-parser==0.17.0
 einops==0.8.2
     # via
     #   -r requirements/test/../common.txt
-    #   -r requirements/test/rocm.in
     #   encodec
     #   vector-quantize-pytorch
     #   vocos
@@ -499,7 +500,7 @@ mcp==1.27.0
     # via -r requirements/test/../common.txt
 mdurl==0.1.2
     # via markdown-it-py
-mistral-common==1.11.3
+mistral-common==1.11.5
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -561,7 +562,6 @@ numba==0.65.0
 numpy==2.2.6
     # via
     #   -r requirements/test/../common.txt
-    #   -r requirements/test/rocm.in
     #   accelerate
     #   albumentations
     #   bitsandbytes
@@ -630,7 +630,6 @@ opencv-python-headless==4.13.0.92
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-    #   -r requirements/test/rocm.in
     #   albumentations
     #   mistral-common
 openpyxl==3.1.5
@@ -834,7 +833,6 @@ pydantic==2.12.5
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-    #   -r requirements/test/rocm.in
     #   albumentations
     #   anthropic
     #   compressed-tensors

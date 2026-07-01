@@ -103,9 +103,12 @@ class SimpleCPUOffloadScheduler:
         assert 0 <= self.fa_gidx < len(self.cpu_kv_cache_config.kv_cache_groups)
         # FA group's own block_size; divides scheduler_block_size (the LCM)
         # but is NOT assumed to equal it.
-        self.fa_block_size: int = self.cpu_kv_cache_config.kv_cache_groups[
-            self.fa_gidx
-        ].kv_cache_spec.block_size
+        self.fa_block_size: int = (
+            self.cpu_kv_cache_config.kv_cache_groups[
+                self.fa_gidx
+            ].kv_cache_spec.block_size
+            * self.cp_world_size
+        )
         assert self.block_size % self.fa_block_size == 0
 
         logger.info(
@@ -348,10 +351,12 @@ class SimpleCPUOffloadScheduler:
         # the rest will be released along with the temp pin below.
         cpu_hit_blocks: list[list[KVCacheBlock]] = []
         for g in range(num_groups):
-            g_block_size = kv_cache_groups[g].kv_cache_spec.block_size
+            g_block_size = (
+                kv_cache_groups[g].kv_cache_spec.block_size * self.cp_world_size
+            )
             assert num_external_tokens % g_block_size == 0, (
                 f"num_external_tokens={num_external_tokens} not aligned to "
-                f"group {g} block_size={g_block_size}"
+                f"group {g} effective block_size={g_block_size}"
             )
             n_take_g = num_external_tokens // g_block_size
             cpu_hit_blocks.append(cpu_hit_blocks_full[g][:n_take_g])
@@ -599,7 +604,9 @@ class SimpleCPUOffloadScheduler:
                 already_stored_g = state.num_stored_blocks[g]
                 group_gpu_ids = block_ids_by_group[g]
 
-                g_block_size = kv_cache_groups[g].kv_cache_spec.block_size
+                g_block_size = (
+                    kv_cache_groups[g].kv_cache_spec.block_size * self.cp_world_size
+                )
                 ready_blocks_g = aligned_tokens // g_block_size
                 scannable = group_gpu_ids[already_stored_g:ready_blocks_g]
 

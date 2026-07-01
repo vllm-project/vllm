@@ -9,11 +9,13 @@ use uuid::Uuid;
 use vllm_engine_core_client::protocol::logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
 };
-use vllm_engine_core_client::protocol::stats::PrefillStats;
-use vllm_engine_core_client::protocol::{
+use vllm_engine_core_client::protocol::output::{
     EngineCoreEvent, EngineCoreEventType, EngineCoreFinishReason, EngineCoreOutput,
-    EngineCoreOutputs, EngineCoreRequest, EngineCoreSamplingParams,
+    EngineCoreOutputs,
 };
+use vllm_engine_core_client::protocol::request::EngineCoreRequest;
+use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
+use vllm_engine_core_client::protocol::stats::PrefillStats;
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::{
@@ -179,7 +181,7 @@ fn sample_generate_request(request_id: &str, max_tokens: u32) -> GenerateRequest
         trace_headers: None,
         priority: 0,
         data_parallel_rank: None,
-        reasoning_ended: None,
+        reasoning_parser_kwargs: None,
         lora_request: None,
     }
 }

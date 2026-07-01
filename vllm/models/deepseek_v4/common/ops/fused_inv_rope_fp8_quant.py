@@ -40,9 +40,18 @@ def _fused_inv_rope_fp8_quant_per_head(
     USE_GDC: tl.constexpr,
     launch_pdl: tl.constexpr,  # triton metadata
 ):
-    # int64: stride multiply overflows int32 past num_tokens=32768 (IMA).
+    # Cast every stride to int64 — without this, Python-int strides are
+    # inferred as int32 and `pid_token(int64) × stride(int32)` can lower to
+    # int32 arithmetic, wrapping past 2³¹ for large prefill batches → IMA.
     pid_token = tl.program_id(0).to(tl.int64)
     pid_gh = tl.program_id(1).to(tl.int64)
+    o_stride_token = o_stride_token.to(tl.int64)
+    o_stride_head = o_stride_head.to(tl.int64)
+    cache_stride_pos = cache_stride_pos.to(tl.int64)
+    fp8_stride_group = fp8_stride_group.to(tl.int64)
+    fp8_stride_token = fp8_stride_token.to(tl.int64)
+    scale_stride_group = scale_stride_group.to(tl.int64)
+    scale_stride_k = scale_stride_k.to(tl.int64)
 
     g = pid_gh // heads_per_group
     head_in_group = pid_gh % heads_per_group
