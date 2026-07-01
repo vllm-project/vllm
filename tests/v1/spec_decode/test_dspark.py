@@ -4,7 +4,6 @@
 import torch
 import pytest
 
-from vllm import envs
 from vllm.config.speculative import SpeculativeConfig
 from vllm.platforms import current_platform
 from vllm.models.deepseek_v4.nvidia.dspark import (
@@ -323,9 +322,8 @@ def test_dspark_speculative_config_predicates_and_hash_include_sampler():
     assert cfg.compute_hash() != hash_without_fused_sampler
 
 
-def test_dspark_env_flags_accept_boolean_strings(monkeypatch):
-    monkeypatch.setenv("VLLM_DSPARK_FUSED_MARKOV_SAMPLER", "true")
-    assert envs.environment_variables["VLLM_DSPARK_FUSED_MARKOV_SAMPLER"]()
+def test_dspark_fused_markov_sampler_defaults_enabled():
+    assert SpeculativeConfig.dspark_fused_markov_sampler is True
 
 
 def test_dspark_shares_target_embedding_and_lm_head(monkeypatch):

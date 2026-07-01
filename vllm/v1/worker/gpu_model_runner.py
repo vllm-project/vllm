@@ -4864,6 +4864,8 @@ class GPUModelRunner(
         if not draft_probs_rows:
             return None
         if len(draft_probs_rows) == 1 and draft_probs_rows[0].is_contiguous():
+            # Rejection sampling consumes this view in the same step; the
+            # persistent draft-probs buffer may be reused by the next proposal.
             return draft_probs_rows[0]
         return torch.cat(draft_probs_rows, dim=0).contiguous()
 

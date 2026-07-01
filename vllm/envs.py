@@ -261,7 +261,6 @@ if TYPE_CHECKING:
     VLLM_DSPARK_TRITON_QKV_POSTPROCESS: bool = False
     VLLM_DSPARK_TRITON_CONTEXT_KV_STORE: bool = False
     VLLM_DSPARK_MARKOV_INPLACE_ADD: bool = False
-    VLLM_DSPARK_FUSED_MARKOV_SAMPLER: bool = False
     VLLM_DSPARK_FORWARD_CUDAGRAPH: bool = False
     VLLM_DSPARK_FORWARD_CUDAGRAPH_ALLOW_TP: bool = False
     VLLM_DSPARK_FUSED_O_PROJ_QUANT: bool = False
@@ -1849,9 +1848,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_DSPARK_MARKOV_INPLACE_ADD": lambda: env_bool(
         "VLLM_DSPARK_MARKOV_INPLACE_ADD"
-    ),
-    "VLLM_DSPARK_FUSED_MARKOV_SAMPLER": lambda: env_bool(
-        "VLLM_DSPARK_FUSED_MARKOV_SAMPLER"
     ),
     "VLLM_DSPARK_FORWARD_CUDAGRAPH": lambda: env_bool(
         "VLLM_DSPARK_FORWARD_CUDAGRAPH"

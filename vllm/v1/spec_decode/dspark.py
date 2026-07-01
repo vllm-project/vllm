@@ -267,10 +267,8 @@ class DSparkProposer(DFlashProposer):
             device=device,
         )
         self._dspark_draft_probs_out: torch.Tensor | None = None
-        self.use_fused_markov_sampler = _spec_bool(
-            spec_config,
-            "dspark_fused_markov_sampler",
-            "VLLM_DSPARK_FUSED_MARKOV_SAMPLER",
+        self.use_fused_markov_sampler = bool(
+            getattr(spec_config, "dspark_fused_markov_sampler", True)
         )
         self.use_forward_cudagraph = _spec_bool(
             spec_config,

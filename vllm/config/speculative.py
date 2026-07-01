@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
-import os
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import Field, SkipValidation, field_validator, model_validator
 from typing_extensions import Self
 
+import vllm.envs as envs
 from vllm.config import LoadConfig
 from vllm.config.kernel import MoEBackend
 from vllm.config.model import HfOverrides, ModelConfig
@@ -32,9 +32,6 @@ else:
 
 logger = init_logger(__name__)
 
-
-def _env_bool(name: str) -> bool:
-    return os.getenv(name, "").lower() in ("1", "true", "yes", "on")
 
 MTPModelTypes = Literal[
     "deepseek_mtp",
@@ -285,43 +282,45 @@ class SpeculativeConfig:
     usage."""
 
     dspark_materialized_attention: bool = Field(
-        default_factory=lambda: _env_bool("VLLM_DSPARK_MATERIALIZED_ATTENTION")
+        default_factory=lambda: envs.env_bool("VLLM_DSPARK_MATERIALIZED_ATTENTION")
     )
     """DSpark-only opt-in for the materialized local attention path."""
     dspark_triton_attention: bool = Field(
-        default_factory=lambda: _env_bool("VLLM_DSPARK_TRITON_ATTENTION")
+        default_factory=lambda: envs.env_bool("VLLM_DSPARK_TRITON_ATTENTION")
     )
     """DSpark-only opt-in for the Triton materialized attention path."""
     dspark_triton_qkv_postprocess: bool = Field(
-        default_factory=lambda: _env_bool("VLLM_DSPARK_TRITON_QKV_POSTPROCESS")
+        default_factory=lambda: envs.env_bool("VLLM_DSPARK_TRITON_QKV_POSTPROCESS")
     )
     """DSpark-only opt-in for fused QKV postprocessing."""
     dspark_triton_context_kv_store: bool = Field(
-        default_factory=lambda: _env_bool("VLLM_DSPARK_TRITON_CONTEXT_KV_STORE")
+        default_factory=lambda: envs.env_bool("VLLM_DSPARK_TRITON_CONTEXT_KV_STORE")
     )
     """DSpark-only opt-in for Triton context KV stores."""
     dspark_markov_inplace_add: bool = Field(
-        default_factory=lambda: _env_bool("VLLM_DSPARK_MARKOV_INPLACE_ADD")
+        default_factory=lambda: envs.env_bool("VLLM_DSPARK_MARKOV_INPLACE_ADD")
     )
     """DSpark-only opt-in for in-place Markov residual adds."""
-    dspark_fused_markov_sampler: bool = Field(
-        default_factory=lambda: _env_bool("VLLM_DSPARK_FUSED_MARKOV_SAMPLER")
-    )
-    """DSpark-only opt-in for fused probabilistic Markov sampling."""
+    dspark_fused_markov_sampler: bool = True
+    """Use fused probabilistic Markov sampling for DSpark."""
     dspark_forward_cudagraph: bool = Field(
-        default_factory=lambda: _env_bool("VLLM_DSPARK_FORWARD_CUDAGRAPH")
+        default_factory=lambda: envs.env_bool("VLLM_DSPARK_FORWARD_CUDAGRAPH")
     )
     """DSpark-only opt-in for the draft forward CUDA graph prototype."""
     dspark_forward_cudagraph_allow_tp: bool = Field(
-        default_factory=lambda: _env_bool("VLLM_DSPARK_FORWARD_CUDAGRAPH_ALLOW_TP")
+        default_factory=lambda: envs.env_bool(
+            "VLLM_DSPARK_FORWARD_CUDAGRAPH_ALLOW_TP"
+        )
     )
     """Allow the DSpark draft forward CUDA graph under tensor parallelism."""
     dspark_fused_o_proj_quant: bool = Field(
-        default_factory=lambda: _env_bool("VLLM_DSPARK_FUSED_O_PROJ_QUANT")
+        default_factory=lambda: envs.env_bool("VLLM_DSPARK_FUSED_O_PROJ_QUANT")
     )
     """DSpark-only opt-in for fused output-projection activation quantization."""
     dspark_fused_shared_experts_quant: bool = Field(
-        default_factory=lambda: _env_bool("VLLM_DSPARK_FUSED_SHARED_EXPERTS_QUANT")
+        default_factory=lambda: envs.env_bool(
+            "VLLM_DSPARK_FUSED_SHARED_EXPERTS_QUANT"
+        )
     )
     """DSpark-only opt-in for fused shared-expert activation quantization."""
 
