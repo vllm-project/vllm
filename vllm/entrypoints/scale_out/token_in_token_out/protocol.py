@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -231,19 +231,14 @@ class GenerateResponse(BaseModel):
     )
 
 
-####### Derender (postprocessing) #######
-
-
 class DerenderChatRequest(BaseModel):
     """Request for the /v1/chat/completions/derender endpoint (non-streaming).
 
-    Wraps a complete GenerateResponse and caller-supplied metadata needed to
-    produce a fully-formed ChatCompletionResponse without a GPU.
-
-    Streaming derender would require a separate endpoint design with
-    incremental token delivery, ``OutputProcessor``-based detokenization,
-    and ``parser.parse_delta()`` instead of ``parser.parse()``.
+    Wraps a complete GenerateResponse and caller supplied metadata needed to
+    produce a fully formed ChatCompletionResponse without a GPU.
     """
+
+    stream: Literal[False] = False
 
     model: str
     generate_response: GenerateResponse
@@ -271,6 +266,8 @@ class DerenderCompletionRequest(BaseModel):
     returned by /v1/completions/render.
     """
 
+    stream: Literal[False] = False
+
     model: str
     generate_responses: list[GenerateResponse]
     prompt_tokens: list[int] | None = None
@@ -296,3 +293,101 @@ class DerenderCompletionRequest(BaseModel):
                 f"generate_responses length ({len(self.generate_responses)})"
             )
         return self
+
+
+class DerenderStreamState(BaseModel):
+    """Per sequence state for stateless streaming derender.
+
+    The client carries this between successive per chunk HTTP calls to the
+    streaming derender endpoint. All fields are plain JSON serializable data.
+    No opaque tokenizer or parser internals are stored here.
+
+    The detokenization reset strategy is as follows: For each request, we
+    rebuild the decoding state from scratch using a small window of recent
+    tokens (``prior_token_ids``). We do this by feeding those tokens one at a
+    time into ``detokenize_incrementally``, starting from an empty state. This
+    recreates the current decoding context, including any partially processed
+    multi-byte characters (tracked by read_offset). After rebuilding the state,
+    we process each new incoming token normally with ``detokenize_incrementally``.
+
+    The detokenization reset strategy performance is as follows:
+    - Each request does a fixed amount of work (based on the window size)
+    - Overall cost grows linearly with the number of chunks (O(n))
+    - This is about the same cost as continuously detokenizing without resetting
+    """
+
+    prior_token_ids: list[int] = Field(default_factory=list)
+    """Accumulated output token IDs emitted so far (grows with each chunk)."""
+
+    role_sent: bool = False
+    """True once the initial ``role: "assistant"`` delta has been emitted.
+
+    Prevents re-emitting the role on subsequent chunks even when
+    ``prior_token_ids`` is transiently empty (e.g. usage only final chunk).
+    """
+
+    # TODO: Properties used in follow on PR for tool call parsing
+    last_content: str | None = None
+    """Last emitted cumulative assistant content text."""
+
+    last_reasoning: str | None = None
+    """Last emitted cumulative reasoning text."""
+
+    last_tool_call_ids: list[str] = Field(default_factory=list)
+    """Stable tool-call IDs, assigned once when each call first appears.
+
+    Prevents ID regeneration across re-parsing.
+    """
+
+
+class DerenderChatStreamRequest(BaseModel):
+    """One chunk streaming derender request for /v1/chat/completions/derender.
+
+    The client sends one request per SSE chunk received from
+    ``/inference/v1/generate``.  Each request carries the generate chunk
+    plus the ``stream_state`` returned by the previous call (``None`` on the
+    first call).  The response contains the derendered chunk and the updated
+    state to be passed to the next call.
+
+    This implements stateless no server side session. All mutable state lives in
+    the client carried ``stream_state``.
+    """
+
+    stream: Literal[True]
+
+    model: str
+    generate_chunk: GenerateStreamResponse
+    """One SSE chunk from ``/inference/v1/generate`` (``stream=True``)."""
+
+    stream_state: DerenderStreamState | None = None
+    """Client carried detok state from the previous call. ``None`` on first."""
+
+    prompt_tokens: int | None = None
+    """Prompt token count for usage. Forwarded from the render step."""
+
+    chat_request: ChatCompletionRequest | None = None
+    """The original (post adjust_request) ChatCompletionRequest from /render."""
+
+
+class DerenderCompletionStreamRequest(BaseModel):
+    """One chunk streaming derender request for /v1/completions/derender.
+
+    Parallel to ``DerenderChatStreamRequest`` for the completions endpoint.
+    Each call processes one SSE chunk (one output sequence's delta) and
+    returns the derendered chunk plus updated state.
+    """
+
+    stream: Literal[True]
+
+    model: str
+    generate_chunk: GenerateStreamResponse
+    """One SSE chunk from ``/inference/v1/generate``."""
+
+    stream_state: DerenderStreamState | None = None
+    """Client-carried detok state. ``None`` on the first call."""
+
+    prompt_tokens: int | None = None
+    """Prompt token count for usage."""
+
+    completion_request: CompletionRequest | None = None
+    """The original (post adjust_request) CompletionRequest from /render."""

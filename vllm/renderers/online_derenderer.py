@@ -8,20 +8,32 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProbs,
     ChatCompletionRequest,
     ChatCompletionResponseChoice,
+    ChatCompletionResponseStreamChoice,
+    ChatCompletionStreamResponse,
     ChatMessage,
 )
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionLogProbs,
     CompletionResponseChoice,
+    CompletionResponseStreamChoice,
+    CompletionStreamResponse,
 )
-from vllm.entrypoints.openai.engine.protocol import ToolCall
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage, ToolCall, UsageInfo
 from vllm.entrypoints.openai.engine.serving import resolve_token_id_placeholder
-from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateResponse
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+    DerenderStreamState,
+    GenerateResponse,
+    GenerateStreamResponse,
+)
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.logger import init_logger
 from vllm.parser import Parser, ParserManager
 from vllm.renderers import BaseRenderer
 from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.detokenizer_utils import (
+    INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET,
+    detokenize_incrementally,
+)
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
@@ -160,6 +172,173 @@ class OnlineDerenderer:
 
         return choices
 
+    def _detokenize_delta(
+        self,
+        tokenizer: TokenizerLike,
+        delta_token_ids: list[int],
+        state: DerenderStreamState,
+        skip_special_tokens: bool = True,
+        spaces_between_special_tokens: bool = True,
+    ) -> tuple[str, DerenderStreamState]:
+        """Incrementally detokenize ``delta_token_ids`` from prior stream state.
+
+        Rebuilds  the sliding decode window from ``state.prior_token_ids`` by
+         replaying the trailing window of prior tokens through
+         ``detokenize_incrementally`` one token at a time, starting from an
+         empty window. This approach avoids carrying opaque tokenizer state across
+         HTTP requests, while still correctly reconstructing any partially read
+         multi-byte characters (tracked by read_offset). In contrast, a simple rebuild
+         (for example using ``convert_prompt_ids_to_tokens``) assumes everything has
+         already been fully processed. This can cause characters to be lost if a
+         multi-byte sequence (U+FFFD) is split across chunk boundaries.
+
+         Args:
+             tokenizer: The tokenizer to decode with.
+             delta_token_ids: New token IDs from this generate chunk.
+             state: Client carried detok state from the previous call.
+             skip_special_tokens: Passed through to the tokenizer.
+             spaces_between_special_tokens: Passed through to the tokenizer.
+
+         Returns:
+             (new_text, updated_state) — the delta text for this chunk and the
+             state to pass to the next call.
+        """
+        prior = state.prior_token_ids
+
+        # Replay just the trailing window (not the full history) to keep
+        # this O(1) in the number of prior tokens. The window is wide
+        # enough that any held back incomplete byte sequence (at most a
+        # few tokens for UTF-8) is fully contained within it.
+        window = prior[-(INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET + 2) :]
+        prev_tokens: list[str] = []
+        prefix_offset, read_offset = 0, 0
+        for tok_id in window:
+            new_toks, _, prefix_offset, read_offset = detokenize_incrementally(
+                tokenizer=tokenizer,
+                all_input_ids=[tok_id],
+                prev_tokens=prev_tokens,
+                prefix_offset=prefix_offset,
+                read_offset=read_offset,
+                skip_special_tokens=skip_special_tokens,
+                spaces_between_special_tokens=spaces_between_special_tokens,
+            )
+            prev_tokens = prev_tokens + new_toks
+
+        text_parts: list[str] = []
+        for tok_id in delta_token_ids:
+            # Only all_input_ids[-1] is consumed by detokenize_incrementally
+            # when prev_tokens is not None (non first iter path).
+            new_toks, text, prefix_offset, read_offset = detokenize_incrementally(
+                tokenizer=tokenizer,
+                all_input_ids=[tok_id],
+                prev_tokens=prev_tokens,
+                prefix_offset=prefix_offset,
+                read_offset=read_offset,
+                skip_special_tokens=skip_special_tokens,
+                spaces_between_special_tokens=spaces_between_special_tokens,
+            )
+            prev_tokens = prev_tokens + new_toks
+            text_parts.append(text)
+
+        updated_state = state.model_copy(
+            update={"prior_token_ids": prior + delta_token_ids}
+        )
+        return "".join(text_parts), updated_state
+
+    async def derender_chat_stream(
+        self,
+        model: str,
+        generate_chunk: GenerateStreamResponse,
+        state: DerenderStreamState | None = None,
+        chat_request: ChatCompletionRequest | None = None,
+        prompt_tokens: int | None = None,
+    ) -> tuple[ChatCompletionStreamResponse, DerenderStreamState]:
+        """Process one GenerateStreamResponse chunk for streaming chat derender.
+
+        TODO: parse path for reasoning and tool calls is implemented in future PR.
+
+        Unlike OpenAI's API, which always emits ``role: "assistant"`` on the
+        very first chunk, this emits it on the first chunk with a non empty
+        ``choices`` list. A leading usage only chunk therefore defers the
+        role to the following content chunk instead of sending an empty
+        role only delta.
+
+        Args:
+            model: Model name for the response object.
+            generate_chunk: One SSE chunk from ``/inference/v1/generate``.
+            state: Client carried detok state (``None`` for first call).
+            chat_request: Original ChatCompletionRequest from ``/render``.
+            prompt_tokens: Prompt token count for the usage chunk.
+
+        Returns:
+            (chunk, updated_state) — the derendered SSE chunk and the state
+            the client must pass to the next call.
+        """
+        if state is None:
+            state = DerenderStreamState()
+
+        if self.parser is not None and chat_request is not None:
+            # TODO: Follow on PR will implement the parse path.
+            raise NotImplementedError(
+                "Streaming chat derender with reasoning/tool parsers is not "
+                "yet implemented.  Use stream=False for parsed output."
+            )
+
+        # A single DerenderStreamState is threaded through every choice in
+        # this chunk. Correct only when there is at most one choice per SSE
+        # event (n=1, one call per index), as the streaming derender
+        # protocol assumes. Multiple choices sharing one chunk would corrupt
+        # each other's prior_token_ids.
+        if len(generate_chunk.choices) > 1:
+            raise ValueError(
+                "derender_chat_stream expects at most one choice per chunk"
+            )
+
+        tokenizer = self.renderer.get_tokenizer()
+        stream_choices: list[ChatCompletionResponseStreamChoice] = []
+        updated_state = state
+
+        for choice in generate_chunk.choices:
+            delta_tids = choice.token_ids or []
+            new_text, updated_state = self._detokenize_delta(
+                tokenizer, delta_tids, updated_state, skip_special_tokens=True
+            )
+
+            include_role = not updated_state.role_sent
+            if include_role:
+                updated_state = updated_state.model_copy(update={"role_sent": True})
+
+            delta = DeltaMessage(
+                role="assistant" if include_role else None,
+                content=new_text if new_text else None,
+            )
+            stream_choices.append(
+                ChatCompletionResponseStreamChoice(
+                    index=choice.index,
+                    delta=delta,
+                    finish_reason=choice.finish_reason,
+                )
+            )
+
+        usage: UsageInfo | None = None
+        if generate_chunk.usage is not None:
+            u = generate_chunk.usage
+            pt = prompt_tokens if prompt_tokens is not None else 0
+            ct = u.completion_tokens or 0
+            usage = UsageInfo(
+                prompt_tokens=pt,
+                completion_tokens=ct,
+                total_tokens=pt + ct,
+            )
+
+        chunk = ChatCompletionStreamResponse(
+            id=generate_chunk.request_id,
+            model=model,
+            choices=stream_choices,
+            usage=usage,
+        )
+        return chunk, updated_state
+
     async def derender_completion(
         self,
         generate_responses: list[GenerateResponse],
@@ -206,6 +385,80 @@ class OnlineDerenderer:
             total_prompt_tokens += pt
 
         return choices, total_prompt_tokens, total_completion_tokens
+
+    async def derender_completion_stream(
+        self,
+        model: str,
+        generate_chunk: GenerateStreamResponse,
+        state: DerenderStreamState | None = None,
+        prompt_tokens: int | None = None,
+    ) -> tuple[CompletionStreamResponse, DerenderStreamState]:
+        """Process one GenerateStreamResponse chunk for streaming completions.
+
+        Each call takes one SSE chunk from ``/inference/v1/generate`` plus the
+        client carried ``stream_state`` and returns a ``CompletionStreamResponse``
+        chunk and the updated state.
+
+        The generate stream emits one choice per SSE event, so this method
+        processes one output sequence at a time.  For ``n > 1`` the client
+        maintains one ``DerenderStreamState`` per ``choice.index``.
+
+        Args:
+            model: Model name for the response object.
+            generate_chunk: One SSE chunk from ``/inference/v1/generate``.
+            state: Client carried detok state (``None`` → first call).
+            prompt_tokens: Prompt token count for usage (from the render step).
+
+        Returns:
+            (chunk, updated_state) — the derendered chunk and updated state.
+        """
+        if state is None:
+            state = DerenderStreamState()
+
+        # See the equivalent check in derender_chat_stream: a single
+        # DerenderStreamState is threaded through every choice in this
+        # chunk, so more than one choice per chunk would corrupt
+        # prior_token_ids across choices.
+        if len(generate_chunk.choices) > 1:
+            raise ValueError(
+                "derender_completion_stream expects at most one choice per chunk"
+            )
+
+        tokenizer = self.renderer.get_tokenizer()
+        stream_choices: list[CompletionResponseStreamChoice] = []
+        updated_state = state
+
+        for choice in generate_chunk.choices:
+            delta_tids = choice.token_ids or []
+            new_text, updated_state = self._detokenize_delta(
+                tokenizer, delta_tids, updated_state, skip_special_tokens=True
+            )
+            stream_choices.append(
+                CompletionResponseStreamChoice(
+                    index=choice.index,
+                    text=new_text,
+                    finish_reason=choice.finish_reason,
+                )
+            )
+
+        usage: UsageInfo | None = None
+        if generate_chunk.usage is not None:
+            u = generate_chunk.usage
+            pt = prompt_tokens if prompt_tokens is not None else 0
+            ct = u.completion_tokens or 0
+            usage = UsageInfo(
+                prompt_tokens=pt,
+                completion_tokens=ct,
+                total_tokens=pt + ct,
+            )
+
+        chunk = CompletionStreamResponse(
+            id=generate_chunk.request_id,
+            model=model,
+            choices=stream_choices,
+            usage=usage,
+        )
+        return chunk, updated_state
 
 
 def _parse_token_id_placeholder(token: str) -> int | None:
