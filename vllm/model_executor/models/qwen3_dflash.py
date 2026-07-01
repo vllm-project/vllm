@@ -380,6 +380,8 @@ class DFlashQwen3Model(nn.Module):
                 num_features_to_use = len(drafter_config["target_layer_ids"])
             elif "layer_ids" in drafter_config:
                 num_features_to_use = len(drafter_config["layer_ids"])
+            elif getattr(self.config, "target_layer_ids", None):
+                num_features_to_use = len(self.config.target_layer_ids)
             if hasattr(self.config, "target_hidden_size"):
                 fc_input_size = self.config.target_hidden_size * num_features_to_use
             else:

@@ -52,7 +52,11 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
             del draft_inner.embed_tokens
         draft_inner.embed_tokens = target_embed
 
-    target_lm_head = getattr(target_model, "lm_head", None)
+    # lm_head lives on the language model, not the (possibly multimodal) outer
+    # wrapper (e.g. Qwen3.5-MoE), whose top-level lm_head is None.
+    target_lm_head = getattr(target_language_model, "lm_head", None)
+    if target_lm_head is None:
+        target_lm_head = getattr(target_model, "lm_head", None)
     draft_lm_head = getattr(draft_model, "lm_head", None)
     if target_lm_head is not None and _should_share(
         draft_model, "has_own_lm_head", draft_lm_head, target_lm_head
