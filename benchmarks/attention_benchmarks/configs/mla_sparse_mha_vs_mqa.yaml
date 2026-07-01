@@ -14,7 +14,7 @@ mode: mha_vs_mqa
 model:
   name: "deepseek-v3"
   num_layers: 60
-  num_q_heads: 128
+  num_q_heads: 16
   num_kv_heads: 1
   head_dim: 576
   kv_lora_rank: 512
@@ -111,25 +111,11 @@ batch_specs:
   - "q55227"
   - "q61726"
   - "q65536"
-  - "q68989"
-  - "q77107"
-  - "q86180"
-  - "q96321"
-  - "q107655"
-  - "q120322"
-  - "q131072"
-  - "q134480"
-  - "q150305"
-  - "q167991"
-  - "q187758"
-  - "q209852"
-  - "q234545"
-  - "q262144"
 
 backends:
   - FLASHMLA_SPARSE
 
 device: "cuda:0"
 profile_memory: true
-sparse_mla_dense_mha_max_seq_len: 32768
+sparse_mla_dense_mha_max_seq_len: 25349
 sparse_mla_topk_pattern: "random"
