@@ -276,7 +276,8 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::protocol::{EngineCoreOutput, decode_msgpack, encode_msgpack};
+    use crate::protocol::output::EngineCoreOutput;
+    use crate::protocol::{decode_msgpack, encode_msgpack};
 
     #[test]
     fn engine_core_outputs_roundtrip_finished_fields() {

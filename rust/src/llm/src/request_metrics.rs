@@ -1,7 +1,9 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use vllm_engine_core_client::protocol::output::{
+    EngineCoreEvent, EngineCoreEventType, EngineCoreOutput,
+};
 use vllm_engine_core_client::protocol::stats::PrefillStats;
-use vllm_engine_core_client::protocol::{EngineCoreEvent, EngineCoreEventType, EngineCoreOutput};
 use vllm_metrics::{
     EngineLabels, FinishedReasonLabels, METRICS, PromptTokenSourceLabels, RequestMetrics,
 };
@@ -328,8 +330,8 @@ pub(crate) fn current_unix_timestamp_secs() -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use vllm_engine_core_client::protocol::output::{EngineCoreEvent, EngineCoreEventType};
     use vllm_engine_core_client::protocol::stats::PrefillStats;
-    use vllm_engine_core_client::protocol::{EngineCoreEvent, EngineCoreEventType};
 
     use super::{RequestMetricsTracker, diff_or_zero};
 
@@ -341,7 +343,7 @@ mod tests {
             2,
             10.0,
             100.2,
-            &vllm_engine_core_client::protocol::EngineCoreOutput {
+            &vllm_engine_core_client::protocol::output::EngineCoreOutput {
                 request_id: "req-1".to_string(),
                 new_token_ids: vec![1],
                 finish_reason: None,
@@ -369,7 +371,7 @@ mod tests {
             2,
             11.5,
             100.4,
-            &vllm_engine_core_client::protocol::EngineCoreOutput {
+            &vllm_engine_core_client::protocol::output::EngineCoreOutput {
                 request_id: "req-1".to_string(),
                 new_token_ids: vec![2, 3],
                 finish_reason: None,

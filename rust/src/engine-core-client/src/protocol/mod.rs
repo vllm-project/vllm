@@ -24,18 +24,13 @@ pub mod handshake;
 pub mod logprobs;
 pub mod lora;
 pub mod multimodal;
-mod output;
-mod request;
-mod sampling;
+pub mod output;
+pub mod request;
+pub mod sampling;
 pub mod stats;
-mod structured_outputs;
+pub mod structured_outputs;
 pub mod tensor;
 pub mod utility;
-pub use dtype::ModelDtype;
-pub use output::*;
-pub use request::*;
-pub use sampling::*;
-pub use structured_outputs::*;
 
 /// Encode a Rust value into msgpack using the protocol crate's serde model.
 pub fn encode_msgpack<T>(value: &T) -> Result<Vec<u8>>

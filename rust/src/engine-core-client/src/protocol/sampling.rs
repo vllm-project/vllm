@@ -152,7 +152,8 @@ impl EngineCoreSamplingParams {
 mod tests {
     use rmpv::Value;
 
-    use crate::protocol::{EngineCoreRequest, decode_msgpack};
+    use crate::protocol::decode_msgpack;
+    use crate::protocol::request::EngineCoreRequest;
 
     /// A real `sampling_params` is a sparse `omit_defaults` map; absent fields
     /// must fall back to defaults. `python_compat` can't catch this since Rust

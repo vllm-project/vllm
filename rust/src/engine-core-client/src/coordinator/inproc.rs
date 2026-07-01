@@ -10,10 +10,9 @@ use zeromq::{XPubSocket, ZmqMessage};
 use crate::client::imp::ClientInner;
 use crate::coordinator::handle::{CoordinatorCommand, CoordinatorState};
 use crate::error::{Error, Result, bail_unexpected_coordinator_output};
-use crate::protocol::{
-    ClassifiedEngineCoreOutputs, DpControlMessage, EngineCoreOutputs, EngineCoreRequestType,
-    encode_msgpack,
-};
+use crate::protocol::encode_msgpack;
+use crate::protocol::output::{ClassifiedEngineCoreOutputs, DpControlMessage, EngineCoreOutputs};
+use crate::protocol::request::EngineCoreRequestType;
 
 /// Coordinator-to-engine `START_DP_WAVE` control payload encoded on the
 /// engine-facing coordinator socket.

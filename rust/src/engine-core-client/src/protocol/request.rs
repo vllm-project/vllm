@@ -5,10 +5,10 @@ use serde::{Deserialize, Serialize};
 use serde_default::DefaultFromSerde;
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 
-use crate::{
-    Error, Result,
-    protocol::{EngineCoreSamplingParams, OpaqueValue, lora, multimodal::MmFeatures},
-};
+use crate::protocol::multimodal::MmFeatures;
+use crate::protocol::sampling::EngineCoreSamplingParams;
+use crate::protocol::{OpaqueValue, lora};
+use crate::{Error, Result};
 
 /// Request types are encoded as single-byte protocol constants so they can be
 /// sent over the ZMQ socket without an extra encoding step.
@@ -140,9 +140,9 @@ impl EngineCoreRequest {
 mod tests {
     use rmpv::Value;
 
-    use crate::protocol::{EngineCoreSamplingParams, decode_value, encode_msgpack};
-
     use super::*;
+    use crate::protocol::sampling::EngineCoreSamplingParams;
+    use crate::protocol::{decode_value, encode_msgpack};
 
     #[test]
     fn engine_core_request_serializes_as_full_array() {

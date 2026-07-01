@@ -10,7 +10,7 @@ use tracing::{debug, error, warn};
 
 use crate::client::AbortRequest;
 use crate::client::state::OutputReceiver;
-use crate::protocol::{EngineCoreFinishReason, EngineCoreOutput};
+use crate::protocol::output::{EngineCoreFinishReason, EngineCoreOutput};
 use crate::{AbortCause, Error, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
