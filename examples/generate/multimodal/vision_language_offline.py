@@ -1377,28 +1377,6 @@ def run_llava_onevision(questions: list[str], modality: str) -> ModelRequestData
     )
 
 
-# Mantis
-def run_mantis(questions: list[str], modality: str) -> ModelRequestData:
-    assert modality == "image"
-
-    llama3_template = "<|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"  # noqa: E501
-    prompts = [llama3_template.format(f"{question}\n<image>") for question in questions]
-
-    engine_args = EngineArgs(
-        model="TIGER-Lab/Mantis-8B-siglip-llama3",
-        max_model_len=4096,
-        hf_overrides={"architectures": ["MantisForConditionalGeneration"]},
-        limit_mm_per_prompt={modality: 1},
-    )
-    stop_token_ids = [128009]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-        stop_token_ids=stop_token_ids,
-    )
-
-
 # MiniCPM-V
 def run_minicpmv_base(questions: list[str], modality: str, model_name):
     assert modality in ["image", "video", "image+video"]
@@ -2390,7 +2368,6 @@ model_example_map = {
     "llava-next": run_llava_next,
     "llava-next-video": run_llava_next_video,
     "llava-onevision": run_llava_onevision,
-    "mantis": run_mantis,
     "minicpmo": run_minicpmo,
     "minicpmv": run_minicpmv,
     "mistral3": run_mistral3,

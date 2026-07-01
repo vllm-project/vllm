@@ -57,7 +57,13 @@ def create_fp4_scale_tensor(
         rounded_m = round_up(m, 128)
         scale_n = n // block_size
         rounded_n = round_up(scale_n, 4)
-        return torch.empty(
+        # Must be zero-initialized: the swizzled scale buffer is padded to
+        # (round_up(m, 128), round_up(scale_n, 4) // 4) but the NVFP4 quant
+        # kernel does not write every padded element that the downstream
+        # NVFP4 GEMM reads. torch.empty leaves those padded scale factors
+        # uninitialized, which corrupts dequantization and causes a severe
+        # Blackwell NVFP4 decode throughput/output-length regression.
+        return torch.zeros(
             (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
         )
     else:
