@@ -298,9 +298,7 @@ class SpeculativeConfig:
     )
     """DSpark-only opt-in for the draft forward CUDA graph prototype."""
     dspark_forward_cudagraph_allow_tp: bool = Field(
-        default_factory=lambda: envs.env_bool(
-            "VLLM_DSPARK_FORWARD_CUDAGRAPH_ALLOW_TP"
-        )
+        default_factory=lambda: envs.env_bool("VLLM_DSPARK_FORWARD_CUDAGRAPH_ALLOW_TP")
     )
     """Allow the DSpark draft forward CUDA graph under tensor parallelism."""
     dspark_fused_o_proj_quant: bool = True
@@ -897,10 +895,7 @@ class SpeculativeConfig:
                             "dspark_block_size",
                             None,
                         )
-                    if (
-                        "Qwen3DSparkModel"
-                        not in self.draft_model_config.architectures
-                    ):
+                    if "Qwen3DSparkModel" not in self.draft_model_config.architectures:
                         # DeepSeek-V4-Flash DSpark reuses the full DeepSeek-V4
                         # config and its weights ship in the target checkpoint.
                         self.draft_model_config.hf_config.model_type = "deepseek_v4"

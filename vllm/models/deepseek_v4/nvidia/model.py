@@ -19,6 +19,7 @@ from vllm.distributed import (
 )
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
     hc_head_fused_kernel_tilelang,
     mhc_fused_post_pre_tilelang,
@@ -48,7 +49,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
@@ -198,10 +198,7 @@ class DeepseekV4MLP(nn.Module):
         output = kernel.apply_block_scaled_mm(
             A=out_fp8, B=down_weight, As=out_scale, Bs=down_scale
         )
-        if (
-            get_tensor_model_parallel_world_size() > 1
-            and self.down_proj.reduce_results
-        ):
+        if get_tensor_model_parallel_world_size() > 1 and self.down_proj.reduce_results:
             output = tensor_model_parallel_all_reduce(output)
         logger.info_once(
             "DSpark fused shared-expert activation+quant engaged: "
@@ -221,7 +218,6 @@ class DeepseekV4MLP(nn.Module):
         activated = self.act_fn(gate_up)
         output, _ = self.down_proj(activated)
         return output
-
 
 
 def make_deepseek_v4_expert_params_mapping(

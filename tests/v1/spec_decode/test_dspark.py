@@ -424,7 +424,7 @@ def test_dspark_speculative_config_predicates_and_hash_include_sampler():
         setattr(cfg, name, False)
 
     assert cfg.use_dspark()
-    assert not cfg.use_eagle()
+    assert cfg.use_eagle()
     hash_without_fused_sampler = cfg.compute_hash()
     cfg.dspark_fused_markov_sampler = True
     assert cfg.compute_hash() != hash_without_fused_sampler

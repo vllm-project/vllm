@@ -54,15 +54,15 @@ from vllm.v1.attention.backends.mla.sparse_mla_kernels import (
     matmul_sparse_mla_attention_with_sink,
 )
 
-from .model import (
-    DeepseekV4MoE,
-    _select_dsv4_attn_cls,
-    make_deepseek_v4_expert_params_mapping,
-)
 from .dspark_triton import (
     dspark_context_kv_store,
     dspark_qkv_postprocess,
     dspark_triton_attention,
+)
+from .model import (
+    DeepseekV4MoE,
+    _select_dsv4_attn_cls,
+    make_deepseek_v4_expert_params_mapping,
 )
 
 logger = init_logger(__name__)
@@ -283,7 +283,9 @@ class DeepSeekV4DSparkLayer(nn.Module):
             scale_hidden_blocks = (hidden_size + 127) // 128
             if wo_a_scale.shape[0] // scale_out_blocks != n_groups:
                 return None
-            wo_a_scale = wo_a_scale.view(n_groups, scale_out_blocks, scale_hidden_blocks)
+            wo_a_scale = wo_a_scale.view(
+                n_groups, scale_out_blocks, scale_hidden_blocks
+            )
         elif wo_a_scale.dim() != 3 or wo_a_scale.shape[0] != n_groups:
             return None
 
@@ -416,9 +418,7 @@ class DeepSeekV4DSparkLayer(nn.Module):
             )
         else:
             q = _rmsnorm_no_weight(q, self.attn.eps).to(x.dtype)
-            q = _apply_rope_gptj_last(
-                q, positions, self.attn.rotary_emb.cos_sin_cache
-            )
+            q = _apply_rope_gptj_last(q, positions, self.attn.rotary_emb.cos_sin_cache)
             kv = _apply_rope_gptj_last(
                 kv, positions, self.attn.rotary_emb.cos_sin_cache
             )
@@ -516,25 +516,17 @@ class DeepSeekV4DSparkLayer(nn.Module):
             else:
                 scores = torch.einsum("bqhd,bnd->bqhn", q.float(), kv.float())
                 scores *= float(self.attn.scale)
-                scores = scores.masked_fill(
-                    ~valid[:, None, None, :], float("-inf")
-                )
+                scores = scores.masked_fill(~valid[:, None, None, :], float("-inf"))
 
-                sink = self.attn.attn_sink[: self.attn.n_local_heads].view(
-                    1, 1, -1, 1
-                )
-                max_score = torch.maximum(
-                    scores.max(dim=-1, keepdim=True).values, sink
-                )
+                sink = self.attn.attn_sink[: self.attn.n_local_heads].view(1, 1, -1, 1)
+                max_score = torch.maximum(scores.max(dim=-1, keepdim=True).values, sink)
                 exp_scores = torch.exp(scores - max_score).masked_fill(
                     ~valid[:, None, None, :], 0.0
                 )
                 denom = exp_scores.sum(dim=-1, keepdim=True) + torch.exp(
                     sink - max_score
                 )
-                o = torch.einsum(
-                    "bqhn,bnd->bqhd", exp_scores / denom, kv.float()
-                )
+                o = torch.einsum("bqhn,bnd->bqhd", exp_scores / denom, kv.float())
                 o = o.to(x.dtype).reshape(
                     batch_size * block_size,
                     self.attn.n_local_heads,
@@ -1082,7 +1074,9 @@ class DeepSeekV4DSpark(nn.Module):
                     loaded_params.add(name)
                     continue
                 if ".shared_experts.w2" in name:
-                    name = name.replace(".shared_experts.w2", ".shared_experts.down_proj")
+                    name = name.replace(
+                        ".shared_experts.w2", ".shared_experts.down_proj"
+                    )
                 if name.endswith(".ffn.gate.bias"):
                     name = name.replace(
                         ".ffn.gate.bias",
