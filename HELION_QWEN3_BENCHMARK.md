@@ -110,8 +110,8 @@ dynamic** fp8 activations, **no** `weight_block_size`. So:
   `--compilation-config '{"mode":3,"custom_ops":["+quant_fp8"],"pass_config":{"fuse_norm_quant":true,"fuse_act_quant":true}}'`
   — then it swaps `rms_norm_dynamic_per_token_quant` +
   `dynamic_per_token_scaled_fp8_quant` (the per-token ops Helion was designed for)
-  and `_helion_*` kernels execute. Whether that net-beats the default fusion-off
-  cutlass path is untested.
+  and `_helion_*` kernels execute. But this is a large net loss vs the default —
+  see "Forced-fusion Helion vs default" below.
 
 ## Qwen3-8B-FP8 and Qwen3-32B-FP8
 
