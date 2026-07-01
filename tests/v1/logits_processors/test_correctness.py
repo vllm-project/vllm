@@ -1381,6 +1381,8 @@ class TestThinkingBudgetReentry:
 
         assert not holder._state[0]["in_end"]
         assert not holder._state[0]["in_think"]
+
+
 # --- Thinking budget natural-end re-entry tests (issue #45974) ---
 # After a model naturally emits </think> before exhausting its budget,
 # subsequent <think> blocks must still be tracked and budget-enforced.
@@ -1699,4 +1701,3 @@ class TestThinkingBudgetNaturalEndReentry:
         )
 
     # --- Forced-end re-entry tests ---
-
