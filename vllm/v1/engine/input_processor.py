@@ -293,10 +293,14 @@ class InputProcessor:
                 tokenization_kwargs=tokenization_kwargs,
             )
 
-        current_platform.validate_request(processed_inputs, params)
-
-        encoder_inputs, decoder_inputs = split_enc_dec_input(processed_inputs)
-        self._validate_model_inputs(encoder_inputs, decoder_inputs)
+        try:
+            current_platform.validate_request(processed_inputs, params)
+            encoder_inputs, decoder_inputs = split_enc_dec_input(processed_inputs)
+            self._validate_model_inputs(encoder_inputs, decoder_inputs)
+        except Exception:
+            if self.renderer.mm_processor_cache is not None:
+                self.renderer.clear_mm_cache()
+            raise
 
         # Mypy can be conservative for TypedDict unions; normalize access.
         if decoder_inputs["type"] == "embeds":
