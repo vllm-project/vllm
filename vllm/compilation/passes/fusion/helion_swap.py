@@ -19,6 +19,8 @@ default when ``helion`` is installed).
 
 from __future__ import annotations
 
+from typing import Any
+
 import torch
 from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
@@ -76,11 +78,28 @@ def build_helion_op_map() -> dict[torch._ops.OpOverload, torch._ops.OpOverload]:
     ``@register_kernel`` decorators that register the ``vllm_helion`` custom ops.
     """
     import vllm.kernels.helion  # noqa: F401  triggers Helion op registration
+    from vllm.kernels.helion.register import _HOP_AVAILABLE
+
+    if _HOP_AVAILABLE:
+        # The HOP path does not register torch.ops.vllm_helion custom ops, so
+        # there is nothing to swap in the post-grad graph. HOP integration must
+        # happen at the Python call site during Dynamo tracing instead.
+        logger.warning(
+            "HelionKernelSwapPass is a no-op because the Helion HOP path is "
+            "enabled (no vllm_helion custom ops to swap)."
+        )
+        return {}
+
+    def _resolve(ns: Any, name: str) -> Any:
+        try:
+            return getattr(ns, name)
+        except (AttributeError, RuntimeError):
+            return None
 
     op_map: dict[torch._ops.OpOverload, torch._ops.OpOverload] = {}
     for name in _SWAPPABLE_OP_NAMES:
-        native = getattr(torch.ops._C, name, None)
-        helion = getattr(torch.ops.vllm_helion, name, None)
+        native = _resolve(torch.ops._C, name)
+        helion = _resolve(torch.ops.vllm_helion, name)
         if native is None or helion is None:
             continue
         native_ov = native.default
