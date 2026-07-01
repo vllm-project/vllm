@@ -200,7 +200,7 @@ class DeepSeekV4Parser(ParserEngine):
 
     def _convert_args(self, raw_args: str, partial: bool) -> str:
         result = _dsml_arg_converter(raw_args, partial)
-        if partial or not self._tools:
+        if not self._tools:
             return result
         func_name = next((s.name for s in self._tool_slots if s.args == raw_args), None)
         return self._unwrap_wrapper_args(result, self._tools, func_name)

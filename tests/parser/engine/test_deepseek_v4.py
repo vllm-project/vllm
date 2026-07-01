@@ -670,6 +670,51 @@ class TestParallelUnwrapping:
         assert args == {"location": "Beijing"}
 
 
+# ── Streaming wrapper consistency ─────────────────────────────────────
+
+
+class TestStreamingWrapperConsistency:
+    """Streamed arg deltas must stay consistent with final extraction
+    when wrapper params like 'arguments' are unwrapped."""
+
+    def test_streaming_wrapper_unwrap_consistency(self, mock_tokenizer, mock_request):
+        tool = _make_tool("get_weather", {"location": {"type": "string"}})
+        tools = [tool]
+        parser = DeepSeekV4Parser(mock_tokenizer, tools=tools)
+        mock_request.tools = tools
+
+        chunks = [
+            DSML_TOOL_START,
+            _invoke(
+                "get_weather",
+                ("arguments", "false", '{"location": "NYC"}'),
+            ),
+            DSML_TOOL_END,
+        ]
+
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+        streamed_args = collect_tool_arguments(results)
+
+        final_delta, _ = results[-1]
+        finish_delta = parser.finish_streaming()
+        extracted = parser._build_extracted_result(final_delta, finish_delta)
+
+        assert extracted.tools_called is True
+        assert len(extracted.tool_calls) == 1
+
+        final_args = extracted.tool_calls[0].function.arguments
+        assert json.loads(final_args) == {"location": "NYC"}
+
+        assert '"arguments"' not in streamed_args, (
+            f"Streamed args should not contain wrapper key, got: {streamed_args!r}"
+        )
+
+        assert final_args.startswith(streamed_args), (
+            f"Extracted args {final_args!r} "
+            f"should start with streamed args {streamed_args!r}"
+        )
+
+
 # ── DelegatingParser: large delta with </think> + tool calls ─────────
 
 _DSV4_FULL_VOCAB = {
