@@ -336,7 +336,7 @@ mod tests {
             .unwrap_err();
 
         expect![[r#"
-            tool parser parsing failed: invalid Llama JSON
+            tool parser parsing failed: near "{\"name\":\"get_weather\",\"arguments\":{\"location\":\"Tokyo\"}}": invalid Llama JSON
             expected `parameters`"#]]
         .assert_eq(&error.to_report_string());
     }
@@ -474,7 +474,7 @@ mod tests {
         let error = parser.parse_chunk(r#"{"parameters":{},"name":"get_weather"}"#).unwrap_err();
 
         expect![[r#"
-            tool parser parsing failed: invalid Llama JSON
+            tool parser parsing failed: near "{\"parameters\":{},\"name\":\"get_weather\"}": invalid Llama JSON
             expected `name`"#]]
         .assert_eq(&error.to_report_string());
     }
@@ -489,7 +489,7 @@ mod tests {
             ))
             .unwrap_err();
 
-        expect!["tool parser parsing failed: invalid Llama JSON"]
+        expect![[r#"tool parser parsing failed: near " trailing": invalid Llama JSON"#]]
             .assert_eq(&error.to_report_string());
     }
 }
