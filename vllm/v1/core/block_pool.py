@@ -405,21 +405,36 @@ class BlockPool:
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block)
 
-    def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
+    def free_blocks(
+        self,
+        ordered_blocks: Iterable[KVCacheBlock],
+        prepend: bool = False,
+    ) -> None:
         """Free a list of blocks. The blocks should be ordered by their
         eviction priority, where the first block will be evicted first.
 
         Args:
             ordered_blocks: A list of blocks to free ordered by their eviction
                 priority.
+            prepend: If ``True``, blocks are inserted at the head of the free
+                queue (reused first). If ``False`` (default), blocks are
+                appended to the tail (standard LRU-like behavior).
         """
         # Materialize the iterable to allow multiple passes.
         blocks_list = list(ordered_blocks)
         for block in blocks_list:
             block.ref_cnt -= 1
-        self.free_block_queue.append_n(
-            [block for block in blocks_list if block.ref_cnt == 0 and not block.is_null]
-        )
+
+        freed = [
+            block for block in blocks_list if block.ref_cnt == 0 and not block.is_null
+        ]
+        if not freed:
+            return
+
+        if prepend:
+            self.free_block_queue.prependleft_n(freed)
+        else:
+            self.free_block_queue.append_n(freed)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.

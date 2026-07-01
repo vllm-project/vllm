@@ -97,15 +97,19 @@ class KnormFullAttentionManager(FullAttentionManager):
     def remove_skipped_blocks(
         self, request_id: str, total_computed_tokens: int
     ) -> None:
-        """Remove blocks from the prefix.
+        """Remove the *least important* blocks from the prefix.
 
-        Drains global score buffer, then frees the oldest blocks from
-        the prefix, preserving warmup region.
+        Drains the global score buffer, then evicts blocks with the
+        highest key L2 norm (lowest importance), preserving the warmup
+        region.  Blocks without scores (newly allocated, not yet observed
+        in a forward pass) are evicted last.
         """
+        # ── 1. Drain and ingest pending scores ──
         scores = drain_block_scores()
         if scores:
             self.update_block_scores(scores)
 
+        # ── 2. Determine how many tokens (blocks) to evict ──
         num_skipped_tokens = self.get_num_skipped_tokens(total_computed_tokens)
         if num_skipped_tokens <= 0:
             return
@@ -116,32 +120,66 @@ class KnormFullAttentionManager(FullAttentionManager):
             num_skipped_tokens // block_size,
             len(blocks),
         )
-        warmup_blocks = max(0, self._config.warmup_tokens // block_size)
+        warmup_blocks = max(1, self._config.warmup_tokens // block_size)
+        target_evict = num_skipped_blocks - warmup_blocks
+        if target_evict <= 0:
+            return
 
+        # ── 3. Collect candidate blocks from the eviction range ──
+        # Exclude warmup blocks and already-null blocks.
+        req_scores = self._block_scores.get(request_id, {})
+        scored: list[tuple[int, KVCacheBlock, float]] = []  # (idx, block, score)
+        unscored: list[tuple[int, KVCacheBlock]] = []  # (idx, block)
+
+        for i in range(warmup_blocks, num_skipped_blocks):
+            if i >= len(blocks):
+                continue
+            block = blocks[i]
+            if block is self._null_block:
+                continue  # skip individually; no early break
+            s = req_scores.get(i)
+            if s is not None:
+                scored.append((i, block, s))
+            else:
+                unscored.append((i, block))
+
+        # ── 4. Sort: highest score (highest norm = least important) first ──
+        scored.sort(key=lambda x: x[2], reverse=True)
+
+        # ── 5. Merge and truncate to the target count ──
+        eviction_candidates: list[tuple[int, KVCacheBlock]] = [
+            (idx, blk) for idx, blk, _ in scored
+        ]
+        eviction_candidates.extend(unscored)
+        num_to_evict = min(target_evict, len(eviction_candidates))
+        if num_to_evict <= 0:
+            return
+        to_evict = eviction_candidates[:num_to_evict]
+
+        # ── 6. Separate cached vs. uncached, replace with null_block ──
         removed_cached: list[KVCacheBlock] = []
         removed_uncached: list[KVCacheBlock] = []
 
-        for i in range(num_skipped_blocks - 1, -1, -1):
-            if i >= len(blocks):
-                continue
-            if blocks[i] is self._null_block:
-                break
-            if i < warmup_blocks:
-                break
-            if blocks[i].block_hash is None:
-                removed_uncached.append(blocks[i])
+        for idx, block in to_evict:
+            if block.block_hash is not None:
+                removed_cached.append(block)
             else:
-                removed_cached.append(blocks[i])
-            blocks[i] = self._null_block
+                removed_uncached.append(block)
+            blocks[idx] = self._null_block
 
+        # ── 7. Free blocks ──
+        # Cached blocks go to the back of the free queue (LRU — give
+        # prefix cache a chance to hit).  Uncached blocks go to the
+        # front (immediate reuse).
         if removed_cached:
             self.block_pool.free_blocks(removed_cached)
         if removed_uncached:
             self.block_pool.free_blocks(removed_uncached, prepend=True)
 
+        # ── 8. Clean up score records for evicted indices ──
         if request_id in self._block_scores:
-            for i in range(num_skipped_blocks):
-                self._block_scores[request_id].pop(i, None)
+            for idx, _ in to_evict:
+                self._block_scores[request_id].pop(idx, None)
 
     def free(self, request_id: str) -> None:
         """Free blocks and clean up score records."""
