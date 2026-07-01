@@ -240,7 +240,7 @@ mod tests {
             .unwrap_err();
 
         expect![[r#"
-            tool parser parsing failed: invalid Mistral
+            tool parser parsing failed: near "{\"arguments\":{},\"name\":\"get_weather\"}]": invalid Mistral
             expected `name`"#]]
         .assert_eq(&error.to_report_string());
     }
