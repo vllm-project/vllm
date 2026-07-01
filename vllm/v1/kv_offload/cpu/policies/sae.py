@@ -104,7 +104,18 @@ class SAECachePolicy(CachePolicy):
 
     @override
     def touch(self, keys: Iterable[OffloadKey]) -> None:
-        raise NotImplementedError
+        self._logical_timer += 1
+        touched_sids: set[int] = set()
+        for k in keys:
+            sid = self._key_to_sid.get(k)
+            if sid is None:
+                continue
+            stats = self._sid_stats[sid]
+            stats["hits"] = stats["hits"] + 1
+            stats["last_touch"] = self._logical_timer
+            touched_sids.add(sid)
+        self._open_sid = None
+        self._last_event = "touch"
 
     @override
     def evict(
@@ -114,4 +125,14 @@ class SAECachePolicy(CachePolicy):
 
     @override
     def clear(self) -> None:
-        raise NotImplementedError
+        self._blocks.clear()
+        self._sid_to_keys.clear()
+        self._key_to_sid.clear()
+        self._sid_stats.clear()
+        self._key_ghost.clear()
+        self._evictable_keys.clear()
+        self._logical_timer = 0
+        self._sid_counter = 0
+        self._lookup_count = 0
+        self._open_sid = None
+        self._last_event = "clear"
