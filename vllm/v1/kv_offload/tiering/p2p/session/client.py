@@ -87,6 +87,12 @@ class ClientRole:
         # _lookups[(req_id, h)].sent_at is None. Populated in
         # register_lookup, drained in flush_pending_lookups.
         self._unsent_lookups_by_req: dict[str, list[bytes]] = {}
+        # Tracks kv_request_ids we have already emitted a LookupMsg for,
+        # to enforce the at-most-one-LookupMsg-per-request invariant.
+        # Cleared on cancel_lookups / close so an id that is later
+        # cancelled and re-used (if that ever happens) is not falsely
+        # flagged.
+        self._flushed_req_ids: set[str] = set()
 
     # ------------------------------------------------------------------
     # Public API
@@ -214,6 +220,16 @@ class ClientRole:
             return
         now = time.monotonic()
         for req_id, hashes in self._unsent_lookups_by_req.items():
+            # At most one LookupMsg per kv_request_id per session:
+            # all block lookups for a request are registered in a
+            # single scheduler step and flushed together here.
+            # While in-flight, register_lookup() for the same
+            # (req_id, hash) is a no-op, so no new unsent entries
+            # can accumulate for a req_id after its first flush.
+            assert req_id not in self._flushed_req_ids, (
+                f"LookupMsg already sent for kv_request_id={req_id}"
+            )
+            self._flushed_req_ids.add(req_id)
             self._send(
                 {
                     TYPE_KEY: LookupMsg.TYPE,
@@ -249,6 +265,7 @@ class ClientRole:
         for k in keys:
             del self._lookups[k]
         self._unsent_lookups_by_req.pop(kv_request_id, None)
+        self._flushed_req_ids.discard(kv_request_id)
 
     def collect_results(self) -> list[LoadResult]:
         """Walk timeouts and drain completed loads.
@@ -318,4 +335,5 @@ class ClientRole:
         self._completed_loads.clear()
         self._lookups.clear()
         self._unsent_lookups_by_req.clear()
+        self._flushed_req_ids.clear()
         return failed
