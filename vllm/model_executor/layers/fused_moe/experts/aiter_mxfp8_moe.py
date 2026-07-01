@@ -78,10 +78,6 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config) -> bool:
-        # Both TP (expert_map=None) and EP are supported: under EP apply()
-        # forwards the per-rank local-expert selection to aiter as
-        # ``expert_mask``, handling both the 0/1-mask form (aiter master ON) and
-        # the -1 index-map form (master OFF). See apply().
         return True
 
     @staticmethod
