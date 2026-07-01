@@ -6,9 +6,25 @@ import torch
 # import vllm.model_executor.kernels.mhc  # noqa: F401
 import vllm.model_executor.kernels.mhc as mhc_kernels
 from vllm.model_executor.custom_op import CustomOp
+from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_tilelang
 
-HAS_TILELANG = has_tilelang()
+
+def _has_tilelang_mhc() -> bool:
+    if not has_tilelang():
+        return False
+    if current_platform.is_cuda():
+        return True
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx942
+
+        # TileLang MHC currently produces incorrect results on gfx942. Keep
+        # gfx942 on the existing torch/triton fallbacks until that path is fixed.
+        return not on_gfx942()
+    return False
+
+
+HAS_TILELANG_MHC = _has_tilelang_mhc()
 
 
 # --8<-- [start:mhc_pre]
@@ -89,7 +105,7 @@ class MHCPreOp(CustomOp):
         #         sinkhorn_repeat,
         #     )
         # else:
-        if HAS_TILELANG:
+        if HAS_TILELANG_MHC:
             return torch.ops.vllm.mhc_pre_tilelang(
                 residual,
                 fn,
@@ -224,7 +240,7 @@ class MHCPostOp(CustomOp):
         #         comb_res_mix,
         #     )
         # else:
-        if HAS_TILELANG:
+        if HAS_TILELANG_MHC:
             return torch.ops.vllm.mhc_post_tilelang(
                 x, residual, post_layer_mix, comb_res_mix
             )
@@ -310,7 +326,7 @@ class HCHeadOp(CustomOp):
         outer_shape = hidden_states.shape[:-2]
         hs_flat = hidden_states.view(-1, hc_mult, hidden_size)
 
-        if HAS_TILELANG:
+        if HAS_TILELANG_MHC:
             out = torch.ops.vllm.hc_head_fused_kernel_tilelang(
                 hs_flat,
                 hc_fn,
@@ -447,7 +463,26 @@ class MHCFusedPostPreOp(CustomOp):
         norm_weight: torch.Tensor | None = None,
         norm_eps: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        return torch.ops.vllm.mhc_fused_post_pre_tilelang(
+        if HAS_TILELANG_MHC:
+            return torch.ops.vllm.mhc_fused_post_pre_tilelang(
+                x,
+                residual,
+                post_layer_mix,
+                comb_res_mix,
+                fn,
+                hc_scale,
+                hc_base,
+                rms_eps,
+                hc_pre_eps,
+                hc_sinkhorn_eps,
+                hc_post_mult_value,
+                sinkhorn_repeat,
+                n_splits,
+                tile_n,
+                norm_weight,
+                norm_eps,
+            )
+        return self.forward_native(
             x,
             residual,
             post_layer_mix,

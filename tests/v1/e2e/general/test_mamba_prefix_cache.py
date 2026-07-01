@@ -11,6 +11,7 @@ import datasets
 import pytest
 import torch
 
+import vllm.envs as envs
 from tests.utils import create_new_process_for_each_test
 from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.config import CacheConfig
@@ -494,12 +495,7 @@ def apply_patch(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(mamba_utils, "do_mamba_copy_block", fake_copy_fn)
 
 
-@create_new_process_for_each_test()
-def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
-    run_ref_mamba_state_in_subprocess()
-    apply_patch(monkeypatch)
-    prompt_dataset = datasets.load_dataset("heheda/a_long_article")
-    full_prompt = prompt_dataset["train"][0]["text"]
+def get_mamba_prefix_cache_step_configs() -> dict[str, TestConfig]:
     tests = {
         "accept_1": TestConfig(
             num_prompt_tokens=554,
@@ -731,6 +727,27 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
         ),
     }
 
+    return tests
+
+
+def fill_following_kv_cache_block_ids(test_config: TestConfig) -> None:
+    for step_action_prev, step_action_next in zip(
+        test_config.step_actions[:-1], test_config.step_actions[1:]
+    ):
+        if len(step_action_next.kv_cache_block_ids) == 0:
+            step_action_next.kv_cache_block_ids = (
+                step_action_prev.kv_cache_block_ids.copy()
+            )
+
+
+@create_new_process_for_each_test()
+def test_mamba_prefix_cache_mrv1(monkeypatch: pytest.MonkeyPatch):
+    run_ref_mamba_state_in_subprocess()
+    apply_patch(monkeypatch)
+    prompt_dataset = datasets.load_dataset("heheda/a_long_article")
+    full_prompt = prompt_dataset["train"][0]["text"]
+    tests = get_mamba_prefix_cache_step_configs()
+
     engine = LLM(
         model=MODEL,
         enable_prefix_caching=True,
@@ -758,16 +775,7 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
         )
         global cur_step_action_idx
         cur_step_action_idx = 0
-        for step_action_prev, step_action_next in zip(
-            test_config.step_actions[:-1], test_config.step_actions[1:]
-        ):
-            if (
-                step_action_next.kv_cache_block_ids is not None
-                and len(step_action_next.kv_cache_block_ids) == 0
-            ):
-                prev_block_ids = step_action_prev.kv_cache_block_ids
-                if prev_block_ids is not None:
-                    step_action_next.kv_cache_block_ids = prev_block_ids.copy()
+        fill_following_kv_cache_block_ids(test_config)
         global step_actions
         step_actions = test_config.step_actions
         _ = engine.generate(
@@ -787,3 +795,259 @@ def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
     del engine
     torch.accelerator.empty_cache()
     cleanup_dist_env_and_memory()
+
+
+@create_new_process_for_each_test()
+def test_mamba_prefix_cache_mrv2(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    envs.disable_envs_cache()
+
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner as MRV2GPUModelRunner
+    from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
+        MambaHybridModelState,
+    )
+    from vllm.v1.worker.gpu.sample.output import SamplerOutput as MRV2SamplerOutput
+
+    events: list[int] = []
+    original_execute_model = MRV2GPUModelRunner.execute_model
+    original_sample = MRV2GPUModelRunner.sample
+    original_preprocess_state = MambaHybridModelState.preprocess_state
+    original_postprocess_state = MambaHybridModelState.postprocess_state
+    original_step_action_fn = InprocClient.get_output
+    original_allocate_slots = KVCacheManager.allocate_slots
+    captured: dict[str, Any] = {}
+
+    def temporal_states(model_state, block_tables, kv_cache_config):
+        # Qwen3-Next keeps the temporal (ssm) state as the last Mamba cache.
+        forward_context = (
+            model_state.vllm_config.compilation_config.static_forward_context
+        )
+        group_ids, _ = get_mamba_groups(kv_cache_config)
+        for group_id in group_ids:
+            block_table = block_tables[group_id]
+            for layer_name in kv_cache_config.kv_cache_groups[group_id].layer_names:
+                yield forward_context[layer_name].kv_cache[-1], block_table
+
+    def temporal_block(temporal_state, block_table, col):
+        return temporal_state[int(block_table[0, col].item())]
+
+    def wrapped_preprocess_state(
+        self: MambaHybridModelState,
+        input_batch: Any,
+        block_tables: tuple[torch.Tensor, ...],
+        kv_cache_config: KVCacheConfig,
+        num_computed_tokens: torch.Tensor,
+    ) -> None:
+        captured["block_tables"] = block_tables
+        captured["kv_cache_config"] = kv_cache_config
+        expected = (
+            None if cur_step_action is None else cur_step_action.preprocess_copy_idx
+        )
+        snapshots = []
+        if expected is not None and expected != (-1, -1):
+            for temporal, bt in temporal_states(self, block_tables, kv_cache_config):
+                snapshots.append(
+                    (temporal, bt, temporal_block(temporal, bt, expected[0]).clone())
+                )
+        ret = original_preprocess_state(
+            self, input_batch, block_tables, kv_cache_config, num_computed_tokens
+        )
+        if cur_step_action is not None:
+            req_idx = int(input_batch.idx_mapping[0].item())
+            src_col = int(self._mamba_src_col_gpu[req_idx].item())
+            off = int(self._mamba_src_off_gpu[req_idx].item())
+            dst = int(self._mamba_state_idx_gpu[req_idx].item())
+            actual = (-1, -1) if src_col < 0 or src_col == dst else (src_col + off, dst)
+            assert actual == expected, (
+                f"V2 align preprocess copy: expected={expected}, "
+                f"actual={actual}, {cur_step_action=}"
+            )
+            for temporal, bt, src_state in snapshots:
+                torch.testing.assert_close(
+                    temporal_block(temporal, bt, expected[1]), src_state
+                )
+        return ret
+
+    def wrapped_postprocess_state(
+        self: MambaHybridModelState,
+        idx_mapping: torch.Tensor,
+        num_sampled: torch.Tensor | int,
+        num_computed_tokens: torch.Tensor | None = None,
+    ) -> None:
+        action = cur_step_action
+        block_tables = captured.get("block_tables")
+        kv_cache_config = captured.get("kv_cache_config")
+        # The postprocess kernel does not expose its indices, so only the copy
+        # case is checked, by effect: snapshot the src block, expect dst == src.
+        if (
+            action is None
+            or num_computed_tokens is None
+            or block_tables is None
+            or action.postprocess_copy_idx == (-1, -1)
+        ):
+            return original_postprocess_state(
+                self, idx_mapping, num_sampled, num_computed_tokens
+            )
+        expected = action.postprocess_copy_idx
+        snapshots = [
+            (temporal, bt, temporal_block(temporal, bt, expected[0]).clone())
+            for temporal, bt in temporal_states(self, block_tables, kv_cache_config)
+        ]
+        ret = original_postprocess_state(
+            self, idx_mapping, num_sampled, num_computed_tokens
+        )
+        for temporal, bt, src_state in snapshots:
+            torch.testing.assert_close(
+                temporal_block(temporal, bt, expected[1]), src_state
+            )
+        return ret
+
+    def wrapped_execute_model(
+        self: MRV2GPUModelRunner,
+        scheduler_output: SchedulerOutput,
+        *args: Any,
+        **kwargs: Any,
+    ):
+        events.extend(
+            req.num_computed_tokens for req in scheduler_output.scheduled_new_reqs
+        )
+        events.extend(scheduler_output.scheduled_cached_reqs.num_computed_tokens)
+        if cur_step_action is not None:
+            num_scheduled_tokens = next(
+                iter(scheduler_output.num_scheduled_tokens.values())
+            )
+            assert num_scheduled_tokens == cur_step_action.num_scheduled_tokens
+        ret = original_execute_model(self, scheduler_output, *args, **kwargs)
+        if cur_step_action is not None and self.execute_model_state is not None:
+            input_batch = self.execute_model_state.input_batch
+            assert (
+                cur_step_action.num_computed_tokens_start
+                == input_batch.positions[input_batch.query_start_loc[0]].item()
+            )
+        return ret
+
+    def fake_sample(
+        self: MRV2GPUModelRunner,
+        hidden_states: torch.Tensor,
+        input_batch: Any,
+        grammar_output: Any,
+    ):
+        if cur_step_action is None:
+            return original_sample(self, hidden_states, input_batch, grammar_output)
+
+        num_reqs = input_batch.num_reqs
+        sampled_token_ids = torch.ones(
+            (num_reqs, self.num_speculative_steps + 1),
+            device=hidden_states.device,
+            dtype=torch.int64,
+        )
+        num_logits = torch.tensor(
+            input_batch.cu_num_logits_np[1 : num_reqs + 1]
+            - input_batch.cu_num_logits_np[:num_reqs],
+            device=hidden_states.device,
+            dtype=torch.int32,
+        )
+        accepted = torch.full_like(num_logits, num_accepted_tokens)
+        num_sampled = torch.minimum(accepted, num_logits)
+        prefill_lens = self.req_states.prefill_len.gpu[input_batch.idx_mapping]
+        is_chunked_prefill = input_batch.seq_lens[:num_reqs] < prefill_lens
+        num_sampled = torch.where(is_chunked_prefill, 0, num_sampled)
+        num_rejected = torch.where(is_chunked_prefill, 0, num_logits - num_sampled)
+        sampler_output = MRV2SamplerOutput(
+            sampled_token_ids=sampled_token_ids,
+            logprobs_tensors=None,
+            num_nans=None,
+            num_sampled=num_sampled,
+        )
+        return sampler_output, num_sampled, num_rejected
+
+    monkeypatch.setattr(
+        InprocClient,
+        "get_output",
+        get_fake_step_action_fn(original_step_action_fn),
+    )
+    monkeypatch.setattr(
+        KVCacheManager,
+        "allocate_slots",
+        get_fake_allocate_slots_fn(original_allocate_slots),
+    )
+    monkeypatch.setattr(MRV2GPUModelRunner, "execute_model", wrapped_execute_model)
+    monkeypatch.setattr(MRV2GPUModelRunner, "sample", fake_sample)
+    monkeypatch.setattr(
+        MambaHybridModelState, "preprocess_state", wrapped_preprocess_state
+    )
+    monkeypatch.setattr(
+        MambaHybridModelState, "postprocess_state", wrapped_postprocess_state
+    )
+
+    engine = LLM(
+        model=MODEL,
+        load_format="dummy",
+        enforce_eager=True,
+        skip_tokenizer_init=True,
+        enable_prefix_caching=True,
+        block_size=BLOCK_SIZE,
+        mamba_cache_mode="align",
+        speculative_config={
+            "method": "qwen3_next_mtp",
+            "num_speculative_tokens": num_speculative_tokens,
+        },
+        max_num_batched_tokens=3072,
+        max_model_len=BLOCK_SIZE * 12,
+        hf_overrides={"num_hidden_layers": NUM_HIDDEN_LAYERS},
+        seed=42,
+    )
+
+    try:
+        tests = get_mamba_prefix_cache_step_configs()
+
+        global step_actions
+        global cur_step_action_idx
+        global num_accepted_tokens
+        for test_name, test_config in tests.items():
+            num_accepted_tokens = test_config.num_accepted_tokens
+            cur_step_action_idx = 0
+            fill_following_kv_cache_block_ids(test_config)
+            step_actions = test_config.step_actions
+            sampling_params = SamplingParams(
+                temperature=0.0,
+                max_tokens=test_config.num_generated_tokens,
+                ignore_eos=True,
+            )
+            _ = engine.generate(
+                [TokensPrompt(prompt_token_ids=[1] * test_config.num_prompt_tokens)],
+                sampling_params=sampling_params,
+            )
+            assert cur_step_action_idx == len(test_config.step_actions), test_name
+            assert (
+                engine.llm_engine.engine_core.engine_core.scheduler.reset_prefix_cache()
+            )
+
+        step_actions = []
+        cur_step_action_idx = 0
+        num_accepted_tokens = 1
+        prompt = TokensPrompt(prompt_token_ids=[1] * (BLOCK_SIZE * 2))
+        sampling_params = SamplingParams(
+            temperature=0.0,
+            max_tokens=1,
+            ignore_eos=True,
+        )
+        _ = engine.generate([prompt], sampling_params=sampling_params)
+        first_event_count = len(events)
+        _ = engine.generate([prompt], sampling_params=sampling_params)
+        second_events = events[first_event_count:]
+        prefix_hits = [
+            num_computed_tokens
+            for num_computed_tokens in second_events
+            if num_computed_tokens >= BLOCK_SIZE
+        ]
+        assert prefix_hits, (
+            "Expected the second identical prompt to hit prefix cache, "
+            f"got events={second_events!r}"
+        )
+        assert engine.llm_engine.engine_core.engine_core.scheduler.reset_prefix_cache()
+    finally:
+        del engine
+        torch.accelerator.empty_cache()
+        cleanup_dist_env_and_memory()

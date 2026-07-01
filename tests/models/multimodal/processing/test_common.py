@@ -20,6 +20,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import batched_tensors_equal
 from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
+from vllm.platforms import current_platform
 from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 from vllm.utils.mistral import is_mistral_tokenizer
 
@@ -83,6 +84,12 @@ MM_DATA_PATCHES = {
     "glmasr": glmasr_patch_mm_data,
 }
 
+_XPU_EXCLUDED_MODEL_IDS = {
+    "baidu/Unlimited-OCR",
+    "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4",
+    "Qwen/Qwen2.5-Omni-7B-AWQ",
+}
+
 
 def _iter_model_ids_to_test(model_arch_list: AbstractSet[str]):
     for model_arch in model_arch_list:
@@ -97,7 +104,14 @@ def _iter_model_ids_to_test(model_arch_list: AbstractSet[str]):
 
 
 def _get_model_ids_to_test(model_arch_list: AbstractSet[str]):
-    return list(_iter_model_ids_to_test(model_arch_list))
+    model_ids = list(_iter_model_ids_to_test(model_arch_list))
+
+    if current_platform.is_xpu():
+        for excluded_model_id in _XPU_EXCLUDED_MODEL_IDS:
+            while excluded_model_id in model_ids:
+                model_ids.remove(excluded_model_id)
+
+    return model_ids
 
 
 def get_model_ids_to_test():
@@ -432,6 +446,12 @@ def test_processing_correctness(
         )
     if model_id == "CohereLabs/cohere-transcribe-03-2026":
         pytest.skip("Fix later")
+    if model_id.startswith("OpenMOSS-Team/MOSS-Audio-"):
+        pytest.skip(
+            "MOSS-Audio uses a custom processor that dynamically expands "
+            "audio placeholders from processed audio lengths. Its vLLM "
+            "processor paths are covered by test_moss_audio.py."
+        )
 
     _test_processing_correctness(
         model_id,

@@ -457,6 +457,12 @@ pub struct ModelObject {
     pub object: String,
     pub created: i64,
     pub owned_by: String,
+    /// Backend model path (base cards) or adapter path (LoRA cards).
+    pub root: Option<String>,
+    /// Base model a LoRA adapter derives from; `null` for base models.
+    pub parent: Option<String>,
+    /// Maximum context length; `null` for LoRA adapter cards.
+    pub max_model_len: Option<u32>,
 }
 
 /// Response body for `GET /v1/models`.

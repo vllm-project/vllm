@@ -51,6 +51,24 @@ def sample_tools() -> list[ChatCompletionToolsParam]:
     ]
 
 
+@pytest.fixture
+def sample_tools_strict() -> list[ChatCompletionToolsParam]:
+    return [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "get_weather",
+                "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+            },
+        )
+    ]
+
+
 def test_supported_structural_tag_models_include_vllm_builtins():
     assert SUPPORTED_STRUCTURAL_TAG_MODELS == (
         XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS | VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
@@ -61,11 +79,11 @@ def test_supported_structural_tag_models_include_vllm_builtins():
 @pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
 def test_get_model_structural_tag_supports_all_xgrammar_builtins(
     model: str,
-    sample_tools: list[ChatCompletionToolsParam],
+    sample_tools_strict: list[ChatCompletionToolsParam],
 ):
     tag = get_model_structural_tag(
         model=model,
-        tools=sample_tools,
+        tools=sample_tools_strict,
         tool_choice="auto",
         reasoning=False,
     )
@@ -84,45 +102,36 @@ def test_get_model_structural_tag_supports_vllm_hermes(
     )
 
     assert isinstance(tag, StructuralTag)
-    assert tag.model_dump() == {
-        "type": "structural_tag",
-        "format": {
-            "type": "tags_with_separator",
-            "tags": [
-                {
-                    "type": "tag",
-                    "begin": '<tool_call>\n{"name": "get_weather", "arguments": ',
-                    "content": {
-                        "type": "json_schema",
-                        "json_schema": {
-                            "type": "object",
-                            "properties": {"city": {"type": "string"}},
-                            "required": ["city"],
-                        },
-                        "style": "json",
-                    },
-                    "end": "}\n</tool_call>",
-                },
-                {
-                    "type": "tag",
-                    "begin": '<tool_call>{"name": "get_weather", "arguments": ',
-                    "content": {
-                        "type": "json_schema",
-                        "json_schema": {
-                            "type": "object",
-                            "properties": {"city": {"type": "string"}},
-                            "required": ["city"],
-                        },
-                        "style": "json",
-                    },
-                    "end": "}</tool_call>",
-                },
-            ],
-            "separator": "",
-            "at_least_one": True,
-            "stop_after_first": False,
-        },
+
+    # Assert the semantically meaningful structure rather than the full
+    # model_dump(), which gains version-specific keys across xgrammar releases
+    # (e.g. "any_order" was added to json_schema content in 0.2.3).
+    dump = tag.model_dump()
+    assert dump["type"] == "structural_tag"
+
+    fmt = dump["format"]
+    assert fmt["type"] == "tags_with_separator"
+    assert fmt["separator"] == ""
+    assert fmt["at_least_one"] is True
+    assert fmt["stop_after_first"] is False
+
+    expected_schema = {
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"],
     }
+    expected_tags = [
+        ('<tool_call>\n{"name": "get_weather", "arguments": ', "}\n</tool_call>"),
+        ('<tool_call>{"name": "get_weather", "arguments": ', "}</tool_call>"),
+    ]
+    assert len(fmt["tags"]) == len(expected_tags)
+    for tag_dump, (begin, end) in zip(fmt["tags"], expected_tags):
+        assert tag_dump["type"] == "tag"
+        assert tag_dump["begin"] == begin
+        assert tag_dump["end"] == end
+        content = tag_dump["content"]
+        assert content["type"] == "json_schema"
+        assert content["json_schema"] == expected_schema
 
 
 def test_hermes_required_tool_calls_use_empty_separator():
@@ -219,7 +228,7 @@ def test_non_structural_tag_parser_uses_schema_constraints(
 
 def test_get_structural_tag_disables_reasoning(
     monkeypatch: pytest.MonkeyPatch,
-    sample_tools: list[ChatCompletionToolsParam],
+    sample_tools_strict: list[ChatCompletionToolsParam],
 ):
     captured: list[bool] = []
 
@@ -235,10 +244,10 @@ def test_get_structural_tag_disables_reasoning(
     request = ChatCompletionRequest(
         messages=[],
         model="m",
-        tools=sample_tools,
+        tools=sample_tools_strict,
         tool_choice="auto",
     )
-    parser = Qwen3EngineToolParser(MagicMock(), tools=sample_tools)
+    parser = Qwen3EngineToolParser(MagicMock(), tools=sample_tools_strict)
 
     parser.get_structural_tag(request)
 
@@ -247,7 +256,7 @@ def test_get_structural_tag_disables_reasoning(
 
 def test_unified_parser_get_structural_tag_disables_reasoning(
     monkeypatch: pytest.MonkeyPatch,
-    sample_tools: list[ChatCompletionToolsParam],
+    sample_tools_strict: list[ChatCompletionToolsParam],
 ):
     captured: list[bool] = []
 
@@ -266,10 +275,10 @@ def test_unified_parser_get_structural_tag_disables_reasoning(
     request = ChatCompletionRequest(
         messages=[],
         model="m",
-        tools=sample_tools,
+        tools=sample_tools_strict,
         tool_choice="auto",
     )
-    parser = TestParser(MagicMock(), tools=sample_tools)
+    parser = TestParser(MagicMock(), tools=sample_tools_strict)
     parser.reasoning_parser = MagicMock(adjust_request=lambda request: request)
 
     parser.adjust_request(request)
@@ -279,7 +288,7 @@ def test_unified_parser_get_structural_tag_disables_reasoning(
 
 def test_xgrammar_function_parameters_are_preserved(
     monkeypatch: pytest.MonkeyPatch,
-    sample_tools: list[ChatCompletionToolsParam],
+    sample_tools_strict: list[ChatCompletionToolsParam],
 ):
     captured: list[list[dict]] = []
 
@@ -294,15 +303,31 @@ def test_xgrammar_function_parameters_are_preserved(
 
     get_model_structural_tag(
         model="llama",
-        tools=sample_tools,
+        tools=sample_tools_strict,
         tool_choice="auto",
         reasoning=False,
     )
 
     assert (
-        captured[0][0]["function"]["parameters"] == sample_tools[0].function.parameters
+        captured[0][0]["function"]["parameters"]
+        == sample_tools_strict[0].function.parameters
     )
-    assert sample_tools[0].function.parameters is not None
+    assert sample_tools_strict[0].function.parameters is not None
+
+
+@pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
+def test_auto_tool_choice_skips_structural_tag_without_strict(
+    model: str,
+    sample_tools: list[ChatCompletionToolsParam],
+):
+    tag = get_model_structural_tag(
+        model=model,
+        tools=sample_tools,
+        tool_choice="auto",
+        reasoning=False,
+    )
+
+    assert tag is None
 
 
 def test_get_function_parameters_relaxes_function_strict_false():

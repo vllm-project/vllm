@@ -245,13 +245,6 @@ def minicpmv_trunc_hf_output(hf_output: RunnerOutput, model: str) -> RunnerOutpu
     return output_ids, output_str, out_logprobs
 
 
-def minimax_vl_01_hf_output(hf_output: RunnerOutput, model: str) -> RunnerOutput:
-    output_ids, output_str, out_logprobs = hf_output
-    if output_str.endswith("<end_of_sentence>"):
-        output_str = output_str.split("<end_of_sentence>")[0]
-    return output_ids, output_str, out_logprobs
-
-
 def ultravox_trunc_hf_output(hf_output: RunnerOutput, model: str) -> RunnerOutput:
     output_ids, output_str, out_logprobs = hf_output
 
@@ -1023,17 +1016,6 @@ def minicpmv_26_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     return hf_model
 
 
-def minimax_vl_01_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
-    orig_generate = hf_model.model.generate
-
-    def _generate(self, *args, image_sizes=None, **kwargs):
-        return orig_generate(*args, decode_text=False, **kwargs)
-
-    hf_model.model.generate = types.MethodType(_generate, hf_model.model)
-
-    return hf_model
-
-
 def molmo_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for Molmo."""
     hf_processor = hf_model.processor
@@ -1235,18 +1217,6 @@ def qwen3_vl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         )
 
     hf_model.processor = processor
-    return hf_model
-
-
-def tarsier_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
-    from vllm.model_executor.models.tarsier import get_vision_encoder_info
-
-    vision_encoder_info = get_vision_encoder_info(hf_model.config)
-
-    hf_processor = hf_model.processor
-    if hf_processor.patch_size is None:
-        hf_processor.patch_size = vision_encoder_info.get_patch_size()
-
     return hf_model
 
 

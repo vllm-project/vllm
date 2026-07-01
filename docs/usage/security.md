@@ -85,6 +85,21 @@ significantly reduce the attack surface for these types of abuse.
 Also, consider setting `VLLM_MEDIA_URL_ALLOW_REDIRECTS=0` to prevent HTTP
 redirects from being followed to bypass domain restrictions.
 
+### 5. **Restrict Media Decode Sizes:**
+
+Compressed media files can expand into gigabytes of memory during decoding. vLLM
+enforces decode-size limits to prevent out-of-memory denial of service:
+
+| Environment Variable | Default | Description |
+| --- | --- | --- |
+| `VLLM_MAX_IMAGE_PIXELS` | `178956970` (~179M pixels) | Maximum decoded image size in pixels. Images exceeding this are rejected before raster memory is allocated. Default matches PIL's built-in 2x decompression-bomb threshold (~680 MB for RGB). |
+| `VLLM_MAX_AUDIO_CLIP_FILESIZE_MB` | `25` | Maximum filesize in MB for a single audio file. |
+| `VLLM_MAX_AUDIO_DECODE_DURATION_S` | `600` | Maximum decoded audio duration in seconds. Prevents compressed audio from expanding into gigabytes of float32 PCM. |
+
+Setting any of these to `0` disables the corresponding limit. This is **not
+recommended** for deployments exposed to untrusted users, as it removes the
+protection against resource-exhaustion attacks.
+
 ## Security and Firewalls: Protecting Exposed vLLM Systems
 
 While vLLM is designed to allow unsafe network services to be isolated to

@@ -145,6 +145,10 @@ class Request:
         # so the worker's broadcast slot ring stays consistent.
         self.next_decode_eligible_step = 0
 
+        # Seq of the most recent step this request was scheduled in; fences
+        # deferred block freeing (see Scheduler._free_request_blocks).
+        self.last_sched_seq = 0
+
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
         self.cache_salt: str | None = cache_salt

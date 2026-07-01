@@ -21,16 +21,24 @@ import os
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
+try:
+    from vllm.fs_io_C import batch_lookup as batch_lookup_C
+
+    _HAS_BATCH_LOOKUP_C = True
+except ImportError:
+    _HAS_BATCH_LOOKUP_C = False
+
 from typing_extensions import override
 
 from vllm.logger import init_logger
-from vllm.v1.kv_offload.base import OffloadKey, ReqContext
+from vllm.v1.kv_offload.base import LookupResult, OffloadKey, ReqContext
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
 from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     JobResult,
     RequestOffloadingContext,
+    ScheduleEndContext,
     SecondaryTierManager,
 )
 from vllm.v1.kv_offload.tiering.fs.io import load_block, store_block
@@ -56,7 +64,11 @@ class FsAsyncLookupManager(AsyncLookupManager):
     def batch_lookup(
         self, keys: list[OffloadKey], req_context: ReqContext
     ) -> Iterable[bool]:
-        return (os.path.exists(self._tier.file_mapper.get_file_name(k)) for k in keys)
+        paths = [self._tier.file_mapper.get_file_name(k) for k in keys]
+        if _HAS_BATCH_LOOKUP_C:
+            # C extension: GIL released for the entire faccessat() batch.
+            return batch_lookup_C(paths)
+        return (os.path.exists(p) for p in paths)
 
 
 class FileSystemTierManager(SecondaryTierManager):
@@ -137,8 +149,11 @@ class FileSystemTierManager(SecondaryTierManager):
         return RequestOffloadingContext()
 
     @override
-    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
-        return self._lookup_manager.lookup(key, req_context)
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
+        result = self._lookup_manager.lookup(key, req_context)
+        if result is None:
+            return LookupResult.RETRY
+        return LookupResult.HIT if result else LookupResult.MISS
 
     @override
     def submit_store(self, job_metadata: JobMetadata) -> None:
@@ -179,11 +194,15 @@ class FileSystemTierManager(SecondaryTierManager):
         )
 
     @override
+    def drain_jobs(self) -> None:
+        """Block until all in-flight transfers in the threadpool finish."""
+        self._pool.wait_idle()
+
     def on_request_finished(self, req_context: ReqContext) -> None:
         self._lookup_manager.cleanup(req_context.req_id)
 
     @override
-    def on_schedule_end(self) -> None:
+    def on_schedule_end(self, context: ScheduleEndContext) -> None:
         self._lookup_manager.flush()
 
     @override

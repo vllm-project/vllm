@@ -82,3 +82,11 @@ class CachePolicy(ABC):
 
         Ghost lists and adaptive state are also reset.
         """
+
+    def mark_evictable(self, key: OffloadKey) -> None:
+        """Called when a block's ref_cnt transitions to 0."""
+        return
+
+    def mark_non_evictable(self, key: OffloadKey) -> None:
+        """Called when a block's ref_cnt transitions from 0."""
+        return

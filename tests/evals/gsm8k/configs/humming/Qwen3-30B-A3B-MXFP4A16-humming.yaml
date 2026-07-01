@@ -1,0 +1,10 @@
+model_name: "nm-testing/Qwen3-30B-A3B-MXFP4A16"
+accuracy_threshold: 0.86
+num_questions: 1319
+num_fewshot: 5
+server_args: >-
+  --enforce-eager
+  --max-model-len 8192
+  --tensor-parallel-size 1
+  --quantization humming
+  --kernel-config.enable_flashinfer_autotune=False

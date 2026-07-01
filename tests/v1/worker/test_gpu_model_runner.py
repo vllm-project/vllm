@@ -85,7 +85,6 @@ def initialize_kv_cache(runner: GPUModelRunner):
         max_model_len=runner.max_model_len,
         max_num_batched_tokens=runner.max_num_tokens,
         device=runner.device,
-        pin_memory=runner.pin_memory,
         vocab_size=runner.model_config.get_vocab_size(),
         block_sizes=[kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size],
         kernel_block_sizes=[
@@ -1405,7 +1404,6 @@ def test_input_batch_with_kernel_block_sizes():
     max_model_len = 512
     max_num_batched_tokens = 512
     device = torch.device(DEVICE_TYPE)
-    pin_memory = False
     vocab_size = 50272
 
     # Test with different kernel block sizes
@@ -1417,7 +1415,6 @@ def test_input_batch_with_kernel_block_sizes():
         max_model_len=max_model_len,
         max_num_batched_tokens=max_num_batched_tokens,
         device=device,
-        pin_memory=pin_memory,
         vocab_size=vocab_size,
         block_sizes=block_sizes,
         kernel_block_sizes=kernel_block_sizes,
@@ -1478,7 +1475,6 @@ def test_hybrid_cache_integration(default_vllm_config, dist_init):
         max_model_len=runner.max_model_len,
         max_num_batched_tokens=runner.max_num_tokens,
         device=runner.device,
-        pin_memory=runner.pin_memory,
         vocab_size=runner.model_config.get_vocab_size(),
         block_sizes=[kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size],
         kernel_block_sizes=[16],

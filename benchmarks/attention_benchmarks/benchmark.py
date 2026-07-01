@@ -53,6 +53,16 @@ from common import (
 from vllm.v1.worker.workspace import init_workspace_manager
 
 
+def _str2bool(v) -> bool:
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ("true", "1", "yes", "t"):
+        return True
+    if v.lower() in ("false", "0", "no", "f"):
+        return False
+    raise argparse.ArgumentTypeError(f"expected a boolean, got {v!r}")
+
+
 def run_standard_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
     """Run standard attention benchmark (Flash/Triton/FlashInfer)."""
     from runner import run_attention_benchmark
@@ -485,6 +495,20 @@ def main():
         help="Prefill backends to compare (fa2, fa3, fa4). "
         "Uses the first decode backend for impl construction.",
     )
+    parser.add_argument(
+        "--fp8-output-scale",
+        type=float,
+        help="Static per-tensor scale enabling the MLA prefill FP8-output "
+        "comparison on FA4 (fused write vs standalone post-quant).",
+    )
+    parser.add_argument(
+        "--fuse-quant-op",
+        nargs="+",
+        type=_str2bool,
+        help="FP8-output write path(s) to run: false = bf16 attention + "
+        "standalone static-FP8 quant, true = FA4 writes FP8 directly. "
+        "Default: both.",
+    )
 
     # Batch specifications
     parser.add_argument(
@@ -617,6 +641,12 @@ def main():
 
         # Prefill backends (e.g., ["fa3", "fa4"])
         args.prefill_backends = yaml_config.get("prefill_backends", None)
+
+        # FP8 output benchmark knobs; CLI wins.
+        if args.fp8_output_scale is None:
+            args.fp8_output_scale = yaml_config.get("fp8_output_scale", None)
+        if args.fuse_quant_op is None:
+            args.fuse_quant_op = yaml_config.get("fuse_quant_op", None)
 
         # Check for special modes
         args.mode = yaml_config.get("mode", None)
@@ -787,8 +817,59 @@ def main():
             "skipped (timings are placeholder zeros).[/]"
         )
 
+    # FA4 fused FP8 output vs standalone post-quant, on the same fa4 kernel:
+    # the delta is the post-quant kernel the fused path removes.
+    fp8_output_scale = getattr(args, "fp8_output_scale", None)
+    if fp8_output_scale is not None:
+        decode_backend = backends[0]
+        fuse_variants = args.fuse_quant_op or [False, True]
+        label_of = {False: "post_quant", True: "fused"}
+        console.print(
+            f"[yellow]FP8 output comparison @ scale={fp8_output_scale} "
+            f"(prefill=fa4, decode impl={decode_backend})[/]"
+        )
+        fp8_results = []
+        total = len(fuse_variants) * len(args.batch_specs)
+        with tqdm(total=total, desc="FP8 output benchmarking") as pbar:
+            for spec in args.batch_specs:
+                for fuse in fuse_variants:
+                    config = BenchmarkConfig(
+                        backend=decode_backend,
+                        batch_spec=spec,
+                        num_layers=args.num_layers,
+                        head_dim=args.head_dim,
+                        num_q_heads=args.num_q_heads,
+                        num_kv_heads=args.num_kv_heads,
+                        block_size=args.block_size,
+                        device=args.device,
+                        repeats=args.repeats,
+                        warmup_iters=args.warmup_iters,
+                        profile_memory=args.profile_memory,
+                        kv_cache_dtype=args.kv_cache_dtype,
+                        use_cuda_graphs=args.cuda_graphs,
+                        prefill_backend="fa4",
+                    )
+                    result = run_benchmark(
+                        config, output_scale=fp8_output_scale, fuse_quant_op=fuse
+                    )
+                    label = label_of[fuse]
+                    labeled_config = replace(result.config, backend=label)
+                    result = replace(result, config=labeled_config)
+                    fp8_results.append(result)
+
+                    if not result.success:
+                        console.print(f"[red]Error {label} {spec}: {result.error}[/]")
+
+                    pbar.update(1)
+
+        console.print("\n[bold green]FP8 Output Results:[/]")
+        formatter = ResultsFormatter(console)
+        labels = [label_of[f] for f in fuse_variants]
+        formatter.print_table(fp8_results, labels, compare_to_fastest=True)
+        all_results = fp8_results
+
     # Handle special mode: decode_vs_prefill comparison
-    if hasattr(args, "mode") and args.mode == "decode_vs_prefill":
+    elif hasattr(args, "mode") and args.mode == "decode_vs_prefill":
         console.print("[yellow]Mode: Decode vs Prefill pipeline comparison[/]")
         console.print(
             "[dim]For each query length, testing both decode and prefill pipelines[/]"

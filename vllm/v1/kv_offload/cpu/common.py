@@ -4,7 +4,10 @@ from typing_extensions import override
 
 from vllm.v1.kv_offload.base import BlockIDsLoadStoreSpec
 
-METRIC_STORES_SKIPPED = "vllm:kv_offload_stores_skipped"
+
+class CPUOffloadingMetrics:
+    STORES_SKIPPED = "vllm:kv_offload_stores_skipped"
+    CPU_CACHE_USAGE_PERC = "vllm:kv_offload_cpu_cache_usage_perc"
 
 
 class CPULoadStoreSpec(BlockIDsLoadStoreSpec):

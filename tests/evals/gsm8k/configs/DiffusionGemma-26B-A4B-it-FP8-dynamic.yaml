@@ -1,0 +1,11 @@
+model_name: "RedHatAI/diffusiongemma-26B-A4B-it-FP8-dynamic"
+accuracy_threshold: 0.84
+num_questions: 1319
+num_fewshot: 5
+startup_max_wait_seconds: 1200
+use_chat_completions: true
+server_args: >-
+  --enforce-eager
+  --max-model-len 4096
+  --tensor-parallel-size 2
+  --attention-backend TRITON_ATTN

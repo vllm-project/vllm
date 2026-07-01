@@ -52,6 +52,8 @@ pub fn default_ready_response() -> EngineCoreReadyResponse {
         dp_stats_address: None,
         dtype: ModelDtype::Float32,
         vllm_version: "test-vllm-version".to_string(),
+        world_size: 1,
+        data_parallel_size: 1,
         kv_cache_size_tokens: None,
         kv_cache_max_concurrency: None,
     }
