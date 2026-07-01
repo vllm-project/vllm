@@ -51,12 +51,13 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
         (5120, 51200),
         (25600, 5120),
     ]
+    has_bias_list = [False]
 
     in_dtype: torch.dtype = current_platform.fp8_dtype()
     scale_dtype: torch.dtype = torch.float32
     out_dtype: torch.dtype = torch.bfloat16
     inputs = {}
-    for M, (K, N) in product(m_size_list, b_shape_list):
+    for M, (K, N), has_bias in product(m_size_list, b_shape_list, has_bias_list):
         scale = 1.0 / math.sqrt(K)
         a = (scale * (0.5 + torch.rand(M, K, dtype=torch.float32, device="cuda"))).to(
             in_dtype
@@ -69,54 +70,55 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
         scale_a = 0.5 + torch.rand((1, M), dtype=scale_dtype, device="cuda")
         scale_a = scale_a.t()
         scale_b = 0.5 + torch.rand((1, 1), dtype=scale_dtype, device="cuda")
-        bias = 0.5 * (torch.rand(N, dtype=out_dtype, device="cuda") - 0.5)
-
-        config_key = CaseKey(
-            {
-                "K": K,
-                "N": N,
-                "M": M,
-            }
+        bias = (
+            0.5 * (torch.rand(N, dtype=out_dtype, device="cuda") - 0.5)
+            if has_bias
+            else None
         )
+
+        config_key = CaseKey({"K": K, "N": N, "M": M, "bias": has_bias})
         inputs[config_key] = (c, a, b, scale_a, scale_b, bias)
 
     return inputs
 
 
-_pick_cache: dict[tuple[int, int, int], CaseKey | None] = {}
+_pick_cache: dict[tuple[int, int, int, bool], CaseKey | None] = {}
 
 
 def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | None:
     """Pick the best pre-tuned config for the given input shape.
-    Selection strategy:
-      1. Find the closest K among available configs
-         (exact match preferred).
-      2. Find the closest N among available configs
-         (exact match preferred).
-      3. Among the M values tuned for that K and N, pick
-         the smallest M >= the input's M. If the input is
-         larger than all available Ms, fall back to the largest.
+
+    K/N are picked by closest match. M is bucketed to the smallest tuned
+    M >= runtime M. The bias field must match exactly.
     """
 
     if not config_keys:
         return None
 
     c, a, b, *_ = args
+    bias = args[5] if len(args) > 5 else None
+
     M, K = a.shape
     N = b.shape[1]
+    has_bias = bias is not None
 
-    cache_key = (M, K, N)
-    cached = _pick_cache.get(cache_key)
-    if cached is not None:
-        return cached
+    cache_key = (M, K, N, has_bias)
+    if cache_key in _pick_cache:
+        return _pick_cache[cache_key]
 
     configs: dict[int, dict[int, list[int]]] = {}
     for key in config_keys:
         if key.is_default():
             continue
+
+        # Require exact bias match.
+        if key["bias"] != has_bias:
+            continue
+
         configs.setdefault(key["K"], {}).setdefault(key["N"], []).append(key["M"])
 
     if not configs:
+        _pick_cache[cache_key] = None
         return None
 
     best_K = min(configs, key=lambda s: abs(s - K))
@@ -129,6 +131,7 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
             "K": best_K,
             "N": best_N,
             "M": best_M,
+            "bias": has_bias,
         }
     )
     _pick_cache[cache_key] = result
@@ -154,7 +157,14 @@ def baseline(
     scale_b: torch.Tensor,  # [1]/[1, 1]/[N]/[N, 1]
     bias: torch.Tensor | None = None,  # [N]
 ) -> None:
-    torch.ops._C.cutlass_scaled_mm(c, a, b, scale_a, scale_b, bias)
+    out = torch.mm(a.to(torch.float32), b.to(torch.float32))
+    out = scale_a * out
+    out = scale_b.T * out
+    out = out.to(c.dtype)
+    if bias is not None:
+        out = out + bias
+
+    c.copy_(out)
 
 
 # Overwrite autotune_baseline_atol and autotune_baseline_rtol

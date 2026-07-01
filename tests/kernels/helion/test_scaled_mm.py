@@ -11,11 +11,11 @@ import pytest
 import torch
 
 from tests.kernels.helion.utils import skip_if_platform_unsupported
-from vllm import _custom_ops as ops
 from vllm.kernels.helion.case_key import CaseKey
 from vllm.kernels.helion.config_manager import ConfigManager
 from vllm.kernels.helion.ops.scaled_mm import (
     _pick_cache,
+    baseline,
     pick_config,
     scaled_mm,
 )
@@ -30,7 +30,7 @@ if not has_helion():
     )
 
 
-def _generate_input(M: int, K: int, N: int) -> tuple[Any, ...]:
+def _generate_input(M: int, K: int, N: int, has_bias: bool = False) -> tuple[Any, ...]:
     in_dtype = current_platform.fp8_dtype()
     a = torch.randn(M, K, dtype=torch.float32, device="cuda").to(in_dtype)
     b = torch.randn(N, K, dtype=torch.float32, device="cuda").to(in_dtype)
@@ -38,10 +38,12 @@ def _generate_input(M: int, K: int, N: int) -> tuple[Any, ...]:
     c = torch.empty((M, N), dtype=torch.bfloat16, device=a.device)
     scale_a = torch.randn(M, 1, dtype=torch.float32, device="cuda")
     scale_b = torch.randn(N, 1, dtype=torch.float32, device="cuda")
-    bias = torch.randn(N, dtype=torch.bfloat16, device="cuda")
 
-    args = (c, a, b, scale_a, scale_b, bias)
-    return args
+    if has_bias:
+        bias = torch.randn(N, dtype=torch.bfloat16, device="cuda")
+        return c, a, b, scale_a, scale_b, bias
+
+    return c, a, b, scale_a, scale_b
 
 
 @pytest.fixture(autouse=True)
@@ -58,29 +60,31 @@ class TestScaledMmConfigPicker:
 
     def test_config_picker_exact_match(self):
         config_keys = [
-            CaseKey({"K": 2048, "N": 4096, "M": 16}),
-            CaseKey({"K": 4096, "N": 6144, "M": 16}),
+            CaseKey({"K": 2048, "N": 4096, "M": 16, "bias": True}),
+            CaseKey({"K": 4096, "N": 6144, "M": 16, "bias": False}),
+            CaseKey({"K": 4096, "N": 6144, "M": 16, "bias": True}),
         ]
 
-        args = _generate_input(16, 4096, 6144)
+        args = _generate_input(16, 4096, 6144, True)
         selected_key = pick_config(args, config_keys)
-        assert selected_key == CaseKey({"K": 4096, "N": 6144, "M": 16})
+        assert selected_key == CaseKey({"K": 4096, "N": 6144, "M": 16, "bias": True})
 
     def test_config_picker_closest_match(self):
         config_keys = [
-            CaseKey({"K": 2048, "N": 4096, "M": 16}),
-            CaseKey({"K": 2048, "N": 4096, "M": 32}),
-            CaseKey({"K": 2048, "N": 6144, "M": 16}),
-            CaseKey({"K": 2048, "N": 6144, "M": 32}),
-            CaseKey({"K": 4096, "N": 4096, "M": 16}),
-            CaseKey({"K": 4096, "N": 4096, "M": 32}),
-            CaseKey({"K": 4096, "N": 6144, "M": 16}),
-            CaseKey({"K": 4096, "N": 6144, "M": 32}),
+            CaseKey({"K": 2048, "N": 4096, "M": 16, "bias": False}),
+            CaseKey({"K": 2048, "N": 4096, "M": 32, "bias": False}),
+            CaseKey({"K": 2048, "N": 4096, "M": 32, "bias": True}),
+            CaseKey({"K": 2048, "N": 6144, "M": 16, "bias": False}),
+            CaseKey({"K": 2048, "N": 6144, "M": 32, "bias": False}),
+            CaseKey({"K": 4096, "N": 4096, "M": 16, "bias": False}),
+            CaseKey({"K": 4096, "N": 4096, "M": 32, "bias": False}),
+            CaseKey({"K": 4096, "N": 6144, "M": 16, "bias": False}),
+            CaseKey({"K": 4096, "N": 6144, "M": 32, "bias": False}),
         ]
 
-        args = _generate_input(20, 3000, 500)
+        args = _generate_input(20, 3000, 500, False)
         selected_key = pick_config(args, config_keys)
-        assert selected_key == CaseKey({"K": 2048, "N": 4096, "M": 32})
+        assert selected_key == CaseKey({"K": 2048, "N": 4096, "M": 32, "bias": False})
 
     def test_config_picker_no_configs(self):
         config_keys: list[dict] = []
@@ -91,19 +95,20 @@ class TestScaledMmConfigPicker:
 
     def test_config_picker_fallback_to_largest(self):
         config_keys = [
-            CaseKey({"K": 2048, "N": 4096, "M": 16}),
-            CaseKey({"K": 2048, "N": 4096, "M": 32}),
-            CaseKey({"K": 2048, "N": 6144, "M": 16}),
-            CaseKey({"K": 2048, "N": 6144, "M": 32}),
-            CaseKey({"K": 4096, "N": 4096, "M": 16}),
-            CaseKey({"K": 4096, "N": 4096, "M": 32}),
-            CaseKey({"K": 4096, "N": 6144, "M": 16}),
-            CaseKey({"K": 4096, "N": 6144, "M": 32}),
+            CaseKey({"K": 2048, "N": 4096, "M": 16, "bias": False}),
+            CaseKey({"K": 2048, "N": 4096, "M": 32, "bias": False}),
+            CaseKey({"K": 2048, "N": 6144, "M": 16, "bias": False}),
+            CaseKey({"K": 2048, "N": 6144, "M": 32, "bias": False}),
+            CaseKey({"K": 4096, "N": 4096, "M": 16, "bias": False}),
+            CaseKey({"K": 4096, "N": 4096, "M": 32, "bias": False}),
+            CaseKey({"K": 4096, "N": 6144, "M": 16, "bias": False}),
+            CaseKey({"K": 4096, "N": 6144, "M": 32, "bias": False}),
+            CaseKey({"K": 4096, "N": 6144, "M": 32, "bias": True}),
         ]
 
-        args = _generate_input(64, 8192, 7000)
+        args = _generate_input(64, 8192, 7000, False)
         selected_key = pick_config(args, config_keys)
-        assert selected_key == CaseKey({"K": 4096, "N": 6144, "M": 32})
+        assert selected_key == CaseKey({"K": 4096, "N": 6144, "M": 32, "bias": False})
 
 
 def _get_8bit_types():
@@ -185,12 +190,10 @@ class TestScaledMmCorrectness:
             bias = torch.rand((N,), device=a.device, dtype=out_dtype)
 
         c_check = torch.empty((M, N), dtype=out_dtype, device=a.device)
+        c_actual = torch.empty((M, N), dtype=out_dtype, device=a.device)
 
         scaled_mm(c_check, a, b, scale_a, scale_b, bias)
-
-        c_actual = ops.cutlass_scaled_mm(
-            a, b, out_dtype=out_dtype, scale_a=scale_a, scale_b=scale_b, bias=bias
-        )
+        baseline(c_actual, a, b, scale_a, scale_b, bias)
 
         torch.testing.assert_close(c_check, c_actual, rtol=1e-1, atol=1e-1)
 
