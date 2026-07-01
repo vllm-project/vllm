@@ -143,6 +143,7 @@ def _fp8_linear_may_use_deep_gemm(module: torch.nn.Module) -> bool:
         and isinstance(module.quant_method, Fp8LinearMethod)
         and not isinstance(module.quant_method, Mxfp8OnlineLinearMethod)
         and getattr(module.quant_method, "block_quant", False)
+        and getattr(module.quant_method, "use_deep_gemm", False)
         and not getattr(module.quant_method, "use_marlin", True)
     ):
         return False
@@ -164,6 +165,10 @@ def _fused_moe_grouped_gemm_may_use_deep_gemm(module: torch.nn.Module) -> bool:
         return False
 
     quant_method = module._quant_method
+    quant_config = getattr(quant_method, "quant_config", None)
+    if getattr(quant_config, "use_deep_gemm", None) is False:
+        return False
+
     moe_quant_config = quant_method.get_fused_moe_quant_config(module.routed_experts)
 
     if (
