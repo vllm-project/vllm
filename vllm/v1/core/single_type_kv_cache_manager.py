@@ -604,7 +604,6 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             pcp_world_size=pcp_world_size,
             max_admission_blocks_per_request=max_admission_blocks_per_request,
         )
-        self.num_cached_hash_block: dict[str, int] = {}
         self._partial_hit_reqs: dict[str, tuple[int, KVCacheBlock]] = {}
         self._retained_cow_source_blocks: list[KVCacheBlock] = []
         self._kv_cache_block_copies: list[KVCacheBlockCopy] = []
@@ -856,24 +855,17 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         if boundary_tokens % self.block_size == 0:
             return
 
-        hash_idx = boundary_tokens // hash_block_size - 1
-        num_cached_hash_blocks = self.num_cached_hash_block.get(request.request_id, 0)
-        if num_cached_hash_blocks > hash_idx:
-            return
-
         blocks = self.req_to_blocks[request.request_id]
         block_idx = boundary_tokens // self.block_size
         if block_idx >= len(blocks):
             return
-        partial_hash = self.block_pool.cache_partial_block(
+        self.block_pool.cache_partial_block(
             request=request,
             block=blocks[block_idx],
             num_tokens=boundary_tokens,
             kv_cache_group_id=self.kv_cache_group_id,
             block_size=self.block_size,
         )
-        if partial_hash is not None:
-            self.num_cached_hash_block[request.request_id] = hash_idx + 1
 
     def take_kv_cache_block_copies(self) -> list[KVCacheBlockCopy]:
         copies = self._kv_cache_block_copies
@@ -881,7 +873,6 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         return copies
 
     def free(self, request_id: str) -> None:
-        self.num_cached_hash_block.pop(request_id, None)
         self._partial_hit_reqs.pop(request_id, None)
         super().free(request_id)
 
