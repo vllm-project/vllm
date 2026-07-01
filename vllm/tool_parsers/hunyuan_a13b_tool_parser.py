@@ -8,8 +8,10 @@ from typing import Any
 
 import regex as re
 
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -20,6 +22,7 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
+    Tool,
     ToolParser,
 )
 from vllm.tool_parsers.utils import consume_space
@@ -29,13 +32,12 @@ logger = init_logger(__name__)
 
 
 class HunyuanA13BToolParser(ToolParser):
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
+        super().__init__(tokenizer, tools)
 
         # Initialize state for streaming mode
         self.prev_tool_calls: list[dict] = []
         self.current_tool_id = -1
-        self.current_tool_name_sent = False
         self.streamed_args: list[str] = []  # Track arguments sent for each tool
 
         # For backward compatibility with tests
@@ -142,7 +144,7 @@ class HunyuanA13BToolParser(ToolParser):
                     function=FunctionCall(
                         name=call["name"],
                         arguments=(
-                            json.dumps(call["arguments"])
+                            json.dumps(call["arguments"], ensure_ascii=False)
                             if isinstance(call["arguments"], dict)
                             else call["arguments"]
                         ),
@@ -259,7 +261,6 @@ class HunyuanA13BToolParser(ToolParser):
                         )
                     else:
                         self.streaming_state["sent_tools"][0]["sent_name"] = True
-                    self.current_tool_name_sent = True
                     return delta
         return None
 
@@ -303,7 +304,6 @@ class HunyuanA13BToolParser(ToolParser):
                     ]
                 )
                 self.streaming_state["sent_tools"][current_idx]["sent_name"] = True
-                self.current_tool_name_sent = True
                 while len(self.streamed_args) <= current_idx:
                     self.streamed_args.append("")
                 return delta

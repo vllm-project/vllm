@@ -34,6 +34,9 @@ def test_model_experts_int8_startup(
     model_info.check_transformers_version(on_fail="skip")
 
     with vllm_runner(
-        model, dtype=dtype, enforce_eager=True, quantization="experts_int8"
+        model,
+        dtype=dtype,
+        enforce_eager=True,
+        quantization="experts_int8",
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)

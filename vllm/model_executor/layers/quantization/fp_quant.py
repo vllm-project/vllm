@@ -3,7 +3,7 @@
 
 # Supports FP-Quant compression, see https://arxiv.org/abs/2509.23202
 
-from typing import Any
+from typing import Any, Literal, cast
 
 import torch
 from torch.nn.parameter import Parameter
@@ -35,25 +35,19 @@ class FPQuantConfig(QuantizationConfig):
         hadamard_group_size: int = 32,
         forward_dtype: str = "mxfp4",
         forward_method: str = "abs_max",
-        pseudoquantization: bool = False,
         modules_to_not_convert: list[str] | None = None,
     ) -> None:
         super().__init__()
         self.hadamard_group_size = hadamard_group_size
         self.forward_dtype = forward_dtype
         self.forward_method = forward_method
-        self.pseudoquantization = pseudoquantization
         self.modules_to_not_convert = modules_to_not_convert
-
-        if pseudoquantization:
-            raise ValueError("Pseudoquantization is not supported for vLLM")
 
     def __repr__(self) -> str:
         return (
             f"FPQuantConfig(hadamard_group_size={self.hadamard_group_size}, "
             f"forward_dtype={self.forward_dtype}, "
             f"forward_method={self.forward_method}, "
-            f"pseudoquantization={self.pseudoquantization}, "
             f"modules_to_not_convert={self.modules_to_not_convert})"
         )
 
@@ -78,13 +72,11 @@ class FPQuantConfig(QuantizationConfig):
         hadamard_group_size = cls.get_from_keys(config, ["hadamard_group_size"])
         forward_dtype = cls.get_from_keys(config, ["forward_dtype"])
         forward_method = cls.get_from_keys(config, ["forward_method"])
-        pseudoquantization = cls.get_from_keys(config, ["pseudoquantization"])
         modules_to_not_convert = cls.get_from_keys(config, ["modules_to_not_convert"])
         return cls(
             hadamard_group_size,
             forward_dtype,
             forward_method,
-            pseudoquantization,
             modules_to_not_convert,
         )
 
@@ -216,19 +208,6 @@ class FPQuantLinearMethod(LinearMethodBase):
         )
         layer.register_parameter("forward_hadamard_matrix", forward_hadamard_matrix)
 
-        backward_hadamard_matrix = Parameter(
-            torch.empty(
-                self.quant_config.hadamard_group_size,
-                self.quant_config.hadamard_group_size,
-                dtype=params_dtype,
-            ),
-            requires_grad=False,
-        )
-        set_weight_attrs(
-            backward_hadamard_matrix, {"ignore_warning": True} | extra_weight_attrs
-        )
-        layer.register_parameter("backward_hadamard_matrix", backward_hadamard_matrix)
-
     def apply(
         self,
         layer: torch.nn.Module,
@@ -248,14 +227,14 @@ class FPQuantLinearMethod(LinearMethodBase):
         )
 
 
-def ceil_div(a, b):
-    return (a + b - 1) // b
-
-
 def fused_quantize_mx(
     x_flat: torch.Tensor, hadamard_matrix: torch.Tensor, forward_method: str
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return fusedQuantizeMx(x_flat, hadamard_matrix, method=forward_method)
+    return fusedQuantizeMx(
+        x_flat,
+        hadamard_matrix,
+        method=cast(Literal["quest", "abs_max"], forward_method),
+    )
 
 
 def fused_quantize_mx_fake(x_flat, hadamard_matrix, forward_method):

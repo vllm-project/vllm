@@ -1,449 +1,228 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# ruff: noqa: E501
+"""Compatibility tests for GLM-4.5 using the shared GLM XML parser."""
 
 import json
+from typing import Any, TypedDict
 
-import pytest
-
-from vllm.entrypoints.openai.protocol import FunctionCall, ToolCall
-from vllm.tokenizers import get_tokenizer
-from vllm.tool_parsers.glm4_moe_tool_parser import (
-    Glm4MoeModelToolParser,
+from tests.parser.engine.replay_harness import MockTokenizer
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionToolsParam,
+    FunctionDefinition,
 )
+from vllm.tool_parsers import ToolParserManager
+from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 
-pytest.skip("skip glm4_moe parser test", allow_module_level=True)
-# Use a common model that is likely to be available
 MODEL = "zai-org/GLM-4.5"
 
-
-@pytest.fixture(scope="module")
-def glm4_moe_tokenizer():
-    return get_tokenizer(tokenizer_name=MODEL)
-
-
-@pytest.fixture
-def glm4_moe_tool_parser(glm4_moe_tokenizer):
-    return Glm4MoeModelToolParser(glm4_moe_tokenizer)
-
-
-def assert_tool_calls(
-    actual_tool_calls: list[ToolCall], expected_tool_calls: list[ToolCall]
-):
-    assert len(actual_tool_calls) == len(expected_tool_calls)
-
-    for actual_tool_call, expected_tool_call in zip(
-        actual_tool_calls, expected_tool_calls
-    ):
-        assert isinstance(actual_tool_call.id, str)
-        assert len(actual_tool_call.id) > 0
-
-        assert actual_tool_call.type == "function"
-        assert actual_tool_call.function.name == expected_tool_call.function.name
-        # Compare arguments as JSON objects to handle formatting differences
-        actual_args = json.loads(actual_tool_call.function.arguments)
-        expected_args = json.loads(expected_tool_call.function.arguments)
-        assert actual_args == expected_args
+_GLM_VOCAB = {
+    "<think>": 50,
+    "</think>": 51,
+    "<tool_call>": 60,
+    "</tool_call>": 61,
+    "<arg_key>": 62,
+    "</arg_key>": 63,
+    "<arg_value>": 64,
+    "</arg_value>": 65,
+}
 
 
-def test_extract_tool_calls_no_tools(glm4_moe_tool_parser):
-    model_output = "This is a test"
-    extracted_tool_calls = glm4_moe_tool_parser.extract_tool_calls(
-        model_output, request=None
-    )  # type: ignore[arg-type]
-    assert not extracted_tool_calls.tools_called
-    assert extracted_tool_calls.tool_calls == []
-    assert extracted_tool_calls.content == model_output
+class _CollectedToolDelta(TypedDict):
+    name: str | None
+    args_fragments: list[str]
 
 
-@pytest.mark.parametrize(
-    ids=[
-        "single_tool_call",
-        "multiple_tool_calls",
-        "tool_call_with_content_before",
-        "tool_call_with_mixed_args",
-        "tool_call_with_chinese_content",
-    ],
-    argnames=["model_output", "expected_tool_calls", "expected_content"],
-    argvalues=[
-        (
-            """<tool_call>get_current_weather
-    <arg_key>city</arg_key>
-    <arg_value>Dallas</arg_value>
-    <arg_key>state</arg_key>
-    <arg_value>TX</arg_value>
-    <arg_key>unit</arg_key>
-    <arg_value>fahrenheit</arg_value>
-    </tool_call>""",
-            [
-                ToolCall(
-                    function=FunctionCall(
-                        name="get_current_weather",
-                        arguments=json.dumps(
-                            {
-                                "city": "Dallas",
-                                "state": "TX",
-                                "unit": "fahrenheit",
-                            }
-                        ),
-                    )
-                )
-            ],
-            None,
+def _mock_tokenizer() -> MockTokenizer:
+    return MockTokenizer(vocab=_GLM_VOCAB, tokens=[])
+
+
+def _tools() -> list[ChatCompletionToolsParam]:
+    return [
+        ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="get_current_weather",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "city": {"type": "string"},
+                        "state": {"type": "string"},
+                        "unit": {"type": "string"},
+                    },
+                },
+            ),
         ),
-        (
-            """<tool_call>get_current_weather
-    <arg_key>city</arg_key>
-    <arg_value>Dallas</arg_value>
-    <arg_key>state</arg_key>
-    <arg_value>TX</arg_value>
-    <arg_key>unit</arg_key>
-    <arg_value>fahrenheit</arg_value>
-    </tool_call>
-    <tool_call>get_current_weather
-    <arg_key>city</arg_key>
-    <arg_value>Orlando</arg_value>
-    <arg_key>state</arg_key>
-    <arg_value>FL</arg_value>
-    <arg_key>unit</arg_key>
-    <arg_value>fahrenheit</arg_value>
-    </tool_call>""",
-            [
-                ToolCall(
-                    function=FunctionCall(
-                        name="get_current_weather",
-                        arguments=json.dumps(
-                            {
-                                "city": "Dallas",
-                                "state": "TX",
-                                "unit": "fahrenheit",
-                            }
-                        ),
-                    )
-                ),
-                ToolCall(
-                    function=FunctionCall(
-                        name="get_current_weather",
-                        arguments=json.dumps(
-                            {
-                                "city": "Orlando",
-                                "state": "FL",
-                                "unit": "fahrenheit",
-                            }
-                        ),
-                    )
-                ),
-            ],
-            None,
+        ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="calculate",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "operation": {"type": "string"},
+                        "a": {"type": "number"},
+                        "b": {"type": "number"},
+                        "enabled": {"type": "boolean"},
+                    },
+                },
+            ),
         ),
-        (
-            """I'll help you check the weather. <tool_call>get_current_weather
-    <arg_key>city</arg_key>
-    <arg_value>Seattle</arg_value>
-    <arg_key>state</arg_key>
-    <arg_value>WA</arg_value>
-    <arg_key>unit</arg_key>
-    <arg_value>celsius</arg_value>
-    </tool_call>""",
-            [
-                ToolCall(
-                    function=FunctionCall(
-                        name="get_current_weather",
-                        arguments=json.dumps(
-                            {
-                                "city": "Seattle",
-                                "state": "WA",
-                                "unit": "celsius",
-                            }
-                        ),
-                    )
-                )
-            ],
-            "I'll help you check the weather.",
+        ChatCompletionToolsParam(
+            function=FunctionDefinition(name="get_time", parameters={}),
         ),
-        (
-            """<tool_call>get_current_weather
-    <arg_key>city</arg_key>
-    <arg_value>New York</arg_value>
-    <arg_key>state</arg_key>
-    <arg_value>NY</arg_value>
-    <arg_key>unit</arg_key>
-    <arg_value>celsius</arg_value>
-    </tool_call>""",
-            [
-                ToolCall(
-                    function=FunctionCall(
-                        name="get_current_weather",
-                        arguments=json.dumps(
-                            {
-                                "city": "New York",
-                                "state": "NY",
-                                "unit": "celsius",
-                            }
-                        ),
-                    )
-                )
-            ],
-            None,
-        ),
-        (
-            """I will help you get the weather.<tool_call>get_weather
-    <arg_key>city</arg_key>
-    <arg_value>Beijing</arg_value>
-    <arg_key>date</arg_key>
-    <arg_value>2025-08-01</arg_value>
-    </tool_call>""",
-            [
-                ToolCall(
-                    function=FunctionCall(
-                        name="get_weather",
-                        arguments=json.dumps(
-                            {
-                                "city": "Beijing",
-                                "date": "2025-08-01",
-                            }
-                        ),
-                    )
-                )
-            ],
-            "I will help you get the weather.",
-        ),
-    ],
-)
-def test_extract_tool_calls(
-    glm4_moe_tool_parser, model_output, expected_tool_calls, expected_content
-):
-    extracted_tool_calls = glm4_moe_tool_parser.extract_tool_calls(
-        model_output, request=None
-    )  # type: ignore[arg-type]
-    assert extracted_tool_calls.tools_called
-    assert_tool_calls(extracted_tool_calls.tool_calls, expected_tool_calls)
-
-    assert extracted_tool_calls.content == expected_content
+    ]
 
 
-def test_extract_tool_calls_with_thinking_tags(glm4_moe_tool_parser):
-    """Test tool extraction when thinking tags are present."""
-    model_output = """<think>I want to get the weather.</think>
+def _request(tools: list[ChatCompletionToolsParam]) -> ChatCompletionRequest:
+    return ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
 
-I will help you get the weather.
-<tool_call>get_weather
+
+def _parser(tools: list[ChatCompletionToolsParam] | None = None):
+    return Glm47MoeModelToolParser(_mock_tokenizer(), tools=tools)
+
+
+def _collect_tool_deltas(deltas: Any) -> dict[int, _CollectedToolDelta]:
+    calls: dict[int, _CollectedToolDelta] = {}
+    for delta in deltas:
+        if delta is None or not delta.tool_calls:
+            continue
+        for tool_call in delta.tool_calls:
+            entry = calls.setdefault(
+                tool_call.index,
+                {"name": None, "args_fragments": []},
+            )
+            function = tool_call.function
+            if function is None:
+                continue
+            if isinstance(function, dict):
+                name = function.get("name")
+                arguments = function.get("arguments")
+            else:
+                name = function.name
+                arguments = function.arguments
+            if isinstance(name, str) and name:
+                entry["name"] = name
+            if isinstance(arguments, str) and arguments:
+                entry["args_fragments"].append(arguments)
+    return calls
+
+
+def test_glm45_uses_shared_glm47_parser():
+    assert ToolParserManager.get_tool_parser("glm45") is Glm47MoeModelToolParser
+    assert ToolParserManager.get_tool_parser("glm47") is Glm47MoeModelToolParser
+
+
+def test_extract_tool_calls_with_glm45_newline_format():
+    tools = _tools()
+    parser = _parser(tools)
+    model_output = """I'll check it. <tool_call>get_current_weather
 <arg_key>city</arg_key>
-<arg_value>Beijing</arg_value>
-<arg_key>date</arg_key>
-<arg_value>2025-08-01</arg_value>
+<arg_value>Dallas</arg_value>
+<arg_key>state</arg_key>
+<arg_value>TX</arg_value>
+<arg_key>unit</arg_key>
+<arg_value>fahrenheit</arg_value>
 </tool_call>"""
 
-    extracted_tool_calls = glm4_moe_tool_parser.extract_tool_calls(
-        model_output, request=None
-    )  # type: ignore[arg-type]
+    extracted = parser.extract_tool_calls(model_output, request=_request(tools))
 
-    assert extracted_tool_calls.tools_called
-    assert len(extracted_tool_calls.tool_calls) == 1
-    assert extracted_tool_calls.tool_calls[0].function.name == "get_weather"
-
-    expected_content = """<think>I want to get the weather.</think>
-
-I will help you get the weather."""
-    assert extracted_tool_calls.content == expected_content
-
-
-def test_extract_tool_calls_malformed_xml(glm4_moe_tool_parser):
-    """Test that malformed XML is handled gracefully."""
-    model_output = """<tool_call>get_weather
-<arg_key>city</arg_key>
-<arg_value>Seattle</arg_value>
-<arg_key>incomplete_arg
-<arg_value>value</arg_value>
-</tool_call>"""
-
-    extracted_tool_calls = glm4_moe_tool_parser.extract_tool_calls(
-        model_output, request=None
-    )  # type: ignore[arg-type]
-
-    # Should handle malformed XML gracefully
-    # The parser should either extract what it can or return no tool calls
-    # depending on how robust we want the parsing to be
-    assert isinstance(extracted_tool_calls.tools_called, bool)
-    assert isinstance(extracted_tool_calls.tool_calls, list)
+    assert extracted.tools_called
+    assert extracted.content == "I'll check it."
+    assert len(extracted.tool_calls) == 1
+    tool_call = extracted.tool_calls[0]
+    assert tool_call.function.name == "get_current_weather"
+    assert json.loads(tool_call.function.arguments) == {
+        "city": "Dallas",
+        "state": "TX",
+        "unit": "fahrenheit",
+    }
 
 
-def test_extract_tool_calls_empty_arguments(glm4_moe_tool_parser):
-    """Test tool calls with no arguments."""
-    model_output = """<tool_call>get_current_time
-</tool_call>"""
-
-    extracted_tool_calls = glm4_moe_tool_parser.extract_tool_calls(
-        model_output, request=None
-    )  # type: ignore[arg-type]
-
-    assert extracted_tool_calls.tools_called
-    assert len(extracted_tool_calls.tool_calls) == 1
-    assert extracted_tool_calls.tool_calls[0].function.name == "get_current_time"
-    # Empty arguments should result in empty JSON object
-    assert extracted_tool_calls.tool_calls[0].function.arguments == "{}"
-
-
-def test_extract_tool_calls_mixed_content(glm4_moe_tool_parser):
-    """Test extraction with mixed content and multiple tool calls."""
-    model_output = """I will help you get the weather info.
-
-<tool_call>get_weather
-<arg_key>city</arg_key>
-<arg_value>Beijing</arg_value>
-<arg_key>date</arg_key>
-<arg_value>2025-08-01</arg_value>
+def test_extract_multiple_tool_calls_with_glm45_newline_format():
+    tools = _tools()
+    parser = _parser(tools)
+    model_output = """<tool_call>get_current_weather
+<arg_key>city</arg_key><arg_value>Dallas</arg_value>
 </tool_call>
-
-meaningwhile, I will also check the weather in Shanghai.
-
-<tool_call>get_weather
-<arg_key>city</arg_key>
-<arg_value>Shanghai</arg_value>
-<arg_key>date</arg_key>
-<arg_value>2025-08-01</arg_value>
+<tool_call>get_current_weather
+<arg_key>city</arg_key><arg_value>Orlando</arg_value>
 </tool_call>"""
 
-    extracted_tool_calls = glm4_moe_tool_parser.extract_tool_calls(
-        model_output, request=None
-    )  # type: ignore[arg-type]
+    extracted = parser.extract_tool_calls(model_output, request=_request(tools))
 
-    assert extracted_tool_calls.tools_called
-    assert len(extracted_tool_calls.tool_calls) == 2
-
-    # Check first tool call
-    assert extracted_tool_calls.tool_calls[0].function.name == "get_weather"
-    args1 = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
-    assert args1["city"] == "Beijing"
-    assert args1["date"] == "2025-08-01"
-
-    # Check second tool call
-    assert extracted_tool_calls.tool_calls[1].function.name == "get_weather"
-    args2 = json.loads(extracted_tool_calls.tool_calls[1].function.arguments)
-    assert args2["city"] == "Shanghai"
-    assert args2["date"] == "2025-08-01"
-
-    # Content should be everything before the first tool call
-    assert extracted_tool_calls.content == "I will help you get the weather info."
+    assert extracted.tools_called
+    assert [tc.function.name for tc in extracted.tool_calls] == [
+        "get_current_weather",
+        "get_current_weather",
+    ]
+    assert [
+        json.loads(tc.function.arguments)["city"] for tc in extracted.tool_calls
+    ] == ["Dallas", "Orlando"]
 
 
-def test_streaming_basic_functionality(glm4_moe_tool_parser):
-    """Test basic streaming functionality."""
-    # Reset streaming state
-    glm4_moe_tool_parser.current_tool_name_sent = False
-    glm4_moe_tool_parser.prev_tool_call_arr = []
-    glm4_moe_tool_parser.current_tool_id = -1
-    glm4_moe_tool_parser.streamed_args_for_tool = []
-
-    # Test with a simple tool call
-    current_text = """<tool_call>get_weather
-<arg_key>city</arg_key>
-<arg_value>Beijing</arg_value>
+def test_extract_tool_calls_coerces_schema_types():
+    tools = _tools()
+    parser = _parser(tools)
+    model_output = """<tool_call>calculate
+<arg_key>operation</arg_key><arg_value>add</arg_value>
+<arg_key>a</arg_key><arg_value>42</arg_value>
+<arg_key>b</arg_key><arg_value>3.14</arg_value>
+<arg_key>enabled</arg_key><arg_value>true</arg_value>
 </tool_call>"""
 
-    # Mock token IDs for testing
-    tool_call_start_id = glm4_moe_tool_parser.tool_call_start_token_id or 12345
-    tool_call_end_id = glm4_moe_tool_parser.tool_call_end_token_id or 12346
+    extracted = parser.extract_tool_calls(model_output, request=_request(tools))
 
-    result = glm4_moe_tool_parser.extract_tool_calls_streaming(
-        previous_text="",
-        current_text=current_text,
-        delta_text="</tool_call>",
-        previous_token_ids=[],
-        current_token_ids=[tool_call_start_id, tool_call_end_id],
-        delta_token_ids=[tool_call_end_id],
-        request=None,
+    assert extracted.tools_called
+    assert json.loads(extracted.tool_calls[0].function.arguments) == {
+        "operation": "add",
+        "a": 42,
+        "b": 3.14,
+        "enabled": True,
+    }
+
+
+def test_extract_zero_argument_tool_call_with_glm45_newline_format():
+    tools = _tools()
+    parser = _parser(tools)
+
+    extracted = parser.extract_tool_calls(
+        "<tool_call>get_time\n</tool_call>",
+        request=_request(tools),
     )
 
-    # The result behavior depends on the streaming state
-    # This test mainly ensures no exceptions are thrown
-    assert result is None or hasattr(result, "tool_calls") or hasattr(result, "content")
+    assert extracted.tools_called
+    assert extracted.tool_calls[0].function.name == "get_time"
+    assert json.loads(extracted.tool_calls[0].function.arguments) == {}
 
 
-def test_streaming_no_tool_calls(glm4_moe_tool_parser):
-    """Test streaming when there are no tool calls."""
-    current_text = "This is just regular text without any tool calls."
+def test_streaming_tool_call_with_glm45_newline_format():
+    tools = _tools()
+    parser = _parser(tools)
+    request = _request(tools)
+    chunks = [
+        "<tool_call>",
+        "get_current_weather\n",
+        "<arg_key>city</arg_key>",
+        "<arg_value>Bei",
+        "jing</arg_value>",
+        "</tool_call>",
+    ]
+    deltas = []
+    current_text = ""
 
-    result = glm4_moe_tool_parser.extract_tool_calls_streaming(
-        previous_text="This is just regular text",
-        current_text=current_text,
-        delta_text=" without any tool calls.",
-        previous_token_ids=[],
-        current_token_ids=[],
-        delta_token_ids=[],
-        request=None,
-    )
+    for chunk in chunks:
+        current_text += chunk
+        deltas.append(
+            parser.extract_tool_calls_streaming(
+                previous_text="",
+                current_text=current_text,
+                delta_text=chunk,
+                previous_token_ids=[],
+                current_token_ids=[],
+                delta_token_ids=[],
+                request=request,
+            )
+        )
 
-    # Should return the delta text as content
-    assert result is not None
-    assert hasattr(result, "content")
-    assert result.content == " without any tool calls."
-
-
-def test_streaming_with_content_before_tool_calls(glm4_moe_tool_parser):
-    """Test streaming when there's content before tool calls."""
-    # Reset streaming state
-    glm4_moe_tool_parser.current_tool_name_sent = False
-    glm4_moe_tool_parser.prev_tool_call_arr = []
-    glm4_moe_tool_parser.current_tool_id = -1
-    glm4_moe_tool_parser.streamed_args_for_tool = []
-
-    current_text = "I will help you get the weather<tool_call>"
-
-    result = glm4_moe_tool_parser.extract_tool_calls_streaming(
-        previous_text="I will help you",
-        current_text=current_text,
-        delta_text="get the weather.<tool_call>",
-        previous_token_ids=[],
-        current_token_ids=[],
-        delta_token_ids=[],
-        request=None,
-    )
-
-    # Should return content when no tool call tokens are detected
-    assert result is not None
-    assert hasattr(result, "content")
-    assert result.content == "get the weather.<tool_call>"
-
-
-def test_extract_tool_calls_special_characters(glm4_moe_tool_parser):
-    """Test tool calls with special characters and unicode."""
-    model_output = """<tool_call>send_message
-<arg_key>recipient</arg_key>
-<arg_value>Amy</arg_value>
-<arg_key>message</arg_key>
-<arg_value>It is a nice day</arg_value>
-<arg_key>priority</arg_key>
-<arg_value>high</arg_value>
-</tool_call>"""
-
-    extracted_tool_calls = glm4_moe_tool_parser.extract_tool_calls(
-        model_output, request=None
-    )  # type: ignore[arg-type]
-
-    assert extracted_tool_calls.tools_called
-    assert len(extracted_tool_calls.tool_calls) == 1
-    assert extracted_tool_calls.tool_calls[0].function.name == "send_message"
-
-    args = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
-    assert args["recipient"] == "Amy"
-    assert args["message"] == "It is a nice day"
-    assert args["priority"] == "high"
-
-
-def test_extract_tool_calls_incomplete_tool_call(glm4_moe_tool_parser):
-    """Test incomplete tool calls (missing closing tag)."""
-    model_output = """<tool_call>get_weather
-<arg_key>city</arg_key>
-<arg_value>Beijing</arg_value>
-<arg_key>date</arg_key>
-<arg_value>2025-08-01</arg_value>"""
-
-    extracted_tool_calls = glm4_moe_tool_parser.extract_tool_calls(
-        model_output, request=None
-    )  # type: ignore[arg-type]
-
-    # Incomplete tool calls should not be extracted
-    assert not extracted_tool_calls.tools_called
-    assert extracted_tool_calls.tool_calls == []
-    assert extracted_tool_calls.content == model_output
+    calls = _collect_tool_deltas(deltas)
+    assert calls[0]["name"] == "get_current_weather"
+    assert json.loads("".join(calls[0]["args_fragments"])) == {"city": "Beijing"}

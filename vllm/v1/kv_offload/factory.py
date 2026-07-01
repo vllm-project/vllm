@@ -5,10 +5,11 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
-from vllm.v1.kv_offload.spec import OffloadingSpec
+from vllm.v1.kv_offload.base import OffloadingSpec
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)
 
@@ -29,10 +30,7 @@ class OffloadingSpecFactory:
         cls._registry[name] = loader
 
     @classmethod
-    def create_spec(
-        cls,
-        config: "VllmConfig",
-    ) -> OffloadingSpec:
+    def get_spec_cls(cls, config: "VllmConfig") -> type[OffloadingSpec]:
         kv_transfer_config = config.kv_transfer_config
         assert kv_transfer_config is not None
         extra_config = kv_transfer_config.kv_connector_extra_config
@@ -46,11 +44,30 @@ class OffloadingSpecFactory:
             spec_module = importlib.import_module(spec_module_path)
             spec_cls = getattr(spec_module, spec_name)
         assert issubclass(spec_cls, OffloadingSpec)
+        return spec_cls
+
+    @classmethod
+    def create_spec(
+        cls,
+        config: "VllmConfig",
+        kv_cache_config: "KVCacheConfig",
+    ) -> OffloadingSpec:
+        kv_transfer_config = config.kv_transfer_config
+        assert kv_transfer_config is not None
+        spec_name = kv_transfer_config.kv_connector_extra_config.get(
+            "spec_name", "CPUOffloadingSpec"
+        )
+        spec_cls = cls.get_spec_cls(config)
         logger.info("Creating offloading spec with name: %s", spec_name)
-        return spec_cls(config)
+        return spec_cls(config, kv_cache_config)
 
 
 # Register various specs here.
 OffloadingSpecFactory.register_spec(
-    "CPUOffloadingSpec", "vllm.v1.kv_offload.cpu", "CPUOffloadingSpec"
+    "CPUOffloadingSpec", "vllm.v1.kv_offload.cpu.spec", "CPUOffloadingSpec"
+)
+OffloadingSpecFactory.register_spec(
+    "TieringOffloadingSpec",
+    "vllm.v1.kv_offload.tiering.spec",
+    "TieringOffloadingSpec",
 )

@@ -9,14 +9,10 @@ import time
 from collections.abc import Callable
 from functools import cache
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import huggingface_hub
-from huggingface_hub import (
-    hf_hub_download,
-    try_to_load_from_cache,
-)
-from huggingface_hub import list_repo_files as hf_list_repo_files
+from huggingface_hub import HfApi, try_to_load_from_cache
 from huggingface_hub.utils import (
     EntryNotFoundError,
     HfHubHTTPError,
@@ -27,23 +23,30 @@ from huggingface_hub.utils import (
 
 from vllm import envs
 from vllm.logger import init_logger
+from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 
+_hf_api: HfApi | None = None
 
-def _get_hf_token() -> str | None:
-    """
-    Get the HuggingFace token from environment variable.
 
-    Returns None if the token is not set, is an empty string,
-    or contains only whitespace.
-    This follows the same pattern as huggingface_hub library which
-    treats empty string tokens as None to avoid authentication errors.
-    """
-    token = os.getenv("HF_TOKEN")
-    if token and token.strip():
-        return token
-    return None
+def hf_api() -> HfApi:
+    """Return a shared HfApi instance tagged with vLLM's library info."""
+    global _hf_api
+    if _hf_api is None:
+        _hf_api = HfApi(
+            library_name="vllm",
+            library_version=VLLM_VERSION,
+        )
+    return _hf_api
+
+
+def hf_fs() -> "huggingface_hub.HfFileSystem":
+    """Return a fresh HfFileSystem tagged with vLLM's library info."""
+    return huggingface_hub.HfFileSystem(
+        library_name="vllm",
+        library_version=VLLM_VERSION,
+    )
 
 
 _R = TypeVar("_R")
@@ -98,7 +101,7 @@ def list_repo_files(
                     revision=revision,
                     token=os.getenv("MODELSCOPE_API_TOKEN", None),
                 )
-            return hf_list_repo_files(
+            return hf_api().list_repo_files(
                 repo_id, revision=revision, repo_type=repo_type, token=token
             )
         except huggingface_hub.errors.OfflineModeIsEnabled:
@@ -145,6 +148,42 @@ def list_filtered_repo_files(
     return file_list
 
 
+def any_pattern_in_repo_files(
+    model_name_or_path: str,
+    allow_patterns: list[str],
+    revision: str | None = None,
+    repo_type: str | None = None,
+    token: str | bool | None = None,
+):
+    return (
+        len(
+            list_filtered_repo_files(
+                model_name_or_path=model_name_or_path,
+                allow_patterns=allow_patterns,
+                revision=revision,
+                repo_type=repo_type,
+                token=token,
+            )
+        )
+        > 0
+    )
+
+
+def is_mistral_model_repo(
+    model_name_or_path: str,
+    revision: str | None = None,
+    repo_type: str | None = None,
+    token: str | bool | None = None,
+) -> bool:
+    return any_pattern_in_repo_files(
+        model_name_or_path=model_name_or_path,
+        allow_patterns=["consolidated*.safetensors"],
+        revision=revision,
+        repo_type=repo_type,
+        token=token,
+    )
+
+
 def file_exists(
     repo_id: str,
     file_name: str,
@@ -153,6 +192,8 @@ def file_exists(
     revision: str | None = None,
     token: str | bool | None = None,
 ) -> bool:
+    # `list_repo_files` is cached and retried on error, so this is more efficient than
+    # huggingface_hub.file_exists default implementation when looking for multiple files
     file_list = list_repo_files(
         repo_id, repo_type=repo_type, revision=revision, token=token
     )
@@ -177,10 +218,11 @@ def file_or_path_exists(
     # NB: file_exists will only check for the existence of the config file on
     # hf_hub. This will fail in offline mode.
 
-    # Call HF to check if the file exists
-    return file_exists(
-        str(model), config_name, revision=revision, token=_get_hf_token()
-    )
+    if cached_filepath is None:
+        # The config file is not cached - check if it exists on hf_hub
+        return file_exists(str(model), config_name, revision=revision)
+    # The config file is known to not exist in cache - we can return False
+    return False
 
 
 def get_model_path(model: str | Path, revision: str | None = None):
@@ -197,9 +239,47 @@ def get_model_path(model: str | Path, revision: str | None = None):
 
         return snapshot_download(model_id=model, **common_kwargs)
 
-    from huggingface_hub import snapshot_download
+    return hf_api().snapshot_download(
+        repo_id=model,
+        **common_kwargs,
+    )
 
-    return snapshot_download(repo_id=model, **common_kwargs)
+
+def _try_download_from_hf_hub(
+    model: str | Path, file_name: str, revision: str | None
+) -> Path | None:
+    """Try to download a file from HuggingFace Hub.
+
+    Returns the local path on success, None on failure.
+    Skips download if model is a local directory.
+    """
+    if Path(model).is_dir():
+        return None
+    try:
+        return Path(
+            hf_api().hf_hub_download(
+                model,
+                file_name,
+                revision=revision,
+            )
+        )
+    except huggingface_hub.errors.OfflineModeIsEnabled:
+        return None
+    except (
+        RepositoryNotFoundError,
+        RevisionNotFoundError,
+        EntryNotFoundError,
+        LocalEntryNotFoundError,
+    ) as e:
+        logger.debug("File or repository not found in hf_hub_download: %s", e)
+        return None
+    except HfHubHTTPError as e:
+        logger.warning(
+            "Cannot connect to Hugging Face Hub. Skipping file download for '%s':",
+            file_name,
+            exc_info=e,
+        )
+        return None
 
 
 def get_hf_file_bytes(
@@ -209,12 +289,9 @@ def get_hf_file_bytes(
     file_path = try_get_local_file(model=model, file_name=file_name, revision=revision)
 
     if file_path is None:
-        hf_hub_file = hf_hub_download(
-            model, file_name, revision=revision, token=_get_hf_token()
-        )
-        file_path = Path(hf_hub_file)
+        file_path = _try_download_from_hf_hub(model, file_name, revision)
 
-    if file_path is not None and file_path.is_file():
+    if isinstance(file_path, Path) and file_path.is_file():
         with open(file_path, "rb") as file:
             return file.read()
 
@@ -223,7 +300,20 @@ def get_hf_file_bytes(
 
 def try_get_local_file(
     model: str | Path, file_name: str, revision: str | None = "main"
-) -> Path | None:
+) -> Path | Any | None:
+    """
+    Try to get a local file from the HuggingFace repository.
+
+    The possible return values are:
+
+    - A `Path` object if the local file is found
+    - The `huggingface_hub._CACHED_NO_EXIST` sentinel if the file is known to not exist
+    - `None` if the file is not found and we cannot determine if it exists or not
+
+    Callers of this method should handle the `_CACHED_NO_EXIST` sentinel appropriately.
+    Checking if the return value `is not None` is not sufficient because it does not
+    distinguish between the file not existing and the file not being found.
+    """
     file_path = Path(model) / file_name
     if file_path.is_file():
         return file_path
@@ -234,6 +324,7 @@ def try_get_local_file(
             )
             if isinstance(cached_filepath, str):
                 return Path(cached_filepath)
+            return cached_filepath
         except ValueError:
             ...
     return None
@@ -259,28 +350,9 @@ def get_hf_file_to_dict(
     file_path = try_get_local_file(model=model, file_name=file_name, revision=revision)
 
     if file_path is None:
-        try:
-            hf_hub_file = hf_hub_download(model, file_name, revision=revision)
-        except huggingface_hub.errors.OfflineModeIsEnabled:
-            return None
-        except (
-            RepositoryNotFoundError,
-            RevisionNotFoundError,
-            EntryNotFoundError,
-            LocalEntryNotFoundError,
-        ) as e:
-            logger.debug("File or repository not found in hf_hub_download", e)
-            return None
-        except HfHubHTTPError as e:
-            logger.warning(
-                "Cannot connect to Hugging Face Hub. Skipping file download for '%s':",
-                file_name,
-                exc_info=e,
-            )
-            return None
-        file_path = Path(hf_hub_file)
+        file_path = _try_download_from_hf_hub(model, file_name, revision)
 
-    if file_path is not None and file_path.is_file():
+    if isinstance(file_path, Path) and file_path.is_file():
         with open(file_path) as file:
             return json.load(file)
 

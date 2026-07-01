@@ -7,9 +7,11 @@ from typing import Any, Optional, Union
 
 import regex as re
 
-from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+)
+from vllm.entrypoints.chat_utils import make_tool_call_id
+from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -18,6 +20,7 @@ from vllm.entrypoints.openai.protocol import (
     ToolCall,
 )
 from vllm.tool_parsers.abstract_tool_parser import (
+    Tool,
     ToolParser,
 )
 from vllm.logger import init_logger
@@ -28,8 +31,8 @@ logger = init_logger(__name__)
 
 
 class xLAMToolParser(ToolParser):
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
+        super().__init__(tokenizer, tools)
 
         # Initialize state for streaming mode
         self.prev_tool_calls: list[dict] = []
@@ -162,7 +165,7 @@ class xLAMToolParser(ToolParser):
                     function=FunctionCall(
                         name=call["name"],
                         arguments=(
-                            json.dumps(call["arguments"])
+                            json.dumps(call["arguments"], ensure_ascii=False)
                             if isinstance(call["arguments"], dict)
                             else call["arguments"]
                         ),
@@ -470,7 +473,9 @@ class xLAMToolParser(ToolParser):
                             ):
                                 current_tool = parsed_tools[current_idx]
                                 if isinstance(current_tool.get("arguments"), dict):
-                                    args_text = json.dumps(current_tool["arguments"])
+                                    args_text = json.dumps(
+                                        current_tool["arguments"], ensure_ascii=False
+                                    )
                                 else:
                                     args_text = str(current_tool.get("arguments", "{}"))
                         except (json.JSONDecodeError, KeyError, IndexError):

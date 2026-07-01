@@ -8,8 +8,6 @@ from vllm import LLM
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.sampling_params import SamplingParams
 
-from ..openai.test_vision import TEST_IMAGE_ASSETS
-
 
 @pytest.fixture(scope="function")
 def text_llm():
@@ -75,47 +73,6 @@ def test_multi_chat(text_llm):
 
     outputs = text_llm.chat(messages)
     assert len(outputs) == 2
-
-
-@pytest.fixture(scope="function")
-def vision_llm():
-    # pytest caches the fixture so we use weakref.proxy to
-    # enable garbage collection
-    llm = LLM(
-        model="microsoft/Phi-3.5-vision-instruct",
-        max_model_len=4096,
-        max_num_seqs=5,
-        enforce_eager=True,
-        trust_remote_code=True,
-        limit_mm_per_prompt={"image": 2},
-        seed=0,
-    )
-
-    yield weakref.proxy(llm)
-
-    del llm
-
-    cleanup_dist_env_and_memory()
-
-
-@pytest.mark.parametrize(
-    "image_urls", [[TEST_IMAGE_ASSETS[0], TEST_IMAGE_ASSETS[1]]], indirect=True
-)
-def test_chat_multi_image(vision_llm, image_urls: list[str]):
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                *(
-                    {"type": "image_url", "image_url": {"url": image_url}}
-                    for image_url in image_urls
-                ),
-                {"type": "text", "text": "What's in this image?"},
-            ],
-        }
-    ]
-    outputs = vision_llm.chat(messages)
-    assert len(outputs) >= 0
 
 
 def test_llm_chat_tokenization_no_double_bos(text_llm):
@@ -195,18 +152,15 @@ def test_chat_batch_failure_cleanup(llm_for_failure_test):
     valid_msg = [{"role": "user", "content": "Hello"}]
     long_text = "This is a very long text to test the error " * 50
     invalid_msg = [{"role": "user", "content": long_text}]
-    batch_1 = [
-        valid_msg,
-        valid_msg,
-        invalid_msg,
-    ]
-    batch_2 = [
-        valid_msg,
-        valid_msg,
-    ]
+
+    batch_1 = [valid_msg, valid_msg, invalid_msg]
+    batch_2 = [valid_msg, valid_msg]
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
-    with pytest.raises(ValueError, match="longer than the maximum model length"):
+
+    with pytest.raises(ValueError, match="maximum context length is"):
         llm.chat(batch_1, sampling_params=sampling_params)
+    assert llm.llm_engine.get_num_unfinished_requests() == 0
+
     outputs_2 = llm.chat(batch_2, sampling_params=sampling_params)
     assert len(outputs_2) == len(batch_2)
     assert llm.llm_engine.get_num_unfinished_requests() == 0

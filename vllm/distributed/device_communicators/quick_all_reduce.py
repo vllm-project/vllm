@@ -9,11 +9,10 @@ from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config_or_none
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import cuda_device_count_stateless
 
 logger = init_logger(__name__)
 
@@ -25,36 +24,41 @@ except Exception:
     quick_ar = False
 
 
-def is_weak_contiguous(inp: torch.Tensor):
-    return inp.is_contiguous() or (
-        inp.storage().nbytes() - inp.storage_offset() * inp.element_size()
-        == inp.numel() * inp.element_size()
-    )
+from vllm.distributed.utils import is_weak_contiguous  # noqa: E402, F401
 
 
 class QuickReduceRegime(Enum):
+    # Keep integer ids aligned with csrc/quickreduce/quick_reduce.h
     FP = 0
     INT8 = 1
     INT6 = 2
     INT4 = 3
-    NONE = 4
+    INT3 = 4
+    NONE = 5
 
 
-MB = 1024 * 1024
+KB = 1024
+MB = 1024 * KB
 
 
 class QuickAllReduce:
     _SUPPORTED_WORLD_SIZES = [2, 4, 8]
     _SUPPORTED_DTYPES = [torch.float16, torch.bfloat16]
     # The following data is based on kernel tests.
-    # In this order [FP, INT8, INT6, INT4].
+    # In this order [FP, INT8, INT6, INT4, INT3].
     _QR_MIN_SIZE = {
-        (torch.float16, 2): [1 * MB, 2 * MB, 2 * MB, 1 * MB],
-        (torch.float16, 4): [1 * MB, 16 * MB, 4 * MB, 2 * MB],
-        (torch.float16, 8): [16 * MB, 4 * MB, 4 * MB, 2 * MB],
-        (torch.bfloat16, 2): [2 * MB, 8 * MB, 8 * MB, 8 * MB],
-        (torch.bfloat16, 4): [8 * MB, 64 * MB, 64 * MB, 16 * MB],
-        (torch.bfloat16, 8): [16 * MB, 2048 * MB, 2048 * MB, 2048 * MB],
+        (torch.float16, 2): [1 * MB, 2 * MB, 2 * MB, 1 * MB, 1 * MB],
+        (torch.float16, 4): [1 * MB, 16 * MB, 4 * MB, 2 * MB, 2 * MB],
+        (torch.float16, 8): [16 * MB, 4 * MB, 4 * MB, 2 * MB, 2 * MB],
+        (torch.bfloat16, 2): [2 * MB, 8 * MB, 8 * MB, 8 * MB, 8 * MB],
+        (torch.bfloat16, 4): [8 * MB, 64 * MB, 64 * MB, 16 * MB, 16 * MB],
+        (torch.bfloat16, 8): [
+            16 * MB,
+            2048 * MB,
+            2048 * MB,
+            2048 * MB,
+            2048 * MB,
+        ],
     }
 
     def __init__(self, group: ProcessGroup, device: int | str | torch.device) -> None:
@@ -63,8 +67,10 @@ class QuickAllReduce:
         available for CUDA and ROCm MI300 series.
 
         Custom quick allreduce leverages quantization for further
-        acceleration on ROCm. It currently supports Q8, Q6, and Q4
-        quantization formats and FP(float16, bfloat16).
+        acceleration on ROCm. It currently supports Q8, Q6, Q4, and Q3
+        quantization formats and FP(float16, bfloat16). Q3 (INT3) is
+        restricted to TP2 (world_size == 2) due to poor performance on
+        larger world sizes.
 
         Quick allreduce is designed as a complement to custom allreduce.
         Its initialization requires even stricter conditions.
@@ -133,12 +139,10 @@ class QuickAllReduce:
         assert isinstance(device, torch.device)
         self.device = device
 
-        cuda_visible_devices = envs.CUDA_VISIBLE_DEVICES
-        if cuda_visible_devices:
-            device_ids = list(map(int, cuda_visible_devices.split(",")))
-        else:
-            device_ids = list(range(cuda_device_count_stateless()))
-        physical_device_id = device_ids[device.index]
+        # device.index is a visible ordinal, not a logical local ID.
+        physical_device_id = current_platform.visible_device_id_to_physical_device_id(
+            device.index
+        )
         tensor = torch.tensor([physical_device_id], dtype=torch.int, device="cpu")
         gather_list = [
             torch.tensor([0], dtype=torch.int, device="cpu")
@@ -184,7 +188,25 @@ class QuickAllReduce:
             )
             return
         self.qr_quant_level = QuickReduceRegime[regime_str]
-        vllm_config = get_current_vllm_config()
+
+        # INT3 is only enabled for TP2 (world_size == 2).
+        # Kernel benchmarks show INT3 all-reduce on TP4/TP8 has poor
+        # performance (the extra ranks make the 3-bit codec's pack/unpack
+        # overhead outweigh the reduced communication volume), so INT3 is
+        # restricted to 2-GPU tensor parallelism. For TP4/TP8 use a wider
+        # codec (e.g. INT4) or NONE instead.
+        if self.qr_quant_level == QuickReduceRegime.INT3 and self.world_size != 2:
+            logger.warning(
+                "Custom quick allreduce is disabled: INT3 quantization is "
+                "only supported for TP2 (world_size == 2), but world_size "
+                "is %d. INT3 on TP4/TP8 is disabled due to poor kernel "
+                "performance. Use INT4/NONE for this world size.",
+                self.world_size,
+            )
+            return
+
+        self.qr_quantization_min_size = self._get_qr_quantization_min_size()
+        vllm_config = get_current_vllm_config_or_none()
         if (
             vllm_config is not None
             and hasattr(vllm_config, "model_config")
@@ -216,10 +238,55 @@ class QuickAllReduce:
                     "lead to error or degradation to custom allreduce or rccl."
                 )
             qr_max_size = qr_max_size * MB
+        effective_qr_max_size = (
+            qr_max_size if qr_max_size is not None else ops.qr_max_size()
+        )
+        qr_min_size = self._get_qr_min_size(effective_qr_max_size)
         self._ptr = ops.init_custom_qr(self.rank, self.world_size, qr_max_size)
-        self.qr_max_size = qr_max_size if qr_max_size is not None else ops.qr_max_size()
+        self.qr_max_size = effective_qr_max_size
+        self.qr_min_size = qr_min_size
+        if qr_min_size is not None:
+            logger.info(
+                "Custom quick allreduce: min size override = %d MB",
+                qr_min_size // MB,
+            )
+        if self.qr_quantization_min_size is not None:
+            logger.info(
+                "Custom quick allreduce: quantization codec threshold = %d KB",
+                self.qr_quantization_min_size // KB,
+            )
         self.create_shared_buffer()
         self.disabled = False
+
+    @staticmethod
+    def _get_qr_min_size(qr_max_size: int | None) -> int | None:
+        qr_min_size = envs.VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB
+        if qr_min_size is None:
+            return None
+        if qr_min_size < 0:
+            raise ValueError(
+                "VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB must be non-negative, "
+                f"got {qr_min_size}"
+            )
+        qr_min_size *= MB
+        if qr_max_size is not None and qr_min_size > qr_max_size:
+            raise ValueError(
+                "VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB must be less than or "
+                "equal to the effective QuickReduce max size"
+            )
+        return qr_min_size
+
+    @staticmethod
+    def _get_qr_quantization_min_size() -> int | None:
+        quantization_min_size = envs.VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB
+        if quantization_min_size is None:
+            return None
+        if quantization_min_size < 0:
+            raise ValueError(
+                "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB must be "
+                f"non-negative, got {quantization_min_size}"
+            )
+        return quantization_min_size * KB
 
     def _rocm_arch_available(self):
         if not current_platform.is_rocm():
@@ -262,11 +329,12 @@ class QuickAllReduce:
         dtype = inp.dtype
         if self.use_fp16_kernels:
             dtype = torch.float16
-        return (
-            inp_size <= self.qr_max_size
-            and inp_size
-            >= self._QR_MIN_SIZE[(dtype, self.world_size)][self.qr_quant_level.value]
-        )
+        min_size = self.qr_min_size
+        if min_size is None:
+            min_size = self._QR_MIN_SIZE[(dtype, self.world_size)][
+                self.qr_quant_level.value
+            ]
+        return inp_size <= self.qr_max_size and inp_size >= min_size
 
     def quick_all_reduce(self, inp: torch.Tensor, *, out: torch.Tensor = None):
         """Performs an out-of-place custom quick all reduce."""
@@ -275,9 +343,18 @@ class QuickAllReduce:
         if out is None:
             out = torch.empty_like(inp)
         ops.qr_all_reduce(
-            self._ptr, inp, out, self.qr_quant_level.value, self.use_fp16_kernels
+            self._ptr, inp, out, self._get_qr_quant_level(inp), self.use_fp16_kernels
         )
         return out
+
+    def _get_qr_quant_level(self, inp: torch.Tensor) -> int:
+        quantization_min_size = self.qr_quantization_min_size
+        if (
+            quantization_min_size is not None
+            and inp.numel() * inp.element_size() < quantization_min_size
+        ):
+            return QuickReduceRegime.FP.value
+        return self.qr_quant_level.value
 
     def close(self):
         if not self.disabled and getattr(self, "_ptr", None):

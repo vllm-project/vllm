@@ -6,4 +6,4 @@
 
 ## Arguments
 
---8<-- "docs/argparse/run-batch.inc.md"
+--8<-- "docs/generated/argparse/run-batch.inc.md"

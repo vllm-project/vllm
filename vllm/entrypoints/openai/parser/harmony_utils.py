@@ -2,36 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import datetime
-import json
-from collections.abc import Iterable, Sequence
-from typing import Literal
+from collections.abc import Sequence
+from typing import Any
 
-from openai.types.responses import (
-    ResponseFunctionToolCall,
-    ResponseOutputItem,
-    ResponseOutputMessage,
-    ResponseOutputText,
-    ResponseReasoningItem,
-)
-from openai.types.responses.response_function_web_search import (
-    ActionFind,
-    ActionOpenPage,
-    ActionSearch,
-    ResponseFunctionWebSearch,
-)
-from openai.types.responses.response_output_item import McpCall
-from openai.types.responses.response_reasoning_item import (
-    Content as ResponseReasoningTextContent,
-)
 from openai.types.responses.tool import Tool
 from openai_harmony import (
     Author,
-    ChannelConfig,
     Conversation,
     DeveloperContent,
     HarmonyEncodingName,
     Message,
     ReasoningEffort,
+    RenderConversationConfig,
     Role,
     StreamableParser,
     SystemContent,
@@ -39,16 +21,48 @@ from openai_harmony import (
     ToolDescription,
     load_harmony_encoding,
 )
-from openai_harmony import Message as OpenAIHarmonyMessage
-from openai_harmony import Role as OpenAIHarmonyRole
 
 from vllm import envs
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionToolsParam,
-    ResponseInputOutputItem,
-    ResponsesRequest,
-)
-from vllm.utils import random_uuid
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
+
+def is_function_recipient(
+    recipient: str,
+    allowed_function_tool_names: frozenset[str] | None = None,
+) -> bool:
+    """Check whether *recipient* refers to a function tool call.
+
+    The optional *allowed_function_tool_names* parameter is used by the
+    Responses API to distinguish bare function-call recipients (missing the
+    ``functions.`` prefix) from MCP tool calls.  When provided, a bare
+    recipient is only treated as a function call if it appears in the set.
+    The Chat Completions path omits this parameter so that all bare
+    recipients are accepted as function calls (the heuristic fallback).
+    """
+    if not recipient:
+        return False
+    if recipient.startswith("<|"):
+        return False
+    if recipient.startswith("functions."):
+        return len(recipient) > len("functions.")
+    if recipient == "assistant":
+        return False
+    if recipient in BUILTIN_TOOL_TO_MCP_SERVER_LABEL:
+        return False
+    first_segment = recipient.split(".", 1)[0]
+    if first_segment in BUILTIN_TOOL_TO_MCP_SERVER_LABEL:
+        return False
+    if allowed_function_tool_names is not None:
+        return recipient in allowed_function_tool_names
+    return True
+
+
+def extract_function_from_recipient(recipient: str) -> str:
+    return recipient.removeprefix("functions.")
+
 
 REASONING_EFFORT = {
     "high": ReasoningEffort.HIGH,
@@ -62,17 +76,20 @@ _harmony_encoding = None
 # they are available and requested by the user.
 # Tool args are provided by MCP tool descriptions. Output
 # of the tools are stringified.
-MCP_BUILTIN_TOOLS: set[str] = {
-    "web_search_preview",
-    "code_interpreter",
-    "container",
+BUILTIN_TOOL_TO_MCP_SERVER_LABEL: dict[str, str] = {
+    "python": "code_interpreter",
+    "browser": "web_search_preview",
+    "container": "container",
 }
+
+# Derive MCP_BUILTIN_TOOLS from the canonical mapping
+MCP_BUILTIN_TOOLS: set[str] = set(BUILTIN_TOOL_TO_MCP_SERVER_LABEL.values())
 
 
 def has_custom_tools(tool_types: set[str]) -> bool:
     """
     Checks if the given tool types are custom tools
-    (i.e. any tool other than MCP buildin tools)
+    (i.e. any tool other than MCP builtin tools)
     """
     return not tool_types.issubset(MCP_BUILTIN_TOOLS)
 
@@ -86,7 +103,7 @@ def get_encoding():
 
 def get_system_message(
     model_identity: str | None = None,
-    reasoning_effort: Literal["high", "medium", "low"] | None = None,
+    reasoning_effort: str | None = None,
     start_date: str | None = None,
     browser_description: str | None = None,
     python_description: str | None = None,
@@ -104,12 +121,21 @@ def get_system_message(
         )
         sys_msg_content = sys_msg_content.with_model_identity(new_identity)
     if reasoning_effort is not None:
+        if reasoning_effort not in REASONING_EFFORT:
+            supported_values = ", ".join(REASONING_EFFORT)
+            raise ValueError(
+                f"reasoning_effort={reasoning_effort!r} is not supported by "
+                f"Harmony. Supported values are: {supported_values}."
+            )
         sys_msg_content = sys_msg_content.with_reasoning_effort(
             REASONING_EFFORT[reasoning_effort]
         )
     if start_date is None:
-        # NOTE(woosuk): This brings non-determinism in vLLM. Be careful.
-        start_date = datetime.datetime.now().strftime("%Y-%m-%d")
+        # NOTE(woosuk): This brings non-determinism in vLLM.
+        # Set VLLM_SYSTEM_START_DATE to pin it.
+        start_date = envs.VLLM_SYSTEM_START_DATE or datetime.datetime.now().strftime(
+            "%Y-%m-%d"
+        )
     sys_msg_content = sys_msg_content.with_conversation_start_date(start_date)
     if browser_description is not None:
         sys_msg_content = sys_msg_content.with_tools(browser_description)
@@ -117,13 +143,6 @@ def get_system_message(
         sys_msg_content = sys_msg_content.with_tools(python_description)
     if container_description is not None:
         sys_msg_content = sys_msg_content.with_tools(container_description)
-    if not with_custom_tools:
-        channel_config = sys_msg_content.channel_config
-        invalid_channel = "commentary"
-        new_config = ChannelConfig.require_channels(
-            [c for c in channel_config.valid_channels if c != invalid_channel]
-        )
-        sys_msg_content = sys_msg_content.with_channel_config(new_config)
     sys_msg = Message.from_role_and_content(Role.SYSTEM, sys_msg_content)
     return sys_msg
 
@@ -132,12 +151,12 @@ def create_tool_definition(tool: ChatCompletionToolsParam | Tool):
     if isinstance(tool, ChatCompletionToolsParam):
         return ToolDescription.new(
             name=tool.function.name,
-            description=tool.function.description,
+            description=tool.function.description or "",
             parameters=tool.function.parameters,
         )
     return ToolDescription.new(
         name=tool.name,
-        description=tool.description,
+        description=tool.description or "",
         parameters=tool.parameters,
     )
 
@@ -178,58 +197,10 @@ def get_user_message(content: str) -> Message:
     return Message.from_role_and_content(Role.USER, content)
 
 
-def parse_response_input(
-    response_msg: ResponseInputOutputItem,
-    prev_responses: list[ResponseOutputItem | ResponseReasoningItem],
-) -> Message:
-    if not isinstance(response_msg, dict):
-        response_msg = response_msg.model_dump()
-    if "type" not in response_msg or response_msg["type"] == "message":
-        role = response_msg["role"]
-        content = response_msg["content"]
-        if role == "system":
-            # User is trying to set a system message. Change it to:
-            # <|start|>developer<|message|># Instructions
-            # {instructions}<|end|>
-            role = "developer"
-            text_prefix = "Instructions:\n"
-        else:
-            text_prefix = ""
-        if isinstance(content, str):
-            msg = Message.from_role_and_content(role, text_prefix + content)
-        else:
-            contents = [TextContent(text=text_prefix + c["text"]) for c in content]
-            msg = Message.from_role_and_contents(role, contents)
-        if role == "assistant":
-            msg = msg.with_channel("final")
-    elif response_msg["type"] == "function_call_output":
-        call_id = response_msg["call_id"]
-        call_response: ResponseFunctionToolCall | None = None
-        for prev_response in reversed(prev_responses):
-            if (
-                isinstance(prev_response, ResponseFunctionToolCall)
-                and prev_response.call_id == call_id
-            ):
-                call_response = prev_response
-                break
-        if call_response is None:
-            raise ValueError(f"No call message found for {call_id}")
-        msg = Message.from_author_and_content(
-            Author.new(Role.TOOL, f"functions.{call_response.name}"),
-            response_msg["output"],
-        )
-    elif response_msg["type"] == "reasoning":
-        content = response_msg["content"]
-        assert len(content) == 1
-        msg = Message.from_role_and_content(Role.ASSISTANT, content[0]["text"])
-    elif response_msg["type"] == "function_call":
-        msg = Message.from_role_and_content(Role.ASSISTANT, response_msg["arguments"])
-        msg = msg.with_channel("commentary")
-        msg = msg.with_recipient(f"functions.{response_msg['name']}")
-        msg = msg.with_content_type("json")
-    else:
-        raise ValueError(f"Unknown input type: {response_msg['type']}")
-    return msg
+def get_system_or_developer_message(role: str, instructions: str) -> Message:
+    if role == "system" and envs.VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS:
+        return get_system_message(instructions=instructions)
+    return get_developer_message(instructions=instructions)
 
 
 def parse_chat_inputs_to_harmony_messages(chat_msgs: list) -> list[Message]:
@@ -250,7 +221,6 @@ def parse_chat_inputs_to_harmony_messages(chat_msgs: list) -> list[Message]:
     for chat_msg in chat_msgs:
         msgs.extend(parse_chat_input_to_harmony_message(chat_msg, tool_id_names))
 
-    msgs = auto_drop_analysis_messages(msgs)
     return msgs
 
 
@@ -286,18 +256,96 @@ def auto_drop_analysis_messages(msgs: list[Message]) -> list[Message]:
     return cleaned_msgs
 
 
-def flatten_chat_text_content(content: str | list | None) -> str | None:
+def flatten_input_text_content(content: Any) -> str | None:
     """
-    Extract the text parts from a chat message content field and flatten them
-    into a single string.
+    Extract text parts from a Chat Completion or Responses API content field and
+    flatten them into a single string. Returns None if no text content is found.
     """
-    if isinstance(content, list):
-        return "".join(
-            item.get("text", "")
-            for item in content
-            if isinstance(item, dict) and item.get("type") == "text"
+    if content is None or isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return None
+
+    texts: list[str] = []
+    for item in content:
+        if isinstance(item, str):
+            texts.append(item)
+            continue
+        if isinstance(item, dict):
+            text = item.get("text")
+            if text is not None:
+                texts.append(text)
+    return "".join(texts) if texts else None
+
+
+def extract_instructions_from_messages(
+    messages: Sequence[Any],
+) -> tuple[str | None, list[Any]]:
+    """
+    Peel a leading system/developer Chat Completion or Responses message and
+    flatten its instruction text.
+    """
+    remaining_messages = list(messages)
+    if not remaining_messages:
+        return None, remaining_messages
+
+    first_message = remaining_messages[0]
+    if not isinstance(first_message, dict):
+        if hasattr(first_message, "to_dict"):
+            # Handle OpenAI Harmony Message
+            first_message = first_message.to_dict()
+        elif hasattr(first_message, "model_dump"):
+            first_message = first_message.model_dump(exclude_none=True)
+        else:
+            raise ValueError(f"Unknown message type: {type(first_message)}")
+
+    if first_message.get("role") not in (
+        "system",
+        "developer",
+    ):
+        return None, remaining_messages
+
+    instructions = flatten_input_text_content(first_message.get("content"))
+    return instructions, remaining_messages[1:]
+
+
+def build_harmony_preamble(
+    *,
+    instructions: str | None = None,
+    tools: list[Tool | ChatCompletionToolsParam] | None = None,
+    reasoning_effort: str | None = None,
+    browser_description: str | None = None,
+    python_description: str | None = None,
+    container_description: str | None = None,
+    with_custom_tools: bool = False,
+) -> list[Message]:
+    """
+    Build the standard Harmony system/developer prefix for a request.
+    """
+    developer_instructions = system_instructions = None
+    if envs.VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS:
+        system_instructions = instructions
+    else:
+        developer_instructions = instructions
+
+    messages = [
+        get_system_message(
+            reasoning_effort=reasoning_effort,
+            browser_description=browser_description,
+            python_description=python_description,
+            container_description=container_description,
+            instructions=system_instructions,
+            with_custom_tools=with_custom_tools,
         )
-    return content
+    ]
+    if developer_instructions or tools:
+        messages.append(
+            get_developer_message(
+                instructions=developer_instructions,
+                tools=tools,
+            )
+        )
+    return messages
 
 
 def parse_chat_input_to_harmony_message(
@@ -320,19 +368,15 @@ def parse_chat_input_to_harmony_message(
     tool_calls = chat_msg.get("tool_calls", [])
 
     if role == "assistant" and tool_calls:
-        content = flatten_chat_text_content(chat_msg.get("content"))
+        content = flatten_input_text_content(chat_msg.get("content"))
         if content:
             commentary_msg = Message.from_role_and_content(Role.ASSISTANT, content)
             commentary_msg = commentary_msg.with_channel("commentary")
             msgs.append(commentary_msg)
 
-        reasoning_content = chat_msg.get("reasoning") or chat_msg.get(
-            "reasoning_content"
-        )
-        if reasoning_content:
-            analysis_msg = Message.from_role_and_content(
-                Role.ASSISTANT, reasoning_content
-            )
+        reasoning = chat_msg.get("reasoning")
+        if reasoning:
+            analysis_msg = Message.from_role_and_content(Role.ASSISTANT, reasoning)
             analysis_msg = analysis_msg.with_channel("analysis")
             msgs.append(analysis_msg)
 
@@ -354,8 +398,7 @@ def parse_chat_input_to_harmony_message(
     if role == "tool":
         tool_call_id = chat_msg.get("tool_call_id", "")
         name = tool_id_names.get(tool_call_id, "")
-        content = chat_msg.get("content", "") or ""
-        content = flatten_chat_text_content(content)
+        content = flatten_input_text_content(chat_msg.get("content")) or ""
 
         msg = (
             Message.from_author_and_content(
@@ -367,9 +410,9 @@ def parse_chat_input_to_harmony_message(
         return [msg]
 
     # Non-tool reasoning content
-    reasoning_content = chat_msg.get("reasoning") or chat_msg.get("reasoning_content")
-    if role == "assistant" and reasoning_content:
-        analysis_msg = Message.from_role_and_content(Role.ASSISTANT, reasoning_content)
+    reasoning = chat_msg.get("reasoning")
+    if role == "assistant" and reasoning:
+        analysis_msg = Message.from_role_and_content(Role.ASSISTANT, reasoning)
         analysis_msg = analysis_msg.with_channel("analysis")
         msgs.append(analysis_msg)
 
@@ -390,7 +433,12 @@ def parse_chat_input_to_harmony_message(
         # Send non-tool assistant messages to the final channel
         msg = msg.with_channel("final")
         msgs.append(msg)
-    # For user/system/developer messages, add them directly even if no content.
+    elif role in ("system", "developer"):
+        instructions = flatten_input_text_content(chat_msg.get("content"))
+        if instructions is not None:
+            msg = get_system_or_developer_message(role, instructions)
+            msgs.append(msg)
+    # For user messages, add them directly even if no content.
     elif role != "assistant":
         msg = Message.from_role_and_contents(role, contents)
         msgs.append(msg)
@@ -398,428 +446,16 @@ def parse_chat_input_to_harmony_message(
     return msgs
 
 
-def parse_input_to_harmony_message(chat_msg) -> list[Message]:
-    """
-    Parse a message from request.previous_input_messages in the Responsees API to
-    Harmony messages.
-    """
-    if not isinstance(chat_msg, dict):
-        # Handle Pydantic models
-        chat_msg = chat_msg.model_dump(exclude_none=True)
-
-    role = chat_msg.get("role")
-
-    # Assistant message with tool calls
-    tool_calls = chat_msg.get("tool_calls")
-    if role == "assistant" and tool_calls:
-        msgs: list[Message] = []
-        for call in tool_calls:
-            func = call.get("function", {})
-            name = func.get("name", "")
-            arguments = func.get("arguments", "") or ""
-            msg = Message.from_role_and_content(Role.ASSISTANT, arguments)
-            msg = msg.with_channel("commentary")
-            msg = msg.with_recipient(f"functions.{name}")
-            msg = msg.with_content_type("json")
-            msgs.append(msg)
-        return msgs
-
-    # Tool role message (tool output)
-    if role == "tool":
-        name = chat_msg.get("name", "")
-        content = chat_msg.get("content", "") or ""
-        content = flatten_chat_text_content(content)
-
-        msg = Message.from_author_and_content(
-            Author.new(Role.TOOL, f"functions.{name}"), content
-        ).with_channel("commentary")
-        return [msg]
-
-    # Default: user/assistant/system messages with content
-    content = chat_msg.get("content", "")
-    if isinstance(content, str):
-        contents = [TextContent(text=content)]
-    else:
-        # TODO: Support refusal.
-        contents = [TextContent(text=c.get("text", "")) for c in content]
-    msg = Message.from_role_and_contents(role, contents)
-    return [msg]
-
-
-def construct_harmony_previous_input_messages(
-    request: ResponsesRequest,
-) -> list[OpenAIHarmonyMessage]:
-    messages: list[OpenAIHarmonyMessage] = []
-    if request.previous_input_messages:
-        for message in request.previous_input_messages:
-            # Handle both OpenAIHarmonyMessage objects and dictionary inputs
-            if isinstance(message, OpenAIHarmonyMessage):
-                message_role = message.author.role
-                # To match OpenAI, instructions, reasoning and tools are
-                # always taken from the most recent Responses API request
-                # not carried over from previous requests
-                if (
-                    message_role == OpenAIHarmonyRole.SYSTEM
-                    or message_role == OpenAIHarmonyRole.DEVELOPER
-                ):
-                    continue
-                messages.append(message)
-            else:
-                harmony_messages = parse_input_to_harmony_message(message)
-                for harmony_msg in harmony_messages:
-                    message_role = harmony_msg.author.role
-                    # To match OpenAI, instructions, reasoning and tools are
-                    # always taken from the most recent Responses API request
-                    # not carried over from previous requests
-                    if (
-                        message_role == OpenAIHarmonyRole.SYSTEM
-                        or message_role == OpenAIHarmonyRole.DEVELOPER
-                    ):
-                        continue
-                    messages.append(harmony_msg)
-    return messages
-
-
 def render_for_completion(messages: list[Message]) -> list[int]:
+    messages = auto_drop_analysis_messages(messages)
     conversation = Conversation.from_messages(messages)
     token_ids = get_encoding().render_conversation_for_completion(
-        conversation, Role.ASSISTANT
+        conversation,
+        Role.ASSISTANT,
+        config=RenderConversationConfig(auto_drop_analysis=False),
     )
     return token_ids
 
 
-def _parse_browser_tool_call(message: Message, recipient: str) -> ResponseOutputItem:
-    """Parse browser tool calls (search, open, find) into web search items."""
-    if len(message.content) != 1:
-        raise ValueError("Invalid number of contents in browser message")
-    content = message.content[0]
-
-    # Parse JSON args (with retry detection)
-    try:
-        browser_call = json.loads(content.text)
-    except json.JSONDecodeError:
-        json_retry_output_message = (
-            f"Invalid JSON args, caught and retried: {content.text}"
-        )
-        browser_call = {
-            "query": json_retry_output_message,
-            "url": json_retry_output_message,
-            "pattern": json_retry_output_message,
-        }
-
-    # Create appropriate action based on recipient
-    if recipient == "browser.search":
-        action = ActionSearch(
-            query=f"cursor:{browser_call.get('query', '')}", type="search"
-        )
-    elif recipient == "browser.open":
-        action = ActionOpenPage(
-            url=f"cursor:{browser_call.get('url', '')}", type="open_page"
-        )
-    elif recipient == "browser.find":
-        action = ActionFind(
-            pattern=browser_call.get("pattern", ""),
-            url=f"cursor:{browser_call.get('url', '')}",
-            type="find",
-        )
-    else:
-        raise ValueError(f"Unknown browser action: {recipient}")
-
-    return ResponseFunctionWebSearch(
-        id=f"ws_{random_uuid()}",
-        action=action,
-        status="completed",
-        type="web_search_call",
-    )
-
-
-def _parse_function_call(message: Message, recipient: str) -> list[ResponseOutputItem]:
-    """Parse function calls into function tool call items."""
-    function_name = recipient.split(".")[-1]
-    output_items = []
-    for content in message.content:
-        random_id = random_uuid()
-        response_item = ResponseFunctionToolCall(
-            arguments=content.text,
-            call_id=f"call_{random_id}",
-            type="function_call",
-            name=function_name,
-            id=f"fc_{random_id}",
-        )
-        output_items.append(response_item)
-    return output_items
-
-
-def _parse_reasoning_content(message: Message) -> list[ResponseOutputItem]:
-    """Parse reasoning/analysis content into reasoning items."""
-    output_items = []
-    for content in message.content:
-        reasoning_item = ResponseReasoningItem(
-            id=f"rs_{random_uuid()}",
-            summary=[],
-            type="reasoning",
-            content=[
-                ResponseReasoningTextContent(text=content.text, type="reasoning_text")
-            ],
-            status=None,
-        )
-        output_items.append(reasoning_item)
-    return output_items
-
-
-def _parse_final_message(message: Message) -> ResponseOutputItem:
-    """Parse final channel messages into output message items."""
-    contents = []
-    for content in message.content:
-        output_text = ResponseOutputText(
-            text=content.text,
-            annotations=[],  # TODO
-            type="output_text",
-            logprobs=None,  # TODO
-        )
-        contents.append(output_text)
-    return ResponseOutputMessage(
-        id=f"msg_{random_uuid()}",
-        content=contents,
-        role=message.author.role,
-        status="completed",
-        type="message",
-    )
-
-
-def _parse_mcp_recipient(recipient: str) -> tuple[str, str]:
-    """
-    Parse MCP recipient into (server_label, tool_name).
-
-    For dotted recipients like "repo_browser.list":
-        - server_label: "repo_browser" (namespace/server)
-        - tool_name: "list" (specific tool)
-
-    For simple recipients like "filesystem":
-        - server_label: "filesystem"
-        - tool_name: "filesystem"
-    """
-    if "." in recipient:
-        server_label = recipient.split(".")[0]
-        tool_name = recipient.split(".")[-1]
-    else:
-        server_label = recipient
-        tool_name = recipient
-    return server_label, tool_name
-
-
-def _parse_mcp_call(message: Message, recipient: str) -> list[ResponseOutputItem]:
-    """Parse MCP calls into MCP call items."""
-    server_label, tool_name = _parse_mcp_recipient(recipient)
-    output_items = []
-    for content in message.content:
-        response_item = McpCall(
-            arguments=content.text,
-            type="mcp_call",
-            name=tool_name,
-            server_label=server_label,
-            id=f"mcp_{random_uuid()}",
-            status="completed",
-        )
-        output_items.append(response_item)
-    return output_items
-
-
-def parse_output_message(message: Message) -> list[ResponseOutputItem]:
-    """
-    Parse a Harmony message into a list of output response items.
-    """
-    if message.author.role != "assistant":
-        # This is a message from a tool to the assistant (e.g., search result).
-        # Don't include it in the final output for now. This aligns with
-        # OpenAI's behavior on models like o4-mini.
-        return []
-
-    output_items: list[ResponseOutputItem] = []
-    recipient = message.recipient
-
-    if recipient is not None:
-        # Browser tool calls
-        if recipient.startswith("browser."):
-            output_items.append(_parse_browser_tool_call(message, recipient))
-
-        # Function calls (should only happen on commentary channel)
-        elif message.channel == "commentary" and recipient.startswith("functions."):
-            output_items.extend(_parse_function_call(message, recipient))
-
-        # Built-in tools are treated as reasoning
-        elif recipient.startswith(("python", "browser", "container")):
-            # Built-in tool recipients (python/browser/container)
-            # generate reasoning output
-            output_items.extend(_parse_reasoning_content(message))
-
-        # All other recipients are MCP calls
-        else:
-            output_items.extend(_parse_mcp_call(message, recipient))
-
-    # No recipient - handle based on channel for non-tool messages
-    elif message.channel == "analysis":
-        output_items.extend(_parse_reasoning_content(message))
-
-    elif message.channel == "commentary":
-        # Per Harmony format, commentary channel can contain preambles to calling
-        # multiple functions - explanatory text with no recipient
-        output_items.extend(_parse_reasoning_content(message))
-
-    elif message.channel == "final":
-        output_items.append(_parse_final_message(message))
-
-    else:
-        raise ValueError(f"Unknown channel: {message.channel}")
-
-    return output_items
-
-
-def parse_remaining_state(parser: StreamableParser) -> list[ResponseOutputItem]:
-    if not parser.current_content:
-        return []
-    if parser.current_role != Role.ASSISTANT:
-        return []
-    current_recipient = parser.current_recipient
-    if current_recipient is not None and current_recipient.startswith("browser."):
-        return []
-
-    if current_recipient and parser.current_channel in ("commentary", "analysis"):
-        if current_recipient.startswith("functions."):
-            rid = random_uuid()
-            return [
-                ResponseFunctionToolCall(
-                    arguments=parser.current_content,
-                    call_id=f"call_{rid}",
-                    type="function_call",
-                    name=current_recipient.split(".")[-1],
-                    id=f"fc_{rid}",
-                    status="in_progress",
-                )
-            ]
-        # Built-in tools (python, browser, container) should be treated as reasoning
-        elif not (
-            current_recipient.startswith("python")
-            or current_recipient.startswith("browser")
-            or current_recipient.startswith("container")
-        ):
-            # All other recipients are MCP calls
-            rid = random_uuid()
-            server_label, tool_name = _parse_mcp_recipient(current_recipient)
-            return [
-                McpCall(
-                    arguments=parser.current_content,
-                    type="mcp_call",
-                    name=tool_name,
-                    server_label=server_label,
-                    id=f"mcp_{rid}",
-                    status="in_progress",
-                )
-            ]
-
-    if parser.current_channel == "commentary":
-        return [
-            ResponseReasoningItem(
-                id=f"rs_{random_uuid()}",
-                summary=[],
-                type="reasoning",
-                content=[
-                    ResponseReasoningTextContent(
-                        text=parser.current_content, type="reasoning_text"
-                    )
-                ],
-                status=None,
-            )
-        ]
-
-    if parser.current_channel == "analysis":
-        return [
-            ResponseReasoningItem(
-                id=f"rs_{random_uuid()}",
-                summary=[],
-                type="reasoning",
-                content=[
-                    ResponseReasoningTextContent(
-                        text=parser.current_content, type="reasoning_text"
-                    )
-                ],
-                status=None,
-            )
-        ]
-
-    if parser.current_channel == "final":
-        output_text = ResponseOutputText(
-            text=parser.current_content,
-            annotations=[],  # TODO
-            type="output_text",
-            logprobs=None,  # TODO
-        )
-        text_item = ResponseOutputMessage(
-            id=f"msg_{random_uuid()}",
-            content=[output_text],
-            role="assistant",
-            # if the parser still has messages (ie if the generator got cut
-            # abruptly), this should be incomplete
-            status="incomplete",
-            type="message",
-        )
-        return [text_item]
-
-    return []
-
-
-def get_stop_tokens_for_assistant_actions() -> list[int]:
-    return get_encoding().stop_tokens_for_assistant_actions()
-
-
 def get_streamable_parser_for_assistant() -> StreamableParser:
     return StreamableParser(get_encoding(), role=Role.ASSISTANT)
-
-
-def parse_output_into_messages(token_ids: Iterable[int]) -> StreamableParser:
-    parser = get_streamable_parser_for_assistant()
-    for token_id in token_ids:
-        parser.process(token_id)
-    return parser
-
-
-def parse_chat_output(
-    token_ids: Sequence[int],
-) -> tuple[str | None, str | None, bool]:
-    """
-    Parse the output of a Harmony chat completion into reasoning and final content.
-    Note that when the `openai` tool parser is used, serving_chat only uses this
-    for the reasoning content and gets the final content from the tool call parser.
-
-    When the `openai` tool parser is not enabled, or when `GptOssReasoningParser` is
-    in use,this needs to return the final content without any tool calls parsed.
-
-    Empty reasoning or final content is returned as None instead of an empty string.
-    """
-    parser = parse_output_into_messages(token_ids)
-    output_msgs = parser.messages
-    is_tool_call = False  # TODO: update this when tool call is supported
-
-    # Get completed messages from the parser
-    reasoning_texts = [
-        msg.content[0].text for msg in output_msgs if msg.channel == "analysis"
-    ]
-    final_texts = [
-        msg.content[0].text for msg in output_msgs if msg.channel != "analysis"
-    ]
-
-    # Extract partial messages from the parser
-    if parser.current_channel == "analysis" and parser.current_content:
-        reasoning_texts.append(parser.current_content)
-    elif parser.current_channel != "analysis" and parser.current_content:
-        final_texts.append(parser.current_content)
-
-    # Flatten multiple messages into a single string
-    reasoning: str | None = "\n".join(reasoning_texts)
-    final_content: str | None = "\n".join(final_texts)
-
-    # Return None instead of empty string since existing callers check for None
-    reasoning = reasoning or None
-    final_content = final_content or None
-
-    return reasoning, final_content, is_tool_call

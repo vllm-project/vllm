@@ -22,16 +22,18 @@ from typing import TYPE_CHECKING, Literal
 
 import torch
 from torch import nn
-from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 
 from vllm.config.utils import getattr_iter
 from vllm.logger import init_logger
+from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
 )
+from vllm.model_executor.models.utils import maybe_prefix
+from vllm.transformers_utils.config import is_rope_parameters_nested
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -93,7 +95,13 @@ def init_on_device_without_buffers(device: torch.device):
             setattr(torch, torch_function_name, old_torch_function)
 
 
-Style = Literal["colwise", "colwise_rep", "rowwise", "rowwise_rep", "replicate"]
+Style = Literal[
+    "colwise",
+    "rowwise",
+    "replicate",
+    "colwise_gather_output",
+    "rowwise_split_input",
+]
 
 
 def replace_linear_class(
@@ -119,10 +127,10 @@ def replace_linear_class(
 
     vllm_linear_cls, vllm_linear_kwargs = {
         "colwise": (ColumnParallelLinear, {}),
-        "colwise_rep": (ColumnParallelLinear, {"gather_output": True}),
         "rowwise": (RowParallelLinear, {}),
-        "rowwise_rep": (RowParallelLinear, {"input_is_parallel": False}),
         "replicate": (ReplicatedLinear, {}),
+        "colwise_gather_output": (ColumnParallelLinear, {"gather_output": True}),
+        "rowwise_split_input": (RowParallelLinear, {"input_is_parallel": False}),
     }.get(style, (ReplicatedLinear, {}))
 
     return vllm_linear_cls(
@@ -133,6 +141,45 @@ def replace_linear_class(
         prefix=prefix,
         return_bias=False,
         **vllm_linear_kwargs,
+    )
+
+
+TorchConv = nn.Conv2d | nn.Conv3d
+VllmConv = Conv2dLayer | Conv3dLayer
+
+
+def replace_conv_class(conv: TorchConv) -> VllmConv | TorchConv:
+    """Replace a Transformers Conv2d/Conv3d with vLLM's Conv2d/Conv3d.
+
+    Args:
+        conv: `nn.Conv2d` or `nn.Conv3d` to be replaced.
+    Returns:
+        The new `Conv2dLayer` or `Conv3dLayer`. If the conv module is not supported,
+        returns the original conv module.
+    """
+    # vLLM does not handle non-zero padding modes
+    if conv.padding_mode != "zeros":
+        return conv
+
+    vllm_conv_cls = {
+        nn.Conv2d: Conv2dLayer,
+        nn.Conv3d: Conv3dLayer,
+    }.get(type(conv))
+
+    if vllm_conv_cls is None:
+        return conv
+
+    return vllm_conv_cls(
+        in_channels=conv.in_channels,
+        out_channels=conv.out_channels,
+        kernel_size=conv.kernel_size,
+        stride=conv.stride,
+        padding=conv.padding,
+        dilation=conv.dilation,
+        groups=conv.groups,
+        bias=conv.bias is not None,
+        padding_mode=conv.padding_mode,
+        params_dtype=conv.weight.dtype,
     )
 
 
@@ -175,6 +222,34 @@ def replace_rms_norm_class(rms_norm: nn.Module, hidden_size: int) -> RMSNorm:
     return RMSNorm(**kwargs)
 
 
+def recursive_replace_linear(
+    model: nn.Module,
+    quant_config: "QuantizationConfig | None",
+    prefix: str = "",
+):
+    """Recursively replace linear modules in the model as needed."""
+
+    def _recursive_replace(module: nn.Module, prefix: str):
+        for child_name, child_module in module.named_children():
+            new_module = child_module
+            qual_name = maybe_prefix(prefix, child_name)
+            # Replace modules as needed
+            if isinstance(child_module, nn.Linear):
+                style = "replicate"
+                new_module = replace_linear_class(
+                    child_module,
+                    style,
+                    quant_config,
+                    prefix=qual_name,
+                )
+            else:
+                _recursive_replace(child_module, prefix=qual_name)
+            if new_module is not child_module:
+                setattr(module, child_name, new_module)
+
+    _recursive_replace(model, prefix=prefix)
+
+
 def log_replacement(name: str, old_module: nn.Module, new_module: nn.Module):
     logger.debug("%s: %s -> %s", name, old_module, new_module)
 
@@ -207,7 +282,7 @@ def can_enable_torch_compile(vllm_config: "VllmConfig") -> bool:
     rope_parameters: dict | None = getattr(text_config, "rope_parameters", None) or {}
     if rope_parameters:
         # Nest rope_parameters if not nested already to simplify logic
-        if not set(rope_parameters.keys()).issubset(ALLOWED_LAYER_TYPES):
+        if not is_rope_parameters_nested(rope_parameters):
             rope_parameters = {"": rope_parameters}
         return all(rp["rope_type"] != "dynamic" for rp in rope_parameters.values())
     return True

@@ -6,7 +6,7 @@ import pytest
 import torch
 import torch.multiprocessing as mp
 
-from tests.utils import multi_gpu_test
+from tests.utils import ensure_current_vllm_config, multi_gpu_test
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import (
     init_distributed_environment,
@@ -21,6 +21,7 @@ from vllm.model_executor.models.vision import (
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
+from vllm.utils.torch_utils import set_random_seed
 
 pytestmark = pytest.mark.cpu_test
 
@@ -98,10 +99,10 @@ def run_dp_sharded_vision_model_vs_direct(
     """
 
     # Set random seed for reproducibility
-    current_platform.seed_everything(0)
+    set_random_seed(0)
 
     device = f"{current_platform.device_name}:{local_rank}"
-    current_platform.set_device(device)
+    torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
 
     update_environment_variables(
@@ -116,7 +117,8 @@ def run_dp_sharded_vision_model_vs_direct(
 
     # initialize distributed
     init_distributed_environment()
-    initialize_model_parallel(tensor_model_parallel_size=world_size)
+    with ensure_current_vllm_config():
+        initialize_model_parallel(tensor_model_parallel_size=world_size)
 
     # Create a test input tensor
     image_input = torch.randn(batch_size, 3, 224, 224)
@@ -284,9 +286,9 @@ def run_dp_sharded_mrope_vision_model_vs_direct(
     calling the model directly.
     """
     # Set random seed for reproducibility
-    current_platform.seed_everything(0)
+    set_random_seed(0)
     device = f"{current_platform.device_name}:{local_rank}"
-    current_platform.set_device(device)
+    torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
 
     update_environment_variables(
@@ -301,7 +303,8 @@ def run_dp_sharded_mrope_vision_model_vs_direct(
 
     # initialize distributed
     init_distributed_environment()
-    initialize_model_parallel(tensor_model_parallel_size=world_size)
+    with ensure_current_vllm_config():
+        initialize_model_parallel(tensor_model_parallel_size=world_size)
 
     # Create test data
     grid_thw_list = []
@@ -362,7 +365,7 @@ def run_dp_sharded_mrope_vision_model_empty_input_worker(
     """Test run_dp_sharded_mrope_vision_model with empty input."""
     # Set up distributed environment
     device = f"{current_platform.device_name}:{local_rank}"
-    current_platform.set_device(device)
+    torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
 
     update_environment_variables(
@@ -376,7 +379,8 @@ def run_dp_sharded_mrope_vision_model_empty_input_worker(
     )
 
     init_distributed_environment()
-    initialize_model_parallel(tensor_model_parallel_size=world_size)
+    with ensure_current_vllm_config():
+        initialize_model_parallel(tensor_model_parallel_size=world_size)
 
     # Create empty inputs
     pixel_values = torch.empty((0, 768))
@@ -408,9 +412,9 @@ def run_dp_sharded_mrope_vision_model_uneven_load_worker(
 ):
     """Test run_dp_sharded_mrope_vision_model with uneven load distribution."""
     # Set up distributed environment
-    current_platform.seed_everything(123)
+    set_random_seed(123)
     device = f"{current_platform.device_name}:{local_rank}"
-    current_platform.set_device(device)
+    torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
 
     update_environment_variables(
@@ -424,7 +428,8 @@ def run_dp_sharded_mrope_vision_model_uneven_load_worker(
     )
 
     init_distributed_environment()
-    initialize_model_parallel(tensor_model_parallel_size=world_size)
+    with ensure_current_vllm_config():
+        initialize_model_parallel(tensor_model_parallel_size=world_size)
 
     # Create images with very different sizes
     grid_thw_list = [

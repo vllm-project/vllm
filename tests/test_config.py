@@ -1,31 +1,41 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import logging
 import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import pydantic
 import pytest
 from pydantic import ValidationError
 
+import vllm.config.vllm as vllm_config_module
+import vllm.envs as envs
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
     CompilationConfig,
+    KernelConfig,
     ModelConfig,
+    ParallelConfig,
     PoolerConfig,
     SchedulerConfig,
+    SpeculativeConfig,
     VllmConfig,
     update_config,
 )
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
+from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
 from vllm.config.utils import get_field
 from vllm.config.vllm import (
     OPTIMIZATION_LEVEL_TO_CONFIG,
     OptimizationLevel,
 )
-from vllm.model_executor.layers.pooler import PoolingType
 from vllm.platforms import current_platform
+
+DEVICE_TYPE = current_platform.device_type
 
 
 def test_compile_config_repr_succeeds():
@@ -40,6 +50,265 @@ def test_compile_config_repr_succeeds():
     assert "inductor_passes" in val
 
 
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [
+        (None, None),
+        ("0", False),
+        ("1", True),
+    ],
+)
+def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
+    if env_value is None:
+        monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", env_value)
+
+    assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
+
+
+@pytest.mark.parametrize(
+    ("model_config", "expected"),
+    [
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen3-1.7B-Base",
+                architectures=["Qwen3ForCausalLM"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen3-32B",
+                architectures=["Qwen3ForCausalLM"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="meta-llama/Llama-3.2-1B",
+                architectures=["LlamaForCausalLM"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="mistralai/Mistral-7B-v0.1",
+                architectures=["MistralForCausalLM"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="facebook/opt-125m",
+                architectures=["OPTForCausalLM"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=False,
+            ),
+            False,
+        ),
+        (
+            SimpleNamespace(
+                model="deepseek-ai/DeepSeek-V2-Lite-Chat",
+                architectures=["DeepseekV2ForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="deepseek-ai/DeepSeek-V2-Chat",
+                architectures=["DeepseekV2ForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen1.5-MoE-A2.7B",
+                architectures=["Qwen2MoeForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen1.5-MoE-A2.7B-Chat",
+                architectures=["Qwen2MoeForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="ibm-research/PowerMoE-3b",
+                architectures=["GraniteMoeForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="mistralai/Mixtral-8x7B-Instruct-v0.1",
+                architectures=["MixtralForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            False,
+        ),
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen3-1.7B-FP8",
+                architectures=["Qwen3ForCausalLM"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=True,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen3.5-4B",
+                architectures=["Qwen3_5ForConditionalGeneration"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=False,
+            ),
+            False,
+        ),
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen3-Embedding-0.6B",
+                architectures=["Qwen3ForCausalLM"],
+                runner_type="pooling",
+                is_moe=False,
+                is_quantized=False,
+            ),
+            False,
+        ),
+    ],
+)
+def test_is_default_v2_model_runner_model(model_config, expected):
+    config = SimpleNamespace(model_config=model_config)
+
+    assert VllmConfig._is_default_v2_model_runner_model(config) is expected
+
+
+@pytest.mark.skip_global_cleanup
+def test_with_hf_config_populates_missing_architectures_from_causal_lm_mapping(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        vllm_config_module,
+        "replace",
+        lambda self, **kwargs: SimpleNamespace(**kwargs),
+    )
+    cfg = SimpleNamespace(
+        model_config=SimpleNamespace(
+            is_multimodal_model=False,
+            hf_config=SimpleNamespace(),
+            get_model_arch_config=lambda: "arch-config",
+        )
+    )
+    hf_config = SimpleNamespace(model_type="mistral", architectures=None)
+
+    updated = VllmConfig.with_hf_config(cfg, hf_config)
+
+    assert updated.model_config.hf_config.architectures == ["MistralForCausalLM"]
+    assert hf_config.architectures is None
+
+
+@pytest.mark.skip_global_cleanup
+def test_with_hf_config_preserves_explicit_architectures_override(monkeypatch):
+    monkeypatch.setattr(
+        vllm_config_module,
+        "replace",
+        lambda self, **kwargs: SimpleNamespace(**kwargs),
+    )
+    cfg = SimpleNamespace(
+        model_config=SimpleNamespace(
+            is_multimodal_model=False,
+            hf_config=SimpleNamespace(),
+            get_model_arch_config=lambda: "arch-config",
+        )
+    )
+    hf_config = SimpleNamespace(model_type="mistral", architectures=None)
+
+    updated = VllmConfig.with_hf_config(
+        cfg,
+        hf_config,
+        architectures=["Ministral3ForCausalLM"],
+    )
+
+    assert updated.model_config.hf_config.architectures == ["Ministral3ForCausalLM"]
+
+
+@pytest.mark.skip_global_cleanup
+def test_with_hf_config_leaves_unknown_model_type_without_architectures(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        vllm_config_module,
+        "replace",
+        lambda self, **kwargs: SimpleNamespace(**kwargs),
+    )
+    cfg = SimpleNamespace(
+        model_config=SimpleNamespace(
+            is_multimodal_model=False,
+            hf_config=SimpleNamespace(),
+            get_model_arch_config=lambda: "arch-config",
+        )
+    )
+    hf_config = SimpleNamespace(
+        model_type="not_a_real_model",
+        architectures=None,
+    )
+
+    updated = VllmConfig.with_hf_config(cfg, hf_config)
+
+    assert updated.model_config.hf_config.architectures is None
+
+
+def test_async_scheduling_with_pipeline_parallelism_is_allowed():
+    cfg = VllmConfig(
+        scheduler_config=SchedulerConfig(
+            max_model_len=8192,
+            is_encoder_decoder=False,
+            async_scheduling=True,
+        ),
+        parallel_config=ParallelConfig(
+            pipeline_parallel_size=2,
+            distributed_executor_backend="mp",
+            nnodes=2,
+        ),
+    )
+    assert cfg.scheduler_config.async_scheduling is True
+
+
 @dataclass
 class _TestConfigFields:
     a: int
@@ -48,9 +317,6 @@ class _TestConfigFields:
 
 
 def test_get_field():
-    with pytest.raises(ValueError):
-        get_field(_TestConfigFields, "a")
-
     b = get_field(_TestConfigFields, "b")
     assert isinstance(b, Field)
     assert b.default is MISSING
@@ -160,8 +426,9 @@ def test_get_pooling_config():
     model_config = ModelConfig(model_id)
 
     assert model_config.pooler_config is not None
-    assert model_config.pooler_config.normalize
-    assert model_config.pooler_config.pooling_type == PoolingType.MEAN.name
+    assert model_config.pooler_config.use_activation
+    assert model_config.pooler_config.seq_pooling_type == "MEAN"
+    assert model_config.pooler_config.tok_pooling_type == "ALL"
 
 
 @pytest.mark.skipif(
@@ -169,7 +436,7 @@ def test_get_pooling_config():
 )
 def test_get_pooling_config_from_args():
     model_id = "sentence-transformers/all-MiniLM-L12-v2"
-    pooler_config = PoolerConfig(pooling_type="CLS", normalize=True)
+    pooler_config = PoolerConfig(seq_pooling_type="CLS", use_activation=False)
     model_config = ModelConfig(model_id, pooler_config=pooler_config)
 
     assert asdict(model_config.pooler_config) == asdict(pooler_config)
@@ -180,14 +447,25 @@ def test_get_pooling_config_from_args():
     [
         ("tomaarsen/Qwen3-Reranker-0.6B-seq-cls", "LAST", "LAST"),  # LLM
         ("intfloat/e5-small", "CLS", "MEAN"),  # BertModel
+    ],
+)
+def test_default_seq_pooling_type(model_id, default_pooling_type, pooling_type):
+    model_config = ModelConfig(model_id)
+    assert model_config._model_info.default_seq_pooling_type == default_pooling_type
+    assert model_config.pooler_config.seq_pooling_type == pooling_type
+
+
+@pytest.mark.parametrize(
+    ("model_id", "default_pooling_type", "pooling_type"),
+    [
         ("Qwen/Qwen2.5-Math-RM-72B", "ALL", "ALL"),  # reward
         ("Qwen/Qwen2.5-Math-PRM-7B", "STEP", "STEP"),  # step reward
     ],
 )
-def test_default_pooling_type(model_id, default_pooling_type, pooling_type):
+def test_default_tok_pooling_type(model_id, default_pooling_type, pooling_type):
     model_config = ModelConfig(model_id)
-    assert model_config._model_info.default_pooling_type == default_pooling_type
-    assert model_config.pooler_config.pooling_type == pooling_type
+    assert model_config._model_info.default_tok_pooling_type == default_pooling_type
+    assert model_config.pooler_config.tok_pooling_type == pooling_type
 
 
 @pytest.mark.parametrize(
@@ -205,8 +483,8 @@ def test_default_pooling_type(model_id, default_pooling_type, pooling_type):
 )
 def test_moe_model_detection(model_id, expected_is_moe_model):
     model_config = ModelConfig(model_id)
-    # Just check that is_moe_model field exists and is a boolean
-    assert model_config.is_model_moe() == expected_is_moe_model
+    # Just check that is_moe field exists and is a boolean
+    assert model_config.is_moe == expected_is_moe_model
 
 
 @pytest.mark.parametrize(
@@ -224,7 +502,7 @@ def test_moe_model_detection(model_id, expected_is_moe_model):
 def test_is_quantized(model_id, quantized):
     model_config = ModelConfig(model_id)
     # Just check that quantized field exists and is a boolean
-    assert model_config.is_quantized() == quantized
+    assert model_config.is_quantized == quantized
 
 
 @pytest.mark.skipif(
@@ -397,8 +675,8 @@ def test_generation_config_loading():
 @pytest.mark.parametrize(
     "pt_load_map_location",
     [
-        "cuda",
-        {"": "cuda"},
+        DEVICE_TYPE,
+        {"": DEVICE_TYPE},
     ],
 )
 def test_load_config_pt_load_map_location(pt_load_map_location):
@@ -546,6 +824,26 @@ def test_s3_url_different_models_create_different_directories(mock_pull_files):
     assert os.path.exists(config2.tokenizer) and os.path.isdir(config2.tokenizer)
 
 
+@patch("vllm.transformers_utils.runai_utils.ObjectStorageModel.pull_files")
+def test_s3_url_different_model_and_tokenizer(mock_pull_files):
+    """Test that when model and tokenizer are different cloud URIs,
+    pull_files receives the correct URI for each."""
+    mock_pull_files.return_value = None
+
+    model_url = "s3://bucket/model/"
+    tokenizer_url = "s3://bucket/tokenizer/"
+
+    config = MockConfig(model=model_url, tokenizer=tokenizer_url)
+    ModelConfig.maybe_pull_model_tokenizer_for_runai(config, model_url, tokenizer_url)
+
+    # pull_files should be called twice: once for model, once for tokenizer
+    assert mock_pull_files.call_count == 2
+    # First call: model URI with allow_pattern
+    assert mock_pull_files.call_args_list[0][0][0] == model_url
+    # Second call: tokenizer URI with ignore_pattern
+    assert mock_pull_files.call_args_list[1][0][0] == tokenizer_url
+
+
 @pytest.mark.parametrize(
     ("model_id", "expected_attn_type", "expected_result", "reason"),
     [
@@ -554,100 +852,100 @@ def test_s3_url_different_models_create_different_directories(mock_pull_files):
             "jason9693/Qwen2.5-1.5B-apeach",
             "decoder",
             True,
-            "Pooling models with causal attn and last pooling support chunked prefill.",
+            "Pooling models with causal attn and LAST/ALL pooling support chunked prefill.",  # noqa: E501
         ),
         (
             "Qwen/Qwen3-Embedding-0.6B",
             "decoder",
             True,
-            "Pooling models with causal attn and last pooling support chunked prefill.",
+            "Pooling models with causal attn and LAST/ALL pooling support chunked prefill.",  # noqa: E501
         ),
         (
             "Qwen/Qwen2.5-Math-PRM-7B",
             "decoder",
             False,
-            "Pooling models with step pooling does not support chunked prefill.",
+            "Pooling models with causal attn and LAST/STEP pooling do not support chunked prefill.",  # noqa: E501
         ),
         (
             "internlm/internlm2-1_8b-reward",
             "decoder",
             True,
-            "Pooling models with causal attn and all pooling support chunked prefill.",
+            "Pooling models with causal attn and LAST/ALL pooling support chunked prefill.",  # noqa: E501
         ),
         (
             "BAAI/bge-base-en",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support chunked prefill.",
+            "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
         ),
         (
             "boltuix/NeuroBERT-NER",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support chunked prefill.",
+            "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
         ),
         (
             "papluca/xlm-roberta-base-language-detection",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support chunked prefill.",
+            "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
         ),
         (
             "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support chunked prefill.",
+            "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
         ),
         (
             "intfloat/e5-small",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support chunked prefill.",
+            "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
         ),
         # multimodal models
         (
             "openai/clip-vit-base-patch32",
             "decoder",
             True,
-            "Pooling models with causal attn and last pooling support chunked prefill.",
+            "Pooling models with causal attn and LAST/ALL pooling support chunked prefill.",  # noqa: E501
         ),
         (
             "google/siglip-base-patch16-224",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support chunked prefill.",
+            "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
         ),
         # generate models
         (
             "Qwen/Qwen3-0.6B",
             "decoder",
             True,
-            "Generative models support chunked prefill.",
+            "Generative models support chunked prefill.",  # noqa: E501
         ),
         (
             "Qwen/Qwen3-Next-80B-A3B-Instruct",
             "hybrid",
             True,
-            "Generative models support chunked prefill.",
+            "Generative models support chunked prefill.",  # noqa: E501
         ),
         (
             "ibm-granite/granite-4.0-h-small",
             "hybrid",
             True,
-            "Generative models support chunked prefill.",
+            "Generative models support chunked prefill.",  # noqa: E501
         ),
         (
             "state-spaces/mamba-130m-hf",
             "attention_free",
             True,
-            "Generative models support chunked prefill.",
+            "Generative models support chunked prefill.",  # noqa: E501
         ),
         # encoder_decoder models
         (
             "openai/whisper-small",
             "encoder_decoder",
             False,
-            "Encoder decoder models does not support chunked prefill.",
+            "Encoder decoder models do not support chunked prefill.",  # noqa: E501
         ),
     ],
 )
@@ -673,100 +971,100 @@ def test_is_chunked_prefill_supported(
             "jason9693/Qwen2.5-1.5B-apeach",
             "decoder",
             True,
-            "Pooling models with causal attn and last pooling support prefix caching.",
+            "Pooling models with causal attn and LAST/ALL pooling support prefix caching.",  # noqa: E501
         ),
         (
             "Qwen/Qwen3-Embedding-0.6B",
             "decoder",
             True,
-            "Pooling models with causal attn and last pooling support prefix caching.",
+            "Pooling models with causal attn and LAST/ALL pooling support prefix caching.",  # noqa: E501
         ),
         (
             "Qwen/Qwen2.5-Math-PRM-7B",
             "decoder",
             False,
-            "Pooling models with step pooling does not support prefix caching.",
+            "Pooling models with causal attn and LAST/STEP pooling do not support prefix caching.",  # noqa: E501
         ),
         (
             "internlm/internlm2-1_8b-reward",
             "decoder",
             True,
-            "Pooling models with causal attn and all pooling support prefix caching.",
+            "Pooling models with causal attn and LAST/ALL pooling support prefix caching.",  # noqa: E501
         ),
         (
             "BAAI/bge-base-en",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support prefix caching.",
+            "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
         ),
         (
             "boltuix/NeuroBERT-NER",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support prefix caching.",
+            "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
         ),
         (
             "papluca/xlm-roberta-base-language-detection",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support prefix caching.",
+            "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
         ),
         (
             "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support prefix caching.",
+            "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
         ),
         (
             "intfloat/e5-small",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support prefix caching.",
+            "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
         ),
         # multimodal models
         (
             "openai/clip-vit-base-patch32",
             "decoder",
             True,
-            "Pooling models with causal attn and last pooling support prefix caching.",
+            "Pooling models with causal attn and LAST/ALL pooling support prefix caching.",  # noqa: E501
         ),
         (
             "google/siglip-base-patch16-224",
             "encoder_only",
             False,
-            "Pooling models with bidirectional attn does not support prefix caching.",
+            "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
         ),
         # generate models
         (
             "Qwen/Qwen3-0.6B",
             "decoder",
             True,
-            "Generative models support prefix caching.",
+            "Generative models support prefix caching.",  # noqa: E501
         ),
         (
             "Qwen/Qwen3-Next-80B-A3B-Instruct",
             "hybrid",
             False,
-            "Hybrid models does not support prefix caching since the feature is still experimental.",  # noqa: E501
+            "Hybrid models do not support prefix caching since the feature is still experimental.",  # noqa: E501
         ),
         (
             "ibm-granite/granite-4.0-h-small",
             "hybrid",
             False,
-            "Hybrid models does not support prefix caching since the feature is still experimental.",  # noqa: E501
+            "Hybrid models do not support prefix caching since the feature is still experimental.",  # noqa: E501
         ),
         (
             "state-spaces/mamba-130m-hf",
             "attention_free",
             False,
-            "Attention free models does not support prefix caching since the feature is still experimental.",  # noqa: E501
+            "Attention free models do not support prefix caching since the feature is still experimental.",  # noqa: E501
         ),
         # encoder_decoder models
         (
             "openai/whisper-small",
             "encoder_decoder",
             False,
-            "Encoder decoder models does not support prefix caching.",
+            "Encoder decoder models do not support prefix caching.",  # noqa: E501
         ),
     ],
 )
@@ -826,7 +1124,7 @@ def test_vllm_config_defaults_are_none():
 
 
 @pytest.mark.parametrize(
-    ("model_id", "compiliation_config", "optimization_level"),
+    ("model_id", "compilation_config", "optimization_level"),
     [
         (
             None,
@@ -868,7 +1166,7 @@ def test_vllm_config_defaults_are_none():
         ("RedHatAI/DeepSeek-V2.5-1210-FP8", CompilationConfig(), OptimizationLevel.O3),
     ],
 )
-def test_vllm_config_defaults(model_id, compiliation_config, optimization_level):
+def test_vllm_config_defaults(model_id, compilation_config, optimization_level):
     """Test that optimization-level defaults are correctly applied."""
 
     model_config = None
@@ -876,12 +1174,12 @@ def test_vllm_config_defaults(model_id, compiliation_config, optimization_level)
         model_config = ModelConfig(model_id)
         vllm_config = VllmConfig(
             model_config=model_config,
-            compilation_config=compiliation_config,
+            compilation_config=compilation_config,
             optimization_level=optimization_level,
         )
     else:
         vllm_config = VllmConfig(
-            compilation_config=compiliation_config,
+            compilation_config=compilation_config,
             optimization_level=optimization_level,
         )
     # Use the global optimization level defaults
@@ -899,12 +1197,17 @@ def test_vllm_config_defaults(model_id, compiliation_config, optimization_level)
     # Verify other compilation_config defaults
     compilation_config_dict = default_config["compilation_config"]
     for k, v in compilation_config_dict.items():
-        if k != "pass_config":
-            actual = getattr(vllm_config.compilation_config, k)
-            expected = v(vllm_config) if callable(v) else v
-            assert actual == expected, (
-                f"compilation_config.{k}: expected {expected}, got {actual}"
-            )
+        if k == "pass_config":
+            continue
+        actual = getattr(vllm_config.compilation_config, k)
+        expected = v(vllm_config) if callable(v) else v
+        # On platforms without static graph support, __post_init__ forces
+        # cudagraph_mode to NONE; expect that instead of the level default.
+        if k == "cudagraph_mode" and not current_platform.support_static_graph_mode():
+            expected = CUDAGraphMode.NONE
+        assert actual == expected, (
+            f"compilation_config.{k}: expected {expected}, got {actual}"
+        )
 
 
 def test_vllm_config_callable_defaults():
@@ -925,7 +1228,7 @@ def test_vllm_config_callable_defaults():
         model_config=quantized_model, optimization_level=OptimizationLevel.O2
     )
     enable_if_quantized = lambda cfg: (
-        cfg.model_config is not None and cfg.model_config.is_quantized()
+        cfg.model_config is not None and cfg.model_config.is_quantized
     )
     assert enable_if_quantized(config_quantized) is True
     assert enable_if_quantized(config_no_model) is False
@@ -936,12 +1239,16 @@ def test_vllm_config_callable_defaults():
         model_config=moe_model, optimization_level=OptimizationLevel.O2
     )
     enable_if_sequential = lambda cfg: (
-        cfg.model_config is not None and not cfg.model_config.is_model_moe()
+        cfg.model_config is not None and not cfg.model_config.is_moe
     )
     assert enable_if_sequential(config_moe) is False
     assert enable_if_sequential(config_quantized) is True
 
 
+@pytest.mark.skipif(
+    not current_platform.support_static_graph_mode(),
+    reason="Explicit overrides may be force-overwritten without static graph support.",
+)
 def test_vllm_config_explicit_overrides():
     """Test that explicit property overrides work correctly with callable defaults.
 
@@ -975,7 +1282,7 @@ def test_vllm_config_explicit_overrides():
     assert config.compilation_config.pass_config.fuse_attn_quant is True
 
     # Explicit cudagraph mode override on quantized model at O2
-    pass_config = PassConfig(fuse_gemm_comms=True)
+    pass_config = PassConfig(enable_qk_norm_rope_fusion=True)
     compilation_config = CompilationConfig(
         cudagraph_mode=CUDAGraphMode.NONE, pass_config=pass_config
     )
@@ -985,7 +1292,9 @@ def test_vllm_config_explicit_overrides():
         compilation_config=compilation_config,
     )
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
-    assert config.compilation_config.pass_config.fuse_gemm_comms is True
+    assert config.compilation_config.pass_config.enable_qk_norm_rope_fusion is (
+        current_platform.is_cuda_alike() or current_platform.is_xpu()
+    )
     # Mode should still use default for O2
     assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
 
@@ -1041,6 +1350,39 @@ def test_vllm_config_explicit_overrides():
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
 
 
+def test_fusion_pass_op_priority():
+    """This test checks that custom op enablement & IR op priority
+    correctly control default fusions"""
+
+    # Default config, O2, rms_norm+quant fusion disabled
+    cfg1 = VllmConfig()
+    assert not cfg1.compilation_config.pass_config.fuse_norm_quant
+
+    # rms_norm manually enabled, O1, rms_norm+quant fusion enabled
+    cfg2 = VllmConfig(
+        optimization_level=OptimizationLevel.O1,
+        compilation_config=CompilationConfig(
+            custom_ops=["+rms_norm"],
+        ),
+    )
+    assert cfg2.compilation_config.pass_config.fuse_norm_quant
+
+    # using custom kernel for RMSNorm via IR:
+    # Note that vLLM IR only supports the non-residual rms_norm for now;
+    # soon this will be resolved.
+    cfg3 = VllmConfig(
+        kernel_config=KernelConfig(
+            ir_op_priority=IrOpPriorityConfig(rms_norm=["vllm_c"])
+        )
+    )
+    assert cfg3.compilation_config.pass_config.fuse_norm_quant
+
+    # block-fp8 model should enable quant_fp8 automatically
+    cfg4 = VllmConfig(model_config=ModelConfig("Qwen/Qwen3-4B-FP8"))
+    assert "+quant_fp8" in cfg4.compilation_config.custom_ops
+    assert cfg4.compilation_config.pass_config.fuse_norm_quant
+
+
 def test_scheduler_config_init():
     with pytest.raises(ValidationError):
         # Positional InitVars missing
@@ -1050,3 +1392,181 @@ def test_scheduler_config_init():
     with pytest.raises(AttributeError):
         # InitVar does not become an attribute
         print(SchedulerConfig.default_factory().max_model_len)
+
+
+@pytest.mark.parametrize(
+    (
+        "model_id",
+        "data_parallel_size",
+        "external_lb",
+        "expected_needs_coordinator",
+    ),
+    [
+        # Non-MoE model with DP=1 should not need coordinator
+        ("facebook/opt-125m", 1, False, False),
+        # Non-MoE model with DP>1 internal LB should need coordinator
+        ("facebook/opt-125m", 2, False, True),
+        # MoE model with DP=1 should not need coordinator
+        ("mistralai/Mixtral-8x7B-Instruct-v0.1", 1, False, False),
+        # MoE model with DP>1 internal LB should need both coordinator
+        # and wave coordination
+        ("mistralai/Mixtral-8x7B-Instruct-v0.1", 2, False, True),
+        # MoE model with DP>1 external LB needs coordinator for wave coordination
+        # (wave coordination runs in coordinator process)
+        ("mistralai/Mixtral-8x7B-Instruct-v0.1", 2, True, True),
+    ],
+)
+def test_needs_dp_coordination(
+    model_id,
+    data_parallel_size,
+    external_lb,
+    expected_needs_coordinator,
+):
+    """Test that DP coordinator and wave coordination are configured correctly."""
+    from vllm.config import ParallelConfig
+
+    model_config = ModelConfig(model_id)
+    parallel_config = ParallelConfig(
+        data_parallel_size=data_parallel_size,
+        data_parallel_external_lb=external_lb,
+    )
+    vllm_config = VllmConfig(model_config=model_config, parallel_config=parallel_config)
+
+    assert vllm_config.needs_dp_coordinator == expected_needs_coordinator
+
+
+def test_renderer_num_workers_with_mm_cache():
+    """Disallow renderer_num_workers > 1 when mm processor cache is enabled,
+    since neither cache type is thread-safe."""
+    mm_model = "Qwen/Qwen2-VL-2B-Instruct"
+
+    # Should raise: multi-worker + cache enabled (default cache_gb=4)
+    with pytest.raises(ValueError, match="renderer-num-workers"):
+        ModelConfig(mm_model, renderer_num_workers=4)
+
+    # Should raise: multi-worker + explicit cache size
+    with pytest.raises(ValueError, match="renderer-num-workers"):
+        ModelConfig(mm_model, renderer_num_workers=2, mm_processor_cache_gb=1.0)
+
+    # Should pass: multi-worker + cache disabled
+    config = ModelConfig(mm_model, renderer_num_workers=4, mm_processor_cache_gb=0)
+    assert config.renderer_num_workers == 4
+
+    # Should pass: single worker + cache enabled (default)
+    config = ModelConfig(mm_model, renderer_num_workers=1)
+    assert config.renderer_num_workers == 1
+
+
+def test_eagle_draft_model_config():
+    """Test that EagleDraft model config is correctly set."""
+    target_model_config = ModelConfig(
+        "meta-llama/Meta-Llama-3-8B-Instruct", trust_remote_code=True
+    )
+    speculative_config = SpeculativeConfig(
+        model="yuhuili/EAGLE-LLaMA3-Instruct-8B",
+        num_speculative_tokens=1,
+        target_model_config=target_model_config,
+        target_parallel_config=ParallelConfig(),
+    )
+    draft_model_config = speculative_config.draft_model_config
+    assert draft_model_config.hf_config.architectures == ["EagleLlamaForCausalLM"]
+    assert draft_model_config.hf_text_config.architectures == ["EagleLlamaForCausalLM"]
+    assert draft_model_config.hf_config.model_type == "eagle"
+    assert draft_model_config.hf_text_config.model_type == "eagle"
+    assert draft_model_config.architectures == ["EagleLlamaForCausalLM"]
+    assert draft_model_config.architecture == "EagleLlamaForCausalLM"
+
+
+def test_draft_sample_method_probabilistic_is_accepted():
+    speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=1,
+        draft_sample_method="probabilistic",
+    )
+    assert speculative_config.draft_sample_method == "probabilistic"
+
+
+def test_draft_sample_method_gumbel_is_rejected():
+    with pytest.raises(ValidationError):
+        SpeculativeConfig(
+            method="ngram",
+            num_speculative_tokens=1,
+            draft_sample_method="gumbel",
+        )
+
+
+def test_ir_op_priority_default():
+    """Test that IR op priority defaults are set correctly."""
+    from vllm.config.kernel import IrOpPriorityConfig
+
+    # Assert default is applied to ops
+    priority_config = IrOpPriorityConfig.with_default(["vllm_c", "native"])
+    assert priority_config.rms_norm == ["vllm_c", "native"]
+    assert priority_config.fused_add_rms_norm == ["vllm_c", "native"]
+
+    # Assert single ops override the default
+    priority_config = IrOpPriorityConfig.with_default(
+        ["native"], rms_norm=["oink", "native"]
+    )
+    assert priority_config.rms_norm == ["oink", "native"]
+    assert priority_config.fused_add_rms_norm == ["native"]
+
+
+def test_ir_op_priority_str():
+    """Test that passing a comma-delimited string works"""
+    from vllm.config.kernel import IrOpPriorityConfig
+
+    priority_config = IrOpPriorityConfig(rms_norm="vllm_c")
+    assert priority_config.rms_norm == ["vllm_c"]
+
+    priority_config = IrOpPriorityConfig(rms_norm="vllm_c,native")
+    assert priority_config.rms_norm == ["vllm_c", "native"]
+
+    priority_config = IrOpPriorityConfig(rms_norm=" native, vllm_c ")
+    assert priority_config.rms_norm == ["native", "vllm_c"]
+
+    with pytest.raises(pydantic.ValidationError):
+        # must be list of only strings
+        priority_config = IrOpPriorityConfig(rms_norm=["vllm_c", 4, "native"])
+
+
+def test_ir_op_priority_ctx():
+    """Test that the priority-setting context sets priority correctly."""
+    from vllm import ir
+    from vllm.config.kernel import IrOpPriorityConfig
+
+    priority = IrOpPriorityConfig.with_default(["native"], rms_norm=["vllm_c"])
+    priority2 = IrOpPriorityConfig.with_default(
+        ["native"], fused_add_rms_norm=["vllm_c"]
+    )
+    with priority.set_priority():
+        assert ir.ops.rms_norm.get_priority() == ["vllm_c", "native"]
+        assert ir.ops.fused_add_rms_norm.get_priority() == ["native"]
+        with priority2.set_priority():
+            assert ir.ops.rms_norm.get_priority() == ["native"]
+            assert ir.ops.fused_add_rms_norm.get_priority() == ["vllm_c", "native"]
+
+        # context restored
+        assert ir.ops.rms_norm.get_priority() == ["vllm_c", "native"]
+        assert ir.ops.fused_add_rms_norm.get_priority() == ["native"]
+
+        with pytest.raises(ValueError), priority2.set_priority():
+            assert ir.ops.rms_norm.get_priority() == ["native"]
+            assert ir.ops.fused_add_rms_norm.get_priority() == ["vllm_c", "native"]
+
+            raise ValueError
+
+        # context restored even after exception
+        assert ir.ops.rms_norm.get_priority() == ["vllm_c", "native"]
+        assert ir.ops.fused_add_rms_norm.get_priority() == ["native"]
+
+
+def test_load_config_rejects_invalid_safetensors_load_strategy():
+    with pytest.raises(pydantic.ValidationError):
+        LoadConfig(safetensors_load_strategy="not_a_real_strategy")
+
+
+@pytest.mark.parametrize("bad_load_format", [None, 123])
+def test_load_config_rejects_non_string_load_format(bad_load_format):
+    with pytest.raises(pydantic.ValidationError):
+        LoadConfig(load_format=bad_load_format)

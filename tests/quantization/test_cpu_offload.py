@@ -66,8 +66,9 @@ def test_cpu_offload_compressed_tensors(monkeypatch):
     monkeypatch.setenv("VLLM_TEST_FORCE_LOAD_FORMAT", "auto")
     # Test wNa16
     compare_two_settings(
-        "nm-testing/tinyllama-oneshot-w4a16-channel-v2",
+        "nm-testing/Qwen1.5-MoE-A2.7B-Chat-quantized.w4a16",
         ["--enforce_eager"],
         ["--enforce_eager", "--cpu-offload-gb", "1"],
         max_wait_seconds=480,
+        include_seeded_sampling=False,
     )

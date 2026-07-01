@@ -157,7 +157,6 @@ class GraniteMoeSharedModel(nn.Module):
 
         self.config = config
         self.quant_config = quant_config  # Required by MixtralModel
-        self.padding_idx = config.pad_token_id
 
         self.vocab_size = config.vocab_size
 
@@ -183,7 +182,7 @@ class GraniteMoeSharedModel(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
@@ -215,11 +214,11 @@ class GraniteMoeSharedModel(nn.Module):
                 for e in range(p.size(0)):
                     w1_name = n.replace(
                         ".block_sparse_moe.input_linear.weight",
-                        f".block_sparse_moe.experts.{e}.w1.weight",
+                        f".block_sparse_moe.experts.routed_experts.{e}.w1.weight",
                     )
                     w3_name = n.replace(
                         ".block_sparse_moe.input_linear.weight",
-                        f".block_sparse_moe.experts.{e}.w3.weight",
+                        f".block_sparse_moe.experts.routed_experts.{e}.w3.weight",
                     )
                     w1_param, w3_param = p[e].chunk(2, dim=0)
                     assert w1_name not in new_weights
@@ -230,7 +229,7 @@ class GraniteMoeSharedModel(nn.Module):
                 for e in range(p.size(0)):
                     w2_name = n.replace(
                         ".block_sparse_moe.output_linear.weight",
-                        f".block_sparse_moe.experts.{e}.w2.weight",
+                        f".block_sparse_moe.experts.routed_experts.{e}.w2.weight",
                     )
                     w2_param = p[e]
                     assert w2_name not in new_weights
@@ -295,7 +294,7 @@ class GraniteMoeSharedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

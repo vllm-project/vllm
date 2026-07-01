@@ -9,8 +9,34 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.v1.kv_cache_interface import kv_cache_uses_per_token_head_scales
 
 logger = init_logger(__name__)
+
+
+class KVCacheScaleParameter(torch.nn.Parameter):
+    """Scalar parameter for KV-cache scales.
+
+    Initialized to -1.0 (an invalid sentinel) so call sites just write
+    `KVCacheScaleParameter()`. The `weight_loader` accepts shape `()` or
+    `(1,)` and rejects anything else — per-head scales go through a separate
+    path (compressed-tensors' `_tp_aware_loader`), not this one. Per-instance
+    overrides still work because instance attribute assignment shadows this
+    class-level loader.
+    """
+
+    def __new__(cls) -> "KVCacheScaleParameter":
+        return super().__new__(cls, torch.tensor(-1.0), requires_grad=False)
+
+    @staticmethod
+    def weight_loader(param: torch.nn.Parameter, loaded_weight: torch.Tensor) -> None:
+        if loaded_weight.numel() != 1:
+            raise ValueError(
+                f"KV-cache scale expects a scalar weight, got shape "
+                f"{tuple(loaded_weight.shape)}"
+            )
+        param.data.copy_(loaded_weight.reshape(()))
 
 
 class BaseKVCacheMethod(QuantizeMethodBase):
@@ -21,7 +47,8 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         - quantize k/v_cache entries before saving them to the cache
         - dequantize k/v_cache entries before fetching them from the cache
 
-    :param quant_config: the appropriate QuantizationConfig
+    Args:
+        quant_config: the appropriate QuantizationConfig
     """
 
     def __init__(self, quant_config: QuantizationConfig):
@@ -35,11 +62,11 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         # Initialize the Q and KV cache scales to -1.0, an invalid value.
         # If the q and k/v_scales appear in the checkpoint, it will be
         # overwritten when loading weights.
-        layer.q_scale = torch.nn.Parameter(torch.tensor(-1.0), requires_grad=False)
-        layer.k_scale = torch.nn.Parameter(torch.tensor(-1.0), requires_grad=False)
-        layer.v_scale = torch.nn.Parameter(torch.tensor(-1.0), requires_grad=False)
+        layer.q_scale = KVCacheScaleParameter()
+        layer.k_scale = KVCacheScaleParameter()
+        layer.v_scale = KVCacheScaleParameter()
         # Initialize P = softmax(QK^T) scales
-        layer.prob_scale = torch.nn.Parameter(torch.tensor(-1.0), requires_grad=False)
+        layer.prob_scale = KVCacheScaleParameter()
 
     def apply(self, layer: torch.nn.Module) -> torch.Tensor:
         raise RuntimeError(f"{self.__class__.__name__}.apply should not be called.")
@@ -52,11 +79,28 @@ class BaseKVCacheMethod(QuantizeMethodBase):
             assert not hasattr(layer, "prob_scale")
             return
 
-        # If the kv-cache dtype is auto, we enforce the k/v_scale to be 1.0
+        # Per-token-head quantized KV cache: scales are computed dynamically
+        # per (token, head) in the kernel at cache-write time.  Checkpoint
+        # scales are never used regardless of calculate_kv_scales.
+        if kv_cache_uses_per_token_head_scales(layer.kv_cache_dtype):
+            layer._k_scale.copy_(1.0)
+            layer._v_scale.copy_(1.0)
+            layer._k_scale_float = 1.0
+            layer._v_scale_float = 1.0
+            del layer.k_scale
+            del layer.v_scale
+            del layer.q_scale
+            del layer.prob_scale
+            return
+
+        # If the kv-cache is not quantized, we enforce the k/v_scale to be 1.0
         # regardless whether the kv-scale is available in the checkpoint.
         # No need to process kv scales after loading if we are going to
         # calculate them on the fly.
-        if layer.kv_cache_dtype != "auto" and not layer.calculate_kv_scales:
+        if (
+            is_quantized_kv_cache(layer.kv_cache_dtype)
+            and not layer.calculate_kv_scales
+        ):
             if layer.k_scale > 0.0 and layer.v_scale > 0.0:
                 # We prefer to use separate k_scale and v_scale if present
                 k_scale = layer.k_scale.to("cpu").tolist()

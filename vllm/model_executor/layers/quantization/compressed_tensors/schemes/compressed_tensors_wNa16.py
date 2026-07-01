@@ -1,21 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from collections.abc import Callable
+from fractions import Fraction
 
 import torch
 from compressed_tensors.quantization import ActivationOrdering
 
+from vllm.distributed.utils import verify_group_size_divides_partition
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
-    CompressedTensorsScheme,
-)
-from vllm.model_executor.layers.quantization.kernels.mixed_precision import (
+from vllm.model_executor.kernels.linear import (
+    MarlinLinearKernel,
     MPLinearLayerConfig,
     choose_mp_linear_kernel,
 )
-from vllm.model_executor.layers.quantization.kernels.mixed_precision.marlin import (
-    MarlinLinearKernel,
+from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
+    CompressedTensorsScheme,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     get_marlin_input_dtype,
@@ -34,7 +35,15 @@ from vllm.scalar_type import scalar_types
 logger = init_logger(__name__)
 
 __all__ = ["CompressedTensorsWNA16"]
-WNA16_SUPPORTED_TYPES_MAP = {4: scalar_types.uint4b8, 8: scalar_types.uint8b128}
+WNA16_SUPPORTED_TYPES_MAP = {
+    2: scalar_types.uint2b2,
+    3: scalar_types.uint3b4,
+    4: scalar_types.uint4b8,
+    5: scalar_types.uint5b16,
+    6: scalar_types.uint6b32,
+    7: scalar_types.uint7b64,
+    8: scalar_types.uint8b128,
+}
 WNA16_ZP_SUPPORTED_TYPES_MAP = {4: scalar_types.uint4, 8: scalar_types.uint8}
 WNA16_SUPPORTED_BITS = list(WNA16_SUPPORTED_TYPES_MAP.keys())
 
@@ -51,7 +60,8 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         actorder: ActivationOrdering | None = None,
         layer_name: str | None = None,
     ):
-        self.pack_factor = 32 // num_bits
+        self.num_bits = num_bits
+        self.pack_factor = Fraction(32, num_bits)
         self.strategy = strategy
         self.symmetric = symmetric
         self.group_size = -1 if group_size is None else group_size
@@ -60,15 +70,22 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
 
         if self.group_size == -1 and self.strategy != "channel":
             raise ValueError(
-                "Marlin kernels require group quantization or "
-                "channelwise quantization, but found no group "
+                "Pack-quantized format requires group quantization "
+                "or channelwise quantization, but found no group "
                 "size and strategy is not channelwise."
             )
 
         if num_bits not in WNA16_SUPPORTED_TYPES_MAP:
             raise ValueError(
                 f"Unsupported num_bits = {num_bits}. "
-                f"Supported num_bits = {WNA16_SUPPORTED_TYPES_MAP.keys()}"
+                f"Supported num_bits = {list(WNA16_SUPPORTED_TYPES_MAP)}"
+            )
+
+        if not self.symmetric and num_bits not in WNA16_ZP_SUPPORTED_TYPES_MAP:
+            raise ValueError(
+                f"Asymmetric quantization not supported for "
+                f"num_bits = {num_bits}. Supported: "
+                f"{list(WNA16_ZP_SUPPORTED_TYPES_MAP)}"
             )
 
         self.quant_type = (
@@ -94,6 +111,12 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         **kwargs,
     ):
         output_size_per_partition = sum(output_partition_sizes)
+        layer.input_size_per_partition = input_size_per_partition
+        layer.output_size_per_partition = output_size_per_partition
+        layer.output_partition_sizes = output_partition_sizes
+        layer.params_dtype = params_dtype
+        if not hasattr(layer, "has_bias"):
+            layer.has_bias = False
 
         mp_linear_kernel_config = MPLinearLayerConfig(
             full_weight_shape=(input_size, output_size),
@@ -114,7 +137,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             logger.info("Using %s for CompressedTensorsWNA16", kernel_type.__name__)
             self._kernel_backends_being_used.add(kernel_type.__name__)
 
-        if isinstance(kernel_type, MarlinLinearKernel):
+        if kernel_type is MarlinLinearKernel:
             input_dtype = get_marlin_input_dtype(self.layer_name)
             if input_dtype is not None:
                 mp_linear_kernel_config.act_type = input_dtype
@@ -129,9 +152,12 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         scales_and_zp_size = input_size // group_size
 
         if partition_scales:
-            assert input_size_per_partition % group_size == 0
+            verify_group_size_divides_partition(
+                input_size_per_partition, group_size, self.layer_name
+            )
             scales_and_zp_size = input_size_per_partition // group_size
 
+        packed_input_dim = math.ceil(input_size_per_partition * self.num_bits / 32)
         weight = PackedvLLMParameter(
             input_dim=1,
             output_dim=0,
@@ -140,7 +166,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             packed_dim=1,
             data=torch.empty(
                 output_size_per_partition,
-                input_size_per_partition // self.pack_factor,
+                packed_input_dim,
                 dtype=torch.int32,
             ),
         )
@@ -154,10 +180,11 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
             ),
         }
 
+        packed_output_dim = math.ceil(output_size_per_partition * self.num_bits / 32)
         zeros_args = {
             "weight_loader": weight_loader,
             "data": torch.zeros(
-                output_size_per_partition // self.pack_factor,
+                packed_output_dim,
                 scales_and_zp_size,
                 dtype=torch.int32,
             ),

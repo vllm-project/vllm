@@ -16,6 +16,7 @@
 # limitations under the License.
 """Transformers modeling backend mixin for causal language models."""
 
+from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -38,7 +39,8 @@ class CausalMixin(VllmModelForTextGeneration):
 
         # Tell `Base.load_weights` to skip
         # `lm_head` if the model has tied word embeddings
-        if self.text_config.tie_word_embeddings:
+        tie_word_embeddings = self._get_tie_word_embeddings()
+        if tie_word_embeddings:
             self.skip_prefixes.append("lm_head.")
 
         if self.pp_group.is_last_rank:
@@ -48,7 +50,7 @@ class CausalMixin(VllmModelForTextGeneration):
                 quant_config=self.quant_config,
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
-            if self.text_config.tie_word_embeddings:
+            if tie_word_embeddings:
                 self.lm_head = self.lm_head.tie_weights(
                     self.model.get_input_embeddings()
                 )
@@ -60,6 +62,22 @@ class CausalMixin(VllmModelForTextGeneration):
         else:
             self.lm_head = PPMissingLayer()
 
+    def load_weights(self, weights: Iterable[tuple[str, "torch.Tensor"]]) -> set[str]:
+        """A thin wrapper around `Base.load_weights` to handle the lm_head bias."""
+
+        lm_head_bias = set()
+
+        def auto_load_lm_head_bias(weights):
+            for name, weight in weights:
+                if name.endswith("lm_head.bias") and self.pp_group.is_last_rank:
+                    self.lm_head._register_bias()
+                    self.lm_head.bias.weight_loader(self.lm_head.bias, weight)
+                    lm_head_bias.add(name)
+                else:
+                    yield name, weight
+
+        return super().load_weights(auto_load_lm_head_bias(weights)) | lm_head_bias
+
     def compute_logits(self, hidden_states: "torch.Tensor") -> "torch.Tensor | None":
-        logits = self.logits_processor(self.lm_head, hidden_states)
+        logits = self.logits_processor(self.lm_head, hidden_states, self.lm_head.bias)
         return logits

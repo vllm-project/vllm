@@ -1,13 +1,30 @@
 # Common dependencies
 -r common.txt
 
-numba == 0.61.2 # Required for N-gram speculative decoding
+numba == 0.65.0 # Required for N-gram speculative decoding
 
 # Dependencies for NVIDIA GPUs
-ray[cgraph]>=2.48.0 # Ray Compiled Graph, required for pipeline parallelism in V1.
-torch==2.9.1
-torchaudio==2.9.1
+torch==2.11.0
+torchaudio==2.11.0
 # These must be updated alongside torch
-torchvision==0.24.1 # Required for phi3v processor. See https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
+torchvision==0.26.0 # Required for phi3v processor. See https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
+PyNvVideoCodec==2.1.0
 # FlashInfer should be updated together with the Dockerfile
-flashinfer-python==0.5.3
+flashinfer-python==0.6.13
+flashinfer-cubin==0.6.13
+apache-tvm-ffi==0.1.9
+tilelang==0.1.9
+nvidia-cudnn-frontend>=1.19.1
+
+# Required for faster safetensors model loading
+fastsafetensors >= 0.3.2
+
+# QuACK and Cutlass DSL for FA4 (cute-DSL implementation)
+nvidia-cutlass-dsl[cu13]==4.5.2
+quack-kernels>=0.3.3
+
+# Tokenspeed_MLA for faster mla with spec decode
+tokenspeed-mla==0.1.2
+
+# Humming kernels for quantization gemm
+humming-kernels[cu13]==0.1.6

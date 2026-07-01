@@ -5,6 +5,7 @@ import copy
 import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
+from unittest.mock import PropertyMock, patch
 
 import pytest
 from transformers import AutoTokenizer
@@ -40,15 +41,20 @@ TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
 PROMPT = "I am Gyoubu Masataka Oniwa"
 PROMPT_TOKENS = TOKENIZER(PROMPT).input_ids
 
+_REQUEST_COUNTER = 0
+
 
 def make_request() -> EngineCoreRequest:
+    global _REQUEST_COUNTER
+    _REQUEST_COUNTER += 1
+    request_id = f"request-{_REQUEST_COUNTER}"
     return EngineCoreRequest(
-        request_id=str(uuid.uuid4()),
+        request_id=request_id,
+        external_req_id=f"{request_id}-{uuid.uuid4()}",
         prompt_token_ids=PROMPT_TOKENS,
         mm_features=None,
         sampling_params=SamplingParams(),
         pooling_params=None,
-        eos_token_id=None,
         arrival_time=time.time(),
         lora_request=None,
         cache_salt=None,
@@ -288,10 +294,6 @@ def test_engine_core_concurrent_batches():
             # Use the thread pool instead of creating a new thread
             return self.thread_pool.submit(_execute)
 
-        @property
-        def max_concurrent_batches(self) -> int:
-            return 2
-
         def shutdown(self):
             if hasattr(self, "thread_pool"):
                 self.thread_pool.shutdown(wait=False)
@@ -309,7 +311,17 @@ def test_engine_core_concurrent_batches():
         async_scheduling=False,
     )
     vllm_config = engine_args.create_engine_config()
-    with set_default_torch_num_threads(1):
+    # Force two concurrent batches to exercise the batch queue independently
+    # of async scheduling (which is disabled above).
+    with (
+        set_default_torch_num_threads(1),
+        patch.object(
+            VllmConfig,
+            "max_concurrent_batches",
+            new_callable=PropertyMock,
+            return_value=2,
+        ),
+    ):
         engine_core = EngineCore(
             vllm_config=vllm_config, log_stats=False, executor_class=DummyExecutor
         )
@@ -501,7 +513,6 @@ def test_encoder_instance_zero_kv_cache(
     cache_config = CacheConfig(
         block_size=16,
         gpu_memory_utilization=gpu_memory_utilization,
-        swap_space=0,
         cache_dtype="auto",
         enable_prefix_caching=enable_prefix_caching,
     )

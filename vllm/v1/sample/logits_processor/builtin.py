@@ -3,9 +3,11 @@
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, TypeVar
 
+import numpy as np
 import torch
 
 from vllm import SamplingParams
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.sample.logits_processor.interface import (
     BatchUpdate,
     LogitsProcessor,
@@ -117,7 +119,6 @@ class MinPLogitsProcessor(LogitsProcessor):
 class LogitBiasLogitsProcessor(LogitsProcessor):
     def __init__(self, _, device: torch.device, is_pin_memory: bool):
         self.device = device
-        self.pin_memory = is_pin_memory
         self.biases: dict[int, dict[int, float]] = {}
 
         self.bias_tensor: torch.Tensor = torch.tensor(())
@@ -153,9 +154,7 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
             )
 
     def _device_tensor(self, data: list, dtype: torch.dtype) -> torch.Tensor:
-        return torch.tensor(
-            data, device="cpu", dtype=dtype, pin_memory=self.pin_memory
-        ).to(device=self.device, non_blocking=True)
+        return async_tensor_h2d(data, device=self.device, dtype=dtype)
 
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
         if self.biases:
@@ -169,7 +168,6 @@ class MinTokensLogitsProcessor(LogitsProcessor):
     ):
         # index -> (min_toks, output_token_ids, stop_token_ids)
         self.device = device
-        self.pin_memory = is_pin_memory
         self.min_toks: dict[int, tuple[int, Sequence[int], set[int]]] = {}
 
         # (req_idx_tensor,eos_tok_id_tensor)
@@ -226,14 +224,65 @@ class MinTokensLogitsProcessor(LogitsProcessor):
             )
 
     def _device_tensor(self, data: list, dtype: torch.dtype) -> torch.Tensor:
-        return torch.tensor(
-            data, device="cpu", dtype=dtype, pin_memory=self.pin_memory
-        ).to(device=self.device, non_blocking=True)
+        return async_tensor_h2d(data, device=self.device, dtype=dtype)
 
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
         if self.min_toks:
             # Inhibit EOS token for requests which have not reached min length
             logits.index_put_(self.logits_slice, self.neg_inf_tensor)
+        return logits
+
+    def apply_with_spec_decode(
+        self,
+        logits: torch.Tensor,
+        num_draft_tokens: list[int],
+    ) -> torch.Tensor:
+        """Spec-decode version of apply().
+        Priority: ``min_tokens`` > ``stop_token_ids`` / EOS.
+        Example: ``num_draft_tokens = [2, 3, 1]``
+          → ``logits`` shape ``[6, V]``, ``cumsum = [0, 2, 5, 6]``
+          → request 0 owns rows 0‑1, request 1 rows 2‑4, request 2 row 5.
+        """
+        if not self.min_toks:
+            return logits
+
+        num_draft_arr = np.array(num_draft_tokens, dtype=np.int64)
+        cumsum = np.concatenate([[0], np.cumsum(num_draft_arr)])
+
+        entries = [
+            (req_idx, min_tok, len(out_tok_ids), list(stop_tok_ids))
+            for req_idx, (min_tok, out_tok_ids, stop_tok_ids) in self.min_toks.items()
+            if stop_tok_ids
+        ]
+
+        if not entries:
+            return logits
+
+        all_rows: list[np.ndarray] = []  # row indices to mask
+        all_toks: list[np.ndarray] = []  # stop-token ids at those rows
+
+        for req_idx, min_tok, current_len, stop_toks in entries:
+            remaining = min_tok - current_len
+            # How many leading draft positions still need stop-token masking.
+            n_mask = int(min(max(remaining, 0), num_draft_arr[req_idx]))
+
+            if n_mask > 0:
+                offset = cumsum[req_idx]
+                row_indices = np.arange(offset, offset + n_mask, dtype=np.int64)
+                n_stop = len(stop_toks)
+                all_rows.append(np.repeat(row_indices, n_stop))
+                all_toks.append(np.tile(stop_toks, n_mask))
+
+        if all_rows:
+            rows_arr = np.concatenate(all_rows)
+            toks_arr = np.concatenate(all_toks)
+            # (row_indices, token_indices) for index_put_ to set -inf.
+            logits_slice = (
+                async_tensor_h2d(rows_arr, device=self.device),
+                async_tensor_h2d(toks_arr, device=self.device),
+            )
+            logits.index_put_(logits_slice, self.neg_inf_tensor)
+
         return logits
 
 

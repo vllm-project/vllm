@@ -8,12 +8,14 @@ from typing import cast
 import numpy as np
 import torch
 
+from vllm.config.reasoning import ReasoningConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.collection_utils import swap_dict_values
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 from vllm.v1.sample.logits_processor import (
@@ -22,7 +24,9 @@ from vllm.v1.sample.logits_processor import (
     MoveDirectionality,
 )
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
+from vllm.v1.sample.thinking_budget_state import (
+    maybe_create_thinking_budget_state_holder,
+)
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
 
@@ -46,6 +50,12 @@ class CachedRequestState:
 
     lora_request: LoRARequest | None = None
     prompt_embeds: torch.Tensor | None = None
+    # To accumulate prompt logprobs tensor chunks across prefill steps.
+    in_progress_prompt_logprobs_cpu: LogprobsTensors | None = None
+
+    # Per-position mask for mixed-mode inputs (e.g chat completion with
+    # prompt_embeds content parts). See `Request.prompt_is_token_ids`.
+    prompt_is_token_ids: list[bool] | None = None
 
     # Used when both async_scheduling and spec_decode are enabled.
     prev_num_draft_len: int = 0
@@ -86,24 +96,29 @@ class InputBatch:
         max_model_len: int,
         max_num_batched_tokens: int,
         device: torch.device,
-        pin_memory: bool,
         vocab_size: int,
         block_sizes: list[int],  # The block_size of each kv cache group
         kernel_block_sizes: list[int],
+        max_num_blocks_per_req: list[int] | None = None,
         logitsprocs: LogitsProcessors | None = None,
         logitsprocs_need_output_token_ids: bool = False,
-        is_spec_decode: bool = False,
+        num_spec_tokens: int = 0,
         is_pooling_model: bool = False,
-        num_speculative_tokens: int = 0,
         cp_kv_cache_interleave_size: int = 1,
+        reasoning_config: ReasoningConfig | None = None,
     ):
+        self.thinking_budget_state_holder = maybe_create_thinking_budget_state_holder(
+            reasoning_config,
+            max_num_reqs,
+            num_spec_tokens,
+            device,
+        )
+        self.thinking_token_budget_reqs: set[str] = set()
         self.is_pooling_model = is_pooling_model
-        self.is_spec_decode = is_spec_decode
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
         self.max_num_batched_tokens = max_num_batched_tokens
         self.device = device
-        self.pin_memory = pin_memory
         self.vocab_size = vocab_size
 
         self._req_ids: list[str | None] = []
@@ -121,21 +136,35 @@ class InputBatch:
         )
         self.token_ids_cpu = self.token_ids_cpu_tensor.numpy()
         self.is_token_ids_tensor = torch.zeros(
-            (max_num_reqs, max_model_len), device="cpu", dtype=bool, pin_memory=False
+            (max_num_reqs, max_model_len),
+            device="cpu",
+            dtype=bool,
+            pin_memory=False,
         )
         self.is_token_ids = self.is_token_ids_tensor.numpy()
         # Store prompt embeddings per request to avoid OOM from large upfront
         # allocation if max_model_len is big.
         # Maps req_index -> tensor of shape (num_prompt_tokens, hidden_size)
         self.req_prompt_embeds: dict[int, torch.Tensor] = {}
-        self.num_tokens = np.zeros(max_num_reqs, dtype=np.int32)
-        self.num_tokens_no_spec = np.zeros(max_num_reqs, dtype=np.int32)
-        self.num_prompt_tokens = np.zeros(max_num_reqs, dtype=np.int32)
+        self.num_tokens_no_spec_cpu_tensor = torch.zeros(
+            (max_num_reqs,),
+            device="cpu",
+            dtype=torch.int32,
+            pin_memory=PIN_MEMORY,
+        )
+        self.num_tokens_no_spec = self.num_tokens_no_spec_cpu_tensor.numpy()
+        self.num_prompt_tokens_cpu_tensor = torch.zeros(
+            (max_num_reqs,),
+            device="cpu",
+            dtype=torch.int32,
+            pin_memory=PIN_MEMORY,
+        )
+        self.num_prompt_tokens = self.num_prompt_tokens_cpu_tensor.numpy()
         self.num_computed_tokens_cpu_tensor = torch.zeros(
             (max_num_reqs,),
             device="cpu",
             dtype=torch.int32,
-            pin_memory=pin_memory,
+            pin_memory=PIN_MEMORY,
         )
         self.num_computed_tokens_cpu = self.num_computed_tokens_cpu_tensor.numpy()
 
@@ -144,11 +173,11 @@ class InputBatch:
             max_num_reqs=max_num_reqs,
             max_model_len=max_model_len,
             max_num_batched_tokens=max_num_batched_tokens,
-            pin_memory=pin_memory,
+            pin_memory=PIN_MEMORY,
             device=device,
             block_sizes=block_sizes,
             kernel_block_sizes=kernel_block_sizes,
-            num_speculative_tokens=num_speculative_tokens,
+            max_num_blocks=max_num_blocks_per_req,
             cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
         )
 
@@ -157,7 +186,7 @@ class InputBatch:
             (max_num_reqs,), dtype=torch.float32, device=device
         )
         self.temperature_cpu_tensor = torch.empty(
-            (max_num_reqs,), dtype=torch.float32, device="cpu", pin_memory=pin_memory
+            (max_num_reqs,), dtype=torch.float32, device="cpu", pin_memory=PIN_MEMORY
         )
         self.temperature_cpu = self.temperature_cpu_tensor.numpy()
         self.greedy_reqs: set[str] = set()
@@ -165,27 +194,24 @@ class InputBatch:
 
         self.top_p = torch.empty((max_num_reqs,), dtype=torch.float32, device=device)
         self.top_p_cpu_tensor = torch.empty(
-            (max_num_reqs,), dtype=torch.float32, device="cpu", pin_memory=pin_memory
+            (max_num_reqs,), dtype=torch.float32, device="cpu", pin_memory=PIN_MEMORY
         )
         self.top_p_cpu = self.top_p_cpu_tensor.numpy()
         self.top_p_reqs: set[str] = set()
 
         self.top_k = torch.empty((max_num_reqs,), dtype=torch.int32, device=device)
         self.top_k_cpu_tensor = torch.empty(
-            (max_num_reqs,), dtype=torch.int32, device="cpu", pin_memory=pin_memory
+            (max_num_reqs,), dtype=torch.int32, device="cpu", pin_memory=PIN_MEMORY
         )
         self.top_k_cpu = self.top_k_cpu_tensor.numpy()
         self.top_k_reqs: set[str] = set()
-
-        # IDs of requests which do not support spec decoding
-        self.spec_decode_unsupported_reqs: set[str] = set()
 
         # Frequency penalty related data structures
         self.frequency_penalties = torch.empty(
             (max_num_reqs,), dtype=torch.float, device=device
         )
         self.frequency_penalties_cpu_tensor = torch.empty(
-            (max_num_reqs,), dtype=torch.float, device="cpu", pin_memory=pin_memory
+            (max_num_reqs,), dtype=torch.float, device="cpu", pin_memory=PIN_MEMORY
         )
         self.frequency_penalties_cpu = self.frequency_penalties_cpu_tensor.numpy()
         self.frequency_penalties_reqs: set[str] = set()
@@ -195,7 +221,7 @@ class InputBatch:
             (max_num_reqs,), dtype=torch.float, device=device
         )
         self.presence_penalties_cpu_tensor = torch.empty(
-            (max_num_reqs,), dtype=torch.float, device="cpu", pin_memory=pin_memory
+            (max_num_reqs,), dtype=torch.float, device="cpu", pin_memory=PIN_MEMORY
         )
         self.presence_penalties_cpu = self.presence_penalties_cpu_tensor.numpy()
         self.presence_penalties_reqs: set[str] = set()
@@ -205,14 +231,14 @@ class InputBatch:
             (max_num_reqs,), dtype=torch.float, device=device
         )
         self.repetition_penalties_cpu_tensor = torch.empty(
-            (max_num_reqs,), dtype=torch.float, device="cpu", pin_memory=pin_memory
+            (max_num_reqs,), dtype=torch.float, device="cpu", pin_memory=PIN_MEMORY
         )
         self.repetition_penalties_cpu = self.repetition_penalties_cpu_tensor.numpy()
         self.repetition_penalties_reqs: set[str] = set()
 
         # Speculative decoding
         self.num_accepted_tokens_cpu_tensor = torch.ones(
-            (max_num_reqs,), dtype=torch.int64, device="cpu", pin_memory=pin_memory
+            (max_num_reqs,), dtype=torch.int32, device="cpu", pin_memory=PIN_MEMORY
         )
         self.num_accepted_tokens_cpu = self.num_accepted_tokens_cpu_tensor.numpy()
 
@@ -228,8 +254,9 @@ class InputBatch:
 
         self.num_logprobs: dict[str, int] = {}
 
-        # To accumulate prompt logprobs tensor chunks across prefill steps.
-        self.in_progress_prompt_logprobs_cpu: dict[str, LogprobsTensors] = {}
+        # req_id -> list of specific token IDs to compute logprobs for
+        # More efficient than num_logprobs=-1 when only a few tokens are needed
+        self.logprob_token_ids: dict[str, list[int]] = {}
 
         # Internal representation of per-step batch state changes, used for
         # reordering persistent batch and generating logitsprocs batch state
@@ -333,16 +360,18 @@ class InputBatch:
         end_idx = start_idx + len(request.output_token_ids)
         if request.prompt_token_ids is not None:
             self.token_ids_cpu[req_index, :num_prompt_tokens] = request.prompt_token_ids
-            self.is_token_ids[req_index, :num_prompt_tokens] = True
+            if request.prompt_is_token_ids is not None:
+                self.is_token_ids[req_index, :num_prompt_tokens] = (
+                    request.prompt_is_token_ids
+                )
+            else:
+                self.is_token_ids[req_index, :num_prompt_tokens] = True
         else:
             self.is_token_ids[req_index, :num_prompt_tokens] = False
         if request.prompt_embeds is not None:
             self.req_prompt_embeds[req_index] = request.prompt_embeds
         self.token_ids_cpu[req_index, start_idx:end_idx] = request.output_token_ids
         self.is_token_ids[req_index, start_idx:end_idx] = True
-        # Number of token ids in prompt (token_ids_cpu or prompt_embeds).
-        # NOTE(woosuk): This may include spec decode tokens.
-        self.num_tokens[req_index] = request.num_tokens
         # Number of tokens without spec decode tokens.
         self.num_tokens_no_spec[req_index] = request.num_tokens
 
@@ -350,8 +379,6 @@ class InputBatch:
         self.block_table.add_row(request.block_ids, req_index)
 
         if sampling_params := request.sampling_params:
-            if self.is_spec_decode and is_spec_decode_unsupported(sampling_params):
-                self.spec_decode_unsupported_reqs.add(req_id)
             if sampling_params.sampling_type == SamplingType.GREEDY:
                 # Should avoid division by zero later when apply_temperature.
                 self.temperature_cpu[req_index] = 0.0
@@ -392,6 +419,10 @@ class InputBatch:
                     if sampling_params.logprobs == -1
                     else sampling_params.logprobs
                 )
+
+            # Store specific token IDs to compute logprobs for (more efficient)
+            if sampling_params.logprob_token_ids is not None:
+                self.logprob_token_ids[req_id] = sampling_params.logprob_token_ids
 
             if sampling_params.allowed_token_ids:
                 self.has_allowed_token_ids.add(req_id)
@@ -450,6 +481,33 @@ class InputBatch:
 
         return req_index
 
+    def update_req_spec_token_ids(
+        self, request: CachedRequestState, scheduled_spec_tokens: dict[str, list[int]]
+    ) -> None:
+        req_id = request.req_id
+        req_index = self.req_id_to_index[req_id]
+        cur_spec_token_ids = self.spec_token_ids[req_index]
+        # When speculative decoding is used with structured output,
+        # the scheduler can drop draft tokens that do not
+        # conform to the schema. This can result in
+        # scheduler_output.scheduled_spec_decode_tokens being empty,
+        # even when speculative decoding is enabled.
+        cur_spec_token_ids.clear()
+        spec_token_ids = scheduled_spec_tokens.get(req_id, ())
+        num_spec_tokens = len(spec_token_ids)
+        request.prev_num_draft_len = num_spec_tokens
+        if not spec_token_ids:
+            return
+
+        # For async scheduling, token_ids_cpu assigned from
+        # spec_token_ids are placeholders and will be overwritten in
+        # _prepare_input_ids.
+        start_index = self.num_tokens_no_spec[req_index]
+        end_token_index = start_index + num_spec_tokens
+        self.token_ids_cpu[req_index, start_index:end_token_index] = spec_token_ids
+        self.is_token_ids[req_index, start_index:end_token_index] = True
+        cur_spec_token_ids.extend(spec_token_ids)
+
     def remove_request(self, req_id: str) -> int | None:
         """This method must always be followed by a call to condense().
 
@@ -468,6 +526,7 @@ class InputBatch:
         self._req_ids[req_index] = None
         self.req_output_token_ids[req_index] = None
         self.spec_token_ids[req_index].clear()
+        self.block_table.clear_row(req_index)
 
         # LoRA
         lora_id = self.request_lora_mapping[req_index]
@@ -488,13 +547,12 @@ class InputBatch:
         self.random_reqs.discard(req_id)
         self.top_p_reqs.discard(req_id)
         self.top_k_reqs.discard(req_id)
-        self.spec_decode_unsupported_reqs.discard(req_id)
         self.frequency_penalties_reqs.discard(req_id)
         self.presence_penalties_reqs.discard(req_id)
         self.repetition_penalties_reqs.discard(req_id)
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
-        self.in_progress_prompt_logprobs_cpu.pop(req_id, None)
+        self.logprob_token_ids.pop(req_id, None)
         if self.prev_req_id_to_index is not None:
             self.prev_req_id_to_index.pop(req_id, None)
 
@@ -503,11 +561,18 @@ class InputBatch:
             # False means we don't fill with -inf.
             self.allowed_token_ids_mask_cpu_tensor[req_index].fill_(False)
         self.bad_words_token_ids.pop(req_index, None)
+        self.thinking_token_budget_reqs.discard(req_id)
         return req_index
 
     def swap_states(self, i1: int, i2: int) -> None:
         old_id_i1 = self._req_ids[i1]
         old_id_i2 = self._req_ids[i2]
+        # Only swap the active token prefix for each request. Copying full
+        # max_model_len rows is expensive and unnecessary during reordering.
+        i1_active_token_count = self._get_active_token_count(i1)
+        i2_active_token_count = self._get_active_token_count(i2)
+        max_active_token_count = max(i1_active_token_count, i2_active_token_count)
+
         self._req_ids[i1], self._req_ids[i2] = self._req_ids[i2], self._req_ids[i1]  # noqa
         self.req_output_token_ids[i1], self.req_output_token_ids[i2] = (
             self.req_output_token_ids[i2],
@@ -521,10 +586,6 @@ class InputBatch:
         self.req_id_to_index[old_id_i1], self.req_id_to_index[old_id_i2] = (
             self.req_id_to_index[old_id_i2],
             self.req_id_to_index[old_id_i1],
-        )
-        self.num_tokens[i1], self.num_tokens[i2] = (
-            self.num_tokens[i2],
-            self.num_tokens[i1],
         )
         self.num_tokens_no_spec[i1], self.num_tokens_no_spec[i2] = (
             self.num_tokens_no_spec[i2],
@@ -543,12 +604,15 @@ class InputBatch:
         # self.token_ids_cpu[i1, ...], self.token_ids_cpu[i2, ...], =\
         #     self.token_ids_cpu[i2, ...], self.token_ids_cpu[i1, ...]
         # instead, we need to temporarily copy the data for one of the indices
-        # TODO(lucas): optimize this by only copying valid indices
-        tmp = self.token_ids_cpu[i1, ...].copy()
-        self.token_ids_cpu[i1, ...] = self.token_ids_cpu[i2, ...]
-        self.token_ids_cpu[i2, ...] = tmp
+        tmp_token_ids = self.token_ids_cpu[i1, :max_active_token_count].copy()
+        self.token_ids_cpu[i1, :max_active_token_count] = self.token_ids_cpu[
+            i2, :max_active_token_count
+        ]
+        self.token_ids_cpu[i2, :max_active_token_count] = tmp_token_ids
 
-        self.is_token_ids[[i1, i2], ...] = self.is_token_ids[[i2, i1], ...]
+        self.is_token_ids[[i1, i2], :max_active_token_count] = self.is_token_ids[
+            [i2, i1], :max_active_token_count
+        ]
 
         # Swap prompt embeddings if they exist
         embeds_i1 = self.req_prompt_embeds.get(i1)
@@ -612,6 +676,11 @@ class InputBatch:
                 self.allowed_token_ids_mask_cpu_tensor[i1],
             )
 
+    def _get_active_token_count(self, req_index: int) -> int:
+        return int(self.num_tokens_no_spec[req_index]) + len(
+            self.spec_token_ids[req_index]
+        )
+
     def condense(self) -> None:
         """Slide non-empty requests down into lower, empty indices.
 
@@ -661,17 +730,14 @@ class InputBatch:
             self.req_output_token_ids[last_req_index] = None
             self.req_id_to_index[req_id] = empty_index
 
-            if last_req_index != empty_index:
-                (
-                    self.spec_token_ids[last_req_index],
-                    self.spec_token_ids[empty_index],
-                ) = (
-                    self.spec_token_ids[empty_index],
-                    self.spec_token_ids[last_req_index],
-                )
-                self.spec_token_ids[last_req_index].clear()
+            num_tokens = self._get_active_token_count(last_req_index)
 
-            num_tokens = self.num_tokens[last_req_index]
+            (self.spec_token_ids[last_req_index], self.spec_token_ids[empty_index]) = (
+                self.spec_token_ids[empty_index],
+                self.spec_token_ids[last_req_index],
+            )
+            self.spec_token_ids[last_req_index].clear()
+
             self.token_ids_cpu[empty_index, :num_tokens] = self.token_ids_cpu[
                 last_req_index, :num_tokens
             ]
@@ -682,7 +748,6 @@ class InputBatch:
                 self.req_prompt_embeds[empty_index] = self.req_prompt_embeds.pop(
                     last_req_index
                 )
-            self.num_tokens[empty_index] = num_tokens
             self.num_tokens_no_spec[empty_index] = self.num_tokens_no_spec[
                 last_req_index
             ]
@@ -757,6 +822,8 @@ class InputBatch:
         # reset batch update tracking.
         # Update sampling metadata if batch state is changed.
         batch_update = self.batch_update_builder.get_and_reset(self.num_reqs)
+        if self.thinking_budget_state_holder is not None and batch_update:
+            self.thinking_budget_state_holder.sync_batch(batch_update)
         for logit_proc in self.logitsprocs.all:
             logit_proc.update_state(batch_update)
         if batch_update:
@@ -799,16 +866,26 @@ class InputBatch:
         # step pooling during the sampling/pooling process.
         # Hence copy these tensors only when there are requests which
         # need penalties/step_pooler to be applied.
+        prompt_token_ids_cpu = (
+            self._make_prompt_token_ids_cpu_tensor() if needs_prompt_token_ids else None
+        )
         prompt_token_ids = (
-            self._make_prompt_token_ids_tensor() if needs_prompt_token_ids else None
+            prompt_token_ids_cpu.to(device=self.device, non_blocking=True)
+            if prompt_token_ids_cpu is not None
+            else None
         )
 
         # Only set output_token_ids if required by the current requests'
         # sampling parameters.
+        holder = self.thinking_budget_state_holder
+        thinking_budget_tracks_reqs = (
+            holder is not None and holder.has_tracked_requests()
+        )
         needs_output_token_ids = (
             not self.no_penalties
             or bool(self.bad_words_token_ids)
             or self.logitsprocs_need_output_token_ids
+            or thinking_budget_tracks_reqs
         )
         output_token_ids = (
             cast(list[list[int]], self.req_output_token_ids)
@@ -826,6 +903,15 @@ class InputBatch:
             )
             allowed_token_ids_mask = self.allowed_token_ids_mask[:num_reqs]
 
+        # Build per-request logprob_token_ids mapping: req_index -> token_ids
+        logprob_token_ids_by_index: dict[int, list[int]] | None = None
+        if self.logprob_token_ids:
+            logprob_token_ids_by_index = {}
+            for req_id, token_ids in self.logprob_token_ids.items():
+                if req_id in self.req_id_to_index:
+                    req_index = self.req_id_to_index[req_id]
+                    logprob_token_ids_by_index[req_index] = token_ids
+
         return SamplingMetadata(
             temperature=temperature,
             all_greedy=self.all_greedy,
@@ -834,16 +920,18 @@ class InputBatch:
             top_k=None if self.no_top_k else self.top_k[:num_reqs],
             generators=self.generators,
             max_num_logprobs=self.max_num_logprobs,
+            logprob_token_ids=logprob_token_ids_by_index,
             prompt_token_ids=prompt_token_ids,
             frequency_penalties=self.frequency_penalties[:num_reqs],
             presence_penalties=self.presence_penalties[:num_reqs],
             repetition_penalties=self.repetition_penalties[:num_reqs],
             output_token_ids=output_token_ids,
-            spec_token_ids=cast(list[list[int]], self.spec_token_ids),
+            spec_token_ids=self.spec_token_ids,
             no_penalties=self.no_penalties,
             allowed_token_ids_mask=allowed_token_ids_mask,
             bad_words_token_ids=self.bad_words_token_ids,
             logitsprocs=self.logitsprocs,
+            thinking_budget_state_holder=self.thinking_budget_state_holder,
         )
 
     def get_pooling_params(self) -> list[PoolingParams]:
@@ -857,22 +945,26 @@ class InputBatch:
     def get_pooling_metadata(self) -> PoolingMetadata:
         pooling_params = self.get_pooling_params()
         pooling_states = self.get_pooling_states()
+        prompt_token_ids_cpu = None
+        if any(p.requires_token_ids for p in pooling_params):
+            prompt_token_ids_cpu = self._make_prompt_token_ids_cpu_tensor()
 
         return PoolingMetadata(
-            prompt_lens=torch.from_numpy(self.num_prompt_tokens[: self.num_reqs]),
+            prompt_lens=self.num_prompt_tokens_cpu_tensor[: self.num_reqs].clone(),
             prompt_token_ids=self.sampling_metadata.prompt_token_ids,
+            prompt_token_ids_cpu=prompt_token_ids_cpu,
             pooling_params=pooling_params,
             pooling_states=pooling_states,
         )
 
-    def _make_prompt_token_ids_tensor(self) -> torch.Tensor:
+    def _make_prompt_token_ids_cpu_tensor(self) -> torch.Tensor:
         num_reqs = self.num_reqs
         max_prompt_len = self.num_prompt_tokens[:num_reqs].max()
         prompt_token_ids_cpu_tensor = torch.empty(
             (self.num_reqs, max_prompt_len),
             device="cpu",
             dtype=torch.int64,
-            pin_memory=self.pin_memory,
+            pin_memory=PIN_MEMORY,
         )
         prompt_token_ids = prompt_token_ids_cpu_tensor.numpy()
         prompt_token_ids[:] = self.token_ids_cpu[:num_reqs, :max_prompt_len]
@@ -880,7 +972,7 @@ class InputBatch:
         # token_id of this value.
         for i in range(num_reqs):
             prompt_token_ids[i, self.num_prompt_tokens[i] :] = self.vocab_size
-        return prompt_token_ids_cpu_tensor.to(device=self.device, non_blocking=True)
+        return prompt_token_ids_cpu_tensor
 
     def make_lora_inputs(
         self, num_scheduled_tokens: np.ndarray, num_sampled_tokens: np.ndarray
@@ -949,9 +1041,47 @@ class InputBatch:
             if sampled_token_ids is None:
                 assert self.async_copy_ready_event is not None
                 self.async_copy_ready_event.synchronize()
-                sampled_token_ids = self.sampled_token_ids_cpu.squeeze(-1).tolist()
-            # Replace placeholder token id with actual sampled id.
-            req_output_token_ids[-1] = sampled_token_ids[prev_index]
+                sampled_token_ids = self.sampled_token_ids_cpu.tolist()
+            # Replace placeholder token id(s) with actual sampled id(s).
+            new_ids: list[int] = sampled_token_ids[prev_index]
+            if not new_ids:
+                continue
+            num_sampled_ids = len(new_ids) if new_ids[-1] != -1 else new_ids.index(-1)
+            # Also account for case where there may be a smaller number of
+            # output placeholders (tokens can be discarded after kv-load
+            # failure) or a larger number (async spec decode adds optimistic
+            # placeholders that may exceed the actual acceptance count).
+            first_placeholder = len(req_output_token_ids)
+            while (
+                first_placeholder > 0
+                and req_output_token_ids[first_placeholder - 1] == -1
+            ):
+                first_placeholder -= 1
+            num_placeholders = len(req_output_token_ids) - first_placeholder
+            num_to_replace = min(num_sampled_ids, num_placeholders)
+            del new_ids[num_to_replace:]
+            req_output_token_ids[first_placeholder:] = new_ids
+            # ^ Implicitly resizes to (first_placeholder + num_to_replace)
+
+    def update_async_spec_token_ids(self, draft_token_ids: list[list[int]]) -> None:
+        """
+        In async scheduling case, update spec_token_ids in sampling metadata with
+        real draft token ids from prior step. This is called right before they are
+        needed by the rejection sampler for penalty/bad_words computation.
+        """
+        if not draft_token_ids or not self.prev_req_id_to_index:
+            return
+
+        if (spec_token_ids := self.sampling_metadata.spec_token_ids) is not None:
+            for req_id, spec_ids in zip(self.req_ids, spec_token_ids):
+                if spec_ids:
+                    prev_index = self.prev_req_id_to_index.get(req_id)
+                    if prev_index is not None:
+                        draft_ids = draft_token_ids[prev_index]
+                        if draft_ids:
+                            del draft_ids[len(spec_ids) :]
+                            spec_ids.clear()
+                            spec_ids.extend(draft_ids)
 
     @property
     def num_reqs(self) -> int:
@@ -979,6 +1109,13 @@ class InputBatch:
             len(self.presence_penalties_reqs) == 0
             and len(self.frequency_penalties_reqs) == 0
             and len(self.repetition_penalties_reqs) == 0
+        )
+
+    @property
+    def no_thinking_budget(self) -> bool:
+        return (
+            self.thinking_budget_state_holder is None
+            or len(self.thinking_token_budget_reqs) == 0
         )
 
     @property

@@ -31,13 +31,14 @@ import torch
 from torch import nn
 from transformers import LlamaConfig
 
-from vllm.attention.backends.abstract import AttentionType
-from vllm.attention.layer import Attention
-from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention import (
+    Attention,
+    EncoderOnlyAttention,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -51,18 +52,24 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
-)
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backend import AttentionType
 
-from .interfaces import SupportsEagle, SupportsEagle3, SupportsLoRA, SupportsPP
+from .adapters import as_embedding_model, as_seq_cls_model
+from .interfaces import (
+    EagleModelMixin,
+    LocalArgmaxMixin,
+    SupportsEagle,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+    SupportsQuant,
+)
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    WeightsMapper,
     extract_layer_index,
-    is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -144,23 +151,13 @@ class LlamaAttention(nn.Module):
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_kv_heads == 0
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        # MistralConfig has an optional head_dim introduced by Mistral-Nemo
+
         head_dim = getattr(config, "head_dim", None)
-        if head_dim is None:
-            head_dim = self.hidden_size // self.total_num_heads
-        self.head_dim = head_dim
+        self.head_dim = head_dim or self.hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
         self.max_position_embeddings = max_position_embeddings
-
-        llama_4_scaling_config = getattr(config, "llama_4_scaling", None)
-        self.do_llama_4_scaling = llama_4_scaling_config is not None
-        if self.do_llama_4_scaling:
-            self.llama_4_scaling_original_max_position_embeddings = (
-                llama_4_scaling_config["original_max_position_embeddings"]
-            )
-            self.llama_4_scaling_beta = llama_4_scaling_config["beta"]
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size=hidden_size,
@@ -195,8 +192,8 @@ class LlamaAttention(nn.Module):
                 # This is a target model, use layer_idx directly
                 effective_layer_idx = layer_idx
             assert effective_layer_idx < len(layer_types), (
-                f"effective_layer_idx: {effective_layer_idx} \
-                is out of bounds for layer_types: {layer_types}"
+                f"effective_layer_idx: {effective_layer_idx} "
+                f"is out of bounds for layer_types: {layer_types}"
             )
 
             is_sliding = layer_types[effective_layer_idx] == "sliding_attention"
@@ -221,17 +218,6 @@ class LlamaAttention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
-    def _get_llama_4_attn_scale(self, positions: torch.Tensor) -> torch.Tensor:
-        # Llama4 scaling
-        scaling = 1 + self.llama_4_scaling_beta * torch.log(
-            1
-            + torch.floor(
-                positions / self.llama_4_scaling_original_max_position_embeddings
-            )
-        )
-        # Broadcast over head_dim
-        return scaling.unsqueeze(-1)
-
     def forward(
         self,
         positions: torch.Tensor,
@@ -240,9 +226,6 @@ class LlamaAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        if self.do_llama_4_scaling:
-            attn_scale = self._get_llama_4_attn_scale(positions)
-            q = (q * attn_scale).to(q.dtype)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
@@ -253,9 +236,6 @@ class LlamaAttention(nn.Module):
         quant_config: QuantizationConfig | None,
     ) -> None:
         is_neox_style = True
-        is_gguf = quant_config and quant_config.get_name() == "gguf"
-        if is_gguf and config.model_type == "llama":
-            is_neox_style = False
 
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -271,6 +251,7 @@ class LlamaDecoderLayer(nn.Module):
         vllm_config: VllmConfig,
         prefix: str = "",
         config: LlamaConfig | None = None,
+        attn_layer_type: type[nn.Module] = LlamaAttention,
     ) -> None:
         super().__init__()
 
@@ -281,7 +262,6 @@ class LlamaDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         # Support abacusai/Smaug-72B-v0.1 with attention_bias
-        # Support internlm/internlm-7b with bias
         attention_bias = getattr(config, "attention_bias", False) or getattr(
             config, "bias", False
         )
@@ -299,7 +279,7 @@ class LlamaDecoderLayer(nn.Module):
         else:
             attn_type = AttentionType.ENCODER_ONLY
 
-        self.self_attn = LlamaAttention(
+        self.self_attn = attn_layer_type(
             config=config,
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -351,18 +331,28 @@ class LlamaDecoderLayer(nn.Module):
         return vllm_config.quant_config
 
 
-def llama_model_invariants(
-    input_ids, positions, intermediate_tensors=None, inputs_embeds=None
-):
-    """Shape invariants for Llama model compilation, those are translated to
-    runtime assertions for unbacked dynamic shapes and are compiled away for
-    backed"""
-    if input_ids is not None:
-        torch._check(positions.size()[0] == input_ids.size()[0])
+@support_torch_compile(
+    # TODO[#32068]: Investigate recompilation
+    # mark_unbacked_dims={"input_ids": 0},
+    dynamic_arg_dims={
+        "input_ids": {0: "b"},
+        "positions": {0: "b"},
+        "intermediate_tensors": {0: "b"},
+        "inputs_embeds": {0: "b"},
+    },
+)
+class LlamaModel(nn.Module, EagleModelMixin):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            # weight_name: (param_name, shard_id)
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+            ".gate_proj": (".gate_up_proj", 0),
+            ".up_proj": (".gate_up_proj", 1),
+        }
+    )
 
-
-@support_torch_compile(shape_invariants=llama_model_invariants)
-class LlamaModel(nn.Module):
     def __init__(
         self,
         *,
@@ -400,8 +390,6 @@ class LlamaModel(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
-        self.aux_hidden_state_layers = tuple[int, ...]()
-
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
@@ -415,6 +403,7 @@ class LlamaModel(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
+        **extra_layer_kwargs,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -427,13 +416,16 @@ class LlamaModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        aux_hidden_states = []
+        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer)
         ):
-            if idx in self.aux_hidden_state_layers:
-                aux_hidden_states.append(hidden_states + residual)
-            hidden_states, residual = layer(positions, hidden_states, residual)
+            hidden_states, residual = layer(
+                positions, hidden_states, residual, **extra_layer_kwargs
+            )
+            self._maybe_add_hidden_state(
+                aux_hidden_states, idx + 1, hidden_states, residual
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -447,108 +439,28 @@ class LlamaModel(nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            (".qkv_proj", ".q_proj", "q"),
-            (".qkv_proj", ".k_proj", "k"),
-            (".qkv_proj", ".v_proj", "v"),
-            (".gate_up_proj", ".gate_proj", 0),
-            (".gate_up_proj", ".up_proj", 1),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
-            if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:
-                # Models trained using ColossalAI may include these tensors in
-                # the checkpoint. Skip them.
-                continue
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                # Loading kv cache quantization scales
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = (
-                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
-                )
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
-                continue
-            if "scale" in name:
-                # Remapping the name of FP8 kv-scale.
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
-                    continue
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-
-                if is_pp_missing_parameter(name, self):
-                    continue
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-
-                if is_pp_missing_parameter(name, self):
-                    continue
-
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class LlamaForCausalLM(
-    nn.Module, SupportsLoRA, SupportsPP, SupportsEagle, SupportsEagle3
+    LocalArgmaxMixin,
+    nn.Module,
+    SupportsLoRA,
+    SupportsPP,
+    SupportsEagle,
+    SupportsEagle3,
+    SupportsQuant,
 ):
+    hf_to_vllm_mapper = LlamaModel.hf_to_vllm_mapper
+    # LoRA specific attributes
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
-
-    # LoRA specific attributes
     embedding_modules = {
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
-    }
-
-    # Mistral/Llama models can also be loaded with --load-format mistral
-    # from consolidated.safetensors checkpoints
-    mistral_mapping = {
-        "layers": "model.layers",
-        "attention": "self_attn",
-        "qscale_act": "input_scale",
-        "qscale_weight": "weight_scale",
-        "kv_fake_quantizer.qscale_act": "kv_scale",
-        "q_fake_quantizer.qscale_act": "attn.q_scale",
-        "k_fake_quantizer.qscale_act": "k_scale",
-        "v_fake_quantizer.qscale_act": "v_scale",
-        "wq": "q_proj",
-        "wk": "k_proj",
-        "wv": "v_proj",
-        "wo": "o_proj",
-        "attention_norm": "input_layernorm",
-        "feed_forward": "mlp",
-        "w1": "gate_proj",
-        "w2": "down_proj",
-        "w3": "up_proj",
-        "ffn_norm": "post_attention_layernorm",
-        "tok_embeddings": "model.embed_tokens",
-        "output": "lm_head",
-        "norm": "model.norm",
     }
 
     def __init__(
@@ -590,18 +502,6 @@ class LlamaForCausalLM(
             self.model.make_empty_intermediate_tensors
         )
 
-    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.model.aux_hidden_state_layers = layers
-
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
-        """Override to return default layers for Llama
-
-        Note: The GPU model runner will override this with layers from
-        the speculative config if available, providing dynamic configuration.
-        """
-        num_layers = len(self.model.layers)
-        return (2, num_layers // 2, num_layers - 3)
-
     def _init_model(
         self,
         vllm_config: VllmConfig,
@@ -615,7 +515,7 @@ class LlamaForCausalLM(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -637,64 +537,16 @@ class LlamaForCausalLM(
             self,
             skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
-        return loader.load_weights(
-            self.maybe_remap_mistral(name, loaded_weight)
-            for name, loaded_weight in weights
-        )
+        return loader.load_weights(weights)
 
-    # This function is used to remap the mistral format as
-    # used by Mistral and Llama <=2
-    def maybe_remap_mistral(
-        self,
-        name: str,
-        loaded_weight: torch.Tensor,
-    ) -> tuple[str, torch.Tensor]:
-        def permute(w: torch.Tensor, n_heads: int, attn_out: int):
-            attn_in = self.config.head_dim * n_heads
 
-            return (
-                w.view(n_heads, attn_in // n_heads // 2, 2, attn_out)
-                .transpose(1, 2)
-                .reshape(attn_in, attn_out)
-            )
+class LlamaBidirectionalForSequenceClassification(as_seq_cls_model(LlamaForCausalLM)):
+    # This class sets the correct attention type and pooling type
+    # through LlamaBidirectionalConfig.
+    pass
 
-        mapping = self.mistral_mapping
-        modules = name.split(".")
 
-        # rotary embeds should be sliced
-        # If using quantized model in mistral format,
-        # quantization scales (qscale_weight) also need to be sliced
-        if "wk" in modules and modules[-1] == "weight":
-            loaded_weight = permute(
-                loaded_weight, self.config.num_key_value_heads, self.config.hidden_size
-            )
-        elif (
-            "wk" in modules
-            and modules[-1] == "qscale_weight"
-            and loaded_weight.numel() > 1
-        ):
-            loaded_weight = permute(loaded_weight, self.config.num_key_value_heads, 1)
-        elif "wq" in modules and modules[-1] == "weight":
-            loaded_weight = permute(
-                loaded_weight, self.config.num_attention_heads, self.config.hidden_size
-            )
-        elif (
-            "wq" in modules
-            and modules[-1] == "qscale_weight"
-            and loaded_weight.numel() > 1
-        ):
-            loaded_weight = permute(loaded_weight, self.config.num_attention_heads, 1)
-
-        num_modules = len(modules)
-        for i in range(num_modules):
-            item = modules[i]
-            next_item = modules[i + 1] if i < num_modules - 1 else None
-
-            combined_item = f"{item}.{next_item}" if next_item is not None else None
-
-            if combined_item in mapping:
-                name = name.replace(combined_item, mapping[combined_item])
-            elif item in mapping and mapping[item] not in name:
-                name = name.replace(item, mapping[item])
-
-        return name, loaded_weight
+class LlamaBidirectionalModel(as_embedding_model(LlamaForCausalLM)):
+    # This class sets the correct attention type and pooling type
+    # through LlamaBidirectionalConfig.
+    pass

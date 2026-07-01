@@ -38,7 +38,8 @@ TOKENIZERS = [
     "EleutherAI/gpt-j-6b",
     "EleutherAI/pythia-70m",
     "bigscience/bloom-560m",
-    "mosaicml/mpt-7b",
+    # FIXME: mosaicml/mpt-7b has been deleted
+    # "mosaicml/mpt-7b",
     "tiiuae/falcon-7b",
     "meta-llama/Llama-3.2-1B-Instruct",
     "codellama/CodeLlama-7b-hf",
@@ -66,7 +67,6 @@ def _run_incremental_decode(
         mm_features=None,
         sampling_params=params,
         pooling_params=None,
-        eos_token_id=None,
         arrival_time=0.0,
         lora_request=None,
         cache_salt=None,

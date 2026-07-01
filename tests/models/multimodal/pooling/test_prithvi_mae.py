@@ -1,18 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib.util
+
 import pytest
 import torch
 
 from ....conftest import VllmRunner
 
-
-def generate_test_mm_data():
-    mm_data = {
-        "pixel_values": torch.full((6, 512, 512), 1.0, dtype=torch.float16),
-        "location_coords": torch.full((1, 2), 1.0, dtype=torch.float16),
-    }
-    return mm_data
+pytestmark = pytest.mark.skipif(
+    importlib.util.find_spec("terratorch") is None,
+    reason="terratorch unavailable while PyPI has `lightning` quarantined; see #41376",
+)
 
 
 def _run_test(
@@ -23,7 +22,12 @@ def _run_test(
         {
             # This model deals with no text input
             "prompt_token_ids": [1],
-            "multi_modal_data": generate_test_mm_data(),
+            "multi_modal_data": {
+                "image": {
+                    "pixel_values": torch.ones((6, 512, 512), dtype=torch.float16),
+                    "location_coords": torch.ones((1, 2), dtype=torch.float16),
+                }
+            },
         }
         for _ in range(10)
     ]
@@ -43,7 +47,7 @@ def _run_test(
         vllm_model.llm.encode(prompt, pooling_task="plugin")
 
 
-MODELS = ["mgazz/Prithvi-EO-2.0-300M-TL-Sen1Floods11"]
+MODELS = ["ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11"]
 
 
 @pytest.mark.core_model

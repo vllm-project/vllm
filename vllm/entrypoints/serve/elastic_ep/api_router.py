@@ -9,14 +9,14 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.openai.api_server import validate_json_request
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
 )
 from vllm.entrypoints.serve.elastic_ep.middleware import (
     get_scaling_elastic_ep,
     set_scaling_elastic_ep,
 )
+from vllm.entrypoints.serve.utils.api_utils import validate_json_request
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -43,7 +43,7 @@ async def scale_elastic_ep(raw_request: Request):
     try:
         body = await raw_request.json()
     except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
+        raise HTTPException(status_code=400, detail="Invalid JSON format") from e
 
     new_data_parallel_size = body.get("new_data_parallel_size")
     drain_timeout = body.get("drain_timeout", 120)  # Default 2 minutes

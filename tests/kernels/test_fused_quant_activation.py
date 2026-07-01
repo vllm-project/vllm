@@ -7,13 +7,16 @@ import vllm._custom_ops as ops
 from tests.kernels.utils import opcheck
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 DTYPES = [torch.bfloat16, torch.float16]
 QUANT_DTYPES = [current_platform.fp8_dtype()]
 NUM_TOKENS = [1, 17, 86, 1234, 3045]  # Arbitrary values for testing
 HIDDEN_SIZES = [16, 48, 128, 1562, 4096]  # Arbitrary values for testing
 SEEDS = [0]
-CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
+CUDA_DEVICES = [
+    f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)
+]
 
 
 def ref_impl(
@@ -39,6 +42,7 @@ def ops_impl(x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_silu_and_mul(
+    default_vllm_config,
     num_tokens: int,
     hidden_size: int,
     dtype: torch.dtype,
@@ -46,9 +50,7 @@ def test_silu_and_mul(
     seed: int,
     device: str,
 ) -> None:
-    torch.random.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
+    set_random_seed(seed)
     torch.set_default_device(device)
 
     layer = SiluAndMul()

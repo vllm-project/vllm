@@ -3,14 +3,15 @@
 
 import contextlib
 import os
+import threading
 import weakref
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing import Process, connection
 from multiprocessing.process import BaseProcess
-from typing import TYPE_CHECKING
-from unittest.mock import patch
+from multiprocessing.queues import Queue
+from typing import TYPE_CHECKING, cast
 
 import msgspec
 import zmq
@@ -20,10 +21,17 @@ from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
-from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
+from vllm.utils import numa_utils
+from vllm.utils.network_utils import (
+    get_open_port,
+    get_open_zmq_ipc_path,
+    get_tcp_uri,
+    zmq_socket_ctx,
+)
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.executor import Executor
+from vllm.v1.executor.ray_utils import WORKER_SPECIFIC_ENV_VARS
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 
 if TYPE_CHECKING:
@@ -75,7 +83,38 @@ class EngineHandshakeMetadata:
 
     addresses: EngineZmqAddresses
     parallel_config: dict[str, int | str | list[int]]
-    parallel_config_hash: str | None = None
+
+
+def _make_control_bundle(node_ip: str) -> dict[str, float]:
+    # The engine actor is scheduled on the final CPU-only bundle. Keep that
+    # bundle colocated with the group's first GPU bundle so the actor does not
+    # float to an unrelated node and reorder worker ranks away from the
+    # advertised DP bootstrap host.
+    return {"CPU": 1.0, "node:" + node_ip: 0.001}
+
+
+def _get_bundle_node_ip(bundle: dict[str, float]) -> str:
+    for key in bundle:
+        if key.startswith("node:"):
+            return key.split(":", 1)[1]
+    raise ValueError(f"Missing node affinity in placement bundle: {bundle}")
+
+
+def _node_ip_from_resources(node_resources: dict) -> str | None:
+    """Return the node IP encoded in a Ray per-node resource dict, or None.
+
+    Ray advertises each node's IP as a ``node:<ip>`` resource key. The head node
+    also carries ``node:__internal_head__``, and placement groups add
+    ``..._group_...`` keys; both are ignored.
+    """
+    for key in node_resources:
+        if (
+            key.startswith("node:")
+            and key != "node:__internal_head__"
+            and "_group_" not in key
+        ):
+            return key.split(":", 1)[1]
+    return None
 
 
 class CoreEngineProcManager:
@@ -86,7 +125,6 @@ class CoreEngineProcManager:
 
     def __init__(
         self,
-        target_fn: Callable,
         local_engine_count: int,
         start_index: int,
         local_start_index: int,
@@ -96,6 +134,7 @@ class CoreEngineProcManager:
         executor_class: type[Executor],
         log_stats: bool,
         client_handshake_address: str | None = None,
+        tensor_queue: Queue | None = None,
     ):
         context = get_mp_context()
         common_kwargs = {
@@ -104,10 +143,15 @@ class CoreEngineProcManager:
             "handshake_address": handshake_address,
             "executor_class": executor_class,
             "log_stats": log_stats,
+            "tensor_queue": tensor_queue,
         }
 
         if client_handshake_address:
             common_kwargs["client_handshake_address"] = client_handshake_address
+
+        is_dp = vllm_config.parallel_config.data_parallel_size > 1
+
+        from vllm.v1.engine.core import EngineCoreProc
 
         self.processes: list[BaseProcess] = []
         local_dp_ranks = []
@@ -119,48 +163,83 @@ class CoreEngineProcManager:
             local_dp_ranks.append(local_index)
             self.processes.append(
                 context.Process(
-                    target=target_fn,
-                    name=f"EngineCore_DP{global_index}",
+                    target=EngineCoreProc.run_engine_core,
+                    name=f"EngineCore_DP{global_index}" if is_dp else "EngineCore",
                     kwargs=common_kwargs
-                    | {
-                        "dp_rank": global_index,
-                        "local_dp_rank": local_index,
-                    },
+                    | {"dp_rank": global_index, "local_dp_rank": local_index},
                 )
             )
 
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
+        self.manager_stopped = threading.Event()
+        self.failed_proc_name: str | None = None
 
-        data_parallel = vllm_config.parallel_config.data_parallel_size > 1
+        # All ranks share this config object: capture the user-provided
+        # --device-ids list before the per-rank shard overwrites it. Mutating
+        # the config before each proc.start() works because the spawn method
+        # pickles process args at start() time, sequentially per rank.
+        user_assigned_gpu_ids = vllm_config.parallel_config.assigned_physical_gpu_ids
         try:
             for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
-                # Adjust device control in DP for non-CUDA platforms
-                # as well as external and ray launchers
-                # For CUDA platforms, we use torch.cuda.set_device()
-                with (
-                    set_device_control_env_var(vllm_config, local_dp_rank)
-                    if (
-                        data_parallel
-                        and (
-                            not current_platform.is_cuda_alike()
-                            or vllm_config.parallel_config.use_ray
-                        )
+                # Populate the logical-to-physical GPU mapping in DP for
+                # platforms that cannot rely on
+                # torch.accelerator.set_device_index(), and for Ray.
+                needs_device_env_isolation = not (
+                    current_platform.is_cuda_alike() or current_platform.is_xpu()
+                )
+                if is_dp and (
+                    needs_device_env_isolation or vllm_config.parallel_config.use_ray
+                ):
+                    set_assigned_physical_gpu_ids_for_dp_rank(
+                        vllm_config, local_dp_rank, user_assigned_gpu_ids
                     )
-                    else contextlib.nullcontext()
+
+                with numa_utils.configure_subprocess(
+                    # EngineCore itself does not have a TP/PP-local rank.
+                    # When DP is enabled, set_assigned_physical_gpu_ids_for_dp_rank()
+                    # populates the logical-to-physical mapping for this DP
+                    # shard, so local_rank=0 means "the first local GPU in
+                    # this shard". The actual TP/PP worker processes spawned
+                    # by the executor are bound separately with their own
+                    # local_rank values.
+                    vllm_config,
+                    local_rank=0,
+                    dp_local_rank=local_dp_rank,
+                    process_kind="EngineCore",
                 ):
                     proc.start()
         finally:
             # Kill other procs if not all are running.
             if self.finished_procs():
-                self.close()
+                self.shutdown()
 
-    def close(self):
-        """Shutdown all procs."""
-        self._finalizer()
+    def shutdown(self, timeout: float | None = None) -> None:
+        """Shutdown engine core processes with configurable timeout."""
+        self.manager_stopped.set()
+        if self._finalizer.detach() is not None:
+            shutdown(self.processes, timeout=timeout)
 
-    def join_first(self):
-        """Wait for any process to exit."""
-        connection.wait(proc.sentinel for proc in self.processes)
+    def monitor_engine_liveness(self) -> None:
+        """Monitor engine core process liveness."""
+
+        sentinel_to_proc = {proc.sentinel: proc for proc in self.processes}
+        sentinels = set(sentinel_to_proc.keys())
+
+        while sentinels and not self.manager_stopped.is_set():
+            died_sentinels = connection.wait(sentinels, timeout=1)
+
+            for sentinel in died_sentinels:
+                proc = sentinel_to_proc.pop(cast(int, sentinel))
+                exitcode = proc.exitcode
+                if exitcode != 0 and not self.manager_stopped.is_set():
+                    self.failed_proc_name = proc.name
+            if died_sentinels:
+                # Any engine exit currently triggers a shutdown. Future
+                # work (e.g., Elastic and fault-tolerant EP) will add finer-grained
+                # handling for different exit scenarios.
+                break
+
+        self.shutdown()
 
     def sentinels(self) -> list:
         return [proc.sentinel for proc in self.processes]
@@ -174,55 +253,118 @@ class CoreEngineProcManager:
         }
 
 
-@contextlib.contextmanager
-def set_device_control_env_var(
-    vllm_config: VllmConfig, local_dp_rank: int
-) -> Iterator[None]:
+class SignalCallback:
+    """Safely trigger a callback from signal handler context via a dedicated thread."""
+
+    def __init__(self, callback: Callable[[], None]):
+        self._callback = callback
+        self._event = threading.Event()
+        self._stopped = False
+        self._thread = threading.Thread(
+            target=self._run,
+            daemon=True,
+            name="signal-callback",
+        )
+        self._thread.start()
+
+    def _run(self):
+        self._event.wait()
+        if not self._stopped:
+            self._callback()
+
+    def trigger(self):
+        self._event.set()
+
+    def stop(self):
+        self._stopped = True
+        self._event.set()
+
+
+def set_assigned_physical_gpu_ids_for_dp_rank(
+    vllm_config: VllmConfig,
+    local_dp_rank: int,
+    user_assigned_gpu_ids: list[int] | None = None,
+) -> None:
     """
-    Temporarily set CUDA_VISIBLE_DEVICES or equivalent
-    for engine subprocess.
+    Populate assigned_physical_gpu_ids on the config for the given DP rank.
+
+    user_assigned_gpu_ids is the full (un-sharded) --device-ids list, if the
+    user provided one; this DP rank's shard is sliced from it. It is passed
+    explicitly rather than read from the config because callers may reuse
+    one config object across DP ranks, overwriting the field each time.
     """
     world_size = vllm_config.parallel_config.world_size
     local_world_size = vllm_config.parallel_config.local_world_size
     evar = current_platform.device_control_env_var
 
-    value = get_device_indices(evar, local_dp_rank, world_size, local_world_size)
-    with patch.dict(os.environ, values=((evar, value),)):
-        yield
+    physical_gpu_ids = get_physical_gpu_ids_for_local_dp_rank(
+        evar,
+        local_dp_rank,
+        world_size,
+        local_world_size,
+        user_assigned_gpu_ids=user_assigned_gpu_ids,
+    )
+    vllm_config.parallel_config.assigned_physical_gpu_ids = physical_gpu_ids
 
 
-def get_device_indices(
+def get_physical_gpu_ids_for_local_dp_rank(
     device_control_env_var: str,
     local_dp_rank: int,
     world_size: int,
     local_world_size: int | None = None,
-):
+    user_assigned_gpu_ids: list[int] | None = None,
+) -> list[int]:
     """
-    Returns a comma-separated string of device indices for the specified
+    Returns list of physical GPU IDs for the specified
     data parallel rank.
 
     For example, if world_size=2 and local_dp_rank=1, and there are 4 devices,
-    this will select devices 2 and 3 for local_dp_rank=1.
+    this will return [2, 3] for local_dp_rank=1.
+
+    If user_assigned_gpu_ids is provided (e.g. from --device-ids), this DP
+    rank's shard is sliced from it instead of being derived from the
+    device-control env var.
     """
     if local_world_size is None:
         local_world_size = world_size
+    if user_assigned_gpu_ids is not None:
+        start = local_dp_rank * world_size
+        stop = start + local_world_size
+        if stop > len(user_assigned_gpu_ids):
+            raise ValueError(
+                f"--device-ids provides {len(user_assigned_gpu_ids)} devices, "
+                f"but DP rank {local_dp_rank} needs devices [{start}, {stop})"
+            )
+        return user_assigned_gpu_ids[start:stop]
     try:
-        value = ",".join(
-            str(current_platform.device_id_to_physical_device_id(i))
+        return [
+            current_platform.device_id_to_physical_device_id(i)
             for i in range(
                 local_dp_rank * world_size,
                 local_dp_rank * world_size + local_world_size,
             )
-        )
+        ]
     except IndexError as e:
         raise Exception(
-            f"Error setting {device_control_env_var}: "
+            f"Error computing device indices for "
+            f"{device_control_env_var}: "
             f"local range: [{local_dp_rank * world_size}, "
             f"{(local_dp_rank + 1) * world_size}) "
             "base value: "
             f'"{os.getenv(device_control_env_var)}"'
         ) from e
-    return value
+
+
+def _apply_dp_identity_suffix(dp_vllm_config, dp_rank: int) -> None:
+    # Ray actor names (RayExecutorV2) and KV-connector engine_ids must
+    # be unique across sibling DP engines or registration collides.
+    # Use the global DP rank, not a node-local rank, since sibling DP
+    # engines can span multiple nodes.
+    dp_vllm_config.instance_id = f"{dp_vllm_config.instance_id}_dp{dp_rank}"
+    if dp_vllm_config.kv_transfer_config is not None:
+        dp_vllm_config.kv_transfer_config.engine_id = (
+            f"{dp_vllm_config.kv_transfer_config.engine_id}_dp{dp_rank}"
+        )
 
 
 class CoreEngineActorManager:
@@ -249,12 +391,22 @@ class CoreEngineActorManager:
         from ray.runtime_env import RuntimeEnv
         from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
-        from vllm.v1.engine.core import DPEngineCoreActor
+        from vllm.v1.engine.core import DPMoEEngineCoreActor, EngineCoreActor
+
+        dp_size = vllm_config.parallel_config.data_parallel_size
+        actor_class = (
+            DPMoEEngineCoreActor
+            if dp_size > 1 and vllm_config.model_config.is_moe
+            else EngineCoreActor
+        )
 
         self.local_engine_actors: list[ray.ActorHandle] = []
         self.remote_engine_actors: list[ray.ActorHandle] = []
 
-        env_vars_list = get_env_vars_to_copy(destination="DPEngineCoreActor")
+        env_vars_list = get_env_vars_to_copy(
+            destination=actor_class.__name__,
+            exclude_vars=WORKER_SPECIFIC_ENV_VARS,
+        )
         self.env_vars_dict = {
             name: os.environ[name] for name in env_vars_list if name in os.environ
         }
@@ -263,14 +415,30 @@ class CoreEngineActorManager:
         self.addresses = addresses
         self.executor_class = executor_class
         self.log_stats = log_stats
-        dp_size = vllm_config.parallel_config.data_parallel_size
         local_engine_count = vllm_config.parallel_config.data_parallel_size_local
         world_size = vllm_config.parallel_config.world_size
+        self.manager_stopped = threading.Event()
+        self.failed_proc_name: str | None = None
 
         if ray.is_initialized():
             logger.info("Ray is already initialized. Skipping Ray initialization.")
         else:
             ray.init()
+
+        parallel_config = vllm_config.parallel_config
+        if parallel_config.enable_elastic_ep:
+            from vllm.distributed.utils import create_tcp_store
+
+            ip = parallel_config.data_parallel_master_ip
+            store = create_tcp_store(
+                ip,
+                0,
+                is_master=True,
+                world_size=-1,
+                wait_for_workers=False,
+            )
+            parallel_config._coord_store_port = store.port
+            self._coord_store = store
 
         if placement_groups is not None:
             assert local_dp_ranks is not None, (
@@ -297,6 +465,8 @@ class CoreEngineActorManager:
             range(dp_size), local_dp_ranks, placement_groups
         ):
             dp_vllm_config = copy.deepcopy(vllm_config)
+            if dp_size > 1:
+                _apply_dp_identity_suffix(dp_vllm_config, index)
             dp_vllm_config.parallel_config.placement_group = pg
             local_client = index < local_engine_count
 
@@ -306,15 +476,15 @@ class CoreEngineActorManager:
             # https://github.com/ray-project/ray/blob/master/python/ray/_private/accelerators/intel_gpu.py#L56 # noqa: E501
             if current_platform.is_xpu():
                 device_evar = current_platform.device_control_env_var
-                device_indices = get_device_indices(
+                physical_gpu_ids = get_physical_gpu_ids_for_local_dp_rank(
                     device_evar, local_index, world_size
                 )
                 actor_env_vars = self.env_vars_dict.copy()
-                actor_env_vars[device_evar] = device_indices
+                actor_env_vars[device_evar] = ",".join(str(d) for d in physical_gpu_ids)
                 runtime_env = RuntimeEnv(env_vars=actor_env_vars)
 
             actor = (
-                ray.remote(DPEngineCoreActor)
+                ray.remote(actor_class)
                 .options(
                     scheduling_strategy=PlacementGroupSchedulingStrategy(
                         placement_group=pg,
@@ -341,8 +511,11 @@ class CoreEngineActorManager:
 
         ray.get(refs)
         self.run_refs = []
+        self.actor_run_ref_dict = dict()
         for actor in self.local_engine_actors + self.remote_engine_actors:
-            self.run_refs.append(actor.run.remote())
+            ref = actor.run.remote()
+            self.run_refs.append(ref)
+            self.actor_run_ref_dict[actor] = ref
 
     @staticmethod
     def create_dp_placement_groups(
@@ -373,6 +546,32 @@ class CoreEngineActorManager:
         assert dp_master_ip_key in nodes[0], (
             f"The DP master node (ip: {dp_master_ip}) is missing or dead"
         )
+
+        # optionally restrict DP placement to a caller-provided node set.
+        requested_node_ips = {
+            ip.strip()
+            for ip in envs.VLLM_RAY_DP_PLACEMENT_NODE_IPS.split(",")
+            if ip.strip()
+        }
+        if requested_node_ips:
+            allowed_node_ips = set(requested_node_ips)
+            # The master node must host the local ranks, so it has to be allowed.
+            if dp_master_ip not in allowed_node_ips:
+                allowed_node_ips.add(dp_master_ip)
+            filtered_nodes = [
+                node_resources
+                for node_resources in nodes
+                if _node_ip_from_resources(node_resources) in allowed_node_ips
+            ]
+            logger.info(
+                "VLLM_RAY_DP_PLACEMENT_NODE_IPS set; restricting DP placement "
+                "from %d to %d node(s): %s",
+                len(nodes),
+                len(filtered_nodes),
+                sorted(allowed_node_ips),
+            )
+            nodes = filtered_nodes
+
         device_str = current_platform.ray_device_key
         n_node_devices: list[int] = [
             int(node_resources[device_str])
@@ -415,9 +614,9 @@ class CoreEngineActorManager:
             )
 
             # if we need multiple nodes per dp group, we require for now that
-            # available nodes are homogenous
+            # available nodes are homogeneous
             assert set(n_node_devices) == {max_device_per_node}, (
-                f"Nodes are not homogenous, {nodes}"
+                f"Nodes are not homogeneous, {nodes}"
             )
             assert world_size % max_device_per_node == 0, (
                 f"For multi-node data parallel groups, world_size ({world_size}) must "
@@ -439,16 +638,10 @@ class CoreEngineActorManager:
         # for "span" pack strategy
         collected_bundles = []
         for node_resources in nodes:
-            node_ip_keys = [
-                key
-                for key in node_resources
-                if key != "node:__internal_head__" and key.startswith("node:")
-            ]
-            assert len(node_ip_keys) == 1, (
-                f"Zero or multiple node IP keys found in node resources: {node_ip_keys}"
+            node_ip = _node_ip_from_resources(node_resources)
+            assert node_ip is not None, (
+                f"No node IP key found in node resources: {node_resources}"
             )
-            node_ip_key = node_ip_keys[0]
-            node_ip = node_ip_key.split(":")[1]
 
             n_device_on_node = int(node_resources.get(device_str, 0))
             if pack_strategy == "span" and n_device_on_node != 0:
@@ -496,10 +689,20 @@ class CoreEngineActorManager:
                     if len(collected_bundles) < world_size:
                         continue
 
-                    bundles = collected_bundles + [{"CPU": 1.0}]
+                    control_node_ip = _get_bundle_node_ip(collected_bundles[0])
+                    bundles = collected_bundles + [
+                        _make_control_bundle(control_node_ip)
+                    ]
                     collected_bundles = []
                 else:
-                    bundles = device_bundle * world_size + [{"CPU": 1.0}]
+                    # STRICT_PACK already keeps every bundle in the placement
+                    # group on one node, so the explicit node affinity on the
+                    # control bundle is redundant for correctness here. Keep it
+                    # anyway for consistency with the span path and to preserve
+                    # intent if this scheduling strategy changes later.
+                    bundles = device_bundle * world_size + [
+                        _make_control_bundle(node_ip)
+                    ]
 
                 pg = ray.util.placement_group(
                     name=f"dp_rank_{len(placement_groups)}",
@@ -510,6 +713,9 @@ class CoreEngineActorManager:
                 local_dp_ranks.append(i)
                 if len(placement_groups) == dp_size:
                     break
+
+            if len(placement_groups) == dp_size:
+                break
 
         if len(placement_groups) < dp_size:
             raise ValueError(
@@ -572,6 +778,8 @@ class CoreEngineActorManager:
 
             node_ip = node.node_ip
             node_id = node.node_id
+            if device_str not in available_resources[node_id]:
+                continue
             available_gpus = int(available_resources[node_id][device_str])
 
             # Get total GPUs on this node from the node's resources
@@ -624,7 +832,13 @@ class CoreEngineActorManager:
         from ray.runtime_env import RuntimeEnv
         from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
-        from vllm.v1.engine.core import DPEngineCoreActor
+        from vllm.v1.engine.core import DPMoEEngineCoreActor, EngineCoreActor
+
+        actor_class = (
+            DPMoEEngineCoreActor
+            if cur_vllm_config.model_config.is_moe
+            else EngineCoreActor
+        )
 
         cur_data_parallel_size = len(self.local_engine_actors) + len(
             self.remote_engine_actors
@@ -650,6 +864,8 @@ class CoreEngineActorManager:
         for i, (pg, local_rank) in enumerate(zip(placement_groups, local_dp_ranks)):
             rank = cur_data_parallel_size + i
             dp_vllm_config = copy.deepcopy(cur_vllm_config)
+            if new_data_parallel_size > 1:
+                _apply_dp_identity_suffix(dp_vllm_config, rank)
             dp_vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
             dp_vllm_config.parallel_config.placement_group = pg
 
@@ -667,7 +883,7 @@ class CoreEngineActorManager:
                 )
 
             actor = (
-                ray.remote(DPEngineCoreActor)
+                ray.remote(actor_class)
                 .options(
                     scheduling_strategy=PlacementGroupSchedulingStrategy(
                         placement_group=pg,
@@ -714,7 +930,9 @@ class CoreEngineActorManager:
         ) + self.remote_engine_actors[-(len(placement_groups) - new_local_engines) :]
 
         for actor in actors:
-            self.run_refs.append(actor.run.remote())
+            ref = actor.run.remote()
+            self.run_refs.append(ref)
+            self.actor_run_ref_dict[actor] = ref
 
         cur_vllm_config.parallel_config.data_parallel_size = new_data_parallel_size
         # Update old_vllm_config with new data_parallel_size_local if any new
@@ -743,16 +961,111 @@ class CoreEngineActorManager:
                 self.remote_engine_actors.pop()
             ray.util.remove_placement_group(pg)
 
+    def remove_run_refs_for_scale_down(self, removed_dp_size: int) -> None:
+        if removed_dp_size <= 0:
+            return
+        flags = self.placement_group_is_local[-removed_dp_size:]
+        li = len(self.local_engine_actors) - 1
+        ri = len(self.remote_engine_actors) - 1
+        for is_local in reversed(flags):
+            if is_local:
+                actor = self.local_engine_actors[li]
+                li -= 1
+            else:
+                actor = self.remote_engine_actors[ri]
+                ri -= 1
+            ref = self.actor_run_ref_dict.pop(actor)
+            self.run_refs.remove(ref)
+
     def get_run_refs(self):
         return self.run_refs
 
-    def close(self):
+    def monitor_engine_liveness(self) -> None:
         import ray
 
+        while not self.manager_stopped.is_set():
+            actor_run_refs = list(self.get_run_refs())
+            if not actor_run_refs:
+                logger.info(
+                    "There are no actors to monitor currently. "
+                    "The monitoring function is about to terminate."
+                )
+                break
+            actor_done_refs, _ = ray.wait(actor_run_refs, timeout=5)
+            unexpected_failure = False
+            for actor_ref in actor_done_refs:
+                if self.manager_stopped.is_set():
+                    break
+                if actor_ref not in self.get_run_refs():
+                    # The run refs may have been updated by elastic scale-down.
+                    continue
+                try:
+                    ray.get(actor_ref)
+                except ray.exceptions.RayActorError:
+                    self.failed_proc_name = f"Actor {actor_ref}"
+                    unexpected_failure = True
+
+            if unexpected_failure:
+                break
+
+        self.shutdown()
+
+    def shutdown(self, timeout: float | None = None) -> None:
+        import ray
+
+        self.manager_stopped.set()
         for actor in self.local_engine_actors + self.remote_engine_actors:
             ray.kill(actor)
         for pg in self.created_placement_groups:
             ray.util.remove_placement_group(pg)
+
+
+def get_engine_zmq_addresses(
+    vllm_config: VllmConfig,
+    num_api_servers: int = 1,
+    *,
+    defer_api_server_ports: bool = True,
+) -> EngineZmqAddresses:
+    """Allocate ZMQ addresses for engine-client communication.
+
+    By default each TCP address is a ``tcp://host:0`` placeholder; the
+    consumer (API-server child or single-process ``MPClient``) binds, then
+    recovers the kernel-assigned port via ``getsockopt(zmq.LAST_ENDPOINT)``
+    and writes it back into ``addresses`` before the engine handshake.
+
+    Set ``defer_api_server_ports=False`` only when the consumer cannot
+    report a bound port back (e.g. the Rust front-end). IPC paths are
+    unaffected."""
+    parallel_config = vllm_config.parallel_config
+    local_engine_count = parallel_config.data_parallel_size_local
+    local_start_index = parallel_config.data_parallel_rank_local
+    dp_size = parallel_config.data_parallel_size
+    host = parallel_config.data_parallel_master_ip
+    local_engines_only = parallel_config.local_engines_only
+
+    # In offline mode there is an LLM instance per DP rank and
+    # one core engine per LLM, see
+    # examples/features/data_parallel/data_parallel_offline.py.
+    offline_mode = local_start_index is not None
+
+    # client_local_only = True for cases where this front-end
+    # sends requests only to colocated engines.
+    client_local_only = (
+        offline_mode or local_engines_only or (local_engine_count == dp_size)
+    )
+    # NOTE(yongji): handling scaling from intra-node to inter-node
+    if parallel_config.enable_elastic_ep:
+        client_local_only = False
+
+    def _addr() -> str:
+        if client_local_only:
+            return get_open_zmq_ipc_path()
+        return get_tcp_uri(host, 0 if defer_api_server_ports else get_open_port())
+
+    return EngineZmqAddresses(
+        inputs=[_addr() for _ in range(num_api_servers)],
+        outputs=[_addr() for _ in range(num_api_servers)],
+    )
 
 
 @contextlib.contextmanager
@@ -760,12 +1073,14 @@ def launch_core_engines(
     vllm_config: VllmConfig,
     executor_class: type[Executor],
     log_stats: bool,
+    addresses: EngineZmqAddresses,
     num_api_servers: int = 1,
 ) -> Iterator[
     tuple[
         CoreEngineProcManager | CoreEngineActorManager | None,
         DPCoordinator | None,
         EngineZmqAddresses,
+        Queue | None,
     ]
 ]:
     """Launch engine and DP coordinator processes as needed."""
@@ -776,40 +1091,31 @@ def launch_core_engines(
     local_start_index = parallel_config.data_parallel_rank_local
     dp_rank = parallel_config.data_parallel_rank
     host = parallel_config.data_parallel_master_ip
-    local_engines_only = (
-        parallel_config.data_parallel_hybrid_lb
-        or parallel_config.data_parallel_external_lb
-    )
+    local_engines_only = parallel_config.local_engines_only
 
-    # In offline mode there is an LLM instance per DP rank and
-    # one core engine per LLM, see
-    # examples/offline_inference/data_parallel.py.
     offline_mode = local_start_index is not None
 
-    # client_local_only = True for cases where this front-end
-    # sends requests only to colocated engines.
-    client_local_only = (
-        offline_mode or local_engines_only or (local_engine_count == dp_size)
-    )
+    # Create a single tensor IPC queue for sharing multimodal tensors between
+    # API servers and engine core. Returns a single queue since we only support
+    # DP=1 for this data flow.
+    tensor_queue: Queue | None = None
+    multimodal_config = vllm_config.model_config.multimodal_config
+    if multimodal_config is not None and multimodal_config.mm_tensor_ipc == "torch_shm":
+        tensor_queue = get_mp_context().Queue()
 
-    # Set up input and output addresses.
-    addresses = EngineZmqAddresses(
-        inputs=[
-            get_engine_client_zmq_addr(client_local_only, host)
-            for _ in range(num_api_servers)
-        ],
-        outputs=[
-            get_engine_client_zmq_addr(client_local_only, host)
-            for _ in range(num_api_servers)
-        ],
+    # Run the DP Coordinator process with rank 0 when in online DP mode.
+    # The coordinator is needed for:
+    # 1. Internal/hybrid LB: collecting and publishing queue stats for load balancing
+    # 2. MoE models: wave coordination in addition to stats
+    run_coordinator = (
+        vllm_config.needs_dp_coordinator and not offline_mode and dp_rank == 0
     )
-
-    # Run the DP Coordinator process with rank 0 when in
-    # online DP mode.
-    run_coordinator = dp_size > 1 and not offline_mode and dp_rank == 0
 
     if run_coordinator:
-        coordinator = DPCoordinator(parallel_config)
+        coordinator = DPCoordinator(
+            parallel_config,
+            enable_wave_coordination=vllm_config.model_config.is_moe,
+        )
 
         addresses.coordinator_input, addresses.coordinator_output = (
             coordinator.get_engine_socket_addresses()
@@ -832,7 +1138,7 @@ def launch_core_engines(
             log_stats=log_stats,
         )
 
-        yield engine_actor_manager, coordinator, addresses
+        yield engine_actor_manager, coordinator, addresses, tensor_queue
         return
 
     if offline_mode:
@@ -863,9 +1169,15 @@ def launch_core_engines(
     # will be False.
     handshake_local_only = offline_mode or local_engine_count == dp_size
 
-    handshake_address = get_engine_client_zmq_addr(
-        handshake_local_only, host, parallel_config.data_parallel_rpc_port
-    )
+    # NOTE(yongji): handling scaling from intra-node to inter-node
+    if parallel_config.enable_elastic_ep:
+        handshake_local_only = False
+
+    # Preserve "port=0 means auto-pick" for the handshake address, which
+    # is consumed by engines spawned in this process and so cannot defer
+    # port resolution to bind time.
+    rpc_port = parallel_config.data_parallel_rpc_port or get_open_port()
+    handshake_address = get_engine_client_zmq_addr(handshake_local_only, host, rpc_port)
 
     if local_engines_only and dp_rank > 0:
         assert not handshake_local_only
@@ -878,12 +1190,9 @@ def launch_core_engines(
     with zmq_socket_ctx(
         local_handshake_address, zmq.ROUTER, bind=True
     ) as handshake_socket:
-        from vllm.v1.engine.core import EngineCoreProc
-
         # Start local engines.
         if local_engine_count:
             local_engine_manager = CoreEngineProcManager(
-                EngineCoreProc.run_engine_core,
                 vllm_config=vllm_config,
                 executor_class=executor_class,
                 log_stats=log_stats,
@@ -893,11 +1202,12 @@ def launch_core_engines(
                 local_engine_count=local_engine_count,
                 start_index=dp_rank,
                 local_start_index=local_start_index or 0,
+                tensor_queue=tensor_queue,
             )
         else:
             local_engine_manager = None
 
-        yield local_engine_manager, coordinator, addresses
+        yield local_engine_manager, coordinator, addresses, tensor_queue
 
         # Now wait for engines to start.
         wait_for_engine_startup(
@@ -905,6 +1215,7 @@ def launch_core_engines(
             addresses,
             engines_to_handshake,
             parallel_config,
+            dp_size > 1 and vllm_config.model_config.is_moe,
             vllm_config.cache_config,
             local_engine_manager,
             coordinator.proc if coordinator else None,
@@ -916,6 +1227,7 @@ def wait_for_engine_startup(
     addresses: EngineZmqAddresses,
     core_engines: list[CoreEngine],
     parallel_config: ParallelConfig,
+    coordinated_dp: bool,
     cache_config: CacheConfig,
     proc_manager: CoreEngineProcManager | None,
     coord_process: Process | None,
@@ -997,8 +1309,7 @@ def wait_for_engine_startup(
                 )
 
         if status == "HELLO" and engine.state == CoreEngineState.NEW:
-            # Send init message with DP config info and config hash.
-            # The config hash ensures all DP workers have compatible configs.
+            # Send init message with DP config info.
             init_message = msgspec.msgpack.encode(
                 EngineHandshakeMetadata(
                     addresses=addresses,
@@ -1010,10 +1321,9 @@ def wait_for_engine_startup(
                             "_data_parallel_master_port_list",
                             "data_parallel_size",
                         )
-                    },
-                    parallel_config_hash=parallel_config.compute_hash()
-                    if parallel_config.data_parallel_size > 1
-                    else None,
+                    }
+                    if coordinated_dp
+                    else {},
                 )
             )
             handshake_socket.send_multipart((eng_identity, init_message), copy=False)
@@ -1021,21 +1331,8 @@ def wait_for_engine_startup(
             start_pending[0 if local else 1] += 1
             engine.state = CoreEngineState.CONNECTED
         elif status == "READY" and engine.state == CoreEngineState.CONNECTED:
-            # Setup KV cache config with initialization state from
-            # engine core process. Sum values from all engines in DP case.
-            num_gpu_blocks = cache_config.num_gpu_blocks or 0
-            num_gpu_blocks += msg["num_gpu_blocks"]
-            cache_config.num_gpu_blocks = num_gpu_blocks
-
-            # In external DP LB mode, the coordinator address that the
-            # front-end procs connect to is obtained from rank 0 via
-            # one of the engine handshakes, and passed to the local
-            # front-end process in the response from the other.
-            if addresses.frontend_stats_publish_address is None:
-                addresses.frontend_stats_publish_address = msg.get("dp_stats_address")
-
-            # Validate config hash consistency across DP workers
-            if parallel_config.data_parallel_size > 1:
+            # Validate config hash consistency across DP workers for MoE models.
+            if coordinated_dp:
                 worker_config_hash = msg.get("parallel_config_hash")
                 expected_hash = parallel_config.compute_hash()
                 if worker_config_hash != expected_hash:

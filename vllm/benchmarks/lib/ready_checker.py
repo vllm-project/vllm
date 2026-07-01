@@ -8,7 +8,11 @@ import time
 import aiohttp
 from tqdm.asyncio import tqdm
 
+from vllm.logger import init_logger
+
 from .endpoint_request_func import RequestFunc, RequestFuncInput, RequestFuncOutput
+
+logger = init_logger(__name__)
 
 
 async def wait_for_endpoint(
@@ -61,6 +65,9 @@ async def wait_for_endpoint(
                 if output.success:
                     pbar.close()
                     return output
+                else:
+                    err_last_line = str(output.error).rstrip().rsplit("\n", 1)[-1]
+                    logger.warning("Endpoint is not ready. Error='%s'", err_last_line)
             except aiohttp.ClientConnectorError:
                 pass
 

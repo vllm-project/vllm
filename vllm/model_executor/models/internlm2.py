@@ -10,7 +10,6 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
@@ -21,6 +20,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -28,23 +28,25 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
+from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_classify
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import SupportsLoRA, SupportsPP, SupportsQuant
 from .interfaces_base import default_pooling_type
 from .utils import (
-    is_pp_missing_parameter,
+    AutoWeightsLoader,
+    StageMissingLayer,
+    WeightsMapper,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    no_init_weights,
 )
 
 
@@ -246,6 +248,14 @@ class InternLMDecoderLayer(nn.Module):
 
 @support_torch_compile
 class InternLM2Model(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            # weight_name: (param_name, shard_id)
+            ".w1": (".gate_up_proj", 0),
+            ".w3": (".gate_up_proj", 1),
+        }
+    )
+
     def __init__(
         self,
         *,
@@ -282,7 +292,7 @@ class InternLM2Model(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -306,8 +316,13 @@ class InternLM2Model(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
-class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
+
+class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SupportsQuant):
+    hf_to_vllm_mapper = InternLM2Model.hf_to_vllm_mapper
     packed_modules_mapping = {
         "wqkv": ["wqkv"],
         "gate_up_proj": ["w1", "w3"],
@@ -348,7 +363,7 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
@@ -366,43 +381,14 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("gate_up_proj", "w1", 0),
-            ("gate_up_proj", "w3", 1),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=(["output."] if self.config.tie_word_embeddings else None),
+        )
+        return loader.load_weights(weights)
 
 
-@default_pooling_type("ALL")
+@default_pooling_type(tok_pooling_type="ALL")
 class InternLM2ForRewardModel(InternLM2ForCausalLM):
     is_pooling_model = True
 
@@ -413,10 +399,16 @@ class InternLM2ForRewardModel(InternLM2ForCausalLM):
         prefix: str = "",
         model_type: type[InternLM2Model] = InternLM2Model,
     ):
-        super().__init__(vllm_config=vllm_config, prefix=prefix, model_type=model_type)
-
-        for attr in ("output", "logits_processor"):
-            delattr(self, attr)
+        with no_init_weights(
+            self,
+            lambda mod: StageMissingLayer("output", mod),
+            targets=(LogitsProcessor, ParallelLMHead),
+        ):
+            super().__init__(
+                vllm_config=vllm_config,
+                prefix=prefix,
+                model_type=model_type,
+            )
 
         config = vllm_config.model_config.hf_config
         self.head_dtype = vllm_config.model_config.head_dtype
@@ -434,13 +426,11 @@ class InternLM2ForRewardModel(InternLM2ForCausalLM):
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        self.pooler = DispatchPooler(
-            {"token_classify": Pooler.for_token_classify(pooler_config)}
-        )
+        self.pooler = pooler_for_token_classify(pooler_config)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

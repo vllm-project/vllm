@@ -17,6 +17,7 @@ from types import MethodType
 from typing import Any, Literal, cast
 
 import vllm.envs as envs
+from vllm.logging_utils import ColoredFormatter, NewLineFormatter
 
 _FORMAT = (
     f"{envs.VLLM_LOGGING_PREFIX}%(levelname)s %(asctime)s "
@@ -37,7 +38,7 @@ def _use_color() -> bool:
     return False
 
 
-DEFAULT_LOGGING_CONFIG = {
+DEFAULT_LOGGING_CONFIG: dict[str, dict[str, Any] | Any] = {
     "formatters": {
         "vllm": {
             "class": "vllm.logging_utils.NewLineFormatter",
@@ -102,7 +103,6 @@ def _should_log_with_scope(scope: LogScope) -> bool:
         from vllm.distributed.parallel_state import is_local_first_rank
 
         return is_local_first_rank()
-    # default "process" scope: always log
     return True
 
 
@@ -115,9 +115,7 @@ class _VllmLogger(Logger):
         `intel_extension_for_pytorch.utils._logger`.
     """
 
-    def debug_once(
-        self, msg: str, *args: Hashable, scope: LogScope = "process"
-    ) -> None:
+    def debug_once(self, msg: str, *args: Hashable, scope: LogScope = "local") -> None:
         """
         As [`debug`][logging.Logger.debug], but subsequent calls with
         the same message are silently dropped.
@@ -126,7 +124,7 @@ class _VllmLogger(Logger):
             return
         _print_debug_once(self, msg, *args)
 
-    def info_once(self, msg: str, *args: Hashable, scope: LogScope = "process") -> None:
+    def info_once(self, msg: str, *args: Hashable, scope: LogScope = "local") -> None:
         """
         As [`info`][logging.Logger.info], but subsequent calls with
         the same message are silently dropped.
@@ -136,7 +134,7 @@ class _VllmLogger(Logger):
         _print_info_once(self, msg, *args)
 
     def warning_once(
-        self, msg: str, *args: Hashable, scope: LogScope = "process"
+        self, msg: str, *args: Hashable, scope: LogScope = "local"
     ) -> None:
         """
         As [`warning`][logging.Logger.warning], but subsequent calls with
@@ -156,7 +154,7 @@ _METHODS_TO_PATCH = {
 
 
 def _configure_vllm_root_logger() -> None:
-    logging_config = dict[str, Any]()
+    logging_config: dict[str, dict[str, Any] | Any] = {}
 
     if not envs.VLLM_CONFIGURE_LOGGING and envs.VLLM_LOGGING_CONFIG_PATH:
         raise RuntimeError(
@@ -222,6 +220,19 @@ def suppress_logging(level: int = logging.INFO) -> Generator[None, Any, None]:
     logging.disable(level)
     yield
     logging.disable(current_level)
+
+
+def current_formatter_type(logger: Logger) -> Literal["color", "newline", None]:
+    lgr: Logger | None = logger
+    while lgr is not None:
+        if lgr.handlers and len(lgr.handlers) == 1 and lgr.handlers[0].name == "vllm":
+            formatter = lgr.handlers[0].formatter
+            if isinstance(formatter, ColoredFormatter):
+                return "color"
+            if isinstance(formatter, NewLineFormatter):
+                return "newline"
+        lgr = lgr.parent
+    return None
 
 
 # The root logger is initialized when the module is imported.

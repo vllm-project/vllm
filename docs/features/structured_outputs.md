@@ -29,7 +29,7 @@ The following parameters are supported, which must be added as extra parameters:
 - `grammar`: the output will follow the context free grammar.
 - `structural_tag`: Follow a JSON schema within a set of specified tags within the generated text.
 
-You can see the complete list of supported parameters on the [OpenAI-Compatible Server](../serving/openai_compatible_server.md) page.
+You can see the complete list of supported parameters on the [OpenAI-Compatible Server](../serving/online_serving/openai_compatible_server.md) page.
 
 Structured outputs are supported by default in the OpenAI-Compatible Server. You
 may choose to specify the backend to use by setting the
@@ -39,7 +39,7 @@ request. You may also choose a specific backend, along with
 some options. A full set of options is available in the `vllm serve --help`
 text.
 
-Now let´s see an example for each of the cases, starting with the `choice`, as it´s the easiest one:
+Now let's see an example for each of the cases, starting with the `choice`, as it's the easiest one:
 
 ??? code
 
@@ -126,12 +126,12 @@ The next example shows how to use the `response_format` parameter with a Pydanti
     ```
 
 !!! tip
-    While not strictly necessary, normally it´s better to indicate in the prompt the
+    While not strictly necessary, normally it's better to indicate in the prompt the
     JSON schema and how the fields should be populated. This can improve the
     results notably in most cases.
 
 Finally we have the `grammar` option, which is probably the most
-difficult to use, but it´s really powerful. It allows us to define complete
+difficult to use, but it's really powerful. It allows us to define complete
 languages like SQL queries. It works by using a context free EBNF grammar.
 As an example, we can use to define a specific format of simplified SQL queries:
 
@@ -165,7 +165,7 @@ As an example, we can use to define a specific format of simplified SQL queries:
     print(completion.choices[0].message.content)
     ```
 
-See also: [full example](../examples/online_serving/structured_outputs.md)
+See also: [full example](../../examples/features/structured_outputs/README.md)
 
 ## Reasoning Outputs
 
@@ -208,7 +208,13 @@ Note that you can use reasoning with any provided structured outputs feature. Th
     print("content: ", completion.choices[0].message.content)
     ```
 
-See also: [full example](../examples/online_serving/structured_outputs.md)
+See also: [full example](../../examples/features/structured_outputs/README.md)
+
+!!! note
+    When using Qwen3 Coder models with reasoning enabled, structured outputs might become disabled if the reasoning content does not get parsed into the `reasoning` field separately (v0.11.2+).
+    To use both features together, you must explicitly enable structured outputs in reasoning mode.
+    To do so, add the following flag when starting the vLLM server: `--structured-outputs-config.enable_in_reasoning=True`.
+    See also: [Reasoning Outputs](reasoning_outputs.md) documentation.
 
 ## Experimental Automatic Parsing (OpenAI API)
 
@@ -298,12 +304,12 @@ Step #2: explanation="Next, let's isolate 'x' by dividing both sides of the equa
 Answer: x = -29/8
 ```
 
-An example of using `structural_tag` can be found here: [examples/online_serving/structured_outputs](../../examples/online_serving/structured_outputs)
+An example of using `structural_tag` can be found here: [examples/features/structured_outputs](../../examples/features/structured_outputs/README.md)
 
 ## Offline Inference
 
 Offline inference allows for the same types of structured outputs.
-To use it, we´ll need to configure the structured outputs using the class `StructuredOutputsParams` inside `SamplingParams`.
+To use it, we'll need to configure the structured outputs using the class `StructuredOutputsParams` inside `SamplingParams`.
 The main available options inside `StructuredOutputsParams` are:
 
 - `json`
@@ -333,4 +339,4 @@ shown below:
     print(outputs[0].outputs[0].text)
     ```
 
-See also: [full example](../examples/online_serving/structured_outputs.md)
+See also: [full example](../../examples/features/structured_outputs/structured_outputs_offline.py)

@@ -6,15 +6,19 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
-from torch.nn.parameter import Parameter, UninitializedParameter
+from torch.nn.parameter import Parameter
 
+import vllm.envs as envs
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
-from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.custom_op import PluggableLayer
+from vllm.model_executor.layers.batch_invariant import (
+    linear_batch_invariant,
+)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
@@ -66,10 +70,18 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda_alike():
+            return linear_batch_invariant(x, layer.weight, bias)
         return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
 
     def embedding(self, layer: torch.nn.Module, input_: torch.Tensor) -> torch.Tensor:
         return F.embedding(input_, layer.weight)
+
+    def tie_weights(
+        self, layer: torch.nn.Module, embed_tokens: "VocabParallelEmbedding"
+    ):
+        layer.weight = embed_tokens.weight
+        return layer
 
 
 def pad_vocab_size(vocab_size: int, pad_to: int = DEFAULT_VOCAB_PADDING_SIZE) -> int:
@@ -181,8 +193,9 @@ def get_masked_input_and_mask(
     return input_, ~vocab_mask
 
 
-@CustomOp.register("vocab_parallel_embedding")
-class VocabParallelEmbedding(CustomOp):
+# --8<-- [start:vocab_parallel_embedding]
+@PluggableLayer.register("vocab_parallel_embedding")
+class VocabParallelEmbedding(PluggableLayer):
     """Embedding parallelized in the vocabulary dimension.
 
     Adapted from torch.nn.Embedding, note that we pad the vocabulary size to
@@ -220,6 +233,8 @@ class VocabParallelEmbedding(CustomOp):
         quant_config: quant config for the layer
         prefix: full name of the layer in the state dict
     """  # noqa: E501
+
+    # --8<-- [end:vocab_parallel_embedding]
 
     def __init__(
         self,
@@ -281,6 +296,7 @@ class VocabParallelEmbedding(CustomOp):
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
+        self.params_dtype = params_dtype
         # Divide the weight matrix along the vocabulary dimension.
         self.num_added_embeddings = self.num_embeddings - self.org_vocab_size
         self.num_embeddings_per_partition = divide(
@@ -415,20 +431,15 @@ class VocabParallelEmbedding(CustomOp):
         output_dim = getattr(param, "output_dim", None)
         packed_dim = getattr(param, "packed_dim", None)
 
-        # If the parameter is a gguf weight, then load it directly.
-        if getattr(param, "is_gguf_weight_type", None):
-            param.data.copy_(loaded_weight)
-            param.weight_type = loaded_weight.item()
-            return
-        elif isinstance(param, UninitializedParameter):
-            shape = list(loaded_weight.shape)
-            if output_dim is not None:
-                shape[output_dim] = self.num_embeddings_per_partition
-            param.materialize(tuple(shape), dtype=loaded_weight.dtype)
-
         # If parameter does not have output dim, then it should
         # be copied onto all gpus (e.g. g_idx for act_order gptq).
         if output_dim is None:
+            if (
+                loaded_weight.ndim == 0
+                and param.data.ndim == 1
+                and param.data.numel() == 1
+            ):
+                loaded_weight = loaded_weight.reshape(1)
             assert param.data.shape == loaded_weight.shape
             param.data.copy_(loaded_weight)
             return
@@ -458,7 +469,7 @@ class VocabParallelEmbedding(CustomOp):
         param[: loaded_weight.shape[0]].data.copy_(loaded_weight)
         param[loaded_weight.shape[0] :].data.fill_(0)
 
-    def forward_native(self, input_):
+    def forward(self, input_):
         if self.tp_size > 1:
             # Build the mask.
             masked_input, input_mask = get_masked_input_and_mask(
@@ -480,9 +491,6 @@ class VocabParallelEmbedding(CustomOp):
         output = tensor_model_parallel_all_reduce(output_parallel)
         return output
 
-    def forward_cuda(self, input_):
-        return self.forward_native(input_)
-
     def extra_repr(self) -> str:
         s = f"num_embeddings={self.num_embeddings_per_partition}"
         s += f", embedding_dim={self.embedding_dim}"
@@ -492,7 +500,8 @@ class VocabParallelEmbedding(CustomOp):
         return s
 
 
-@CustomOp.register("parallel_lm_head")
+# --8<-- [start:parallel_lm_head]
+@PluggableLayer.register("parallel_lm_head")
 class ParallelLMHead(VocabParallelEmbedding):
     """Parallelized LM head.
 
@@ -508,6 +517,8 @@ class ParallelLMHead(VocabParallelEmbedding):
         org_num_embeddings: original vocabulary size (without LoRA).
         padding_size: padding size for the vocabulary.
     """
+
+    # --8<-- [end:parallel_lm_head]
 
     def __init__(
         self,
@@ -531,27 +542,19 @@ class ParallelLMHead(VocabParallelEmbedding):
         )
         self.quant_config = quant_config
         if bias:
-            self.bias = Parameter(
-                torch.empty(self.num_embeddings_per_partition, dtype=params_dtype)
-            )
-            set_weight_attrs(
-                self.bias,
-                {
-                    "output_dim": 0,
-                    "weight_loader": self.weight_loader,
-                },
-            )
+            self._register_bias()
         else:
             self.register_parameter("bias", None)
 
+    def _register_bias(self):
+        data = torch.empty(self.num_embeddings_per_partition, dtype=self.params_dtype)
+        self.bias = Parameter(data, requires_grad=False)
+        weight_attrs = dict(output_dim=0, weight_loader=self.weight_loader)
+        set_weight_attrs(weight=self.bias, weight_attrs=weight_attrs)
+
     def tie_weights(self, embed_tokens: VocabParallelEmbedding):
         """Tie the weights with word embeddings."""
-        # GGUF quantized embed_tokens.
-        if self.quant_config and self.quant_config.get_name() == "gguf":
-            return embed_tokens
-        else:
-            self.weight = embed_tokens.weight
-            return self
+        return self.quant_method.tie_weights(self, embed_tokens)
 
     def forward(self, input_):
         del input_

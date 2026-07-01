@@ -13,7 +13,7 @@ from vllm.utils.import_utils import PlaceholderModule
 
 logger = init_logger(__name__)
 
-SUPPORTED_SCHEMES = ["s3://", "gs://"]
+SUPPORTED_SCHEMES = ["s3://", "gs://", "az://"]
 
 try:
     from runai_model_streamer import list_safetensors as runai_list_safetensors
@@ -64,9 +64,7 @@ class ObjectStorageModel:
             "model_streamer",
             hashlib.sha256(str(url).encode()).hexdigest()[:8],
         )
-        if os.path.exists(dir_name):
-            shutil.rmtree(dir_name)
-        os.makedirs(dir_name)
+        os.makedirs(dir_name, exist_ok=True)
         self.dir = dir_name
         logger.debug("Init object storage, model cache path is: %s", dir_name)
 

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 from collections.abc import Iterable
 from functools import partial
 
@@ -33,7 +34,9 @@ class EagleMistralLarge3Model(DeepseekV2Model):
     ):
         nn.Module.__init__(self)
 
-        config = vllm_config.model_config.hf_config
+        config = copy.deepcopy(vllm_config.model_config.hf_config)
+        config.first_k_dense_replace += start_layer_id
+
         quant_config = vllm_config.quant_config
         self.config = config
         self.vllm_config = vllm_config
@@ -53,6 +56,7 @@ class EagleMistralLarge3Model(DeepseekV2Model):
                 DeepseekV2DecoderLayer(
                     vllm_config=vllm_config,
                     prefix=maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
+                    config=config,
                 )
                 for i in range(self.config.num_hidden_layers)
             ]
@@ -67,8 +71,20 @@ class EagleMistralLarge3Model(DeepseekV2Model):
             input_is_parallel=False,
             quant_config=quant_config,
             return_bias=False,
+            prefix=maybe_prefix(prefix, "fc"),
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.aux_hidden_state_layers: tuple[int, ...] = ()
+
+        # Needed by load_weights
+        qk_nope_head_dim = getattr(config, "qk_nope_head_dim", 0)
+        qk_rope_head_dim = getattr(config, "qk_rope_head_dim", 0)
+        self.use_mha = config.model_type == "deepseek" or all(
+            dim == 0 for dim in (qk_nope_head_dim, qk_rope_head_dim)
+        )
+        self.num_redundant_experts = (
+            vllm_config.parallel_config.eplb_config.num_redundant_experts
+        )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )

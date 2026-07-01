@@ -79,10 +79,11 @@ def _get_test_sampling_params(
     structured_outputs: bool = False,
 ) -> tuple[list[SamplingParams], list[int]]:
     """Generate random sampling params for a batch."""
+    rng = random.Random(seed)
 
     def get_mostly_n_gt1() -> int:
         r"""Mostly n \in [2,20], ~1/3 n=1"""
-        x = random.randint(0, 28)
+        x = rng.randint(0, 28)
         if x < 10:
             return 1
         else:
@@ -224,7 +225,7 @@ def test_skip_tokenizer_initialization(model: str):
     )
     sampling_params = SamplingParams(prompt_logprobs=True, detokenize=True)
 
-    with pytest.raises(ValueError, match="cannot pass text prompts when"):
+    with pytest.raises(ValueError, match="`skip_tokenizer_init=True`"):
         llm.generate("abc", sampling_params)
 
     outputs = llm.generate(

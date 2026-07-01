@@ -63,6 +63,7 @@ class ECConnectorBase(ABC):
         self._role = role
         if vllm_config.ec_transfer_config is not None:
             self._is_producer = vllm_config.ec_transfer_config.is_ec_producer
+            self._is_consumer = vllm_config.ec_transfer_config.is_ec_consumer
         else:
             raise ValueError("ec_transfer_config must be set for ECConnectorBase")
 
@@ -73,6 +74,18 @@ class ECConnectorBase(ABC):
     @property
     def is_producer(self) -> bool:
         return self._is_producer
+
+    @property
+    def is_consumer(self) -> bool:
+        return self._is_consumer
+
+    def shutdown(self) -> None:
+        """
+        Shutdown the connector. This is called when the process
+        is shutting down to ensure that all the async operations are
+        completed and the connector is cleaned up properly.
+        """
+        return None
 
     # ==============================
     # Worker-side methods
@@ -182,21 +195,38 @@ class ECConnectorBase(ABC):
     # ==============================
 
     @abstractmethod
-    def has_caches(
+    def has_cache_item(
         self,
-        request: "Request",
-    ) -> list[bool]:
+        identifier: str,
+    ) -> bool:
         """
-        Check if encoder cache exists for each mm data of requests
+        Check if a single encoder cache exists
 
         Args:
-            request (Request): the request object.
+            identifier (str): the identifier of the media.
 
         Returns:
-            A list bool where ith value is True if cache exist for
-            ith mm_data of requests
+            A bool where value is True if cache exist for
+            the media
         """
         pass
+
+    def ensure_cache_available(
+        self, request: "Request", num_computed_tokens: int
+    ) -> bool:
+        """
+        Ensure encoder cache items are available for the given request.
+        May initiate asynchronous transfers for items not yet local.
+
+        Args:
+            request: the request whose multimodal features to check.
+            num_computed_tokens: tokens already covered by cached KV blocks.
+
+        Returns:
+            True if all items are ready or no transfer is needed.
+            False if any items are still in transit (request should be deferred).
+        """
+        return True
 
     @abstractmethod
     def update_state_after_alloc(self, request: "Request", index: int):

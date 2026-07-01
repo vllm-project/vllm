@@ -1,14 +1,16 @@
 name: vllm_ci
 job_dirs:
-  - ".buildkite/test_areas"
   - ".buildkite/image_build"
+  - ".buildkite/test_areas"
+  - ".buildkite/hardware_tests"
 run_all_patterns:
   - "docker/Dockerfile"
   - "CMakeLists.txt"
   - "requirements/common.txt"
   - "requirements/cuda.txt"
-  - "requirements/build.txt"
-  - "requirements/test.txt"
+  - "requirements/kv_connectors.txt"
+  - "requirements/build/cuda.txt"
+  - "requirements/test/cuda.txt"
   - "setup.py"
   - "csrc/"
   - "cmake/"

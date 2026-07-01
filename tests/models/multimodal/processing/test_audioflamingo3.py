@@ -40,16 +40,32 @@ class MockAudioFlamingo3Processor:
     def __init__(self):
         self.audio_token = "<sound>"
         self.audio_token_id = 12345
+        self.max_audio_len = 60
         self.feature_extractor = MockFeatureExtractor()
+        self.tokenizer = self._tokenize
 
-    def __call__(self, text=None, audios=None, **kwargs):
-        return {"input_ids": [1, 2, 3], "input_features": [np.zeros((3000, 80))]}
+    def __call__(self, text=None, audio=None, **kwargs):
+        return {
+            "input_ids": torch.tensor([[1, 2, 3]], dtype=torch.long),
+            "input_features": torch.zeros((3, 80, 3000)),
+            "input_features_mask": torch.ones((3, 3000), dtype=torch.long),
+        }
+
+    def _tokenize(self, text, **kwargs):
+        return {"input_ids": torch.tensor([[1, 2, 3]], dtype=torch.long)}
 
 
 class MockFeatureExtractor:
     def __init__(self):
         self.sampling_rate = 16000
         self.chunk_length = 30
+        self.hop_length = 160
+
+    def __call__(self, audios, **kwargs):
+        return {
+            "input_features": torch.zeros((len(audios), 80, 3000)),
+            "attention_mask": torch.ones((len(audios), 3000), dtype=torch.long),
+        }
 
 
 @pytest.fixture
@@ -59,13 +75,15 @@ def mock_ctx():
     ctx = MagicMock()
     ctx.get_hf_config.return_value = config
     ctx.get_hf_processor.return_value = MockAudioFlamingo3Processor()
+    ctx.call_hf_processor.side_effect = lambda processor, data, kwargs: processor(
+        **data, **kwargs
+    )
     ctx.model_config.hf_config = config
     return ctx
 
 
 @pytest.fixture(autouse=True)
 def check_transformers_version():
-    # Check if the model is supported by the current transformers version
     model_info = HF_EXAMPLE_MODELS.get_hf_info("AudioFlamingo3ForConditionalGeneration")
     model_info.check_transformers_version(on_fail="skip")
 
@@ -84,26 +102,19 @@ def test_audio_chunk_counting(mock_ctx):
 
     sr = 16000
     audio_1 = np.zeros(30 * sr)
-    audio_2 = np.zeros(45 * sr)
+    audio_2 = np.zeros(75 * sr)
 
     mm_data = {"audio": [audio_1, audio_2]}
     prompt = "<|user|>Listen.<|end|>"
 
-    from vllm.multimodal.processing import BaseMultiModalProcessor
+    processed = processor._call_hf_processor(prompt, mm_data, {}, {})
 
-    def mock_base_call(self, prompt, mm_data, mm_kwargs, tok_kwargs):
-        return {"input_ids": [1, 2, 3], "input_features": torch.randn(1, 80, 3000)}
+    chunk_counts = processed["chunk_counts"]
 
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(BaseMultiModalProcessor, "_call_hf_processor", mock_base_call)
-
-        processed = processor._call_hf_processor(prompt, mm_data, {}, {})
-
-        chunk_counts = processed["chunk_counts"]
-
-        assert chunk_counts[0].item() == 1
-        assert chunk_counts[1].item() == 2
-        assert len(chunk_counts) == 2
+    assert chunk_counts[0].item() == 1
+    assert chunk_counts[1].item() == 2
+    assert len(chunk_counts) == 2
+    assert processed["feature_attention_mask"].shape == (3, 3000)
 
 
 def test_dummy_data_generation(mock_ctx):
@@ -116,10 +127,27 @@ def test_dummy_data_generation(mock_ctx):
     builder = AudioFlamingo3DummyInputsBuilder(info)
 
     mm_counts = {"audio": 2}
-    dummy_data = builder.get_dummy_mm_data(100, mm_counts, None)
+    dummy_data = builder.get_dummy_mm_data(100, mm_counts, {})
 
     assert "audio" in dummy_data
     assert len(dummy_data["audio"]) == 2
 
-    expected_len = 600 * 16000
+    expected_len = 60 * 16000
     assert len(dummy_data["audio"][0]) == expected_len
+
+
+def test_audio_token_count_matches_hf_processor_math():
+    from vllm.model_executor.models.audioflamingo3 import (
+        _count_audio_tokens_from_mask,
+    )
+
+    feature_attention_mask = torch.zeros((3, 3000), dtype=torch.long)
+    feature_attention_mask[0, :2999] = 1
+    feature_attention_mask[1, :2999] = 1
+    feature_attention_mask[2, :1500] = 1
+    chunk_counts = torch.tensor([2, 1], dtype=torch.long)
+
+    assert (
+        _count_audio_tokens_from_mask(feature_attention_mask, chunk_counts, 0) == 1499
+    )
+    assert _count_audio_tokens_from_mask(feature_attention_mask, chunk_counts, 1) == 375

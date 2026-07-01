@@ -1,3 +1,7 @@
+---
+toc_depth: 3
+---
+
 # CPU
 
 vLLM is a Python library that supports the following CPU variants. Select your CPU type to see vendor specific instructions:
@@ -75,6 +79,8 @@ For example, the nightly build index is: `https://wheels.vllm.ai/nightly/cpu/`.
 
 #### Set up using Python-only build (without compilation) {#python-only-build}
 
+This method requires [pre-built wheels](#pre-built-wheels) for your platform.
+
 Please refer to the instructions for [Python-only build on GPU](./gpu.md#python-only-build), and replace the build commands with:
 
 ```bash
@@ -131,10 +137,14 @@ VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_VARIANT=cpu VLLM_TARGET_DEVICE=cpu
 
 === "Apple silicon"
 
-    --8<-- "docs/getting_started/installation/cpu.arm.inc.md:build-image-from-source"
+    --8<-- "docs/getting_started/installation/cpu.apple.inc.md:build-image-from-source"
 
 === "IBM Z (S390X)"
     --8<-- "docs/getting_started/installation/cpu.s390x.inc.md:build-image-from-source"
+
+## AMD Zen optimizations {#amd-zen-optimizations}
+
+--8<-- "docs/getting_started/installation/cpu.x86.inc.md:amd-zen-optimizations"
 
 ## Related runtime environment variables
 
@@ -143,12 +153,14 @@ VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_VARIANT=cpu VLLM_TARGET_DEVICE=cpu
 - `VLLM_CPU_NUM_OF_RESERVED_CPU`: specify the number of CPU cores which are not dedicated to the OpenMP threads for each rank. The variable only takes effect when VLLM_CPU_OMP_THREADS_BIND is set to `auto`. Default value is `None`. If the value is not set and use `auto` thread binding, no CPU will be reserved for `world_size == 1`, 1 CPU per rank will be reserved for `world_size > 1`.
 - `CPU_VISIBLE_MEMORY_NODES`: specify visible NUMA memory nodes for vLLM CPU workers, similar to ```CUDA_VISIBLE_DEVICES```. The variable only takes effect when VLLM_CPU_OMP_THREADS_BIND is set to `auto`. The variable provides more control for the auto thread-binding feature, such as masking nodes and changing nodes binding sequence.
 - `VLLM_CPU_SGL_KERNEL` (x86 only, Experimental): whether to use small-batch optimized kernels for linear layer and MoE layer, especially for low-latency requirements like online serving. The kernels require AMX instruction set, BFloat16 weight type and weight shapes divisible by 32. Default is `0` (False).
+- `VLLM_ZENTORCH_WEIGHT_PREPACK` (AMD Zen only): when `ZenCpuPlatform` is active, eagerly prepack linear weights into ZenDNN's blocked layout at model load time, eliminating per-inference layout conversion overhead. Default is `1` (enabled). See [AMD Zen optimizations](#amd-zen-optimizations).
 
 ## FAQ
 
 ### Which `dtype` should be used?
 
 - Currently, vLLM CPU uses model default settings as `dtype`. However, due to unstable float16 support in torch CPU, it is recommended to explicitly set `dtype=bfloat16` if there are any performance or accuracy problem.  
+- On AMD Zen CPUs (`ZenCpuPlatform`), `float16` is **not** supported. Only `bfloat16` and `float32` are accepted; models declared with `float16` are auto-downcast to `bfloat16` at model load time. See [AMD Zen optimizations](#amd-zen-optimizations).
 
 ### How to launch a vLLM service on CPU?
 
@@ -172,13 +184,13 @@ Note, it is recommended to manually reserve 1 CPU for vLLM front-end process whe
 
 ### What are supported models on CPU?
 
-For the full and up-to-date list of models validated on CPU platforms, please see the official documentation: [Supported Models on CPU](https://docs.vllm.ai/en/latest/models/hardware_supported_models/cpu)
+For the full and up-to-date list of models validated on CPU platforms, please see the official documentation: [Supported Models on CPU](../../models/hardware_supported_models/cpu.md)
 
 ### How to find benchmark configuration examples for supported CPU models?
 
-For any model listed under [Supported Models on CPU](https://docs.vllm.ai/en/latest/models/hardware_supported_models/cpu), optimized runtime configurations are provided in the vLLM Benchmark Suite’s CPU test cases, defined in [cpu test cases](https://github.com/vllm-project/vllm/blob/main/.buildkite/performance-benchmarks/tests/serving-tests-cpu.json)
-For details on how these optimized configurations are determined, see: [performance-benchmark-details](https://github.com/vllm-project/vllm/tree/main/.buildkite/performance-benchmarks#performance-benchmark-details).
-To benchmark the supported models using these optimized settings, follow the steps in [running vLLM Benchmark Suite manually](https://docs.vllm.ai/en/latest/contributing/benchmarks/#manually-trigger-the-benchmark) and run the Benchmark Suite on a CPU environment.  
+For any model listed under [Supported Models on CPU](../../models/hardware_supported_models/cpu.md), optimized runtime configurations are provided in the vLLM Benchmark Suite’s CPU test cases, defined in cpu test cases as serving-tests-cpu.json. Full test cases for Text-only models, Multi-Modal models and Embedded models are in cpu Text-Only test cases as serving-tests-cpu-text.json, cpu Multi-Modal test cases as serving-tests-cpu-multimodal.json and cpu Embedded test cases as serving-tests-cpu-embed.json.  
+For details on how these optimized configurations are determined, see: [performance-benchmark-details](../../../.buildkite/performance-benchmarks/README.md#performance-benchmark-details).
+To benchmark the supported models using these optimized settings, follow the steps in [running vLLM Benchmark Suite manually](../../benchmarking/dashboard.md#manually-trigger-the-benchmark) and run the Benchmark Suite on a CPU environment.  
 
 Below is an example command to benchmark all CPU-supported models using optimized configurations.
 
@@ -198,6 +210,47 @@ lscpu | grep "NUMA node(s):" | awk '{print $3}'
 
 For performance reference, users may also consult the [vLLM Performance Dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm&deviceName=cpu)
 , which publishes default-model CPU results produced using the same Benchmark Suite.
+
+#### Dry-Run
+
+For users only need to get the optimized runtime configurations without running benchmark, a Dry-Run mode is provided.
+By passing an environment variable DRY_RUN=1 with run-performance-benchmarks.sh,
+all commands will be generated under `./benchmark/results/`.
+
+```bash
+ON_CPU=1 DRY_RUN=1 bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh
+```
+
+By providing different JSON file, users can get runtime configurations for different models such as Embedded Models.
+
+```bash
+ON_CPU=1 SERVING_JSON=serving-tests-cpu-embed.json DRY_RUN=1 bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh
+```
+
+By providing MODEL_FILTER and DTYPE_FILTER, only commands for related model ID and Data Type will be generated.
+
+```bash
+ON_CPU=1 SERVING_JSON=serving-tests-cpu-text.json DRY_RUN=1 MODEL_FILTER=meta-llama/Llama-3.1-8B-Instruct DTYPE_FILTER=bfloat16  bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh
+```
+
+### How do I enable AMD Zen optimizations? {#how-do-i-enable-amd-zen-optimizations}
+
+On an AMD Zen 4 / Zen 5 CPU, install the CPU wheel with the `zen` extra so vLLM pulls the tested `zentorch` version for that release:
+
+```bash
+export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
+uv pip install "vllm[zen]" --extra-index-url https://wheels.vllm.ai/${VLLM_VERSION}/cpu --index-strategy first-index --torch-backend cpu
+```
+
+vLLM auto-detects the platform and routes linear layers through ZenDNN-optimized kernels - no flag needed. To verify it is engaged, look for the platform-selection line in the server's startup logs:
+
+```bash
+vllm serve Qwen/Qwen3-0.6B 2>&1 | grep "AMD Zen CPU detected with zentorch installed"
+```
+
+For per-backend dispatch details (which kernel each linear layer was bound to), re-run with `VLLM_LOGGING_LEVEL=DEBUG` and grep for `CPU unquantized GEMM dispatch`.
+
+See [AMD Zen optimizations](#amd-zen-optimizations) for detection rules, supported dtypes, and the `VLLM_ZENTORCH_WEIGHT_PREPACK` knob.
 
 ### How to decide `VLLM_CPU_OMP_THREADS_BIND`?
 
@@ -231,7 +284,7 @@ For performance reference, users may also consult the [vLLM Performance Dashboar
 
     # On this platform, it is recommended to only bind openMP threads on logical CPU cores 0-7 or 8-15
     $ export VLLM_CPU_OMP_THREADS_BIND=0-7
-    $ python examples/offline_inference/basic/basic.py
+    $ python examples/basic/offline_inference/basic.py
     ```
 
 - When deploying vLLM CPU backend on a multi-socket machine with NUMA and enable tensor parallel or pipeline parallel, each NUMA node is treated as a TP/PP rank. So be aware to set CPU cores of a single rank on the same NUMA node to avoid cross NUMA node memory access.

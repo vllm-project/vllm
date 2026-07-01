@@ -38,7 +38,7 @@ if ! grep -q "name = \"vllm-tpu\"" "$PYPROJECT_FILE"; then
     cp "$PYPROJECT_FILE" "${PYPROJECT_FILE}.bak"
     sed -i '0,/^name = "vllm"/s//name = "vllm-tpu"/' "$PYPROJECT_FILE"
 
-    echo "Patching ${CHANGE_FILE_LIST[@]} vllm to vllm-tpu..."
+    echo "Patching ${CHANGE_FILE_LIST[*]} vllm to vllm-tpu..."
     # patching
     #   importlib.metadata.version('vllm') -> importlib.metadata.version('vllm-tpu')
     #   importlib.metadata.version("vllm") -> importlib.metadata.version("vllm-tpu")
@@ -79,12 +79,15 @@ trap cleanup EXIT HUP INT QUIT PIPE TERM # Register cleanup function to run on s
 
 echo "Updating pyproject.toml completed. Proceeding with build..."
 
+echo "Install dependencies for no-isolation build"
+pip install -r "$VLLM_DIR/requirements/build/tpu.txt"
+
 echo "Building wheel for TPU..."
 rm -rf dist/
 mkdir -p dist/
 
 # User confirmed to use 'python -m build' directly
-if ! VLLM_TARGET_DEVICE=tpu python -m build; then
+if ! VLLM_TARGET_DEVICE=tpu python -m build --no-isolation; then
     echo "Error: Python build command failed. Check if 'python -m build' works and the 'build' module is installed."
     exit 1
 fi

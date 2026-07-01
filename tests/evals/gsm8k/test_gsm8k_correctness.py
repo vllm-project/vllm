@@ -9,15 +9,31 @@ pytest -s -v tests/evals/gsm8k/test_gsm8k_correctness.py \
     --config-list-file=configs/models-small.txt
 """
 
+import importlib.metadata
 import shlex
+from importlib.util import find_spec
 
+import pytest
+import torch
 import yaml
+from packaging import version
 
 from tests.utils import RemoteOpenAIServer
+from vllm.platforms import current_platform
 
 from .gsm8k_eval import evaluate_gsm8k
 
-TOL = 0.08  # Absolute tolerance for accuracy comparison
+# MXFP4 via quark requires amd-quark >= 0.12 on torch >= 2.11.
+# Earlier torch releases work with older quark versions. See
+# https://github.com/amd/Quark/issues/34
+# TODO: Remove once amd-quark>=0.12.0
+QUARK_MXFP4_TORCH_COMPATIBLE = find_spec("quark") is not None and (
+    version.parse(importlib.metadata.version("amd-quark")) >= version.parse("0.12.0")
+    if version.parse(torch.__version__.split("+")[0]) >= version.parse("2.11")
+    else True
+)
+
+DEFAULT_STARTUP_MAX_WAIT_SECONDS = 1200
 
 
 def run_gsm8k_eval(eval_config: dict, server_url: str) -> dict:
@@ -39,11 +55,21 @@ def run_gsm8k_eval(eval_config: dict, server_url: str) -> dict:
         host = f"http://{host}"
 
     # Run GSM8K evaluation
+    request_timeout_seconds = eval_config.get("request_timeout_seconds", 600)
+    if current_platform.is_rocm():
+        request_timeout_seconds = eval_config.get(
+            "rocm_request_timeout_seconds", request_timeout_seconds
+        )
+
     results = evaluate_gsm8k(
         num_questions=eval_config["num_questions"],
         num_shots=eval_config["num_fewshot"],
+        max_tokens=eval_config.get("max_tokens", 256),
+        model=eval_config["model_name"],
+        use_chat_completions=eval_config.get("use_chat_completions", False),
         host=host,
         port=port,
+        request_timeout_seconds=request_timeout_seconds,
     )
 
     return results
@@ -53,6 +79,46 @@ def test_gsm8k_correctness(config_filename):
     """Test GSM8K correctness for a given model configuration."""
     eval_config = yaml.safe_load(config_filename.read_text(encoding="utf-8"))
 
+    if (
+        not current_platform.is_cuda()
+        and "Qwen3-30B-A3B-MXFP4A16" in eval_config["model_name"]
+    ):
+        pytest.skip(
+            "Skipping Qwen3-30B-A3B-MXFP4A16 on non-CUDA platforms. "
+            "Marlin kernels are not supported."
+        )
+
+    if (
+        not current_platform.is_cuda()
+        and "gemma-4-E4B-it-qat-mobile-ct" in eval_config["model_name"]
+    ):
+        pytest.skip(
+            "Skipping gemma-4-E4B-it-qat-mobile-ct on non-CUDA platforms. "
+            "Its W2A16 (uint2b2) scheme has no kernel outside CUDA."
+        )
+
+    # TODO(akaratza): Enable DeepSeek-V3.2 and DeepSeek-R1 on ROCm platforms
+    if current_platform.is_rocm() and (
+        "deepseek-ai/DeepSeek-V3.2" in eval_config["model_name"]
+        or "deepseek-ai/DeepSeek-R1" in eval_config["model_name"]
+    ):
+        pytest.skip(
+            "Skipping DeepSeek-V3.2 and DeepSeek-R1 on ROCm platforms "
+            "due to agent pool disk space issues and pod evictions."
+        )
+    if current_platform.is_rocm() and ("Qwen3.5-35B-A3B-MXFP4" in config_filename.name):
+        from vllm.platforms.rocm import on_gfx950
+
+        if not on_gfx950() and "AITER-TP2" in config_filename.name:
+            pytest.skip(
+                "Skipping Qwen3.5-35B-A3B-MXFP4-AITER-TP2 on non-GFX950 platforms. "
+                "The quantization scheme is not supported on non-GFX950 platforms."
+            )
+        if not QUARK_MXFP4_TORCH_COMPATIBLE:
+            pytest.skip(
+                "Skipping Qwen3.5-35B-A3B-MXFP4: amd-quark >= 0.12 is required "
+                "on torch >= 2.11."
+            )
     # Parse server arguments from config (use shlex to handle quoted strings)
     server_args_str = eval_config.get("server_args", "")
     server_args = shlex.split(server_args_str) if server_args_str else []
@@ -61,23 +127,36 @@ def test_gsm8k_correctness(config_filename):
     server_args.extend(
         [
             "--trust-remote-code",
+            "--disable-uvicorn-access-log",
         ]
     )
 
-    env_dict = eval_config.get("env", None)
+    startup_max_wait_seconds = eval_config.get(
+        "startup_max_wait_seconds", DEFAULT_STARTUP_MAX_WAIT_SECONDS
+    )
+    env_dict = dict(eval_config.get("env") or {})
+    env_dict["VLLM_ENGINE_READY_TIMEOUT_S"] = str(int(startup_max_wait_seconds))
 
     print(f"Starting GSM8K evaluation for model: {eval_config['model_name']}")
     print(f"Expected metric threshold: {eval_config['accuracy_threshold']}")
     print(f"Number of questions: {eval_config['num_questions']}")
     print(f"Number of few-shot examples: {eval_config['num_fewshot']}")
+    request_timeout_seconds = eval_config.get("request_timeout_seconds", 600)
+    if current_platform.is_rocm():
+        request_timeout_seconds = eval_config.get(
+            "rocm_request_timeout_seconds", request_timeout_seconds
+        )
+    print(f"Request timeout: {request_timeout_seconds}s")
+    print(f"Startup max wait: {startup_max_wait_seconds}s")
     print(f"Server args: {' '.join(server_args)}")
+    print(f"Environment variables: {env_dict}")
 
     # Launch server and run evaluation
     with RemoteOpenAIServer(
         eval_config["model_name"],
         server_args,
         env_dict=env_dict,
-        max_wait_seconds=600,
+        max_wait_seconds=startup_max_wait_seconds,
     ) as remote_server:
         server_url = remote_server.url_for("v1")
         print(f"Server started at: {server_url}")
@@ -86,20 +165,20 @@ def test_gsm8k_correctness(config_filename):
 
         measured_metric = results["accuracy"]
         expected_metric = eval_config["accuracy_threshold"]
+        tol = eval_config.get("tolerance", 0.08)
 
         print(f"GSM8K Results for {eval_config['model_name']}:")
         print(f"  Measured metric: {measured_metric:.4f}")
         print(f"  Expected metric: {expected_metric:.4f}")
-        print(f"  Tolerance: {TOL:.4f}")
+        print(f"  Tolerance: {tol:.4f}")
         print(f"  Questions: {results['num_questions']}")
         print(f"  Invalid rate: {results['invalid_rate']:.3f}")
         print(f"  Latency: {results['latency']:.1f}s")
         print(f"  QPS: {results['questions_per_second']:.1f}")
 
-        # Verify metric is within tolerance
-        assert measured_metric >= expected_metric - TOL, (
+        assert measured_metric >= expected_metric - tol, (
             f"GSM8K metric too low: {measured_metric:.4f} < "
-            f"{expected_metric:.4f} - {TOL:.4f} = {expected_metric - TOL:.4f}"
+            f"{expected_metric:.4f} - {tol:.4f} = {expected_metric - tol:.4f}"
         )
 
         print(f"✅ GSM8K test passed for {eval_config['model_name']}")

@@ -12,7 +12,9 @@ from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.bitsandbytes_loader import BitsAndBytesModelLoader
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
-from vllm.model_executor.model_loader.gguf_loader import GGUFModelLoader
+from vllm.model_executor.model_loader.modelexpress_loader import (
+    ModelExpressModelLoader,
+)
 from vllm.model_executor.model_loader.runai_streamer_loader import (
     RunaiModelStreamerLoader,
 )
@@ -34,8 +36,9 @@ LoadFormats = Literal[
     "bitsandbytes",
     "dummy",
     "fastsafetensors",
-    "gguf",
+    "instanttensor",
     "mistral",
+    "modelexpress",
     "npcache",
     "pt",
     "runai_streamer",
@@ -50,8 +53,9 @@ _LOAD_FORMAT_TO_MODEL_LOADER: dict[str, type[BaseModelLoader]] = {
     "bitsandbytes": BitsAndBytesModelLoader,
     "dummy": DummyModelLoader,
     "fastsafetensors": DefaultModelLoader,
-    "gguf": GGUFModelLoader,
+    "instanttensor": DefaultModelLoader,
     "mistral": DefaultModelLoader,
+    "modelexpress": ModelExpressModelLoader,
     "npcache": DefaultModelLoader,
     "pt": DefaultModelLoader,
     "runai_streamer": RunaiModelStreamerLoader,
@@ -124,12 +128,18 @@ def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
 
 
 def get_model(
-    *, vllm_config: VllmConfig, model_config: ModelConfig | None = None
+    *,
+    vllm_config: VllmConfig,
+    model_config: ModelConfig | None = None,
+    prefix: str = "",
+    load_config: LoadConfig | None = None,
 ) -> nn.Module:
-    loader = get_model_loader(vllm_config.load_config)
+    loader = get_model_loader(load_config or vllm_config.load_config)
     if model_config is None:
         model_config = vllm_config.model_config
-    return loader.load_model(vllm_config=vllm_config, model_config=model_config)
+    return loader.load_model(
+        vllm_config=vllm_config, model_config=model_config, prefix=prefix
+    )
 
 
 __all__ = [
@@ -141,7 +151,7 @@ __all__ = [
     "register_model_loader",
     "BaseModelLoader",
     "BitsAndBytesModelLoader",
-    "GGUFModelLoader",
+    "ModelExpressModelLoader",
     "DefaultModelLoader",
     "DummyModelLoader",
     "RunaiModelStreamerLoader",

@@ -3,7 +3,6 @@
 """Benchmark the latency of processing a single batch of requests."""
 
 import argparse
-import dataclasses
 import json
 import os
 import time
@@ -14,8 +13,9 @@ from tqdm import tqdm
 
 from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
 from vllm.engine.arg_utils import EngineArgs
-from vllm.inputs import PromptType
+from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.sampling_params import BeamSearchParams
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 def save_to_pytorch_benchmark_format(
@@ -31,7 +31,7 @@ def save_to_pytorch_benchmark_format(
         write_to_json(pt_file, pt_records)
 
 
-def add_cli_args(parser: argparse.ArgumentParser):
+def add_cli_args(parser: FlexibleArgumentParser):
     parser.add_argument("--input-len", type=int, default=32)
     parser.add_argument("--output-len", type=int, default=128)
     parser.add_argument("--batch-size", type=int, default=8)
@@ -79,17 +79,13 @@ def add_cli_args(parser: argparse.ArgumentParser):
 
 def main(args: argparse.Namespace):
     engine_args = EngineArgs.from_cli_args(args)
-    if args.profile and not engine_args.profiler_config.profiler == "torch":
-        raise ValueError(
-            "The torch profiler is not enabled. Please provide profiler_config."
-        )
 
     # Lazy import to avoid importing LLM when the bench command is not selected.
     from vllm import LLM, SamplingParams
 
     # NOTE(woosuk): If the request cannot be processed in a single batch,
     # the engine will automatically process the request in multiple batches.
-    llm = LLM(**dataclasses.asdict(engine_args))
+    llm = LLM.from_engine_args(engine_args)
     assert llm.llm_engine.model_config.max_model_len >= (
         args.input_len + args.output_len
     ), (
@@ -108,8 +104,9 @@ def main(args: argparse.Namespace):
     dummy_prompt_token_ids = np.random.randint(
         10000, size=(args.batch_size, args.input_len)
     )
-    dummy_prompts: list[PromptType] = [
-        {"prompt_token_ids": batch} for batch in dummy_prompt_token_ids.tolist()
+    dummy_prompts: list[TokensPrompt | TextPrompt] = [
+        TokensPrompt(prompt_token_ids=batch)
+        for batch in dummy_prompt_token_ids.tolist()
     ]
 
     def llm_generate():
@@ -125,8 +122,8 @@ def main(args: argparse.Namespace):
                 ),
             )
 
-    def run_to_completion(profile_dir: str | None = None):
-        if profile_dir:
+    def run_to_completion(do_profile: bool = False):
+        if do_profile:
             llm.start_profile()
             llm_generate()
             llm.stop_profile()
@@ -139,18 +136,24 @@ def main(args: argparse.Namespace):
 
     print("Warming up...")
     for _ in tqdm(range(args.num_iters_warmup), desc="Warmup iterations"):
-        run_to_completion(profile_dir=None)
+        run_to_completion(do_profile=False)
 
     if args.profile:
-        profile_dir = engine_args.profiler_config.torch_profiler_dir
-        print(f"Profiling (results will be saved to '{profile_dir}')...")
-        run_to_completion(profile_dir=profile_dir)
+        profiler_config = engine_args.profiler_config
+        if profiler_config.profiler == "torch":
+            print(
+                "Profiling with torch profiler (results will be saved to"
+                f" {profiler_config.torch_profiler_dir})..."
+            )
+        elif profiler_config.profiler == "cuda":
+            print("Profiling with cuda profiler ...")
+        run_to_completion(do_profile=True)
         return
 
     # Benchmark.
     latencies = []
-    for _ in tqdm(range(args.num_iters), desc="Profiling iterations"):
-        latencies.append(run_to_completion(profile_dir=None))
+    for _ in tqdm(range(args.num_iters), desc="Bench iterations"):
+        latencies.append(run_to_completion(do_profile=False))
     latencies = np.array(latencies)
     percentages = [10, 25, 50, 75, 90, 99]
     percentiles = np.percentile(latencies, percentages)

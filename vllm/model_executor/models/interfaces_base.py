@@ -15,17 +15,19 @@ import torch.nn as nn
 from typing_extensions import TypeIs, TypeVar
 
 from vllm.logger import init_logger
+from vllm.tasks import ScoreType
 from vllm.utils.func_utils import supports_kw
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.model import AttnTypeStr
-    from vllm.config.pooler import PoolingTypeStr
+    from vllm.config.pooler import SequencePoolingType, TokenPoolingType
     from vllm.model_executor.layers.pooler import Pooler
 else:
     VllmConfig = Any
     Pooler = Any
-    PoolingTypeStr = Any
+    SequencePoolingType = Any
+    TokenPoolingType = Any
     AttnTypeStr = Any
 
 logger = init_logger(__name__)
@@ -155,9 +157,19 @@ class VllmModelForPooling(VllmModel[T_co], Protocol[T_co]):
         MRO of your model class.
     """
 
-    default_pooling_type: ClassVar[PoolingTypeStr] = "LAST"
+    default_seq_pooling_type: ClassVar[SequencePoolingType] = "LAST"
     """
-    Indicates the [vllm.config.pooler.PoolerConfig.pooling_type][]
+    Indicates the [vllm.config.pooler.PoolerConfig.seq_pooling_type][]
+    to use by default.
+
+    You can use the
+    [vllm.model_executor.models.interfaces_base.default_pooling_type][]
+    decorator to conveniently set this field.
+    """
+
+    default_tok_pooling_type: ClassVar[TokenPoolingType] = "ALL"
+    """
+    Indicates the [vllm.config.pooler.PoolerConfig.tok_pooling_type][]
     to use by default.
 
     You can use the
@@ -174,6 +186,26 @@ class VllmModelForPooling(VllmModel[T_co], Protocol[T_co]):
     You can use the
     [vllm.model_executor.models.interfaces_base.attn_type][]
     decorator to conveniently set this field.
+    """
+
+    score_type: ClassVar[ScoreType] = "bi-encoder"
+    """
+    Indicates the
+    [vllm.config.model.ModelConfig.score_type][]
+    to use by default.
+    
+    Scoring API handles score/rerank for:\n
+    - "classify" task (score_type: cross-encoder models)\n
+    - "embed" task (score_type: bi-encoder models)\n
+    - "token_embed" task (score_type: late interaction models)\n
+    
+    score_type defaults to bi-encoder, then the Score API uses the "embed" task.\n
+    If you set score_type to cross-encoder via 
+    [vllm.model_executor.models.interfaces.SupportsCrossEncoding][], 
+    then the Score API uses the "score" task.\n
+    If you set score_type to late-interaction via 
+    [vllm.model_executor.models.interfaces.SupportsLateInteraction][], 
+    then the Score API uses the "token_embed" task.\n
     """
 
     pooler: Pooler
@@ -200,18 +232,31 @@ def is_pooling_model(
 _T = TypeVar("_T", bound=type[nn.Module])
 
 
-def default_pooling_type(pooling_type: PoolingTypeStr):
-    """Decorator to set `VllmModelForPooling.default_pooling_type`."""
+def default_pooling_type(
+    *,
+    seq_pooling_type: SequencePoolingType = "LAST",
+    tok_pooling_type: TokenPoolingType = "ALL",
+):
+    """Decorator to set `VllmModelForPooling.default_*_pooling_type`."""
 
     def func(model: _T) -> _T:
-        model.default_pooling_type = pooling_type  # type: ignore
+        model.default_seq_pooling_type = seq_pooling_type  # type: ignore
+        model.default_tok_pooling_type = tok_pooling_type  # type: ignore
         return model
 
     return func
 
 
-def get_default_pooling_type(model: type[object] | object) -> PoolingTypeStr:
-    return getattr(model, "default_pooling_type", "LAST")
+def get_default_seq_pooling_type(
+    model: type[object] | object,
+) -> SequencePoolingType:
+    return getattr(model, "default_seq_pooling_type", "LAST")
+
+
+def get_default_tok_pooling_type(
+    model: type[object] | object,
+) -> TokenPoolingType:
+    return getattr(model, "default_tok_pooling_type", "ALL")
 
 
 def attn_type(attn_type: AttnTypeStr):
@@ -226,3 +271,13 @@ def attn_type(attn_type: AttnTypeStr):
 
 def get_attn_type(model: type[object] | object) -> AttnTypeStr:
     return getattr(model, "attn_type", "decoder")
+
+
+def get_score_type(model: type[object] | object) -> ScoreType:
+    score_types = set()
+    for m in model.__mro__:
+        score_type = getattr(m, "score_type", "bi-encoder")
+        if score_type != "bi-encoder":
+            score_types.add(score_type)
+    assert len(score_types) < 2
+    return "bi-encoder" if not score_types else list(score_types)[0]

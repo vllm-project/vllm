@@ -11,20 +11,26 @@ from tqdm import tqdm
 
 import vllm.envs as envs
 from vllm.distributed.parallel_state import get_dp_group, is_global_first_rank
-from vllm.model_executor.layers.fused_moe.deep_gemm_moe import DeepGemmExperts
-from vllm.model_executor.layers.fused_moe.deep_gemm_utils import compute_aligned_M
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE, FusedMoEModularMethod
-from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
-from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
+from vllm.model_executor.layers.fused_moe import MoERunner
+from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
+    compute_aligned_M_and_alignment,
+)
+from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import DeepGemmExperts
+from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
 )
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
+from vllm.model_executor.layers.quantization.online.mxfp8 import Mxfp8OnlineLinearMethod
+from vllm.tracing import instrument
 from vllm.utils.deep_gemm import (
     fp8_gemm_nt,
     get_mk_alignment_for_contiguous_layout,
     m_grouped_fp8_gemm_nt_contiguous,
+    mk_alignment_scope,
 )
+from vllm.utils.math_utils import cdiv
+from vllm.utils.platform_utils import num_compute_units
 
 
 def _generate_optimal_warmup_m_values(
@@ -40,13 +46,10 @@ def _generate_optimal_warmup_m_values(
         device: The torch device to get properties from.
     """
 
-    def ceil_div(a: int, b: int) -> int:
-        return (a + b - 1) // b
-
     # DeepGEMM's possible block sizes
     block_ms = [64, 128, 256]
     block_ns = list(range(16, min(257, n + 1), 16))
-    num_sms = torch.cuda.get_device_properties(device).multi_processor_count
+    num_sms = num_compute_units(device.index)
 
     m_values = set()
 
@@ -63,7 +66,7 @@ def _generate_optimal_warmup_m_values(
             for wave in range(1, 11):  # Up to 10 waves
                 # M where this block config transitions to next wave
                 target_blocks = wave * num_sms
-                m = target_blocks * block_m // ceil_div(n, block_n)
+                m = target_blocks * block_m // cdiv(n, block_n)
                 if 1 <= m <= max_tokens:
                     m_values.add(m)
 
@@ -99,12 +102,13 @@ def _extract_data_from_linear_base_module(
 
 
 def _extract_data_from_fused_moe_module(
-    m: torch.nn.Module,
+    m_: torch.nn.Module,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]:
     """
     Extract weights, weight scales and num_topk from FusedMoE module.
     """
-    assert isinstance(m, FusedMoE)
+    assert isinstance(m_, MoERunner)
+    m = m_.routed_experts
     w13 = m.w13_weight
     w13_s = (
         m.w13_weight_scale_inv
@@ -130,11 +134,16 @@ def _fp8_linear_may_use_deep_gemm(module: torch.nn.Module) -> bool:
     """
     Return True if the input module/layer could be processed with DeepGEMM.
     """
+
+    # FIXME: this logic is brittle and incorrect - since we
+    # could use DeepGEMM with for than just Fp8LinearMethod
     block_size = get_mk_alignment_for_contiguous_layout()[0]
     if not (
         isinstance(module, LinearBase)
         and isinstance(module.quant_method, Fp8LinearMethod)
-        and module.quant_method.block_quant
+        and not isinstance(module.quant_method, Mxfp8OnlineLinearMethod)
+        and getattr(module.quant_method, "block_quant", False)
+        and not getattr(module.quant_method, "use_marlin", True)
     ):
         return False
 
@@ -151,10 +160,11 @@ def _fused_moe_grouped_gemm_may_use_deep_gemm(module: torch.nn.Module) -> bool:
     if not (envs.VLLM_USE_DEEP_GEMM and envs.VLLM_MOE_USE_DEEP_GEMM):
         return False
 
-    if not isinstance(module, FusedMoE):
+    if not isinstance(module, MoERunner):
         return False
 
-    moe_quant_config = module.quant_method.get_fused_moe_quant_config(module)
+    quant_method = module._quant_method
+    moe_quant_config = quant_method.get_fused_moe_quant_config(module.routed_experts)
 
     if (
         moe_quant_config is None
@@ -163,13 +173,12 @@ def _fused_moe_grouped_gemm_may_use_deep_gemm(module: torch.nn.Module) -> bool:
     ):
         return False
 
-    if not isinstance(module.quant_method, FusedMoEModularMethod):
-        # modular kernels could invoke deep_gemm_moe_fp8
-        return True
+    moe_kernel = getattr(quant_method, "moe_kernel", None)
+    if moe_kernel is None:
+        return False
 
-    mk: FusedMoEModularKernel = module.quant_method.fused_experts
-    # Further check if the ModularKernel implementation uses the DeepGemmExperts
-    return isinstance(mk.fused_experts, (DeepGemmExperts, TritonOrDeepGemmExperts))
+    fused_experts = moe_kernel.impl.fused_experts
+    return isinstance(fused_experts, (DeepGemmExperts, TritonOrDeepGemmExperts))
 
 
 FP8_GEMM_NT_WARMUP_CACHE: set[torch.Size] = set()
@@ -232,7 +241,7 @@ def _get_grouped_gemm_params(
     w2: torch.Tensor,
     num_topk: int,
     max_tokens: int,
-) -> tuple[int, int, torch.Tensor]:
+) -> tuple[int, int, list[tuple[int, int, torch.Tensor]]]:
     assert w1.size(0) == w2.size(0), "w1 and w2 must have the same number of experts"
 
     block_m = get_mk_alignment_for_contiguous_layout()[0]
@@ -240,22 +249,48 @@ def _get_grouped_gemm_params(
     device = w1.device
 
     # Assumes all ranks have the same max_num_batched_tokens
-    max_tokens_across_dp = get_dp_group().world_size * max_tokens
-    max_tokens = min(max_tokens_across_dp, envs.VLLM_FUSED_MOE_CHUNK_SIZE)
+    max_tokens = get_dp_group().world_size * max_tokens
 
-    # This is the maximum GroupedGemm M size that we expect to run
-    # the grouped_gemm with.
-    MAX_M = compute_aligned_M(
-        max_tokens, num_topk, num_experts, block_m, expert_tokens_meta=None
+    request_m_values = _generate_optimal_warmup_m_values(
+        max_tokens,
+        max(w1.size(1), w2.size(1)),
+        device,
     )
-    # Distribute expert-ids evenly.
-    MAX_BLOCKS = MAX_M // block_m
-    expert_ids_block = torch.randint(
-        low=0, high=num_experts, size=(MAX_BLOCKS,), device=device, dtype=torch.int32
-    )
-    expert_ids = torch.repeat_interleave(expert_ids_block, block_m, dim=0)
+    request_m_values = sorted({m for m in (*request_m_values, max_tokens) if m > 0})
+    if not request_m_values:
+        return 0, block_m, []
 
-    return MAX_M, block_m, expert_ids
+    cases_by_shape: dict[tuple[int, int], torch.Tensor] = {}
+    for request_m in request_m_values:
+        M_sum, align_used = compute_aligned_M_and_alignment(
+            M=request_m,
+            num_topk=num_topk,
+            local_num_experts=num_experts,
+            alignment=block_m,
+            expert_tokens_meta=None,
+        )
+        if (M_sum, align_used) in cases_by_shape:
+            continue
+
+        num_blocks = M_sum // align_used
+        expert_ids_block = torch.randint(
+            low=0,
+            high=num_experts,
+            size=(num_blocks,),
+            device=device,
+            dtype=torch.int32,
+        )
+        cases_by_shape[(M_sum, align_used)] = torch.repeat_interleave(
+            expert_ids_block, align_used, dim=0
+        )
+
+    max_m = max(M_sum for M_sum, _ in cases_by_shape)
+    warmup_cases = [
+        (M_sum, align_used, expert_ids)
+        for (M_sum, align_used), expert_ids in sorted(cases_by_shape.items())
+    ]
+
+    return max_m, block_m, warmup_cases
 
 
 def _deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(
@@ -273,7 +308,11 @@ def _deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(
     ):
         return
 
-    MAX_M, block_m, expert_ids = _get_grouped_gemm_params(w1, w2, num_topk, max_tokens)
+    MAX_M, block_m, warmup_cases = _get_grouped_gemm_params(
+        w1, w2, num_topk, max_tokens
+    )
+    if not warmup_cases:
+        return
     device = w1.device
 
     def _warmup(w: torch.Tensor, w_scale: torch.Tensor):
@@ -284,15 +323,14 @@ def _deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(
         )
         out = torch.empty((MAX_M, n), device=device, dtype=torch.bfloat16)
 
-        m_values = list(range(block_m, MAX_M + 1, block_m))
-
-        for num_tokens in m_values:
-            m_grouped_fp8_gemm_nt_contiguous(
-                (a1q[:num_tokens], a1q_scales[:num_tokens]),
-                (w, w_scale),
-                out[:num_tokens],
-                expert_ids[:num_tokens],
-            )
+        for num_tokens, align_used, expert_ids in warmup_cases:
+            with mk_alignment_scope(align_used):
+                m_grouped_fp8_gemm_nt_contiguous(
+                    (a1q[:num_tokens], a1q_scales[:num_tokens]),
+                    (w, w_scale),
+                    out[:num_tokens],
+                    expert_ids,
+                )
             if pbar is not None:
                 pbar.update(1)
 
@@ -345,8 +383,8 @@ def _count_warmup_iterations(model: torch.nn.Module, max_tokens: int) -> int:
             w13, _, w2, _, num_topk = _extract_data_from_fused_moe_module(m)
             if w13.size() in seen_grouped_sizes and w2.size() in seen_grouped_sizes:
                 continue
-            MAX_M, block_m, _ = _get_grouped_gemm_params(w13, w2, num_topk, max_tokens)
-            n_values = (MAX_M - block_m) // block_m + 1
+            _, _, warmup_cases = _get_grouped_gemm_params(w13, w2, num_topk, max_tokens)
+            n_values = len(warmup_cases)
             if w13.size() not in seen_grouped_sizes:
                 total += n_values
                 seen_grouped_sizes.add(w13.size())
@@ -356,6 +394,7 @@ def _count_warmup_iterations(model: torch.nn.Module, max_tokens: int) -> int:
     return total
 
 
+@instrument(span_name="DeepGemm warmup")
 def deep_gemm_warmup(model: torch.nn.Module, max_tokens: int):
     total = _count_warmup_iterations(model, max_tokens)
     if total == 0:

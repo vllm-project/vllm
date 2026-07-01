@@ -5,8 +5,10 @@ import inspect
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
+import regex as re
 import torch
 from torch import nn
+from transformers import PretrainedConfig
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -17,6 +19,13 @@ else:
 
 class QuantizeMethodBase(ABC):
     """Base class for different quantized methods."""
+
+    uses_meta_device: bool = False
+    """
+    Whether this method creates weights on meta device for online quantization.
+    When True, weights are created on meta device and quantized layer-wise
+    in process_weights_after_loading, reducing peak memory during loading.
+    """
 
     @abstractmethod
     def create_weights(
@@ -41,6 +50,20 @@ class QuantizeMethodBase(ABC):
         Expects create_weights to have been called before on the layer."""
         raise NotImplementedError
 
+    # Not required functions
+    def tie_weights(self, layer: torch.nn.Module, embed_tokens: torch.nn.Module):
+        """Tie ``layer``'s weight to ``embed_tokens``' weight.
+
+        The default shares the weight tensor, which is the standard behavior for
+        tied word embeddings and matches what ``ParallelLMHead.tie_weights`` did
+        directly before quantization methods became responsible for it.
+        Quantization methods that need special weight handling (e.g. repacked
+        weights) override this.
+
+        Expects create_weights to have been called before on the layer."""
+        layer.weight = embed_tokens.weight
+        return layer
+
     def process_weights_after_loading(self, layer: nn.Module) -> None:
         """Process the weight after loading.
 
@@ -63,6 +86,18 @@ def method_has_implemented_embedding(method_class: type[QuantizeMethodBase]) -> 
 
 class QuantizationConfig(ABC):
     """Base class for quantization configs."""
+
+    _ignore_unexpected_suffixes = (
+        ".q_scale",
+        ".k_scale",
+        ".v_scale",
+        ".q_zero_point",
+        ".k_zero_point",
+        ".v_zero_point",
+    )
+    """Suffixes of quantization parameters that may be present in the checkpoint but
+    not in the model, and should be ignored if unexpected during loading. These are used
+    after remapping, so should be in vLLM format (e.g. .q_scale, not .q.scale)."""
 
     def __init__(self):
         super().__init__()
@@ -104,13 +139,22 @@ class QuantizationConfig(ABC):
 
     @classmethod
     def override_quantization_method(
-        cls, hf_quant_cfg, user_quant
+        cls,
+        hf_quant_cfg: dict[str, Any],
+        user_quant: str | None,
+        hf_config: Any = None,
     ) -> QuantizationMethods | None:
         """
         Detects if this quantization method can support a given checkpoint
         format by overriding the user specified quantization method --
         this method should only be overwritten by subclasses in exceptional
-        circumstances
+        circumstances.
+
+        Args:
+            hf_quant_cfg: The checkpoint's quantization config dict.
+            user_quant: The user-specified quantization method string.
+            hf_config: The HuggingFace model config object (e.g. for
+                model_type checks). May be None if not available.
         """
         return None
 
@@ -147,8 +191,40 @@ class QuantizationConfig(ABC):
         """
         raise NotImplementedError
 
-    def get_cache_scale(self, name: str) -> str | None:
-        return None
+    @staticmethod
+    def get_cache_scale_mapper() -> "WeightsMapper":
+        """Mapping from checkpoint KV-cache scale names to vLLM scale names.
+
+        Returning a mapper here causes `AutoWeightsLoader` to apply it to the
+        weight stream automatically; individual model `load_weights` methods
+        do not need to know about KV-cache scales.
+        """
+        from vllm.model_executor.models.utils import WeightsMapper
+
+        orig_to_new_regex = {
+            # Deprecated fused kv_scale -> attn.k_scale
+            re.compile(r"\.kv_scale$"): r".attn.k_scale",
+            # ModelOpt: .self_attn.{k,v}_proj.{k,v}_scale -> .self_attn.attn.*
+            re.compile(r"\.self_attn\.[kv]_proj\.([kv])_scale$"): (
+                r".self_attn.attn.\1_scale"
+            ),
+            # Fused QKV / qkqkv proj: .self_attn.qk(qk)v_proj.{k,v}_scale -> attn
+            re.compile(r"\.self_attn\.qk(?:qk)?v_proj\.([kv])_scale$"): (
+                r".self_attn.attn.\1_scale"
+            ),
+            # NemotronH: .mixer.{k,v}_proj.{k,v}_scale -> .mixer.attn.*
+            re.compile(r"\.mixer\.[kv]_proj\.([kv])_scale$"): r".mixer.attn.\1_scale",
+            # HYV3: .self_attn.q.scale -> .self_attn.attn.q_scale
+            re.compile(r"\.self_attn\.q\.scale$"): r".self_attn.attn.q_scale",
+            # HYV3: .self_attn.{k,v}_cache.scale -> .self_attn.attn.{k,v}_scale
+            re.compile(r"\.self_attn\.([kv])_cache\.scale$"): (
+                r".self_attn.attn.\1_scale"
+            ),
+            # Default: .{q,k,v}_scale -> .attn.{q,k,v}_scale (unless already .attn)
+            re.compile(r"(?<!\.attn)\.([qkv])_scale$"): r".attn.\1_scale",
+            re.compile(r"(?<!\.attn)\.([qkv])_zero_point$"): r".attn.\1_zero_point",
+        }
+        return WeightsMapper(orig_to_new_regex=orig_to_new_regex)
 
     def apply_vllm_mapper(  # noqa: B027
         self, hf_to_vllm_mapper: "WeightsMapper"
@@ -157,14 +233,44 @@ class QuantizationConfig(ABC):
         Interface for models to update module names referenced in
         quantization configs in order to reflect the vllm model structure
 
-        :param hf_to_vllm_mapper: maps from hf model structure (the assumed
-            structure of the qconfig) to vllm model structure
+        Args:
+            hf_to_vllm_mapper: maps from hf model structure (the assumed
+                structure of the qconfig) to vllm model structure
         """
         # TODO (@kylesayrs): add implementations for all subclasses
         pass
 
-    def maybe_update_config(self, model_name: str):  # noqa: B027
+    def maybe_update_config(  # noqa: B027
+        self,
+        model_name: str,
+        hf_config: PretrainedConfig | None = None,
+        revision: str | None = None,
+    ):
         """
         Interface to update values after config initialization.
+
+        Args:
+            model_name: The name of the model
+            hf_config: The Hugging Face config of the model
+            revision: The revision of the model
+        Returns:
         """
+        # TODO: revision is never passed currently in vllm.py,
+        # but is used in subclasses, should we remove this parameter?
         pass
+
+    def is_mxfp4_quant(self, prefix: str, layer: torch.nn.Module) -> bool:
+        """
+        Determine if mxfp4 quantization will be used for this config.
+
+        This allows hidden_size rounding to happen before moe_config creation
+        without needing to instantiate quant_method first.
+
+        Args:
+            prefix: The layer prefix/name in the model
+            layer: The layer module
+
+        Returns:
+            True if this config uses MXFP4 quantization, False otherwise
+        """
+        return False

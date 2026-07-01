@@ -29,11 +29,10 @@ import torch
 from torch import nn
 from transformers import Glm4Config
 
-from vllm.attention.backends.abstract import AttentionType
-from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -41,11 +40,16 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .llama import LlamaMLP as Glm4MLP
 from .llama import LlamaModel
-from .utils import AutoWeightsLoader, PPMissingLayer, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    PPMissingLayer,
+    maybe_prefix,
+)
 
 
 class Glm4Attention(nn.Module):
@@ -78,7 +82,15 @@ class Glm4Attention(nn.Module):
             # Number of KV heads is less than TP size, so we replicate
             # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_kv_heads == 0
-        config.rope_parameters.setdefault("partial_rotary_factor", 0.5)
+
+        rope_params = getattr(config, "rope_parameters", None)
+        if isinstance(rope_params, dict) and "partial_rotary_factor" in rope_params:
+            config.rope_parameters.setdefault(
+                "partial_rotary_factor", rope_params["partial_rotary_factor"]
+            )
+        else:
+            config.rope_parameters.setdefault("partial_rotary_factor", 0.5)
+
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
         self.head_dim = head_dim or hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
@@ -223,15 +235,8 @@ class Glm4Model(LlamaModel):
 
 class Glm4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -270,7 +275,7 @@ class Glm4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -288,8 +293,26 @@ class Glm4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
+        skip_prefixes = ["lm_head."] if self.config.tie_word_embeddings else []
+        # Skip the speculative (MTP) layers, which are loaded by the
+        # draft model instead.
+        num_nextn_layers = getattr(self.config, "num_nextn_predict_layers", 0)
+        skip_prefixes += [
+            f"model.layers.{self.config.num_hidden_layers + i}."
+            for i in range(num_nextn_layers)
+        ]
+        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
         return loader.load_weights(weights)
+
+
+def get_spec_layer_idx_from_weight_name(
+    config: Glm4Config, weight_name: str
+) -> int | None:
+    if hasattr(config, "num_nextn_predict_layers") and (
+        config.num_nextn_predict_layers > 0
+    ):
+        layer_idx = config.num_hidden_layers
+        for i in range(config.num_nextn_predict_layers):
+            if f"layers.{layer_idx + i}." in weight_name:
+                return layer_idx + i
+    return None

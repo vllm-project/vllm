@@ -7,11 +7,11 @@ import torch
 import torch.nn as nn
 from transformers import Lfm2Config
 
-from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -20,6 +20,8 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFunc,
+    MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
@@ -30,15 +32,14 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import HasInnerState, IsHybrid, SupportsLoRA, SupportsPP, SupportsQuant
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    WeightsMapper,
     extract_layer_index,
-    is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -49,7 +50,7 @@ class Lfm2MLP(nn.Module):
     def __init__(
         self,
         dim: int,
-        ff_dim: int,
+        intermediate_size: int,
         multiple_of: int,
         auto_adjust_ff_dim: bool,
         ffn_dim_multiplier: float | None,
@@ -58,21 +59,23 @@ class Lfm2MLP(nn.Module):
     ):
         super().__init__()
         if auto_adjust_ff_dim:
-            ff_dim = int(2 * ff_dim / 3)
+            intermediate_size = int(2 * intermediate_size / 3)
             # custom dim factor multiplier
             if ffn_dim_multiplier is not None:
-                ff_dim = int(ffn_dim_multiplier * ff_dim)
-            ff_dim = multiple_of * ((ff_dim + multiple_of - 1) // multiple_of)
+                intermediate_size = int(ffn_dim_multiplier * intermediate_size)
+            intermediate_size = multiple_of * (
+                (intermediate_size + multiple_of - 1) // multiple_of
+            )
 
-        self.w1 = MergedColumnParallelLinear(
+        self.w13 = MergedColumnParallelLinear(
             input_size=dim,
-            output_sizes=[ff_dim] * 2,
+            output_sizes=[intermediate_size] * 2,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.w1",
+            prefix=f"{prefix}.w13",
         )
         self.w2 = RowParallelLinear(
-            input_size=ff_dim,
+            input_size=intermediate_size,
             output_size=dim,
             bias=False,
             quant_config=quant_config,
@@ -81,7 +84,7 @@ class Lfm2MLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate_up, _ = self.w1(x)
+        gate_up, _ = self.w13(x)
         x = self.act_fn(gate_up)
         x, _ = self.w2(x)
         return x
@@ -209,7 +212,7 @@ class Lfm2AttentionDecoderLayer(nn.Module):
 
         self.feed_forward = Lfm2MLP(
             dim=config.block_dim,
-            ff_dim=config.block_ff_dim,
+            intermediate_size=config.intermediate_size,
             multiple_of=config.block_multiple_of,
             auto_adjust_ff_dim=config.block_auto_adjust_ff_dim,
             ffn_dim_multiplier=config.block_ffn_dim_multiplier,
@@ -248,7 +251,7 @@ class Lfm2ShortConvDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
-        self.conv = ShortConv(
+        self.short_conv = ShortConv(
             config=config,
             dim=config.conv_dim,
             layer_idx=layer_idx,
@@ -259,7 +262,7 @@ class Lfm2ShortConvDecoderLayer(nn.Module):
 
         self.feed_forward = Lfm2MLP(
             dim=config.block_dim,
-            ff_dim=config.block_ff_dim,
+            intermediate_size=config.intermediate_size,
             multiple_of=config.block_multiple_of,
             auto_adjust_ff_dim=config.block_auto_adjust_ff_dim,
             ffn_dim_multiplier=config.block_ffn_dim_multiplier,
@@ -281,7 +284,7 @@ class Lfm2ShortConvDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.operator_norm(hidden_states, residual)
         output = torch.empty_like(hidden_states)
-        self.conv(
+        self.short_conv(
             hidden_states,
             output,
         )
@@ -292,6 +295,20 @@ class Lfm2ShortConvDecoderLayer(nn.Module):
 
 @support_torch_compile
 class Lfm2Model(nn.Module):
+    # HF uses .conv. but vLLM uses .short_conv. to avoid LoRA regex collision
+    # with the inner .conv.conv child (ShortConv has a child self.conv, so
+    # naming the container .conv too makes _match_target_modules match both).
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={".conv.": ".short_conv."},
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+            ".w1": (".w13", 0),
+            ".w3": (".w13", 1),
+        },
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -340,7 +357,7 @@ class Lfm2Model(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -370,35 +387,8 @@ class Lfm2Model(nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            (".qkv_proj", ".q_proj", "q"),
-            (".qkv_proj", ".k_proj", "k"),
-            (".qkv_proj", ".v_proj", "v"),
-            (".w1", ".w1", 0),
-            (".w1", ".w3", 1),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class Lfm2ForCausalLM(
@@ -410,11 +400,15 @@ class Lfm2ForCausalLM(
             "k_proj",
             "v_proj",
         ],
-        "w1": [
+        "w13": [
             "w1",
             "w3",
         ],
+        "in_proj": ["in_proj"],
     }
+
+    # Reuse the backbone mapper so LoRA/quantization see the same name mapping.
+    hf_to_vllm_mapper = Lfm2Model.hf_to_vllm_mapper
 
     # LoRA specific attributes
     embedding_modules = {
@@ -455,14 +449,19 @@ class Lfm2ForCausalLM(
             conv_kernel=hf_config.conv_L_cache,
         )
 
+    @classmethod
+    def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc]:
+        return MambaStateCopyFuncCalculator.short_conv_state_copy_func()
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         cache_config = vllm_config.cache_config
-
-        assert not cache_config.enable_prefix_caching, (
-            "Lfm2 currently does not support prefix caching"
-        )
+        if cache_config.mamba_cache_mode == "all":
+            raise NotImplementedError(
+                "Lfm2 currently does not support 'all' prefix caching, "
+                "please use '--mamba-cache-mode=align' instead"
+            )
 
         super().__init__()
         self.config = config
@@ -492,7 +491,7 @@ class Lfm2ForCausalLM(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

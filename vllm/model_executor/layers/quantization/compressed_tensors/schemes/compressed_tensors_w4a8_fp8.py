@@ -6,13 +6,14 @@ from collections.abc import Callable
 import torch
 from compressed_tensors.quantization import ActivationOrdering
 
+from vllm.distributed.utils import verify_group_size_divides_partition
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
-    CompressedTensorsScheme,
-)
-from vllm.model_executor.layers.quantization.kernels.mixed_precision import (
+from vllm.model_executor.kernels.linear import (
     MPLinearLayerConfig,
     choose_mp_linear_kernel,
+)
+from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
+    CompressedTensorsScheme,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_repeat_scales_on_all_ranks,
@@ -112,7 +113,7 @@ class CompressedTensorsW4A8Fp8(CompressedTensorsScheme):
         scales_and_zp_size = input_size // group_size
 
         if partition_scales:
-            assert input_size_per_partition % group_size == 0
+            verify_group_size_divides_partition(input_size_per_partition, group_size)
             scales_and_zp_size = input_size_per_partition // group_size
 
         weight = PackedvLLMParameter(

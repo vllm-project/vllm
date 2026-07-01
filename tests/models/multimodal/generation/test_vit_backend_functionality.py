@@ -7,17 +7,16 @@ This test validates that each multimodal model can successfully generate outputs
 using different ViT attention backends. Tests are parametrized by model and backend.
 """
 
-from dataclasses import asdict
 from typing import Any
 
 import pytest
 from transformers import AutoProcessor
 
-from vllm import LLM, EngineArgs, SamplingParams
-from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.multimodal.utils import encode_image_base64
+from vllm import LLM, SamplingParams
+from vllm.multimodal.utils import encode_image_url
 from vllm.multimodal.video import sample_frames_from_video
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from ....utils import create_new_process_for_each_test
 from ...utils import dummy_hf_overrides
@@ -90,6 +89,19 @@ MODEL_CONFIGS: dict[str, dict[str, Any]] = {
         },
         "use_processor": True,
         "question": "What is the content of each image?",
+    },
+    "glm_ocr": {
+        "model_name": "zai-org/GLM-OCR",
+        "interface": "llm_generate",
+        "max_model_len": 131072,
+        "max_num_seqs": 2,
+        "sampling_params": {
+            "temperature": 0.0,
+            "max_tokens": 256,
+            "stop_token_ids": None,
+        },
+        "use_processor": True,
+        "question": "Text Recognition:",
     },
     "keye_vl": {
         "model_name": "Kwai-Keye/Keye-VL-8B-Preview",
@@ -178,8 +190,7 @@ def build_dots_ocr_prompt(images, config):
     """Build Dots.OCR specific prompt with OCR instructions."""
     # Use only stop_sign image for Dots.OCR
     image = images[0]  # Already filtered to stop_sign
-
-    image_url = f"data:image/jpeg;base64,{encode_image_base64(image)}"
+    image_url = encode_image_url(image)
 
     placeholders = [{"type": "image_url", "image_url": {"url": image_url}}]
     messages = [
@@ -204,9 +215,7 @@ def build_processor_prompt(images, config):
         config["model_name"], trust_remote_code=True
     )
 
-    image_urls = [
-        f"data:image/jpeg;base64,{encode_image_base64(img)}" for img in images
-    ]
+    image_urls = [encode_image_url(img) for img in images]
     placeholders = [{"type": "image", "image": url} for url in image_urls]
     messages = [
         {
@@ -225,9 +234,7 @@ def build_processor_prompt(images, config):
 
 def build_ovis_prompt(images, config):
     """Build Ovis2.5 specific prompt with custom format."""
-    image_urls = [
-        f"data:image/jpeg;base64,{encode_image_base64(img)}" for img in images
-    ]
+    image_urls = [encode_image_url(img) for img in images]
 
     placeholders = "\n".join(
         f"Image-{i}: <image>\n" for i, _ in enumerate(image_urls, start=1)
@@ -266,7 +273,7 @@ def run_llm_generate_test(config, mm_encoder_attn_backend, image_assets):
     limit_mm_per_prompt = config.get("limit_mm_per_prompt", {"image": len(images)})
 
     # Create engine
-    engine_args = EngineArgs(
+    llm = LLM(
         model=config["model_name"],
         trust_remote_code=True,
         max_model_len=config["max_model_len"],
@@ -275,10 +282,8 @@ def run_llm_generate_test(config, mm_encoder_attn_backend, image_assets):
         mm_encoder_attn_backend=mm_encoder_attn_backend,
         hf_overrides=dummy_hf_overrides,
         load_format="dummy",
+        seed=42,
     )
-
-    engine_dict = asdict(engine_args) | {"seed": 42}
-    llm = LLM(**engine_dict)
 
     # Generate
     sampling_params = SamplingParams(**config["sampling_params"])
@@ -310,7 +315,7 @@ def run_llm_chat_test(config, mm_encoder_attn_backend, image_assets):
     messages = build_dots_ocr_prompt([stop_sign_image], config)
 
     # Create engine
-    engine_args = EngineArgs(
+    llm = LLM(
         model=config["model_name"],
         trust_remote_code=True,
         max_model_len=config["max_model_len"],
@@ -319,10 +324,8 @@ def run_llm_chat_test(config, mm_encoder_attn_backend, image_assets):
         mm_encoder_attn_backend=mm_encoder_attn_backend,
         hf_overrides=dummy_hf_overrides,
         load_format="dummy",
+        seed=42,
     )
-
-    engine_dict = asdict(engine_args) | {"seed": 42}
-    llm = LLM(**engine_dict)
 
     # Generate using chat
     sampling_params = SamplingParams(**config["sampling_params"])

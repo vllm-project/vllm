@@ -9,8 +9,8 @@ from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     _ceil_to_ue8m0,
     calc_diff,
-    fp8_mqa_logits,
-    fp8_paged_mqa_logits,
+    fp8_fp4_mqa_logits,
+    fp8_fp4_paged_mqa_logits,
     get_num_sms,
     get_paged_mqa_logits_metadata,
 )
@@ -95,7 +95,8 @@ def _ref_fp8_mqa_logits(
 @pytest.mark.skipif(
     not current_platform.has_device_capability(90), reason="SM90 and SM100 only"
 )
-def test_deepgemm_fp8_mqa_logits():
+@pytest.mark.parametrize("clean_logits", [True, False])
+def test_deepgemm_fp8_mqa_logits(clean_logits: bool):
     torch.manual_seed(0)
     random.seed(0)
     num_heads, head_dim = 32, 128
@@ -126,7 +127,9 @@ def test_deepgemm_fp8_mqa_logits():
 
                 q_fp8 = q.to(torch.float8_e4m3fn)
                 kv_fp8 = per_custom_dims_cast_to_fp8(kv, (0,), False)
-                logits = fp8_mqa_logits(q_fp8, kv_fp8, weights, ks, ke)
+                logits = fp8_fp4_mqa_logits(
+                    (q_fp8, None), kv_fp8, weights, ks, ke, clean_logits=clean_logits
+                )
 
                 ref_logits = _ref_fp8_mqa_logits(
                     q=q,
@@ -135,18 +138,19 @@ def test_deepgemm_fp8_mqa_logits():
                     cu_seqlen_ks=ks,
                     cu_seqlen_ke=ke,
                 )
-
                 ref_neginf_mask = ref_logits == float("-inf")
-                neginf_mask = logits == float("-inf")
-                assert torch.equal(neginf_mask, ref_neginf_mask)
+
+                if clean_logits:
+                    neginf_mask = logits == float("-inf")
+                    assert torch.equal(neginf_mask, ref_neginf_mask)
 
                 ref_logits = ref_logits.masked_fill(ref_neginf_mask, 0)
-                logits = logits.masked_fill(neginf_mask, 0)
+                logits = logits.masked_fill(ref_neginf_mask, 0)
                 diff = calc_diff(logits, ref_logits)
                 assert diff < 1e-3, f"{diff=}"
 
 
-def _ref_fp8_paged_mqa_logits(
+def _ref_fp8_fp4_paged_mqa_logits(
     q: torch.Tensor,
     kv_cache: torch.Tensor,
     weights: torch.Tensor,
@@ -201,7 +205,10 @@ def _ref_fp8_paged_mqa_logits(
 @pytest.mark.skipif(
     not current_platform.has_device_capability(90), reason="SM90 and SM100 only"
 )
-def test_deepgemm_fp8_paged_mqa_logits():
+def test_deepgemm_fp8_fp4_paged_mqa_logits():
+    # NOTE: clean_logits=True is incompatible with the 2D context_lens
+    # required by csrc/apis/attention.hpp; only the False path is exercised.
+    clean_logits = False
     torch.manual_seed(0)
     random.seed(0)
 
@@ -253,20 +260,29 @@ def test_deepgemm_fp8_paged_mqa_logits():
                 q_fp8 = q.to(torch.float8_e4m3fn)
                 kv_cache_fp8 = kv_cache_cast_to_fp8(kv_cache)
 
+                # deep_gemm paged MQA logits requires 2D context_lens of
+                # shape (B, next_n) (csrc/apis/attention.hpp:332-335);
+                # see indexer.py:607-608. For each batch/next_n token, the
+                # effective context length is context_lens[b] - next_n + j + 1.
+                next_n_arange = torch.arange(next_n, device="cuda", dtype=torch.int32)
+                context_lens_2d = (
+                    context_lens.unsqueeze(-1) - next_n + 1 + next_n_arange
+                ).contiguous()
                 schedule_metadata = get_paged_mqa_logits_metadata(
-                    context_lens, blocksize, get_num_sms()
+                    context_lens_2d, blocksize, get_num_sms()
                 )
-                logits = fp8_paged_mqa_logits(
-                    q_fp8,
+                logits = fp8_fp4_paged_mqa_logits(
+                    (q_fp8, None),
                     kv_cache_fp8,
                     weights,
-                    context_lens,
+                    context_lens_2d,
                     block_tables,
                     schedule_metadata,
                     max_model_len,
+                    clean_logits=clean_logits,
                 )
 
-                ref_logits = _ref_fp8_paged_mqa_logits(
+                ref_logits = _ref_fp8_fp4_paged_mqa_logits(
                     q,
                     kv_cache,
                     weights,

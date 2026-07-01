@@ -6,6 +6,7 @@ from types import MappingProxyType
 from typing import Any
 
 import regex as re
+import torch
 
 
 def deep_compare(dict1: Any, dict2: Any) -> bool:
@@ -16,7 +17,8 @@ def deep_compare(dict1: Any, dict2: Any) -> bool:
             return False
         return all(deep_compare(dict1[k], dict2[k]) for k in dict1)
     elif isinstance(dict1, list):
-        return set(dict1) == set(dict2)
+        # `dict1` may be a list of dict.
+        return all(deep_compare(dict1[i], dict2[i]) for i in range(len(dict1)))
     else:
         return dict1 == dict2
 
@@ -103,3 +105,16 @@ def _is_equal_or_regex_match(
     elif target == value:
         return True
     return False
+
+
+# utility for tensor dims > 2 cases
+def quark_quantize_weight_to_mxfp4(w: torch.Tensor):
+    assert w.dtype == torch.bfloat16, (
+        "Quark dynamic quantization is supported only for fp16 weights and only to MXF4"
+    )
+
+    from aiter.ops.triton.quant import dynamic_mxfp4_quant
+
+    *dims, d = w.shape
+    w, w_scales = dynamic_mxfp4_quant(w.reshape(-1, d))
+    return w.view(*dims, d // 2), w_scales.view(*dims, d // 32)

@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# ruff: noqa: SIM117
 import fnmatch
 import glob
 import itertools
@@ -11,7 +10,6 @@ from typing import Any
 
 import numpy as np
 import torch
-from huggingface_hub import HfApi
 from packaging import version
 from torch import nn
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
@@ -23,7 +21,8 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.lora.utils import is_moe_model
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import (
     LinearBase,
     MergedColumnParallelLinear,
@@ -48,18 +47,14 @@ from vllm.model_executor.utils import (
     set_weight_attrs,
 )
 from vllm.platforms import current_platform
+from vllm.transformers_utils.repo_utils import hf_api
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 logger = init_logger(__name__)
 
 
-def is_moe_model(model: torch.nn.Module) -> bool:
-    """Checks if the model contains FusedMoE layers."""
-    return bool(any(isinstance(module, FusedMoE) for module in model.modules()))
-
-
 class BitsAndBytesModelLoader(BaseModelLoader):
-    """Model loader to load model weights with BitAndBytes quantization."""
+    """Model loader to load model weights with BitsAndBytes quantization."""
 
     possible_config_file_names = ["adapter_config.json"]
 
@@ -102,8 +97,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 if weight_files:
                     return model_name_or_path, weight_files, pattern
         else:
-            hf_api = HfApi()
-            repo_files = hf_api.list_repo_files(repo_id=model_name_or_path)
+            repo_files = hf_api().list_repo_files(repo_id=model_name_or_path)
             for pattern in allowed_patterns:
                 matching_files = fnmatch.filter(repo_files, pattern)
                 if matching_files:
@@ -146,8 +140,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 download_safetensors_index_file_from_hf(
                     model_name_or_path,
                     index_file,
-                    self.load_config.download_dir,
-                    revision,
+                    cache_dir=self.load_config.download_dir,
+                    revision=revision,
                 )
             hf_weights_files = filter_duplicate_safetensors_files(
                 hf_weights_files, hf_folder, index_file
@@ -470,13 +464,13 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 self.target_modules.append(name)
                 if module.disable_tp:
                     self.tp_disabled_modules.append(name)
-            elif isinstance(module, FusedMoE) and hasattr(
+            elif isinstance(module, RoutedExperts) and hasattr(
                 module.quant_method, "quant_config"
             ):
                 # TODO: support FusedMoE with prequant and 8bit.
                 if self.pre_quant and self.load_8bit:
                     raise ValueError(
-                        "Prequant BitsAndBytes 8bit models with FusedMoE "
+                        "Prequant BitsAndBytes 8bit models with RoutedExperts "
                         "is not supported yet."
                     )
                 # Get the corresponding weight name using module name and
@@ -514,7 +508,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             # dimension (dim=-1)
             elif isinstance(module, (RowParallelLinear,)):
                 self.column_sharded_weights_modules.append(name)
-            elif isinstance(module, FusedMoE):
+            elif isinstance(module, RoutedExperts):
                 expert_mapping = self.expert_params_mapping
                 for exp in expert_mapping:
                     if exp[-1] == "w2":
@@ -573,16 +567,11 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         if is_moe_model(model):
             self.expert_params_mapping = get_moe_expert_mapping(model)
-            if not self.expert_params_mapping:
-                raise AttributeError(
-                    f"MoE Model {type(model).__name__} does not support "
-                    "BitsAndBytes quantization yet. Ensure this model has "
-                    "'get_expert_mapping' method."
-                )
         # For some models like Molmo, we need to use hf_to_vllm_mapper
         # to ensure correct loading of weights.
         if hf_to_vllm_mapper := getattr(model, "hf_to_vllm_mapper", None):
-            self.weight_mapper = lambda name: hf_to_vllm_mapper._map_name(name)
+            unstacked_mapper = hf_to_vllm_mapper.get_unstacked_mapper()
+            self.weight_mapper = lambda name, m=unstacked_mapper: m._map_name(name)
 
         self._get_bnb_target_modules(model)
         self._classify_module_sharding(model)
@@ -635,7 +624,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         expert_mapping = self.expert_params_mapping
         expert_qs_dict = {}
         for name, module in model.named_modules():
-            if not isinstance(module, FusedMoE):
+            if not isinstance(module, RoutedExperts):
                 continue
             w1_states_lst = []
             w2_states_lst = []
@@ -750,6 +739,29 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             stacked_quant_state_dict[quant_param_name][shard_index] = quant_state_dict[
                 non_stacked_param_name
             ]
+
+        # repeat k_proj for v_proj for k_eq_v models (e.g. Gemma4)
+        config = getattr(model, "config", None)
+        if config is not None:
+            text_config = config.get_text_config()
+            if getattr(text_config, "attention_k_eq_v", False):
+                shard_packed = {
+                    name
+                    for name, subs in self.modules_mapping.packed_mapping.items()
+                    if len(subs) == 3
+                }
+                for param_name, shards in stacked_quant_state_dict.items():
+                    is_target = (
+                        isinstance(shards, dict)
+                        and len(shards) == 2
+                        and any(
+                            param_name.endswith(f"{p}.weight") for p in shard_packed
+                        )
+                    )
+                    if is_target:
+                        assert 1 in shards and 2 not in shards
+                        shards[2] = shards[1]
+
         return stacked_quant_state_dict
 
     def _bind_quant_states_to_params(
@@ -816,7 +828,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             **stacked_quant_state_dict,
         }
         self._bind_quant_states_to_params(model, stacked_quant_state_dict)
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
 
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config.model, model_config.revision)

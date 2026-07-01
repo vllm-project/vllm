@@ -29,11 +29,7 @@ class RunaiDummyExecutor(UniProcExecutor):
             is_driver_worker=is_driver_worker,
         )
 
-        wrapper_kwargs = {
-            "vllm_config": self.vllm_config,
-        }
-
-        self.driver_worker = WorkerWrapperBase(**wrapper_kwargs)
+        self.driver_worker = WorkerWrapperBase()
 
         self.collective_rpc("init_worker", args=([worker_rpc_kwargs],))
         self.collective_rpc("init_device")

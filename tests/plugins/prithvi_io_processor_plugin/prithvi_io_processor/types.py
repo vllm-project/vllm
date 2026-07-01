@@ -38,9 +38,6 @@ class ImagePrompt(BaseModel):
     """
 
 
-MultiModalPromptType = ImagePrompt
-
-
 class ImageRequestOutput(BaseModel):
     """
     The output data of an image request to vLLM.
@@ -54,4 +51,3 @@ class ImageRequestOutput(BaseModel):
     type: Literal["path", "b64_json"]
     format: str
     data: str
-    request_id: str | None = None

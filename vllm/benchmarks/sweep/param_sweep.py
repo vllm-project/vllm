@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 import os
-from typing import Any
 
 
 class ParameterSweep(list["ParameterSweepItem"]):
@@ -62,8 +61,8 @@ class ParameterSweepItem(dict[str, object]):
 
         return cls(record)
 
-    def __or__(self, other: dict[str, Any]):
-        return type(self)(super().__or__(other))
+    def __or__(self, other: dict[str, object], /) -> "ParameterSweepItem":  # type: ignore[override]
+        return ParameterSweepItem(super().__or__(other))
 
     @property
     def name(self) -> str:
@@ -74,7 +73,8 @@ class ParameterSweepItem(dict[str, object]):
         representation of all parameters.
         """
         if "_benchmark_name" in self:
-            return self["_benchmark_name"]
+            return str(self["_benchmark_name"])
+
         return self.as_text(sep="-")
 
     # In JSON, we prefer "_"

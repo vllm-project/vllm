@@ -10,8 +10,11 @@ import vllm.lora.ops.triton_ops as triton_ops
 from vllm.lora.ops.triton_ops import LoRAKernelMeta
 from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 from .utils import PunicaTensors, assert_close, generate_data_for_nslices
+
+DEVICE_TYPE = current_platform.device_type
 
 
 @pytest.fixture(autouse=True)
@@ -146,7 +149,9 @@ def check_lora_shrink_kernel(
 
     # Setup metadata information for the LoRA kernel.
     lora_meta = LoRAKernelMeta.make(
-        max_loras=num_loras, max_num_tokens=token_nums, device="cuda"
+        max_loras=num_loras,
+        max_num_tokens=token_nums,
+        device=DEVICE_TYPE,
     )
     lora_meta.prepare_tensors(data.token_lora_mapping)
 
@@ -161,7 +166,7 @@ def check_lora_shrink_kernel(
             data.inputs_tensor,
             data.lora_weights,
             out_tensor,
-            *lora_meta.meta_args(token_nums=token_nums),
+            *lora_meta.meta_args(token_nums=token_nums, specialize_active_lora=False),
             scaling,
         )
 
@@ -219,7 +224,9 @@ def check_lora_expand_kernel(
 
     # Setup metadata information for the LoRA kernel.
     lora_meta = LoRAKernelMeta.make(
-        max_loras=num_loras, max_num_tokens=token_nums, device="cuda"
+        max_loras=num_loras,
+        max_num_tokens=token_nums,
+        device=DEVICE_TYPE,
     )
     lora_meta.prepare_tensors(data.token_lora_mapping)
 
@@ -234,7 +241,7 @@ def check_lora_expand_kernel(
             data.inputs_tensor,
             data.lora_weights,
             out_tensor,
-            *lora_meta.meta_args(token_nums=token_nums),
+            *lora_meta.meta_args(token_nums=token_nums, specialize_active_lora=False),
             offset_start=0,
             add_inputs=add_inputs,
         )
@@ -367,7 +374,7 @@ test_params = {
 }
 
 DTYPES = [torch.float16, torch.bfloat16]
-DEVICES = [f"cuda:{0}"]
+DEVICES = [f"{DEVICE_TYPE}:{0}"]
 SEED = [0]
 
 
@@ -395,7 +402,8 @@ def test_kernels(
     Tests LoRA kernels.
     """
     torch.set_default_device(device)
-    current_platform.seed_everything(seed)
+    torch.accelerator.set_device_index(device)
+    set_random_seed(seed)
 
     if op_type == "shrink":
         check_lora_shrink_kernel(
@@ -447,7 +455,8 @@ def test_kernels_hidden_size(
     Tests SGMV and LoRA kernels.
     """
     torch.set_default_device(device)
-    current_platform.seed_everything(seed)
+    torch.accelerator.set_device_index(device)
+    set_random_seed(seed)
 
     if op_type == "shrink":
         check_lora_shrink_kernel(
@@ -473,3 +482,127 @@ def test_kernels_hidden_size(
             seq_length=128,
             add_inputs=True,
         )
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_add_lora_fused_moe_early_exit(device):
+    """
+    Ensures add_lora_fused_moe does not invoke the LoRA kernel or
+    modify the output tensor when no_lora_flag_cpu is True
+    """
+    from types import SimpleNamespace
+
+    from vllm.lora.punica_wrapper.punica_gpu import PunicaWrapperGPU
+
+    torch.set_default_device(device)
+    torch.accelerator.set_device_index(device)
+
+    max_loras, num_tokens = 4, 16
+    num_experts, top_k, max_lora_rank = 8, 2, 16
+    K, N = 256, 128
+
+    # build PunicaWrapperGPU with minimal lora_config mock
+    lora_config = SimpleNamespace(
+        max_loras=max_loras,
+        specialize_active_lora=False,
+    )
+    wrapper = PunicaWrapperGPU(
+        max_num_batched_tokens=num_tokens,
+        max_batches=num_tokens,
+        device=device,
+        lora_config=lora_config,
+    )
+
+    # simulate a prior LoRA batch so the internal mapping is
+    # populated with stale LoRA IDs
+    lora_mapping = torch.zeros(
+        num_tokens,
+        dtype=torch.int32,
+        device=device,
+    )
+    lora_mapping[:8] = 1
+    lora_mapping[8:] = 2
+    wrapper.token_mapping_meta.prepare_tensors(lora_mapping)
+
+    # simulate a base-model batch (all -1)
+    base_mapping = torch.full(
+        (num_tokens,),
+        -1,
+        dtype=torch.int32,
+        device=device,
+    )
+    wrapper.token_mapping_meta.prepare_tensors(base_mapping)
+
+    assert wrapper.token_mapping_meta.no_lora_flag_cpu[0].item() is True
+
+    # dummy tensors for add_lora_fused_moe
+    y = torch.rand(num_tokens, top_k, N, dtype=torch.bfloat16, device=device)
+    y_snapshot = y.clone()
+    x = torch.rand(num_tokens, K, dtype=torch.bfloat16, device=device)
+
+    lora_a_stacked = (
+        torch.rand(
+            max_loras,
+            num_experts,
+            max_lora_rank,
+            K,
+            dtype=torch.bfloat16,
+            device=device,
+        ),
+    )
+    lora_b_stacked = (
+        torch.rand(
+            max_loras,
+            num_experts,
+            N,
+            max_lora_rank,
+            dtype=torch.bfloat16,
+            device=device,
+        ),
+    )
+    topk_weights = torch.ones(
+        num_tokens,
+        top_k,
+        dtype=torch.float32,
+        device=device,
+    )
+    adapter_enabled = torch.ones(
+        max_loras + 1,
+        dtype=torch.int32,
+        device=device,
+    )
+    shrink_config = expand_config = {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 32,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 1,
+        "NUM_WARPS": 4,
+        "NUM_STAGES": 3,
+        "SPLIT_K": 1,
+    }
+
+    # call add_lora_fused_moe - the early exit should prevent any
+    # modification to the output
+    wrapper.add_lora_fused_moe(
+        y=y,
+        x=x,
+        lora_a_stacked=lora_a_stacked,
+        lora_b_stacked=lora_b_stacked,
+        topk_weights=topk_weights,
+        sorted_token_ids=None,
+        expert_ids=torch.zeros(
+            num_tokens * top_k,
+            dtype=torch.int32,
+            device=device,
+        ),
+        num_tokens_post_padded=None,
+        max_lora_rank=max_lora_rank,
+        top_k_num=top_k,
+        shrink_config=shrink_config,
+        expand_config=expand_config,
+        adapter_enabled=adapter_enabled,
+    )
+
+    assert torch.equal(y, y_snapshot), (
+        "add_lora_fused_moe modified output tensor despite no_lora_flag_cpu=True"
+    )

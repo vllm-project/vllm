@@ -9,16 +9,16 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from typing_extensions import assert_never
 
-from vllm.entrypoints.openai.api_server import validate_json_request
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
     DetokenizeResponse,
-    ErrorResponse,
     TokenizeRequest,
     TokenizeResponse,
 )
-from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
-from vllm.entrypoints.utils import (
+from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
+from vllm.entrypoints.serve.utils.api_utils import (
+    validate_json_request,
     with_cancellation,
 )
 from vllm.logger import init_logger
@@ -26,8 +26,8 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-def tokenization(request: Request) -> OpenAIServingTokenization:
-    return request.app.state.openai_serving_tokenization
+def tokenization(request: Request) -> ServingTokenization:
+    return request.app.state.serving_tokenization
 
 
 router = APIRouter()
@@ -47,16 +47,7 @@ router = APIRouter()
 async def tokenize(request: TokenizeRequest, raw_request: Request):
     handler = tokenization(raw_request)
 
-    try:
-        generator = await handler.create_tokenize(request, raw_request)
-    except NotImplementedError as e:
-        raise HTTPException(
-            status_code=HTTPStatus.NOT_IMPLEMENTED.value, detail=str(e)
-        ) from e
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
+    generator = await handler.create_tokenize(request, raw_request)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(

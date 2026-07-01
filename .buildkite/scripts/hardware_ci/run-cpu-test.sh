@@ -2,119 +2,58 @@
 
 # This script build the CPU docker image and run the offline inference inside the container.
 # It serves a sanity check for compilation and basic model usage.
-set -ex
+set -euox pipefail
 
 # allow to bind to different cores
 CORE_RANGE=${CORE_RANGE:-48-95}
-# used for TP/PP E2E test
-OMP_CORE_RANGE=${OMP_CORE_RANGE:-48-95}
 NUMA_NODE=${NUMA_NODE:-1}
+AGENT_SLOT=${AGENT_SLOT:-}
+IMAGE_NAME="cpu-test-${NUMA_NODE}${AGENT_SLOT:+-${AGENT_SLOT}}"
+TIMEOUT_VAL=$1
+TEST_COMMAND=$2
 
-export CMAKE_BUILD_PARALLEL_LEVEL=32
+# Disk hygiene knobs. Reclaim space only once the Docker root filesystem crosses
+# DISK_USAGE_THRESHOLD percent, and cap the shared BuildKit cache at
+# BUILDKIT_CACHE_MAX so subsequent builds keep reusing the hottest layers.
+DISK_USAGE_THRESHOLD=${DISK_USAGE_THRESHOLD:-70}
+BUILDKIT_CACHE_MAX=${BUILDKIT_CACHE_MAX:-80GB}
 
-# Setup cleanup
-remove_docker_container() {
-    set -e;
-    docker rm -f cpu-test-"$NUMA_NODE" cpu-test-"$NUMA_NODE"-avx2 || true;
+# Reclaim disk only when the host is under pressure. We trim (not purge) the
+# shared BuildKit cache so cross-job/cross-agent reuse stays intact, and only
+# touch dangling images; other agents' uniquely tagged images are left alone.
+prune_if_disk_pressure() {
+    local docker_root disk_usage
+    docker_root=$(docker info -f '{{.DockerRootDir}}' 2>/dev/null || true)
+    if [ -z "$docker_root" ]; then
+        return 0
+    fi
+    disk_usage=$(df "$docker_root" 2>/dev/null | tail -1 | awk '{print $5}' | tr -d '%')
+    if [ "${disk_usage:-0}" -gt "$DISK_USAGE_THRESHOLD" ]; then
+        echo "--- :broom: Disk usage ${disk_usage}% exceeds ${DISK_USAGE_THRESHOLD}%, reclaiming space"
+        docker image prune -f || true
+        docker builder prune -f --keep-storage="$BUILDKIT_CACHE_MAX" || true
+    else
+        echo "Disk usage ${disk_usage:-unknown}% within ${DISK_USAGE_THRESHOLD}% threshold; skipping prune"
+    fi
 }
-trap remove_docker_container EXIT
-remove_docker_container
 
-# Try building the docker image
-numactl -C "$CORE_RANGE" -N "$NUMA_NODE" docker build --progress plain --tag cpu-test-"$NUMA_NODE" --target vllm-test -f docker/Dockerfile.cpu .
-numactl -C "$CORE_RANGE" -N "$NUMA_NODE" docker build --progress plain --build-arg VLLM_CPU_DISABLE_AVX512="true" --tag cpu-test-"$NUMA_NODE"-avx2 --target vllm-test -f docker/Dockerfile.cpu .
+# Always drop this agent's image once the job ends (the default builder never
+# uses it as a cache source, so removing it costs no rebuild speed), then
+# reclaim space if needed. Guard every docker call with `|| true` so the trap
+# never overrides the test's exit code.
+cleanup() {
+    docker image rm -f "$IMAGE_NAME" || true
+    prune_if_disk_pressure
+}
+trap cleanup EXIT
+
+# Free space up front so a nearly-full host doesn't fail the build.
+prune_if_disk_pressure
+
+# building the docker image
+echo "--- :docker: Building Docker image"
+docker build --progress plain --tag "$IMAGE_NAME" --target vllm-test -f docker/Dockerfile.cpu .
 
 # Run the image, setting --shm-size=4g for tensor parallel.
-docker run -itd --cpuset-cpus="$CORE_RANGE" --cpuset-mems="$NUMA_NODE" --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface --privileged=true -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=16 --env VLLM_CPU_CI_ENV=1 -e E2E_OMP_THREADS="$OMP_CORE_RANGE" --shm-size=4g --name cpu-test-"$NUMA_NODE" cpu-test-"$NUMA_NODE"
-docker run -itd --cpuset-cpus="$CORE_RANGE" --cpuset-mems="$NUMA_NODE" --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface --privileged=true -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=16 --env VLLM_CPU_CI_ENV=1 -e E2E_OMP_THREADS="$OMP_CORE_RANGE" --shm-size=4g --name cpu-test-"$NUMA_NODE"-avx2 cpu-test-"$NUMA_NODE"-avx2
-
-function cpu_tests() {
-  set -e
-  export NUMA_NODE=$2
-
-  # list packages
-  docker exec cpu-test-"$NUMA_NODE"-avx2 bash -c "
-    set -e
-    pip list"
-
-  docker exec cpu-test-"$NUMA_NODE" bash -c "
-    set -e
-    pip list"
-
-  # offline inference
-  docker exec cpu-test-"$NUMA_NODE"-avx2 bash -c "
-    set -e
-    python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m"
-
-  # Run kernel tests
-  docker exec cpu-test-"$NUMA_NODE" bash -c "
-    set -e
-    pytest -x -v -s tests/kernels/attention/test_cpu_attn.py
-    pytest -x -v -s tests/kernels/moe/test_cpu_fused_moe.py
-    pytest -x -v -s tests/kernels/test_onednn.py"
-
-  # Run basic model test
-  docker exec cpu-test-"$NUMA_NODE" bash -c "
-    set -e
-    # Note: disable until supports V1
-    # pytest -x -v -s tests/kernels/attention/test_cache.py -m cpu_model
-    # pytest -x -v -s tests/kernels/attention/test_mla_decode_cpu.py -m cpu_model
-
-    pytest -x -v -s tests/models/language/generation -m cpu_model
-    VLLM_CPU_SGL_KERNEL=1 pytest -x -v -s tests/models/language/generation -m cpu_model
-
-    pytest -x -v -s tests/models/language/pooling -m cpu_model
-    pytest -x -v -s tests/models/multimodal/generation \
-                --ignore=tests/models/multimodal/generation/test_pixtral.py \
-                -m cpu_model"
-
-  # Run compressed-tensor test
-  docker exec cpu-test-"$NUMA_NODE" bash -c "
-    set -e
-    pytest -x -s -v \
-    tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_logprobs"
-
-  # Run AWQ/GPTQ test
-  docker exec cpu-test-"$NUMA_NODE" bash -c "
-    set -e
-    pytest -x -s -v \
-    tests/quantization/test_cpu_wna16.py"
-
-  # Run multi-lora tests
-  docker exec cpu-test-"$NUMA_NODE" bash -c "
-    set -e
-    pytest -x -s -v \
-    tests/lora/test_qwen2vl.py"
-
-  # online serving: tp+pp
-  docker exec cpu-test-"$NUMA_NODE" bash -c '
-    set -e
-    VLLM_CPU_OMP_THREADS_BIND=$E2E_OMP_THREADS VLLM_CPU_SGL_KERNEL=1 vllm serve meta-llama/Llama-3.2-3B-Instruct -tp=2 -pp=2 &
-    server_pid=$!
-    timeout 600 bash -c "until curl localhost:8000/v1/models; do sleep 1; done" || exit 1
-    vllm bench serve \
-      --backend vllm \
-      --dataset-name random \
-      --model meta-llama/Llama-3.2-3B-Instruct \
-      --num-prompts 20 \
-      --endpoint /v1/completions
-    kill -s SIGTERM $server_pid &'
-
-  # online serving: tp+dp
-  docker exec cpu-test-"$NUMA_NODE" bash -c '
-    set -e
-    VLLM_CPU_OMP_THREADS_BIND=$E2E_OMP_THREADS VLLM_CPU_SGL_KERNEL=1 vllm serve meta-llama/Llama-3.2-3B-Instruct -tp=2 -dp=2 &
-    server_pid=$!
-    timeout 600 bash -c "until curl localhost:8000/v1/models; do sleep 1; done" || exit 1
-    vllm bench serve \
-      --backend vllm \
-      --dataset-name random \
-      --model meta-llama/Llama-3.2-3B-Instruct \
-      --num-prompts 20 \
-      --endpoint /v1/completions
-    kill -s SIGTERM $server_pid &'
-}
-
-# All of CPU tests are expected to be finished less than 40 mins.
-export -f cpu_tests
-timeout 2.5h bash -c "cpu_tests $CORE_RANGE $NUMA_NODE"
+docker run --rm --cpuset-cpus="$CORE_RANGE" --cpuset-mems="$NUMA_NODE" -v ~/.cache/huggingface:/root/.cache/huggingface --privileged=true -e HF_TOKEN -e VLLM_CPU_KVCACHE_SPACE=16 -e VLLM_CPU_CI_ENV=1 -e VLLM_CPU_SIM_MULTI_NUMA=1 -e VLLM_CPU_ATTN_SPLIT_KV=0 --shm-size=4g "$IMAGE_NAME" \
+        timeout "$TIMEOUT_VAL" bash -c "set -euox pipefail; echo \"--- Print packages\"; pip list; echo \"--- Running tests\"; ${TEST_COMMAND}"

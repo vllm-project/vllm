@@ -107,6 +107,33 @@ vLLM supports the `tool_choice='none'` option in the chat completion API. When t
 !!! note
     When tools are specified in the request, vLLM includes tool definitions in the prompt by default, regardless of the `tool_choice` setting. To exclude tool definitions when `tool_choice='none'`, use the `--exclude-tools-when-tool-choice-none` option.
 
+## Constrained Decoding Behavior
+
+Whether vLLM enforces the tool parameter schema during generation depends on the `tool_choice` mode and the per-tool `strict` field:
+
+| `tool_choice` value | Schema-constrained decoding | Behavior |
+| --- | --- | --- |
+| Named function | Yes (via structured outputs backend) | Arguments are guaranteed to be valid JSON conforming to the function's parameter schema. |
+| `"required"` | Yes (via structured outputs backend) | Same as named function. The model must produce at least one tool call. |
+| `"auto"` | Only when `strict: true` is set on at least one tool | Structural-tag parsers constrain tool-call arguments when a tool opts in with `strict: true`. Without it, the model generates freely and tool calls are extracted from raw text. |
+| `"none"` | N/A | No tool calls are produced. |
+
+### Strict Mode
+
+For `tool_choice="required"` or named function calling, structural-tag constraints are always applied regardless of the `strict` field. For `tool_choice="auto"`, setting `strict: true` on at least one tool opts in to structural-tag constraints; without it, the model generates freely and tool calls are extracted from raw text. The `strict` field is supported across all three API surfaces: Chat Completion, Responses, and Anthropic Messages.
+
+For best compatibility with strict schema enforcement, define tool parameter schemas in the OpenAI strict-schema style:
+
+* Set `additionalProperties` to `false` for each object in `parameters`.
+* Mark all fields in `properties` as required.
+* Represent optional fields by allowing `null`, for example `{"type": ["string", "null"]}`.
+
+vLLM also provides a global toggle via the `VLLM_ENFORCE_STRICT_TOOL_CALLING` environment variable (defaults to `true`). When set to `false`, vLLM does not attach structural tags for tool calling regardless of the per-tool `strict` field. This environment variable only affects structural-tag based tool calling; it does not change schema-derived structured outputs used by named function calling or `tool_choice="required"`.
+
+```bash
+VLLM_ENFORCE_STRICT_TOOL_CALLING=false vllm serve ...
+```
+
 ## Automatic Function Calling
 
 To enable this feature, you should set the following flags:
@@ -123,6 +150,9 @@ template configured in the `tokenizer_config.json`. In this case, it will be use
 from HuggingFace; and you can find an example of this in a `tokenizer_config.json` [here](https://huggingface.co/NousResearch/Hermes-2-Pro-Llama-3-8B/blob/main/tokenizer_config.json).
 
 If your favorite tool-calling model is not supported, please feel free to contribute a parser & tool use chat template!
+
+!!! note
+    With `tool_choice="auto"`, schema-level constraint requires both `VLLM_ENFORCE_STRICT_TOOL_CALLING=true` (the default) and at least one tool with `strict: true`. When these conditions are met and the selected parser supports structural tags, vLLM constrains tool-call arguments. Otherwise, vLLM extracts tool calls from raw text, so arguments may occasionally be malformed or violate the function's parameter schema.
 
 ### Hermes Models (`hermes`)
 
@@ -219,7 +249,7 @@ Supported models:
 
 * `ibm-granite/granite-4.0-h-small` and other Granite 4.0 models
 
-    Recommended flags: `--tool-call-parser hermes`
+    Recommended flags: `--tool-call-parser granite4`
 
 * `ibm-granite/granite-3.0-8b-instruct`
 
@@ -291,15 +321,6 @@ For Qwen2.5, the chat template in tokenizer_config.json has already included sup
 
 Flags: `--tool-call-parser hermes`
 
-### MiniMax Models (`minimax_m1`)
-
-Supported models:
-
-* `MiniMaxAi/MiniMax-M1-40k` (use with [examples/tool_chat_template_minimax_m1.jinja](../../examples/tool_chat_template_minimax_m1.jinja))
-* `MiniMaxAi/MiniMax-M1-80k` (use with [examples/tool_chat_template_minimax_m1.jinja](../../examples/tool_chat_template_minimax_m1.jinja))
-
-Flags: `--tool-call-parser minimax --chat-template examples/tool_chat_template_minimax_m1.jinja`
-
 ### DeepSeek-V3 Models (`deepseek_v3`)
 
 Supported models:
@@ -316,6 +337,15 @@ Supported models:
 * `deepseek-ai/DeepSeek-V3.1` (use with [examples/tool_chat_template_deepseekv31.jinja](../../examples/tool_chat_template_deepseekv31.jinja))
 
 Flags: `--tool-call-parser deepseek_v31 --chat-template {see_above}`
+
+### OpenAI OSS Models (`openai`)
+
+Supported models:
+
+* `openai/gpt-oss-20b`
+* `openai/gpt-oss-120b`
+
+Flags: `--tool-call-parser openai`
 
 ### Kimi-K2 Models (`kimi_k2`)
 
@@ -336,6 +366,16 @@ Flags:
 * For non-reasoning: `--tool-call-parser hunyuan_a13b`
 * For reasoning: `--tool-call-parser hunyuan_a13b --reasoning-parser hunyuan_a13b`
 
+### Cohere Command A Reasoning (`cohere_command3`)
+
+Supported models:
+
+* [`CohereLabs/command-a-reasoning-08-2025`](https://huggingface.co/CohereLabs/command-a-reasoning-08-2025)
+
+Flags: `--tool-call-parser cohere_command3 --reasoning-parser cohere_command3`
+
+Note: the Cohere tool parser requires the `cohere_melody` package, which is not installed by default. Before using this parser please install the [cohere_melody](https://pypi.org/project/cohere-melody/) package.
+
 ### LongCat-Flash-Chat Models (`longcat`)
 
 Supported models:
@@ -352,15 +392,47 @@ Supported models:
 * `zai-org/GLM-4.5`
 * `zai-org/GLM-4.5-Air`
 * `zai-org/GLM-4.6`
-* `zai-org/GLM-4.6-Air`
 
 Flags: `--tool-call-parser glm45`
+
+### GLM-4.7 Models (`glm47`)
+
+Supported models:
+
+* `zai-org/GLM-4.7`
+* `zai-org/GLM-4.7-Flash`
+
+Flags: `--tool-call-parser glm47`
+
+### FunctionGemma Models (`functiongemma`)
+
+Google's FunctionGemma is a lightweight (270M parameter) model specifically designed for function calling.
+It's built on Gemma 3 and optimized for edge deployment on devices like laptops and phones.
+
+Supported models:
+
+* `google/functiongemma-270m-it`
+
+FunctionGemma uses a unique output format with `<start_function_call>` and `<end_function_call>` tags:
+
+```text
+<start_function_call>call:get_weather{location:<escape>London<escape>}<end_function_call>
+```
+
+The model is designed to be fine-tuned for specific function-calling tasks for best results.
+
+Flags: `--tool-call-parser functiongemma --chat-template examples/tool_chat_template_functiongemma.jinja`
+
+!!! note
+    FunctionGemma is intended to be fine-tuned for your specific function-calling task.
+    The base model provides general function calling capabilities, but best results
+    are achieved with task-specific fine-tuning. See Google's [FunctionGemma documentation](https://ai.google.dev/gemma/docs/functiongemma) for fine-tuning guides.
 
 ### Qwen3-Coder Models (`qwen3_xml`)
 
 Supported models:
 
-* `Qwen/Qwen3-480B-A35B-Instruct`
+* `Qwen/Qwen3-Coder-480B-A35B-Instruct`
 * `Qwen/Qwen3-Coder-30B-A3B-Instruct`
 
 Flags: `--tool-call-parser qwen3_xml`
@@ -388,6 +460,17 @@ Supported models:
 * `ai-sage/GigaChat3-10B-A1.8B-bf16`
 
 Flags: `--tool-call-parser gigachat3`
+
+### Apertus Models (`apertus`)
+
+Use the chat template from the examples folder; it fixes several OpenAI compatibility issues: `--chat-template /vllm-workspace/examples/tool_chat_template_apertus.jinja`
+
+Supported models:
+
+* `swiss-ai/Apertus-8B-Instruct-2509`
+* `swiss-ai/Apertus-70B-Instruct-2509`
+
+Flags: `--tool-call-parser apertus`
 
 ### Models with Pythonic Tool Calls (`pythonic`)
 
@@ -418,6 +501,13 @@ Flags: `--tool-call-parser pythonic --chat-template {see_above}`
 !!! warning
     Llama's smaller models frequently fail to emit tool calls in the correct format. Results may vary depending on the model.
 
+## Benchmarking Tool-Calling Performance
+
+To measure serving latency and throughput on realistic tool-calling traffic,
+use the BFCL (Berkeley Function Calling Leaderboard) dataset with
+`vllm bench serve`. See the [BFCL benchmark example](../benchmarking/cli.md#bfcl-tool-calling-benchmark)
+for the full server + client commands.
+
 ## How to Write a Tool Parser Plugin
 
 A tool parser plugin is a Python file containing one or more ToolParser implementations. You can write a ToolParser similar to the `Hermes2ProToolParser` in [vllm/tool_parsers/hermes_tool_parser.py](../../vllm/tool_parsers/hermes_tool_parser.py).
@@ -440,7 +530,7 @@ Here is a summary of a plugin file:
 
         # adjust request. e.g.: set skip special tokens
         # to False for tool call output.
-        def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        def adjust_request(self, request: ChatCompletionRequest | ResponsesRequest) -> ChatCompletionRequest | ResponsesRequest:
             return request
 
         # implement the tool call parse for stream call

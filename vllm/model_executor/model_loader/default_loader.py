@@ -16,6 +16,9 @@ from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+from vllm.model_executor.model_loader.ep_weight_filter import (
+    compute_local_expert_ids,
+)
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf,
     download_weights_from_hf,
@@ -23,6 +26,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     filter_duplicate_safetensors_files,
     filter_files_not_needed_for_inference,
     get_quant_config,
+    instanttensor_weights_iterator,
     maybe_download_from_modelscope,
     multi_thread_pt_weights_iterator,
     multi_thread_safetensors_weights_iterator,
@@ -30,7 +34,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     pt_weights_iterator,
     safetensors_weights_iterator,
 )
-from vllm.platforms import current_platform
+from vllm.tracing import instrument
 from vllm.transformers_utils.repo_utils import list_filtered_repo_files
 
 logger = init_logger(__name__)
@@ -52,6 +56,9 @@ class DefaultModelLoader(BaseModelLoader):
         revision: str | None
         """The optional model revision."""
 
+        subfolder: str | None = None
+        """The subfolder inside the model repo."""
+
         prefix: str = ""
         """A prefix to prepend to all weights."""
 
@@ -66,9 +73,19 @@ class DefaultModelLoader(BaseModelLoader):
 
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
+        self.local_expert_ids: set[int] | None = None
 
         extra_config = load_config.model_loader_extra_config
-        allowed_keys = {"enable_multithread_load", "num_threads"}
+        if not isinstance(extra_config, dict):
+            raise ValueError(
+                f"model_loader_extra_config must be a dict for load format "
+                f"{load_config.load_format}, got {type(extra_config).__name__}"
+            )
+        allowed_keys = {
+            "enable_multithread_load",
+            "num_threads",
+            "enable_weights_track",
+        }
         unexpected_keys = set(extra_config.keys()) - allowed_keys
 
         if unexpected_keys:
@@ -78,9 +95,40 @@ class DefaultModelLoader(BaseModelLoader):
                 f"{unexpected_keys}"
             )
 
+        enable_multithread_load = extra_config.get("enable_multithread_load", False)
+        if not isinstance(enable_multithread_load, bool):
+            raise ValueError(
+                f"enable_multithread_load must be a bool, got "
+                f"{type(enable_multithread_load).__name__}"
+            )
+        num_threads = extra_config.get("num_threads")
+        if num_threads is not None and not (
+            isinstance(num_threads, int) and num_threads > 0
+        ):
+            raise ValueError(
+                f"num_threads must be a positive integer, got {num_threads!r}"
+            )
+
+        self.enable_weights_track: bool | None = extra_config.get(
+            "enable_weights_track", None
+        )
+
+        # The multi-thread loader ignores safetensors_load_strategy, so reject
+        # the combination instead of silently dropping the requested strategy.
+        if extra_config.get("enable_multithread_load") and (
+            load_config.safetensors_load_strategy not in (None, "lazy")
+        ):
+            raise ValueError(
+                "enable_multithread_load does not support "
+                "safetensors_load_strategy="
+                f"{load_config.safetensors_load_strategy!r}; the multi-thread "
+                "loader only implements the default lazy strategy."
+            )
+
     def _prepare_weights(
         self,
         model_name_or_path: str,
+        subfolder: str | None,
         revision: str | None,
         fall_back_to_pt: bool,
         allow_patterns_overrides: list[str] | None,
@@ -117,7 +165,11 @@ class DefaultModelLoader(BaseModelLoader):
         # Some quantized models use .pt files for storing the weights.
         if load_format == "hf":
             allow_patterns = ["*.safetensors", "*.bin"]
-        elif load_format == "safetensors" or load_format == "fastsafetensors":
+        elif (
+            load_format == "safetensors"
+            or load_format == "fastsafetensors"
+            or load_format == "instanttensor"
+        ):
             use_safetensors = True
             allow_patterns = ["*.safetensors"]
         elif load_format == "mistral":
@@ -131,7 +183,9 @@ class DefaultModelLoader(BaseModelLoader):
         else:
             raise ValueError(f"Unknown load_format: {load_format}")
 
-        if fall_back_to_pt:
+        # Don't fall back to .pt for explicit safetensors formats; otherwise a
+        # .pt file is matched and later opened as safetensors.
+        if fall_back_to_pt and not use_safetensors:
             allow_patterns += ["*.pt"]
 
         if allow_patterns_overrides is not None:
@@ -143,16 +197,20 @@ class DefaultModelLoader(BaseModelLoader):
                 self.load_config.download_dir,
                 allow_patterns,
                 revision,
+                subfolder=subfolder,
                 ignore_patterns=self.load_config.ignore_patterns,
             )
         else:
             hf_folder = model_name_or_path
 
+        if subfolder is not None:
+            hf_folder = os.path.join(hf_folder, subfolder)
+
         hf_weights_files: list[str] = []
         for pattern in allow_patterns:
             hf_weights_files += glob.glob(os.path.join(hf_folder, pattern))
             if len(hf_weights_files) > 0:
-                if pattern == "*.safetensors":
+                if pattern.endswith(".safetensors"):
                     use_safetensors = True
                 break
 
@@ -166,8 +224,9 @@ class DefaultModelLoader(BaseModelLoader):
                 download_safetensors_index_file_from_hf(
                     model_name_or_path,
                     index_file,
-                    self.load_config.download_dir,
-                    revision,
+                    cache_dir=self.load_config.download_dir,
+                    subfolder=subfolder,
+                    revision=revision,
                 )
             hf_weights_files = filter_duplicate_safetensors_files(
                 hf_weights_files, hf_folder, index_file
@@ -189,6 +248,7 @@ class DefaultModelLoader(BaseModelLoader):
         extra_config = self.load_config.model_loader_extra_config
         hf_folder, hf_weights_files, use_safetensors = self._prepare_weights(
             source.model_or_path,
+            source.subfolder,
             source.revision,
             source.fall_back_to_pt,
             source.allow_patterns_overrides,
@@ -209,6 +269,11 @@ class DefaultModelLoader(BaseModelLoader):
                     hf_weights_files,
                     self.load_config.use_tqdm_on_load,
                 )
+            elif self.load_config.load_format == "instanttensor":
+                weights_iterator = instanttensor_weights_iterator(
+                    hf_weights_files,
+                    self.load_config.use_tqdm_on_load,
+                )
             else:
                 if extra_config.get("enable_multithread_load"):
                     weights_iterator = multi_thread_safetensors_weights_iterator(
@@ -223,6 +288,13 @@ class DefaultModelLoader(BaseModelLoader):
                         hf_weights_files,
                         self.load_config.use_tqdm_on_load,
                         self.load_config.safetensors_load_strategy,
+                        local_expert_ids=self.local_expert_ids,
+                        safetensors_prefetch_num_threads=(
+                            self.load_config.safetensors_prefetch_num_threads
+                        ),
+                        safetensors_prefetch_block_size=(
+                            self.load_config.safetensors_prefetch_block_size
+                        ),
                     )
         else:
             if extra_config.get("enable_multithread_load"):
@@ -240,22 +312,6 @@ class DefaultModelLoader(BaseModelLoader):
                     self.load_config.use_tqdm_on_load,
                     self.load_config.pt_load_map_location,
                 )
-
-        if current_platform.is_tpu():
-            from vllm.platforms.tpu import USE_TPU_INFERENCE
-
-            if not USE_TPU_INFERENCE:
-                # In PyTorch XLA, we should call `torch_xla.sync`
-                # frequently so that not too many ops are accumulated
-                # in the XLA program.
-                import torch_xla
-
-                def _xla_weights_iterator(iterator: Generator):
-                    for weights in iterator:
-                        yield weights
-                        torch_xla.sync(wait=False)
-
-                weights_iterator = _xla_weights_iterator(weights_iterator)
 
         if self.counter_before_loading_weights == 0.0:
             self.counter_before_loading_weights = time.perf_counter()
@@ -285,12 +341,77 @@ class DefaultModelLoader(BaseModelLoader):
 
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(
-            model_config.model,
-            model_config.revision,
+            model_name_or_path=model_config.model,
+            subfolder=None,
+            revision=model_config.revision,
             fall_back_to_pt=True,
             allow_patterns_overrides=None,
         )
 
+    def _init_ep_weight_filter(self, model_config: ModelConfig) -> None:
+        """Compute local expert ids for EP weight filtering.
+
+        When expert parallelism is active, each rank only needs a subset of
+        expert weights.  By computing the set upfront we can skip non-local
+        expert tensors *before* reading them from disk.
+        """
+        from vllm.config import get_current_vllm_config
+
+        vllm_config = get_current_vllm_config()
+        parallel_config = vllm_config.parallel_config
+
+        if not (
+            model_config.is_moe
+            and parallel_config.enable_expert_parallel
+            and parallel_config.enable_ep_weight_filter
+        ):
+            return
+
+        # When EPLB is enabled, redundant physical expert slots may map to
+        # logical experts that belong to other ranks in the default partition.
+        # The weight loader needs to see ALL logical expert weights so it can
+        # populate these redundant slots.  Skip the filter entirely.
+        if parallel_config.enable_eplb:
+            return
+
+        num_experts = model_config.get_num_experts()
+        if num_experts <= 0:
+            return
+
+        # EP size/rank computation mirrors FusedMoEParallelConfig.make():
+        #   ep_size = dp_size * pcp_size * tp_size (flattened)
+        #   ep_rank = dp_rank * pcp_size * tp_size + pcp_rank * tp_size + tp_rank
+        from vllm.distributed import (
+            get_dp_group,
+            get_pcp_group,
+            get_tensor_model_parallel_rank,
+        )
+
+        dp_size = parallel_config.data_parallel_size
+        tp_size = parallel_config.tensor_parallel_size
+        pcp_size = parallel_config.prefill_context_parallel_size
+        dp_rank = get_dp_group().rank_in_group if dp_size > 1 else 0
+        tp_rank = get_tensor_model_parallel_rank() if tp_size > 1 else 0
+        pcp_rank = get_pcp_group().rank_in_group if pcp_size > 1 else 0
+        ep_size = dp_size * pcp_size * tp_size
+        ep_rank = dp_rank * pcp_size * tp_size + pcp_rank * tp_size + tp_rank
+
+        self.local_expert_ids = compute_local_expert_ids(
+            num_experts,
+            ep_size,
+            ep_rank,
+            placement=parallel_config.expert_placement_strategy,
+        )
+        if self.local_expert_ids is not None:
+            logger.info_once(
+                "EP weight filter: ep_size=%d, ep_rank=%d, loading %d/%d experts",
+                ep_size,
+                ep_rank,
+                len(self.local_expert_ids),
+                num_experts,
+            )
+
+    @instrument(span_name="Load weights")
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
         if model_config.quantization == "torchao":
             quant_config = get_quant_config(model_config, self.load_config)
@@ -301,18 +422,46 @@ class DefaultModelLoader(BaseModelLoader):
             ):
                 self.load_config.safetensors_load_strategy = "torchao"
 
-        weights_to_load = {name for name, _ in model.named_parameters()}
+        self._init_ep_weight_filter(model_config)
+
         loaded_weights = model.load_weights(self.get_all_weights(model_config, model))
 
         self.counter_after_loading_weights = time.perf_counter()
         logger.info_once(
             "Loading weights took %.2f seconds",
             self.counter_after_loading_weights - self.counter_before_loading_weights,
-            scope="local",
         )
         # We only enable strict check for non-quantized models
-        # that have loaded weights tracking currently.
-        if model_config.quantization is None and loaded_weights is not None:
+        # that have loaded weights tracking by default.
+        default_enable_weights_track = (
+            model_config.quantization is None and loaded_weights is not None
+        )
+        enable_weights_track = (
+            self.enable_weights_track
+            if self.enable_weights_track is not None
+            else default_enable_weights_track
+        )
+        if enable_weights_track:
+            self.track_weights_loading(model, loaded_weights)
+
+    def track_weights_loading(
+        self, model: nn.Module, loaded_weights: set[str] | None
+    ) -> None:
+        weights_to_load = {name for name, _ in model.named_parameters()}
+        if loaded_weights is not None:
+            # ignore online quantization scales
+            for name, module in model.named_modules():
+                quant_method = getattr(module, "quant_method", None)
+                has_online_quant = getattr(quant_method, "uses_meta_device", False)
+                has_postprocess_quant = getattr(
+                    quant_method, "process_weights_after_loading", None
+                )
+                # ignore kv_cache scale and online quant scale,
+                # which can be missing in checkpoints
+                if has_online_quant or has_postprocess_quant:
+                    for param_name, _ in module.named_parameters():
+                        full_name = f"{name}.{param_name}" if name else param_name
+                        loaded_weights.add(full_name)
             weights_not_loaded = weights_to_load - loaded_weights
             if weights_not_loaded:
                 raise ValueError(

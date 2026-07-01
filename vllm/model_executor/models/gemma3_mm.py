@@ -7,21 +7,23 @@ from typing import Annotated, Any, Literal
 import torch
 from torch import nn
 from transformers import BatchFeature, Gemma3Config, Gemma3Processor
+from transformers.models.gemma3.image_processing_gemma3 import Gemma3ImageProcessor
 from transformers.models.gemma3.processing_gemma3 import Gemma3ProcessorKwargs
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
-from vllm.multimodal.processing import (
+from vllm.multimodal.processing import BaseDummyInputsBuilder
+from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     MultiModalPromptUpdates,
@@ -32,12 +34,12 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
     replace_token_matches,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEncoderCudaGraph,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
@@ -84,54 +86,35 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
-    def _resolve_image_kwargs(
-        self,
-        processor: Gemma3Processor,
-        keys: set[str],
-    ) -> dict[str, Any]:
-        image_processor = processor.image_processor
-        kwargs = processor._merge_kwargs(
-            Gemma3ProcessorKwargs,
-            tokenizer_init_kwargs=processor.tokenizer.init_kwargs,
-        )
-
-        images_kwargs = kwargs["images_kwargs"]
-
-        def _resolve_kw(key: str):
-            val = getattr(image_processor, key)
-            if val is None:
-                val = images_kwargs[key]
-
-            return val
-
-        return {k: _resolve_kw(k) for k in keys}
-
     def get_num_crops(
         self,
         *,
         image_width: int,
         image_height: int,
-        processor: Gemma3Processor | None,
+        processor: Gemma3Processor,
+        mm_kwargs: Mapping[str, object],
     ) -> int:
-        if processor is None:
-            processor = self.get_hf_processor()
+        image_processor: Gemma3ImageProcessor = processor.image_processor
 
-        images_kwargs = self._resolve_image_kwargs(
-            processor,
-            {
-                "do_pan_and_scan",
-                "pan_and_scan_min_crop_size",
-                "pan_and_scan_max_num_crops",
-                "pan_and_scan_min_ratio_to_activate",
-            },
+        images_kwargs = processor._merge_kwargs(
+            Gemma3ProcessorKwargs,
+            tokenizer_init_kwargs=processor.tokenizer.init_kwargs,
+            **self.ctx.get_merged_mm_kwargs(mm_kwargs),
+        )["images_kwargs"]
+
+        do_pan_and_scan = images_kwargs.get(
+            "do_pan_and_scan", image_processor.do_pan_and_scan
         )
-
-        do_pan_and_scan = images_kwargs["do_pan_and_scan"]
-        pan_and_scan_min_crop_size = images_kwargs["pan_and_scan_min_crop_size"]
-        pan_and_scan_max_num_crops = images_kwargs["pan_and_scan_max_num_crops"]
-        pan_and_scan_min_ratio_to_activate = images_kwargs[
-            "pan_and_scan_min_ratio_to_activate"
-        ]
+        pan_and_scan_min_crop_size = images_kwargs.get(
+            "pan_and_scan_min_crop_size", image_processor.pan_and_scan_min_crop_size
+        )
+        pan_and_scan_max_num_crops = images_kwargs.get(
+            "pan_and_scan_max_num_crops", image_processor.pan_and_scan_max_num_crops
+        )
+        pan_and_scan_min_ratio_to_activate = images_kwargs.get(
+            "pan_and_scan_min_ratio_to_activate",
+            image_processor.pan_and_scan_min_ratio_to_activate,
+        )
 
         if not do_pan_and_scan:
             return 0
@@ -180,17 +163,16 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: Gemma3Processor | None,
+        processor: Gemma3Processor,
+        mm_kwargs: Mapping[str, object],
     ) -> PromptUpdateDetails[str]:
-        if processor is None:
-            processor = self.get_hf_processor()
-
         boi_token = processor.boi_token
 
         num_crops = self.get_num_crops(
             image_width=image_width,
             image_height=image_height,
             processor=processor,
+            mm_kwargs=mm_kwargs,
         )
 
         if num_crops == 0:
@@ -215,15 +197,14 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: Gemma3Processor | None,
+        processor: Gemma3Processor,
+        mm_kwargs: Mapping[str, object],
     ) -> int:
-        if processor is None:
-            processor = self.get_hf_processor()
-
         num_crops = self.get_num_crops(
             image_width=image_width,
             image_height=image_height,
             processor=processor,
+            mm_kwargs=mm_kwargs,
         )
         image_seq_len = processor.image_seq_length
 
@@ -231,11 +212,17 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
 
     def get_image_size_with_most_features(self) -> ImageSize:
         processor = self.get_hf_processor()
+        image_processor: Gemma3ImageProcessor = processor.image_processor
 
-        images_kwargs = self._resolve_image_kwargs(
-            processor, {"pan_and_scan_max_num_crops"}
+        images_kwargs = processor._merge_kwargs(
+            Gemma3ProcessorKwargs,
+            tokenizer_init_kwargs=processor.tokenizer.init_kwargs,
+            **self.ctx.get_merged_mm_kwargs({}),
+        )["images_kwargs"]
+
+        max_num_crops = images_kwargs.get(
+            "pan_and_scan_max_num_crops", image_processor.pan_and_scan_max_num_crops
         )
-        max_num_crops = images_kwargs["pan_and_scan_max_num_crops"]
 
         vision_config = self.get_hf_config().vision_config
         native_size = vision_config.image_size
@@ -255,13 +242,13 @@ class Gemma3DummyInputsBuilder(BaseDummyInputsBuilder[Gemma3ProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         target_width, target_height = self.info.get_image_size_with_most_features()
 
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
@@ -290,11 +277,8 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
 
         # HF processor pops the `num_crops` kwarg, which is needed by vLLM
         if (images := mm_data.get("images")) is not None:
-            parsed_images = (
-                self._get_data_parser()
-                .parse_mm_data({"image": images})
-                .get_items("image", ImageProcessorItems)
-            )
+            mm_items = self.info.parse_mm_data({"image": images}, validate=False)
+            parsed_images = mm_items.get_items("image", ImageProcessorItems)
             image_sizes = [
                 parsed_images.get_image_size(i) for i in range(len(parsed_images))
             ]
@@ -305,6 +289,7 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
                     image_width=size.width,
                     image_height=size.height,
                     processor=hf_processor,
+                    mm_kwargs=mm_kwargs,
                 )
                 for size in image_sizes
             ]
@@ -321,7 +306,7 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
 
         return dict(
             pixel_values=MultiModalFieldConfig.flat_from_sizes("image", num_patches),
-            num_patches=MultiModalFieldConfig.batched("image"),
+            num_patches=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
         )
 
     def _get_prompt_updates(
@@ -341,6 +326,7 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
                 image_width=image_size.width,
                 image_height=image_size.height,
                 processor=hf_processor,
+                mm_kwargs=hf_processor_mm_kwargs,
             )
 
         return [
@@ -482,7 +468,7 @@ class Gemma3MultiModalProjector(nn.Module):
     dummy_inputs=Gemma3DummyInputsBuilder,
 )
 class Gemma3ForConditionalGeneration(
-    nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
+    nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA, SupportsEncoderCudaGraph
 ):
     packed_modules_mapping = {
         "qkv_proj": [
@@ -519,27 +505,35 @@ class Gemma3ForConditionalGeneration(
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
+        self.model_config = vllm_config.model_config
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
+        self.vit_positions_per_patch = (
+            self.config.vision_config.image_size // self.config.vision_config.patch_size
+        ) ** 2
 
-        self.vision_tower = SiglipVisionModel(
-            config.vision_config,
-            quant_config,
-            prefix=maybe_prefix(prefix, "vision_tower"),
+        self.configure_mm_token_handling(
+            vocab_size=config.text_config.vocab_size,
+            mm_token_ids=[config.image_token_index],
         )
-        self.multi_modal_projector = Gemma3MultiModalProjector(config)
 
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-            architectures=["Gemma3ForCausalLM"],
-        )
-        logit_scale = getattr(config, "logit_scale", 1.0)
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision_tower = SiglipVisionModel(
+                config.vision_config,
+                quant_config,
+                prefix=maybe_prefix(prefix, "vision_tower"),
+            )
+            self.multi_modal_projector = Gemma3MultiModalProjector(config)
 
-        if hasattr(self.language_model, "logits_processor"):
-            # The logits processor can be unset if we're using
-            # automatic conversion to pooling model.
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+                architectures=["Gemma3ForCausalLM"],
+            )
+
+            logit_scale = getattr(config, "logit_scale", 1.0)
             self.language_model.logits_processor.scale *= logit_scale
 
         self.make_empty_intermediate_tensors = (
@@ -579,8 +573,6 @@ class Gemma3ForConditionalGeneration(
         self,
         image_input: Gemma3ImageInputs,
     ) -> list[torch.Tensor]:
-        assert self.vision_tower is not None
-
         pixel_values = image_input["pixel_values"]
         num_patches = image_input["num_patches"]
 
@@ -591,9 +583,6 @@ class Gemma3ForConditionalGeneration(
         image_embeds = self.multi_modal_projector(image_features)
 
         return [e.flatten(0, 1) for e in image_embeds.split(num_patches.tolist())]
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
@@ -608,7 +597,6 @@ class Gemma3ForConditionalGeneration(
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = True,
     ) -> torch.Tensor:
         # Early return for text-only inference (no multimodal data)
         if multimodal_embeddings is None or is_multimodal is None:
@@ -619,12 +607,11 @@ class Gemma3ForConditionalGeneration(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -662,3 +649,171 @@ class Gemma3ForConditionalGeneration(
             connector="multi_modal_projector",
             tower_model="vision_tower",
         )
+
+    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+        """
+        Calculate the number of tokens output by the vision encoder.
+
+        The vision encoder processes images into patch embeddings. For Gemma3,
+        the relationship between prompt placeholder tokens and actual vision
+        encoder output tokens depends on the patch grid size.
+
+        Args:
+            num_image_tokens: Number of image placeholder tokens in the prompt
+                              (typically mm_tokens_per_image per image)
+
+        Returns:
+            Number of tokens output by the vision encoder
+        """
+        # For Gemma3, the vision encoder outputs tokens_per_side x tokens_per_side
+        # tokens per image. Since num_image_tokens represents the number of
+        # connector output tokens (mm_tokens_per_image = 256), and tokens_per_side
+        # is sqrt(256) = 16, we need to account for the token expansion.
+        # Based on empirical testing, the multiplier of 16 works correctly.
+        return num_image_tokens * 16
+
+    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
+        """
+        Calculate the number of tokens output by the multimodal connector.
+
+        The connector applies projection and normalization but maintains the
+        token count for Gemma3.
+
+        Args:
+            num_vision_tokens: Number of tokens from vision encoder
+
+        Returns:
+            Number of tokens after connector processing
+        """
+        # The Gemma3 connector maintains a 1:1 token mapping
+        return num_vision_tokens
+
+    def get_encoder_cudagraph_config(self):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphConfig,
+        )
+
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            buffer_keys=["pixel_values"],
+            out_hidden_size=self.config.text_config.hidden_size,
+        )
+
+    def get_encoder_cudagraph_budget_range(
+        self,
+        vllm_config: VllmConfig,
+    ) -> tuple[int, int]:
+        min_budget = self.config.mm_tokens_per_image
+        max_budget = min(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            self.model_config.max_model_len,
+        )
+        return (min_budget, max_budget)
+
+    def get_encoder_cudagraph_item_specs(
+        self,
+        mm_kwargs: dict[str, Any],
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
+
+        num_patches = mm_kwargs["num_patches"]
+        mm_tokens_per_image = self.config.mm_tokens_per_image
+
+        return [
+            EncoderItemSpec(
+                input_size=int(np) * self.vit_positions_per_patch,
+                output_tokens=int(np) * mm_tokens_per_image,
+            )
+            for np in num_patches
+        ]
+
+    def select_encoder_cudagraph_items(
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+    ) -> dict[str, Any]:
+        pixel_values = mm_kwargs["pixel_values"]
+        num_patches = mm_kwargs["num_patches"]
+
+        if len(indices) == 0:
+            return {
+                "pixel_values": pixel_values[:0],
+                "num_patches": num_patches[:0],
+            }
+        cum_patches = [0]
+        for p in num_patches:
+            cum_patches.append(cum_patches[-1] + int(p))
+
+        selected_pv = torch.cat(
+            [pixel_values[cum_patches[i] : cum_patches[i + 1]] for i in indices]
+        )
+        selected_np = num_patches[indices]
+
+        return {
+            "pixel_values": selected_pv,
+            "num_patches": selected_np,
+        }
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphCaptureInputs,
+        )
+
+        mm_tokens_per_image = self.config.mm_tokens_per_image
+        num_images = min(
+            token_budget // mm_tokens_per_image,
+            max_batch_size,
+        )
+
+        image_size = self.config.vision_config.image_size
+        dummy_pixel_values = torch.randn(
+            num_images,
+            3,
+            image_size,
+            image_size,
+            device=device,
+            dtype=dtype,
+        )
+        values = {"pixel_values": dummy_pixel_values}
+
+        return EncoderCudaGraphCaptureInputs(
+            values,
+        )
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphReplayBuffers,
+        )
+
+        return EncoderCudaGraphReplayBuffers(
+            values={"pixel_values": mm_kwargs["pixel_values"]},
+        )
+
+    def encoder_cudagraph_forward(
+        self,
+        values: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        pixel_values = values["pixel_values"]
+        image_features = self.vision_tower(pixel_values)
+        image_features = self.multi_modal_projector(image_features)
+        return image_features.flatten(end_dim=1)
+
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> torch.Tensor:
+        image_input = self._parse_and_validate_image_input(**mm_kwargs)
+        results = self._process_image_input(image_input)
+        return torch.cat(results, dim=0)

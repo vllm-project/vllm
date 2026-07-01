@@ -5,9 +5,11 @@ import dataclasses
 import pytest
 
 from vllm.config import CompilationMode
-from vllm.utils.torch_utils import cuda_device_count_stateless
+from vllm.platforms import current_platform
 
 from ...utils import compare_all_settings
+
+ATTN_BACKEND = "FLASH_ATTN" if not current_platform.is_rocm() else "ROCM_ATTN"
 
 
 @dataclasses.dataclass
@@ -31,7 +33,7 @@ class TestSetting:
             model_args=["--max-model-len", "2048"],
             pp_size=2,
             tp_size=2,
-            attn_backend="FLASH_ATTN",
+            attn_backend=ATTN_BACKEND,
             method="generate",
         ),
         # llama model with quantization
@@ -40,7 +42,7 @@ class TestSetting:
             model_args=["--quantization", "gptq", "--max-model-len", "2048"],
             pp_size=1,
             tp_size=1,
-            attn_backend="FLASH_ATTN",
+            attn_backend=ATTN_BACKEND,
             method="generate",
         ),
         # MoE model
@@ -49,7 +51,7 @@ class TestSetting:
             model_args=["--max-model-len", "2048"],
             pp_size=1,
             tp_size=2,
-            attn_backend="FLASH_ATTN",
+            attn_backend=ATTN_BACKEND,
             method="generate",
         ),
         # embedding model
@@ -65,16 +67,22 @@ class TestSetting:
             ],
             pp_size=1,
             tp_size=1,
-            attn_backend="FLASH_ATTN",
+            attn_backend=ATTN_BACKEND,
             method="encode",
         ),
-        TestSetting(
-            model="BAAI/bge-base-en-v1.5",
-            model_args=["--runner", "pooling"],
-            pp_size=1,
-            tp_size=1,
-            attn_backend="FLASH_ATTN",
-            method="encode",
+        pytest.param(
+            TestSetting(
+                model="BAAI/bge-base-en-v1.5",
+                model_args=["--runner", "pooling"],
+                pp_size=1,
+                tp_size=1,
+                attn_backend="FLASH_ATTN",
+                method="encode",
+            ),
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm(),
+                reason="Encoder self-attention is not implemented for ROCm",
+            ),
         ),
         # vision language model
         # See https://github.com/vllm-project/vllm/issues/26716.
@@ -100,10 +108,10 @@ def test_compile_correctness(
     tp_size = test_setting.tp_size
     attn_backend = test_setting.attn_backend
     method = test_setting.method
-    if cuda_device_count_stateless() < pp_size * tp_size:
+    if current_platform.device_count() < pp_size * tp_size:
         pytest.skip(
             f"Need at least {pp_size}*{tp_size} CUDA gpus but got "
-            f"{cuda_device_count_stateless()}"
+            f"{current_platform.device_count()}"
         )
 
     final_args = [
@@ -128,6 +136,7 @@ def test_compile_correctness(
             all_args.append(
                 final_args + [f"-cc.mode={mode.name}", "-cc.backend=inductor"]
             )
+            all_envs.append({})
 
         # inductor will change the output, so we only compare if the output
         # is close, not exactly the same.
@@ -136,6 +145,7 @@ def test_compile_correctness(
             all_args,
             all_envs,
             method=method if method != "generate" else "generate_close",
+            force_v1_runner=True,
         )
         all_envs.clear()
         all_args.clear()
@@ -148,6 +158,5 @@ def test_compile_correctness(
     ]:
         all_args.append(final_args + [f"-cc.mode={mode.name}", "-cc.backend=eager"])
         all_envs.append({})
-        all_envs.append({})
 
-    compare_all_settings(model, all_args * 3, all_envs, method=method)
+    compare_all_settings(model, all_args, all_envs, method=method, force_v1_runner=True)

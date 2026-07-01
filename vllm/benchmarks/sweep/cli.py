@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
 
-from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG
+from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from .plot import SweepPlotArgs
 from .plot import main as plot_main
@@ -10,18 +11,21 @@ from .plot_pareto import SweepPlotParetoArgs
 from .plot_pareto import main as plot_pareto_main
 from .serve import SweepServeArgs
 from .serve import main as serve_main
-from .serve_sla import SweepServeSLAArgs
-from .serve_sla import main as serve_sla_main
+from .serve_workload import SweepServeWorkloadArgs
+from .serve_workload import main as serve_workload_main
+from .startup import SweepStartupArgs
+from .startup import main as startup_main
 
 SUBCOMMANDS = (
     (SweepServeArgs, serve_main),
-    (SweepServeSLAArgs, serve_sla_main),
+    (SweepServeWorkloadArgs, serve_workload_main),
+    (SweepStartupArgs, startup_main),
     (SweepPlotArgs, plot_main),
     (SweepPlotParetoArgs, plot_pareto_main),
 )
 
 
-def add_cli_args(parser: argparse.ArgumentParser):
+def add_cli_args(parser: FlexibleArgumentParser):
     subparsers = parser.add_subparsers(required=True, dest="sweep_type")
 
     for cmd, entrypoint in SUBCOMMANDS:

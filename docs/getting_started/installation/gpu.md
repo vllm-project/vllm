@@ -1,3 +1,7 @@
+---
+toc_depth: 3
+---
+
 # GPU
 
 vLLM is a Python library that supports the following GPU variants. Select your GPU type to see vendor specific instructions:
@@ -13,6 +17,10 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 === "Intel XPU"
 
     --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:installation"
+
+=== "Apple Silicon"
+
+    --8<-- "docs/getting_started/installation/gpu.apple.inc.md:installation"
 
 ## Requirements
 
@@ -34,6 +42,10 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 
     --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:requirements"
 
+=== "Apple Silicon"
+
+    --8<-- "docs/getting_started/installation/gpu.apple.inc.md:requirements"
+
 ## Set up using Python
 
 ### Create a new Python environment
@@ -52,6 +64,10 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 
     --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:set-up-using-python"
 
+=== "Apple Silicon"
+
+    --8<-- "docs/getting_started/installation/gpu.apple.inc.md:set-up-using-python"
+
 ### Pre-built wheels {#pre-built-wheels}
 
 === "NVIDIA CUDA"
@@ -65,6 +81,10 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 === "Intel XPU"
 
     --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:pre-built-wheels"
+
+=== "Apple Silicon"
+
+    --8<-- "docs/getting_started/installation/gpu.apple.inc.md:pre-built-wheels"
 
 ### Build wheel from source
 
@@ -80,9 +100,15 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 
     --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:build-wheel-from-source"
 
+=== "Apple Silicon"
+
+    --8<-- "docs/getting_started/installation/gpu.apple.inc.md:build-wheel-from-source"
+
 ## Set up using Docker
 
 ### Pre-built images
+
+--8<-- [start:pre-built-images]
 
 === "NVIDIA CUDA"
 
@@ -96,7 +122,15 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 
     --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:pre-built-images"
 
+=== "Apple Silicon"
+
+    --8<-- "docs/getting_started/installation/gpu.apple.inc.md:pre-built-images"
+
+--8<-- [end:pre-built-images]
+
 ### Build image from source
+
+--8<-- [start:build-image-from-source]
 
 === "NVIDIA CUDA"
 
@@ -109,6 +143,12 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 === "Intel XPU"
 
     --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:build-image-from-source"
+
+=== "Apple Silicon"
+
+    --8<-- "docs/getting_started/installation/gpu.apple.inc.md:build-image-from-source"
+
+--8<-- [end:build-image-from-source]
 
 ## Supported features
 
@@ -123,3 +163,7 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 === "Intel XPU"
 
     --8<-- "docs/getting_started/installation/gpu.xpu.inc.md:supported-features"
+
+=== "Apple Silicon"
+
+    --8<-- "docs/getting_started/installation/gpu.apple.inc.md:supported-features"

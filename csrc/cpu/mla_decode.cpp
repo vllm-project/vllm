@@ -18,17 +18,9 @@ struct KernelVecType<float> {
 
 template <>
 struct KernelVecType<c10::Half> {
-#if defined(__powerpc64__) || defined(__s390x__)
-  // Power and s390x architecture-specific vector types
-  using qk_load_vec_type = vec_op::FP32Vec16;
-  using qk_vec_type = vec_op::FP32Vec16;
-  using v_load_vec_type = vec_op::FP32Vec16;
-#else
-  // Fallback for other architectures, including x86
   using qk_load_vec_type = vec_op::FP16Vec16;
   using qk_vec_type = vec_op::FP32Vec16;
   using v_load_vec_type = vec_op::FP16Vec16;
-#endif
 };
 
 #ifdef __AVX512BF16__
@@ -38,8 +30,6 @@ struct KernelVecType<c10::BFloat16> {
   using qk_vec_type = vec_op::BF16Vec32;
   using v_load_vec_type = vec_op::BF16Vec16;
 };
-#elif defined(__aarch64__) && !defined(ARM_BF16_SUPPORT)
-// pass
 #else
 template <>
 struct KernelVecType<c10::BFloat16> {
@@ -261,7 +251,7 @@ void mla_decode_kvcache_cpu_impl(
   constexpr int QK_NUM_ELEM = qk_vec_type::VEC_ELEM_NUM;
 
   // shared across threads
-  const int max_threads = omp_get_max_threads();
+  const int max_threads = cpu_utils::get_max_threads();
   const int acc_out_nbytes =
       max_threads * num_heads * V_HEAD_DIM * sizeof(float);
   float* acc_out = static_cast<float*>(std::aligned_alloc(64, acc_out_nbytes));

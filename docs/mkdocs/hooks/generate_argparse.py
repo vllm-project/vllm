@@ -4,9 +4,10 @@ import importlib.metadata
 import importlib.util
 import logging
 import sys
+import textwrap
 import traceback
 from argparse import SUPPRESS, Action, HelpFormatter
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from importlib.machinery import ModuleSpec
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -17,7 +18,7 @@ from pydantic_core import core_schema
 logger = logging.getLogger("mkdocs")
 
 ROOT_DIR = Path(__file__).parent.parent.parent.parent
-ARGPARSE_DOC_DIR = ROOT_DIR / "docs/argparse"
+ARGPARSE_DOC_DIR = ROOT_DIR / "docs/generated/argparse"
 
 sys.path.insert(0, str(ROOT_DIR))
 
@@ -37,15 +38,28 @@ class MockCustomOp:
         return decorator
 
 
+class MockPluggableLayer:
+    @staticmethod
+    def register(name):
+        def decorator(cls):
+            return cls
+
+        return decorator
+
+
 mock_if_no_torch("vllm._C", MagicMock())
-mock_if_no_torch("vllm.model_executor.custom_op", MagicMock(CustomOp=MockCustomOp))
+mock_if_no_torch("vllm._C_stable_libtorch", MagicMock())
+mock_if_no_torch(
+    "vllm.model_executor.custom_op",
+    MagicMock(CustomOp=MockCustomOp, PluggableLayer=MockPluggableLayer),
+)
 mock_if_no_torch(
     "vllm.utils.torch_utils", MagicMock(direct_register_custom_op=lambda *a, **k: None)
 )
 
 
 # Mock any version checks by reading from compiled CI requirements
-with open(ROOT_DIR / "requirements/test.txt") as f:
+with open(ROOT_DIR / "requirements/test/cuda.txt") as f:
     VERSIONS = dict(line.strip().split("==") for line in f if "==" in line)
 importlib.metadata.version = lambda name: VERSIONS.get(name) or "0.0.0"
 
@@ -54,11 +68,36 @@ importlib.metadata.version = lambda name: VERSIONS.get(name) or "0.0.0"
 mock_if_no_torch("torch.nn", MagicMock(Parameter=object))
 
 
+# Mock torch.library.infer_schema for vllm.ir.ops.IrOpInplaceOverload.__init__
+# We need to return the corresponding number of inputs, as IR infra will assert it
+def get_outputs(native_fn: Callable) -> str:
+    """
+    Extract output schema from function's return type annotation,
+    e.g. 'Tensor' or 'Tensor, Tensor'.
+    """
+    import typing
+
+    return_type = typing.get_type_hints(native_fn)["return"]
+    origin = typing.get_origin(return_type)
+    arg_name = lambda a: a.__name__ if hasattr(a, "__name__") else str(a)
+    if origin is tuple:
+        args = typing.get_args(return_type)
+        return ", ".join(arg_name(arg) for arg in args)
+    else:
+        return f"{arg_name(return_type)}"
+
+
+mock_if_no_torch(
+    "torch.library",
+    MagicMock(infer_schema=lambda fn, **k: f"(Tensor x) -> {get_outputs(fn)}"),
+)
+
+
 class PydanticMagicMock(MagicMock):
     """`MagicMock` that's able to generate pydantic-core schemas."""
 
     def __init__(self, *args, **kwargs):
-        name = kwargs.pop("name", None)
+        name = kwargs.get("name")
         super().__init__(*args, **kwargs)
         self.__spec__ = ModuleSpec(name, None)
 
@@ -84,7 +123,8 @@ def auto_mock(module_name: str, attr: str, max_mocks: int = 100):
             logger.info("Mocking %s for argparse doc generation", e.name)
             sys.modules[e.name] = PydanticMagicMock(name=e.name)
         except Exception:
-            logger.exception("Failed to import %s.%s: %s", module_name, attr)
+            logger.exception("Failed to import %s.%s", module_name, attr)
+            raise
 
     raise ImportError(
         f"Failed to import {module_name}.{attr} after mocking {max_mocks} imports"
@@ -92,20 +132,22 @@ def auto_mock(module_name: str, attr: str, max_mocks: int = 100):
 
 
 bench_latency = auto_mock("vllm.benchmarks", "latency")
+bench_mm_processor = auto_mock("vllm.benchmarks", "mm_processor")
 bench_serve = auto_mock("vllm.benchmarks", "serve")
 bench_sweep_plot = auto_mock("vllm.benchmarks.sweep.plot", "SweepPlotArgs")
 bench_sweep_plot_pareto = auto_mock(
     "vllm.benchmarks.sweep.plot_pareto", "SweepPlotParetoArgs"
 )
 bench_sweep_serve = auto_mock("vllm.benchmarks.sweep.serve", "SweepServeArgs")
-bench_sweep_serve_sla = auto_mock(
-    "vllm.benchmarks.sweep.serve_sla", "SweepServeSLAArgs"
+bench_sweep_serve_workload = auto_mock(
+    "vllm.benchmarks.sweep.serve_workload", "SweepServeWorkloadArgs"
 )
 bench_throughput = auto_mock("vllm.benchmarks", "throughput")
 AsyncEngineArgs = auto_mock("vllm.engine.arg_utils", "AsyncEngineArgs")
 EngineArgs = auto_mock("vllm.engine.arg_utils", "EngineArgs")
 ChatCommand = auto_mock("vllm.entrypoints.cli.openai", "ChatCommand")
 CompleteCommand = auto_mock("vllm.entrypoints.cli.openai", "CompleteCommand")
+RenderSubcommand = auto_mock("vllm.entrypoints.cli.launch", "RenderSubcommand")
 openai_cli_args = auto_mock("vllm.entrypoints.openai", "cli_args")
 openai_run_batch = auto_mock("vllm.entrypoints.openai", "run_batch")
 
@@ -151,21 +193,21 @@ class MarkdownFormatter(HelpFormatter):
             heading_md = f"{self._argument_heading_prefix} {option_strings}\n\n"
             self._markdown_output.append(heading_md)
 
-            if choices := action.choices:
-                choices = f"`{'`, `'.join(str(c) for c in choices)}`"
-                self._markdown_output.append(f"Possible choices: {choices}\n\n")
-            elif (metavar := action.metavar) and isinstance(metavar, (list, tuple)):
-                metavar = f"`{'`, `'.join(str(m) for m in metavar)}`"
-                self._markdown_output.append(f"Possible choices: {metavar}\n\n")
+            if action.choices or isinstance(action.metavar, list | tuple):
+                choices_iterable = action.choices or action.metavar
+                choices = f"`{'`, `'.join(str(c) for c in choices_iterable)}`"
+                self._markdown_output.append(f":   Possible choices: {choices}\n\n")
 
             if action.help:
-                self._markdown_output.append(f"{action.help}\n\n")
+                help_dd = ":" + textwrap.indent(action.help, "    ")[1:]
+                self._markdown_output.append(f"{help_dd}\n\n")
 
-            if (default := action.default) != SUPPRESS:
+            # None usually means the default is determined at runtime
+            if (default := action.default) != SUPPRESS and default is not None:
                 # Make empty string defaults visible
                 if default == "":
                     default = '""'
-                self._markdown_output.append(f"Default: `{default}`\n\n")
+                self._markdown_output.append(f":   Default: `{default}`\n\n")
 
     def format_help(self):
         """Return the formatted help as markdown."""
@@ -219,14 +261,18 @@ def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
         "serve": create_parser(openai_cli_args.make_arg_parser),
         "chat": create_parser(ChatCommand.add_cli_args),
         "complete": create_parser(CompleteCommand.add_cli_args),
+        "launch_render": create_parser(RenderSubcommand.add_cli_args),
         "run-batch": create_parser(openai_run_batch.make_arg_parser),
         # Benchmark CLI
         "bench_latency": create_parser(bench_latency.add_cli_args),
+        "bench_mm_processor": create_parser(bench_mm_processor.add_cli_args),
         "bench_serve": create_parser(bench_serve.add_cli_args),
         "bench_sweep_plot": create_parser(bench_sweep_plot.add_cli_args),
         "bench_sweep_plot_pareto": create_parser(bench_sweep_plot_pareto.add_cli_args),
         "bench_sweep_serve": create_parser(bench_sweep_serve.add_cli_args),
-        "bench_sweep_serve_sla": create_parser(bench_sweep_serve_sla.add_cli_args),
+        "bench_sweep_serve_workload": create_parser(
+            bench_sweep_serve_workload.add_cli_args
+        ),
         "bench_throughput": create_parser(bench_throughput.add_cli_args),
     }
 

@@ -7,15 +7,57 @@ import torch
 from torch.nn import functional as F
 
 from vllm import _custom_ops as ops
-from vllm._custom_ops import cpu_fused_moe, cpu_prepack_moe_weight
-from vllm.model_executor.layers.activation import SiluAndMul, SwigluOAIAndMul
+from vllm._custom_ops import (
+    CPUQuantMethod,
+    cpu_fused_moe,
+    cpu_prepack_moe_weight,
+    fused_experts_cpu,
+)
+from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization.utils.layer_utils import replace_parameter
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
 _CPU_MOE_LAYER_CACHE = {}
-_CPU_MOE_ACT = {
-    "silu": SiluAndMul(),
-    "swigluoai": SwigluOAIAndMul(),
+
+
+def _swigluoai_forward_native(
+    x: torch.Tensor,
+    alpha: float = 1.702,
+    limit: float = 7.0,
+) -> torch.Tensor:
+    """PyTorch-native implementation of SwigluOAIAndMul.forward_native.
+
+    Standalone function to avoid instantiating SwigluOAIAndMul (a CustomOp)
+    which would trigger get_current_vllm_config() before config is set.
+    """
+    gate, up = x[..., ::2], x[..., 1::2]
+    gate = gate.clamp(min=None, max=limit)
+    up = up.clamp(min=-limit, max=limit)
+    glu = gate * torch.sigmoid(gate * alpha)
+    gated_output = (up + 1) * glu
+    return gated_output
+
+
+def _gelu_and_mul(
+    x: torch.Tensor,
+) -> torch.Tensor:
+    d = x.shape[-1] // 2
+    return F.gelu(x[..., :d], approximate="none") * x[..., d:]
+
+
+# Map activation names to their native forward functions.
+# Uses static methods or standalone functions to avoid instantiating CustomOp
+# classes, which would call get_current_vllm_config() before config is set.
+_CPU_MOE_ACT_FN: dict[MoEActivation, Callable[[torch.Tensor], torch.Tensor]] = {
+    MoEActivation.SILU: SiluAndMul.forward_native,
+    MoEActivation.SWIGLUOAI: _swigluoai_forward_native,
+    MoEActivation.GELU: _gelu_and_mul,
+    MoEActivation.GELU_TANH: (
+        lambda x: F.gelu(x[..., : x.shape[-1] // 2], approximate="tanh")
+        * x[..., x.shape[-1] // 2 :]
+    ),
 }
 
 
@@ -145,9 +187,9 @@ class SGLFusedMOE:
         routed_scaling_factor: float = 1.0,
         e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
+        activation: MoEActivation = MoEActivation.SILU,
     ) -> torch.Tensor:
-        assert activation == "silu", f"{activation} is not supported."
+        assert activation == MoEActivation.SILU, f"{activation} is not supported."
         assert not apply_router_weight_on_input
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
@@ -163,26 +205,30 @@ class SGLFusedMOE:
             e_score_correction_bias=e_score_correction_bias,
         )
 
-        torch.ops._C.fused_experts_cpu(
+        return fused_experts_cpu(
             x,
             layer.w13_weight,
             layer.w2_weight,
             topk_weights,
             topk_ids,
-            True,
-            False,
-            False,
-            None,
-            None,
-            None,
-            None,
-            None,
-            True,
+            False,  # inplace
+            CPUQuantMethod.UNQUANT,  # moe_comp_method
+            None,  # w1_scale
+            None,  # w2_scale
+            None,  # w1_zero
+            None,  # w2_zero
+            None,  # block_size
+            None,  # w1_bias
+            None,  # w2_bias
+            None,  # alpha
+            None,  # limit
+            True,  # is_vnni
         )
-        return x
 
 
 class CPUFusedMOE:
+    """CPU-based fused MoE implementation."""
+
     def __init__(self, layer: torch.nn.Module) -> None:
         use_grouped_gemm, isa = self.check_grouped_gemm(layer)
         self.isa = isa
@@ -210,10 +256,9 @@ class CPUFusedMOE:
         routed_scaling_factor: float = 1.0,
         e_score_correction_bias: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
+        activation: MoEActivation = MoEActivation.SILU,
     ) -> torch.Tensor:
-        assert activation in _CPU_MOE_ACT, f"{activation} is not supported."
-        assert not apply_router_weight_on_input
+        assert activation in _CPU_MOE_ACT_FN, f"{activation} is not supported."
 
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
@@ -236,6 +281,7 @@ class CPUFusedMOE:
             topk_ids,
             activation,
             global_num_experts,
+            apply_router_weight_on_input,
         )
 
     def check_grouped_gemm(
@@ -254,7 +300,7 @@ class CPUFusedMOE:
         if not (w13_output_size % 32 == 0 and w2_output_size % 32 == 0):
             return False, "none"
 
-        supports_amx = torch._C._cpu._is_amx_tile_supported()
+        supports_amx = torch.cpu._is_amx_tile_supported()
 
         if (
             supports_amx
@@ -266,6 +312,17 @@ class CPUFusedMOE:
 
         if supports_amx:
             return False, "none"
+
+        supports_neon = current_platform.get_cpu_architecture() == CpuArchEnum.ARM
+        if supports_neon:
+            if (
+                dtype == torch.bfloat16
+                and w13_input_size % 4 == 0
+                and w2_input_size % 4 == 0
+            ):
+                return True, "neon"
+            else:
+                return False, "none"
 
         return True, "vec"
 
@@ -328,9 +385,16 @@ class CPUFusedMOE:
         input: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        activation: str,
+        activation: MoEActivation,
         global_num_experts: int = -1,
+        skip_weighted: bool = False,
     ) -> torch.Tensor:
+        if skip_weighted:
+            assert topk_ids.size(1) == 1, (
+                "apply_router_weight_on_input is only implemented for topk=1"
+            )
+            input.mul_(topk_weights.to(input.dtype))
+
         output = cpu_fused_moe(
             input,
             layer.w13_weight,
@@ -339,8 +403,9 @@ class CPUFusedMOE:
             getattr(layer, "w2_bias", None),
             topk_weights,
             topk_ids,
-            activation,
+            activation.value,
             self.isa,
+            skip_weighted,
         )
         return output
 
@@ -350,9 +415,16 @@ class CPUFusedMOE:
         input: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        activation: str,
+        activation: MoEActivation,
         global_num_experts: int = -1,
+        skip_weighted: bool = False,
     ) -> torch.Tensor:
+        if skip_weighted:
+            assert topk_ids.size(1) == 1, (
+                "apply_router_weight_on_input is only implemented for topk=1"
+            )
+            input.mul_(topk_weights.to(input.dtype))
+
         output = torch.empty_like(input)
         layer_id = id(layer)
         torch.ops.vllm.cpu_fused_moe_torch(
@@ -361,8 +433,9 @@ class CPUFusedMOE:
             input,
             topk_weights,
             topk_ids,
-            activation,
+            activation.value,
             global_num_experts,
+            skip_weighted,
         )
 
         return output
@@ -376,7 +449,9 @@ def cpu_fused_moe_torch(
     topk_ids: torch.Tensor,
     activation: str,
     global_num_experts: int = -1,
+    skip_weighted: bool = False,
 ) -> None:
+    act = MoEActivation.from_str(activation)
     layer = _CPU_MOE_LAYER_CACHE[layer_id]()
 
     # Ref code from https://github.com/sgl-project/sglang/blob/716e682721397df103f347d22da8bd46c6016dab/python/sglang/srt/layers/moe/fused_moe_native.py#L53
@@ -400,7 +475,7 @@ def cpu_fused_moe_torch(
         tokens_for_this_expert = sorted_tokens[start_idx:end_idx]
 
         gate_up = layer.gate_up_linear[i](tokens_for_this_expert)  # type: ignore
-        gate_up = _CPU_MOE_ACT[activation].forward_native(gate_up)
+        gate_up = _CPU_MOE_ACT_FN[act](gate_up)
         expert_out = layer.down_linear[i](gate_up)  # type: ignore
         outputs.append(expert_out)
         start_idx = end_idx
@@ -409,13 +484,16 @@ def cpu_fused_moe_torch(
     new_x = torch.empty_like(outs)
 
     new_x[idxs] = outs
-    final_out = (
-        new_x.view(*topk_ids.shape, -1)
-        .type(topk_weights.dtype)
-        .mul_(topk_weights.unsqueeze(dim=-1))
-        .sum(dim=1)
-        .type(new_x.dtype)
-    )
+    if skip_weighted:
+        final_out = new_x
+    else:
+        final_out = (
+            new_x.view(*topk_ids.shape, -1)
+            .type(topk_weights.dtype)
+            .mul_(topk_weights.unsqueeze(dim=-1))
+            .sum(dim=1)
+            .type(new_x.dtype)
+        )
     output.copy_(final_out)
 
 

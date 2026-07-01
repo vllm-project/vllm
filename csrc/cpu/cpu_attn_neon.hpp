@@ -4,6 +4,9 @@
 #include "cpu_attn_impl.hpp"
 #include <arm_neon.h>
 #include <type_traits>
+#ifdef ARM_BF16_SUPPORT
+  #include "cpu_attn_neon_bfmmla.hpp"
+#endif
 namespace cpu_attention {
 
 namespace {
@@ -57,7 +60,7 @@ FORCE_INLINE void load_row8_B_as_f32<c10::BFloat16>(const c10::BFloat16* p,
 #endif
 }
 
-// Mx8, with 1 <= M <= 8 , K streamed, unroll-by-4 with NEON FMLAs
+// Mx8, with 1 <= M <= 8 , K streamed, unroll-by-4 with ASIMD FMLAs
 // #Loads = (K // 4) * (M + 4 * sizeof(kv_cache_t) / 2)
 // #FMLAs = (K // 4) * (4 * 2 * M)
 // We have (4 * 2 * M) FMLAs for (M + 4 * sizeof(kv_cache_t) / 2) loads
@@ -245,8 +248,8 @@ class TileGemmNeonFMLA {
 }  // namespace
 
 // this is similar to "ISA::VEC" at the moment
-template <typename scalar_t, int64_t head_dim>
-class AttentionImpl<ISA::NEON, scalar_t, head_dim> {
+template <typename scalar_t, int64_t head_dim, typename kv_cache_scalar_t>
+class AttentionImpl<ISA::NEON, scalar_t, head_dim, kv_cache_scalar_t> {
  public:
   using query_t = scalar_t;
   using q_buffer_t = float;
@@ -340,7 +343,8 @@ class AttentionImpl<ISA::NEON, scalar_t, head_dim> {
       const int64_t head_num, const int64_t key_head_num_stride,
       const int64_t value_head_num_stride, const int64_t num_blocks,
       const int64_t num_blocks_stride, const int64_t cache_head_num_stride,
-      const int64_t block_size, const int64_t block_size_stride) {
+      const int64_t block_size, const int64_t block_size_stride,
+      const float /*k_inv*/ = 0.0f, const float /*v_inv*/ = 0.0f) {
 #pragma omp parallel for collapse(2)
     for (int64_t token_idx = 0; token_idx < token_num; ++token_idx) {
       for (int64_t head_idx = 0; head_idx < head_num; ++head_idx) {
@@ -381,6 +385,18 @@ class AttentionImpl<ISA::NEON, scalar_t, head_dim> {
     }
   }
 };
+
+#ifdef ARM_BF16_SUPPORT
+// For BF16 on Arm, reuse the BFMMLA kernels with 32-token alignment.
+template <int64_t head_dim>
+class AttentionImpl<ISA::NEON, c10::BFloat16, head_dim, c10::BFloat16>
+    : public AttentionImplNEONBFMMLA<BLOCK_SIZE_ALIGNMENT, ISA::NEON,
+                                     head_dim> {};
+#endif
 }  // namespace cpu_attention
 
-#endif  // #ifndef CPU_ATTN_NEON_HPP
+#undef BLOCK_SIZE_ALIGNMENT
+#undef HEAD_SIZE_ALIGNMENT
+#undef MAX_Q_HEAD_NUM_PER_ITER
+
+#endif  // #ifndef CPU_ATTN_ASIMD_HPP

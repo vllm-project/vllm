@@ -3,6 +3,7 @@
 """Attention layer with FlashInfer."""
 
 from dataclasses import dataclass
+from functools import partial
 from typing import ClassVar
 
 import numpy as np
@@ -13,30 +14,24 @@ from flashinfer import (
     BatchPrefillWithRaggedKVCacheWrapper,
     MultiLevelCascadeAttentionWrapper,
 )
-from flashinfer.decode import _get_range_buf, trtllm_batch_decode_with_kv_cache
+from flashinfer.decode import fast_decode_plan, trtllm_batch_decode_with_kv_cache
 from flashinfer.prefill import trtllm_batch_context_with_kv_cache
 from flashinfer.utils import FP4Tensor
+from typing_extensions import override
 
 from vllm import envs
-from vllm.attention.backends.abstract import (
-    AttentionBackend,
-    AttentionImpl,
-    AttentionType,
-    MultipleOf,
+from vllm.config import (
+    CUDAGraphMode,
+    VllmConfig,
+    get_current_vllm_config_or_none,
 )
-from vllm.attention.ops.common import cp_lse_ag_out_rs
-from vllm.attention.ops.merge_attn_states import merge_attn_states
-from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
-    kNvfp4Quant,
+    kNvfp4Dynamic,
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
@@ -46,19 +41,41 @@ from vllm.utils.flashinfer import (
     use_trtllm_attention,
 )
 from vllm.utils.math_utils import cdiv
-from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.v1.attention.backends.utils import (
+from vllm.utils.torch_utils import (
+    PIN_MEMORY,
+    canonicalize_singleton_dim_strides,
+    is_quantized_kv_cache,
+    is_strictly_contiguous,
+    nvfp4_kv_cache_full_dim,
+    nvfp4_kv_cache_split_views,
+)
+from vllm.v1.attention.backend import (
+    AttentionBackend,
     AttentionCGSupport,
+    AttentionImpl,
     AttentionMetadataBuilder,
+    AttentionType,
     CommonAttentionMetadata,
+    MultipleOf,
+)
+from vllm.v1.attention.backends.utils import (
     KVCacheLayoutType,
     get_dcp_local_seq_lens,
     get_kv_cache_layout,
+    get_num_attention_heads_from_layers,
     get_per_layer_parameters,
     infer_global_hyperparameters,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
+from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
+from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVQuantMode,
+    UniformTypeKVCacheSpecs,
+)
+from vllm.v1.utils import CpuGpuBuffer
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT = 2048 * 1024 * 1024
 
@@ -87,8 +104,13 @@ def _trtllm_prefill_attn_kvfp8_dequant(
     mock_kv_cache_ptr,
     k_scale_ptr,
     v_scale_ptr,
-    K_CACHE_STRIDE: tl.constexpr,
-    KV_CACHE_STRIDE: tl.constexpr,
+    src_stride_page,
+    src_stride_kv,
+    src_stride_head,
+    DST_K_CACHE_STRIDE: tl.constexpr,
+    DST_KV_CACHE_STRIDE: tl.constexpr,
+    HEAD_STRIDE: tl.constexpr,
+    NUM_KV_HEADS: tl.constexpr,
 ):
     batch_idx = tl.program_id(0).to(tl.int64)
     mock_block_table_idx = tl.program_id(1).to(tl.int64)
@@ -99,31 +121,42 @@ def _trtllm_prefill_attn_kvfp8_dequant(
         return
     dequant_dtype = mock_kv_cache_ptr.dtype.element_ty
 
-    # Dequantize K
     k_scale_val = tl.load(k_scale_ptr)
-    offset = orig_page_num * KV_CACHE_STRIDE + tl.arange(0, K_CACHE_STRIDE)
-    fp8_vals = tl.load(kv_cache_ptr + offset)
-    dequantized_vals = fp8_vals.to(tl.float32) * k_scale_val
-    mock_cache_offset = (
-        batch_idx * block_table_stride + mock_block_table_idx + 1
-    ) * KV_CACHE_STRIDE + tl.arange(0, K_CACHE_STRIDE)
-    dequantized_vals = dequantized_vals.to(dequant_dtype)
-    tl.store(mock_kv_cache_ptr + mock_cache_offset, dequantized_vals)
-
-    # Dequantize V
     v_scale_val = tl.load(v_scale_ptr)
-    offset = (
-        orig_page_num * KV_CACHE_STRIDE + K_CACHE_STRIDE + tl.arange(0, K_CACHE_STRIDE)
-    )
-    fp8_vals = tl.load(kv_cache_ptr + offset)
-    dequantized_vals = fp8_vals.to(tl.float32) * v_scale_val
-    mock_cache_offset = (
-        (batch_idx * block_table_stride + mock_block_table_idx + 1) * KV_CACHE_STRIDE
-        + K_CACHE_STRIDE
-        + tl.arange(0, K_CACHE_STRIDE)
-    )
-    dequantized_vals = dequantized_vals.to(dequant_dtype)
-    tl.store(mock_kv_cache_ptr + mock_cache_offset, dequantized_vals)
+
+    mock_page_idx = batch_idx * block_table_stride + mock_block_table_idx + 1
+    head_offsets = tl.arange(0, HEAD_STRIDE)
+
+    for h in range(NUM_KV_HEADS):
+        h_off = tl.cast(h, tl.int64)
+
+        # Read K from source (supports non-contiguous page/kv/head strides)
+        src_k = orig_page_num * src_stride_page + h_off * src_stride_head + head_offsets
+        fp8_k = tl.load(kv_cache_ptr + src_k)
+        dequant_k = (fp8_k.to(tl.float32) * k_scale_val).to(dequant_dtype)
+
+        # Write K to contiguous mock cache
+        dst_k = mock_page_idx * DST_KV_CACHE_STRIDE + h * HEAD_STRIDE + head_offsets
+        tl.store(mock_kv_cache_ptr + dst_k, dequant_k)
+
+        # Read V from source (offset by src_stride_kv for the V half)
+        src_v = (
+            orig_page_num * src_stride_page
+            + src_stride_kv
+            + h_off * src_stride_head
+            + head_offsets
+        )
+        fp8_v = tl.load(kv_cache_ptr + src_v)
+        dequant_v = (fp8_v.to(tl.float32) * v_scale_val).to(dequant_dtype)
+
+        # Write V to contiguous mock cache
+        dst_v = (
+            mock_page_idx * DST_KV_CACHE_STRIDE
+            + DST_K_CACHE_STRIDE
+            + h * HEAD_STRIDE
+            + head_offsets
+        )
+        tl.store(mock_kv_cache_ptr + dst_v, dequant_v)
 
 
 def trtllm_prefill_attn_kvfp8_dequant(
@@ -137,8 +170,18 @@ def trtllm_prefill_attn_kvfp8_dequant(
     s = kv_cache.shape
     assert s[1] == 2
     assert dequant_dtype in (torch.bfloat16, torch.float16)
-    k_cache_stride = s[2] * s[3] * s[4]
+
+    num_kv_heads, block_size, head_size = s[2], s[3], s[4]
+    head_stride = block_size * head_size
+    k_cache_stride = num_kv_heads * head_stride
     kv_cache_stride = k_cache_stride * s[1]
+
+    strides = kv_cache.stride()
+    assert strides[3] == head_size and strides[4] == 1, (
+        "For kv cache layouts, (block_size, head_size) "
+        f"dimensions must be contiguous, got strides {strides}"
+    )
+
     new_s = (batch_size * num_of_page_per_token + 1, s[1], s[2], s[3], s[4])
     # mock kv cache contains just the pages needed by this prefill
     mock_kv_cache = torch.empty(new_s, dtype=dequant_dtype, device=kv_cache.device)
@@ -157,8 +200,13 @@ def trtllm_prefill_attn_kvfp8_dequant(
         mock_kv_cache,
         k_scale,
         v_scale,
+        strides[0],
+        strides[1],
+        strides[2],
         k_cache_stride,
         kv_cache_stride,
+        head_stride,
+        num_kv_heads,
     )
     return mock_kv_cache, mock_block_table
 
@@ -167,13 +215,16 @@ class BatchDCPPrefillWrapper:
     def __init__(
         self,
         workspace_buffer: torch.Tensor | None = None,
+        dcp_a2a: bool = False,
     ):
+        if dcp_a2a:
+            self._dcp_combine = partial(dcp_a2a_lse_reduce, is_lse_base_on_e=False)
+        else:
+            self._dcp_combine = partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
         self._context = BatchPrefillWithPagedKVCacheWrapper(
             workspace_buffer, get_kv_cache_layout()
         )
-        self._new_tokens = BatchPrefillWithRaggedKVCacheWrapper(
-            workspace_buffer, get_kv_cache_layout()
-        )
+        self._new_tokens = BatchPrefillWithRaggedKVCacheWrapper(workspace_buffer)
 
     def plan(
         self,
@@ -181,7 +232,6 @@ class BatchDCPPrefillWrapper:
         paged_kv_indptr_cpu: torch.Tensor,
         paged_kv_indices: torch.Tensor,
         paged_kv_last_page_len_cpu: torch.Tensor,
-        prefill_start: int,
         page_size: int,
         num_qo_heads: int,
         dcp_world_size: int,
@@ -197,14 +247,14 @@ class BatchDCPPrefillWrapper:
     ):
         """Plan the prefill operation with given parameters."""
         self._context.plan(
-            qo_indptr_cpu,
-            paged_kv_indptr_cpu,
-            paged_kv_indices,
-            paged_kv_last_page_len_cpu[prefill_start:],
-            num_qo_heads * dcp_world_size,
-            num_kv_heads,
-            head_dim,
-            page_size,
+            qo_indptr=qo_indptr_cpu,
+            paged_kv_indptr=paged_kv_indptr_cpu,
+            paged_kv_indices=paged_kv_indices,
+            paged_kv_last_page_len=paged_kv_last_page_len_cpu,
+            num_qo_heads=num_qo_heads * dcp_world_size,
+            num_kv_heads=num_kv_heads,
+            head_dim_qk=head_dim,
+            page_size=page_size,
             causal=False,  # This is context run
             sm_scale=sm_scale,
             window_left=window_left,
@@ -247,12 +297,11 @@ class BatchDCPPrefillWrapper:
             v_scale=layer._v_scale_float,
             return_lse=True,
         )
-        output_context, lse_context = cp_lse_ag_out_rs(
+        output_context, lse_context = self._dcp_combine(
             output_context_tmp,
             lse_context_tmp,
             get_dcp_group(),
             return_lse=True,
-            is_lse_base_on_e=False,
         )
         lse_context = lse_context.transpose(0, 1).contiguous()
 
@@ -275,24 +324,45 @@ class BatchDCPPrefillWrapper:
 
 
 class FlashInferBackend(AttentionBackend):
-    accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
+        "float16",
+        "bfloat16",
         "fp8",
         "fp8_e4m3",
         "fp8_e5m2",
+        "nvfp4",
     ]
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        # Note: Not sure for all platforms, but on Blackwell,
-        # only support a page size of 16, 32, 64.
-        return [16, 32, 64]
+        # Page sizes >= 128 only run on the trtllm-gen dynamic kernel (GQA/MQA
+        # on Blackwell); advertise them only when usable so selection never
+        # picks a large kernel block we cannot serve.
+        use_large_pages = False
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is not None and vllm_config.model_config is not None:
+            pc = vllm_config.parallel_config
+            mc = vllm_config.model_config
+            num_qo_heads = mc.get_num_attention_heads(pc)
+            num_kv_heads = mc.get_num_kv_heads(pc)
+            use_large_pages = (
+                num_kv_heads > 0
+                and num_qo_heads // num_kv_heads > 1
+                and can_use_trtllm_attention(num_qo_heads, num_kv_heads)
+            )
+        if not use_large_pages:
+            return [16, 32, 64]
+        return [16, 32, 64, 128, 256, 512, 1024]
 
     @staticmethod
     def get_name() -> str:
         return "FLASHINFER"
+
+    @classmethod
+    def supports_non_causal(cls) -> bool:
+        return True
 
     @staticmethod
     def get_impl_cls() -> type["FlashInferImpl"]:
@@ -310,6 +380,10 @@ class FlashInferBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
+        if cache_dtype_str == "nvfp4":
+            # Packed layout: fp4 data + fp8 block scales in last dim
+            last_dim = nvfp4_kv_cache_full_dim(head_size)
+            return (num_blocks, 2, block_size, num_kv_heads, last_dim)
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
 
     @staticmethod
@@ -334,22 +408,29 @@ class FlashInferBackend(AttentionBackend):
         return stride_order
 
     @staticmethod
-    def get_fp8_dtype_for_flashinfer(kv_cache_dtype: str) -> torch.dtype:
+    def get_dtype_for_flashinfer(kv_cache_dtype: str) -> torch.dtype:
         if kv_cache_dtype in ("fp8", "fp8_e4m3"):
             return torch.float8_e4m3fn
         elif kv_cache_dtype == "fp8_e5m2":
             return torch.float8_e5m2
+        elif kv_cache_dtype == "nvfp4":
+            return torch.uint8
         else:
-            raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
+            raise ValueError(f"Unrecognized dtype: {kv_cache_dtype}")
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         # https://github.com/flashinfer-ai/flashinfer/blob/3d55c71a62052c590c130897d3a3db49b14fcc34/include/flashinfer/utils.cuh#L157
-        return [64, 128, 256]
+        return [64, 128, 256, 512]
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        return capability >= DeviceCapability(7, 5) and capability <= DeviceCapability(
+        # FlashInfer supports SM75+, but is currently broken on SM75 (Turing):
+        # https://github.com/flashinfer-ai/flashinfer/issues/3620 (fix:
+        # https://github.com/flashinfer-ai/flashinfer/pull/3621). Temporarily
+        # raise the floor to SM80 so it is not auto-selected on SM75 until
+        # that fix lands; revert to DeviceCapability(7, 5) once it does.
+        return capability >= DeviceCapability(8, 0) and capability <= DeviceCapability(
             12, 1
         )
 
@@ -371,49 +452,113 @@ class FlashInferBackend(AttentionBackend):
 
     @classmethod
     def get_required_kv_cache_layout(cls) -> KVCacheLayoutType | None:
-        from vllm.platforms import current_platform
-
         capability = current_platform.get_device_capability()
         if capability is not None and capability.major == 10:
             return "HND"
         return None
 
+    forward_includes_kv_cache_update: bool = False
+
+
+@dataclass
+class FIPrefill:
+    """Metadata for the native FlashInfer prefill pathway (non-TRTLLM)."""
+
+    wrapper: BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper
+
+
+@dataclass
+class FIDecode:
+    """Metadata for the native FlashInfer decode pathway (non-TRTLLM)."""
+
+    wrapper: BatchDecodeWithPagedKVCacheWrapper
+
+
+@dataclass
+class TRTLLMPrefill:
+    """Metadata for the TRTLLM prefill pathway."""
+
+    block_tables: torch.Tensor
+    """
+    The slice of the block table tensor corresponding *only* to prefill requests.
+    Shape: [num_prefills, max_num_blocks_per_seq]
+    """
+
+    seq_lens: torch.Tensor
+    """
+    The slice of the sequence lengths tensor corresponding *only* to prefill requests.
+    Shape: [num_prefills]
+    """
+
+    cum_seq_lens_q: torch.Tensor
+    cum_seq_lens_kv: torch.Tensor
+
+    max_q_len: int
+    """
+    The maximum query length *among prefill requests*.
+    """
+
+    max_seq_len: int
+    """The maximum sequence length for KV Cache."""
+
+
+@dataclass
+class TRTLLMDecode:
+    """Metadata for the TRTLLM decode pathway."""
+
+    block_tables: torch.Tensor
+    """
+    The slice of the block table tensor corresponding *only* to decode requests.
+    Shape: [num_decodes, max_num_blocks_per_seq]
+    """
+
+    seq_lens: torch.Tensor
+    """
+    The slice of the sequence lengths tensor corresponding *only* to decode requests.
+    Shape: [num_decodes]
+    """
+
+    max_seq_len: int
+    """The maximum sequence length for KV Cache."""
+
 
 @dataclass
 class FlashInferMetadata:
-    num_actual_tokens: int  # Number of tokens excluding padding.
-
-    # The data type of the query
-    q_data_type: torch.dtype
+    num_actual_tokens: int
+    """Total number of tokens in the batch (excluding padding)."""
 
     slot_mapping: torch.Tensor
+    """Tensor for writing K/V to the cache. Shape: [num_actual_tokens]"""
 
-    # For flashinfer trtllm batch decode
-    max_q_len: int
-    max_q_len_prefill: int
-    max_seq_len: int
-    seq_lens: torch.Tensor
-    block_table_tensor: torch.Tensor
-    prefill_use_trtllm: bool
-    decode_use_trtllm: bool
+    q_data_type: torch.dtype
 
-    # For handling prefill decode split
     num_decodes: int
     num_decode_tokens: int
     num_prefills: int
     num_prefill_tokens: int
+    causal: bool
 
-    # For cascade attention (CPU for planning).
+    prefill: FIPrefill | TRTLLMPrefill | None
+    """
+    Holds the metadata for the prefill portion of the batch.
+    Will be `None` if `num_prefill_tokens == 0`.
+    """
+
+    decode: FIDecode | TRTLLMDecode | None
+    """
+    Holds the metadata for the decode portion of the batch.
+    Will be `None` if `num_decode_tokens == 0`.
+    """
+
+    # --- Special Case: Cascade Attention ---
+
     use_cascade: bool
+    """
+    If True, the entire batch is a cascade attention call, and the
+    `prefill` and `decode` fields will both be None.
+    """
 
-    prefill_wrapper: (
-        BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper | None
-    ) = None
-    decode_wrapper: BatchDecodeWithPagedKVCacheWrapper | None = None
-    cascade_wrapper: MultiLevelCascadeAttentionWrapper | None = None
-
-    qo_indptr_gpu: torch.Tensor | None = None
-    paged_kv_indptr_gpu: torch.Tensor | None = None
+    cascade_wrapper: MultiLevelCascadeAttentionWrapper | None
 
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
@@ -434,9 +579,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._prefill_wrapper: (
             BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper | None
         ) = None  # Wrapper for prefill/append
+        self._noncausal_prefill_wrapper: BatchPrefillWithPagedKVCacheWrapper | None = (
+            None  # Wrapper for non-causal prefill (DFlash)
+        )
         self._decode_wrapper = None  # Wrapper for decode (general shape)
 
-        if vllm_is_batch_invariant():
+        if envs.VLLM_BATCH_INVARIANT:
             self.decode_fixed_split_size = 2048
             self.prefill_fixed_split_size = 4096
             self.disable_split_kv = True
@@ -466,11 +614,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self._decode_wrappers_cudagraph: dict[
                 int, BatchDecodeWithPagedKVCacheWrapper
             ] = {}
-            self._decode_cudagraph_max_bs = min(
-                (1 + num_spec_tokens) * max_num_reqs,
-                self.compilation_config.max_cudagraph_capture_size,
-            )
-
+            self._decode_cudagraph_max_bs = (1 + num_spec_tokens) * max_num_reqs
+            if self.compilation_config.max_cudagraph_capture_size is not None:
+                self._decode_cudagraph_max_bs = min(
+                    self._decode_cudagraph_max_bs,
+                    self.compilation_config.max_cudagraph_capture_size,
+                )
         try:
             self.dcp_world_size = get_dcp_group().world_size
             self.dcp_rank = get_dcp_group().rank_in_group
@@ -482,21 +631,43 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.dcp_world_size = 1
             self.dcp_rank = 0
             self.dcp_kv_cache_interleave_size = 1
-
-        self.num_qo_heads = self.model_config.get_num_attention_heads(
-            self.vllm_config.parallel_config
+        self.use_dcp = self.dcp_world_size > 1
+        self.dcp_a2a = (
+            self.use_dcp and vllm_config.parallel_config.dcp_comm_backend == "a2a"
         )
+
+        # Compatible with models with non-uniform per-layer head counts.
+        self.num_qo_heads = get_num_attention_heads_from_layers(
+            vllm_config, layer_names
+        ) or self.model_config.get_num_attention_heads(self.vllm_config.parallel_config)
 
         self.num_kv_heads = self.kv_cache_spec.num_kv_heads
         self.head_dim = self.kv_cache_spec.head_size
         self.page_size = self.kv_cache_spec.block_size
 
-        self.cache_dtype = self.cache_config.cache_dtype
-        if self.cache_dtype.startswith("fp8"):
-            self.kv_cache_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
-                self.cache_dtype
-            )
+        if self.kv_cache_spec.kv_quant_mode != KVQuantMode.NONE:
+            self.cache_dtype = self.cache_config.cache_dtype
+            # Cannot use self.kv_cache_spec.dtype here because kv_cache_spec
+            # storage dtype may not be the same as the op dtype (uint8 vs fp8_e4m3)
+            self.is_kvcache_nvfp4 = self.cache_dtype == "nvfp4"
+            if self.is_kvcache_nvfp4:
+                # trtllm-gen FP4 FMHA kernels only exist for sm100f (sm_100/sm_103).
+                # Fail fast at init rather than crashing on the first request.
+                if not current_platform.is_device_capability_family(100):
+                    raise ValueError(
+                        "--kv-cache-dtype nvfp4 requires sm100f, "
+                        "please try a different dtype or remove"
+                    )
+                # For NVFP4, kv_cache_dtype stays as the string "nvfp4"
+                # which is passed to FlashInferImpl
+                self.kv_cache_dtype = self.cache_dtype
+            else:
+                self.kv_cache_dtype = FlashInferBackend.get_dtype_for_flashinfer(
+                    self.cache_dtype
+                )
         else:
+            self.cache_dtype = "auto"
+            self.is_kvcache_nvfp4 = False
             assert self.kv_cache_spec.dtype == self.model_config.dtype
             self.kv_cache_dtype = self.kv_cache_spec.dtype
 
@@ -505,11 +676,24 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # try to use fp8 q if kv cache is fp8, and will fall back to model dtype
         # if TRTLLM attention kernel is not used when building attn metadata
         can_use_trtllm = can_use_trtllm_attention(self.num_qo_heads, self.num_kv_heads)
+
+        # Page sizes >= 128 require the trtllm-gen GQA/MQA path (guaranteed by
+        # get_supported_kernel_block_sizes).
+        assert self.page_size <= 64 or (
+            can_use_trtllm and self.num_qo_heads // self.num_kv_heads > 1
+        ), f"Unexpected FlashInfer page size {self.page_size} without trtllm-gen GQA"
+
         if (
             can_use_trtllm
             and not vllm_config.attention_config.disable_flashinfer_q_quantization
         ):
-            self.q_data_type = self.kv_cache_dtype
+            if self.is_kvcache_nvfp4:
+                # NVFP4 KV cache uses FP8 quantized queries
+                self.q_data_type = FlashInferBackend.get_dtype_for_flashinfer(
+                    "fp8_e4m3"
+                )
+            else:
+                self.q_data_type = self.kv_cache_dtype
         else:
             self.q_data_type = self.model_config.dtype
 
@@ -535,56 +719,66 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 "sinks, please use trtllm on blackwell or flash attention on "
                 "earlier GPUs."
             )
-        # Preparing persistent buffers (device-side)
-        self.paged_kv_indptr = torch.zeros(
-            max_num_reqs + 1, dtype=torch.int32, device=self.device
-        )
-        self.paged_kv_indices = torch.zeros(
-            max_num_pages,  # max num pages possible
-            dtype=torch.int32,
+        # Preparing persistent buffers
+        # Since we do not have explicit synchronization in ModelRunnerV2, we do not pin
+        # reused CPU buffers to avoid a race condition between step N async copies to
+        # GPU and step N+1 buffer updates.
+        self.pin_memory = not vllm_config.use_v2_model_runner and PIN_MEMORY
+        self.paged_kv_indptr = self._make_buffer(max_num_reqs + 1)
+        self.paged_kv_indptr_cpu_buffer = torch.zeros_like(
+            self.paged_kv_indptr.cpu, pin_memory=self.pin_memory
+        )  # Extra buffer for mutable paged_kv_indptr.cpu in cuda graph mode
+        self.paged_kv_indices = self._make_buffer(max_num_pages)
+        self.paged_kv_last_page_len = self._make_buffer(max_num_reqs)
+
+    def _make_buffer(
+        self, *size: int | torch.SymInt, dtype: torch.dtype = torch.int32
+    ) -> CpuGpuBuffer:
+        return CpuGpuBuffer(
+            *size,
+            dtype=dtype,
             device=self.device,
+            pin_memory=self.pin_memory,
+            with_numpy=True,
         )
-        self.paged_kv_last_page_len = torch.zeros(
-            max_num_reqs, dtype=torch.int32, device=self.device
-        )
-        # host-side buffer
-        pin_memory = is_pin_memory_available()
-        self.paged_kv_indptr_cpu = torch.zeros(
-            max_num_reqs + 1, dtype=torch.int32, device="cpu", pin_memory=pin_memory
-        )
-        self.paged_kv_indptr_np = self.paged_kv_indptr_cpu.numpy()
-        self.paged_kv_indptr_buffer = torch.zeros_like(
-            self.paged_kv_indptr_cpu, pin_memory=pin_memory
-        )
-        self.paged_kv_indices_cpu = torch.zeros(
-            max_num_pages, dtype=torch.int32, device="cpu", pin_memory=pin_memory
-        )
-        self.paged_kv_last_page_len_cpu = torch.zeros(
-            max_num_reqs, dtype=torch.int32, device="cpu", pin_memory=pin_memory
-        )
-        self.paged_kv_last_page_len_np = self.paged_kv_last_page_len_cpu.numpy()
 
-        if self.head_dim == 256 and current_platform.is_device_capability_family(100):
-            # https://github.com/flashinfer-ai/flashinfer/issues/1993 reports that
-            # head size 256 and block size 16 is not supported on blackwell.
-            assert kv_cache_spec.block_size != 16, (
-                "There is a bug in FlashInfer "
-                "block_size 16 head size 256 support. Please avoid this combination by "
-                "passing --block-size 32 or --block-size 64."
-            )
-
+    @override  # type: ignore[misc]
     @classmethod
     def get_cudagraph_support(
         cls: type["FlashInferMetadataBuilder"],
         vllm_config: VllmConfig,
         kv_cache_spec: AttentionSpec,
     ) -> AttentionCGSupport:
-        has_trtllm_support = can_use_trtllm_attention(
-            num_qo_heads=vllm_config.model_config.get_num_attention_heads(
-                vllm_config.parallel_config
-            ),
-            num_kv_heads=kv_cache_spec.num_kv_heads,
+        """Get the cudagraph support level for FlashInfer attention.
+
+        This depends on whether we can use TRTLLM attention for decodes, since we can
+        only do UNIFORM_SINGLE_TOKEN_DECODE if it is unavailable.
+        To check this, we must call can_use_trtllm_attention with the number of KV
+        heads from the kv_cache_spec. We check all available KV cache specs and
+        only return UNIFORM_BATCH if all of them support TRTLLM attention.
+        """
+        # For UniformTypeKVCacheSpecs, check all contained specs
+        kv_specs = (
+            kv_cache_spec.kv_cache_specs.values()
+            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs)
+            else [kv_cache_spec]
         )
+        num_qo_heads = vllm_config.model_config.get_num_attention_heads(
+            vllm_config.parallel_config
+        )
+        has_trtllm_support: bool = len(kv_specs) > 0
+        for spec in kv_specs:
+            if not isinstance(spec, AttentionSpec):
+                # FlashInfer only applies to attention, so we don't consider other types
+                # of KV spec (e.g. Mamba) here. This is mostly for type checking.
+                continue
+            if not can_use_trtllm_attention(
+                num_qo_heads=num_qo_heads,
+                num_kv_heads=spec.num_kv_heads,
+            ):
+                has_trtllm_support = False
+                break
+
         if has_trtllm_support:
             return AttentionCGSupport.UNIFORM_BATCH
         else:
@@ -593,7 +787,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
             buffer_size = envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
-            if vllm_is_batch_invariant():
+            if envs.VLLM_BATCH_INVARIANT:
                 buffer_size = FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT
             self._workspace_buffer = torch.zeros(
                 buffer_size, dtype=torch.uint8, device=self.device
@@ -605,15 +799,40 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def _get_prefill_wrapper(
         self,
+        causal: bool = True,
     ) -> BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper:
+        if not causal:
+            if self.use_dcp:
+                raise NotImplementedError(
+                    "FlashInfer non-causal prefill is not supported with DCP yet."
+                )
+            if self.is_kvcache_nvfp4:
+                raise NotImplementedError(
+                    "FlashInfer non-causal attention is not supported with "
+                    "NVFP4 KV cache."
+                )
+            if self._noncausal_prefill_wrapper is None:
+                self._noncausal_prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
+                    self._get_workspace_buffer(),
+                    get_kv_cache_layout(),
+                    backend="auto",
+                )
+            return self._noncausal_prefill_wrapper
+
         if self._prefill_wrapper is None:
-            if self.dcp_world_size > 1:
+            if self.use_dcp:
                 self._prefill_wrapper = BatchDCPPrefillWrapper(
                     workspace_buffer=self._get_workspace_buffer(),
+                    dcp_a2a=self.dcp_a2a,
                 )
             else:
+                # NVFP4 KV cache requires the trtllm-gen backend inside
+                # the wrapper; fa2/fa3 do not support nvfp4.
+                backend = "trtllm-gen" if self.is_kvcache_nvfp4 else "auto"
                 self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                    self._get_workspace_buffer(), get_kv_cache_layout()
+                    self._get_workspace_buffer(),
+                    get_kv_cache_layout(),
+                    backend=backend,
                 )
         assert self._prefill_wrapper is not None
         return self._prefill_wrapper
@@ -626,13 +845,16 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         if decode_wrapper is None:
             if use_cudagraph:
-                paged_kv_indptr = self.paged_kv_indptr[: batch_size + 1]
-                paged_kv_indices = self.paged_kv_indices
-                paged_kv_last_page_len = self.paged_kv_last_page_len[:batch_size]
+                paged_kv_indptr = self.paged_kv_indptr.gpu[: batch_size + 1]
+                paged_kv_indices = self.paged_kv_indices.gpu
+                paged_kv_last_page_len = self.paged_kv_last_page_len.gpu[:batch_size]
             else:
                 paged_kv_indptr = None
                 paged_kv_indices = None
                 paged_kv_last_page_len = None
+            # NVFP4 KV cache requires the trtllm-gen backend inside
+            # the wrapper; fa2/fa3 do not support nvfp4.
+            backend = "trtllm-gen" if self.is_kvcache_nvfp4 else "auto"
             decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
                 self._get_workspace_buffer(),
                 get_kv_cache_layout(),
@@ -644,6 +866,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 # at least as good as cuda cores for all attention ops in latest
                 # gpus.
                 use_tensor_cores=True,
+                backend=backend,
             )
 
             # save the decode wrapper
@@ -661,99 +884,43 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             )
         return self._cascade_wrapper
 
-    def build(
+    def _compute_flashinfer_kv_metadata(
         self,
-        common_prefix_len: int,
-        common_attn_metadata: CommonAttentionMetadata,
-        fast_build: bool = False,
-    ) -> FlashInferMetadata:
-        num_reqs = common_attn_metadata.num_reqs
-        num_actual_tokens = common_attn_metadata.num_actual_tokens
-        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
-            split_decodes_and_prefills(
-                common_attn_metadata,
-                decode_threshold=self.reorder_batch_threshold,
-                require_uniform=True,
-            )
-        )
+        num_blocks_np: np.ndarray,
+        seq_lens_np: np.ndarray,
+        block_table_tensor: torch.Tensor,
+        num_reqs: int,
+        page_size: int,
+    ) -> torch.Tensor:
+        """
+        Compute paged_kv_indptr, paged_kv_indices, paged_kv_last_page_len for FlashInfer
+        attention.
 
-        page_size = self.page_size
-        max_q_len = common_attn_metadata.max_query_len
-        max_seq_len = common_attn_metadata.max_seq_len
-        seq_lens = common_attn_metadata.seq_lens
-        seq_lens_cpu = common_attn_metadata.seq_lens_cpu
-        block_table_tensor = common_attn_metadata.block_table_tensor
-        qo_indptr_cpu = common_attn_metadata.query_start_loc_cpu
+        Results are stored in self.paged_kv_indptr,
+        self.paged_kv_indices, self.paged_kv_last_page_len buffers.
 
-        if self.dcp_world_size > 1:
-            if num_prefills > 0:
-                qo_indptr_prefill_cpu = (
-                    qo_indptr_cpu[num_decodes:] - qo_indptr_cpu[num_decodes]
-                )
-                query_lens_prefill_cpu = (
-                    qo_indptr_prefill_cpu[1:] - qo_indptr_prefill_cpu[:-1]
-                )
-                seq_lens_cpu[num_decodes:] = (
-                    seq_lens_cpu[num_decodes:] - query_lens_prefill_cpu
-                )
-
-            seq_lens_cpu = get_dcp_local_seq_lens(
-                seq_lens_cpu,
-                self.dcp_world_size,
-                self.dcp_rank,
-                self.dcp_kv_cache_interleave_size,
-            )
-
-        seq_lens_np = seq_lens_cpu.numpy()
-        num_blocks_np = (seq_lens_np + (page_size - 1)) // page_size
-
-        use_cascade = common_prefix_len > 0
-        if use_cascade:
-            # Grab the blocks of the shared prefix from the first request.
-            assert common_prefix_len % page_size == 0
-            num_common_kv_blocks = common_prefix_len // page_size
-
-            # Create CPU versions directly for cascade (no GPU versions needed)
-            shared_qo_indptr_cpu = torch.tensor(
-                [0, num_actual_tokens], dtype=torch.int32, device="cpu"
-            )
-            shared_kv_page_indptr_cpu = torch.tensor(
-                [0, num_common_kv_blocks], dtype=torch.int32, device="cpu"
-            )
-            shared_kv_page_indices_cpu = block_table_tensor[0, :num_common_kv_blocks]
-            shared_kv_last_page_len_cpu = torch.tensor(
-                [page_size], dtype=torch.int32, device="cpu"
-            )
-
-            # Remove the blocks of the shared prefix from all requests.
-            block_table_tensor = block_table_tensor[:, num_common_kv_blocks:]
-            num_blocks_np -= num_common_kv_blocks
-        else:
-            shared_qo_indptr_cpu = None
-            shared_kv_page_indptr_cpu = None
-            shared_kv_page_indices_cpu = None
-            shared_kv_last_page_len_cpu = None
-
+        Returns paged_kv_indices, a GPU tensor with shape [num_actual_pages].
+        """
         # write self.paged_kv_indptr_cpu inplace (0-index is always 0)
         np.cumsum(
             num_blocks_np,
             dtype=np.int32,
-            out=self.paged_kv_indptr_np[1 : num_reqs + 1],
+            out=self.paged_kv_indptr.np[1 : num_reqs + 1],
         )
         # NOTE(woosuk): Because self.paged_kv_indptr_cpu can be modified
         # after this line (e.g., for cuda graphs), we need to copy the data to
         # self.paged_kv_indptr_buffer to avoid race condition.
-        self.paged_kv_indptr_buffer[: num_reqs + 1] = self.paged_kv_indptr_cpu[
+        self.paged_kv_indptr_cpu_buffer[: num_reqs + 1] = self.paged_kv_indptr.cpu[
             : num_reqs + 1
         ]
-        paged_kv_indptr = self.paged_kv_indptr[: num_reqs + 1]
+        paged_kv_indptr = self.paged_kv_indptr.gpu[: num_reqs + 1]
         paged_kv_indptr.copy_(
-            self.paged_kv_indptr_buffer[: num_reqs + 1], non_blocking=True
+            self.paged_kv_indptr_cpu_buffer[: num_reqs + 1], non_blocking=True
         )
 
         # write self.paged_kv_indices inplace
-        num_actual_pages = self.paged_kv_indptr_np[num_reqs]
-        paged_kv_indices = self.paged_kv_indices[:num_actual_pages]
+        num_actual_pages = self.paged_kv_indptr.np[num_reqs]
+        paged_kv_indices = self.paged_kv_indices.gpu[:num_actual_pages]
         _copy_page_indices_kernel[(num_reqs,)](
             paged_kv_indices,
             block_table_tensor,
@@ -764,14 +931,59 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         # write self.paged_kv_last_page_len_cpu inplace
         paged_kv_last_page_len_np = seq_lens_np % page_size
-        self.paged_kv_last_page_len_np[:num_reqs] = np.where(
+        self.paged_kv_last_page_len.np[:num_reqs] = np.where(
             (paged_kv_last_page_len_np == 0) & (seq_lens_np != 0),
             page_size,
             paged_kv_last_page_len_np,
         )
+        self.paged_kv_last_page_len.gpu[:num_reqs].copy_(
+            self.paged_kv_last_page_len.cpu[:num_reqs], non_blocking=True
+        )
+        return paged_kv_indices
 
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> FlashInferMetadata:
+        num_reqs = common_attn_metadata.num_reqs
+        num_actual_tokens = common_attn_metadata.num_actual_tokens
+        causal = common_attn_metadata.causal
+        if causal:
+            num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+                split_decodes_and_prefills(
+                    common_attn_metadata,
+                    decode_threshold=self.reorder_batch_threshold,
+                    require_uniform=True,
+                )
+            )
+        else:
+            # FlashInfer decode/TRTLLM paths cannot express non-causal
+            # query-query attention, so DFlash runs as native prefill.
+            num_decodes = 0
+            num_prefills = num_reqs
+            num_decode_tokens = 0
+            num_prefill_tokens = num_actual_tokens
+
+        page_size = self.page_size
+        max_seq_len = common_attn_metadata.max_seq_len
+        seq_lens = common_attn_metadata.seq_lens
+        block_table_tensor = common_attn_metadata.block_table_tensor
+        qo_indptr = common_attn_metadata.query_start_loc
+        qo_indptr_cpu = common_attn_metadata.query_start_loc_cpu
+
+        # Step 1: Decide which dispatch modes to use:
+        # - Cascade attention (distinct mode)
+        # - Prefill (FI native or TRTLLM)
+        # - Decode (FI native or TRTLLM)
+        use_cascade = common_prefix_len > 0
         uses_spec_reorder = self.reorder_batch_threshold > 1
-        prefill_use_trtllm = use_trtllm_attention(
+        # Page sizes >= 128 must use trtllm-gen; force it for prefill too.
+        prefill_force_trtllm = (
+            True if page_size >= 128 else self.attention_config.use_trtllm_attention
+        )
+        prefill_use_trtllm = causal and use_trtllm_attention(
             self.num_qo_heads,
             self.num_kv_heads,
             num_prefill_tokens,
@@ -780,15 +992,29 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.cache_dtype,
             self.q_data_type,
             is_prefill=True,
-            force_use_trtllm=self.attention_config.use_trtllm_attention,
+            force_use_trtllm=prefill_force_trtllm,
             has_sinks=self.has_sinks,
             has_spec=uses_spec_reorder,
         )
         decode_use_trtllm = (
-            self.use_trtllm_decode_attention and self.dcp_world_size <= 1
+            causal and self.use_trtllm_decode_attention and self.dcp_world_size <= 1
         )
 
-        if not (prefill_use_trtllm and decode_use_trtllm):
+        if not causal and self.use_dcp:
+            raise NotImplementedError(
+                "FlashInfer non-causal prefill is not supported with DCP yet."
+            )
+        if not causal and self.use_trtllm_decode_attention:
+            logger.warning_once(
+                "Using FlashInfer for draft model non-causal attention; TRTLLM "
+                "can still be used for target model causal attention."
+            )
+        all_uses_trtllm = causal and (
+            (num_prefills == 0 or prefill_use_trtllm)
+            and (num_decodes == 0 or decode_use_trtllm)
+        )
+
+        if not all_uses_trtllm:
             if self.has_sinks:
                 raise NotImplementedError(
                     "FlashInfer backend currently does not support attention "
@@ -813,38 +1039,122 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # fall back to model dtype.
             self.q_data_type = self.model_config.dtype
 
+        # Step 2: Initialize the output metadata
+        # Leave prefill/decode/cascade_wrapper empty, to be populated
+        # case by case depending on the batch contents and backend selection.
         attn_metadata = FlashInferMetadata(
             num_actual_tokens=num_actual_tokens,
-            q_data_type=self.q_data_type,
             slot_mapping=common_attn_metadata.slot_mapping,
-            max_q_len=max_q_len,
-            max_q_len_prefill=max_q_len,
-            max_seq_len=max_seq_len,
-            seq_lens=seq_lens,
-            block_table_tensor=block_table_tensor,
-            prefill_use_trtllm=prefill_use_trtllm,
-            decode_use_trtllm=decode_use_trtllm,
+            q_data_type=self.q_data_type,
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
+            causal=causal,
             use_cascade=use_cascade,
+            prefill=None,
+            decode=None,
+            cascade_wrapper=None,
         )
 
-        paged_kv_indptr_cpu = self.paged_kv_indptr_cpu[: 1 + num_reqs]
-        paged_kv_last_page_len_cpu = self.paged_kv_last_page_len_cpu[:num_reqs]
+        # Guard access to seq_lens_cpu, which may not always be needed
+        # and can be expensive to retrieve in async mode.
+        # When all attention (both prefill and decode) uses TRTLLM,
+        # seq_lens_cpu is not needed since TRTLLM paths use GPU tensors
+        # (block_tables, seq_lens) directly.
+        needs_seq_lens_cpu = self.use_dcp or use_cascade or not all_uses_trtllm
+        seq_lens_cpu = common_attn_metadata.seq_lens_cpu if needs_seq_lens_cpu else None
+        seq_lens_np = seq_lens_cpu.numpy() if seq_lens_cpu is not None else None
+        num_blocks_np = (
+            (seq_lens_np + (page_size - 1)) // page_size
+            if seq_lens_np is not None
+            else None
+        )
 
-        if attn_metadata.use_cascade:
+        # Adjust seq_lens_cpu for DCP
+        if self.use_dcp:
+            assert seq_lens_cpu is not None
+            if num_prefills > 0:
+                qo_indptr_prefill_cpu = (
+                    qo_indptr_cpu[num_decodes:] - qo_indptr_cpu[num_decodes]
+                )
+                query_lens_prefill_cpu = (
+                    qo_indptr_prefill_cpu[1:] - qo_indptr_prefill_cpu[:-1]
+                )
+                seq_lens_cpu[num_decodes:] = (
+                    seq_lens_cpu[num_decodes:] - query_lens_prefill_cpu
+                )
+
+            seq_lens_cpu = get_dcp_local_seq_lens(
+                seq_lens_cpu,
+                self.dcp_world_size,
+                self.dcp_rank,
+                self.dcp_kv_cache_interleave_size,
+            )
+
+        # Adjust num_block_np for cascade attention
+        if use_cascade:
+            assert num_blocks_np is not None
+            assert common_prefix_len % page_size == 0
+            num_common_kv_blocks = common_prefix_len // page_size
+            num_blocks_np -= num_common_kv_blocks
+
+        # Compute paged_kv_indices if necessary
+        # paged_kv_indices is only needed for FlashInfer native paths;
+        # TRTLLM paths use block_tables directly on GPU.
+        needs_paged_kv_indices = use_cascade or not all_uses_trtllm
+        if needs_paged_kv_indices:
+            assert num_blocks_np is not None
+            assert seq_lens_np is not None
+            paged_kv_indices = self._compute_flashinfer_kv_metadata(
+                num_blocks_np,
+                seq_lens_np,
+                block_table_tensor,
+                num_reqs,
+                page_size,
+            )
+        else:
+            paged_kv_indices = None
+
+        # Early-out for cascade attention
+        if use_cascade:
+            assert num_blocks_np is not None
+            # Grab the blocks of the shared prefix from the first request.
+            num_common_kv_blocks = common_prefix_len // page_size
+
+            # Create CPU versions directly for cascade (no GPU versions needed)
+            shared_qo_indptr_cpu = torch.tensor(
+                [0, num_actual_tokens], dtype=torch.int32, device="cpu"
+            )
+            shared_kv_page_indptr_cpu = torch.tensor(
+                [0, num_common_kv_blocks], dtype=torch.int32, device="cpu"
+            )
+            shared_kv_page_indices_cpu = block_table_tensor[0, :num_common_kv_blocks]
+            shared_kv_last_page_len_cpu = torch.tensor(
+                [page_size], dtype=torch.int32, device="cpu"
+            )
+
+            # Remove the blocks of the shared prefix from all requests.
+            block_table_tensor = block_table_tensor[:, num_common_kv_blocks:]
+            num_blocks_np -= num_common_kv_blocks
+
+            assert paged_kv_indices is not None
+            paged_kv_indptr_cpu = self.paged_kv_indptr.cpu[: 1 + num_reqs]
+            paged_kv_last_page_len_cpu = self.paged_kv_last_page_len.cpu[:num_reqs]
+
             attn_metadata.cascade_wrapper = self._get_cascade_wrapper()
             attn_metadata.cascade_wrapper.plan(
-                [shared_qo_indptr_cpu, qo_indptr_cpu],
-                [shared_kv_page_indptr_cpu, paged_kv_indptr_cpu],
-                [shared_kv_page_indices_cpu, paged_kv_indices],
-                [shared_kv_last_page_len_cpu, paged_kv_last_page_len_cpu],
-                self.num_qo_heads,
-                self.num_kv_heads,
-                self.head_dim,
-                self.page_size,
+                qo_indptr_arr=[shared_qo_indptr_cpu, qo_indptr_cpu],
+                paged_kv_indptr_arr=[shared_kv_page_indptr_cpu, paged_kv_indptr_cpu],
+                paged_kv_indices_arr=[shared_kv_page_indices_cpu, paged_kv_indices],
+                paged_kv_last_page_len=[
+                    shared_kv_last_page_len_cpu,
+                    paged_kv_last_page_len_cpu,
+                ],
+                num_qo_heads=self.num_qo_heads,
+                num_kv_heads=self.num_kv_heads,
+                head_dim=self.head_dim,
+                page_size=self.page_size,
                 causal=True,
                 sm_scale=self.sm_scale,
                 window_left=self.window_left,
@@ -852,91 +1162,128 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 q_data_type=self.q_data_type,
                 kv_data_type=self.kv_cache_dtype,
             )
-        else:
-            # Regular attention (common case).
-            # Decodes are at the front and prefills are at the back.
-            num_prefills = attn_metadata.num_prefills
-            num_decodes = attn_metadata.num_decodes
-            if num_prefills > 0:
-                # Decodes are first so prefills start after the last decode
-                prefill_start = num_decodes
-                attn_metadata.prefill_wrapper = self._get_prefill_wrapper()
-                assert qo_indptr_cpu[prefill_start:].shape[0] == num_prefills + 1
-                assert paged_kv_indptr_cpu[prefill_start:].shape[0] == num_prefills + 1
-                assert (
-                    paged_kv_last_page_len_cpu[prefill_start:].shape[0] == num_prefills
-                )
-                # Since prefill_wrapper.run() will be called with
-                # query[num_decode_tokens:] we need to adjust the qo_indptr
-                # to be relative to the start of the prefill queries.
-                qo_indptr_cpu = (
-                    qo_indptr_cpu[prefill_start:] - qo_indptr_cpu[prefill_start]
-                )
-                paged_kv_indptr_cpu = paged_kv_indptr_cpu[prefill_start:]
+            return attn_metadata
 
-                # Recompute max_q_len for the slice of requests we are using
-                # for prefills. This can be different from max_q_len when
-                # we have a non-uniform batch with some short decodes offloaded
-                # to the prefill pathway
-                query_lens_prefill = qo_indptr_cpu[1:] - qo_indptr_cpu[:-1]
-                attn_metadata.max_q_len_prefill = int(query_lens_prefill.max().item())
+        # Step 3: Handle prefill and decode pathways case by case
+        ## PREFILL PATHWAY
+        if num_prefills > 0:
+            # Slices for shared prefill metadata
+            prefill_start = num_decodes
+            qo_indptr_prefill_cpu = (
+                qo_indptr_cpu[prefill_start:] - qo_indptr_cpu[prefill_start]
+            )
+            assert qo_indptr_prefill_cpu.shape[0] == num_prefills + 1
 
-                if not attn_metadata.prefill_use_trtllm:
-                    if self.dcp_world_size > 1:
-                        assert isinstance(
-                            attn_metadata.prefill_wrapper, BatchDCPPrefillWrapper
-                        )
-                        attn_metadata.prefill_wrapper.plan(
-                            qo_indptr_cpu=qo_indptr_cpu,
-                            paged_kv_indptr_cpu=paged_kv_indptr_cpu,
-                            paged_kv_indices=paged_kv_indices,
-                            paged_kv_last_page_len_cpu=paged_kv_last_page_len_cpu,
-                            prefill_start=prefill_start,
-                            page_size=self.page_size,
-                            num_qo_heads=self.num_qo_heads,
-                            dcp_world_size=self.dcp_world_size,
-                            num_kv_heads=self.num_kv_heads,
-                            head_dim=self.head_dim,
-                            sm_scale=self.sm_scale,
-                            window_left=self.window_left,
-                            logits_soft_cap=self.logits_soft_cap,
-                            q_data_type=self.q_data_type,
-                            kv_cache_dtype=self.kv_cache_dtype,
-                            prefill_fixed_split_size=self.prefill_fixed_split_size,
-                            disable_split_kv=self.disable_split_kv,
-                        )
-                    else:
-                        assert isinstance(
-                            attn_metadata.prefill_wrapper,
-                            BatchPrefillWithPagedKVCacheWrapper,
-                        )
-                        attn_metadata.prefill_wrapper.plan(
-                            qo_indptr_cpu,
-                            paged_kv_indptr_cpu,
-                            paged_kv_indices,
-                            paged_kv_last_page_len_cpu[prefill_start:],
-                            self.num_qo_heads,
-                            self.num_kv_heads,
-                            self.head_dim,
-                            self.page_size,
-                            causal=True,
-                            sm_scale=self.sm_scale,
-                            window_left=self.window_left,
-                            logits_soft_cap=self.logits_soft_cap,
-                            q_data_type=self.q_data_type,
-                            kv_data_type=self.kv_cache_dtype,
-                            fixed_split_size=self.prefill_fixed_split_size,
-                            disable_split_kv=self.disable_split_kv,
-                        )
+            if prefill_use_trtllm:
+                # Create GPU versions
+                qo_indptr_prefill_gpu = (
+                    qo_indptr[prefill_start:] - qo_indptr[prefill_start]
+                )
+                # Compute cum_seq_lens_kv on GPU to avoid CPU sync.
+                # This is the cumulative sum of the number of KV cache
+                # blocks per prefill request.
+                prefill_seq_lens = seq_lens[prefill_start:]
+                num_blocks_per_req = (prefill_seq_lens + page_size - 1) // page_size
+                paged_kv_indptr_prefill_gpu = self.paged_kv_indptr.gpu[
+                    prefill_start : num_reqs + 1
+                ]
+                # Assign to slice to avoid cpu sync.
+                paged_kv_indptr_prefill_gpu[:1] = 0
+                torch.cumsum(
+                    num_blocks_per_req,
+                    dim=0,
+                    out=paged_kv_indptr_prefill_gpu[1:],
+                )
+                # Compute max_q_len for prefill requests
+                query_lens_prefill_cpu = (
+                    qo_indptr_prefill_cpu[1:] - qo_indptr_prefill_cpu[:-1]
+                )
+                max_q_len_prefill = int(query_lens_prefill_cpu.max().item())
+                attn_metadata.prefill = TRTLLMPrefill(
+                    block_tables=block_table_tensor[prefill_start:],
+                    seq_lens=seq_lens[prefill_start:],
+                    cum_seq_lens_q=qo_indptr_prefill_gpu,
+                    cum_seq_lens_kv=paged_kv_indptr_prefill_gpu,
+                    max_q_len=max_q_len_prefill,
+                    max_seq_len=max_seq_len,
+                )
+            else:
+                prefill_wrapper = self._get_prefill_wrapper(causal=attn_metadata.causal)
+                # Slicing CPU buffers that are only needed for FI native prefills
+                paged_kv_last_page_len_prefill_cpu = self.paged_kv_last_page_len.cpu[
+                    prefill_start:num_reqs
+                ]
+                assert paged_kv_last_page_len_prefill_cpu.shape[0] == num_prefills
+                paged_kv_indptr_prefill_cpu = self.paged_kv_indptr.cpu[
+                    prefill_start : num_reqs + 1
+                ]
+                assert paged_kv_indptr_prefill_cpu.shape[0] == num_prefills + 1
+                if self.use_dcp:
+                    assert isinstance(prefill_wrapper, BatchDCPPrefillWrapper)
+                    prefill_wrapper.plan(
+                        qo_indptr_cpu=qo_indptr_prefill_cpu,
+                        paged_kv_indptr_cpu=paged_kv_indptr_prefill_cpu,
+                        paged_kv_indices=paged_kv_indices,
+                        paged_kv_last_page_len_cpu=paged_kv_last_page_len_prefill_cpu,
+                        page_size=self.page_size,
+                        num_qo_heads=self.num_qo_heads,
+                        dcp_world_size=self.dcp_world_size,
+                        num_kv_heads=self.num_kv_heads,
+                        head_dim=self.head_dim,
+                        sm_scale=self.sm_scale,
+                        window_left=self.window_left,
+                        logits_soft_cap=self.logits_soft_cap,
+                        q_data_type=self.q_data_type,
+                        kv_cache_dtype=self.kv_cache_dtype,
+                        prefill_fixed_split_size=self.prefill_fixed_split_size,
+                        disable_split_kv=self.disable_split_kv,
+                    )
                 else:
-                    attn_metadata.qo_indptr_gpu = qo_indptr_cpu.to(
-                        self.device, non_blocking=True
+                    assert isinstance(
+                        prefill_wrapper,
+                        BatchPrefillWithPagedKVCacheWrapper,
                     )
-                    attn_metadata.paged_kv_indptr_gpu = paged_kv_indptr_cpu.to(
-                        self.device, non_blocking=True
+                    # NVFP4 trtllm kernel only supports FP8 output;
+                    # use FP8 o_data_type so the wrapper matches the
+                    # FP8 output buffer allocated in forward().
+                    o_dtype = (
+                        FP8_DTYPE if self.is_kvcache_nvfp4 else self.model_config.dtype
                     )
+                    prefill_wrapper.plan(
+                        qo_indptr=qo_indptr_prefill_cpu,
+                        paged_kv_indptr=paged_kv_indptr_prefill_cpu,
+                        paged_kv_indices=paged_kv_indices,
+                        paged_kv_last_page_len=paged_kv_last_page_len_prefill_cpu,
+                        num_qo_heads=self.num_qo_heads,
+                        num_kv_heads=self.num_kv_heads,
+                        head_dim_qk=self.head_dim,
+                        page_size=self.page_size,
+                        causal=attn_metadata.causal,
+                        sm_scale=self.sm_scale,
+                        window_left=self.window_left,
+                        logits_soft_cap=self.logits_soft_cap,
+                        q_data_type=self.q_data_type,
+                        kv_data_type=self.kv_cache_dtype,
+                        o_data_type=o_dtype,
+                        fixed_split_size=self.prefill_fixed_split_size,
+                        disable_split_kv=self.disable_split_kv,
+                    )
+                attn_metadata.prefill = FIPrefill(wrapper=prefill_wrapper)
 
-            if num_decodes > 0:
+        ## DECODE PATHWAY
+        if num_decodes > 0:
+            if decode_use_trtllm:
+                assert num_decode_tokens % num_decodes == 0, (
+                    "TRTLLM decode requires uniform query lengths per request. "
+                    f"Got {num_decode_tokens=} and {num_decodes=}."
+                )
+                attn_metadata.decode = TRTLLMDecode(
+                    block_tables=block_table_tensor[:num_decodes],
+                    seq_lens=seq_lens[:num_decodes],
+                    max_seq_len=max_seq_len,
+                )
+            else:
+                assert seq_lens_cpu is not None
                 pure_decode = num_prefills == 0
                 use_cudagraph = (
                     self.enable_cuda_graph
@@ -945,33 +1292,41 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 )
                 num_input_tokens = num_decode_tokens
 
-                attn_metadata.decode_wrapper = self._get_decode_wrapper(
+                decode_wrapper = self._get_decode_wrapper(
                     num_input_tokens, use_cudagraph
                 )
-                if not attn_metadata.decode_use_trtllm:
-                    # Use the persistent buffer with padding length,
-                    # instead of the same address but chunked version
-                    # in atten_metadata when using cudagraph.
-                    fast_plan_decode(
-                        attn_metadata.decode_wrapper,
-                        self.paged_kv_indptr_cpu[: num_input_tokens + 1],
-                        paged_kv_indices,
-                        self.paged_kv_last_page_len_cpu[:num_input_tokens],
-                        seq_lens_cpu[:num_input_tokens],
-                        self.num_qo_heads * self.dcp_world_size,
-                        self.num_kv_heads,
-                        self.head_dim,
-                        self.page_size,
-                        # Disable flashinfer's pos encoding and use vllm's rope.
-                        pos_encoding_mode="NONE",
-                        sm_scale=self.sm_scale,
-                        window_left=self.window_left,
-                        logits_soft_cap=self.logits_soft_cap,
-                        q_data_type=self.q_data_type,
-                        kv_data_type=self.kv_cache_dtype,
-                        fixed_split_size=self.decode_fixed_split_size,
-                        disable_split_kv=self.disable_split_kv,
-                    )
+                # Use the persistent buffer with padding length,
+                # instead of the same address but chunked version
+                # in atten_metadata when using cudagraph.
+                # NVFP4 trtllm kernel only supports FP8 output;
+                # use FP8 o_data_type so the wrapper matches the
+                # FP8 output buffer allocated in forward().
+                o_dtype = (
+                    FP8_DTYPE if self.is_kvcache_nvfp4 else self.model_config.dtype
+                )
+                fast_plan_decode(
+                    decode_wrapper,
+                    indptr_cpu=self.paged_kv_indptr.cpu[: num_input_tokens + 1],
+                    indices=paged_kv_indices,
+                    last_page_len_cpu=self.paged_kv_last_page_len.cpu[
+                        :num_input_tokens
+                    ],
+                    num_qo_heads=self.num_qo_heads * self.dcp_world_size,
+                    num_kv_heads=self.num_kv_heads,
+                    head_dim=self.head_dim,
+                    page_size=self.page_size,
+                    # Disable flashinfer's pos encoding and use vllm's rope.
+                    pos_encoding_mode="NONE",
+                    sm_scale=self.sm_scale,
+                    window_left=self.window_left,
+                    logits_soft_cap=self.logits_soft_cap,
+                    q_data_type=self.q_data_type,
+                    kv_data_type=self.kv_cache_dtype,
+                    o_data_type=o_dtype,
+                    fixed_split_size=self.decode_fixed_split_size,
+                    disable_split_kv=self.disable_split_kv,
+                )
+                attn_metadata.decode = FIDecode(wrapper=decode_wrapper)
         return attn_metadata
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
@@ -1016,6 +1371,8 @@ class FlashInferImpl(AttentionImpl):
             self.sliding_window[0] if self.sliding_window is not None else -1
         )
         self.kv_cache_dtype = kv_cache_dtype
+        self.is_kvcache_nvfp4 = kv_cache_dtype == "nvfp4"
+        self.fp4_data_dim = head_size // 2 if self.is_kvcache_nvfp4 else 0
         self.logits_soft_cap = logits_soft_cap
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
 
@@ -1040,20 +1397,42 @@ class FlashInferImpl(AttentionImpl):
             self.sinks = sinks
 
         self.support_trtllm_attn = can_use_trtllm_attention(num_heads, num_kv_heads)
-        vllm_config = get_current_vllm_config()
+        vllm_config = get_current_vllm_config_or_none()
         self.supports_quant_query_input = (
             self.support_trtllm_attn
+            and vllm_config is not None
             and not vllm_config.attention_config.disable_flashinfer_q_quantization
         )
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
         self.o_sf_scale: float | None = None
 
+        # Pre-allocated FP8 output buffer for NVFP4 without fused output quant.
+        if self.is_kvcache_nvfp4 and vllm_config is not None:
+            max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+            self._nvfp4_fp8_out = torch.empty(
+                (max_num_tokens, num_heads, head_size),
+                dtype=FP8_DTYPE,
+                device="cuda",
+            )
+        else:
+            self._nvfp4_fp8_out = None
+
+        dcp_a2a = (
+            vllm_config is not None
+            and vllm_config.parallel_config.decode_context_parallel_size > 1
+            and vllm_config.parallel_config.dcp_comm_backend == "a2a"
+        )
+        if dcp_a2a:
+            self.dcp_combine = partial(dcp_a2a_lse_reduce, is_lse_base_on_e=False)
+        else:
+            self.dcp_combine = partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
+
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return (
             self.support_trtllm_attn
-            and self.kv_cache_dtype.startswith("fp8")
-            and quant_key in (kFp8StaticTensorSym, kNvfp4Quant)
+            and is_quantized_kv_cache(self.kv_cache_dtype)
+            and quant_key in (kFp8StaticTensorSym, kNvfp4Dynamic)
         )
 
     # FlashInfer requires attention sinks to be float32
@@ -1069,7 +1448,7 @@ class FlashInferImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: FlashInferMetadata,
-        output: torch.Tensor | None = None,
+        output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -1086,8 +1465,6 @@ class FlashInferImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        assert output is not None, "Output tensor must be provided."
-
         if attn_metadata is None:
             # Profiling run.
             return output.fill_(0)
@@ -1099,10 +1476,17 @@ class FlashInferImpl(AttentionImpl):
         )
 
         if self.bmm1_scale is None:
-            self.bmm1_scale = layer._q_scale_float * layer._k_scale_float * self.scale
+            self.bmm1_scale = self.scale
+            if is_quantized_kv_cache(self.kv_cache_dtype):
+                self.bmm1_scale *= layer._q_scale_float * layer._k_scale_float
 
         if self.bmm2_scale is None:
-            self.bmm2_scale = layer._v_scale_float
+            self.bmm2_scale = 1.0
+            if is_quantized_kv_cache(self.kv_cache_dtype):
+                self.bmm2_scale *= layer._v_scale_float
+
+        prefill_use_trtllm = isinstance(attn_metadata.prefill, TRTLLMPrefill)
+        decode_use_trtllm = isinstance(attn_metadata.decode, TRTLLMDecode)
 
         # The attn+quant fusion happens when output_scale is provided.
         if output_scale is None:
@@ -1113,8 +1497,8 @@ class FlashInferImpl(AttentionImpl):
             assert attn_metadata.q_data_type == FP8_DTYPE, (
                 "Query must be FP8 when attn+quant fusion happened."
             )
-            assert (
-                attn_metadata.prefill_use_trtllm and attn_metadata.decode_use_trtllm
+            assert (attn_metadata.num_prefills == 0 or prefill_use_trtllm) and (
+                attn_metadata.num_decodes == 0 or decode_use_trtllm
             ), "Must use TRT-LLM attn"
 
             if output.dtype == FP8_DTYPE:
@@ -1149,32 +1533,16 @@ class FlashInferImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
-        if self.kv_sharing_target_layer_name is None:
-            # Reshape the input keys and values and store them in the cache.
-            # Skip this if sharing KV cache with an earlier attention layer.
-            # NOTE(woosuk): Here, key and value are padded while slot_mapping is
-            # not padded. However, we don't need to do key[:num_actual_tokens]
-            # and value[:num_actual_tokens] because the reshape_and_cache_flash
-            # op uses the slot_mapping's shape to determine the number of
-            # actual tokens.
-            torch.ops._C_cache_ops.reshape_and_cache_flash(
-                key,
-                value,
-                kv_cache[:, 0],
-                kv_cache[:, 1],
-                attn_metadata.slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
-            )
-
-            # The FlashInfer api requires data to be in fp8_e4m3 or fp8_e5m2
-            # to process the cache when the kv_cache_dtype is fp8
-            if self.kv_cache_dtype.startswith("fp8"):
-                torch_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
-                    self.kv_cache_dtype
-                )
-                kv_cache = kv_cache.view(torch_dtype)
+        # FlashInfer treats uint8 KV cache as NVFP4. vLLM stores FP8 KV cache
+        # as uint8 bytes, so pass FP8 caches with their logical dtype.
+        if not self.is_kvcache_nvfp4 and kv_cache.dtype == torch.uint8:
+            fp8_view_dtype = None
+            if self.kv_cache_dtype in ("fp8", "fp8_e4m3", torch.float8_e4m3fn):
+                fp8_view_dtype = torch.float8_e4m3fn
+            elif self.kv_cache_dtype in ("fp8_e5m2", torch.float8_e5m2):
+                fp8_view_dtype = torch.float8_e5m2
+            if fp8_view_dtype is not None:
+                kv_cache = kv_cache.view(fp8_view_dtype)
 
         # Inputs and outputs may be padded for CUDA graphs
         query = query[:num_actual_tokens]
@@ -1191,22 +1559,49 @@ class FlashInferImpl(AttentionImpl):
 
         # When using spec decoding, num_decodes can be < num_decode_tokens
         # because some decode requests may have more than one query token.
-        num_decodes = attn_metadata.num_decodes
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_prefill_tokens = attn_metadata.num_prefill_tokens
 
         stride_order = FlashInferBackend.get_kv_cache_stride_order()
-        kv_cache_permute = kv_cache.permute(*stride_order)
+        kv_cache_permute = kv_cache.permute(*stride_order)  # HND and contiguous
+        # Fix degenerate strides on any size-1 dimension (e.g. num_kv_heads=1
+        # with TP=8).  PyTorch permits non-canonical strides on size-1 dims;
+        # CUDA TMA requires ≥16-byte alignment on all non-outermost strides.
+        # canonicalize_singleton_dim_strides patches metadata via as_strided —
+        # zero-copy.  See vllm.utils.torch_utils.
+        fixed = canonicalize_singleton_dim_strides(kv_cache_permute)
+        if fixed is not kv_cache_permute:
+            logger.debug(
+                "Canonicalized degenerate KV cache strides (FlashInfer): "
+                "shape=%s, strides before=%s, strides after=%s",
+                kv_cache_permute.shape,
+                kv_cache_permute.stride(),
+                fixed.stride(),
+            )
+        kv_cache_permute = fixed
+
+        # For NVFP4, the kv_cache last dim is full_dim (data + scale packed).
+        # Split into correctly-strided data and scale views.
+        nvfp4_kv_data = None
+        nvfp4_kv_block_scales = None
+        if self.is_kvcache_nvfp4:
+            nvfp4_kv_data, nvfp4_kv_block_scales = nvfp4_kv_cache_split_views(
+                kv_cache_permute
+            )
+
+        use_dcp = self.dcp_world_size > 1
+
         # Regular attention (common case).
         # Decodes are at the front and prefills are at the back.
         if num_prefill_tokens > 0:
-            prefill_wrapper = attn_metadata.prefill_wrapper
             prefill_query = query[num_decode_tokens:]
             assert prefill_query.shape[0] == num_prefill_tokens
-            assert prefill_wrapper is not None
 
-            if not attn_metadata.prefill_use_trtllm:
-                if self.dcp_world_size > 1:
+            if not prefill_use_trtllm:
+                assert isinstance(attn_metadata.prefill, FIPrefill)
+                prefill_wrapper = attn_metadata.prefill.wrapper
+                assert prefill_wrapper is not None
+                if use_dcp:
                     assert isinstance(prefill_wrapper, BatchDCPPrefillWrapper)
                     assert prefill_wrapper._context._window_left == self.window_left
                     assert prefill_wrapper._context._logits_soft_cap == (
@@ -1238,28 +1633,56 @@ class FlashInferImpl(AttentionImpl):
                         self.logits_soft_cap or 0.0
                     )
                     assert prefill_wrapper._sm_scale == self.scale
-                    assert prefill_wrapper._causal
+                    assert prefill_wrapper._causal == attn_metadata.causal
+
+                    if self.is_kvcache_nvfp4:
+                        kv_cache_permute = nvfp4_kv_data
+                    kv_cache_sf = (
+                        nvfp4_kv_block_scales if self.is_kvcache_nvfp4 else None
+                    )
+
+                    # NVFP4 trtllm kernel only supports FP8 output.
+                    # Use a pre-allocated FP8 buffer and dequantize
+                    # afterwards.
+                    needs_fp8_out_prefill = (
+                        self.is_kvcache_nvfp4 and output.dtype != FP8_DTYPE
+                    )
+                    if needs_fp8_out_prefill:
+                        out_prefill = self._nvfp4_fp8_out[:num_prefill_tokens]
+                    else:
+                        out_prefill = output[num_decode_tokens:]
+
                     prefill_wrapper.run(
                         prefill_query,
                         kv_cache_permute,
                         k_scale=layer._k_scale_float,
                         v_scale=layer._v_scale_float,
-                        out=output[num_decode_tokens:],
+                        out=out_prefill,
+                        kv_cache_sf=kv_cache_sf,
                     )
+
+                    if needs_fp8_out_prefill:
+                        output[
+                            num_decode_tokens : num_decode_tokens + num_prefill_tokens
+                        ].copy_(out_prefill.to(output.dtype))
             else:
-                # prefill_query may be non-contiguous
+                assert isinstance(attn_metadata.prefill, TRTLLMPrefill)
+                # prefill_query may be non-contiguous or have degenerate strides
+                # on size=1 dims. contiguous() ensures memory layout; then
+                # canonicalize_singleton_dim_strides fixes any remaining
+                # degenerate strides on size=1 dims for TMA alignment.
                 prefill_query = prefill_query.contiguous()
+                prefill_query = canonicalize_singleton_dim_strides(prefill_query)
                 workspace_buffer = _get_trtllm_gen_workspace_buffer()
-                block_tables_prefill = attn_metadata.block_table_tensor[num_decodes:]
-                seq_lens_prefill = attn_metadata.seq_lens[num_decodes:]
+                block_tables_prefill = attn_metadata.prefill.block_tables
+                seq_lens_prefill = attn_metadata.prefill.seq_lens
 
                 # This path needs to be enabled with VLLM_KV_CACHE_LAYOUT = HND
                 assert get_kv_cache_layout() == "HND"
-                assert prefill_query.is_contiguous()
-                assert kv_cache_permute.is_contiguous()
-                assert workspace_buffer.is_contiguous()
-                assert block_tables_prefill.is_contiguous()
-                assert seq_lens_prefill.is_contiguous()
+                assert is_strictly_contiguous(prefill_query)
+                assert is_strictly_contiguous(workspace_buffer)
+                assert is_strictly_contiguous(block_tables_prefill)
+                assert is_strictly_contiguous(seq_lens_prefill)
 
                 if output.dtype == FP4_DTYPE:
                     assert self.o_sf_scale is not None
@@ -1273,7 +1696,24 @@ class FlashInferImpl(AttentionImpl):
                     assert self.o_sf_scale is None
                     out = output[num_decode_tokens:]
 
-                if (
+                # NVFP4 trtllm kernel only supports FP8 output.
+                # Use a pre-allocated FP8 buffer and dequantize afterwards.
+                needs_fp8_out = self.is_kvcache_nvfp4 and output.dtype != FP8_DTYPE
+                if needs_fp8_out:
+                    out = self._nvfp4_fp8_out[:num_prefill_tokens]
+
+                prefill_kv_block_scales = None
+                if self.is_kvcache_nvfp4:
+                    # NVFP4 trtllm-gen kernel requires FP8 query.
+                    assert attn_metadata.q_data_type == FP8_DTYPE, (
+                        "NVFP4 KV cache requires FP8 quantized queries for "
+                        "trtllm-gen prefill. Set "
+                        "disable_flashinfer_q_quantization=False."
+                    )
+                    mock_kv_cache = nvfp4_kv_data
+                    mock_block_table = block_tables_prefill
+                    prefill_kv_block_scales = nvfp4_kv_block_scales
+                elif (
                     attn_metadata.q_data_type != FP8_DTYPE
                     and self.kv_cache_dtype.startswith("fp8")
                 ):
@@ -1281,6 +1721,18 @@ class FlashInferImpl(AttentionImpl):
                     # and fp8 kv cache. So to enable prefill attention
                     # with fp8 kv cache, we can construct a mock block
                     # and mock kv cache with BF16 KV involved in the prefill
+                    #
+                    kv_cache_permute = canonicalize_singleton_dim_strides(
+                        kv_cache_permute
+                    )
+                    kv_strides = kv_cache_permute.stride()
+                    assert (
+                        kv_strides[-1] == 1
+                        and kv_strides[-2] == kv_cache_permute.shape[-1]
+                    ), (
+                        "KV cache inner dims (block_size, head_size) must be "
+                        f"contiguous, got strides {kv_strides}"
+                    )
                     mock_kv_cache, mock_block_table = trtllm_prefill_attn_kvfp8_dequant(
                         kv_cache_permute,
                         block_tables_prefill,
@@ -1298,31 +1750,50 @@ class FlashInferImpl(AttentionImpl):
                     workspace_buffer=workspace_buffer,
                     block_tables=mock_block_table,
                     seq_lens=seq_lens_prefill,
-                    max_q_len=attn_metadata.max_q_len_prefill,
-                    max_kv_len=attn_metadata.max_seq_len,
+                    max_q_len=attn_metadata.prefill.max_q_len,
+                    max_kv_len=attn_metadata.prefill.max_seq_len,
                     bmm1_scale=self.bmm1_scale,
                     bmm2_scale=self.bmm2_scale,
                     batch_size=attn_metadata.num_prefills,
-                    cum_seq_lens_q=attn_metadata.qo_indptr_gpu,
-                    cum_seq_lens_kv=attn_metadata.paged_kv_indptr_gpu,
+                    cum_seq_lens_q=attn_metadata.prefill.cum_seq_lens_q,
+                    cum_seq_lens_kv=attn_metadata.prefill.cum_seq_lens_kv,
                     window_left=self.window_left,
                     sinks=self.sinks,
                     o_sf_scale=self.o_sf_scale,
                     out=out,
+                    kv_cache_sf=prefill_kv_block_scales,
                 )
 
+                if needs_fp8_out:
+                    output[
+                        num_decode_tokens : num_decode_tokens + num_prefill_tokens
+                    ].copy_(out[:num_prefill_tokens].to(output.dtype))
+
         if num_decode_tokens > 0:
-            decode_wrapper = attn_metadata.decode_wrapper
             decode_query = query[:num_decode_tokens]
             assert decode_query.shape[0] == num_decode_tokens
-            assert decode_wrapper is not None
 
-            if not attn_metadata.decode_use_trtllm:
+            if not decode_use_trtllm:
+                assert isinstance(attn_metadata.decode, FIDecode)
+                decode_wrapper = attn_metadata.decode.wrapper
+                assert decode_wrapper is not None
                 assert decode_wrapper._window_left == self.window_left
                 assert decode_wrapper._logits_soft_cap == (self.logits_soft_cap or 0.0)
                 assert decode_wrapper._sm_scale == self.scale
 
-                if self.dcp_world_size > 1:
+                if self.is_kvcache_nvfp4:
+                    kv_cache_permute = nvfp4_kv_data
+                kv_cache_sf = nvfp4_kv_block_scales if self.is_kvcache_nvfp4 else None
+
+                # NVFP4 kernel only supports FP8 output.
+                # Use a pre-allocated FP8 buffer and dequantize afterwards.
+                needs_fp8_out = self.is_kvcache_nvfp4 and output.dtype != FP8_DTYPE
+                if needs_fp8_out:
+                    out_decode = self._nvfp4_fp8_out[:num_decode_tokens]
+                else:
+                    out_decode = output[:num_decode_tokens]
+
+                if use_dcp:
                     decode_query = get_dcp_group().all_gather(
                         decode_query.contiguous(), dim=-2
                     )
@@ -1340,12 +1811,12 @@ class FlashInferImpl(AttentionImpl):
                         out=output_tmp,
                         lse=lse,
                         return_lse=True,
+                        kv_cache_sf=kv_cache_sf,
                     )
-                    output[:num_decode_tokens] = cp_lse_ag_out_rs(
+                    output[:num_decode_tokens] = self.dcp_combine(
                         output_tmp,
                         lse,
                         get_dcp_group(),
-                        is_lse_base_on_e=False,
                     )
                 else:
                     decode_wrapper.run(
@@ -1353,24 +1824,38 @@ class FlashInferImpl(AttentionImpl):
                         kv_cache_permute,
                         k_scale=layer._k_scale_float,
                         v_scale=layer._v_scale_float,
-                        out=output[:num_decode_tokens],
+                        out=out_decode,
+                        kv_cache_sf=kv_cache_sf,
                     )
+
+                if needs_fp8_out:
+                    output[:num_decode_tokens].copy_(out_decode.to(output.dtype))
             else:
-                # decode_query may be non-contiguous
+                assert isinstance(attn_metadata.decode, TRTLLMDecode)
+                # decode_query may be non-contiguous or have degenerate strides
+                # on size=1 dims. contiguous() ensures memory layout; then
+                # canonicalize_singleton_dim_strides fixes any remaining
+                # degenerate strides on size=1 dims for TMA alignment.
                 decode_query = decode_query.contiguous()
+                decode_query = canonicalize_singleton_dim_strides(decode_query)
                 workspace_buffer = _get_trtllm_gen_workspace_buffer()
-                block_tables_decode = attn_metadata.block_table_tensor[
-                    :num_decode_tokens
-                ]
-                seq_lens_decode = attn_metadata.seq_lens[:num_decode_tokens]
+                block_tables_decode = attn_metadata.decode.block_tables
+                seq_lens_decode = attn_metadata.decode.seq_lens
 
                 # This path needs to be enabled with VLLM_KV_CACHE_LAYOUT = HND
                 assert get_kv_cache_layout() == "HND"
-                assert decode_query.is_contiguous()
-                assert kv_cache_permute.is_contiguous()
-                assert workspace_buffer.is_contiguous()
-                assert block_tables_decode.is_contiguous()
-                assert seq_lens_decode.is_contiguous()
+                assert is_strictly_contiguous(decode_query)
+                assert is_strictly_contiguous(workspace_buffer)
+                assert is_strictly_contiguous(block_tables_decode)
+                assert is_strictly_contiguous(seq_lens_decode)
+                kv_cache_permute = canonicalize_singleton_dim_strides(kv_cache_permute)
+                kv_strides = kv_cache_permute.stride()
+                assert (
+                    kv_strides[-1] == 1 and kv_strides[-2] == kv_cache_permute.shape[-1]
+                ), (
+                    "KV cache inner dims (block_size, head_size) must be "
+                    f"contiguous, got strides {kv_strides}"
+                )
 
                 if output.dtype == FP4_DTYPE:
                     assert self.o_sf_scale is not None
@@ -1384,6 +1869,12 @@ class FlashInferImpl(AttentionImpl):
                     assert self.o_sf_scale is None
                     out = output[:num_decode_tokens]
 
+                # NVFP4 trtllm kernel only supports FP8 output.
+                # Use a pre-allocated FP8 buffer and dequantize afterwards.
+                needs_fp8_out = self.is_kvcache_nvfp4 and output.dtype != FP8_DTYPE
+                if needs_fp8_out:
+                    out = self._nvfp4_fp8_out[:num_decode_tokens]
+
                 if num_decode_tokens % attn_metadata.num_decodes != 0:
                     # This gets triggered when the dummy_run forces
                     # attention to be initialized with q_len = 0
@@ -1393,11 +1884,13 @@ class FlashInferImpl(AttentionImpl):
 
                 trtllm_batch_decode_with_kv_cache(
                     query=decode_query,
-                    kv_cache=kv_cache_permute,
+                    kv_cache=(
+                        nvfp4_kv_data if self.is_kvcache_nvfp4 else kv_cache_permute
+                    ),
                     workspace_buffer=workspace_buffer,
                     block_tables=block_tables_decode,
                     seq_lens=seq_lens_decode,
-                    max_seq_len=attn_metadata.max_seq_len,
+                    max_seq_len=attn_metadata.decode.max_seq_len,
                     bmm1_scale=self.bmm1_scale,
                     bmm2_scale=self.bmm2_scale,
                     window_left=self.window_left,
@@ -1405,8 +1898,43 @@ class FlashInferImpl(AttentionImpl):
                     o_sf_scale=self.o_sf_scale,
                     out=out,
                     q_len_per_req=q_len_per_req,
+                    kv_cache_sf=(
+                        nvfp4_kv_block_scales if self.is_kvcache_nvfp4 else None
+                    ),
                 )
+
+                if needs_fp8_out:
+                    output[:num_decode_tokens].copy_(out.to(output.dtype))
         return output_padded
+
+    def do_kv_cache_update(
+        self,
+        layer: torch.nn.Module,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        if self.kv_sharing_target_layer_name is None:
+            # Reshape the input keys and values and store them in the cache.
+            # Skip this if sharing KV cache with an earlier attention layer.
+            # NOTE(woosuk): Here, key and value are padded while slot_mapping is
+            # not padded. However, we don't need to do key[:num_actual_tokens]
+            # and value[:num_actual_tokens] because the reshape_and_cache_flash
+            # op uses the slot_mapping's shape to determine the number of
+            # actual tokens.
+            k_cache = kv_cache[:, 0]
+            v_cache = kv_cache[:, 1]
+            torch.ops._C_cache_ops.reshape_and_cache_flash(
+                key,
+                value,
+                k_cache,
+                v_cache,
+                slot_mapping,
+                self.kv_cache_dtype,
+                layer._k_scale,
+                layer._v_scale,
+            )
 
 
 def fast_plan_decode(
@@ -1414,7 +1942,6 @@ def fast_plan_decode(
     indptr_cpu: torch.Tensor,
     indices: torch.Tensor,
     last_page_len_cpu: torch.Tensor,
-    seq_lens_cpu: torch.Tensor,
     num_qo_heads: int,
     num_kv_heads: int,
     head_dim: int,
@@ -1424,6 +1951,7 @@ def fast_plan_decode(
     logits_soft_cap: float | None = None,
     q_data_type: str | torch.dtype | None = "float16",
     kv_data_type: str | torch.dtype | None = None,
+    o_data_type: str | torch.dtype | None = None,
     data_type: str | torch.dtype | None = None,
     sm_scale: float | None = None,
     rope_scale: float | None = None,
@@ -1450,105 +1978,56 @@ def fast_plan_decode(
     # this warm up is to generate the _cached_module for the decode wrapper.
     if not self.is_cuda_graph_enabled or getattr(self, "vllm_first_call", True):
         self.plan(
-            indptr_cpu,
-            indices,
-            last_page_len_cpu,
-            num_qo_heads,
-            num_kv_heads,
-            head_dim,
-            page_size,
-            pos_encoding_mode,
-            window_left,
-            logits_soft_cap,
-            q_data_type,
-            kv_data_type,
-            data_type,
-            sm_scale,
-            rope_scale,
-            rope_theta,
-            non_blocking,
-            None,  # block_tables
-            None,  # seq_lens
-            fixed_split_size,
-            disable_split_kv,
+            indptr=indptr_cpu,
+            indices=indices,
+            last_page_len=last_page_len_cpu,
+            num_qo_heads=num_qo_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            page_size=page_size,
+            pos_encoding_mode=pos_encoding_mode,
+            window_left=window_left,
+            logits_soft_cap=logits_soft_cap,
+            q_data_type=q_data_type,
+            kv_data_type=kv_data_type,
+            o_data_type=o_data_type,
+            data_type=data_type,
+            sm_scale=sm_scale,
+            rope_scale=rope_scale,
+            rope_theta=rope_theta,
+            non_blocking=non_blocking,
+            block_tables=None,
+            seq_lens=None,
+            fixed_split_size=fixed_split_size,
+            disable_split_kv=disable_split_kv,
         )
         self.vllm_first_call = False
         return
 
     assert self.is_cuda_graph_enabled, "Should be cudagraph only here"
 
-    batch_size = len(last_page_len_cpu)
-    if logits_soft_cap is None:
-        logits_soft_cap = 0.0
-
-    # Handle data types consistently
-    if data_type is not None:
-        if q_data_type is None:
-            q_data_type = data_type
-        if kv_data_type is None:
-            kv_data_type = data_type
-    elif q_data_type is None:
-        q_data_type = "float16"
-
-    if kv_data_type is None:
-        kv_data_type = q_data_type
-    q_data_type = (
-        getattr(torch, q_data_type) if isinstance(q_data_type, str) else q_data_type
+    fast_decode_plan(
+        self,
+        indptr=indptr_cpu,
+        indices=indices,
+        last_page_len=last_page_len_cpu,
+        num_qo_heads=num_qo_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        page_size=page_size,
+        pos_encoding_mode=pos_encoding_mode,
+        window_left=window_left,
+        logits_soft_cap=logits_soft_cap,
+        q_data_type=q_data_type,
+        kv_data_type=kv_data_type,
+        data_type=data_type,
+        sm_scale=sm_scale,
+        rope_scale=rope_scale,
+        rope_theta=rope_theta,
+        non_blocking=non_blocking,
+        fixed_split_size=fixed_split_size,
+        disable_split_kv=disable_split_kv,
     )
-    kv_data_type = (
-        getattr(torch, kv_data_type) if isinstance(kv_data_type, str) else kv_data_type
-    )
-
-    if batch_size != self._fixed_batch_size:
-        raise ValueError(
-            "The batch size should be fixed in cudagraph mode, the runtime "
-            "batch size {} mismatches the batch size set during "
-            "initialization {}".format(batch_size, self._fixed_batch_size)
-        )
-    if len(indices) > len(self._paged_kv_indices_buf):
-        raise ValueError(
-            "The size of indices should be less than or equal to the allocated buffer"
-        )
-
-    # host-to-device copy for the indptr buffer
-    self._paged_kv_indptr_buf.copy_(indptr_cpu, non_blocking=True)
-    # host-to-device copy for the last_page_len buffer
-    self._paged_kv_last_page_len_buf.copy_(last_page_len_cpu, non_blocking=True)
-
-    qo_indptr_host = _get_range_buf(batch_size + 1, "cpu")
-
-    try:
-        # Make sure we pass exactly 19 arguments for tensor core version
-        self._plan_info = self._cached_module.plan(
-            self._float_workspace_buffer,
-            self._int_workspace_buffer,
-            self._pin_memory_int_workspace_buffer,
-            qo_indptr_host,
-            indptr_cpu,
-            seq_lens_cpu,
-            batch_size,  # total_num_rows
-            batch_size,
-            num_qo_heads,
-            num_kv_heads,
-            page_size,
-            self.is_cuda_graph_enabled,
-            head_dim,
-            head_dim,
-            False,  # causal
-            window_left,
-            fixed_split_size,
-            disable_split_kv,
-            0,
-        )
-    except Exception as e:
-        raise RuntimeError(f"Error in tensor core plan: {e}") from e
-
-    self._pos_encoding_mode = pos_encoding_mode
-    self._window_left = window_left
-    self._logits_soft_cap = logits_soft_cap
-    self._sm_scale = sm_scale
-    self._rope_scale = rope_scale
-    self._rope_theta = rope_theta
 
 
 @triton.jit

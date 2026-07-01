@@ -7,8 +7,8 @@ from collections.abc import Generator
 
 import pytest
 
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionRequest,
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     FunctionCall,
     ToolCall,
@@ -328,7 +328,7 @@ def test_extract_tool_calls_streaming_incremental(
     expected_content,
 ):
     """Verify the Ernie45 Parser streaming behavior by verifying each chunk is as expected."""  # noqa: E501
-    request = ChatCompletionRequest(model=MODEL, messages=[], tools=[])
+    request = ChatCompletionRequest(model=MODEL, messages=[])
 
     tool_calls_dict = {}
     for delta_message in stream_delta_message_generator(

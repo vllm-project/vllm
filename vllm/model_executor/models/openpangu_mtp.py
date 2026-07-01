@@ -28,7 +28,9 @@ from vllm.config import VllmConfig
 
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -43,7 +45,6 @@ from vllm.model_executor.models.deepseek_mtp import (
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsPP
 from .openpangu import OpenPanguDecoderLayer
 
 
@@ -92,7 +93,7 @@ class OpenPanguMultiTokenPredictor(DeepSeekMultiTokenPredictor):
 
 
 @support_torch_compile
-class OpenPanguMTP(nn.Module, SupportsPP):
+class OpenPanguMTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
@@ -105,7 +106,7 @@ class OpenPanguMTP(nn.Module, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
@@ -148,7 +149,8 @@ class OpenPanguMTP(nn.Module, SupportsPP):
             ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
         ]
 
-        expert_params_mapping = FusedMoE.make_expert_params_mapping(
+        expert_params_mapping = fused_moe_make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",

@@ -10,8 +10,7 @@ from typing import Final, Generic, Literal, Protocol, TypeAlias, TypeVar
 import torch
 from transformers import PretrainedConfig
 
-from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.config import VllmConfig
+from vllm.config import MultiModalConfig, get_current_vllm_config_or_none
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -19,6 +18,8 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import round_up
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = init_logger(__name__)
 
@@ -79,7 +80,7 @@ def get_vision_encoder_info(hf_config: VisionLanguageConfig) -> VisionEncoderInf
     raise NotImplementedError(msg)
 
 
-def get_vit_attn_backend(
+def _get_vit_attn_backend(
     head_size: int,
     dtype: torch.dtype,
     *,
@@ -95,9 +96,55 @@ def get_vit_attn_backend(
     )
 
 
-def should_torch_compile_mm_vit(vllm_config: VllmConfig) -> bool:
-    """Callable to be passed to `@support_torch_compile`'s `enable_if` argument."""
-    return vllm_config.compilation_config.compile_mm_encoder
+def get_vit_attn_backend(
+    head_size: int,
+    dtype: torch.dtype,
+) -> AttentionBackendEnum:
+    """
+    Get the attention backend for Vision Transformer.
+    """
+    mm_cfg = get_multimodal_config()
+    attn_backend_override = (
+        mm_cfg.mm_encoder_attn_backend if mm_cfg is not None else None
+    )
+    return _get_vit_attn_backend(
+        head_size,
+        dtype,
+        attn_backend_override=attn_backend_override,
+    )
+
+
+def get_multimodal_config() -> MultiModalConfig | None:
+    """Return the current ``MultiModalConfig``, or ``None`` when no engine
+    config context is active (e.g., during unit tests) or when the current
+    ``model_config`` does not carry a ``multimodal_config`` (e.g., minimal
+    stubs used in tests)."""
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None or vllm_config.model_config is None:
+        return None
+    return getattr(vllm_config.model_config, "multimodal_config", None)
+
+
+def get_fp8_padded_hidden_size(num_heads: int, head_dim: int) -> int | None:
+    """Return the padded hidden size for FP8 ViT encoder attention, or
+    ``None`` when FP8 is not enabled.
+
+    cuDNN FP8 prefill attention requires ``head_dim`` to be a multiple of
+    16. For non-aligned ``head_dim`` (e.g. 72), Q/K/V are padded to the
+    nearest multiple of 16.
+    """
+    mm_cfg = get_multimodal_config()
+    if mm_cfg is None or mm_cfg.mm_encoder_attn_dtype != "fp8":
+        return None
+    return num_heads * round_up(head_dim, 16)
+
+
+def is_vit_use_data_parallel():
+    """
+    Get the tensor parallel type for Vision Transformer.
+    """
+    mm_cfg = get_multimodal_config()
+    return mm_cfg is not None and mm_cfg.mm_encoder_tp_mode == "data"
 
 
 VisionFeatureSelectStrategyStr = Literal["class", "default", "full"]
@@ -154,6 +201,7 @@ def resolve_visual_encoder_outputs(
     *,
     select_layers: list[int] | None = None,
     max_possible_layers: int | None = None,
+    last_hs_proc: Callable[[torch.Tensor], torch.Tensor] | None = None,
     feature_select_strategy: VisionFeatureSelectStrategy | None = None,
 ) -> torch.Tensor:
     """Given the outputs a visual encoder module that may correspond to the
@@ -166,6 +214,11 @@ def resolve_visual_encoder_outputs(
         select_layers: Optional layer indices to grab from the encoder
             outputs; if provided, encoder outputs must be a list.
         max_possible_layers: Total layers in the fully loaded visual encoder.
+        last_hs_proc: Optional callable to be applied to the last layer if it
+            is used, e.g., pooling head for Siglip. This is done prior to
+            feature selection and layer normalization. If select_layers are
+            provided, the output of last_hs_proc must be able to be
+            concatenated with the other select_layers along the last dimension.
         feature_select_strategy: Defines how to select the hidden states
             from each layer.
     """
@@ -175,6 +228,11 @@ def resolve_visual_encoder_outputs(
                 "Expected only a single encoder output when "
                 "`select_layers` is not provided"
             )
+
+        # Preprocess the encoder outputs as needed, e.g., map head
+        # and layer norm for siglip, which runs before feature selection
+        if last_hs_proc is not None:
+            encoder_outputs = last_hs_proc(encoder_outputs)
 
         if feature_select_strategy is not None:
             select_features = _get_vision_feature_selector(feature_select_strategy)
@@ -205,12 +263,15 @@ def resolve_visual_encoder_outputs(
         for layer_idx in select_layers
     ]
 
+    uses_last_layer = select_layers[-1] in (max_possible_layers - 1, -1)
+    if last_hs_proc is not None and uses_last_layer:
+        hs_pool[-1] = last_hs_proc(hs_pool[-1])
+
     if feature_select_strategy is not None:
         select_features = _get_vision_feature_selector(feature_select_strategy)
         hs_pool = [select_features(hs) for hs in hs_pool]
 
     # Apply post-norm on the final hidden state if we are using it
-    uses_last_layer = select_layers[-1] in (max_possible_layers - 1, -1)
     if post_layer_norm is not None and uses_last_layer:
         hs_pool[-1] = post_layer_norm(hs_pool[-1])
 

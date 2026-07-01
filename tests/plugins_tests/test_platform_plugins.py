@@ -17,7 +17,7 @@ def test_platform_plugins():
     example_file = os.path.join(
         os.path.dirname(os.path.dirname(os.path.dirname(current_file))),
         "examples",
-        "offline_inference/basic/basic.py",
+        "basic/offline_inference/basic.py",
     )
     runpy.run_path(example_file)
 
@@ -31,7 +31,7 @@ def test_platform_plugins():
     )
 
 
-def test_oot_custom_op(monkeypatch: pytest.MonkeyPatch):
+def test_oot_custom_op(default_vllm_config, monkeypatch: pytest.MonkeyPatch):
     # simulate workload by running an example
     load_general_plugins()
     from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding

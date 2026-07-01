@@ -5,17 +5,19 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import os
-from typing import TYPE_CHECKING
+import tempfile
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from typing import TYPE_CHECKING, TypeVar
 
-import numpy as np
 import regex as re
 import torch
 from cachetools import LRUCache
-from diskcache import Cache
 
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.import_utils import LazyLoader
+from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 
 if TYPE_CHECKING:
@@ -34,13 +36,50 @@ else:
         "convert_slow_tokenizer", globals(), "transformers.convert_slow_tokenizer"
     )
 
-    TokenizerLike = object
-    SchedulerOutput = object
-    InputBatch = object
 
 logger = init_logger(__name__)
 
+_T = TypeVar("_T")
+
 CACHE = None
+
+
+def compile_regex_with_timeout(fn: Callable[[str], _T], pattern: str) -> _T:
+    """Run a regex compilation callable with a timeout.
+
+    Prevents ReDoS attacks where adversarial regex patterns (e.g. nested
+    quantifiers like ``(a+)+b``) cause exponential DFA state-space explosion,
+    hanging the inference worker indefinitely.
+
+    Args:
+        fn: Single-argument callable that takes the pattern and performs
+            the regex compilation.
+        pattern: The regex pattern string, passed to *fn* and included in
+            timeout error messages.
+
+    Raises:
+        ValueError: If compilation exceeds the configured timeout.
+    """
+    timeout = envs.VLLM_REGEX_COMPILATION_TIMEOUT_S
+    if timeout <= 0:
+        return fn(pattern)
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(fn, pattern)
+    try:
+        result = future.result(timeout=timeout)
+    except TimeoutError:
+        future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise ValueError(
+            f"Regex compilation timed out after {timeout}s. "
+            "The pattern may be too complex or contain constructs that "
+            "cause exponential state-space explosion (e.g. nested "
+            f"quantifiers). Pattern: {pattern[:200]}"
+        ) from None
+    else:
+        executor.shutdown(wait=False)
+        return result
 
 
 def apply_grammar_bitmask(
@@ -72,56 +111,67 @@ def apply_grammar_bitmask(
     # request in the batch, as the logit indices are offset by this amount.
     struct_out_req_batch_indices: dict[str, int] = {}
     cumulative_offset = 0
-    seq = sorted(input_batch.req_id_to_index.items(), key=lambda x: x[1])
-    for req_id, batch_index in seq:
+    spec_tokens = scheduler_output.scheduled_spec_decode_tokens
+    struct_out_req_ids = set(grammar_output.structured_output_request_ids)
+    for batch_index, req_id in enumerate(input_batch.req_ids):
         logit_index = batch_index + cumulative_offset
-        cumulative_offset += len(
-            scheduler_output.scheduled_spec_decode_tokens.get(req_id, [])
-        )
-        if req_id in grammar_output.structured_output_request_ids:
+        cumulative_offset += len(spec_tokens.get(req_id, ()))
+        if req_id in struct_out_req_ids:
             struct_out_req_batch_indices[req_id] = logit_index
 
     out_indices = []
 
     # Reorder the bitmask to match the order of the requests in the batch.
-    sorted_bitmask = np.full(
-        shape=(logits.shape[0], grammar_bitmask.shape[1]),
-        fill_value=-1,
-        dtype=grammar_bitmask.dtype,
+    sorted_bitmask_tensor = torch.full(
+        (logits.shape[0], grammar_bitmask.shape[1]),
+        -1,
+        dtype=torch.from_numpy(grammar_bitmask[:0]).dtype,
+        pin_memory=PIN_MEMORY,
     )
+    sorted_bitmask = sorted_bitmask_tensor.numpy()
     cumulative_index = 0
     for req_id in grammar_output.structured_output_request_ids:
-        num_spec_tokens = len(
-            scheduler_output.scheduled_spec_decode_tokens.get(req_id, [])
-        )
-        if req_id in struct_out_req_batch_indices:
-            logit_index = struct_out_req_batch_indices[req_id]
+        num_spec_tokens = len(spec_tokens.get(req_id, ()))
+        if (logit_idx := struct_out_req_batch_indices.get(req_id)) is not None:
             for i in range(1 + num_spec_tokens):
-                sorted_bitmask[logit_index + i] = grammar_bitmask[cumulative_index + i]
-                out_indices.append(logit_index + i)
+                bitmask_index = logit_idx + i
+                sorted_bitmask[bitmask_index] = grammar_bitmask[cumulative_index + i]
+                out_indices.append(bitmask_index)
         cumulative_index += 1 + num_spec_tokens
 
-    # Copy async to device as tensor.
-    grammar_bitmask = torch.from_numpy(sorted_bitmask).to(
-        logits.device, non_blocking=True
-    )
+    # Copy async to device.
+    grammar_bitmask = sorted_bitmask_tensor.to(logits.device, non_blocking=True)
 
     # If the length of out indices and the logits have the same shape
     # we don't need to pass indices to the kernel,
     # since the bitmask is already aligned with the logits.
     skip_out_indices = len(out_indices) == logits.shape[0]
 
-    index_tensor = None
-    if not skip_out_indices:
-        # xgrammar expects a python list of indices but it will actually work with
-        # a tensor. If we copy the tensor ourselves here we can do it in a non_blocking
-        # manner and there should be no cpu sync within xgrammar.
-        index_tensor = torch.tensor(
-            out_indices, dtype=torch.int32, device="cpu", pin_memory=True
-        )
-        index_tensor = index_tensor.to(logits.device, non_blocking=True)
+    if not logits.is_cpu:
+        index_tensor = None
+        if not skip_out_indices:
+            # xgrammar expects a python list of indices but it will actually work with
+            # a tensor. If we copy the tensor ourselves here we can do it in a
+            # non_blocking manner and there should be no cpu sync within xgrammar.
+            index_tensor = async_tensor_h2d(
+                out_indices, dtype=torch.int32, device=logits.device
+            )
 
-    xgr.apply_token_bitmask_inplace(logits, grammar_bitmask, indices=index_tensor)
+        xgr.apply_token_bitmask_inplace(logits, grammar_bitmask, indices=index_tensor)
+        return
+
+    # CPU case, use list for indices.
+    indices = None if skip_out_indices else out_indices
+    # Handle dtype conversion for CPU (older xgrammar CPU kernels require float32)
+    # See: https://github.com/vllm-project/vllm/issues/31901
+    if logits.dtype != torch.float32:
+        # Convert to float32, apply bitmask, then convert back
+        logits_fp32 = logits.to(torch.float32)
+        xgr.apply_token_bitmask_inplace(logits_fp32, grammar_bitmask, indices=indices)
+        # Copy the modified values back to the original tensor
+        logits.copy_(logits_fp32.to(logits.dtype))
+    else:
+        xgr.apply_token_bitmask_inplace(logits, grammar_bitmask, indices=indices)
 
 
 class OutlinesVocabulary:
@@ -149,21 +199,19 @@ def get_outlines_cache_path() -> str:
     if outlines_cache_dir:
         # OUTLINES_CACHE_DIR takes precedence
         return outlines_cache_dir
-    elif xdg_cache_home:
+    if xdg_cache_home:
         return os.path.join(xdg_cache_home, ".cache", "outlines")
     # If homedir is "/", we may be inside a container, and thus writing to
     # root would be problematic, so we fall back to using a tempfile.
     # Also validate the path exists, since os.path.expanduser does
     # not guarantee existence.
-    elif os.path.isdir(home_dir) and home_dir != "/":
+    if os.path.isdir(home_dir) and home_dir != "/":
         # Default Unix fallback: ~/.cache/outlines
         return os.path.join(home_dir, ".cache", "outlines")
-    else:
-        import tempfile
 
-        # home_dir may be / inside a docker container without existing user
-        tempdir = tempfile.gettempdir()
-        return os.path.join(tempdir, ".cache", "outlines")
+    # home_dir may be / inside a docker container without existing user
+    tempdir = tempfile.gettempdir()
+    return os.path.join(tempdir, ".cache", "outlines")
 
 
 def get_outlines_cache():
@@ -171,6 +219,8 @@ def get_outlines_cache():
 
     cache_dir = get_outlines_cache_path()
     if envs.VLLM_V1_USE_OUTLINES_CACHE:
+        from diskcache import Cache
+
         logger.warning(
             "Enabling outlines cache. This is an unbounded on-disk "
             "cache. It may consume a lot of disk space and should "
@@ -184,23 +234,21 @@ def get_outlines_cache():
             cache.clear()
         cache.set("__version__", outlines_version)
         return cache
-    else:
-        return LRUCache(maxsize=128)
+
+    return LRUCache(maxsize=128)
 
 
 re_llama_byte_token = re.compile(r"^<0x[0-9A-F]{2}>$")
 re_replacement_seq = re.compile(r"^.{0,6}�+.{0,6}$")
 
 
-def _reduced_vocabulary(
-    tokenizer: TokenizerLike,
-    eos_token_id: int,
-) -> dict[bytes, list[int]]:
+def _reduced_vocabulary(tokenizer: TokenizerLike) -> dict[bytes, list[int]]:
     """Create a map from vocabulary tokens to lists of equivalent token ids.
 
     Returns:
         A Dict of token string -> equivalent token ids
     """
+    eos_token_id = tokenizer.eos_token_id
 
     unicode_to_bytes = {
         v: k for k, v in convert_slow_tokenizer.bytes_to_unicode().items()
@@ -234,7 +282,9 @@ def _reduced_vocabulary(
                 # by this point.
                 token_bytes = bytes(token_str)  # type: ignore[arg-type]
 
-            elif "\ufffd" in token_str and not re_replacement_seq.match(token_str):
+            elif (token_str == "\ufffd" and token != "\ufffd") or (
+                "\ufffd" in token_str and not re_replacement_seq.match(token_str)
+            ):
                 # Handle tokens with invalid UTF-8 sequences.
                 if re_llama_byte_token.match(token):
                     # Llama-like tokenizers use <0xXX> for incomplete sequences.
@@ -266,34 +316,13 @@ def get_outlines_vocabulary(tokenizer: TokenizerLike) -> oc.Vocabulary:
     if hasattr(tokenizer, "_outlines_vocabulary"):
         return tokenizer._outlines_vocabulary  # type: ignore
 
-    try:
-        if (
-            hasattr(
-                tokenizer,
-                "eos_token_id",
-            )
-            and tokenizer.eos_token_id is not None
-        ):
-            eos_token_id = tokenizer.eos_token_id
-        else:
-            raise ValueError(
-                f"Error during structured outputs setup for outlines: Tokenizer ({type(tokenizer)}) has no `eos_token_id` property, but `eos_token_id` is required for structured outputs to work properly."  # noqa: E501
-            )
+    reduced_vocab = _reduced_vocabulary(tokenizer)
+    vocabulary = OutlinesVocabulary(
+        oc.Vocabulary(tokenizer.eos_token_id, reduced_vocab)
+    )
+    tokenizer._outlines_vocabulary = vocabulary  # type: ignore
 
-        reduced_vocab = _reduced_vocabulary(
-            tokenizer,
-            eos_token_id,  # type: ignore
-        )
-        vocabulary = OutlinesVocabulary(oc.Vocabulary(eos_token_id, reduced_vocab))
-        tokenizer._outlines_vocabulary = vocabulary  # type: ignore
-
-        return vocabulary
-    except AttributeError as e:
-        raise ValueError(
-            f"Cannot get the vocabulary of the tokenizer "
-            f"({type(tokenizer)}). The tokenizer should have a "
-            "get_vocab method."
-        ) from e
+    return vocabulary
 
 
 def grammar_is_likely_lark(grammar_str: str) -> bool:

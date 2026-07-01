@@ -4,14 +4,192 @@
 # Copyright (c) 2024, Tri Dao, Albert Gu.
 # Adapted from https://github.com/state-spaces/mamba/blob/v2.2.4/mamba_ssm/ops/triton/selective_state_update.py
 
+import functools
+import json
+import os
+from contextlib import contextmanager
+from typing import Any
+
 import torch
 from packaging import version
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm.attention.backends.utils import PAD_SLOT_ID
+from vllm.logger import init_logger
+from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
+from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+
+if current_platform.is_xpu():
+    from vllm._xpu_ops import xpu_ops
+
+logger = init_logger(__name__)
 
 TRITON3 = HAS_TRITON and (version.parse(triton.__version__) >= version.parse("3.0.0"))
+
+
+# ---------------------------------------------------------------------------
+# JSON config loading
+# ---------------------------------------------------------------------------
+
+_CONFIGS_DIR = os.path.join(
+    os.path.dirname(os.path.realpath(__file__)), "configs", "selective_state_update"
+)
+
+
+def get_ssm_config_file_name(
+    headdim: int, dstate: int, cache_dtype: str, device_name: str
+) -> str:
+    """Return the JSON filename for the given kernel shape.
+
+    Layout: ``configs/selective_state_update/
+    headdim=<H>,dstate=<D>,device_name=<dev>,cache_dtype=<dt>.json``.
+    """
+    return (
+        f"headdim={headdim},dstate={dstate},"
+        f"device_name={device_name},cache_dtype={cache_dtype}.json"
+    )
+
+
+def get_ssm_device_name() -> str:
+    return current_platform.get_device_name().replace(" ", "_")
+
+
+def _canonical_cache_dtype(cache_dtype: str) -> str:
+    """Canonical key for config lookup. bf16 and fp16 share the same tuned
+    configs because the kernel only sees bit width when accessing state."""
+    return "float16" if cache_dtype == "bfloat16" else cache_dtype
+
+
+@functools.cache
+def get_ssm_configs(
+    headdim: int, dstate: int, cache_dtype: str
+) -> dict[int, Any] | None:
+    """
+    Return tuned (BLOCK_SIZE_M, num_warps) configs for *selective_state_update*
+    keyed by ``effective_batch = batch * nheads``, or ``None`` if no config
+    file is found for the (headdim, dstate, cache_dtype, device) combination.
+
+    They can be generated with:
+        benchmarks/kernels/benchmark_selective_state_update.py --save-configs
+    """
+    cache_dtype = _canonical_cache_dtype(cache_dtype)
+    device_name = get_ssm_device_name()
+    json_file_name = get_ssm_config_file_name(headdim, dstate, cache_dtype, device_name)
+
+    config_file_paths: list[str] = []
+
+    # User-supplied override
+    user_defined_config_folder = envs.VLLM_TUNED_CONFIG_FOLDER
+    if user_defined_config_folder is not None:
+        config_file_paths.append(
+            os.path.join(user_defined_config_folder, json_file_name)
+        )
+
+    # Bundled default
+    config_file_paths.append(os.path.join(_CONFIGS_DIR, json_file_name))
+
+    for path in config_file_paths:
+        if os.path.exists(path):
+            with open(path) as f:
+                logger.info_once(
+                    "Using SSM config from %s for selective_state_update.",
+                    path,
+                    scope="global",
+                )
+                raw = json.load(f)
+                if isinstance(raw, dict):
+                    # triton_version included in the config file only for reference
+                    raw.pop("triton_version", None)
+                    return {int(k): v for k, v in raw.items() if k.isdigit()}
+
+    logger.warning_once(
+        "Using default Mamba SSU config. Performance might be sub-optimal! "
+        "Config file not found at %s",
+        ", ".join(config_file_paths),
+    )
+    return None
+
+
+def _get_default_ssm_launch_config(
+    dstate: int,
+    is_blackwell: bool,
+) -> tuple[int, int]:
+    """Hard-coded fallback heuristic used when no tuned config is available."""
+    BLOCK_SIZE_M, num_warps = 4, 8
+    if dstate <= 16:
+        BLOCK_SIZE_M, num_warps = 32, 4
+    elif dstate <= 32:
+        BLOCK_SIZE_M, num_warps = 16, 4
+    elif dstate <= 64:
+        BLOCK_SIZE_M, num_warps = 8, 4
+    else:
+        if is_blackwell:
+            BLOCK_SIZE_M, num_warps = 32, 8
+        elif dstate <= 128:
+            BLOCK_SIZE_M, num_warps = 4, 4
+    return BLOCK_SIZE_M, num_warps
+
+
+@functools.cache
+def _try_get_optimal_ssm_config_cached(
+    headdim: int,
+    dstate: int,
+    batch: int,
+    nheads: int,
+    cache_dtype: str,
+    is_blackwell: bool,
+) -> tuple[int, int]:
+    """Cached resolution. See :func:`try_get_optimal_ssm_config`."""
+    effective_batch = batch * nheads
+    configs = get_ssm_configs(headdim, dstate, cache_dtype)
+    if configs:
+        # Pick the closest effective_batch in the tuned grid (MoE strategy).
+        closest = min(configs.keys(), key=lambda x: abs(x - effective_batch))
+        cfg = configs[closest]
+        return cfg["BLOCK_SIZE_M"], cfg["num_warps"]
+
+    return _get_default_ssm_launch_config(dstate, is_blackwell)
+
+
+# Override hook for benchmarks/tests, see `override_ssm_config`.
+_ssm_config_override: tuple[int, int] | None = None
+
+
+@contextmanager
+def override_ssm_config(config: tuple[int, int]):
+    """Pin ``try_get_optimal_ssm_config`` to ``config`` for the duration of
+    the context. Used by the tuning benchmark to time specific configs."""
+    global _ssm_config_override
+    prev = _ssm_config_override
+    _ssm_config_override = config
+    try:
+        yield
+    finally:
+        _ssm_config_override = prev
+
+
+def try_get_optimal_ssm_config(
+    headdim: int,
+    dstate: int,
+    batch: int,
+    nheads: int,
+    cache_dtype: str,
+    is_blackwell: bool,
+) -> tuple[int, int]:
+    """Return (BLOCK_SIZE_M, num_warps) for the given kernel shape.
+
+    Tuning is keyed on ``effective_batch = batch * nheads`` (the kernel grid
+    scales with the product), so configs transfer across (model, TP) combos
+    sharing ``(headdim, dstate, cache_dtype)``.
+    """
+    if _ssm_config_override is not None:
+        return _ssm_config_override
+    return _try_get_optimal_ssm_config_cached(
+        headdim, dstate, batch, nheads, cache_dtype, is_blackwell
+    )
+
 
 if TRITON3:
 
@@ -25,6 +203,21 @@ else:
     def softplus(dt):
         dt = tl.where(dt <= 20.0, tl.math.log1p(tl.exp(dt)), dt)
         return dt
+
+
+@triton.jit
+def convert_rs_fp16x2(x: tl.tensor, rand: tl.tensor) -> tl.tensor:
+    y = tl.inline_asm_elementwise(
+        asm="""{
+cvt.rs.f16x2.f32 $0, $2, $1, $3;
+}""",
+        constraints="=r,r,r,r,r",
+        args=(x, rand),
+        dtype=tl.float16,
+        is_pure=True,
+        pack=2,
+    )
+    return y
 
 
 @triton.heuristics({"HAS_DT_BIAS": lambda args: args["dt_bias_ptr"] is not None})
@@ -47,6 +240,7 @@ else:
 def _selective_scan_update_kernel(
     # Pointers to matrices
     state_ptr,
+    rand_seed_ptr,
     x_ptr,
     dt_ptr,
     dt_bias_ptr,
@@ -58,7 +252,7 @@ def _selective_scan_update_kernel(
     out_ptr,
     state_batch_indices_ptr,
     dst_state_batch_indices_ptr,
-    pad_slot_id,
+    null_block_id,
     num_accepted_tokens_ptr,
     cu_seqlens_ptr,
     # Matrix dimensions
@@ -112,6 +306,8 @@ def _selective_scan_update_kernel(
     IS_SPEC_DECODING: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     BLOCK_SIZE_DSTATE: tl.constexpr,
+    USE_RS_ROUNDING: tl.constexpr,
+    PHILOX_ROUNDS: tl.constexpr,
 ):
     pid_m = tl.program_id(axis=0)
     pid_b = tl.program_id(axis=1)
@@ -184,7 +380,7 @@ def _selective_scan_update_kernel(
 
     mask = (offs_m[:, None] < dim) & (offs_n[None, :] < dstate)
     if HAS_STATE_BATCH_INDICES:
-        mask &= state_batch_idx != pad_slot_id
+        mask &= state_batch_idx != null_block_id
     state = tl.load(state_ptrs, mask=mask, other=0.0).to(tl.float32)
 
     if HAS_DT_BIAS:
@@ -215,7 +411,7 @@ def _selective_scan_update_kernel(
                 mask=(offs_m[:, None] < dim) & (offs_n[None, :] < dstate),
                 other=0.0,
             ).to(tl.float32)
-            dA = tl.exp(A * dt[:, None])
+            dA = fast_exp(A * dt[:, None])
         else:
             dt = tl.load(dt_ptr).to(tl.float32)
             if HAS_DT_BIAS:
@@ -223,7 +419,7 @@ def _selective_scan_update_kernel(
             if DT_SOFTPLUS:
                 dt = softplus(dt)
             A = tl.load(A_ptr).to(tl.float32)
-            dA = tl.exp(A * dt)  # scalar, not a matrix
+            dA = fast_exp(A * dt)  # scalar, not a matrix
 
         B = tl.load(B_ptrs, mask=offs_n < dstate, other=0.0).to(tl.float32)
         C = tl.load(C_ptrs, mask=offs_n < dstate, other=0.0).to(tl.float32)
@@ -238,7 +434,7 @@ def _selective_scan_update_kernel(
         if IS_SPEC_DECODING:
             dst_idx_ptr = dst_state_batch_indices_ptr + i_t * stride_dst_state_indices_T
             token_dst_idx = tl.load(dst_idx_ptr).to(tl.int64)
-            if token_dst_idx != pad_slot_id:
+            if token_dst_idx != null_block_id:
                 token_dst_ptrs = (
                     state_ptr_base
                     + token_dst_idx * stride_state_batch
@@ -266,7 +462,35 @@ def _selective_scan_update_kernel(
             z_ptr += stride_z_batch
 
     if not IS_SPEC_DECODING:
-        tl.store(dst_state_ptrs, state.to(dst_state_ptrs.dtype.element_ty), mask=mask)
+        if USE_RS_ROUNDING:
+            # Load random seed
+            rand_seed = tl.load(rand_seed_ptr)
+            # Generate random offsets for each element in state
+            if HAS_STATE_BATCH_INDICES:
+                rand_offsets = (
+                    state_batch_idx * stride_state_batch + pid_h * stride_state_head
+                )
+            else:
+                rand_offsets = pid_b * stride_state_batch + pid_h * stride_state_head
+            rand_offsets += (
+                offs_m[:, None] * stride_state_dim
+                + offs_n[None, :] * stride_state_dstate
+            )
+            # Generate random 32-bits for each element in state
+            if PHILOX_ROUNDS > 0:
+                rand = tl.randint(rand_seed, rand_offsets, PHILOX_ROUNDS)
+            else:
+                rand = tl.randint(rand_seed, rand_offsets)
+            # Convert state to fp16 with RS rounding
+            state = convert_rs_fp16x2(state, rand)
+            tl.static_assert(state.dtype == tl.float16, "state must be fp16")
+            tl.static_assert(
+                dst_state_ptrs.dtype.element_ty == tl.float16,
+                "dst_state_ptrs must be fp16",
+            )
+        else:
+            state = state.to(dst_state_ptrs.dtype.element_ty)
+        tl.store(dst_state_ptrs, state, mask=mask)
 
 
 def selective_state_update(
@@ -276,16 +500,19 @@ def selective_state_update(
     A,
     B,
     C,
-    D=None,
+    D,
+    dt_bias,
     z=None,
-    dt_bias=None,
     dt_softplus=False,
     state_batch_indices=None,
     dst_state_batch_indices=None,
-    pad_slot_id=PAD_SLOT_ID,
+    null_block_id=NULL_BLOCK_ID,
     out=None,
     num_accepted_tokens=None,
     cu_seqlens=None,
+    is_blackwell=False,
+    enable_stochastic_rounding=False,
+    cache_philox_rounds=0,
 ):
     """
     Argument:
@@ -298,12 +525,12 @@ def selective_state_update(
         D: (dim,) or (nheads, dim)
         z: (batch, dim) or (batch, nheads, dim)
         dt_bias: (dim,) or (nheads, dim)
-        pad_slot_id: int
-            if cache_indices is passed, lets the kernel identify padded
-            entries that will not be processed,
-            for example: cache_indices = [pad_slot_id, 1, 20, pad_slot_id]
-            in this case, the kernel will not process entries at
-            indices 0 and 3
+        null_block_id: int
+            if state_batch_indices is passed, lets the kernel identify
+            padded entries that will not be processed,
+            for example: state_batch_indices = [null_block_id, 1, 20,
+            null_block_id] in this case, the kernel will not process
+            entries at indices 0 and 3
         out: Preallocated ssm output tensor. Assume same shape as x.
              In-place updated.
         num_accepted_tokens: (batch,)
@@ -324,21 +551,21 @@ def selective_state_update(
         B = B.unsqueeze(1)
     if C.dim() == 2:
         C = C.unsqueeze(1)
-    if D is not None and D.dim() == 1:
+    if D.dim() == 1:
         D = D.unsqueeze(0)
     if z is not None and z.dim() == 2:
         z = z.unsqueeze(1)
-    if dt_bias is not None and dt_bias.dim() == 1:
+    if dt_bias.dim() == 1:
         dt_bias = dt_bias.unsqueeze(0)
     if out.dim() == 2:
         out = out.unsqueeze(1)
-    if num_accepted_tokens is not None:
-        assert state_batch_indices is not None and state_batch_indices.dim() == 2
-        assert dst_state_batch_indices is None or dst_state_batch_indices.dim() == 2
     if state_batch_indices is not None and state_batch_indices.dim() == 1:
         state_batch_indices = state_batch_indices.unsqueeze(1)
     if dst_state_batch_indices is not None and dst_state_batch_indices.dim() == 1:
         dst_state_batch_indices = dst_state_batch_indices.unsqueeze(1)
+    if num_accepted_tokens is not None:
+        assert state_batch_indices is not None and state_batch_indices.dim() == 2
+        assert dst_state_batch_indices is None or dst_state_batch_indices.dim() == 2
 
     _, nheads, dim, dstate = state.shape
     batch = x.shape[0]
@@ -360,12 +587,10 @@ def selective_state_update(
     assert nheads % ngroups == 0, "nheads must be divisible by ngroups"
     assert B.shape == (batch, ngroups, dstate)
     assert C.shape == B.shape
-    if D is not None:
-        assert D.shape == (nheads, dim)
+    assert D.shape == (nheads, dim)
     if z is not None:
         assert z.shape == x.shape
-    if dt_bias is not None:
-        assert dt_bias.shape == (nheads, dim)
+    assert dt_bias.shape == (nheads, dim)
     if state_batch_indices is not None:
         assert state_batch_indices.shape[0] >= N
         assert state_batch_indices.shape[1] >= max_seqlen
@@ -391,26 +616,29 @@ def selective_state_update(
         if dst_state_batch_indices is not None
         else (0, 0)
     )
-    # We don't want autotune since it will overwrite the state
-    # We instead tune by hand.
-    BLOCK_SIZE_M, num_warps = (
-        (32, 4)
-        if dstate <= 16
-        else (
-            (16, 4)
-            if dstate <= 32
-            else ((8, 4) if dstate <= 64 else ((4, 4) if dstate <= 128 else ((4, 8))))
-        )
+    # We don't want autotune since it will overwrite the state.
+    # Load from JSON config if available, otherwise fall back to heuristic.
+    cache_dtype = str(state.dtype).removeprefix("torch.")
+    BLOCK_SIZE_M, num_warps = try_get_optimal_ssm_config(
+        dim, dstate, N, nheads, cache_dtype, is_blackwell
     )
+
     tie_hdim = (
         A.stride(-1) == 0
         and A.stride(-2) == 0
         and dt.stride(-1) == 0
         and dt_bias.stride(-1) == 0
     )
-    with torch.cuda.device(x.device.index):
+    rand_seed = (
+        torch.randint(0, 2**32, (1,), device=state.device)
+        if enable_stochastic_rounding
+        else None
+    )
+
+    with torch.accelerator.device_index(x.device.index):
         _selective_scan_update_kernel[grid](
             state,
+            rand_seed,
             x,
             dt,
             dt_bias,
@@ -422,7 +650,7 @@ def selective_state_update(
             out,
             state_batch_indices,
             dst_state_batch_indices,
-            pad_slot_id,
+            null_block_id,
             num_accepted_tokens,
             cu_seqlens,
             N,
@@ -440,7 +668,8 @@ def selective_state_update(
             dt.stride(0),
             dt.stride(1),
             dt.stride(2),
-            *(dt_bias.stride(0), dt_bias.stride(1)) if dt_bias is not None else 0,
+            dt_bias.stride(0),
+            dt_bias.stride(1),
             A.stride(0),
             A.stride(1),
             A.stride(2),
@@ -450,7 +679,8 @@ def selective_state_update(
             C.stride(0),
             C.stride(1),
             C.stride(2),
-            *(D.stride(0), D.stride(1)) if D is not None else 0,
+            D.stride(0),
+            D.stride(1),
             z_strides[0],
             z_strides[1],
             z_strides[2],
@@ -465,6 +695,8 @@ def selective_state_update(
             tie_hdim,
             BLOCK_SIZE_M,
             num_warps=num_warps,
+            USE_RS_ROUNDING=enable_stochastic_rounding,
+            PHILOX_ROUNDS=cache_philox_rounds,
         )
 
 
@@ -482,11 +714,13 @@ def selective_scan_fn(
     query_start_loc=None,
     cache_indices=None,
     has_initial_state=None,
-    pad_slot_id=PAD_SLOT_ID,
+    null_block_id=NULL_BLOCK_ID,
     block_size=1024,
     block_idx_first_scheduled_token=None,
     block_idx_last_scheduled_token=None,
     initial_state_idx=None,
+    cu_chunk_seqlen=None,
+    last_chunk_indices=None,
 ) -> torch.Tensor:
     """
     u: (dim, total_length) for varlen or (batch, dim, seqlen)
@@ -518,10 +752,10 @@ def selective_scan_fn(
         indicate if the ssm_state at the corresponding index should be
         used as initial state. Not providing argument assumes
         there's no initial state
-    pad_slot_id: int
+    null_block_id: int
         if cache_indices is passed, lets the kernel identify padding entries
         that will not be processed,
-        for example: cache_indices = [pad_slot_id, 1 ,20 ,pad_slot_id]
+        for example: cache_indices = [null_block_id, 1 ,20 ,null_block_id]
         in this case, the kernel will not process entries at indices 0 and 3
     block_size: int
         The block size to align the cached states to
@@ -559,26 +793,52 @@ def selective_scan_fn(
     if C.dim() == 2 and query_start_loc is not None:
         C = C.unsqueeze(0)
 
-    ops.selective_scan_fwd(
-        u,
-        delta,
-        A,
-        B,
-        C,
-        D,
-        z,
-        delta_bias,
-        delta_softplus,
-        query_start_loc,
-        cache_indices,
-        has_initial_state,
-        ssm_states,
-        pad_slot_id,
-        block_size,
-        block_idx_first_scheduled_token,
-        block_idx_last_scheduled_token,
-        initial_state_idx,
-    )
+    if current_platform.is_xpu():
+        xpu_ops.selective_scan_fwd(
+            u,
+            delta,
+            A,
+            B,
+            C,
+            D,
+            z,
+            delta_bias,
+            delta_softplus,
+            query_start_loc,
+            cache_indices,
+            has_initial_state,
+            ssm_states,
+            null_block_id,
+            block_size,
+            block_idx_first_scheduled_token,
+            block_idx_last_scheduled_token,
+            initial_state_idx,
+            cu_chunk_seqlen,
+            last_chunk_indices,
+        )
+    else:
+        ops.selective_scan_fwd(
+            u,
+            delta,
+            A,
+            B,
+            C,
+            D,
+            z,
+            delta_bias,
+            delta_softplus,
+            query_start_loc,
+            cache_indices,
+            has_initial_state,
+            ssm_states,
+            null_block_id,
+            block_size,
+            block_idx_first_scheduled_token,
+            block_idx_last_scheduled_token,
+            initial_state_idx,
+            cu_chunk_seqlen,
+            last_chunk_indices,
+        )
 
     if z is None:
         return delta  # output written inplace to delta

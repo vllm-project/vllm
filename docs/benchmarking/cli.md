@@ -4,6 +4,11 @@ This section guides you through running benchmark tests with the extensive datas
 
 It's a living document, updated as new features and datasets become available.
 
+!!! tip
+    The benchmarks described on this page are mainly for evaluating specific vLLM features as well as regression testing.
+
+    For benchmarking production vLLM servers, we recommend [GuideLLM](https://github.com/vllm-project/guidellm), an established performance benchmarking framework with live progress updates and automatic report generation. It is also more flexible than `vllm bench serve` in terms of dataset loading, request formatting, and workload patterns.
+
 ## Dataset Overview
 
 <style>
@@ -13,14 +18,14 @@ th {
 </style>
 
 | Dataset | Online | Offline | Data Path |
-|---------|--------|---------|-----------|
+| ------- | ------ | ------- | --------- |
 | ShareGPT | ✅ | ✅ | `wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json` |
 | ShareGPT4V (Image) | ✅ | ✅ | `wget https://huggingface.co/datasets/Lin-Chen/ShareGPT4V/resolve/main/sharegpt4v_instruct_gpt4-vision_cap100k.json`<br>Note that the images need to be downloaded separately. For example, to download COCO's 2017 Train images:<br>`wget http://images.cocodataset.org/zips/train2017.zip` |
 | ShareGPT4Video (Video) | ✅ | ✅ | `git clone https://huggingface.co/datasets/ShareGPT4Video/ShareGPT4Video` |
 | BurstGPT | ✅ | ✅ | `wget https://github.com/HPMLL/BurstGPT/releases/download/v1.1/BurstGPT_without_fails_2.csv` |
 | Sonnet (deprecated) | ✅ | ✅ | Local file: `benchmarks/sonnet.txt` |
 | Random | ✅ | ✅ | `synthetic` |
-| RandomMultiModal (Image/Video) | 🟡 | 🚧 | `synthetic` |
+| RandomMultiModal (Image/Video) | ✅ | ✅ | `synthetic` |
 | RandomForReranking | ✅ | ✅ | `synthetic` |
 | Prefix Repetition | ✅ | ✅ | `synthetic` |
 | HuggingFace-VisionArena | ✅ | ✅ | `lmarena-ai/VisionArena-Chat` |
@@ -29,9 +34,15 @@ th {
 | HuggingFace-AIMO | ✅ | ✅ | `AI-MO/aimo-validation-aime`, `AI-MO/NuminaMath-1.5`, `AI-MO/NuminaMath-CoT` |
 | HuggingFace-Other | ✅ | ✅ | `lmms-lab/LLaVA-OneVision-Data`, `Aeala/ShareGPT_Vicuna_unfiltered` |
 | HuggingFace-MTBench | ✅ | ✅ | `philschmid/mt-bench` |
+| HuggingFace-HumanEval | ✅ | ✅ | `openai/openai_humaneval` |
+| HuggingFace-GSM8K | ✅ | ✅ | `openai/gsm8k` |
 | HuggingFace-Blazedit | ✅ | ✅ | `vdaita/edit_5k_char`, `vdaita/edit_10k_char` |
+| HuggingFace-ASR | ✅ | ✅ | `openslr/librispeech_asr`, `facebook/voxpopuli`, `LIUM/tedlium`, `edinburghcstr/ami`, `speechcolab/gigaspeech`, `kensho/spgispeech`, `ArtificialAnalysis/Earnings22-Cleaned-AA`, `D4nt3/esb-datasets-earnings22-validation-tiny-filtered` |
 | Spec Bench | ✅ | ✅ | `wget https://raw.githubusercontent.com/hemingkx/Spec-Bench/refs/heads/main/data/spec_bench/question.jsonl` |
+| SPEED-Bench | ✅ | ✅ | `curl -LsSf https://raw.githubusercontent.com/NVIDIA-NeMo/Skills/refs/heads/main/nemo_skills/dataset/speed-bench/prepare.py \| python3 -` |
 | Custom | ✅ | ✅ | Local file: `data.jsonl` |
+| Custom Audio | ✅ | ✅ | Local file: `audio_data.jsonl` |
+| Custom Image | ✅ | ✅ | Local file: `image_data.jsonl` |
 
 Legend:
 
@@ -100,9 +111,41 @@ P99 ITL (ms):                            8.39
 ==================================================
 ```
 
+#### Results Visualization
+
+The `--plot-timeline` and `--plot-dataset-stats` can be used to generate respectively the requests completion timeline and dataset prompt and output tokens statistics, which can be useful for debugging purpose or for deeper analysis.
+
+```bash
+vllm bench serve \
+    --backend vllm \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --endpoint /v1/completions \
+    --dataset-name sharegpt \
+    --dataset-path <your data path>/ShareGPT_V3_unfiltered_cleaned_split.json \
+    --num-prompts 100 \
+    --plot-timeline \
+    --timeline-itl-thresholds 2,5 \
+    --plot-dataset-stats \
+    --save-result
+```
+
+##### Interactive Timeline
+
+The generated timeline is an interactive visualization in the form of an HTML file that can be rendered in most browsers. To customize the ITL color thresholds, one can use `--timeline-itl-thresholds` flag (default: 25ms, 50ms)
+
+Example output:
+
+<iframe src="../assets/contributing/vllm_bench_serve_timeline.html" width="100%" height="600" frameborder="0"></iframe>
+
+##### Dataset statistics
+
+The generated figure shows the input prompt and output tokens distribution.
+
+Example output: ![Dataset Statistics](../assets/contributing/vllm_bench_serve_dataset_stats.png)
+
 #### Custom Dataset
 
-If the dataset you want to benchmark is not supported yet in vLLM, even then you can benchmark on it using `CustomDataset`. Your data needs to be in `.jsonl` format and needs to have "prompt" field per entry, e.g., data.jsonl
+If the dataset you want to benchmark is not supported yet in vLLM, even then you can benchmark on it using `CustomDataset`. At inference time, use the option `--dataset-name custom`. Your data needs to be in the `.jsonl` format and needs to have "prompt" field per entry, e.g., data.jsonl
 
 ```json
 {"prompt": "What is the capital of India?"}
@@ -132,6 +175,100 @@ vllm bench serve --port 9001 --save-result --save-detailed \
 ```
 
 You can skip applying chat template if your data already has it by using `--custom-skip-chat-template`.
+
+#### Custom Audio Dataset
+
+If the audio dataset you want to benchmark is not supported yet in vLLM, then you can benchmark on it using `CustomAudioDataset`. At inference time, use the option `--dataset-name custom_audio`. Your data needs to be in the `.jsonl` format and needs to have "prompt" and "audio" fields per entry, e.g., `audio_data.jsonl`:
+
+```json
+{"prompt": "What does this audio say?", "audio": "/path/to/audio_1.wav"}
+{"prompt": "Transcribe the audio.", "audio": "/path/to/audio_2.wav"}
+```
+
+- **Supported models:** The `CustomAudioDataset` class supports two types of audio models: ASR models (e.g. Whisper) which do not require a "prompt" field; and multimodal audio-text chat models (e.g. Qwen2-Audio). Since these model types require different arguments at inference, we are giving two examples.
+
+- **Example 1: Whisper**
+
+Whisper is a dedicated ASR encoder-decoder model, so it uses `--backend openai-audio` and `--endpoint /v1/audio/transcriptions`.
+
+```bash
+# start server
+vllm serve openai/whisper-tiny
+```
+
+```bash
+vllm bench serve \
+  --model openai/whisper-tiny \
+  --backend openai-audio \
+  --endpoint /v1/audio/transcriptions \
+  --dataset-name custom_audio \
+  --dataset-path audio_data.jsonl \
+  --no-oversample \
+  --custom-output-len 256 \
+  --save-result \
+  --save-detailed \
+  --result-filename whisper_bench.json
+```
+
+- **Example 2: Qwen2-Audio**
+
+Qwen2-Audio is a multimodal chat model that can do ASR and speech analysis, so it uses `--backend openai-chat`, and `--endpoint /v1/chat/completions`. It also requires `--enable-multimodal-chat` to enable multimodal chat transformation.
+
+```bash
+vllm bench serve \
+  --model Qwen/Qwen2-Audio-7B-Instruct \
+  --backend openai-chat \
+  --endpoint /v1/chat/completions \
+  --dataset-name custom_audio \
+  --dataset-path audio_data.jsonl \
+  --no-oversample \
+  --custom-output-len 256 \
+  --enable-multimodal-chat \
+  --save-result \
+  --save-detailed \
+  --result-filename qwen_bench.json
+```
+
+#### Custom Image Dataset
+
+If the image dataset you want to benchmark is not supported yet in vLLM, then you can benchmark on it using `CustomImageDataset`. At inference time, use the option `--dataset-name custom_image`. Your data needs to be in the `.jsonl` format and can use "prompt" and "image_files" fields per entry, e.g., `image_data.jsonl`:
+
+```json
+{"prompt": "How many animals are present in the given image?", "image_files": ["/path/to/image/folder/horsepony.jpg"]}
+{"prompt": "What colour is the bird shown in the image?", "image_files": ["/path/to/image/folder/flycatcher.jpeg"]}
+```
+
+Every image listed in "image_files" is added to the request in the listed order after the prompt text. To preserve an interleaved order of text and images, use a "content" field with OpenAI-compatible content parts:
+
+```json
+{"content": [{"type": "text", "text": "Compare "}, {"type": "image", "image": "/path/to/image/folder/chart_a.png"}, {"type": "text", "text": " with "}, {"type": "image_url", "image_url": {"url": "/path/to/image/folder/chart_b.png"}}]}
+```
+
+The "image" shorthand accepts the same values as "image_files". The "image_url" field accepts either an OpenAI-style object with a "url" field or a URL string.
+
+By default, image references are sent to the serving endpoint as provided, with local image paths converted to `file://` URLs.
+
+If the benchmark client should load local and HTTP(S) images before sending requests, pass `--custom-ensure-client-side-data` to encode them as base64 data URLs on the client side.
+
+Existing `data:image/...` URLs are already self-contained and are kept unchanged.
+
+```bash
+# need a model with vision capability here
+vllm serve Qwen/Qwen2-VL-7B-Instruct
+```
+
+```bash
+# run benchmarking script
+vllm bench serve --save-result --save-detailed \
+  --backend openai-chat \
+  --model Qwen/Qwen2-VL-7B-Instruct \
+  --endpoint /v1/chat/completions \
+  --dataset-name custom_image \
+  --dataset-path <path-to-your-image-data-jsonl> \
+  --custom-ensure-client-side-data
+```
+
+Note that we need to use the `openai-chat` backend and `/v1/chat/completions` endpoint for multimodal inputs.
 
 #### VisionArena Benchmark for Vision Language Models
 
@@ -201,9 +338,113 @@ vllm bench serve \
     --model meta-llama/Meta-Llama-3-8B-Instruct \
     --dataset-name spec_bench \
     --dataset-path "<YOUR_DOWNLOADED_PATH>/data/spec_bench/question.jsonl" \
-    --num-prompts -1
+    --num-prompts -1 \
     --spec-bench-category "summarization"
 ```
+
+#### SPEED-Bench Benchmark with Speculative Decoding
+
+[SPEED-Bench](https://huggingface.co/datasets/nvidia/SPEED-Bench) is a unified and diverse dataset for speculative decoding, supporting acceptance rate and length measurements using the Qualitative split and throughput measurements using the Throughput splits in 5 configuration of input sequence length (1k, 2k, 8k, 16k, 32k).
+
+!!! note
+    This dataset is governed by the [NVIDIA Evaluation Dataset License Agreement](https://huggingface.co/datasets/nvidia/SPEED-Bench/blob/main/License.pdf). For each dataset a user elects to use, the user is responsible for checking if the dataset license is fit for the intended purpose. The `prepare.py` script automatically fetches data from all the source datasets.
+
+First, download the dataset to a folder, using this one liner:
+
+```bash
+curl -LsSf https://raw.githubusercontent.com/NVIDIA-NeMo/Skills/refs/heads/main/nemo_skills/dataset/speed-bench/prepare.py | python3 -
+```
+
+The command supports also the following arguments:
+
+- `--config`: download only a subset of the dataset: `qualitative`, `throughput_1k`, `throughput_2k`, `throughput_8k`, `throughput_16k` and `throughput_32k`. By default, it will download all subsets.
+- `--output_dir`: download to a specified folder. By default, it will download to the current directory.
+
+Start a server with speculative decoding:
+
+```bash
+vllm serve meta-llama/Llama-3.3-70B-Instruct \
+    --speculative-config $'{"method": "eagle3",
+    "num_speculative_tokens": 3,
+    "model": "nvidia/Llama-3.3-70B-Instruct-Eagle3"}'
+```
+
+Run all categories in the Qualitative split:
+
+```bash
+vllm bench serve \
+    --model meta-llama/Llama-3.3-70B-Instruct \
+    --dataset-name speed_bench \
+    --dataset-path "<YOUR_DOWNLOADED_PATH>/data/speed_bench" \
+    --num-prompts -1
+```
+
+Available categories include `[writing, roleplay, reasoning, math, coding, stem, humanities, multilingual, summarization, qa, rag]`.
+
+Run only a specific category like "multilingual":
+
+```bash
+vllm bench serve \
+    --model meta-llama/Llama-3.3-70B-Instruct \
+    --dataset-name speed_bench \
+    --dataset-path "<YOUR_DOWNLOADED_PATH>/data/speed_bench" \
+    --num-prompts -1 \
+    --speed-bench-category "multilingual"
+```
+
+Run all categories in the Throughput split (2k ISL):
+
+```bash
+vllm bench serve \
+    --model meta-llama/Llama-3.3-70B-Instruct \
+    --dataset-name speed_bench \
+    --speed-bench-dataset-subset throughput_2k \
+    --dataset-path "<YOUR_DOWNLOADED_PATH>/data/speed_bench/" \
+    --num-prompts -1
+```
+
+Available categories include `[high_entropy, mixed, low_entropy]`, where high entropy data contains unstructued data such as creative writing while low entropy data contains more structured data such as coding, more details are in the dataset card.
+
+#### BFCL (Tool-Calling) Benchmark
+
+The Berkeley Function Calling Leaderboard (BFCL) dataset measures serving
+latency and throughput on realistic tool-calling traffic. Each request
+carries a per-sample `tools` schema and chat history, so the server must
+expose `/v1/chat/completions` with an auto-tool-choice parser enabled.
+The benchmark client always uses the `openai-chat` backend.
+
+Start a tool-parser-enabled server, then run the bench. For example, with
+`gpt-oss-20b`:
+
+```bash
+# Server
+vllm serve openai/gpt-oss-20b \
+    --enable-auto-tool-choice \
+    --tool-call-parser openai \
+    --reasoning-parser openai_gptoss
+
+# Client
+vllm bench serve \
+    --backend openai-chat \
+    --endpoint /v1/chat/completions \
+    --model openai/gpt-oss-20b \
+    --dataset-name hf \
+    --dataset-path gorilla-llm/Berkeley-Function-Calling-Leaderboard \
+    --bfcl-categories simple,live_simple,multiple \
+    --num-prompts 200
+```
+
+`--bfcl-categories` is a comma-separated list of BFCL v3 category names
+(without the `BFCL_v3_` prefix or `.json` suffix). Defaults to
+`simple,live_simple,multiple`. Other supported non-multi-turn categories
+include `parallel`, `live_parallel`, `parallel_multiple`,
+`live_parallel_multiple`, `irrelevance`, `live_irrelevance`,
+`live_relevance`, `java`, `javascript`, and `rest`. Multi-turn categories
+are not yet supported.
+
+The dataset class normalizes BFCL's loose schema dialect (`dict` →
+`object`, `float` → `number`, `tuple` → `array`, `any` → `string`) so
+modern grammar backends accept the translated tool definitions.
 
 #### Other HuggingFaceDataset Examples
 
@@ -259,6 +500,26 @@ vllm bench serve \
     --num-prompts 80
 ```
 
+`openai/openai_humaneval`:
+
+``` bash
+vllm bench serve \
+    --model NousResearch/Hermes-3-Llama-3.1-8B \
+    --dataset-name hf \
+    --dataset-path openai/openai_humaneval \
+    --num-prompts 80
+```
+
+`openai/gsm8k`:
+
+``` bash
+vllm bench serve \
+    --model NousResearch/Hermes-3-Llama-3.1-8B \
+    --dataset-name hf \
+    --dataset-path openai/gsm8k \
+    --num-prompts 80
+```
+
 `vdaita/edit_5k_char` or `vdaita/edit_10k_char`:
 
 ``` bash
@@ -269,6 +530,22 @@ vllm bench serve \
     --num-prompts 90 \
     --blazedit-min-distance 0.01 \
     --blazedit-max-distance 0.99
+```
+
+`openslr/librispeech_asr`, `facebook/voxpopuli`, `LIUM/tedlium`, `edinburghcstr/ami`, `speechcolab/gigaspeech`, `kensho/spgispeech`, `ArtificialAnalysis/Earnings22-Cleaned-AA`, `D4nt3/esb-datasets-earnings22-validation-tiny-filtered`
+
+```bash
+vllm bench serve \
+    --model openai/whisper-large-v3-turbo \
+    --backend openai-audio \
+    --dataset-name hf \
+    --dataset-path facebook/voxpopuli --hf-subset en --hf-split test --no-stream --trust-remote-code \
+    --num-prompts 99999999 \
+    --no-oversample \
+    --endpoint /v1/audio/transcriptions \
+    --ready-check-timeout-sec 600 \
+    --save-result \
+    --max-concurrency 512
 ```
 
 #### Running With Sampling Parameters
@@ -333,14 +610,14 @@ The `--burstiness` parameter mathematically controls request arrival patterns us
 
 Load Pattern Recommendations by Use Case:
 
-| Use Case           | Burstiness   | Request Rate    | Max Concurrency | Description                                               |
-| ---                | ---          | ---             | ---             | ---                                                       |
+| Use Case           | Burstiness   | Request Rate    | Max Concurrency | Description                                                                        |
+| ---                | ---          | ---             | ---             | ---                                                                                |
 | Maximum Throughput | N/A          | Infinite        | Limited         | **Most common**: Simulates load balancer/gateway limits with unlimited user demand |
-| Realistic Testing  | 1.0          | Moderate (5-20) | Infinite        | Natural Poisson traffic patterns for baseline performance |
-| Stress Testing     | 0.1-0.5      | High (20-100)   | Infinite        | Challenging burst patterns to test resilience             |
-| Latency Profiling  | 2.0-5.0      | Low (1-10)      | Infinite        | Uniform load for consistent timing analysis               |
-| Capacity Planning  | 1.0          | Variable        | Limited         | Test resource limits with realistic constraints           |
-| SLA Validation     | 1.0          | Target rate     | SLA limit       | Production-like constraints for compliance testing        |
+| Realistic Testing  | 1.0          | Moderate (5-20) | Infinite        | Natural Poisson traffic patterns for baseline performance                          |
+| Stress Testing     | 0.1-0.5      | High (20-100)   | Infinite        | Challenging burst patterns to test resilience                                      |
+| Latency Profiling  | 2.0-5.0      | Low (1-10)      | Infinite        | Uniform load for consistent timing analysis                                        |
+| Capacity Planning  | 1.0          | Variable        | Limited         | Test resource limits with realistic constraints                                    |
+| SLA Validation     | 1.0          | Target rate     | SLA limit       | Production-like constraints for compliance testing                                 |
 
 These load patterns help evaluate different aspects of your vLLM deployment, from basic performance characteristics to resilience under challenging traffic conditions.
 
@@ -493,6 +770,24 @@ vllm bench throughput \
   --max-lora-rank 8 \
   --enable-lora \
   --lora-path yard1/llama-2-7b-sql-lora-test
+```
+
+#### Synthetic Random Multimodal (random-mm)
+
+Generate synthetic multimodal inputs for offline throughput testing without external datasets.
+Use `--backend vllm-chat` so that image tokens are counted correctly.
+
+```bash
+vllm bench throughput \
+  --model Qwen/Qwen2-VL-7B-Instruct \
+  --backend vllm-chat \
+  --dataset-name random-mm \
+  --num-prompts 100 \
+  --random-input-len 300 \
+  --random-output-len 40 \
+  --random-mm-base-items-per-request 2 \
+  --random-mm-limit-mm-per-prompt '{"image": 3, "video": 0}' \
+  --random-mm-bucket-config '{(256, 256, 1): 0.7, (720, 1280, 1): 0.3}'
 ```
 
 </details>
@@ -670,6 +965,41 @@ vllm bench serve \
 
 </details>
 
+### Replay Timed Traces
+
+<details class="admonition abstract" markdown="1">
+<summary>Show more</summary>
+
+Example of how to run traces which have timing information
+with them.
+
+#### Running MoonshotAI traces
+
+Start the server:
+
+```bash
+vllm serve Qwen/Qwen3.5-2B \
+--host 127.0.0.1 --port 8000
+```
+
+Run the benchmark:
+
+```bash
+# Download an example trace 
+# curl -L -o conversation_trace.jsonl \
+#https://raw.githubusercontent.com/kvcache-ai/Mooncake/main/FAST25-release/traces/conversation_trace.jsonl 
+
+vllm bench serve --model Qwen/Qwen3.5-2B \  
+--dataset-name=timed_trace --num-prompts 100 --host 127.0.0.1 \
+--port 8000 --dataset-path ./conversation_trace.jsonl \
+--ignore-eos  --self-timed --timed-trace-chunk-hash-size 512 \
+--timed-trace-sec-multiplier 0.001 
+```
+
+This will replay the first 100 lines from the trace file `conversation.jsonl`.  
+
+</details>
+
 ### 🧪 Hashing Benchmarks
 
 <details class="admonition abstract" markdown="1">
@@ -796,8 +1126,8 @@ Generate synthetic image inputs alongside random text prompts to stress-test vis
 
 Notes:
 
-- Works only with online benchmark via the OpenAI backend (`--backend openai-chat`) and endpoint `/v1/chat/completions`.
-- Video sampling is not yet implemented.
+- For online benchmarks, use `--backend openai-chat` with endpoint `/v1/chat/completions`.
+- For offline benchmarks, use `--backend vllm-chat` (see [Offline Throughput Benchmark](#-offline-throughput-benchmark) for an example).
 
 Start the server (example):
 
@@ -860,6 +1190,74 @@ How sampling works:
 - If a modality (e.g., image) reaches its limit from `--random-mm-limit-mm-per-prompt`, all buckets of that modality are excluded and the remaining bucket probabilities are renormalized before continuing.
 This should be seen as an edge case, and if this behavior can be avoided by setting `--random-mm-limit-mm-per-prompt` to a large number. Note that this might result in errors due to engine config `--limit-mm-per-prompt`.
 - The resulting request contains synthetic image data in `multi_modal_data` (OpenAI Chat format). When `random-mm` is used with the OpenAI Chat backend, prompts remain text and MM content is attached via `multi_modal_data`.
+
+</details>
+
+### 🔬 Multimodal Processor Benchmark
+
+Benchmark per-stage latency of the multimodal (MM) input processor pipeline, including the encoder forward pass. This is useful for profiling preprocessing bottlenecks in vision-language models.
+
+<details class="admonition abstract" markdown="1">
+<summary>Show more</summary>
+
+The benchmark measures the following stages for each request:
+
+| Stage | Description |
+| ----- | ----------- |
+| `get_mm_hashes_secs` | Time spent hashing multimodal inputs |
+| `get_cache_missing_items_secs` | Time spent looking up the processor cache |
+| `apply_hf_processor_secs` | Time spent in the HuggingFace processor |
+| `merge_mm_kwargs_secs` | Time spent merging multimodal kwargs |
+| `apply_prompt_updates_secs` | Time spent updating prompt tokens |
+| `preprocessor_total_secs` | Total preprocessing time |
+| `encoder_forward_secs` | Time spent in the encoder model forward pass |
+| `num_encoder_calls` | Number of encoder invocations per request |
+
+The benchmark also reports end-to-end latency (TTFT + decode time) per
+request. Use `--metric-percentiles` to select which percentiles to report
+(default: p99) and `--output-json` to save results.
+
+#### Basic Example with Synthetic Data (random-mm)
+
+```bash
+vllm bench mm-processor \
+  --model Qwen/Qwen2-VL-7B-Instruct \
+  --dataset-name random-mm \
+  --num-prompts 50 \
+  --random-input-len 300 \
+  --random-output-len 40 \
+  --random-mm-base-items-per-request 2 \
+  --random-mm-limit-mm-per-prompt '{"image": 3, "video": 0}' \
+  --random-mm-bucket-config '{(256, 256, 1): 0.7, (720, 1280, 1): 0.3}'
+```
+
+#### Using a HuggingFace Dataset
+
+```bash
+vllm bench mm-processor \
+  --model Qwen/Qwen2-VL-7B-Instruct \
+  --dataset-name hf \
+  --dataset-path lmarena-ai/VisionArena-Chat \
+  --hf-split train \
+  --num-prompts 100
+```
+
+#### Warmup, Custom Percentiles, and JSON Output
+
+```bash
+vllm bench mm-processor \
+  --model Qwen/Qwen2-VL-7B-Instruct \
+  --dataset-name random-mm \
+  --num-prompts 200 \
+  --num-warmups 5 \
+  --random-input-len 300 \
+  --random-output-len 40 \
+  --random-mm-base-items-per-request 1 \
+  --metric-percentiles 50,90,95,99 \
+  --output-json results.json
+```
+
+See [`vllm bench mm-processor`](../cli/bench/mm_processor.md) for the full argument reference.
 
 </details>
 

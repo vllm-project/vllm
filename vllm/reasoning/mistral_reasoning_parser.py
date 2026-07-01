@@ -1,18 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterable, Sequence
 from functools import cached_property
+from typing import TYPE_CHECKING
 
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionRequest,
-    ResponsesRequest,
-)
-from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 from vllm.tokenizers.mistral import MistralTokenizer
 
-logger = init_logger(__name__)
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 
 class MistralReasoningParser(BaseThinkingReasoningParser):
@@ -40,8 +39,8 @@ class MistralReasoningParser(BaseThinkingReasoningParser):
                 "constructor during construction."
             )
 
-        self.start_token_id = tokenizer.tokenizer.get_control_token(self.start_token)
-        self.end_token_id = tokenizer.tokenizer.get_control_token(self.end_token)
+        self.start_token_id = tokenizer.tokenizer.get_special_token(self.start_token)
+        self.end_token_id = tokenizer.tokenizer.get_special_token(self.end_token)
 
         if self.start_token_id is None or self.end_token_id is None:
             raise RuntimeError(
@@ -63,16 +62,25 @@ class MistralReasoningParser(BaseThinkingReasoningParser):
 
         return SpecialTokens.end_think
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         has_eot_token = False
 
-        for id in input_ids[::-1]:
+        for id in reversed(input_ids):
             if id == self.start_token_id:
                 # Reasoning ends only if a BOT token is found before a EOT token.
                 return has_eot_token
             elif id == self.end_token_id:
                 has_eot_token = True
         return False
+
+    def is_reasoning_end_streaming(
+        self, input_ids: Sequence[int], delta_ids: Iterable[int]
+    ) -> bool:
+        if self.end_token_id in delta_ids:
+            return True
+        # Grammar's think? is optional — if [THINK] was never generated,
+        # reasoning was skipped entirely.
+        return self.start_token_id not in input_ids
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """
@@ -104,13 +112,13 @@ class MistralReasoningParser(BaseThinkingReasoningParser):
         # 3. Both BOT and EOT have been outputted.
         elif has_bot_token and has_eot_token:
             return input_ids[:bot_token_index] + input_ids[eot_token_index + 1 :]
-        # 4. Only EOT has been outputted => this should not have occured for a model
+        # 4. Only EOT has been outputted => this should not have occurred for a model
         #    well prompted and trained.
         else:
             return input_ids[:eot_token_index] + input_ids[eot_token_index + 1 :]
 
     def extract_reasoning(
-        self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
+        self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> tuple[str | None, str | None]:
         """
         Extract reasoning content from the model output.
