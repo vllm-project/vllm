@@ -4,9 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::multimodal::MmFeatures;
-use vllm_engine_core_client::protocol::{
-    EngineCoreRequest, EngineCoreSamplingParams, ReasoningParserKwargs,
-};
+use vllm_engine_core_client::protocol::request::{EngineCoreRequest, ReasoningParserKwargs};
+use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 
 use crate::error::{Error, Result};
 
@@ -134,7 +133,8 @@ fn current_unix_timestamp_secs() -> f64 {
 mod tests {
     use std::collections::BTreeMap;
 
-    use vllm_engine_core_client::protocol::{EngineCoreSamplingParams, ReasoningParserKwargs};
+    use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
+    use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 
     use super::GenerateRequest;
     use crate::error::Error;
