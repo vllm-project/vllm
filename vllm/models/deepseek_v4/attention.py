@@ -170,6 +170,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
         self.prefix = prefix  # Alias for compatibility with compressor
         self.hidden_size = config.hidden_size
+        self.hc_mult = getattr(config, "hc_mult", 1)
         self.n_heads = config.num_attention_heads
         assert self.n_heads % tp_size == 0
         self.n_local_heads = self.n_heads // tp_size
@@ -339,8 +340,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # Metadata-independent input GEMMs + RMSNorm stay in the captured
         # graph; the metadata-dependent rest (q up-proj + kv-insert, indexer,
         # compressor, MLA attention) runs in the eager break.
+        single_hidden_states = self._select_attn_input(hidden_states)
         qr_kv, kv_score, indexer_kv_score, indexer_weights = (
-            self.attn_gemm_parallel_execute(hidden_states)
+            self.attn_gemm_parallel_execute(single_hidden_states)
         )
         qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
         qr, kv = fused_q_kv_rmsnorm(
@@ -355,7 +357,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # where the breakable cudagraph capture breaks (the attention op runs
         # eagerly between captured graph segments).
         self.attention_impl(
-            hidden_states,
+            single_hidden_states,
             qr,
             kv,
             kv_score,
@@ -369,7 +371,14 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # Inverse-RoPE + wo_a + wo_b output projection (platform-specific).
         return self._o_proj(o, positions)
 
-    def attn_gemm_parallel_execute(self, hidden_states) -> tuple[Any, ...]:
+    def _select_attn_input(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if hidden_states.dim() == 3:
+            return hidden_states[:, 0, :]
+        return hidden_states
+
+    def attn_gemm_parallel_execute(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[Any, ...]:
         aux_streams = self.aux_stream_list
         if aux_streams is not None:
             assert len(aux_streams) >= 3

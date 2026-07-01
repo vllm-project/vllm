@@ -1512,7 +1512,10 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
         if not torch.allclose(
             layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
         ):
-            raise ValueError("Different global scales for w1 and w3 is not supported.")
+            logger.warning_once(
+                "Different NVFP4 global scales for MoE w1 and w3 were found. "
+                "Using the maximum per expert for fused w13."
+            )
 
         # Use a single gscale for w13
         w13_weight_scale_2 = torch.maximum(

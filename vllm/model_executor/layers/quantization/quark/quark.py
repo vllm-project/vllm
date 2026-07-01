@@ -30,6 +30,7 @@ from vllm.model_executor.layers.quantization.quark.schemes import (
     QuarkScheme,
     QuarkW4A8_MXFP4_FP8,
     QuarkW8A8Fp8,
+    QuarkW8A8Fp8Block,
     QuarkW8A8Int8,
 )
 from vllm.model_executor.layers.quantization.quark.utils import (
@@ -63,6 +64,9 @@ class QuarkConfig(QuantizationConfig):
         if kv_cache_group is None:
             kv_cache_group = []
         self.quant_config = quant_config
+        self.packed_modules_mapping = dict(getattr(self, "packed_modules_mapping", {}))
+        self.packed_modules_mapping.setdefault("gate_up_proj", ["w1", "w3"])
+        self.packed_modules_mapping.setdefault("fused_wqa_wkv", ["wq_a", "wkv"])
         self.kv_cache_group = kv_cache_group
         self.kv_cache_config = kv_cache_config
         self.pack_method = pack_method
@@ -344,6 +348,32 @@ class QuarkConfig(QuantizationConfig):
         # Confirm activation scheme is supported.
         is_per_tensor_activation = input_quant.get("qscheme") == "per_tensor"
         return is_per_tensor_activation
+
+    def _is_fp8_block_w8a8(
+        self,
+        weight_quant: dict[str, Any] | None,
+        input_quant: dict[str, Any] | None,
+    ) -> bool:
+        if weight_quant is None or input_quant is None:
+            return False
+
+        is_fp8_dtype = (
+            weight_quant.get("dtype") == "fp8_e4m3"
+            and input_quant.get("dtype") == "fp8_e4m3"
+        )
+        is_block_weight = (
+            not weight_quant.get("is_dynamic")
+            and weight_quant.get("qscheme") == "per_block"
+            and list(weight_quant.get("block_size") or []) == [128, 128]
+            and weight_quant.get("symmetric") is True
+        )
+        is_dynamic_group_input = (
+            input_quant.get("is_dynamic") is True
+            and input_quant.get("qscheme") == "per_group"
+            and input_quant.get("group_size") == 128
+            and input_quant.get("symmetric") is True
+        )
+        return is_fp8_dtype and is_block_weight and is_dynamic_group_input
 
     def _is_static_tensor_w8a8(
         self,
@@ -627,6 +657,12 @@ class QuarkConfig(QuantizationConfig):
 
         if self._is_nvfp4(weight_config, input_config):
             return QuarkNVFP4()
+        elif self._is_fp8_block_w8a8(weight_config, input_config):
+            is_fp8_block_supported = self._check_scheme_supported(
+                QuarkW8A8Fp8Block.get_min_capability(), error=False
+            )
+            if is_fp8_block_supported:
+                return QuarkW8A8Fp8Block(weight_config, input_config)
         elif self._is_fp8_w8a8(weight_config, input_config):
             is_fp8_w8a8_supported = self._check_scheme_supported(
                 QuarkW8A8Fp8.get_min_capability(), error=False
