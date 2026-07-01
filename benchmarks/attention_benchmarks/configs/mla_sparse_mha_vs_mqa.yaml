@@ -1,0 +1,121 @@
+# Sparse MLA benchmark: forward_mha vs forward_mqa crossover plot
+#
+# Dense pure-prefill sweep to generate a smooth speedup curve. The 100 points
+# run from q32 through q262144, approximately even on the log2 scale, and include
+# routing boundaries plus extra samples around the 6k-8k crossover region.
+# Dense MHA is only benchmarked through q32768 because it dominates runtime above
+# that range.
+#
+# Usage:
+#   python benchmark.py --config configs/mla_sparse_mha_vs_mqa.yaml
+
+mode: mha_vs_mqa
+
+model:
+  name: "deepseek-v3"
+  num_layers: 60
+  num_q_heads: 16
+  num_kv_heads: 1
+  head_dim: 576
+  kv_lora_rank: 512
+  qk_nope_head_dim: 128
+  qk_rope_head_dim: 64
+  v_head_dim: 128
+  block_size: 128
+  max_model_len: 262144
+
+batch_specs:
+  - "q32"
+  - "q36"
+  - "q40"
+  - "q45"
+  - "q50"
+  - "q56"
+  - "q62"
+  - "q70"
+  - "q78"
+  - "q87"
+  - "q97"
+  - "q109"
+  - "q122"
+  - "q136"
+  - "q152"
+  - "q170"
+  - "q190"
+  - "q212"
+  - "q237"
+  - "q255"
+  - "q256"
+  - "q257"
+  - "q265"
+  - "q296"
+  - "q331"
+  - "q370"
+  - "q413"
+  - "q462"
+  - "q516"
+  - "q577"
+  - "q645"
+  - "q721"
+  - "q806"
+  - "q901"
+  - "q1007"
+  - "q1125"
+  - "q1257"
+  - "q1405"
+  - "q1571"
+  - "q1756"
+  - "q1962"
+  - "q2048"
+  - "q2049"
+  - "q2193"
+  - "q2451"
+  - "q2740"
+  - "q3062"
+  - "q3422"
+  - "q3825"
+  - "q4275"
+  - "q4778"
+  - "q5340"
+  - "q5854"
+  - "q5969"
+  - "q6000"
+  - "q6144"
+  - "q6367"
+  - "q6671"
+  - "q6925"
+  - "q7168"
+  - "q7456"
+  - "q7532"
+  - "q8192"
+  - "q8193"
+  - "q8333"
+  - "q9314"
+  - "q10410"
+  - "q11635"
+  - "q13004"
+  - "q14534"
+  - "q16244"
+  - "q18156"
+  - "q20292"
+  - "q22680"
+  - "q25349"
+  - "q28332"
+  - "q31665"
+  - "q32768"
+  - "q32769"
+  - "q35391"
+  - "q39556"
+  - "q44210"
+  - "q49413"
+  - "q55227"
+  - "q61726"
+  - "q65536"
+
+backends:
+  - FLASHMLA_SPARSE
+
+device: "cuda:0"
+profile_memory: true
+sparse_mla_dense_mha_max_seq_len: 25349
+sparse_mla_topk_pattern: "random"

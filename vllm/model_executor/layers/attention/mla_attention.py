@@ -693,20 +693,28 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         if fp8_attention and self.kv_cache_dtype != "fp8_ds_mla":
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
-        # Sparse MLA impls only support forward_mqa (decode-style attention)
         is_sparse_impl = isinstance(self.impl, SparseMLAAttentionImpl)
 
-        if is_sparse_impl:
-            num_mqa_tokens = q.size(0)
-            num_mha_tokens = 0
-        else:
-            assert (
-                attn_metadata.num_decodes is not None
-                and attn_metadata.num_prefills is not None
-                and attn_metadata.num_decode_tokens is not None
+        assert (
+            attn_metadata.num_decodes is not None
+            and attn_metadata.num_prefills is not None
+            and attn_metadata.num_decode_tokens is not None
+        )
+        num_mqa_tokens = attn_metadata.num_decode_tokens
+        num_mha_tokens = q.size(0) - num_mqa_tokens
+
+        # Sparse MLA can use dense MHA while the sequence is short enough that
+        # the sparse top-k would cover the full sequence anyway.
+        if is_sparse_impl and num_mha_tokens > 0:
+            max_seq_len = attn_metadata.max_seq_len  # type: ignore[union-attr]
+            use_mha = (
+                getattr(self.impl, "_fa4_available", False)
+                and max_seq_len <= attn_metadata.topk_tokens  # type: ignore[attr-defined]
+                and not self._vllm_config.attention_config.sparse_mla_force_mqa
             )
-            num_mqa_tokens = attn_metadata.num_decode_tokens
-            num_mha_tokens = q.size(0) - num_mqa_tokens
+            if not use_mha:
+                num_mqa_tokens = q.size(0)
+                num_mha_tokens = 0
 
         mha_use_quant_output = (
             quant_key is not None
