@@ -266,10 +266,10 @@ class ThinkingBudgetStateHolder:
             and state["start_thinking"] >= 0
             and state["end_thinking"] >= 0
             and state["end_thinking"] > state["start_thinking"]
-            and not state.get("continue_thinking", False)
         ):
             state["in_think"] = False
             state["think_count"] = 0
+            state["continue_thinking"] = False
             state["start_thinking"] = -1
             state["end_thinking"] = -1
             state["scan_offset"] = len(state.get("output_tok_ids", []))
@@ -373,6 +373,7 @@ class ThinkingBudgetStateHolder:
                     # Case: ...<start>...<end>... - exiting think mode
                     state["in_think"] = False
                     state["think_count"] = 0
+                    state["continue_thinking"] = False
                     state["start_thinking"] = -1
                     state["end_thinking"] = -1
                     state["scan_offset"] = len(state.get("output_tok_ids", []))
@@ -387,6 +388,7 @@ class ThinkingBudgetStateHolder:
                 # Found think end - exiting think mode
                 state["in_think"] = False
                 state["think_count"] = 0
+                state["continue_thinking"] = False
                 state["start_thinking"] = -1
                 state["end_thinking"] = -1
                 state["scan_offset"] = len(state.get("output_tok_ids", []))

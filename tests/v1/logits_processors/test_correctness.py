@@ -1702,4 +1702,78 @@ class TestThinkingBudgetNaturalEndReentry:
             "Partial end tokens in content must not prevent Block 2 enforcement"
         )
 
+    def test_continue_thinking_natural_end_reentry(self):
+        """Prompt-prefill inside <think>: after natural end, Block 2 must be enforced.
+
+        When a request arrives with the prompt already inside a <think> block,
+        continue_thinking is set to True. This test verifies that after a
+        natural </think> exit, continue_thinking is cleared and Block 2
+        enforcement works correctly.
+        """
+        from dataclasses import dataclass
+        from unittest.mock import MagicMock
+
+        from vllm.v1.sample.thinking_budget_state import ThinkingBudgetStateHolder
+
+        @dataclass
+        class FakeReasoningConfig:
+            reasoning_start_token_ids: list[int]
+            reasoning_end_token_ids: list[int]
+            enabled: bool = True
+
+        cfg = FakeReasoningConfig(
+            reasoning_start_token_ids=[self.THINK_START],
+            reasoning_end_token_ids=self.THINK_END_SINGLE,
+        )
+        holder = ThinkingBudgetStateHolder(
+            reasoning_config=cfg,
+            max_num_seqs=8,
+            num_spec_tokens=0,
+            device=torch.device("cpu"),
+            is_pin_memory=False,
+        )
+
+        # Simulate: prompt already inside <think> (sets continue_thinking=True)
+        prompt_tok_ids = [self.THINK_START]
+        params = MagicMock()
+        params.thinking_token_budget = self.BUDGET
+        batch_update = MagicMock(
+            removed=[],
+            added=[(0, params, prompt_tok_ids, [])],
+            moved=[],
+        )
+        holder.sync_batch(batch_update)
+        assert holder._state[0]["continue_thinking"], (
+            "Prompt inside <think> must set continue_thinking=True"
+        )
+
+        # Block 1: emit some think tokens then natural </think>
+        output = list(prompt_tok_ids)
+        for _ in range(4):
+            output.append(self.THINK_TOKEN)
+            holder.update_state([output], None, None)
+        output.append(self.THINK_END_SINGLE[0])
+        holder.update_state([output], None, None)
+
+        assert not holder._state[0]["in_think"], "Should have exited think mode"
+        assert not holder._state[0]["continue_thinking"], (
+            "continue_thinking must be cleared after natural end"
+        )
+
+        # Content tokens
+        for _ in range(3):
+            output.append(self.CONTENT_TOKEN)
+            holder.update_state([output], None, None)
+
+        # Block 2: re-entry must be detected and budget enforced
+        output.append(self.THINK_START)
+        holder.update_state([output], None, None)
+        for _ in range(self.BUDGET + 1):
+            output.append(self.THINK_TOKEN)
+            holder.update_state([output], None, None)
+
+        assert holder._state[0]["in_end"], (
+            "Block 2 after natural end of prompt-prefill session must be enforced"
+        )
+
     # --- Forced-end re-entry tests ---
