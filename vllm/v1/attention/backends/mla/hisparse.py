@@ -1021,25 +1021,15 @@ class HiSparseCoordinator:
             torch.cuda.current_stream(self.device).wait_event(self._prefetch_event)
             self._prefetch_event = None
         else:
+            # Not prefetched (overlap off, or host pool not yet bound): gather
+            # this layer's misses inline, same path the leader's prefetch uses.
             self.bind_source_cache(kv_cache)
-            global_indices = self._plan.global_indices[:n]
-            miss_mask = self._plan.miss_mask[:n]
             if self._kernel_path():
-                kernel_source = (
-                    self.hot_cache if self._source_is_host else self._source_cache
-                )
-                torch.ops._C_cache_ops.hisparse_gather_plan(
-                    kernel_source,
-                    self._host_cache,
-                    self._host_cache_valid,
-                    self.hot_cache,
-                    global_indices,
-                    hot_indices,
-                    miss_mask,
-                    self.num_real_reqs,
-                )
+                self._gather_plan_into(n)
             else:
-                self._apply_plan_fallback(global_indices, hot_indices, miss_mask)
+                self._apply_plan_fallback(
+                    self._plan.global_indices[:n], hot_indices, self._plan.miss_mask[:n]
+                )
         if return_valid_counts:
             assert self._plan.valid_counts is not None, (
                 "apply_plan(return_valid_counts=True) requires the group's full "
