@@ -64,6 +64,10 @@ class CPUAttentionBackend(AttentionBackend):
         return "CPU_ATTN"
 
     @classmethod
+    def supports_non_causal(cls) -> bool:
+        return True
+
+    @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """CPU attention supports decoder,
         encoder-only and encoder-decoder attention."""
@@ -438,9 +442,22 @@ def _riscv_supports_rvv() -> bool:
             cpuinfo = f.read()
     except OSError:
         return False
-    return any(f"zvl{n}b" in cpuinfo for n in (128, 256)) and all(
-        f"zvl{n}b" not in cpuinfo for n in (512, 1024)
-    )
+    # If VLEN >= 512 is detected, the RVV kernel was not compiled.
+    if any(f"zvl{n}b" in cpuinfo for n in (512, 1024)):
+        return False
+
+    # zvl128b or zvl256b explicitly advertised -> RVV kernel available.
+    if any(f"zvl{n}b" in cpuinfo for n in (128, 256)):
+        return True
+
+    # No zvl<N>b flag at all (e.g. some hardware reports zve* without
+    # a VLEN hint).  Delegate to the C++ compile-time check instead.
+    try:
+        import torch
+
+        return torch.ops._C.cpu_attn_has_isa("rvv")
+    except Exception:
+        return False
 
 
 def _get_attn_isa(

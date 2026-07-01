@@ -29,10 +29,10 @@ rms_no_var = lambda x, weight, epsilon, variance_size=None: variance_size is Non
 def rms_norm(
     x: Tensor, weight: Tensor | None, epsilon: float, variance_size: int | None = None
 ) -> Tensor:
+    assert variance_size is None
     if weight is None:
         # Kernel requires weight tensor, pass ones
         weight = torch.ones(x.shape[-1], device=x.device, dtype=x.dtype)
-    assert variance_size is None
     output = torch.empty(x.shape, device=x.device, dtype=x.dtype)
     torch.ops._C.rms_norm(output, x, weight, epsilon)
     return output
@@ -57,10 +57,9 @@ def fused_add_rms_norm(
     epsilon: float,
     variance_size: int | None = None,
 ) -> tuple[Tensor, Tensor]:
+    assert variance_size is None
     if weight is None:
         # Kernel requires weight tensor, pass ones
         weight = torch.ones(x.shape[-1], device=x.device, dtype=x.dtype)
-
-    assert variance_size is None
     torch.ops._C.fused_add_rms_norm(x, x_residual, weight, epsilon)
     return x, x_residual

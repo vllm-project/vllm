@@ -73,7 +73,7 @@ def is_flashmla_sparse_supported() -> tuple[bool, str | None]:
     ):
         return (
             False,
-            "FlashMLA Sparse is only supported on Hopper and Blackwell devices.",
+            "FlashMLA Sparse is only supported on Hopper and Blackwell DC devices.",
         )
     return True, None
 

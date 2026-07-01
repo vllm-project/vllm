@@ -69,7 +69,7 @@ else:
     me_models = LazyLoader("model_executor", globals(), "vllm.model_executor.models")
     LoadConfig = Any
     ParallelConfig = Any
-    QuantizationMethods = Any
+    QuantizationMethods = str
     LogitsProcessor = Any
 
 logger = init_logger(__name__)
@@ -213,7 +213,7 @@ class ModelConfig:
     flexibility."""
     enable_return_routed_experts: bool = False
     """Whether to return routed experts."""
-    max_logprobs: int = 20
+    max_logprobs: int = Field(default=20, ge=-1)
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
     OpenAI Chat Completions API. -1 means no cap, i.e. all (output_length *
@@ -289,6 +289,11 @@ class ModelConfig:
     enable_sleep_mode: bool = False
     """Enable sleep mode for the engine (only cuda and
     hip platforms are supported)."""
+    sleep_mode_backend: str = "cumem"
+    """Mechanism used to free and restore GPU state for sleep mode. ``"cumem"``
+    (default) uses the built-in ``CuMemAllocator`` and is behavior-compatible
+    with prior releases. Additional backends (CUDA checkpoint, CRIU, durable
+    snapshot) may be registered in-tree or by plugins (RFC #34303)."""
     enable_cumem_allocator: bool = False
     """Enable the custom cumem allocator to leverage advanced GPU memory
     allocation features such as multi-node NVLink support.
@@ -351,6 +356,7 @@ class ModelConfig:
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
     mm_tensor_ipc: InitVar[MMTensorIPC] = None
+    mm_ipc_gpu_memory_gb: InitVar[float | None] = None
 
     def compute_hash(self) -> str:
         """
@@ -397,6 +403,7 @@ class ModelConfig:
             "mm_encoder_tp_mode",
             "interleave_mm_strings",
             "skip_mm_profiling",
+            "mm_ipc_gpu_memory_gb",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors
@@ -477,6 +484,7 @@ class ModelConfig:
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
         mm_tensor_ipc: MMTensorIPC,
+        mm_ipc_gpu_memory_gb: float | None,
     ) -> None:
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(
@@ -601,8 +609,6 @@ class ModelConfig:
         if self.tokenizer_mode == "auto":
             if self.model_impl == "terratorch":
                 self.tokenizer_mode = "terratorch"
-            elif arch == "Grok1ForCausalLM":
-                self.tokenizer_mode = "grok2"
             elif arch == "MoonshotKimiaForCausalLM":
                 self.tokenizer_mode = "kimi_audio"
             elif arch == "DeepseekV32ForCausalLM":
@@ -692,6 +698,7 @@ class ModelConfig:
                 skip_mm_profiling=skip_mm_profiling,
                 video_pruning_rate=video_pruning_rate,
                 mm_tensor_ipc=mm_tensor_ipc,
+                mm_ipc_gpu_memory_gb=mm_ipc_gpu_memory_gb,
             )
 
             mm_config_kwargs = {
@@ -984,6 +991,8 @@ class ModelConfig:
                 "auto_gptq",
                 "gptq",
                 "gptq_marlin",
+                "auto_awq",
+                "awq",
                 "awq_marlin",
                 "inc",
                 "moe_wna16",
@@ -1246,6 +1255,10 @@ class ModelConfig:
     @property
     def is_mm_prefix_lm(self) -> bool:
         return self.model_arch_config.is_mm_prefix_lm
+
+    @property
+    def rswa_window(self) -> int | None:
+        return self.model_arch_config.rswa_window
 
     def get_head_size(self) -> int:
         return self.model_arch_config.head_size

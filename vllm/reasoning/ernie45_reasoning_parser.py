@@ -7,14 +7,11 @@ from typing import TYPE_CHECKING
 from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
-from vllm.logger import init_logger
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-
-logger = init_logger(__name__)
 
 
 class Ernie45ReasoningParser(BaseThinkingReasoningParser):
@@ -117,7 +114,8 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
                     content = content[:response_end_idx]
             elif self.response_end_token_id in delta_token_ids:
                 response_end_idx = content.rfind(self.response_end_token)
-                content = content[:response_end_idx]
+                if response_end_idx != -1:
+                    content = content[:response_end_idx]
             # remove \n after </think>  or </response>
             if previous_token_ids[-1] in self.parser_token_ids and (
                 len(delta_token_ids) > 0 and delta_token_ids[0] == self.newline_token_id

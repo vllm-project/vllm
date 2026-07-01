@@ -8,8 +8,9 @@ use zeromq::{DealerSocket, PushSocket, SocketOptions, SubSocket, ZmqMessage};
 
 use crate::EngineId;
 use crate::error::{Error, Result, bail_unexpected_handshake_message};
+use crate::protocol::dtype::ModelDtype;
 use crate::protocol::handshake::{EngineCoreReadyResponse, HandshakeInitMessage, ReadyMessage};
-use crate::protocol::{ModelDtype, decode_msgpack, encode_msgpack};
+use crate::protocol::{decode_msgpack, encode_msgpack};
 
 /// Default model length advertised by reusable mock engine helpers.
 pub const DEFAULT_MOCK_MAX_MODEL_LEN: u64 = 1024 * 1024;
@@ -52,6 +53,8 @@ pub fn default_ready_response() -> EngineCoreReadyResponse {
         dp_stats_address: None,
         dtype: ModelDtype::Float32,
         vllm_version: "test-vllm-version".to_string(),
+        world_size: 1,
+        data_parallel_size: 1,
         kv_cache_size_tokens: None,
         kv_cache_max_concurrency: None,
     }

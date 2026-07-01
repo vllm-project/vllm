@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import ClassVar
 
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.import_utils import PlaceholderModule
 
 from .param_sweep import ParameterSweep, ParameterSweepItem
@@ -368,7 +369,7 @@ class SweepServeArgs:
         )
 
     @classmethod
-    def add_cli_args(cls, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    def add_cli_args(cls, parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         parser.add_argument(
             "--serve-cmd",
             type=str,
@@ -531,7 +532,7 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=SweepServeArgs.parser_help)
+    parser = FlexibleArgumentParser(description=SweepServeArgs.parser_help)
     SweepServeArgs.add_cli_args(parser)
 
     main(parser.parse_args())

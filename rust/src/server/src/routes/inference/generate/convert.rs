@@ -68,6 +68,7 @@ pub(super) fn prepare_generate_request(
         cache_salt: request.cache_salt,
         add_special_tokens: false,
         data_parallel_rank: ctx.data_parallel_rank,
+        reasoning_parser_kwargs: None,
         lora_request: lora_resolution.lora_request.clone(),
     };
 
@@ -147,6 +148,33 @@ mod tests {
                 .vllm_xargs
                 .and_then(|mut xargs| xargs.remove("kv_transfer_params")),
             Some(json!({"connector": "x"}))
+        );
+    }
+
+    #[test]
+    fn prepare_generate_request_forwards_thinking_token_budget() {
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "token_ids": [11, 22, 33],
+            "sampling_params": {
+                "thinking_token_budget": 64
+            }
+        }))
+        .expect("parse request");
+
+        let prepared = prepare_generate_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("prepare");
+
+        // The raw inference route shares `vllm_text::SamplingParams`, so the
+        // field is carried through to lowering exactly like the OpenAI routes
+        // (normalization/validation then happens in `lower_sampling_params`).
+        assert_eq!(
+            prepared.text_request.sampling_params.thinking_token_budget,
+            Some(64)
         );
     }
 

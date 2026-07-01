@@ -48,6 +48,13 @@ def internvl_chat_template(content: str) -> str:
     return f"<|im_start|>user\n{content}<|im_end|>\n<|im_start|>assistant\n"
 
 
+def kimi_vl_chat_template(content: str) -> str:
+    return (
+        f"<|im_user|>user<|im_middle|>{content}<|im_end|>"
+        "<|im_assistant|>assistant<|im_middle|>"
+    )
+
+
 def step3_vl_chat_template(content: str) -> str:
     return (
         "<｜begin▁of▁sentence｜> You are a helpful assistant.<|BOT|>user\n "
@@ -55,7 +62,21 @@ def step3_vl_chat_template(content: str) -> str:
     )
 
 
+def gemma3_chat_template(content: str) -> str:
+    return f"<bos><start_of_turn>user\n{content}<end_of_turn>\n<start_of_turn>model\n"
+
+
 MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
+    "gemma3": VitCudagraphTestConfig(
+        model="google/gemma-3-4b-it",
+        modalities=["image"],
+        image_prompt=gemma3_chat_template("<start_of_image>What is in this image?"),
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [512],
+        },
+        dtype="bfloat16",
+        max_model_len=4096,
+    ),
     "llama4": VitCudagraphTestConfig(
         model="meta-llama/Llama-4-Scout-17B-16E-Instruct",
         modalities=["image"],
@@ -98,6 +119,34 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
             "Describe this video in one sentence."
         ),
         needs_video_metadata=False,
+        marks=[pytest.mark.core_model],
+    ),
+    "kimi_vl": VitCudagraphTestConfig(
+        model="moonshotai/Kimi-VL-A3B-Instruct",
+        modalities=["image"],
+        image_prompt=kimi_vl_chat_template(
+            "<|media_start|>image<|media_content|><|media_pad|><|media_end|>"
+            "What is in this image?"
+        ),
+        needs_video_metadata=False,
+        # Single bucket sized to cover the test images' output tokens.
+        # The default auto-inferred range fans out into multiple power-of-2
+        # buckets, each holding a full ViT capture pool.
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [1024],
+        },
+        # Shrink to 1 text + 1 vision layer with random weights so the
+        # test runs on any CI GPU (incl. L4) and skips the multi-GiB
+        # weight download. The test only validates that encoder CG
+        # capture/replay functions correctly, not output quality.
+        vllm_runner_kwargs={
+            "trust_remote_code": True,
+            "load_format": "dummy",
+            "hf_overrides": partial(
+                dummy_hf_overrides,
+                model_arch="KimiVLForConditionalGeneration",
+            ),
+        },
         marks=[pytest.mark.core_model],
     ),
     "qwen3_vl": VitCudagraphTestConfig(

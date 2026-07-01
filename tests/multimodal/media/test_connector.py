@@ -153,6 +153,23 @@ async def test_fetch_image_local_files(image_url: str):
 
 
 @pytest.mark.asyncio
+async def test_fetch_image_local_files_relative_allowed_path(tmp_path, monkeypatch):
+    media_dir = tmp_path / "media"
+    media_dir.mkdir()
+    image_path = media_dir / "image.png"
+    Image.new("RGB", (1, 1), color=(255, 0, 0)).save(image_path)
+
+    monkeypatch.chdir(tmp_path)
+    local_connector = MediaConnector(allowed_local_media_path="media")
+
+    image_sync = local_connector.fetch_image(image_path.as_uri())
+    image_async = await local_connector.fetch_image_async(image_path.as_uri())
+
+    assert image_sync.size == (1, 1)
+    assert not ImageChops.difference(image_sync, image_async).getbbox()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("image_url", [TEST_IMAGE_ASSETS[0]], indirect=True)
 async def test_fetch_image_local_files_with_space_in_name(image_url: str):
     connector = MediaConnector()

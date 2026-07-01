@@ -74,6 +74,7 @@ vllm serve <model> \
 | `max_tracker_size` | no | `64000` | single-tier | Max entries in the lookup tracker. |
 | `secondary_tiers` | no | `[]` | multi-tier | List of secondary tier configs (see below). |
 | `offload_prompt_only` | no | `true` | both | If `true`, only prompt (prefill) blocks are offloaded; decode blocks are skipped. |
+| `self_describing_kv_events` | no | `false` | single-tier | Opt-in. When `true` *and* KV cache events are enabled (`--kv-events-config` with `enable_kv_cache_events`), the connector emits self-describing block-granular `BlockStored`/`BlockRemoved` payloads (constituent block hashes, whole-chunk `token_ids`, per-block `block_size`, parent hash, LoRA + group/cache-spec metadata) instead of the placeholder fallback, so external KV-event consumers can index offloaded blocks. Inert unless events are enabled. Currently rejected by `TieringOffloadingSpec`. Full-attention groups only; sliding-window/SSM groups keep the placeholder fallback. In chunk mode (`block_size` > GPU block size), overlapping chunks re-announce shared per-block hashes, so consumers must reference-count (deduplicate) repeated store/remove announcements. |
 | `spec_module_path` | no | — | both | Python import path for a custom `OffloadingSpec` not in the built-in registry. Required only when `spec_name` is not built-in (advanced). |
 
 ## Secondary Tiers
@@ -119,6 +120,20 @@ To enable KV cache sharing between multiple vLLM instances using the same `root_
 PYTHONHASHSEED=0 vllm serve ...
 ```
 
+### P2P (Including P/D)
+
+The P2P tier (`type: "p2p"`) shares completed KV blocks between vLLM instances over RDMA via NIXL. Each instance binds a control socket on `host:port` and exchanges blocks directly with peers — no shared filesystem required.
+
+| Key | Required | Default | Notes |
+| --- | --- | --- | --- |
+| `type` | yes | — | Must be `p2p`. |
+| `host` | no | `0.0.0.0` | Address the control socket binds to. |
+| `port` | no | `7777` | Port for the control socket. Must be reachable from peers. |
+| `backends` | no | `["UCX"]` | NIXL transport backends. See [NixlConnector Usage Guide](nixl_connector_usage.md#selecting-a-nixl-transport-backend-plugin) for available backends and selection guidance. |
+| `num_threads` | no | `4` | NIXL agent worker threads. Only used when `backends` is UCX-only; ignored when any non-UCX backend is requested. |
+
+The `backends` and `num_threads` options mirror the conditional logic used by [`NixlConnector`](nixl_connector_usage.md#selecting-a-nixl-transport-backend-plugin): when any non-UCX backend is configured, NIXL is initialised with `backends=...`; otherwise it falls back to a UCX-only agent with the configured `num_threads`. This lets the P2P tier use a different transport (e.g. `MOONCAKE`, `GDS_MT`, `LIBFABRIC`) than the main `NixlConnector` running in the same process.
+
 ## Tuning Tips
 
 - `cpu_bytes_to_use`: a bigger CPU tier means fewer trips to slower secondary tiers and a higher hit rate. The value is total across all workers, not per-worker. Leave headroom for the rest of the host workload.
@@ -126,6 +141,29 @@ PYTHONHASHSEED=0 vllm serve ...
 - `block_size`: larger offloaded blocks reduce per-block bookkeeping overhead but increase the granularity of lookups. Must be a multiple of the GPU block size.
 - FS thread counts: tune `n_read_threads` and `n_write_threads` to the parallelism your storage can sustain. Reads are latency-sensitive on the prefill path, so prefer more read threads when prefill hit rates are high.
 - Sharing `root_dir` across runs: runs with the same model, `block_size`, parallelism layout, and dtype share files under the same `<digest>` subdirectory. Changing any of these produces a new subdirectory; old ones are orphaned but harmless. Delete them to reclaim disk.
+
+## Per-Request Selective Offload
+
+Individual requests can cap how many of their tokens are eligible for offload by setting `max_offload_tokens` in the request's `kv_transfer_params`. Only the first `max_offload_tokens` tokens of the request are offloaded; blocks beyond that point are skipped on the store path. This is useful when a known prefix (e.g., a system prompt or shared context) is worth caching but later request-specific tokens are not.
+
+| Key | Type | Notes |
+| --- | --- | --- |
+| `max_offload_tokens` | non-negative `int` | Upper bound on tokens to offload for this request. `0` disables offload for the request entirely; omit the key (or set to `None`) for no cap. Non-`int`, negative, or `bool` values are rejected with a warning and treated as no cap. |
+
+!!! note
+    `max_offload_tokens` is experimental and subject to change.
+
+Example (OpenAI-compatible completions request):
+
+```json
+{
+  "model": "<model>",
+  "prompt": "...",
+  "kv_transfer_params": {
+    "max_offload_tokens": 1024
+  }
+}
+```
 
 ## Further Reading
 

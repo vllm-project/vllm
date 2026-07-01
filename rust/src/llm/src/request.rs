@@ -4,7 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::multimodal::MmFeatures;
-use vllm_engine_core_client::protocol::{EngineCoreRequest, EngineCoreSamplingParams};
+use vllm_engine_core_client::protocol::request::{EngineCoreRequest, ReasoningParserKwargs};
+use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 
 use crate::error::{Error, Result};
 
@@ -27,14 +28,24 @@ pub struct GenerateRequest {
     pub sampling_params: EngineCoreSamplingParams,
     /// Optional multimodal features already prepared by `vllm-chat`.
     pub mm_features: Option<MmFeatures>,
-
-    // Fields below are currently likely unused by callers.
+    /// Unix timestamp, in seconds, when this request arrived at the frontend.
+    ///
+    /// When omitted, the Rust frontend fills it immediately before sending the
+    /// request to engine-core, matching Python's default arrival-time behavior.
     pub arrival_time: Option<f64>,
+    /// Optional salt used to partition prefix-cache entries for this request.
     pub cache_salt: Option<String>,
+    /// Optional tracing headers to forward to engine-core and downstream
+    /// observability hooks.
     pub trace_headers: Option<BTreeMap<String, String>>,
+    /// Request scheduling priority. Lower values are scheduled earlier.
     pub priority: i32,
+    /// Optional data-parallel rank override for routing this request.
     pub data_parallel_rank: Option<u32>,
-    pub reasoning_ended: Option<bool>,
+    /// Optional reasoning-parser kwargs forwarded to engine-side structured
+    /// output logic.
+    pub reasoning_parser_kwargs: Option<ReasoningParserKwargs>,
+    /// Optional LoRA adapter request applied to this generation.
     pub lora_request: Option<LoraRequest>,
 }
 
@@ -61,7 +72,7 @@ impl GenerateRequest {
             trace_headers,
             priority,
             data_parallel_rank,
-            reasoning_ended,
+            reasoning_parser_kwargs,
             lora_request,
         } = self;
 
@@ -72,7 +83,6 @@ impl GenerateRequest {
         } else {
             external_request_id.clone()
         };
-
         Ok(PreparedGenerateRequest {
             engine_request: EngineCoreRequest {
                 request_id: engine_request_id,
@@ -92,8 +102,10 @@ impl GenerateRequest {
                 trace_headers,
                 resumable: false,
                 external_req_id: Some(external_request_id),
-                reasoning_ended,
-                reasoning_parser_kwargs: None,
+                // Rust parser doesn't expose this information, leave it unset and let the
+                // reasoning logic in engine-sided structured output manager handle it.
+                reasoning_ended: None,
+                reasoning_parser_kwargs,
                 abort_immediately: false,
             },
         })
@@ -121,7 +133,8 @@ fn current_unix_timestamp_secs() -> f64 {
 mod tests {
     use std::collections::BTreeMap;
 
-    use vllm_engine_core_client::protocol::EngineCoreSamplingParams;
+    use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
+    use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 
     use super::GenerateRequest;
     use crate::error::Error;
@@ -140,7 +153,15 @@ mod tests {
             )])),
             priority: 3,
             data_parallel_rank: Some(2),
-            reasoning_ended: Some(true),
+            reasoning_parser_kwargs: Some(ReasoningParserKwargs {
+                chat_template_kwargs: [(
+                    "chat_template_kwargs".to_string(),
+                    serde_json::json!({
+                        "enable_thinking": true,
+                    }),
+                )]
+                .into(),
+            }),
             lora_request: None,
         }
     }
@@ -166,7 +187,16 @@ mod tests {
                 "abc".to_string(),
             )]))
         );
-        assert_eq!(request.reasoning_ended, Some(true));
+        assert_eq!(request.reasoning_ended, None);
+        assert_eq!(
+            request
+                .reasoning_parser_kwargs
+                .as_ref()
+                .and_then(|kwargs| kwargs.chat_template_kwargs.get("chat_template_kwargs")),
+            Some(&serde_json::json!({
+                "enable_thinking": true
+            }))
+        );
     }
 
     #[test]
