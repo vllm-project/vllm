@@ -1587,7 +1587,13 @@ class AssetHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError) as e:
+            logger.debug(
+                "Client disconnected while serving test asset %s: %r", filename, e
+            )
+            self.close_connection = True
 
 
 def _find_free_port() -> int:

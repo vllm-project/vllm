@@ -51,6 +51,7 @@ vllm serve $MODEL \
   --trust-remote-code \
   --enable-prefix-caching \
   --mamba-cache-mode all \
+  --attention-backend FLASHINFER \
   --kv-transfer-config "$KV_CONFIG" &
 
 # Start decode instance
@@ -68,6 +69,7 @@ vllm serve $MODEL \
   --trust-remote-code \
   --enable-prefix-caching \
   --mamba-cache-mode all \
+  --attention-backend FLASHINFER \
   --kv-transfer-config "$KV_CONFIG" &
 
 echo "Waiting for prefill instance on port $PREFILL_PORT..."

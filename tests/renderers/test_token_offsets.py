@@ -5,7 +5,7 @@
 These exercise ``_tokenize_prompt`` (offset extraction + capability/MM
 gating) and the ``_tokenize_prompt -> _process_tokens -> TokensInput``
 forwarding chain. Endpoint-level coverage lives in
-``tests/entrypoints/serve/render/test_render.py``.
+``tests/entrypoints/scale_out/render/test_render.py``.
 """
 
 import pytest

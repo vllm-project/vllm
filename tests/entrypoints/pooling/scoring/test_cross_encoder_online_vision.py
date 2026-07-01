@@ -38,12 +38,17 @@ BACKEND_TOL: dict[str, float] = {
     "FLEX_ATTENTION": 0.045,  # gfx950:~3.25%, gfx942:~1.10%
 }
 
-# ROCm 7.2/gfx950 shows small absolute drift on the low text-vs-text
-# probability even though larger scores remain well inside the relative
-# tolerance. Keep the relative tolerances tight and add only a small floor.
+# Some ROCm attention backends show small absolute drift on the low
+# text-vs-text probability even though larger scores remain well inside the
+# relative tolerance. The absolute drift is uniform across score magnitudes
+# (~0.005-0.010), so it only exceeds the relative tolerance for the small
+# ~0.10 text-vs-text value. Keep the relative tolerances tight and add only a
+# small absolute floor for the affected backends.
+# TRITON_ATTN: gfx942/ROCm 7.2 drifts ~0.008 abs on text-vs-text (~7.9% rel).
 BACKEND_ABS_TOL: dict[str, float] = {
     "default": 0.0,
     "ROCM_AITER_FA": 0.005,
+    "TRITON_ATTN": 0.009,
     "FLEX_ATTENTION": 0.006,
 }
 

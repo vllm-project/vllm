@@ -104,11 +104,6 @@ def test_gpt_oss_attention_quantization(
 
     model_args = EvaluationConfig(model_name).get_model_args(tp_size)
 
-    # Emulation backend on MI300, MI250 is opt-in
-    # following https://github.com/vllm-project/vllm/pull/45896
-    if not on_gfx950():
-        model_args["moe_backend"] = "emulation"
-
     extra_run_kwargs = {
         "gen_kwargs": {"max_gen_toks": 8000},
         "apply_chat_template": True,

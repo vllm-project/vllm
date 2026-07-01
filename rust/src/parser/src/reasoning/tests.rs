@@ -1,54 +1,42 @@
 use std::sync::Arc;
 
-use vllm_tokenizer::Tokenizer;
+use vllm_tokenizer::test_utils::TestTokenizer;
 
 use super::{
     DeepSeekR1ReasoningParser, DelimitedReasoningParser, MiniMaxM3ReasoningParser,
     Qwen3ReasoningParser, ReasoningParser,
 };
 
-pub(crate) struct FakeTokenizer;
+pub(crate) const THINK_START_ID: u32 = 256;
+pub(crate) const THINK_END_ID: u32 = 257;
+pub(crate) const START_THINKING_ID: u32 = 258;
+pub(crate) const END_THINKING_ID: u32 = 259;
+pub(crate) const MINIMAX_THINK_START_ID: u32 = 260;
+pub(crate) const MINIMAX_THINK_END_ID: u32 = 261;
+pub(crate) const SPECIAL_BOUNDARY_ID: u32 = 262;
+pub(crate) const MM_THINK_START_ID: u32 = 263;
+pub(crate) const MM_THINK_END_ID: u32 = 264;
+pub(crate) const SEED_THINK_START_ID: u32 = 265;
+pub(crate) const SEED_THINK_END_ID: u32 = 266;
 
-impl Tokenizer for FakeTokenizer {
-    fn encode(&self, text: &str, _add_special_tokens: bool) -> vllm_tokenizer::Result<Vec<u32>> {
-        Ok(text.chars().map(u32::from).collect())
-    }
-
-    fn decode(
-        &self,
-        token_ids: &[u32],
-        _skip_special_tokens: bool,
-    ) -> vllm_tokenizer::Result<String> {
-        Ok(token_ids
-            .iter()
-            .map(|token_id| char::from_u32(*token_id).unwrap_or('\u{FFFD}'))
-            .collect())
-    }
-
-    fn token_to_id(&self, token: &str) -> Option<u32> {
-        match token {
-            "<think>" => Some(1),
-            "</think>" => Some(2),
-            "<|START_THINKING|>" => Some(3),
-            "<|END_THINKING|>" => Some(4),
-            "◁think▷" => Some(5),
-            "◁/think▷" => Some(6),
-            "<mm:think>" => Some(8),
-            "</mm:think>" => Some(9),
-            "<seed:think>" => Some(10),
-            "</seed:think>" => Some(11),
-            _ => None,
-        }
-    }
-
-    fn is_special_id(&self, token_id: u32) -> bool {
-        token_id == 7
-    }
+pub(crate) fn fake_tokenizer() -> TestTokenizer {
+    TestTokenizer::new()
+        .with_regular_token("<think>", THINK_START_ID)
+        .with_regular_token("</think>", THINK_END_ID)
+        .with_regular_token("<|START_THINKING|>", START_THINKING_ID)
+        .with_regular_token("<|END_THINKING|>", END_THINKING_ID)
+        .with_regular_token("◁think▷", MINIMAX_THINK_START_ID)
+        .with_regular_token("◁/think▷", MINIMAX_THINK_END_ID)
+        .with_special_token("<special-boundary>", SPECIAL_BOUNDARY_ID)
+        .with_regular_token("<mm:think>", MM_THINK_START_ID)
+        .with_regular_token("</mm:think>", MM_THINK_END_ID)
+        .with_regular_token("<seed:think>", SEED_THINK_START_ID)
+        .with_regular_token("</seed:think>", SEED_THINK_END_ID)
 }
 
 #[test]
 fn delimited_content_only_stream() {
-    let tokenizer = Arc::new(FakeTokenizer);
+    let tokenizer = Arc::new(fake_tokenizer());
     let mut parser =
         DelimitedReasoningParser::new(tokenizer, "<think>", "</think>", false).unwrap();
 
@@ -60,7 +48,7 @@ fn delimited_content_only_stream() {
 
 #[test]
 fn delimited_single_chunk_with_reasoning_and_content() {
-    let tokenizer = Arc::new(FakeTokenizer);
+    let tokenizer = Arc::new(fake_tokenizer());
     let mut parser =
         DelimitedReasoningParser::new(tokenizer, "<think>", "</think>", false).unwrap();
 
@@ -71,7 +59,7 @@ fn delimited_single_chunk_with_reasoning_and_content() {
 
 #[test]
 fn delimited_partial_tokens_across_chunks() {
-    let tokenizer = Arc::new(FakeTokenizer);
+    let tokenizer = Arc::new(fake_tokenizer());
     let mut parser =
         DelimitedReasoningParser::new(tokenizer, "<think>", "</think>", false).unwrap();
 
@@ -83,10 +71,10 @@ fn delimited_partial_tokens_across_chunks() {
 
 #[test]
 fn delimited_finish_flushes_buffer() {
-    let tokenizer = Arc::new(FakeTokenizer);
+    let tokenizer = Arc::new(fake_tokenizer());
     let mut parser =
         DelimitedReasoningParser::new(tokenizer, "<think>", "</think>", false).unwrap();
-    parser.initialize(&[1]);
+    parser.initialize(&[THINK_START_ID]);
 
     let delta = parser.push("unfinished</thi");
     assert_eq!(delta.reasoning.as_deref(), Some("unfinished"));
@@ -96,7 +84,7 @@ fn delimited_finish_flushes_buffer() {
 
 #[test]
 fn qwen3_without_prompt_markers_expects_start_token() {
-    let tokenizer = Arc::new(FakeTokenizer);
+    let tokenizer = Arc::new(fake_tokenizer());
     let mut parser = Qwen3ReasoningParser::new(tokenizer).unwrap();
 
     let delta = parser.push("reason</think>answer").unwrap();
@@ -106,9 +94,9 @@ fn qwen3_without_prompt_markers_expects_start_token() {
 
 #[test]
 fn qwen3_prompt_end_marker_starts_in_content() {
-    let tokenizer = Arc::new(FakeTokenizer);
+    let tokenizer = Arc::new(fake_tokenizer());
     let mut parser = Qwen3ReasoningParser::new(tokenizer).unwrap();
-    parser.initialize(&[2]).unwrap();
+    parser.initialize(&[THINK_END_ID]).unwrap();
 
     let delta = parser.push("answer").unwrap();
     assert_eq!(delta.reasoning, None);
@@ -117,7 +105,7 @@ fn qwen3_prompt_end_marker_starts_in_content() {
 
 #[test]
 fn qwen3_tolerates_old_and_new_formats() {
-    let tokenizer = Arc::new(FakeTokenizer);
+    let tokenizer = Arc::new(fake_tokenizer());
 
     let mut old_parser = Qwen3ReasoningParser::new(tokenizer.clone()).unwrap();
     let old = old_parser.push("<think>reason</think>answer").unwrap();
@@ -125,7 +113,7 @@ fn qwen3_tolerates_old_and_new_formats() {
     assert_eq!(old.content.as_deref(), Some("answer"));
 
     let mut new_parser = Qwen3ReasoningParser::new(tokenizer).unwrap();
-    new_parser.initialize(&[1]).unwrap();
+    new_parser.initialize(&[THINK_START_ID]).unwrap();
     let new = new_parser.push("reason</think>answer").unwrap();
     assert_eq!(new.reasoning.as_deref(), Some("reason"));
     assert_eq!(new.content.as_deref(), Some("answer"));
@@ -133,10 +121,10 @@ fn qwen3_tolerates_old_and_new_formats() {
 
 #[test]
 fn qwen3_stops_scanning_at_last_special_token() {
-    let tokenizer = Arc::new(FakeTokenizer);
+    let tokenizer = Arc::new(fake_tokenizer());
     let mut parser = Qwen3ReasoningParser::new(tokenizer).unwrap();
 
-    parser.initialize(&[1, 7]).unwrap();
+    parser.initialize(&[THINK_START_ID, SPECIAL_BOUNDARY_ID]).unwrap();
 
     let delta = parser.push("answer").unwrap();
     assert_eq!(delta.reasoning, None);
@@ -145,7 +133,7 @@ fn qwen3_stops_scanning_at_last_special_token() {
 
 #[test]
 fn deepseek_r1_defaults_to_reasoning_without_prompt_boundary() {
-    let tokenizer = Arc::new(FakeTokenizer);
+    let tokenizer = Arc::new(fake_tokenizer());
     let mut parser = DeepSeekR1ReasoningParser::new(tokenizer).unwrap();
 
     let delta = parser.push("reason</think>answer").unwrap();
@@ -155,10 +143,10 @@ fn deepseek_r1_defaults_to_reasoning_without_prompt_boundary() {
 
 #[test]
 fn deepseek_r1_stops_scanning_at_last_special_token() {
-    let tokenizer = Arc::new(FakeTokenizer);
+    let tokenizer = Arc::new(fake_tokenizer());
     let mut parser = DeepSeekR1ReasoningParser::new(tokenizer).unwrap();
 
-    parser.initialize(&[2, 7]).unwrap();
+    parser.initialize(&[THINK_END_ID, SPECIAL_BOUNDARY_ID]).unwrap();
 
     let delta = parser.push("reason</think>answer").unwrap();
     assert_eq!(delta.reasoning.as_deref(), Some("reason"));
@@ -167,7 +155,7 @@ fn deepseek_r1_stops_scanning_at_last_special_token() {
 
 #[test]
 fn minimax_m3_handles_explicit_think_delimiters() {
-    let tokenizer = Arc::new(FakeTokenizer);
+    let tokenizer = Arc::new(fake_tokenizer());
     let mut parser = MiniMaxM3ReasoningParser::new(tokenizer).unwrap();
 
     let delta = parser.push("<mm:think>reason</mm:think>answer").unwrap();
@@ -177,7 +165,7 @@ fn minimax_m3_handles_explicit_think_delimiters() {
 
 #[test]
 fn minimax_m3_drops_leading_end_marker() {
-    let tokenizer = Arc::new(FakeTokenizer);
+    let tokenizer = Arc::new(fake_tokenizer());
     let mut parser = MiniMaxM3ReasoningParser::new(tokenizer).unwrap();
 
     let delta = parser.push("</mm:think>answer").unwrap();
@@ -187,7 +175,7 @@ fn minimax_m3_drops_leading_end_marker() {
 
 #[test]
 fn minimax_m3_preserves_non_leading_end_marker() {
-    let tokenizer = Arc::new(FakeTokenizer);
+    let tokenizer = Arc::new(fake_tokenizer());
     let mut parser = MiniMaxM3ReasoningParser::new(tokenizer).unwrap();
 
     let delta = parser.push("XXX</mm:think>YYY").unwrap();
@@ -197,7 +185,7 @@ fn minimax_m3_preserves_non_leading_end_marker() {
 
 #[test]
 fn minimax_m3_drops_split_leading_end_marker() {
-    let tokenizer = Arc::new(FakeTokenizer);
+    let tokenizer = Arc::new(fake_tokenizer());
     let mut parser = MiniMaxM3ReasoningParser::new(tokenizer).unwrap();
 
     assert!(parser.push("</mm").unwrap().is_empty());
@@ -208,9 +196,9 @@ fn minimax_m3_drops_split_leading_end_marker() {
 
 #[test]
 fn minimax_m3_uses_prompt_prefilled_start_marker() {
-    let tokenizer = Arc::new(FakeTokenizer);
+    let tokenizer = Arc::new(fake_tokenizer());
     let mut parser = MiniMaxM3ReasoningParser::new(tokenizer).unwrap();
-    parser.initialize(&[8]).unwrap();
+    parser.initialize(&[MM_THINK_START_ID]).unwrap();
 
     let delta = parser.push("reason</mm:think>answer").unwrap();
     assert_eq!(delta.reasoning.as_deref(), Some("reason"));
@@ -219,9 +207,9 @@ fn minimax_m3_uses_prompt_prefilled_start_marker() {
 
 #[test]
 fn minimax_m3_uses_prompt_prefilled_end_marker() {
-    let tokenizer = Arc::new(FakeTokenizer);
+    let tokenizer = Arc::new(fake_tokenizer());
     let mut parser = MiniMaxM3ReasoningParser::new(tokenizer).unwrap();
-    parser.initialize(&[9]).unwrap();
+    parser.initialize(&[MM_THINK_END_ID]).unwrap();
 
     let delta = parser.push("answer").unwrap();
     assert_eq!(delta.reasoning, None);
