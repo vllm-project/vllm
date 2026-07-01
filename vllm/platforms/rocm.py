@@ -825,21 +825,10 @@ class RocmPlatform(Platform):
     def _verify_aiter_fused_shared_experts(
         cls, parallel_config: "ParallelConfig"
     ) -> None:
-        """Guard AITER fused shared-experts against incompatible features.
+        """Reject AITER fused shared-experts + incompatible features.
 
-        VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS fuses the shared expert into
-        the routed-expert MoE by appending a per-rank shared-expert slot. That
-        extra slot changes the routed-expert count each rank sees, which breaks
-        features that reason about the per-rank routed-expert layout:
-
-        - EPLB relies on a stable routed-expert count for its per-expert
-          bookkeeping/relocation.
-        - Dual/two batch overlap (DBO, aka batch-overlap microbatching) splits
-          the batch across ubatches that share the fused MoE layout.
-
-        Reject these combinations up front with a clear message instead of
-        failing deep in the MoE path. This is the single place to extend as
-        other mutually exclusive features are added.
+        The fused shared-expert slot changes the per-rank routed-expert count,
+        which breaks EPLB bookkeeping and dual batch overlap (DBO).
         """
         from vllm._aiter_ops import rocm_aiter_ops
 
@@ -849,20 +838,13 @@ class RocmPlatform(Platform):
         if parallel_config.enable_eplb:
             raise ValueError(
                 "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is incompatible with "
-                "EPLB: the fused shared-expert slot changes the routed-expert "
-                "count and breaks EPLB's per-expert bookkeeping. Disable one of "
-                "them (unset VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS or run "
-                "without --enable-eplb)."
+                "EPLB. Disable one of them."
             )
 
         if parallel_config.use_ubatching:
             raise ValueError(
                 "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is incompatible with "
-                "dual/two batch overlap (DBO): the fused shared-expert slot "
-                "changes the routed-expert count and is not supported by the "
-                "batch-overlap microbatching path. Disable one of them (unset "
-                "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS, or run without "
-                "--enable-dbo and with --ubatch-size<=1)."
+                "dual batch overlap (DBO). Disable one of them."
             )
 
     @classmethod

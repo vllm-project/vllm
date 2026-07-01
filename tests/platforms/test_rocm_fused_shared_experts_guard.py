@@ -1,17 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for ``RocmPlatform._verify_aiter_fused_shared_experts``.
+"""Tests for ``RocmPlatform._verify_aiter_fused_shared_experts``.
 
-These verify that enabling AITER fused shared-experts
-(``VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS``) together with features that
-reason about the per-rank routed-expert layout (EPLB, dual/two batch overlap)
-is rejected up front with a clear error, and that otherwise-valid combinations
-are left untouched.
-
-The guard only reads ``enable_eplb`` and ``use_ubatching`` off the parallel
-config, so we use a lightweight stub instead of a real ``ParallelConfig``
-(constructing one with ``enable_eplb=True`` triggers a CUDA-platform check that
-is unrelated to what we exercise here).
+The guard only reads ``enable_eplb`` and ``use_ubatching``, so we use a stub
+instead of a real ``ParallelConfig`` (which validates the platform on init).
 """
 
 from types import SimpleNamespace
@@ -28,7 +20,7 @@ def _parallel_config(*, enable_eplb=False, use_ubatching=False):
 
 @pytest.fixture
 def set_fused_se(monkeypatch):
-    """Return a setter that forces the fused shared-experts capability flag."""
+    """Force the fused shared-experts capability flag."""
 
     def _set(enabled: bool):
         monkeypatch.setattr(
@@ -42,7 +34,7 @@ def set_fused_se(monkeypatch):
 
 def test_no_conflict_when_fused_se_disabled(set_fused_se):
     set_fused_se(False)
-    # Even with both features on, a disabled fused-SE must not raise.
+    # Disabled fused-SE must not raise even with both features on.
     parallel_config = _parallel_config(enable_eplb=True, use_ubatching=True)
     RocmPlatform._verify_aiter_fused_shared_experts(parallel_config)
 
@@ -68,7 +60,7 @@ def test_fused_se_with_ubatching_raises(set_fused_se):
 
 
 def test_eplb_conflict_checked_before_ubatching(set_fused_se):
-    # When both conflict, EPLB is reported first (deterministic message).
+    # EPLB is reported first when both conflict.
     set_fused_se(True)
     parallel_config = _parallel_config(enable_eplb=True, use_ubatching=True)
     with pytest.raises(ValueError, match="EPLB"):
