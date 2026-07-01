@@ -243,6 +243,8 @@ class SchedulerOutput:
     # Dynamic speculative decoding: optimal K chosen by scheduler.
     # Number of spec tokens to schedule for the next step.
     num_spec_tokens_to_schedule: int = 0
+    # Adaptive K: per-step speculation length selected by cost model.
+    adaptive_k_for_step: int | None = None
 
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
