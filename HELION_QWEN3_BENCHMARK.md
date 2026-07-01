@@ -134,3 +134,22 @@ by the rest of the forward pass.
 
 (Measured under CUDA-graph replay — eager mode shows a flat ~30 µs custom-op Python
 dispatch floor that cudagraphs/compile remove, so do not benchmark these in eager.)
+
+### Forced-fusion Helion vs default (RedHatAI FP8-dynamic) — Helion loses badly
+
+P50, matched config (input256/out128/bs16, warmup10/iters30):
+
+| configuration | P50 latency |
+|---|---|
+| **default (fusion off, CUTLASS)** | **0.348 s** |
+| fusion on + native | 0.363 s |
+| fusion on + Helion | 0.976 s (~2.8x slower) |
+
+Forcing fusion to reach Helion is a large **net loss**. The Helion kernels execute
+but the run is consistently ~2.8x slower (P50 > Avg, i.e. steady, not JIT spikes) —
+the Helion custom ops appear not to be captured into the full CUDA graph on this
+path, so they pay the ~30 us/call custom-op dispatch overhead per layer per step.
+(In isolated CUDA-graph capture the same kernels were 1.2-1.4x *faster*, so this is
+a graph-capture/integration cost, not the kernel.)
+
+**Overall:** Helion is not a net win for any Qwen3-1.7B FP8 variant tested.
