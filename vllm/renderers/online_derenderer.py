@@ -16,7 +16,7 @@ from vllm.entrypoints.openai.completion.protocol import (
 )
 from vllm.entrypoints.openai.engine.protocol import ToolCall
 from vllm.entrypoints.openai.engine.serving import resolve_token_id_placeholder
-from vllm.entrypoints.serve.disagg.protocol import GenerateResponse
+from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateResponse
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.logger import init_logger
 from vllm.parser import Parser, ParserManager

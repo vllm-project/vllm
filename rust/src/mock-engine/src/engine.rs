@@ -11,11 +11,12 @@ use tokio::sync::mpsc;
 use tokio::task::yield_now;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+use vllm_engine_core_client::protocol::output::{
+    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs,
+};
+use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::protocol::utility::{
     EngineCoreUtilityRequest, UtilityOutput, UtilityResultEnvelope,
-};
-use vllm_engine_core_client::protocol::{
-    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest,
 };
 
 use super::Opt;
