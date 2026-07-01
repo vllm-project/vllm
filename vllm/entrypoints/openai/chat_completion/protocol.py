@@ -193,7 +193,9 @@ class ChatCompletionNamedToolChoiceParam(OpenAIBaseModel):
 class ChatCompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/chat/create
-    messages: list[ChatCompletionMessageParam]
+    # Optional so a request may instead supply pre-tokenized `prompt_token_ids`
+    # (token-in). At least one of the two must be provided.
+    messages: list[ChatCompletionMessageParam] = Field(default_factory=list)
     model: str | None = None
     frequency_penalty: float | None = 0.0
     logit_bias: dict[str, float] | None = None
@@ -416,6 +418,23 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "Requires the chat template to use ``{% generation %}`` "
             "tags.  When the template does not support it, "
             "``assistant_tokens_mask`` will be ``null``."
+        ),
+    )
+
+    prompt_token_ids: list[int] | None = Field(
+        default=None,
+        description=(
+            "Pre-tokenized prompt fed directly to the engine, bypassing chat "
+            "templating and tokenization (token-in). The output is still "
+            "detokenized to text and runs tool/reasoning parsing as usual "
+            "(text-out). At least one of `messages` or `prompt_token_ids` must "
+            "be provided; when both are set, `prompt_token_ids` takes "
+            "precedence and `messages` is ignored for prompt construction. "
+            "Chat-template options (e.g. `chat_template`, `documents`, "
+            "`add_generation_prompt`, `continue_final_message`, "
+            "`add_special_tokens`, `echo`) are incompatible with this field. "
+            "Intended for disaggregated serving where the prompt is tokenized "
+            "once upstream."
         ),
     )
 
@@ -904,6 +923,38 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 "`add_generation_prompt` to True.",
             )
         return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_prompt_token_ids(cls, data):
+        if not isinstance(data, dict) or not data.get("prompt_token_ids"):
+            return data
+        # Chat-template options have no meaning for pre-tokenized input.
+        incompatible = (
+            "chat_template",
+            "chat_template_kwargs",
+            "documents",
+            "add_generation_prompt",
+            "continue_final_message",
+            "add_special_tokens",
+            "echo",
+        )
+        conflicts = [k for k in incompatible if k in data]
+        if conflicts:
+            raise VLLMValidationError(
+                f"{sorted(conflicts)} cannot be used with `prompt_token_ids`; "
+                "pre-tokenized input bypasses chat templating.",
+                parameter="prompt_token_ids",
+            )
+        return data
+
+    @model_validator(mode="after")
+    def check_prompt_source(self) -> "ChatCompletionRequest":
+        if not self.messages and not self.prompt_token_ids:
+            raise VLLMValidationError(
+                "Either `messages` or `prompt_token_ids` must be provided.",
+            )
+        return self
 
     @model_validator(mode="before")
     @classmethod
