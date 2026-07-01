@@ -152,9 +152,14 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         hidden_states = self.h_proj(previous_hidden_states) + self.e_proj(
             inputs_embeds
         ).unsqueeze(-2)
-        hidden_states = self.mtp_block(
+        hidden_states, residual, post_mix, res_mix = self.mtp_block(
             positions=positions, x=hidden_states, input_ids=None
         )
+        # The fused post+pre path defers the block's final hc_post to here.
+        if self.mtp_block.use_fused_mhc:
+            hidden_states = self.mtp_block.hc_post(
+                hidden_states, residual, post_mix, res_mix
+            )
         # Return the flat pre-hc_head residual so it can be re-fed as the
         # next spec step's `previous_hidden_states` when
         # num_speculative_tokens > 1. hc_head is deferred to compute_logits.

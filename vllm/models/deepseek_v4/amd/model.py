@@ -27,7 +27,10 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mhc import (
+    HAS_AITER_MHC,
+    HAS_TILELANG_MHC,
     HCHeadOp,
+    MHCFusedPostPreOp,
     MHCPostOp,
     MHCPreOp,
 )
@@ -300,6 +303,16 @@ class DeepseekV4DecoderLayer(nn.Module):
         )
         self.mhc_pre = MHCPreOp()
         self.mhc_post = MHCPostOp()
+        self.mhc_fused_post_pre = MHCFusedPostPreOp()
+        # Backend selection mirrors the per-op dispatch in mhc.py: prefer the
+        # unfused aiter mHC pre/post path, and only fall back to the tilelang
+        # fused post+pre path when aiter is unavailable (the aiter kernels need
+        # a hidden size that is a multiple of 256). When neither aiter nor
+        # tilelang is available, the unfused path handles the torch/triton
+        # reference fallback.
+        self.use_fused_mhc = HAS_TILELANG_MHC and not (
+            HAS_AITER_MHC and self.hidden_size % 256 == 0
+        )
 
     def hc_pre(
         self,
@@ -330,12 +343,73 @@ class DeepseekV4DecoderLayer(nn.Module):
     ):
         return self.mhc_post(x, residual, post, comb)
 
-    def forward(
+    def _forward_fused_post_pre(
         self,
         x: torch.Tensor,
         positions: torch.Tensor,
         input_ids: torch.Tensor | None,
-    ) -> torch.Tensor:
+        post_mix: torch.Tensor | None = None,
+        res_mix: torch.Tensor | None = None,
+        residual: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        # Fused mHC post+pre (tilelang) path, selected when aiter is unavailable
+        # (see ``use_fused_mhc``). Retained so the aiter mhc_fused_post_pre kernel
+        # can be wired into MHCFusedPostPreOp for easy enablement later. The final
+        # layer's hc_post is deferred to the caller (DeepseekV4Model / MTP forward).
+        if residual is None:
+            # Run standalone hc_pre on first layer
+            residual = x
+            x, post_mix, res_mix = self.hc_pre(
+                x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
+            )
+        else:
+            residual, post_mix, res_mix, x = self.mhc_fused_post_pre(
+                x,
+                residual,
+                post_mix,
+                res_mix,
+                self.hc_attn_fn,
+                self.hc_attn_scale,
+                self.hc_attn_base,
+                self.rms_norm_eps,
+                self.hc_eps,
+                self.hc_eps,
+                self.hc_post_alpha,
+                self.hc_sinkhorn_iters,
+            )
+
+        x = self.attn_norm(x)
+        x = self.attn(positions, x, None)
+
+        residual, post_mix, res_mix, x = self.mhc_fused_post_pre(
+            x,
+            residual,
+            post_mix,
+            res_mix,
+            self.hc_ffn_fn,
+            self.hc_ffn_scale,
+            self.hc_ffn_base,
+            self.rms_norm_eps,
+            self.hc_eps,
+            self.hc_eps,
+            self.hc_post_alpha,
+            self.hc_sinkhorn_iters,
+        )
+        x = self.ffn_norm(x)
+        x = self.ffn(x, input_ids)
+        return x, residual, post_mix, res_mix
+
+    def _forward_unfused_post_pre(
+        self,
+        x: torch.Tensor,
+        positions: torch.Tensor,
+        input_ids: torch.Tensor | None,
+        post_mix: torch.Tensor | None = None,
+        res_mix: torch.Tensor | None = None,
+        residual: torch.Tensor | None = None,
+    ) -> tuple[
+        torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None
+    ]:
         # Unfused mHC: hc_pre and hc_post each select the backend directly
         # (aiter -> tilelang -> torch); hc_post is applied inline.
         residual = x
@@ -353,7 +427,26 @@ class DeepseekV4DecoderLayer(nn.Module):
         x = self.ffn_norm(x)
         x = self.ffn(x, input_ids)
         x = self.hc_post(x, residual, post, comb)
-        return x
+        return x, None, None, None
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        positions: torch.Tensor,
+        input_ids: torch.Tensor | None,
+        post_mix: torch.Tensor | None = None,
+        res_mix: torch.Tensor | None = None,
+        residual: torch.Tensor | None = None,
+    ) -> tuple[
+        torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None
+    ]:
+        if not self.use_fused_mhc:
+            return self._forward_unfused_post_pre(
+                x, positions, input_ids, post_mix, res_mix, residual
+            )
+        return self._forward_fused_post_pre(
+            x, positions, input_ids, post_mix, res_mix, residual
+        )
 
 
 class DeepseekV4Model(nn.Module):
@@ -491,8 +584,19 @@ class DeepseekV4Model(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
 
+        residual, post_mix, res_mix = None, None, None
         for layer in islice(self.layers, self.start_layer, self.end_layer):
-            hidden_states = layer(hidden_states, positions, input_ids)
+            hidden_states, residual, post_mix, res_mix = layer(
+                hidden_states,
+                positions,
+                input_ids,
+                post_mix,
+                res_mix,
+                residual,
+            )
+        # The fused post+pre path defers the final layer's hc_post to here.
+        if layer is not None and layer.use_fused_mhc:
+            hidden_states = layer.hc_post(hidden_states, residual, post_mix, res_mix)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
