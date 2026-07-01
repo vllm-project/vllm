@@ -124,15 +124,16 @@ def get_packed_modules_mapping(model: torch.nn.Module) -> dict[str, list[str]]:
 def get_moe_expert_mapping(
     model: torch.nn.Module,
 ) -> list[tuple[str, str, int, str]]:
-    if parent_map := getattr(model, "get_expert_mapping", None):
-        return parent_map()
-    else:
-        # We only check main components instead of whole model submodules
-        for child in model.children():
-            child_map = getattr(child, "get_expert_mapping", None)
-            if child_map is not None:
-                return child_map()
-        return []
+    """Get the expert mapping from a model.
+
+    It will be retrieved from the first module that has a `get_expert_mapping` method.
+    If the model manually implements `get_expert_mapping`, it will be used.
+    Otherwise, it will use the first RoutedExperts layer."""
+    for _, module in model.named_modules():
+        get_mapping = getattr(module, "get_expert_mapping", None)
+        if get_mapping is not None:
+            return get_mapping()
+    raise ValueError("No module in the model has a `get_expert_mapping` method.")
 
 
 def maybe_disable_graph_partition(current_backend: str) -> dict[str, bool]:

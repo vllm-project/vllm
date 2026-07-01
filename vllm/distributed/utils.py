@@ -64,6 +64,38 @@ def divide(numerator, denominator):
     return numerator // denominator
 
 
+def verify_group_size_divides_partition(
+    input_size_per_partition: int,
+    group_size: int,
+    layer_name: str | None = None,
+    extra_suggestion: str = "",
+) -> None:
+    """Validate that a TP-sharded layer holds a whole number of quant groups."""
+    if input_size_per_partition % group_size == 0:
+        return
+    location = f" for layer '{layer_name}'" if layer_name else ""
+    raise ValueError(
+        f"Weight {input_size_per_partition=}{location} is not divisible by "
+        f"{group_size=}. This happens when tensor_parallel_size splits the layer input "
+        "into shards that are not a whole number of quant groups. Consider reducing "
+        f"tensor_parallel_size{extra_suggestion}."
+    )
+
+
+def is_weak_contiguous(inp: torch.Tensor) -> bool:
+    """Check that *inp* occupies a single contiguous block of memory.
+
+    Unlike ``torch.Tensor.is_contiguous()``, this also accepts tensors
+    whose strides are not strictly C-contiguous (e.g. column-major) as
+    long as the underlying storage from the tensor's offset onward is
+    exactly ``numel * element_size`` bytes.
+    """
+    return inp.is_contiguous() or (
+        inp.storage().nbytes() - inp.storage_offset() * inp.element_size()
+        == inp.numel() * inp.element_size()
+    )
+
+
 def split_tensor_along_last_dim(
     tensor: torch.Tensor,
     num_partitions: int,

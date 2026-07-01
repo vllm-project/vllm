@@ -425,7 +425,7 @@ def _run_eagle_correctness(
             if "deepseek" in model_setup[1].lower():
                 m.setenv("VLLM_ROCM_USE_AITER", "1")
                 m.delenv("VLLM_MLA_DISABLE", raising=False)
-                attention_config = {"backend": "TRITON_MLA"}
+                attention_config = {"backend": "ROCM_AITER_MLA"}
             else:
                 m.setenv("VLLM_ROCM_USE_AITER", "1")
 
@@ -715,6 +715,47 @@ def test_eagle_correctness_heavy(
         enable_chunked_prefill,
         model_impl,
         attn_backend,
+    )
+
+
+@large_gpu_mark(min_gb=24)
+def test_medusa_acceptance_rate(
+    sampling_config: SamplingParams,
+):
+    """Verify a trained Medusa checkpoint achieves nonzero acceptance rate.
+
+    Uses the canonical FasterDecoding vicuna-7b checkpoint to confirm the
+    speculation path actually accepts tokens — unlike test_medusa_correctness,
+    which uses a random head and only validates output correctness.
+    """
+    target_model = "lmsys/vicuna-7b-v1.3"
+    medusa_model = "FasterDecoding/medusa-vicuna-7b-v1.3"
+    prompts = _build_gsm8k_prompts(num_questions=10, num_shots=1)[0]
+
+    spec_llm = LLM(
+        model=target_model,
+        speculative_config={
+            "method": "medusa",
+            "model": medusa_model,
+            "num_speculative_tokens": 3,
+        },
+        max_model_len=1024,
+        enforce_eager=True,
+        disable_log_stats=False,
+    )
+    spec_llm.generate(prompts, sampling_config)
+    metrics = spec_llm.get_metrics()
+    acceptance_rate = compute_acceptance_rate(metrics)
+    del spec_llm
+    torch.accelerator.empty_cache()
+    cleanup_dist_env_and_memory()
+
+    min_acceptance_rate = 0.198
+    print(f"Medusa acceptance rate: {acceptance_rate:.4f} (min {min_acceptance_rate})")
+
+    # Regression guard at 90% of the measured baseline.
+    assert acceptance_rate >= min_acceptance_rate, (
+        f"Medusa acceptance rate {acceptance_rate:.4f} below min {min_acceptance_rate}"
     )
 
 
@@ -1300,13 +1341,18 @@ def dflash_config():
     )
 
 
-def test_dflash_acceptance_rates(dflash_config):
+@pytest.mark.parametrize("use_mrv2", [False, True])
+def test_dflash_acceptance_rates(
+    monkeypatch: pytest.MonkeyPatch, use_mrv2: bool, dflash_config
+):
     """
     E2E test for DFlash (block diffusion) speculative decoding.
     Runs acceptance rate validation on GSM8k, MT-Bench, and HumanEval
     comparing against baseline results from the paper (Table 1).
     See https://github.com/z-lab/dflash/blob/main/benchmark_sglang.py for methodology.
     """
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_mrv2 else "0")
+
     spec_llm = LLM(**dflash_config)
 
     max_prompts_per_dataset = 200  # mt-bench has 80, humaneval has 164, truncates gsm8k
@@ -1414,11 +1460,16 @@ def test_synthetic_acceptance_rate():
     cleanup_dist_env_and_memory()
 
 
-def test_dflash_correctness(dflash_config):
+@pytest.mark.parametrize("use_mrv2", [False, True])
+def test_dflash_correctness(
+    monkeypatch: pytest.MonkeyPatch, use_mrv2: bool, dflash_config
+):
     """
     E2E test for DFlash (block diffusion) speculative decoding.
     Ensures output correctness on GSM8k, with cudagraphs and batching on.
     """
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_mrv2 else "0")
+
     spec_llm = LLM(**dflash_config)
 
     # Evaluate GSM8k accuracy (Qwen3-8B ref: ~87-92% on GSM8k)

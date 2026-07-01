@@ -31,25 +31,27 @@ class SecondaryTierFactory:
         primary_kv_view: memoryview,
         offloading_spec: "OffloadingSpec",
     ) -> SecondaryTierManager:
+        tier_cls = cls.get_tier_class(tier_config)
         config = tier_config.copy()
-
-        tier_type = config.pop("type", None)
-        if not tier_type:
-            raise ValueError("Secondary tier configuration must include 'type'")
-
-        if tier_type not in cls._registry:
-            raise ValueError(
-                f"Unknown secondary tier type: {tier_type!r}. "
-                f"Supported types: {list(cls._registry)}"
-            )
-
-        tier_cls = cls._registry[tier_type]()
+        tier_type = config.pop("type")
         return tier_cls(
             offloading_spec=offloading_spec,
             primary_kv_view=primary_kv_view,
             tier_type=tier_type,
             **config,
         )
+
+    @classmethod
+    def get_tier_class(cls, tier_config: dict) -> type[SecondaryTierManager]:
+        tier_type = tier_config.get("type")
+        if not tier_type:
+            raise ValueError("Secondary tier configuration must include 'type'")
+        if tier_type not in cls._registry:
+            raise ValueError(
+                f"Unknown secondary tier type: {tier_type!r}. "
+                f"Supported types: {list(cls._registry)}"
+            )
+        return cls._registry[tier_type]()
 
 
 SecondaryTierFactory.register_tier(
@@ -59,7 +61,19 @@ SecondaryTierFactory.register_tier(
 )
 
 SecondaryTierFactory.register_tier(
-    "fs_python",
+    "fs",
     "vllm.v1.kv_offload.tiering.fs.manager",
     "FileSystemTierManager",
+)
+
+SecondaryTierFactory.register_tier(
+    "p2p",
+    "vllm.v1.kv_offload.tiering.p2p.manager",
+    "P2PSecondaryTierManager",
+)
+
+SecondaryTierFactory.register_tier(
+    "obj",
+    "vllm.v1.kv_offload.tiering.obj.manager",
+    "ObjectStoreSecondaryTierManager",
 )

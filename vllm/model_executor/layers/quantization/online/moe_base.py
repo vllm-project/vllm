@@ -8,7 +8,6 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEMethodBase,
-    FusedMoEQuantConfig,
     RoutedExperts,
     SharedExperts,
 )
@@ -100,21 +99,6 @@ class OnlineMoEMethodBase(FusedMoEMethodBase):
     @abstractmethod
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         pass
-
-    def _maybe_inject_biases(
-        self,
-        quant_config: FusedMoEQuantConfig,
-        layer: torch.nn.Module,
-    ) -> None:
-        """Inject biases into the quant config if the model has them
-        (e.g. GPT-OSS biased MoE)."""
-        if self.moe.has_bias:
-            w13_bias = getattr(layer, "w13_bias", None)
-            w2_bias = getattr(layer, "w2_bias", None)
-            if w13_bias is not None:
-                quant_config._w1.bias = w13_bias
-            if w2_bias is not None:
-                quant_config._w2.bias = w2_bias
 
     def maybe_make_prepare_finalize(
         self,

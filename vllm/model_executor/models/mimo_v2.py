@@ -35,6 +35,10 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    scaled_quantize,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -47,11 +51,14 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
-from vllm.v1.attention.backends.flash_attn_diffkv import (
-    FlashAttentionDiffKVBackend,
-)
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from .interfaces import MixtureOfExperts, SupportsPP
+from .interfaces import (
+    EagleModelMixin,
+    MixtureOfExperts,
+    SupportsEagle3,
+    SupportsPP,
+)
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -292,11 +299,27 @@ class MiMoV2Attention(nn.Module):
 
         sliding_window = sliding_window_size if sliding_window_size > -1 else None
 
-        # Use DiffKV backend when V has a different head dim than K
+        # Use DiffKV backend when V has a different head dim than K.
+        # Auto-pick FA-DiffKV when FA3/4 is usable on this device, else fall
+        # back to TRITON_ATTN_DIFFKV.  Users can force a choice via
+        # `--attention-backend <FLASH_ATTN_DIFFKV|TRITON_ATTN_DIFFKV>`.
         if self.v_head_dim != self.head_dim:
-            FlashAttentionDiffKVBackend.set_head_size_v(self.v_head_dim)
-            attn_backend = FlashAttentionDiffKVBackend
-            logger.info_once("Using FlashAttentionDiffKVBackend for attention.")
+            requested = get_current_vllm_config().attention_config.backend
+            if requested is not None and requested.name.endswith("_DIFFKV"):
+                backend_enum = requested
+            else:
+                fa_backend = AttentionBackendEnum.FLASH_ATTN_DIFFKV.get_class()
+                if fa_backend.is_supported_on_current_device(
+                    head_size=self.head_dim,
+                    head_size_v=self.v_head_dim,
+                    has_sinks=self.attention_sink_bias is not None,
+                ):
+                    backend_enum = AttentionBackendEnum.FLASH_ATTN_DIFFKV
+                else:
+                    backend_enum = AttentionBackendEnum.TRITON_ATTN_DIFFKV
+            attn_backend = backend_enum.get_class()
+            attn_backend.set_head_size_v(self.v_head_dim)
+            logger.info_once("Using %s for attention.", attn_backend.get_name())
         else:
             attn_backend = None
 
@@ -441,8 +464,87 @@ class MiMoV2FlashDecoderLayer(nn.Module):
         return self.config.hybrid_layer_pattern[self.layer_id] == 1
 
 
+def _shard_fp8_qkv_proj(
+    w_full: torch.Tensor,
+    s_full: torch.Tensor,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    v_head_dim: int,
+    tp_rank: int,
+    tp_size: int,
+    block: int = 128,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Shard the fp8 qkv_proj weights for ``tp_rank``.
+
+    The checkpoint stores the fused QKV as ``num_kv_heads`` contiguous groups
+    (one per KV head; ``n`` below), each ordered ``[Q | K | V]``:
+
+        [Q_1 | K_1 | V_1 | Q_2 | K_2 | V_2 | ... | Q_n | K_n | V_n]
+
+    Per group, Q has ``(num_heads / num_kv_heads) * head_dim`` rows, K has
+    ``head_dim`` rows, and V has ``v_head_dim`` rows.
+
+    Each TP rank owns ``g = num_kv_heads / tp_size`` of these groups, and the
+    forward expects them de-interleaved into a single Q, K, and V block:
+
+        [Q_1 | Q_2 | ... | Q_g | K_1 | K_2 | ... | K_g | V_1 | V_2 | ... | V_g]
+
+    When ``g == 1`` the rank's slice is already ``[Q | K | V]``, so a plain
+    chunk suffices. When ``g > 1`` we cannot reach the de-interleaved layout by
+    re-permuting the fp8 block scales: each scale covers a 128-row block, and
+    since K is 192 rows (1.5 blocks) a block straddles the K/V boundary, so no
+    whole-block permutation produces it. Instead we dequantize this rank's
+    groups to float (dropping the block constraint), reorder the rows into the
+    layout above (Q, K, and V then each span a whole number of blocks), and
+    re-quantize to fp8.
+    """
+    assert tp_size <= num_kv_heads and num_kv_heads % tp_size == 0, (
+        "TP size must evenly split the number of KV heads."
+    )
+
+    kv_heads_per_rank = num_kv_heads // tp_size
+    if kv_heads_per_rank == 1:
+        # One KV head per rank. The weights and scale can be trivially sharded
+        # without re-quantization.
+        w = w_full.chunk(tp_size, dim=0)[tp_rank]
+        s = s_full.chunk(tp_size, dim=0)[tp_rank]
+        return w, s
+
+    q_rows_per_group = (num_heads // num_kv_heads) * head_dim
+    k_rows_per_group = head_dim
+    v_rows_per_group = v_head_dim
+    rows_per_group = q_rows_per_group + k_rows_per_group + v_rows_per_group
+    scale_rows_per_group = s_full.shape[0] // num_kv_heads
+    qs, ks, vs = [], [], []
+    for g_idx in range(tp_rank * kv_heads_per_rank, (tp_rank + 1) * kv_heads_per_rank):
+        row_start = g_idx * rows_per_group
+        scale_row_start = g_idx * scale_rows_per_group
+        # Dequantize this group's weights.
+        w_g = w_full[row_start : row_start + rows_per_group].to(torch.float32)
+        s_g = s_full[scale_row_start : scale_row_start + scale_rows_per_group].to(
+            torch.float32
+        )
+        s_g_expanded = s_g.repeat_interleave(block, dim=0).repeat_interleave(
+            block, dim=1
+        )[:rows_per_group]
+        w_g_dequant = w_g * s_g_expanded
+        # Track the dequantized q, k, and v weights separately.
+        qs.append(w_g_dequant[:q_rows_per_group])
+        ks.append(w_g_dequant[q_rows_per_group : q_rows_per_group + k_rows_per_group])
+        vs.append(w_g_dequant[q_rows_per_group + k_rows_per_group :])
+
+    # Combine the q, k, and v weights into the following layout:
+    # [Q_1, Q_2, .., Q_g, K_1, K_2, ..., K_g, V_1, V_2, ..., V_g]
+    grouped = torch.cat([torch.cat(qs), torch.cat(ks), torch.cat(vs)], dim=0)
+    # Quantize back to fp8.
+    return scaled_quantize(
+        grouped, GroupShape(block, block), w_full.dtype, compute_dtype=torch.float32
+    )
+
+
 @support_torch_compile
-class MiMoV2Model(nn.Module):
+class MiMoV2Model(nn.Module, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -505,10 +607,16 @@ class MiMoV2Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        aux_hidden_states = self._maybe_add_hidden_state(
+            [], self.start_layer, hidden_states, residual
+        )
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer)
         ):
             hidden_states, residual = layer(positions, hidden_states, residual)
+            self._maybe_add_hidden_state(
+                aux_hidden_states, idx + 1, hidden_states, residual
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -517,6 +625,8 @@ class MiMoV2Model(nn.Module):
 
         hidden_states, _ = self.norm(hidden_states, residual)
 
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
@@ -547,6 +657,10 @@ class MiMoV2Model(nn.Module):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: set[str] = set()
         expert_params_mapping = self.get_expert_mapping()
+        # Pro-format fused qkv_proj arrives as two tensors (weight and
+        # weight_scale_inv). Store them per-layer so that they can be
+        # sharded together.
+        pending_fp8_qkv_proj: dict[str, dict[str, torch.Tensor]] = {}
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -554,22 +668,6 @@ class MiMoV2Model(nn.Module):
                 continue
             if "mtp" in name:
                 continue
-
-            if self.quant_config is not None:
-                cache_scale_name = self.quant_config.get_cache_scale(name)
-                if cache_scale_name is not None and cache_scale_name in params_dict:
-                    param = params_dict[cache_scale_name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-
-                    kv_scale = loaded_weight
-                    if kv_scale.dim() > 0 and kv_scale.numel() > 1:
-                        kv_scale = kv_scale.view(-1)[0]
-
-                    weight_loader(param, kv_scale)
-                    loaded_params.add(cache_scale_name)
-                    continue
 
             expert_matched = False
             for param_name, weight_name, expert_id, shard_id in expert_params_mapping:
@@ -606,11 +704,15 @@ class MiMoV2Model(nn.Module):
             if expert_matched:
                 continue
             # Support fused qkv_proj checkpoint (Pro format)
-            if "qkv_proj" in name:
-                if name in params_dict:
-                    param = params_dict[name]
-                    loaded_weight = loaded_weight.chunk(tp_size, dim=0)[tp_rank]
-                    default_weight_loader(param, loaded_weight)
+            if self._try_load_fp8_qkv_proj(
+                name,
+                loaded_weight,
+                pending_fp8_qkv_proj,
+                params_dict,
+                loaded_params,
+                tp_rank,
+                tp_size,
+            ):
                 continue
             stacked_matched = False
             for param_name, weight_name, shard_id in stacked_params_mapping:
@@ -668,8 +770,72 @@ class MiMoV2Model(nn.Module):
 
         return loaded_params
 
+    def _try_load_fp8_qkv_proj(
+        self,
+        name: str,
+        tensor: torch.Tensor,
+        fp8_qkv_proj_dict: dict[str, dict[str, torch.Tensor]],
+        params_dict: dict[str, torch.nn.Parameter],
+        loaded_params: set[str],
+        tp_rank: int,
+        tp_size: int,
+    ) -> bool:
+        """
+        The fused fp8 QKV projection weights and scale are stored separately.
+        Special care must be taken while sharding these tensors across TP ranks.
+        See _shard_fp8_qkv_proj for more details.
 
-class MiMoV2FlashForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
+        Returns:
+            True if ``tensor`` was an fp8 qkv_proj weight/scale and was consumed
+            (caller should skip it); False otherwise, so the caller falls
+            through to its normal loading path.
+        """
+        is_weight = (
+            name.endswith("qkv_proj.weight") and tensor.dtype == torch.float8_e4m3fn
+        )
+        is_scale = name.endswith("qkv_proj.weight_scale_inv")
+        if not is_weight and not is_scale:
+            # Weight is not in FP8 format. Ignore.
+            return False
+
+        if is_pp_missing_parameter(name, self):
+            # This qkv_proj is for a layer not on this PP rank.
+            return True
+
+        prefix, qkv_kind = name.rsplit(".", 1)
+        entry = fp8_qkv_proj_dict.setdefault(prefix, {})
+        entry[qkv_kind] = tensor
+        if "weight" not in entry or "weight_scale_inv" not in entry:
+            # Still waiting for the other param.
+            return True
+        del fp8_qkv_proj_dict[prefix]
+
+        # Get self_attn module, which is a parent of qkv_proj.
+        attn = self.get_submodule(prefix.rsplit(".", 1)[0])
+
+        # Shard the qkv_proj per-rank.
+        w_rank, s_rank = _shard_fp8_qkv_proj(
+            entry["weight"],
+            entry["weight_scale_inv"],
+            num_heads=attn.total_num_heads,
+            num_kv_heads=attn.total_num_kv_heads,
+            head_dim=attn.head_dim,
+            v_head_dim=attn.v_head_dim,
+            tp_rank=tp_rank,
+            tp_size=tp_size,
+        )
+        sharded = {"weight": w_rank, "weight_scale_inv": s_rank}
+        for kind, tensor in sharded.items():
+            param_name = f"{prefix}.{kind}"
+            param = params_dict[param_name]
+            if tensor.shape[0] > param.shape[0]:
+                tensor = tensor[: param.shape[0]]
+            default_weight_loader(param, tensor)
+            loaded_params.add(param_name)
+        return True
+
+
+class MiMoV2FlashForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsEagle3):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
