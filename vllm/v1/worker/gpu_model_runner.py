@@ -7439,13 +7439,13 @@ class GPUModelRunner(
         self.routed_experts_initialized = True
 
     def _bind_routed_experts_capturer(self, capturer: RoutedExpertsCapturer) -> None:
+        from vllm.model_executor.layers.fused_moe.layer import MoERunner
         from vllm.model_executor.layers.fused_moe.modular_kernel import (
             FusedMoEExpertsMonolithic,
         )
         from vllm.model_executor.layers.fused_moe.router.base_router import (
             BaseRouter,
         )
-        from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 
         for module in self.compilation_config.static_forward_context.values():
             if not isinstance(module, MoERunner):
