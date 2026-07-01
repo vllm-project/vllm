@@ -7,7 +7,7 @@ Abstract interfaces and data types for the secondary tiering layer.
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import numpy as np
 
@@ -47,6 +47,37 @@ class JobResult:
 
     job_id: JobId
     success: bool
+
+
+class TieringManagerReverseAPI(Protocol):
+    """Reverse-direction interface: secondary tier → tiering manager.
+
+    Passed to secondary tiers via on_schedule_end() each step.
+
+    Required call sequence for each remote request:
+        1. on_new_request(req_context)  — set up per-request state
+        2. lookup(key, req_context)     — check block availability
+           (repeat per block)
+        3. create_store_job(keys, req_context) — pin blocks and get a
+           job handle
+        4. on_request_finished(req_context) — clean up per-request state
+
+    Steps 2-3 may be interleaved. Step 4 must be called even if no
+    blocks were found, to avoid leaking async lookup state (e.g. in
+    the fs tier's AsyncLookupManager).
+    """
+
+    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext: ...
+
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult: ...
+
+    def create_store_job(
+        self,
+        keys: Collection[OffloadKey],
+        req_context: ReqContext,
+    ) -> JobMetadata: ...
+
+    def on_request_finished(self, req_context: ReqContext) -> None: ...
 
 
 class SecondaryTierManager(ABC):
@@ -210,11 +241,19 @@ class SecondaryTierManager(ABC):
         """
         return
 
-    def on_schedule_end(self, context: ScheduleEndContext) -> None:
+    def on_schedule_end(
+        self,
+        context: ScheduleEndContext,
+        reverse_api: TieringManagerReverseAPI | None = None,
+    ) -> None:
         """Called once at the end of each scheduler step.
 
-        Secondary tiers may override this for per-step cleanup or
-        deferred work submission.
+        Args:
+            context: Per-step context from the scheduler.
+            reverse_api: Handle for calling back into the tiering
+                manager (lookup, pin blocks, lifecycle). See
+                TieringManagerReverseAPI for the required call
+                sequence. None when no tiering manager is present.
         """
         return
 
