@@ -152,8 +152,15 @@ def _apply_to_nccl_comms(label: str, action: Callable[[Any], None]) -> None:
     free_before = torch.cuda.mem_get_info()[0]
     for pynccl in comms:
         action(pynccl)
-    freed = abs(free_before - torch.cuda.mem_get_info()[0])
-    logger.info("NCCL %s: %d comms, %.1f MiB", label, len(comms), freed / 1024**2)
+    delta = torch.cuda.mem_get_info()[0] - free_before
+    direction = "freed" if delta > 0 else "allocated"
+    logger.info(
+        "NCCL %s: %d comms, %.1f MiB %s",
+        label,
+        len(comms),
+        abs(delta) / 1024**2,
+        direction,
+    )
 
 
 def suspend_nccl_comms() -> None:
