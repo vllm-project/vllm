@@ -4,7 +4,7 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from functools import partial
+from functools import cache, partial
 from typing import ClassVar
 
 import numpy as np
@@ -89,6 +89,45 @@ FP4_DTYPE = torch.uint8
 logger = init_logger(__name__)
 
 trtllm_workspace_buffer = None
+
+
+@cache
+def _get_xqa_spec_decode_causal_mask(
+    batch_size: int,
+    q_seq_len: int,
+    device: torch.device,
+) -> torch.Tensor:
+    num_packed_masks_per_token = (q_seq_len + 31) // 32
+
+    q_indices = torch.arange(q_seq_len, device=device, dtype=torch.int32).unsqueeze(1)
+    kv_indices = torch.arange(q_seq_len, device=device, dtype=torch.int32).unsqueeze(0)
+    causal_bool_mask = kv_indices <= q_indices
+
+    padded_seq_len = num_packed_masks_per_token * 32
+    if padded_seq_len > q_seq_len:
+        padding = torch.zeros(
+            q_seq_len,
+            padded_seq_len - q_seq_len,
+            device=device,
+            dtype=torch.bool,
+        )
+        causal_bool_mask = torch.cat([causal_bool_mask, padding], dim=1)
+
+    causal_bool_mask = causal_bool_mask.view(q_seq_len, num_packed_masks_per_token, 32)
+    bit_positions = torch.tensor(
+        [1 << i for i in range(32)],
+        device=device,
+        dtype=torch.int64,
+    )
+    mask_uint32 = (
+        (causal_bool_mask.to(torch.int64) * bit_positions).sum(dim=-1).to(torch.uint32)
+    )
+    mask_uint32 = (
+        mask_uint32.unsqueeze(0)
+        .expand(batch_size, q_seq_len, num_packed_masks_per_token)
+        .contiguous()
+    )
+    return mask_uint32.view(torch.uint16)
 
 
 def _get_trtllm_workspace_buffer():
@@ -738,12 +777,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             if can_use_xqa_or_trtllm_gen_decode
             else None
         )
-        supports_spec_as_decode = (
-            self.flashinfer_trtllm_api_decode_kernel
-            == FlashInferDecodeKernel.TRTLLM_GEN
-        )
         self._init_reorder_batch_threshold(
-            1, supports_spec_as_decode=supports_spec_as_decode
+            1, supports_spec_as_decode=can_use_xqa_or_trtllm_gen_decode
         )
 
         self._cascade_wrapper = None  # Wrapper for cascade attention
@@ -851,14 +886,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         vllm_config: VllmConfig,
         kv_cache_spec: AttentionSpec,
     ) -> AttentionCGSupport:
-        """Get the cudagraph support level for FlashInfer attention.
-
-        The SM90 XQA integration only enables single-token decode today. Keep
-        specdec CUDA graphs limited to trtllm-gen until vLLM wires the XQA
-        specdec mask.
-        """
-        if current_platform.is_device_capability(90):
-            return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+        """Get the cudagraph support level for FlashInfer attention."""
 
         # For UniformTypeKVCacheSpecs, check all contained specs
         kv_specs = (
@@ -2061,9 +2089,12 @@ class FlashInferImpl(AttentionImpl):
                 else:
                     q_len_per_req = num_decode_tokens // attn_metadata.num_decodes
 
+                decode_mask = None
                 if decode_with_xqa and q_len_per_req > 1:
-                    raise NotImplementedError(
-                        "FlashInfer XQA speculative decode is not wired in vLLM yet."
+                    decode_mask = _get_xqa_spec_decode_causal_mask(
+                        attn_metadata.num_decodes,
+                        q_len_per_req,
+                        decode_query.device,
                     )
 
                 # XQA decode can use model-dtype Q with FP8 KV, so only include
@@ -2095,6 +2126,7 @@ class FlashInferImpl(AttentionImpl):
                     kv_cache_sf=(
                         nvfp4_kv_block_scales if self.is_kvcache_nvfp4 else None
                     ),
+                    mask=decode_mask,
                 )
 
                 if needs_fp8_out:
