@@ -22,7 +22,7 @@ steps:
     agent_tags:
       label: debug_b50
       gpu: 2+
-      mem: 16+
+      mem: 24+
     no_plugin: true
     env:
       REGISTRY: "public.ecr.aws/q9t5s3a7"
@@ -56,7 +56,7 @@ steps:
     agent_tags:
       label: debug_b50
       gpu: 1+
-      mem: 16+
+      mem: 24+
     no_plugin: true
     env:
       REGISTRY: "public.ecr.aws/q9t5s3a7"
