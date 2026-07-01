@@ -1505,7 +1505,7 @@ class DeepseekV2Model(nn.Module):
         if _pending_wk_fp8 is None:
             _pending_wk_fp8 = {}
             self._pending_indexer_wk_fp8 = _pending_wk_fp8
-            
+
         indexer_fused_mapping = [
             ("wk_weights_proj", "wk", 0),
             ("wk_weights_proj", "weights_proj", 1),
