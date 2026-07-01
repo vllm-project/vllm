@@ -11,8 +11,6 @@ from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
-    KVCacheBlockListWithHitLength,
-    get_cache_hit_length,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
@@ -135,6 +133,7 @@ class KVCacheCoordinator(ABC):
         new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
         num_encoder_tokens: int,
         total_computed_tokens: int,
+        num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
     ) -> int:
@@ -150,6 +149,8 @@ class KVCacheCoordinator(ABC):
             num_encoder_tokens: The number of encoder tokens for allocating
                 blocks for cross-attention.
             total_computed_tokens: Include both local and external tokens.
+            num_local_computed_tokens: The number of local prefix-cache computed
+                tokens.
             num_tokens_main_model: The number of tokens for the main model (aka target
                 model in spec decode). w/o spec decode, it is num_tokens;
                 with spec decode, it is num_tokens - num_lookahead_tokens.
@@ -171,6 +172,7 @@ class KVCacheCoordinator(ABC):
                     num_encoder_tokens,
                     [],
                     0,
+                    0,
                     num_encoder_tokens,
                     apply_admission_cap=apply_admission_cap,
                 )
@@ -180,6 +182,7 @@ class KVCacheCoordinator(ABC):
                     num_tokens,
                     new_computed_blocks[i],
                     total_computed_tokens,
+                    num_local_computed_tokens,
                     num_tokens_main_model,
                     apply_admission_cap=apply_admission_cap,
                 )
@@ -475,7 +478,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         block_hashes: list[BlockHash],
         max_cache_hit_length: int,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
-        hit_blocks = self.single_type_managers[0].find_longest_cache_hit(
+        hit_blocks, hit_length = self.single_type_managers[0].find_longest_cache_hit(
             block_hashes=block_hashes,
             max_length=max_cache_hit_length,
             kv_cache_group_ids=[0],
@@ -486,7 +489,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             dcp_world_size=self.dcp_world_size,
             pcp_world_size=self.pcp_world_size,
         )
-        return hit_blocks, len(hit_blocks[0]) * self.block_size
+        return hit_blocks, hit_length
 
 
 class SpecGroup(NamedTuple):
@@ -668,6 +671,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         hit_length = max_cache_hit_length
         longest_hit_length = 0
         hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * num_groups
+        hit_length_by_group: list[int] = [0] * num_groups
 
         # Simple hybrid (1 full attn + 1 other): one iteration suffices.
         # Full attn is always first if it exists.
@@ -693,7 +697,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     # to the (reduced) current hit length.
                     curr_hit_length = min(
                         curr_hit_length,
-                        get_cache_hit_length(cached_blocks, spec.block_size),
+                        hit_length_by_group[group_ids[0]],
                     )
                     continue
 
@@ -705,7 +709,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     _max_length = min(
                         curr_hit_length + spec.block_size, max_cache_hit_length
                     )
-                hit_blocks = manager_cls.find_longest_cache_hit(
+                hit_blocks, _new_hit_length = manager_cls.find_longest_cache_hit(
                     block_hashes=block_hashes,
                     max_length=_max_length,
                     kv_cache_group_ids=group_ids,
@@ -714,7 +718,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     drop_eagle_block=drop_eagle_block,
                     alignment_tokens=self._cache_hit_alignment_tokens,
                 )
-                _new_hit_length = get_cache_hit_length(hit_blocks[0], spec.block_size)
                 if drop_eagle_block:
                     eagle_verified.add(idx)
                 elif _new_hit_length < curr_hit_length:
@@ -723,6 +726,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 curr_hit_length = _new_hit_length
                 for group_id, blocks in zip(group_ids, hit_blocks):
                     hit_blocks_by_group[group_id] = blocks
+                    hit_length_by_group[group_id] = _new_hit_length
 
                 longest_hit_length = max(longest_hit_length, curr_hit_length)
 
@@ -738,17 +742,14 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             num_blocks = cdiv(hit_length, first_group.spec.block_size)
             for group_id in first_group.group_ids:
                 if (blks := hit_blocks_by_group[group_id]) is not None:
-                    # Full attention always returns a hit-length-carrying list.
-                    assert isinstance(blks, KVCacheBlockListWithHitLength)
                     del blks[num_blocks:]
-                    blks.hit_length = hit_length
+                    hit_length_by_group[group_id] = hit_length
 
         # Uncached shared prefix detection: If any attn. group cached a longer prefix
         # than the current prefix, it is an uncached common prefix across requests:
         self.num_uncached_common_prefix_tokens = longest_hit_length - hit_length
         return tuple(
-            blocks if blocks is not None else KVCacheBlockListWithHitLength()
-            for blocks in hit_blocks_by_group
+            blocks if blocks is not None else [] for blocks in hit_blocks_by_group
         ), hit_length
 
     def find_longest_cache_hit_per_group(
@@ -767,7 +768,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         hit_lengths: list[int] = [0] * num_groups
 
         for spec, group_ids, manager_cls, use_eagle in self.attention_groups:
-            blocks = manager_cls.find_longest_cache_hit(
+            blocks, group_hit = manager_cls.find_longest_cache_hit(
                 block_hashes=block_hashes,
                 max_length=max_cache_hit_length,
                 kv_cache_group_ids=group_ids,
@@ -776,7 +777,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 drop_eagle_block=use_eagle,
                 alignment_tokens=self._cache_hit_alignment_tokens,
             )
-            group_hit = get_cache_hit_length(blocks[0], spec.block_size)
             for gid, blks in zip(group_ids, blocks):
                 hit_blocks[gid] = blks
                 hit_lengths[gid] = group_hit

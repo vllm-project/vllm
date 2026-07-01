@@ -16,9 +16,6 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHashWithGroupId,
     KVCacheBlock,
     KVCacheBlockCopy,
-    KVCacheBlockListWithHitLength,
-    get_cache_hit_length,
-    has_partial_cache_hit,
     resolve_block_hashes,
 )
 from vllm.v1.kv_cache_interface import (
@@ -121,6 +118,7 @@ class SingleTypeKVCacheManager(ABC):
         num_tokens: int,
         new_computed_blocks: Sequence[KVCacheBlock],
         total_computed_tokens: int,
+        num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
     ) -> int:
@@ -134,6 +132,8 @@ class SingleTypeKVCacheManager(ABC):
             new_computed_blocks: The new computed blocks just hitting the
                 prefix caching.
             total_computed_tokens: Include both local and external computed
+                tokens.
+            num_local_computed_tokens: The number of local prefix-cache computed
                 tokens.
             num_tokens_main_model: The number of tokens for the main model (aka target
                 model in spec decode). w/o spec decode, it is num_tokens;
@@ -485,7 +485,7 @@ class SingleTypeKVCacheManager(ABC):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
-    ) -> tuple[KVCacheBlockListWithHitLength, ...]:
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         """
         Get the longest cache hit prefix of the blocks that is not longer than
         `max_length`. The prefix should be a common prefix hit for all the
@@ -512,11 +512,9 @@ class SingleTypeKVCacheManager(ABC):
             pcp_world_size: The world size of prefill context parallelism.
 
         Returns:
-            A list of cached blocks with skipped blocks replaced by null block
-            for each kv cache group in `kv_cache_group_ids`.
-            Return a list of length `len(kv_cache_group_ids)`, where the i-th
-            element is a list of cached blocks for the i-th kv cache group
-            in `kv_cache_group_ids`.
+            A tuple containing cached blocks and the exact cache-hit length in
+            tokens. The cached block tuple has skipped blocks replaced by null
+            blocks for each kv cache group in `kv_cache_group_ids`.
             For example, sliding window manager should return a list like
             ([NULL, NULL, KVCacheBlock(7), KVCacheBlock(8)]) for block size 4
             and sliding window 8 and len(kv_cache_group_ids) = 1.
@@ -622,7 +620,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         block_pool: BlockPool,
         block_size: int,
         hash_block_size: int,
-    ) -> tuple[KVCacheBlockListWithHitLength, ...]:
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         assert block_size % hash_block_size == 0
         scale_factor = block_size // hash_block_size
         full_block_hashes = BlockHashListWithBlockSize(
@@ -633,8 +631,8 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             len(block_hashes),
         )
 
-        computed_blocks: tuple[KVCacheBlockListWithHitLength, ...] = tuple(
-            KVCacheBlockListWithHitLength() for _ in range(len(kv_cache_group_ids))
+        computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
+            [] for _ in range(len(kv_cache_group_ids))
         )
         max_num_full_blocks = max_length // block_size
         num_full_blocks = 0
@@ -667,10 +665,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             hit_length = num_tokens
             break
 
-        for computed in computed_blocks:
-            assert isinstance(computed, KVCacheBlockListWithHitLength)
-            computed.hit_length = hit_length
-        return computed_blocks
+        return computed_blocks, hit_length
 
     @classmethod
     def find_longest_cache_hit(
@@ -684,7 +679,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
-    ) -> tuple[KVCacheBlockListWithHitLength, ...]:
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         assert isinstance(
             kv_cache_spec, FullAttentionSpec | ChunkedLocalAttentionSpec
         ), (
@@ -698,15 +693,15 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             supports_fine_grained_hash_lookup=cls.supports_fine_grained_hash_lookup,
             alignment_tokens=alignment_tokens,
         )
-        computed_blocks: tuple[KVCacheBlockListWithHitLength, ...] = tuple(
-            KVCacheBlockListWithHitLength() for _ in range(len(kv_cache_group_ids))
+        computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
+            [] for _ in range(len(kv_cache_group_ids))
         )
         block_size = kv_cache_spec.block_size
         if dcp_world_size * pcp_world_size > 1:
             block_size *= dcp_world_size * pcp_world_size
         if alignment_tokens < block_size and block_size % alignment_tokens == 0:
             assert isinstance(block_hashes, list)
-            computed_blocks = cls._find_fine_grained_cache_hit(
+            computed_blocks, hit_length = cls._find_fine_grained_cache_hit(
                 block_hashes=block_hashes,
                 max_length=max_length,
                 kv_cache_group_ids=kv_cache_group_ids,
@@ -717,19 +712,12 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             if drop_eagle_block and computed_blocks[0]:
                 for computed in computed_blocks:
                     computed.pop()
-                    assert isinstance(computed, KVCacheBlockListWithHitLength)
-                    computed.hit_length = len(computed) * block_size
-            while (
-                block_size != alignment_tokens
-                and get_cache_hit_length(computed_blocks[0], block_size)
-                % alignment_tokens
-                != 0
-            ):
+                hit_length = len(computed_blocks[0]) * block_size
+            while block_size != alignment_tokens and hit_length % alignment_tokens != 0:
                 for computed in computed_blocks:
                     computed.pop()
-                    assert isinstance(computed, KVCacheBlockListWithHitLength)
-                    computed.hit_length = len(computed) * block_size
-            return computed_blocks
+                hit_length = len(computed_blocks[0]) * block_size
+            return computed_blocks, hit_length
 
         max_num_blocks = max_length // block_size
         hit_length = 0
@@ -757,10 +745,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             for computed in computed_blocks:
                 computed.pop()
             hit_length -= block_size
-        for computed in computed_blocks:
-            assert isinstance(computed, KVCacheBlockListWithHitLength)
-            computed.hit_length = hit_length
-        return computed_blocks
+        return computed_blocks, hit_length
 
     def get_num_blocks_to_allocate(
         self,
@@ -768,6 +753,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         num_tokens: int,
         new_computed_blocks: Sequence[KVCacheBlock],
         total_computed_tokens: int,
+        num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
     ) -> int:
@@ -776,11 +762,14 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             num_tokens,
             new_computed_blocks,
             total_computed_tokens,
+            num_local_computed_tokens,
             num_tokens_main_model,
             apply_admission_cap=apply_admission_cap,
         )
-        if request_id not in self.num_cached_block and has_partial_cache_hit(
-            new_computed_blocks, self.block_size
+        if (
+            request_id not in self.num_cached_block
+            and len(new_computed_blocks) > 0
+            and num_local_computed_tokens % self.block_size != 0
         ):
             num_blocks += 1
         return num_blocks
@@ -798,8 +787,12 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             num_local_computed_tokens,
             num_external_computed_tokens,
         )
-        hit_length = get_cache_hit_length(new_computed_blocks, self.block_size)
-        if hit_length > 0 and hit_length % self.block_size != 0:
+        hit_length = num_local_computed_tokens
+        if (
+            len(new_computed_blocks) > 0
+            and hit_length > 0
+            and hit_length % self.block_size != 0
+        ):
             block_idx = hit_length // self.block_size
             source_block = new_computed_blocks[-1]
             self._partial_hit_reqs[request_id] = (
@@ -936,7 +929,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
-    ) -> tuple[KVCacheBlockListWithHitLength, ...]:
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         assert isinstance(kv_cache_spec, SlidingWindowSpec), (
             "SlidingWindowManager can only be used for sliding window groups"
         )
@@ -961,8 +954,8 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         # sliding_window_contiguous_blocks),
         # which is good for low cache hit rate scenarios.
         max_num_blocks = max_length // kv_cache_spec.block_size
-        computed_blocks = tuple(
-            KVCacheBlockListWithHitLength([block_pool.null_block] * max_num_blocks)
+        computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
+            [block_pool.null_block] * max_num_blocks
             for _ in range(len(kv_cache_group_ids))
         )
         block_size = kv_cache_spec.block_size
@@ -1016,9 +1009,8 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             ):
                 for computed in computed_blocks:
                     computed.pop()
-        for computed in computed_blocks:
-            computed.hit_length = len(computed) * block_size
-        return computed_blocks
+        hit_length = len(computed_blocks[0]) * block_size
+        return computed_blocks, hit_length
 
     @classmethod
     def reachable_block_mask(
@@ -1139,7 +1131,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
-    ) -> tuple[KVCacheBlockListWithHitLength, ...]:
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         """
         For chunked local attention, we need to find the longest cache hit
         prefix of the blocks that is not longer than `max_length`. The prefix
@@ -1211,10 +1203,8 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         local_attention_start_block_idx = (
             local_attention_start_idx // kv_cache_spec.block_size
         )
-        computed_blocks: tuple[KVCacheBlockListWithHitLength, ...] = tuple(
-            KVCacheBlockListWithHitLength(
-                [block_pool.null_block] * local_attention_start_block_idx
-            )
+        computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
+            [block_pool.null_block] * local_attention_start_block_idx
             for _ in range(len(kv_cache_group_ids))
         )
         for i in range(local_attention_start_block_idx, max_num_blocks):
@@ -1226,9 +1216,8 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
                     computed.append(cached)
             else:
                 break
-        for computed in computed_blocks:
-            computed.hit_length = len(computed) * kv_cache_spec.block_size
-        return computed_blocks
+        hit_length = len(computed_blocks[0]) * kv_cache_spec.block_size
+        return computed_blocks, hit_length
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """
@@ -1315,7 +1304,7 @@ class MambaManager(SingleTypeKVCacheManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
-    ) -> tuple[KVCacheBlockListWithHitLength, ...]:
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         assert isinstance(kv_cache_spec, MambaSpec), (
             "MambaManager can only be used for mamba groups"
         )
@@ -1328,9 +1317,10 @@ class MambaManager(SingleTypeKVCacheManager):
             supports_fine_grained_hash_lookup=cls.supports_fine_grained_hash_lookup,
             alignment_tokens=alignment_tokens,
         )
-        computed_blocks: tuple[KVCacheBlockListWithHitLength, ...] = tuple(
-            KVCacheBlockListWithHitLength() for _ in range(len(kv_cache_group_ids))
+        computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
+            [] for _ in range(len(kv_cache_group_ids))
         )
+        hit_length = 0
 
         block_size = kv_cache_spec.block_size
         if alignment_tokens < block_size and block_size % alignment_tokens == 0:
@@ -1351,10 +1341,9 @@ class MambaManager(SingleTypeKVCacheManager):
                     for computed, cached in zip(computed_blocks, cached_block):
                         computed.extend([block_pool.null_block] * block_idx)
                         computed.append(cached)
-                        assert isinstance(computed, KVCacheBlockListWithHitLength)
-                        computed.hit_length = num_tokens
+                    hit_length = num_tokens
                     break
-            return computed_blocks
+            return computed_blocks, hit_length
 
         max_num_blocks = max_length // block_size
         # Search from right to left and early stop when a match is found.
@@ -1377,11 +1366,10 @@ class MambaManager(SingleTypeKVCacheManager):
                     # so we insert dummy blocks at the beginning:
                     computed.extend([block_pool.null_block] * i)
                     computed.append(cached)
-                    assert isinstance(computed, KVCacheBlockListWithHitLength)
-                    computed.hit_length = (i + 1) * block_size
+                hit_length = (i + 1) * block_size
                 break  # we just need the last match - early stopping
 
-        return computed_blocks
+        return computed_blocks, hit_length
 
     def remove_skipped_blocks(self, request_id: str, num_computed_tokens: int) -> None:
         assert isinstance(self.kv_cache_spec, MambaSpec)
@@ -1425,6 +1413,7 @@ class MambaManager(SingleTypeKVCacheManager):
         num_tokens: int,
         new_computed_blocks: Sequence[KVCacheBlock],
         total_computed_tokens: int,
+        num_local_computed_tokens: int,
         num_tokens_main_model: int,
         apply_admission_cap: bool = False,
     ) -> int:
@@ -1450,6 +1439,7 @@ class MambaManager(SingleTypeKVCacheManager):
                 num_tokens,
                 new_computed_blocks,
                 total_computed_tokens,
+                num_local_computed_tokens,
                 num_tokens_main_model,
                 apply_admission_cap=apply_admission_cap,
             )
@@ -1477,9 +1467,12 @@ class MambaManager(SingleTypeKVCacheManager):
                 - len(new_computed_blocks)
                 - len(self.req_to_blocks[request_id])
             )
+            has_partial_local_hit = (
+                len(new_computed_blocks) > 0
+                and num_local_computed_tokens % self.block_size != 0
+            )
             has_partial_hit = (
-                has_partial_cache_hit(new_computed_blocks, self.block_size)
-                or request_id in self._partial_hit_reqs
+                has_partial_local_hit or request_id in self._partial_hit_reqs
             )
             if has_partial_hit:
                 num_new_blocks = max(num_new_blocks, 0) + 1
@@ -1706,11 +1699,12 @@ class MambaManager(SingleTypeKVCacheManager):
             num_local_computed_tokens,
             num_external_computed_tokens,
         )
-        if self.mamba_cache_mode == "align" and has_partial_cache_hit(
-            new_computed_blocks, self.block_size
+        if (
+            self.mamba_cache_mode == "align"
+            and len(new_computed_blocks) > 0
+            and num_local_computed_tokens % self.block_size != 0
         ):
-            hit_length = get_cache_hit_length(new_computed_blocks, self.block_size)
-            block_idx = hit_length // self.block_size
+            block_idx = num_local_computed_tokens // self.block_size
             self._partial_hit_reqs[request_id] = (block_idx, new_computed_blocks[-1])
             self.num_cached_block[request_id] = block_idx
 
@@ -1765,7 +1759,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
-    ) -> tuple[KVCacheBlockListWithHitLength, ...]:
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         assert isinstance(kv_cache_spec, CrossAttentionSpec), (
             "CrossAttentionManager can only be used for cross-attention groups"
         )

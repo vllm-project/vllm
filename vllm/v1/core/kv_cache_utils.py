@@ -176,36 +176,6 @@ class KVCacheBlock:
         )
 
 
-class KVCacheBlockListWithHitLength(list[KVCacheBlock]):
-    """A block list carrying the exact token length it represents."""
-
-    def __init__(
-        self,
-        blocks: Sequence[KVCacheBlock] = (),
-        hit_length: int | None = None,
-    ) -> None:
-        super().__init__(blocks)
-        self.hit_length = hit_length
-
-
-def get_cache_hit_length(
-    blocks: Sequence[KVCacheBlock],
-    block_size: int,
-) -> int:
-    hit_length = getattr(blocks, "hit_length", None)
-    if hit_length is not None:
-        return hit_length
-    return len(blocks) * block_size
-
-
-def has_partial_cache_hit(
-    blocks: Sequence[KVCacheBlock],
-    block_size: int,
-) -> bool:
-    hit_length = get_cache_hit_length(blocks, block_size)
-    return hit_length > 0 and hit_length % block_size != 0
-
-
 class KVCacheBlockCopy(NamedTuple):
     src_block_id: int
     dst_block_id: int

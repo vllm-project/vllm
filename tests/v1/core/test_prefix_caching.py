@@ -1486,7 +1486,6 @@ def test_hybrid_partial_hash_truncates_full_attention_hit_length():
     computed_blocks, num_computed = manager.get_computed_blocks(req)
     assert num_computed == 6
     assert [len(group) for group in computed_blocks.blocks] == [2, 2]
-    assert computed_blocks.blocks[0].hit_length == 6
 
 
 def test_prefill_plp():

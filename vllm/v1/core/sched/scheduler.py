@@ -2341,6 +2341,7 @@ class Scheduler(SchedulerInterface):
             new_computed_blocks=self.kv_cache_manager.empty_kv_cache_blocks.blocks,
             num_encoder_tokens=0,
             total_computed_tokens=request.num_computed_tokens,
+            num_local_computed_tokens=request.num_computed_tokens,
             num_tokens_main_model=full_num_tokens,
             apply_admission_cap=True,
         )

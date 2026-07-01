@@ -88,7 +88,7 @@ def test_chunked_local_attention_possible_cached_prefix():
             kv_cache_spec=chunked_local_attention_spec,
             drop_eagle_block=False,
             alignment_tokens=block_size,
-        )[0]
+        )[0][0]
         assert len(computed_blocks) == expect_length
 
         assert all(
@@ -159,7 +159,7 @@ def test_sliding_window_possible_cached_prefix():
             kv_cache_spec=sliding_window_spec,
             drop_eagle_block=False,
             alignment_tokens=block_size,
-        )[0]
+        )[0][0]
         assert len(computed_blocks) == expect_length
 
         assert all(
@@ -348,13 +348,13 @@ def test_get_num_blocks_to_allocate():
 
     assert (
         manager.get_num_blocks_to_allocate(
-            "1", 20 * block_size, cached_blocks_1, 0, 20 * block_size
+            "1", 20 * block_size, cached_blocks_1, 0, 0, 20 * block_size
         )
         == 20
     )
     assert (
         manager.get_num_blocks_to_allocate(
-            "2", 20 * block_size, cached_blocks_2, 0, 20 * block_size
+            "2", 20 * block_size, cached_blocks_2, 0, 0, 20 * block_size
         )
         == 15
     )
@@ -384,6 +384,7 @@ def test_evictable_cached_blocks_not_double_allocated():
         num_tokens=2 * block_size,
         new_computed_blocks=[evictable_block],
         total_computed_tokens=block_size,
+        num_local_computed_tokens=block_size,
         num_tokens_main_model=2 * block_size,
     )
     # Free capacity check should count evictable cached blocks, but allocation
@@ -424,13 +425,13 @@ def test_chunked_local_attention_get_num_blocks_to_allocate():
 
     assert (
         manager.get_num_blocks_to_allocate(
-            "1", 20 * block_size, cached_blocks_1, 0, 20 * block_size
+            "1", 20 * block_size, cached_blocks_1, 0, 0, 20 * block_size
         )
         == 20
     )
     assert (
         manager.get_num_blocks_to_allocate(
-            "2", 20 * block_size, cached_blocks_2, 0, 20 * block_size
+            "2", 20 * block_size, cached_blocks_2, 0, 0, 20 * block_size
         )
         == 15
     )
@@ -474,6 +475,7 @@ def test_predictor_matches_allocator_blocks_calculation_with_admission_cap():
             num_tokens=num_tokens,
             new_computed_blocks=[],
             total_computed_tokens=total_computed,
+            num_local_computed_tokens=0,
             num_tokens_main_model=num_tokens,
         )
         new_blocks = manager.allocate_new_blocks(
