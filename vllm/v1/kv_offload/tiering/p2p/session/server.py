@@ -347,6 +347,12 @@ class ServerRole:
         wire order — after which ``cb.finish_request`` fires and the
         entry is dropped.
         """
+        logger.debug(
+            "P2P LOOKUP server %s: RECV LookupMsg kv_request_id=%s hashes=%d",
+            self._peer_id,
+            kv_request_id,
+            len(block_hashes),
+        )
         self._lookup_id_counter += 1
         lookup_id = self._lookup_id_counter
         ctx = ReqContext(req_id=f"p2p:{self._peer_id}:{kv_request_id}:lu{lookup_id}")
@@ -380,6 +386,16 @@ class ServerRole:
                 # gives the underlying primary write or promotion time
                 # to settle.
                 lookup.pending.add(h)
+
+        logger.debug(
+            "P2P LOOKUP server %s: RESOLVED kv_request_id=%s hits=%d misses=%d "
+            "pending=%d",
+            self._peer_id,
+            kv_request_id,
+            len(hit_hashes),
+            sum(1 for v in lookup.resolved.values() if not v),
+            len(lookup.pending),
+        )
 
         if hit_hashes:
             self._pin_and_register_hits(kv_request_id, hit_hashes, ctx)
@@ -468,12 +484,23 @@ class ServerRole:
         LookupMsg so the client can zip hashes and hits positionally.
         """
         if lookup.hashes:
+            hits = [lookup.resolved[h] for h in lookup.hashes]
+            n_hit = sum(1 for v in hits if v)
+            logger.debug(
+                "P2P LOOKUP server %s: SEND LookupRespMsg kv_request_id=%s "
+                "hashes=%d hits=%d misses=%d",
+                self._peer_id,
+                lookup.kv_request_id,
+                len(lookup.hashes),
+                n_hit,
+                len(hits) - n_hit,
+            )
             self._send(
                 {
                     TYPE_KEY: LookupRespMsg.TYPE,
                     LookupRespMsg.KV_REQUEST_ID: lookup.kv_request_id,
                     LookupRespMsg.BLOCK_HASHES: list(lookup.hashes),
-                    LookupRespMsg.HITS: [lookup.resolved[h] for h in lookup.hashes],
+                    LookupRespMsg.HITS: hits,
                 }
             )
         self._cb.finish_request(lookup.ctx)

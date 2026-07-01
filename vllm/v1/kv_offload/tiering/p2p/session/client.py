@@ -201,6 +201,13 @@ class ClientRole:
             return result
         self._lookups[key] = None
         self._unsent_lookups_by_req.setdefault(kv_request_id, []).append(block_hash)
+        logger.debug(
+            "P2P LOOKUP client %s: REGISTER kv_request_id=%s hash=%s (unsent=%d)",
+            self._peer_id,
+            kv_request_id,
+            block_hash.hex()[:16],
+            len(self._unsent_lookups_by_req[kv_request_id]),
+        )
         return None
 
     def flush_pending_lookups(self) -> None:
@@ -223,6 +230,12 @@ class ClientRole:
                 f"LookupMsg already sent for kv_request_id={req_id}"
             )
             self._flushed_req_ids.add(req_id)
+            logger.debug(
+                "P2P LOOKUP client %s: SEND LookupMsg kv_request_id=%s hashes=%d",
+                self._peer_id,
+                req_id,
+                len(hashes),
+            )
             self._send(
                 {
                     TYPE_KEY: LookupMsg.TYPE,
@@ -244,6 +257,16 @@ class ClientRole:
         never asked) are silently dropped — the producer is free to
         split or coalesce responses.
         """
+        n_hit = sum(1 for hit in hits if hit)
+        logger.debug(
+            "P2P LOOKUP client %s: RECV LookupRespMsg kv_request_id=%s "
+            "hashes=%d hits=%d misses=%d",
+            self._peer_id,
+            kv_request_id,
+            len(block_hashes),
+            n_hit,
+            len(hits) - n_hit,
+        )
         for h, hit in zip(block_hashes, hits):
             key = (kv_request_id, h)
             if key in self._lookups:
