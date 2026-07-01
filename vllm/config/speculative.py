@@ -9,7 +9,7 @@ from typing_extensions import Self
 
 from vllm.config import LoadConfig
 from vllm.config.kernel import MoEBackend
-from vllm.config.model import ModelConfig
+from vllm.config.model import HfOverrides, ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -712,6 +712,15 @@ class SpeculativeConfig:
             self.prompt_lookup_min = 0
 
             if self.model is not None:
+                # Old-format Medusa checkpoints (e.g. FasterDecoding/medusa-*)
+                # lack a model_type key in config.json, so AutoConfig cannot
+                # detect them. When the method is explicitly "medusa", inject
+                # model_type so MedusaConfig.from_pretrained is used instead.
+                draft_hf_overrides: HfOverrides
+                if self.method == "medusa":
+                    draft_hf_overrides = {"model_type": "medusa"}
+                else:
+                    draft_hf_overrides = SpeculativeConfig.hf_config_override
                 self.draft_model_config = ModelConfig(
                     model=self.model,
                     runner="draft",
@@ -730,9 +739,20 @@ class SpeculativeConfig:
                     quantization=self.quantization,
                     enforce_eager=self.target_model_config.enforce_eager,
                     max_logprobs=self.target_model_config.max_logprobs,
-                    hf_overrides=SpeculativeConfig.hf_config_override,
+                    hf_overrides=draft_hf_overrides,
                     config_format=self.target_model_config.config_format,
                 )
+
+                # Old-format Medusa checkpoints (e.g. FasterDecoding/medusa-*)
+                # omit vocab_size in config.json, so MedusaConfig falls back to
+                # its default (32001). Align with the target model's vocab size
+                # to avoid shape mismatches when loading LM-head weights.
+                if self.method == "medusa":
+                    target_vocab = self.target_model_config.hf_config.vocab_size
+                    draft_hf = self.draft_model_config.hf_config
+                    if draft_hf.vocab_size != target_vocab:
+                        draft_hf.vocab_size = target_vocab
+                        draft_hf.truncated_vocab_size = target_vocab
 
                 # Automatically detect the method
                 if self.method in ("eagle", "eagle3", "dflash"):
