@@ -96,7 +96,17 @@ impl ToolParser for ApertusToolParser {
         match &self.mode {
             Mode::Text | Mode::Done => output.push_text(&self.buffer),
             Mode::ToolCalls { .. } => {
-                return Err(parsing_failed!("incomplete Apertus tool call"));
+                let body = self.buffer.trim();
+                match serde_json::from_str::<Vec<serde_json::Value>>(body) {
+                    Ok(values) => {
+                        for delta in json_values_to_deltas(&values) {
+                            output.push_call(delta);
+                        }
+                    }
+                    Err(_) => {
+                        return Err(parsing_failed!("incomplete Apertus tool call"));
+                    }
+                }
             }
         }
         let _ = self.reset_state();
@@ -154,8 +164,11 @@ fn parse_done_event(input: &mut ApertusInput<'_>) -> ModalResult<ApertusEvent> {
 
 fn parse_tool_calls_body(body: &str) -> ModalResult<ApertusEvent> {
     let values: Vec<serde_json::Value> = serde_json::from_str(body).unwrap_or_default();
+    Ok(ApertusEvent::ToolCalls(json_values_to_deltas(&values)))
+}
 
-    let deltas: Vec<ToolCallDelta> = values
+fn json_values_to_deltas(values: &[serde_json::Value]) -> Vec<ToolCallDelta> {
+    values
         .iter()
         .enumerate()
         .filter_map(|(i, v)| {
@@ -168,16 +181,17 @@ fn parse_tool_calls_body(body: &str) -> ModalResult<ApertusEvent> {
                 arguments,
             })
         })
-        .collect();
-
-    Ok(ApertusEvent::ToolCalls(deltas))
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
+    use expect_test::expect;
     use serde_json::json;
+    use thiserror_ext::AsReport;
 
     use super::{ApertusToolParser, TOOL_CALLS_PREFIX, TOOL_CALLS_SUFFIX, ToolParser};
+    use crate::tool::ToolParserOutput;
     use crate::tool::ToolParserTestExt as _;
     use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
 
@@ -250,6 +264,23 @@ mod tests {
     }
 
     #[test]
+    fn apertus_does_not_validate_or_normalize_arguments() {
+        let mut parser = ApertusToolParser::new(&test_tools());
+        // Valid JSON, but extra fields that a tool schema would reject.
+        let arguments = r#"{"city":"Paris","extra":true}"#;
+        let output = parser
+            .parse_complete(&wrap_with_tokens(&build_tool_block(&[(
+                "get_weather",
+                arguments,
+            )])))
+            .unwrap();
+
+        // Arguments are re-serialized by serde_json (compact form), but the
+        // parser does not validate against any tool schema.
+        assert_eq!(output.calls()[0].arguments, r#"{"city":"Paris","extra":true}"#);
+    }
+
+    #[test]
     fn apertus_parse_complete_preserves_text_before_and_after() {
         let mut parser = ApertusToolParser::new(&test_tools());
         let output = parser
@@ -308,6 +339,41 @@ mod tests {
         let output = collect_stream(&mut parser, &["Hello, ", "world!"]);
         assert_eq!(output.normal_text(), "Hello, world!");
         assert!(output.calls().is_empty());
+    }
+
+    #[test]
+    fn apertus_streaming_emits_argument_deltas() {
+        let mut parser = ApertusToolParser::new(&test_tools());
+        let chunks = [
+            "preface ",
+            TOOL_CALLS_PREFIX,
+            r#"[{"get_weather": {"city":"#,
+            r#""Beijing""#,
+            "}}]",
+            TOOL_CALLS_SUFFIX,
+            " suffix",
+        ];
+
+        let mut output = ToolParserOutput::default();
+        let mut chunk_had_calls = Vec::new();
+        for chunk in chunks {
+            let next = parser.parse_chunk(chunk).unwrap();
+            chunk_had_calls.push(!next.calls().is_empty());
+            output.append(next);
+        }
+        output.append(parser.finish().unwrap());
+
+        // Body chunks produce no tool calls; all calls arrive with the suffix.
+        assert_eq!(
+            chunk_had_calls,
+            [false, false, false, false, false, true, false]
+        );
+
+        assert_eq!(output.normal_text(), "preface  suffix");
+        assert_eq!(
+            output.coalesce().calls()[0].arguments,
+            r#"{"city":"Beijing"}"#
+        );
     }
 
     #[test]
@@ -375,9 +441,31 @@ mod tests {
         let mut parser = ApertusToolParser::new(&test_tools());
         let output = collect_stream(&mut parser, &chunks);
 
-        assert_eq!(output.calls().len(), 2);
-        assert_eq!(output.calls()[0].tool_index, 0);
-        assert_eq!(output.calls()[1].tool_index, 1);
+        expect![[r#"
+            ToolParserOutput {
+                events: [
+                    ToolCall(
+                        ToolCallDelta {
+                            tool_index: 0,
+                            name: Some(
+                                "get_weather",
+                            ),
+                            arguments: "{\"city\":\"Seattle\"}",
+                        },
+                    ),
+                    ToolCall(
+                        ToolCallDelta {
+                            tool_index: 1,
+                            name: Some(
+                                "add",
+                            ),
+                            arguments: "{\"x\":1,\"y\":2}",
+                        },
+                    ),
+                ],
+            }
+        "#]]
+        .assert_debug_eq(&output);
     }
 
     #[test]
@@ -396,7 +484,41 @@ mod tests {
         parser.parse_chunk(TOOL_CALLS_PREFIX).unwrap();
         parser.parse_chunk(r#"[{"get_weather": {"city":"#).unwrap();
 
-        assert!(parser.finish().is_err());
+        let error = parser.finish().unwrap_err();
+
+        expect!["tool parser parsing failed: incomplete Apertus tool call"]
+            .assert_eq(&error.to_report_string());
+    }
+
+    #[test]
+    fn apertus_finish_parses_complete_json_without_suffix() {
+        let mut parser = ApertusToolParser::new(&test_tools());
+        parser.parse_chunk(TOOL_CALLS_PREFIX).unwrap();
+        parser
+            .parse_chunk(r#"[{"get_weather":{"city":"Paris"}}]"#)
+            .unwrap();
+
+        let output = parser.finish().unwrap();
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(
+            output.calls()[0].arguments,
+            r#"{"city":"Paris"}"#
+        );
+    }
+
+    #[test]
+    fn apertus_streaming_missing_suffix_parses_body_on_finish() {
+        let mut parser = ApertusToolParser::new(&test_tools());
+        let prefix_output = parser.parse_chunk("Prefix. ").unwrap();
+        assert_eq!(prefix_output.normal_text(), "Prefix. ");
+        parser.parse_chunk(TOOL_CALLS_PREFIX).unwrap();
+        parser.parse_chunk(r#"[{"get_weather":{"city":"#).unwrap();
+        parser.parse_chunk(r#""Paris"}}]"#).unwrap();
+
+        let output = parser.finish().unwrap();
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
     }
 
     #[test]
