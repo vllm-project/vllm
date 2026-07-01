@@ -949,7 +949,7 @@ fn frontend_args_json_rejects_unsupported_fields() {
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","root_path":"/prefix"}' for '--args-json <JSON>':
+        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","root_path":"/prefix"}' for '--args-json <JSON>': 
         The following arguments are not implemented in Rust frontend yet:
         - root_path
 
