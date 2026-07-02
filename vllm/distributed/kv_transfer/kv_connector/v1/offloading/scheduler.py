@@ -696,6 +696,11 @@ class OffloadingConnectorScheduler:
         self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
         if num_external_tokens == 0:
+            for group_blocks in blocks.blocks:
+                self._current_batch_allocated_block_ids.update(
+                    block.block_id for block in group_blocks
+                    if block.block_id != 0
+                )
             return
 
         req_status = self._req_status[request.request_id]
