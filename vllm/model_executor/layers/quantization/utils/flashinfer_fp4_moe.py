@@ -337,7 +337,13 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
         layer.moe_config.hidden_dim = padded_hidden
 
         # Align weights for FI NVFP4 MoE kernels.
-        min_alignment = 16 if is_gated else 128
+        # FlashInfer's TRT-LLM block-scale shuffle asserts the gate/up row dim
+        # (= up_mult * padded_intermediate, up_mult=2 when gated) is a multiple of
+        # 128. So gated needs padded_intermediate % 64 (2*64=128); the old value 16
+        # left 2*intermediate a multiple of only 32, so an NVFP4 MoE whose rank-local
+        # intermediate is not 128-aligned at TP>1 (e.g. Gemma-4-26B-A4B at tp4) hit
+        # `assert M % 128 == 0`. Padded rows are zero -> outputs unchanged.
+        min_alignment = 64 if is_gated else 128
         w13, w13_scale, w2, w2_scale, padded_intermediate = (
             align_fp4_moe_weights_for_fi(
                 w13, w13_scale, w2, w2_scale, is_act_and_mul, min_alignment
