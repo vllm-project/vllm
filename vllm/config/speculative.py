@@ -227,6 +227,43 @@ class SpeculativeConfig:
     synthetic_acceptance_rates. Only valid when rejection_sample_method is 'synthetic'.
     Mutually exclusive with synthetic_acceptance_rates."""
 
+    dspark_scheduler: bool = False
+    """Enable the DSpark hardware-aware confidence scheduler: adaptive
+    per-step verification width from the profiled cost table, online
+    engine-overhead estimate, and calibrated confidence-head survival.
+    Also captures FULL decode CUDA graphs at every verification width and,
+    when no num_speculative_tokens_per_batch_size is configured, auto-derives
+    the dynamic-SD batch-size table from the startup profile."""
+
+    dspark_per_request: bool = False
+    """DSpark: allocate per-request verification widths (paper Algorithm 1)
+    within the batch-level width budget via a global greedy over calibrated
+    prefix-survival probabilities. Requires dspark_scheduler."""
+
+    dspark_pad_to_bucket: bool = False
+    """DSpark: execute ragged per-request widths as a single uniform padded
+    forward at the scheduler-optimal width (pads route KV to the dummy slot
+    and are excluded from sampling), keeping FULL-graph execution. Requires
+    dspark_per_request."""
+
+    dspark_confidence_threshold: float = 0.0
+    """DSpark: per-request confidence threshold (0 disables). Requires
+    dspark_scheduler. This single knob drives two different mechanisms
+    depending on dspark_per_request:
+
+    - With dspark_per_request: it sets per-request VERIFICATION WIDTHS -- each
+      request keeps the prefix whose calibrated survival >= threshold.
+    - Without dspark_per_request: it masks drafts within the batch-uniform
+      width -- positions whose raw survival < threshold are force-rejected.
+
+    Primarily for acceptance-rate studies."""
+
+    dspark_budget_frac: float = 1.0
+    """DSpark: fraction of the batch verification-token budget the
+    per-request allocator may spend. 1.0 is lossless (equivalent to the
+    uniform batch width); lower values trade accepted tokens for higher
+    acceptance rates."""
+
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
         """Mean acceptance length to unconditional per-position rates, using
@@ -572,6 +609,42 @@ class SpeculativeConfig:
 
         return hf_config
 
+    def _validate_dspark(self):
+        # Called at the end of __post_init__, once method is fully resolved.
+        if self.method != "dspark":
+            if (
+                self.dspark_scheduler
+                or self.dspark_per_request
+                or self.dspark_pad_to_bucket
+                or self.dspark_confidence_threshold != 0.0
+                or self.dspark_budget_frac != 1.0
+            ):
+                raise ValueError(
+                    f"dspark_* options require method='dspark' (got {self.method!r})."
+                )
+            return
+        if self.dspark_per_request and not self.dspark_scheduler:
+            raise ValueError("dspark_per_request requires dspark_scheduler=True.")
+        if self.dspark_pad_to_bucket and not self.dspark_per_request:
+            raise ValueError("dspark_pad_to_bucket requires dspark_per_request=True.")
+        if self.dspark_confidence_threshold > 0.0 and not self.dspark_scheduler:
+            raise ValueError(
+                "dspark_confidence_threshold requires dspark_scheduler=True."
+            )
+        if self.dspark_budget_frac < 1.0 and not self.dspark_per_request:
+            raise ValueError(
+                "dspark_budget_frac < 1.0 requires dspark_per_request=True."
+            )
+        if not 0.0 < self.dspark_budget_frac <= 1.0:
+            raise ValueError(
+                f"dspark_budget_frac must be in (0, 1], got {self.dspark_budget_frac}."
+            )
+        if not 0.0 <= self.dspark_confidence_threshold <= 1.0:
+            raise ValueError(
+                f"dspark_confidence_threshold must be in [0, 1], got "
+                f"{self.dspark_confidence_threshold}."
+            )
+
     def __post_init__(self):
         # Note: "method" is a new parameter that helps to extend the
         # configuration of non-model-based proposers, and the "model" parameter
@@ -904,6 +977,7 @@ class SpeculativeConfig:
                         self.target_parallel_config, self.draft_tensor_parallel_size
                     )
                 )
+        self._validate_dspark()
         return self
 
     def _validate_suffix_decoding(self):

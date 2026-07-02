@@ -10,6 +10,9 @@ The parallel backbone is a standard Qwen3 decoder stack reused from the
 DFlash Qwen3 draft (see qwen3_dflash.py). DSpark adds:
   * ``markov_head``: low-rank V x r / r x V transition bias added to the base
     logits, sampled left-to-right by the speculator (the sequential stage).
+  * ``confidence_head``: per-position survival logit over
+    ``[hidden ; markov_embed(prev token)]``, used by the DSpark scheduler to
+    pick per-step draft lengths.
 
 DSparkMarkovHead is shared with the DSV4-style DSpark model.
 """
@@ -67,6 +70,22 @@ class DSparkMarkovHead(nn.Module):
         return logits_processor(self.markov_w2, markov_embed)
 
 
+class DSparkConfidenceHead(nn.Module):
+    """Per-position survival logit ``w . [h_k ; markov_embed(x_{k-1})] + b``.
+
+    Sigmoid of the output estimates the conditional probability that draft
+    position ``k`` survives target verification given all earlier block
+    tokens were accepted.
+    """
+
+    def __init__(self, hidden_size: int, markov_rank: int) -> None:
+        super().__init__()
+        self.proj = nn.Linear(hidden_size + markov_rank, 1, bias=True)
+
+    def forward(self, hidden: torch.Tensor, markov_embed: torch.Tensor) -> torch.Tensor:
+        return self.proj(torch.cat([hidden, markov_embed], dim=-1)).squeeze(-1)
+
+
 class Qwen3DSparkModel(DFlashQwen3Model):
     """DFlash Qwen3 backbone + DSpark Markov head."""
 
@@ -90,6 +109,12 @@ class Qwen3DSparkModel(DFlashQwen3Model):
             config.markov_rank,
             prefix=maybe_prefix(prefix, "markov_head"),
         )
+        if getattr(config, "enable_confidence_head", False):
+            self.confidence_head = DSparkConfidenceHead(
+                config.hidden_size, config.markov_rank
+            )
+        else:
+            self.confidence_head = None
 
 
 class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
@@ -125,6 +150,10 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
             )
         else:
             self.draft_id_to_target_id = None
+        if self.model.confidence_head is None:
+            # Signals to the DSpark scheduler that this checkpoint cannot
+            # provide survival estimates (load_draft_model guards on it).
+            self.compute_confidence = None
 
     def get_draft_kv_cache_layer_names(self) -> list[str]:
         return [layer.self_attn.attn.layer_name for layer in self.model.layers]
@@ -139,6 +168,11 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
         if self.draft_id_to_target_id is None:
             return draft_ids
         return draft_ids + self.draft_id_to_target_id[draft_ids]
+
+    def compute_confidence(
+        self, hidden_states: torch.Tensor, markov_embed: torch.Tensor
+    ) -> torch.Tensor:
+        return self.model.confidence_head(hidden_states, markov_embed)
 
     def markov_embed(self, token_ids: torch.Tensor) -> torch.Tensor:
         return self.model.markov_head.embed(token_ids)
@@ -170,10 +204,11 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
             process_eagle_weight(self, name)
 
         # mask_embedding is an unused placeholder param; DSpark masks via the vocab row.
-        # confidence_head is not wired into inference yet; skip its weights.
         # embed_tokens / lm_head are optional; when omitted they are shared from
         # the target by load_dspark_model, so skip the unloaded params here.
-        skip_substrs = ["mask_embedding", "confidence_head"]
+        skip_substrs = ["mask_embedding"]
+        if self.model.confidence_head is None:
+            skip_substrs.append("confidence_head")
         if not includes_embed_tokens:
             skip_substrs.append("embed_tokens")
         if not includes_lm_head:

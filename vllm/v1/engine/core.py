@@ -147,6 +147,43 @@ class EngineCore:
             kv_cache_config, vllm_config
         )
 
+        # DSpark: if no dynamic-SD table was configured, adopt the one the
+        # worker auto-derived from its startup cost profile, so scheduled
+        # verification widths always land on captured graph shapes.
+        spec_cfg = vllm_config.speculative_config
+        dspark_cost_profile = None
+        if (
+            spec_cfg is not None
+            and spec_cfg.method == "dspark"
+            and spec_cfg.dspark_scheduler
+            and spec_cfg.num_speculative_tokens_per_batch_size is None
+        ):
+            if vllm_config.parallel_config.world_size == 1:
+                tables = self.model_executor.collective_rpc(
+                    "get_dspark_dynamic_sd_table"
+                )
+                if tables and tables[0]:
+                    spec_cfg.num_speculative_tokens_per_batch_size = tables[0]
+                    logger.info(
+                        "DSpark: adopting auto-derived dynamic-SD table: %s",
+                        tables[0],
+                    )
+                    # Also hand over the raw cost profile: the schedule is
+                    # re-derived from realized acceptance at runtime.
+                    profiles = self.model_executor.collective_rpc(
+                        "get_dspark_cost_profile"
+                    )
+                    if profiles and profiles[0]:
+                        dspark_cost_profile = profiles[0]
+            else:
+                # Workers hold separate config copies under the multiproc
+                # executor, so the K-hint gate would not see the injected
+                # table; skip auto-adoption. (Broadcast: follow-up.)
+                logger.warning(
+                    "DSpark: auto-derived dynamic-SD table is only supported "
+                    "with a single worker (world_size==1); skipping."
+                )
+
         self.scheduler: SchedulerInterface = Scheduler(
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
@@ -156,6 +193,10 @@ class EngineCore:
             block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
         )
+        if dspark_cost_profile is not None and hasattr(
+            self.scheduler, "set_dspark_cost_profile"
+        ):
+            self.scheduler.set_dspark_cost_profile(*dspark_cost_profile)
         self.use_spec_decode = vllm_config.speculative_config is not None
         self.check_for_draft_tokens = (
             self.use_spec_decode or vllm_config.model_config.is_diffusion

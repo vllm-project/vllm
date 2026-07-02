@@ -48,6 +48,7 @@ from vllm.tasks import SupportedTask
 from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import PIN_MEMORY, STR_DTYPE_TO_TORCH_DTYPE
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
@@ -103,6 +104,7 @@ from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.shutdown import free_before_shutdown
 from vllm.v1.worker.gpu.spec_decode import init_speculator
+from vllm.v1.worker.gpu.spec_decode.dspark.scheduler import derive_dynamic_sd_table
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
 )
@@ -187,11 +189,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Speculative decoding.
         self.speculator = None
+        self._dspark_padbucket = False
+        self._dspark_dyn_sd_table: list[tuple[int, int, int]] | None = None
+        self._pad_q: int | None = None
         self.use_aux_hidden_state_outputs = False
         self.num_speculative_steps = vllm_config.num_speculative_tokens
         if self.speculative_config is not None:
             if self.is_last_pp_rank:
                 self.speculator = init_speculator(self.vllm_config, self.device)
+                # DSpark pad-to-bucket: pad ragged spec batches to a uniform
+                # width so they dispatch to that width's FULL graph.
+                self._dspark_padbucket = (
+                    self.speculative_config is not None
+                    and getattr(self.speculative_config, "dspark_pad_to_bucket", False)
+                )
 
             if self.speculative_config.method in ("eagle3", "dflash", "dspark"):
                 # Drafting may require auxiliary hidden states from target model outputs
@@ -464,6 +475,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cudagraph_mode,
             decode_query_len=self.decode_query_len,
             lora_capture_cases=self.lora_capture_cases,
+            # Also capture FULL decode graphs at the trimmed verify widths
+            # DSpark's scheduler may emit (absent on other speculators).
+            extra_uniform_decode_lens=getattr(
+                self.speculator, "extra_uniform_decode_lens", None
+            ),
         )
         if self.speculator is not None:
             self.speculator.init_cudagraph_manager(cudagraph_mode)
@@ -681,6 +697,77 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return 0
 
     @torch.inference_mode()
+    def _profile_dspark_cost_table(self) -> None:
+        """Build the DSpark scheduler's shape-aware cost table T(R, L).
+
+        Called once after CUDA graph capture (graphs warm, KV cache live): for
+        each verify length L in [0, gamma] and request count R, time a uniform
+        decode step at query length 1+L (forced via a temporary
+        decode_query_len). Timing the real dispatched shape captures the
+        FULL/PIECEWISE/eager cliffs a 1-D T(num_tokens) table cannot. The dummy
+        step always drafts full gamma, so the L=0 row slightly over-estimates
+        the true no-spec cost.
+        """
+        spec = self.speculator
+        if not getattr(spec, "dspark_scheduler_enabled", False):
+            return
+        gamma = self.num_speculative_steps
+        # Measure exactly at the capture buckets: runtime pads R up to the next
+        # captured bucket, so ceiling-bucket lookup gives the dispatched cost;
+        # interpolating across the FULL/eager cliff would underestimate it.
+        buckets = ModelCudaGraphManager.UNIFORM_DECODE_REQUEST_BUCKETS
+        r_grid = sorted(
+            {r for r in buckets if 1 <= r <= self.max_num_reqs} | {self.max_num_reqs}
+        )
+        saved_qlen = self.decode_query_len
+        times_by_l: list[list[float]] = []
+        try:
+            for length in range(gamma + 1):
+                q = 1 + length
+                self.decode_query_len = q
+                row: list[float] = []
+                for r in r_grid:
+                    nt = r * q
+                    if nt > self.max_num_tokens:
+                        row.append(row[-1] if row else 0.0)
+                        continue
+                    for _ in range(2):  # warmup
+                        self._dummy_run(nt, uniform_decode=True)
+                    torch.accelerator.synchronize()
+                    t0 = time.perf_counter()
+                    iters = 3
+                    for _ in range(iters):
+                        self._dummy_run(nt, uniform_decode=True)
+                    torch.accelerator.synchronize()
+                    row.append((time.perf_counter() - t0) / iters)
+                times_by_l.append(row)
+        finally:
+            self.decode_query_len = saved_qlen
+        spec.set_cost_table(r_grid, times_by_l)
+        self._dspark_cost_profile = (r_grid, times_by_l)
+        self._dspark_dyn_sd_table = derive_dynamic_sd_table(
+            r_grid, times_by_l, self.num_speculative_steps, self.max_num_reqs
+        )
+        logger.info(
+            "DSpark auto-derived dynamic-SD table (batch-size ranges -> K): %s",
+            self._dspark_dyn_sd_table,
+        )
+        logger.info(
+            "DSpark shape-aware cost table: r_grid=%s; T(R=%d) by L = %s ms",
+            r_grid,
+            r_grid[-1],
+            [round(times_by_l[L][-1] * 1e3, 1) for L in range(gamma + 1)],
+        )
+
+    def get_dspark_dynamic_sd_table(self) -> list[tuple[int, int, int]] | None:
+        return self._dspark_dyn_sd_table
+
+    def get_dspark_cost_profile(
+        self,
+    ) -> tuple[list[int], list[list[float]]] | None:
+        return getattr(self, "_dspark_cost_profile", None)
+
+    @torch.inference_mode()
     def capture_model(self) -> int:
         assert self.cudagraph_manager is not None
         if not self.cudagraph_manager.needs_capture():
@@ -712,6 +799,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             if self.speculator is not None:
                 self.speculator.capture(attn_states)
+                self._profile_dspark_cost_table()
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
@@ -897,6 +985,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 idx_mapping, total_num_logits, cu_num_logits, max_expand_len
             )
 
+        # DSpark pad-to-bucket: run a ragged spec-decode batch at one uniform
+        # width (chosen pre-dispatch in execute_model). The padded layout
+        # drives positions/seq_lens/attention; cu_num_logits stays REAL (real
+        # tokens are a prefix of each span) for logits and token accounting.
+        real_query_start_loc = None
+        pad_q = getattr(self, "_pad_q", None)
+        self._pad_q = None
+        if pad_q is not None and num_draft_tokens_per_req is not None:
+            real_qsl_np = np.zeros(num_reqs + 1, dtype=np.int32)
+            np.cumsum(num_scheduled_tokens, out=real_qsl_np[1:])
+            real_query_start_loc = async_copy_to_gpu(real_qsl_np, device=self.device)
+            num_scheduled_tokens = np.full(num_reqs, pad_q, dtype=np.int32)
+            num_tokens = num_reqs * pad_q
+
         # Get query_start_loc.
         # num_reqs_padded is None for PIECEWISE graphs (no request padding needed)
         num_reqs_padded = batch_desc.num_reqs or num_reqs
@@ -962,7 +1064,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cu_num_logits,
             total_num_logits,
             self.model_state.num_new_sampled_tokens_per_step,
+            prefix_mode=real_query_start_loc is not None,
         )
+        if real_query_start_loc is not None:
+            # Fill padded tails with the drafting mask token; pads are
+            # excluded from logits by the prefix-mode logits indices.
+            ids2d = self.input_buffers.input_ids[:num_tokens].view(num_reqs, pad_q)
+            real_lens = cu_num_logits[1:] - cu_num_logits[:-1]
+            pad_mask = torch.arange(
+                pad_q, device=self.device, dtype=torch.int32
+            ).unsqueeze(0) >= real_lens.unsqueeze(1)
+            ids2d.masked_fill_(pad_mask, self.speculator.parallel_drafting_token_id)
 
         # CPU upper bound on seq_lens; padded entries left at zero.
         num_computed_tokens_np = self.req_states.num_computed_tokens_np[idx_mapping_np]
@@ -999,6 +1111,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_draft_tokens_per_req=num_draft_tokens_per_req,
             query_start_loc=query_start_loc,
             query_start_loc_np=query_start_loc_np,
+            real_query_start_loc=real_query_start_loc,
             seq_lens=seq_lens,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=dcp_local_seq_lens,
@@ -1074,6 +1187,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch,
                 # Draft logits are needed for probabilistic rejection sampling.
                 self.speculator.draft_logits,
+                # DSpark confidence-threshold mode: positions beyond a
+                # request's valid count are pads to force-reject.
+                valid_draft_len=getattr(self.speculator, "valid_draft_len", None),
             )
 
         return sampler_output, sampler_output.num_sampled, sampler_output.num_rejected
@@ -1119,6 +1235,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         is_profile: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         if not dummy_run:
+            # Dynamic SD: hand the speculator the engine-scheduled next-step
+            # width (K=0 skips the draft forward). Gated on the LIVE config --
+            # the table may be auto-injected after worker init via the shared
+            # config object -- and never written on the static path, where it
+            # would pin the worker-side scheduler to full gamma.
+            spec_cfg = self.vllm_config.speculative_config
+            if (
+                hasattr(self.speculator, "next_k_hint")
+                and spec_cfg is not None
+                and spec_cfg.uses_dynamic_speculative_decoding()
+            ):
+                self.speculator.next_k_hint = (
+                    scheduler_output.num_spec_tokens_to_schedule
+                )
             # Update the request states.
             self.update_pp_decode_requests()
             self.finish_requests(scheduler_output)
@@ -1136,6 +1266,30 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_toks = scheduler_output.total_num_scheduled_tokens
         max_query_len = max(scheduler_output.num_scheduled_tokens.values())
         uniform_tok_count = get_uniform_token_count(num_reqs, num_toks, max_query_len)
+
+        # DSpark pad-to-bucket: pad a ragged all-decode spec batch to uniform
+        # width max(1+l_r) so it dispatches to that width's FULL graph.
+        # Decided here (pre-dispatch); consumed by prepare_inputs.
+        self._pad_q = None
+        if (
+            self._dspark_padbucket
+            and not dummy_run
+            and uniform_tok_count is None
+            and scheduler_output.scheduled_spec_decode_tokens
+            and max_query_len <= self.decode_query_len
+            # DP ranks must replay the same graph shapes; a rank-local pad
+            # decision would diverge dispatch across ranks.
+            and self.dp_size == 1
+        ):
+            sched_drafts = scheduler_output.scheduled_spec_decode_tokens
+            all_decode = all(
+                n == 1 + len(sched_drafts.get(rid, ()))
+                for rid, n in scheduler_output.num_scheduled_tokens.items()
+            )
+            if all_decode:
+                self._pad_q = max_query_len
+                num_toks = num_reqs * max_query_len
+                uniform_tok_count = max_query_len
 
         num_active_loras = 0
         if self.lora_config:
@@ -1182,6 +1336,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.kv_cache_config,
                 self.req_states.num_computed_tokens.gpu,
             )
+            if input_batch.real_query_start_loc is not None:
+                # Pad positions overshoot the real sequence and may compute
+                # slots in unallocated pages: route their KV writes to the
+                # dummy slot.
+                npq = input_batch.num_tokens // input_batch.num_reqs
+                real_lens = (
+                    input_batch.cu_num_logits[1:] - input_batch.cu_num_logits[:-1]
+                )
+                pad_flat = (
+                    torch.arange(npq, device=self.device, dtype=torch.int32).unsqueeze(
+                        0
+                    )
+                    >= real_lens.unsqueeze(1)
+                ).reshape(-1)
+                slot_mappings[..., : input_batch.num_tokens].masked_fill_(
+                    pad_flat, PAD_SLOT_ID
+                )
 
             if self.lora_config:
                 # Activate LoRA adapters.
@@ -1449,7 +1620,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sampler_output.sampled_token_ids,
             num_sampled,
             num_rejected,
-            input_batch.query_start_loc,
+            # Account computed tokens by the REAL layout (padded query lens
+            # would overcount).
+            input_batch.real_query_start_loc
+            if input_batch.real_query_start_loc is not None
+            else input_batch.query_start_loc,
         )
 
         if self.speculator is not None:
@@ -1476,14 +1651,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.sampler.sampling_states.seeds.gpu,
                 mm_inputs=mm_inputs,
             )
-            self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
+            # DSpark may trim the draft to a uniform L < num_speculative_steps
+            # per step: write the first L columns and propagate L as the verify
+            # length. L == full width is the unchanged fixed-gamma path.
+            n_draft = draft_tokens.shape[1]
+            self.req_states.draft_tokens[input_batch.idx_mapping, :n_draft] = (
+                draft_tokens
+            )
+        else:
+            n_draft = self.num_speculative_steps
 
         if self.num_speculative_steps > 0:
             # Spec-decode and diffusion LLMs both use draft tokens but the latter does
             # not have a speculator (i.e. self.speculator is None)
             self.draft_tokens_handler.set_draft_tokens(
                 input_batch,
-                self.req_states.draft_tokens[input_batch.idx_mapping],
+                self.req_states.draft_tokens[input_batch.idx_mapping, :n_draft],
+                # DSpark Algorithm-1 per-request lengths; absent/None on the
+                # uniform path.
+                lengths=getattr(self.speculator, "_perreq_batch_len", None),
             )
 
         # Post-step KV connector related operations.

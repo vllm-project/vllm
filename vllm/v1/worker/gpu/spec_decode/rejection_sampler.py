@@ -103,12 +103,22 @@ class RejectionSampler:
         logits: torch.Tensor,
         input_batch: InputBatch,
         draft_logits: torch.Tensor | None = None,
+        valid_draft_len: torch.Tensor | None = None,
     ) -> SamplerOutput:
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
         num_nans = get_num_nans(logits) if self.sampler.compute_nans else None
 
         draft_sampled = input_batch.input_ids[input_batch.logits_indices]
+        if valid_draft_len is not None:
+            # Draft position i (1-indexed) of request r is a pad iff
+            # i > valid_draft_len[r]; the -1 sentinel makes the kernel
+            # force-reject pads and resample at the first pad position.
+            keep = (
+                input_batch.expanded_local_pos
+                <= valid_draft_len[input_batch.expanded_idx_mapping]
+            )
+            draft_sampled = torch.where(keep, draft_sampled, -1)
         pos = input_batch.positions[input_batch.logits_indices]
         processed_logits = self.sampler.apply_sampling_params(
             logits,

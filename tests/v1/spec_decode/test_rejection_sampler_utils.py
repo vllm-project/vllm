@@ -412,3 +412,52 @@ def test_block_verification_accepts_at_least_as_many(num_speculative_steps: int)
         f"Block verification mean accepted length {mean_block:.4f} is worse "
         f"than standard {mean_standard:.4f}."
     )
+
+
+@pytest.mark.parametrize("temperature", [0.0, 0.6])
+def test_padded_draft_prefix_accepted(temperature: float):
+    """Padded speculation: real draft tokens up to a per-request valid length,
+    -1 pads after. Acceptance must stop at the first pad (recovery token
+    resampled there), and real prefix tokens must still be accepted normally.
+    """
+    torch.manual_seed(0)
+    device = "cuda"
+    K = 4
+    num_trials = 256
+
+    target_logits_1d = torch.randn(VOCAB_SIZE, device=device)
+    if temperature > 0:
+        target_logits_1d = target_logits_1d / temperature
+    # Draft == target so every real (non-pad) draft position is accepted:
+    # greedy accepts on argmax match; stochastic accepts since p(x) == q(x).
+    draft_logits_1d = target_logits_1d.clone()
+
+    inputs = _build_rejection_sample_inputs(
+        target_logits_1d,
+        draft_logits_1d,
+        K,
+        temperature=temperature,
+        num_trials=num_trials,
+    )
+    draft_sampled_2d = inputs["draft_sampled"].view(num_trials, K + 1)
+    if temperature == 0:
+        # Make the real drafts the target argmax so greedy accepts them.
+        draft_sampled_2d[:, 1:] = target_logits_1d.argmax()
+    # Request r keeps valid_len[r] real drafts, the rest are pads.
+    valid_len = torch.arange(num_trials, dtype=torch.int64, device=device) % (K + 1)
+    local_draft_pos = torch.arange(1, K + 1, device=device).unsqueeze(0)
+    draft_sampled_2d[:, 1:] = torch.where(
+        local_draft_pos <= valid_len.unsqueeze(1), draft_sampled_2d[:, 1:], -1
+    )
+
+    sampled, num_sampled = rejection_sample(**inputs, num_speculative_steps=K)
+
+    # Exactly the real prefix + one recovery/bonus token is sampled.
+    assert torch.equal(num_sampled.long(), valid_len + 1), (
+        f"num_sampled={num_sampled.tolist()[:12]} valid_len={valid_len.tolist()[:12]}"
+    )
+    # All sampled tokens are valid vocab ids (recovery token never reads pads).
+    for r in range(0, num_trials, 17):
+        n = int(num_sampled[r])
+        toks = sampled[r, :n]
+        assert (toks >= 0).all() and (toks < VOCAB_SIZE).all()

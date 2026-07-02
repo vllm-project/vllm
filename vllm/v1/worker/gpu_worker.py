@@ -905,6 +905,16 @@ class Worker(WorkerBase):
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
 
+    def get_dspark_dynamic_sd_table(self) -> list[tuple[int, int, int]] | None:
+        getter = getattr(self.model_runner, "get_dspark_dynamic_sd_table", None)
+        return getter() if getter is not None else None
+
+    def get_dspark_cost_profile(
+        self,
+    ) -> tuple[list[int], list[list[float]]] | None:
+        getter = getattr(self.model_runner, "get_dspark_cost_profile", None)
+        return getter() if getter is not None else None
+
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_runner.get_supported_tasks()
 

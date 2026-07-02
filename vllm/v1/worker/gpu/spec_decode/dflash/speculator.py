@@ -271,6 +271,9 @@ class DFlashSpeculator(DraftModelSpeculator):
         is_profile: bool = False,
     ) -> torch.Tensor:
         num_reqs = input_batch.num_reqs
+        draft_len = self._schedule_draft_len(
+            input_batch, num_sampled, num_rejected, dummy_run
+        )
         num_target_tokens = input_batch.num_tokens
         num_query_tokens = num_reqs * self.num_query_per_req
         max_seq_len = input_batch.seq_lens_cpu_upper_bound[:num_reqs].max().item()
@@ -366,6 +369,11 @@ class DFlashSpeculator(DraftModelSpeculator):
             context_slots,
         )
 
+        if draft_len == 0:
+            # Scheduler gate: context KV was refreshed above but the draft
+            # forward is skipped -> empty draft, engine runs a normal decode.
+            return self._finalize_draft(input_batch, num_reqs, 0, dummy_run)
+
         # Every DFlash step has exactly num_query_per_req tokens, so we can use FULL CGs
         batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
             self.query_cudagraph_manager,
@@ -410,6 +418,26 @@ class DFlashSpeculator(DraftModelSpeculator):
                 cudagraph_runtime_mode=batch_desc.cg_mode,
             )
 
+        return self._finalize_draft(input_batch, num_reqs, draft_len, dummy_run)
+
+    def _schedule_draft_len(
+        self,
+        input_batch: InputBatch,
+        num_sampled: torch.Tensor,
+        num_rejected: torch.Tensor,
+        dummy_run: bool,
+    ) -> int:
+        """Pick this step's draft length; 0 skips the draft forward."""
+        return self.num_speculative_steps
+
+    def _finalize_draft(
+        self,
+        input_batch: InputBatch,
+        num_reqs: int,
+        draft_len: int,
+        dummy_run: bool,
+    ) -> torch.Tensor:
+        """Post-draft hook: trim/mask the draft block before returning it."""
         return self.draft_tokens[:num_reqs]
 
 
@@ -434,6 +462,7 @@ def _prepare_dflash_inputs_kernel(
     next_prefill_tokens_ptr,
     num_sampled_ptr,
     num_rejected_ptr,
+    cu_num_logits_ptr,
     # Block table for slot mapping lookup.
     block_table_ptr,
     block_table_stride,
@@ -448,6 +477,7 @@ def _prepare_dflash_inputs_kernel(
     SAMPLE_FROM_ANCHOR: tl.constexpr,
     PAD_SLOT_ID: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    HAS_REAL_LENS: tl.constexpr = False,
 ):
     req_idx = tl.program_id(0)
     block_idx = tl.program_id(1)
@@ -457,9 +487,17 @@ def _prepare_dflash_inputs_kernel(
     ctx_start = tl.load(target_query_start_loc_ptr + req_idx)
     ctx_end = tl.load(target_query_start_loc_ptr + req_idx + 1)
     num_ctx = ctx_end - ctx_start
+    span_len = num_ctx
+    if HAS_REAL_LENS:
+        # Padded speculation: the target span is padded to a uniform width
+        # with the real tokens as a PREFIX; the real length comes from
+        # cu_num_logits. All downstream indexing derives from num_ctx.
+        num_ctx = tl.load(cu_num_logits_ptr + req_idx + 1) - tl.load(
+            cu_num_logits_ptr + req_idx
+        )
 
     num_rejected = tl.load(num_rejected_ptr + req_idx)
-    valid_ctx_end = ctx_end - num_rejected
+    valid_ctx_end = ctx_start + num_ctx - num_rejected
 
     num_sampled = tl.load(num_sampled_ptr + req_idx)
     if num_sampled > 0:
@@ -489,6 +527,17 @@ def _prepare_dflash_inputs_kernel(
     ctx_slot = ctx_block_id * block_size + (ctx_pos % block_size)
     tl.store(out_context_positions_ptr + ctx_start + j, ctx_pos, mask=is_ctx)
     tl.store(out_context_slot_mapping_ptr + ctx_start + j, ctx_slot, mask=is_ctx)
+    if HAS_REAL_LENS:
+        # Neutralize the padded tail of the context arrays: stale entries from
+        # prior steps would otherwise write garbage draft-context KV into
+        # other requests' pages via precompute_and_store_context_kv.
+        is_pad_ctx = (j >= num_ctx) & (j < span_len)
+        tl.store(out_context_positions_ptr + ctx_start + j, 0, mask=is_pad_ctx)
+        tl.store(
+            out_context_slot_mapping_ptr + ctx_start + j,
+            PAD_SLOT_ID,
+            mask=is_pad_ctx,
+        )
 
     # --- Query positions / input_ids / slots ---
     query_pos = last_valid_pos + 1 + query_off
@@ -616,6 +665,7 @@ def prepare_dflash_inputs(
         next_prefill_tokens,
         num_sampled,
         num_rejected,
+        input_batch.cu_num_logits,
         block_table,
         block_table.stride(0),
         parallel_drafting_token_id,
@@ -628,4 +678,6 @@ def prepare_dflash_inputs(
         SAMPLE_FROM_ANCHOR=sample_from_anchor,
         PAD_SLOT_ID=PAD_SLOT_ID,
         BLOCK_SIZE=BLOCK_SIZE,
+        # Padded speculation: spans are padded, real lengths in cu_num_logits.
+        HAS_REAL_LENS=input_batch.real_query_start_loc is not None,
     )
