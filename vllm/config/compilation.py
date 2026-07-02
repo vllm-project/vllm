@@ -726,7 +726,7 @@ class CompilationConfig:
     """custom ops that are enabled"""
     disabled_custom_ops: Counter[str] = field(default_factory=Counter, init=False)
     """custom ops that are disabled"""
-    traced_files: set[str] = field(default_factory=set, init=False)
+    traced_files: set[Path] = field(default_factory=set, init=False)
     """files that are traced for compilation"""
     compilation_time: float = field(default=0.0, init=False)
     """time taken for compilation"""

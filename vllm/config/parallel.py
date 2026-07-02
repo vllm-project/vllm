@@ -732,7 +732,7 @@ class ParallelConfig:
         torch.distributed.all_reduce(tensor, op=ReduceOp.MIN, group=dp_group)
         return tensor.item()
 
-    def compute_hash(self):
+    def compute_hash(self) -> str:
         """
         Provide a hash that uniquely identifies all the configs
         that affect the structure of the computation
