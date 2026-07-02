@@ -476,6 +476,57 @@ def _merge_empty_only_subgraphs(
             prev_non_splitting_subgraph_id = subgraph_id
 
 
+def _replace_size_in_slice(
+    s: slice,
+    node: fx.Node,
+    dims: list["fx.Node | int"],
+) -> slice:
+    """Replace a size node used as a slice bound with a scalar dim.
+
+    A slice bound must be scalar, and the intended value is the token count,
+    which is the unique dynamic (SymInt) dim; use it when exactly one exists,
+    otherwise fall back to dims[0].
+    """
+
+    def _sub(bound: object) -> object:
+        if isinstance(bound, fx.Node) and bound is node:
+            sym_dims = [(i, d) for i, d in enumerate(dims) if isinstance(d, fx.Node)]
+            if len(sym_dims) == 1:
+                return sym_dims[0][1]
+            return dims[0]
+        return bound
+
+    new_start, new_stop, new_step = _sub(s.start), _sub(s.stop), _sub(s.step)
+    if new_start is not s.start or new_stop is not s.stop or new_step is not s.step:
+        return slice(new_start, new_stop, new_step)
+    return s
+
+
+def _replace_size_in_args(
+    args: tuple | list,
+    node: fx.Node,
+    dims: list["fx.Node | int"],
+) -> list:
+    """Recursively replace a size node in an FX node's args.
+
+    At expandable positions (top-level args, inside tuples/lists), the
+    size node is expanded into individual per-dim values. At slice bounds it
+    is replaced with a single scalar dim (see _replace_size_in_slice).
+    """
+    result: list = []
+    for arg in args:
+        if isinstance(arg, fx.Node) and arg is node:
+            result.extend(dims)
+        elif isinstance(arg, slice):
+            result.append(_replace_size_in_slice(arg, node, dims))
+        elif isinstance(arg, (tuple, list)):
+            inner = _replace_size_in_args(arg, node, dims)
+            result.append(type(arg)(inner))
+        else:
+            result.append(arg)
+    return result
+
+
 def _decompose_size_nodes(graph: fx.GraphModule) -> None:
     """Decompose x.size() into per-dim sym_size.int calls.
 
@@ -533,15 +584,10 @@ def _decompose_size_nodes(graph: fx.GraphModule) -> None:
                 user.replace_all_uses_with(dims[idx])
                 graph.graph.erase_node(user)
             else:
-                # User consumes the full size tuple (e.g. view(clone, size))
-                # → view(clone, d0, d1, ...)
-                new_args = []
-                for arg in user.args:
-                    if arg is node:
-                        new_args.extend(dims)
-                    else:
-                        new_args.append(arg)
-                user.args = tuple(new_args)
+                # User consumes the size in args (possibly nested in
+                # slices, tuples, or lists).  Expand at expandable
+                # positions; replace with scalar dim at slice bounds.
+                user.args = tuple(_replace_size_in_args(user.args, node, dims))
         graph.graph.erase_node(node)
 
 
