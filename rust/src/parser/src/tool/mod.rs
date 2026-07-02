@@ -4,6 +4,7 @@
 pub(crate) mod error;
 mod deepseek_dsml;
 pub(crate) mod deepseek_json;
+mod functiongemma;
 mod glm_xml;
 mod hy_v3;
 mod json;
@@ -19,6 +20,7 @@ use std::collections::{BTreeMap, btree_map};
 pub use deepseek_dsml::{DeepSeekV4ToolParser, DeepSeekV32ToolParser};
 pub use deepseek_json::{DeepSeekV3ToolParser, DeepSeekV31ToolParser};
 pub use error::{Result, ToolParserError};
+pub use functiongemma::FunctionGemmaToolParser;
 pub use glm_xml::{Glm45MoeToolParser, Glm47MoeToolParser};
 pub use hy_v3::HyV3ToolParser;
 pub use json::{
