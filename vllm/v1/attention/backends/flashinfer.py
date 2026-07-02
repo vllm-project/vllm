@@ -1925,13 +1925,18 @@ class FlashInferImpl(AttentionImpl):
             # actual tokens.
             k_cache = kv_cache[:, 0]
             v_cache = kv_cache[:, 1]
+            kv_cache_dtype = (
+                self.kv_cache_dtype
+                if is_quantized_kv_cache(self.kv_cache_dtype)
+                else "auto"
+            )
             torch.ops._C_cache_ops.reshape_and_cache_flash(
                 key,
                 value,
                 k_cache,
                 v_cache,
                 slot_mapping,
-                self.kv_cache_dtype,
+                kv_cache_dtype,
                 layer._k_scale,
                 layer._v_scale,
             )

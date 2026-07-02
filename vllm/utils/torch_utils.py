@@ -380,12 +380,14 @@ def resolve_kv_cache_dtype_string(
     if kv_cache_dtype != "auto":
         return kv_cache_dtype
 
-    hf_cfg = getattr(model_config, "hf_config", None)
-    if hf_cfg is not None:
-        quant_cfg = getattr(hf_cfg, "quantization_config", None)
+    for config_name in ("model_arch_config", "hf_config"):
+        config = getattr(model_config, config_name, None)
+        if config is None:
+            continue
+        quant_cfg = getattr(config, "quantization_config", None)
         if quant_cfg is not None:
             kv_algo_str = get_kv_cache_quant_algo_string(quant_cfg)
-            if kv_algo_str is not None:
+            if kv_algo_str is not None and kv_algo_str != "auto":
                 return kv_algo_str
 
     # Default to auto (will be handled by downstream code)
