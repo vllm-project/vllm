@@ -212,6 +212,7 @@ if TYPE_CHECKING:
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
     VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS: int = 5
+    VLLM_SLEEP_WAKE_TIMEOUT_SECONDS: int = 0
     VLLM_KV_CACHE_LAYOUT: Literal["NHD", "HND"] | None = None
     VLLM_SSM_CONV_STATE_LAYOUT: Literal["SD", "DS"] | None = None
     VLLM_COMPUTE_NANS_IN_LOGITS: bool = False
@@ -1628,6 +1629,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS": lambda: int(
         os.getenv("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS", "5")
     ),
+    # Timeout in seconds for the sleep/wake_up collective RPC calls. These
+    # calls have no timeout by default (0 == disabled), because a legitimate
+    # cold wake (e.g. re-mapping weights/kv_cache that were paged out) can take
+    # minutes. Set this to a generous bound (e.g. 300) when you want a wedged
+    # worker (e.g. a worker that aborted mid-wake) to surface as a TimeoutError
+    # the engine can act on, instead of blocking the engine forever. Must be
+    # larger than the slowest legitimate wake to avoid false positives.
+    "VLLM_SLEEP_WAKE_TIMEOUT_SECONDS": lambda: int(
+        os.getenv("VLLM_SLEEP_WAKE_TIMEOUT_SECONDS", "0")
+    ),
     # KV Cache layout used throughout vllm.
     # Some common values are:
     # - NHD
@@ -2078,6 +2089,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
         "VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS",
+        "VLLM_SLEEP_WAKE_TIMEOUT_SECONDS",
         "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH",
         "VLLM_IMAGE_FETCH_TIMEOUT",
         "VLLM_VIDEO_FETCH_TIMEOUT",
