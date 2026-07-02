@@ -970,7 +970,6 @@ def preprocess_mamba(
     mamba_spec = copy_bufs.mamba_spec
     num_speculative_blocks = mamba_spec.num_speculative_blocks
     # TODO(Chen): we need to optimize this function a lot
-    assert cache_config.enable_prefix_caching
     block_size = mamba_spec.block_size
     cleanup_mamba_state_idx(scheduler_output, mamba_state_idx)
 
@@ -1014,7 +1013,8 @@ def preprocess_mamba(
                 forward_context,
             )
             input_batch.num_accepted_tokens_cpu[i] = 1
-    do_mamba_copy_block(copy_bufs)
+    # in sync kv transfer load condition, copy state here will get empty blocks,
+    # so here we only collect copy metadata and actually perform the copy operation after the kv transfer is loaded.
 
 
 def postprocess_mamba_all(
