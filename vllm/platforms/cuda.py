@@ -381,6 +381,7 @@ class CudaPlatformBase(Platform):
                 backend_class = _get_attn_backend_class(backend)
                 invalid_reasons_i = backend_class.validate_configuration(
                     device_capability=device_capability,
+                    num_heads=num_heads,
                     **attn_selector_config._asdict(),
                 )
             except ImportError:
@@ -410,6 +411,7 @@ class CudaPlatformBase(Platform):
                 backend_class = _get_attn_backend_class(selected_backend)
                 invalid_reasons = backend_class.validate_configuration(
                     device_capability=device_capability,
+                    num_heads=num_heads,
                     **attn_selector_config._asdict(),
                 )
             except ImportError:
