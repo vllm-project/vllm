@@ -1,20 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek V4 model — hardware-isolated entry point.
+"""DeepSeek V4 model — entry point.
 
-The actual implementation lives under ``nvidia/`` and ``amd/``; this module
-picks the right one for the current platform and re-exports the public
-classes used by the model registry and quantization config lookup.
+The actual implementation lives under ``nvidia/``, ``amd/``, etc. ;
+this module picks the right one for the current platform and
+re-exports the public classes used by the model registry and
+quantization config lookup.
 """
 
 from vllm.platforms import current_platform
 
-from .quant_config import DeepseekV4FP8Config
+if current_platform.is_out_of_tree():
+    from .hw_agnostic.quantization.quant_config import DeepseekV4FP8Config
+else:
+    from .quant_config import DeepseekV4FP8Config  # type: ignore[assignment]
 
 # Pick the per-platform implementation. The NVIDIA branch is the static
 # default that mypy sees; the ROCm/XPU branches override at runtime and are
 # kept type-compatible via ``# type: ignore[assignment]``.
-if current_platform.is_rocm():
+if current_platform.is_out_of_tree():
+    from .hw_agnostic.model import DeepseekV4ForCausalLM  # type: ignore[assignment]
+    from .hw_agnostic.mtp import DeepSeekV4MTP  # type: ignore[assignment]
+elif current_platform.is_rocm():
     from .amd.model import DeepseekV4ForCausalLM
     from .amd.mtp import DeepSeekV4MTP
 
