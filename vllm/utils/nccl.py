@@ -14,8 +14,6 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-_NCCL_GIN_TYPE_NONE = 0
-
 
 def find_nccl_library() -> str:
     """Return NCCL/RCCL shared library name to load.
