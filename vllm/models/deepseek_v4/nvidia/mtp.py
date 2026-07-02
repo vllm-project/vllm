@@ -358,6 +358,36 @@ class DeepSeekV4MTP(nn.Module):
             else ".weight_scale_inv"
         )
 
+        # Top-level ``head.weight`` and ``embed.weight`` keys (as written by
+        # ``transformers.save_pretrained`` for DSv4-Flash) need to be routed
+        # to each MTP layer's ``shared_head.head`` and ``embed_tokens`` slots.
+        # Without this, the rename loop below leaves these keys with
+        # ``spec_layer is None`` and they hit the ``continue`` on line below,
+        # leaving the MTP draft head's lm-head and embedding uninitialized at
+        # serve time. Symptom: speculative decoding produces draft tokens but
+        # acceptance rate is exactly 0% with no load-time error.
+        #
+        # The fix: synthesize ``mtp.{layer}.head.weight`` and
+        # ``mtp.{layer}.emb.tok_emb.weight`` entries (which DO match the
+        # mtp.{i}. -> model.layers.{N+i}. rename and then route correctly via
+        # _remap_weight_name) for each MTP layer the model has.
+        weights = list(weights)
+        extras: list[tuple[str, torch.Tensor]] = []
+        toplevel_aliases = {
+            "head.weight": "head.weight",
+            "embed.weight": "emb.tok_emb.weight",
+        }
+        for raw_name, loaded_weight in weights:
+            if raw_name in toplevel_aliases:
+                for layer_off in range(self.config.num_nextn_predict_layers):
+                    extras.append(
+                        (
+                            f"mtp.{layer_off}.{toplevel_aliases[raw_name]}",
+                            loaded_weight,
+                        )
+                    )
+        weights = list(weights) + extras
+
         for name, loaded_weight in weights:
             mtp_layer_idx = _find_mtp_layer_idx(name)
             # V4 checkpoints store MTP weights as `mtp.{i}.*`; remap to
