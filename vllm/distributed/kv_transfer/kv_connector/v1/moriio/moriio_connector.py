@@ -1008,6 +1008,8 @@ class MoRIIOConnectorWorker:
         self._handshake_futures: dict[EngineId, Future[set[str]]] = {}
         # Protects _handshake_futures and _remote_agents.
         self._handshake_lock = threading.RLock()
+        # Remote engines already covered by the eager pre-forward handshake.
+        self._eager_handshaked_engines: set[EngineId] = set()
 
         self.block_size = vllm_config.cache_config.block_size
         self.model_config = vllm_config.model_config
@@ -1707,6 +1709,116 @@ class MoRIIOConnectorWorker:
     def get_engine_name_with_dp(self, engine_name, dp_rank):
         return f"{engine_name}_dp{dp_rank}"
 
+    def _eager_handshake_all_dp_ranks(self, metadata: MoRIIOConnectorMetadata) -> None:
+        """Handshake EVERY remote prefill DP rank BEFORE the decode forward pass,
+        identically across all local TP workers.
+
+        Why this exists (the deadlock it prevents): with heterogeneous DP prefill
+        a decode TP worker reads KV from whichever prefill DP rank owns the
+        request, so across requests every worker must reach several prefill DP
+        ranks. The decode forward issues per-layer TP collectives (e.g. an
+        all-gather) that all local TP workers must enter together. If the
+        handshakes are left to fire lazily on the read path, the workers diverge:
+        a worker whose target rank is already cached races ahead into the forward
+        collective while a peer is still blocked in a handshake recv(). The first
+        worker then waits inside the collective for the stuck peer -> 600s NCCL
+        timeout / hang. This was observed directly with mixed TP<->DP configs.
+
+        Fix: complete ALL prefill-DP-rank handshakes for every referenced remote
+        engine HERE, before any read enters the forward, so no worker is still
+        handshaking once its peers reach a collective. Fires ONCE per remote
+        engine (first contact), gated by _eager_handshaked_engines. The engine
+        set comes from scheduler-built metadata (identical on every TP worker),
+        so all workers run the same handshakes in the same order and reach the
+        all-reduce barrier below together.
+
+        Failure handling: handshake exceptions are caught, never raised before
+        the collective (raising early would hang the peers still waiting for it).
+        Every worker reaches the all-reduce(MIN) vote; if ANY worker failed, ALL
+        raise the same error AFTER the collective, so the step fails fast and
+        uniformly in ~seconds instead of one rank hanging the forward for 600s.
+        """
+        import torch.distributed as dist
+
+        # Distinct remote engines referenced this step, in metadata (==
+        # scheduler) order so every TP worker iterates engines identically.
+        engines: dict[str, ReqMeta] = {}
+        for _req_id, meta in metadata.reqs_to_recv.items():
+            remote_engine_id = (
+                str(meta.remote_host) + ":" + str(meta.remote_handshake_port)
+            )
+            engines.setdefault(remote_engine_id, meta)
+
+        for remote_engine_id, meta in engines.items():
+            if remote_engine_id in self._eager_handshaked_engines:
+                continue
+
+            remote_dp_size = int(meta.remote_dp_size)
+            port = int(meta.remote_handshake_port)
+            tp_size = int(meta.tp_size)
+
+            # Submit handshakes for every not-yet-known DP rank UNDER the lock; do
+            # NOT hold it across the join or the collective (a stalled recv must
+            # not block another thread's lock acquisition). Gate on BOTH
+            # _remote_agents AND layer metadata: a rank with an agent entry but no
+            # layer metadata is half-handshaked and would KeyError at read time.
+            futures: list[tuple[str, Future[set[str]]]] = []
+            with self._handshake_lock:
+                for cur_dp_rank in range(remote_dp_size):
+                    eid = self.get_engine_name_with_dp(remote_engine_id, cur_dp_rank)
+                    if (
+                        eid in self._remote_agents
+                        and eid in self.layer_name_to_remote_kv_cache_metadata
+                    ):
+                        continue
+                    fut = self._handshake_initiation_executor.submit(
+                        self._moriio_handshake,
+                        meta.remote_host,
+                        port,
+                        tp_size,
+                        eid,
+                        cur_dp_rank,
+                    )
+                    futures.append((eid, fut))
+
+            # Join outside the lock. Bounded handshake errors are recorded here
+            # and reported after the all-reduce.
+            all_ok = True
+            results: dict[str, set[str]] = {}
+            for eid, fut in futures:
+                try:
+                    results[eid] = fut.result()
+                except Exception:
+                    logger.exception("Eager MoRIIO handshake failed for %s", eid)
+                    all_ok = False
+
+            with self._handshake_lock:
+                for eid, agents in results.items():
+                    self._remote_agents[eid] = agents
+
+            logger.info(
+                "Eager MoRIIO handshake: engine=%s dp_size=%d new_ranks=%d "
+                "ok=%s tp_rank=%d",
+                remote_engine_id,
+                remote_dp_size,
+                len(futures),
+                all_ok,
+                self.tp_rank,
+            )
+            # CPU all-reduce = TP-uniform success vote AND lockstep barrier: it
+            # blocks until every TP worker arrives, gives them the same verdict,
+            # and stays off the model compute stream.
+            vote = torch.tensor([1 if all_ok else 0], device="cpu", dtype=torch.int32)
+            dist.all_reduce(vote, group=self.tp_group.cpu_group, op=dist.ReduceOp.MIN)
+            if int(vote.item()) == 0:
+                raise HandshakeError(
+                    f"Eager MoRIIO handshake failed for {remote_engine_id} on "
+                    "at least one TP rank; failing this step fast to avoid a "
+                    "TP collective hang"
+                )
+
+            self._eager_handshaked_engines.add(remote_engine_id)
+
     def start_load_kv(self, metadata: MoRIIOConnectorMetadata):
         """
         Start loading by triggering non-blocking moriio_xfer.
@@ -1727,6 +1839,12 @@ class MoRIIOConnectorWorker:
             return
         if self.mode == MoRIIOMode.WRITE:
             return
+
+        # Handshake every referenced remote prefill rank up front, before any
+        # read enters the forward pass. A lazy per-rank handshake on the read
+        # path lets TP workers diverge into a forward collective while a peer is
+        # still blocked handshaking -> NCCL hang (see below).
+        self._eager_handshake_all_dp_ranks(metadata)
 
         wait_handshake_readd_req = False
         remote_engine_id = None
