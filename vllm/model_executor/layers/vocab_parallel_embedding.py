@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
+from vllm.config import get_current_vllm_config_or_none
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -262,6 +263,7 @@ class VocabParallelEmbedding(PluggableLayer):
             self.org_vocab_size_padded + num_added_embeddings, self.padding_size
         )
         assert self.org_vocab_size_padded <= self.num_embeddings_padded
+        self.loaded_org_vocab_size = self._get_loaded_org_vocab_size()
 
         self.shard_indices = self._get_indices(
             self.num_embeddings_padded,
@@ -323,6 +325,25 @@ class VocabParallelEmbedding(PluggableLayer):
             params_dtype=params_dtype,
             weight_loader=self.weight_loader,
         )
+
+    def _get_loaded_org_vocab_size(self) -> int | None:
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is None:
+            return None
+        speculative_config = vllm_config.speculative_config
+        if speculative_config is None:
+            return None
+        if not speculative_config.allow_draft_model_vocab_padding:
+            return None
+        if vllm_config.model_config.runner_type != "draft":
+            return None
+        loaded_org_vocab_size = speculative_config.draft_model_unpadded_vocab_size
+        if (
+            loaded_org_vocab_size is None
+            or loaded_org_vocab_size >= self.org_vocab_size
+        ):
+            return None
+        return loaded_org_vocab_size
 
     @classmethod
     def _get_indices(
@@ -450,6 +471,10 @@ class VocabParallelEmbedding(PluggableLayer):
 
         # If param packed on the same dim we are sharding on, then
         # need to adjust offsets of loaded weight by pack_factor.
+        if self.loaded_org_vocab_size is not None and packed_dim is not None:
+            raise ValueError(
+                "Draft model vocab padding does not support packed weights."
+            )
         if packed_dim is not None and packed_dim == output_dim:
             packed_factor = (
                 param.packed_factor
@@ -462,10 +487,40 @@ class VocabParallelEmbedding(PluggableLayer):
             start_idx = start_idx // packed_factor
             shard_size = shard_size // packed_factor
         else:
-            assert loaded_weight.shape[output_dim] == self.org_vocab_size
+            loaded_vocab_size = loaded_weight.shape[output_dim]
+            if self.loaded_org_vocab_size is None:
+                assert loaded_vocab_size == self.org_vocab_size
+            else:
+                if output_dim != 0:
+                    raise ValueError(
+                        "Draft model vocab padding only supports weights "
+                        "sharded on output_dim=0."
+                    )
+                if self.num_added_embeddings != 0:
+                    raise ValueError(
+                        "Draft model vocab padding does not support added "
+                        "vocabulary embeddings."
+                    )
+                if loaded_vocab_size != self.loaded_org_vocab_size:
+                    raise ValueError(
+                        "Loaded draft vocab size does not match the recorded "
+                        "unpadded draft vocab size. Expected "
+                        f"{self.loaded_org_vocab_size}, got {loaded_vocab_size}."
+                    )
 
         # Copy the data. Select chunk corresponding to current shard.
-        loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
+        if self.loaded_org_vocab_size is None:
+            loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
+        else:
+            loaded_shard_size = max(
+                min(shard_size, self.loaded_org_vocab_size - start_idx), 0
+            )
+            if loaded_shard_size == 0:
+                loaded_weight = loaded_weight.narrow(output_dim, 0, 0)
+            else:
+                loaded_weight = loaded_weight.narrow(
+                    output_dim, start_idx, loaded_shard_size
+                )
         param[: loaded_weight.shape[0]].data.copy_(loaded_weight)
         param[loaded_weight.shape[0] :].data.fill_(0)
 
