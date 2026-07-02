@@ -669,6 +669,22 @@ direct_register_custom_op(
 )
 
 
+def _get_layer_slot_mapping(
+    forward_context: ForwardContext,
+    layer_name: str,
+) -> torch.Tensor | None:
+    slot_mapping = forward_context.slot_mapping
+    if isinstance(slot_mapping, list):
+        # list[dict[str, Tensor]]: used in speculative decoding where [0] is
+        # the base-model (non-speculative) slot mapping dict.
+        slot_mapping = slot_mapping[0]
+
+    assert isinstance(slot_mapping, dict), (
+        f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
+    )
+    return slot_mapping.get(layer_name)
+
+
 def get_attention_context(
     layer_name: str,
 ) -> tuple[Any, "Attention | MLAAttention", torch.Tensor, torch.Tensor]:
@@ -704,11 +720,7 @@ def get_attention_context(
         attn_metadata = attn_metadata_raw
     attn_layer: Attention | MLAAttention = forward_context.no_compile_layers[layer_name]
     kv_cache = attn_layer.kv_cache
-    slot_mapping = forward_context.slot_mapping
-    assert isinstance(slot_mapping, dict), (
-        f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
-    )
-    layer_slot_mapping = slot_mapping.get(layer_name)
+    layer_slot_mapping = _get_layer_slot_mapping(forward_context, layer_name)
     return attn_metadata, attn_layer, kv_cache, layer_slot_mapping
 
 
